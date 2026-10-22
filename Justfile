@@ -394,7 +394,8 @@ lint:
     cargo xtask actions-check
     # A contribution is certified, not granted: every commit since origin/main carries its
     # author's `Signed-off-by:`, with no exemption, and none is made as an agent.
-    # `.github/workflows/signoff.yml` holds the same rule on a pull request.
+    # `.github/workflows/signoff.yml` holds the same rule on every pull request; this holds it,
+    # plus the shape of an agent's commit, under `just lint`, and a test keeps the two in agreement.
     cargo xtask signoff-check
 
 # What each worktree costs on disk, and what is reclaimable.

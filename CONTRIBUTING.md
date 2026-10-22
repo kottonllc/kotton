@@ -42,7 +42,9 @@ a commit authored as an agent is refused. A merge commit is a commit: `git merge
 signs it.
 
 The check that holds this is [`.github/workflows/signoff.yml`](.github/workflows/signoff.yml),
-and it runs on every pull request.
+and it runs on every pull request. `cargo xtask signoff-check` holds the same rule, plus the
+shape of an agent's commit (`Gates:`, `Assisted-by:`, then your sign-off), under `just lint`,
+and a test keeps the two in agreement.
 
 ## What does not bend
 

@@ -23,8 +23,9 @@ jobs:
             body=$(git log -1 --format=%B "$c")
             short=$(git log -1 --format='%h %s' "$c")
             case "$ae $ce" in *noreply@anthropic.com*) echo "$short: authored or committed as an agent ($an <$ae>, $cn <$ce>)"; bad=1 ;; esac
-            case "$an $cn" in *Claude*|*claude*|*Copilot*|*copilot*) echo "$short: authored or committed as an agent ($an / $cn)"; bad=1 ;; esac
-            if printf '%s\n' "$body" | grep -qiE '^Co-Authored-By:.*(claude|copilot|anthropic)'; then echo "$short: an agent is named as a co-author"; bad=1; fi
+            for n in "$an" "$cn"; do case "$n" in fable-design|*"[bot]") echo "$short: authored or committed as an agent ($n)"; bad=1 ;; esac; done
+            case "$ae $ce" in *"[bot]@users.noreply.github.com"*) echo "$short: authored or committed as a forge bot ($an <$ae>, $cn <$ce>)"; bad=1 ;; esac
+            if printf '%s\n' "$body" | grep -qiE '^Co-Authored-By:.*(<noreply@anthropic.com>|\[bot\]@users\.noreply\.github\.com>)'; then echo "$short: an agent is named as a co-author"; bad=1; fi
             if printf '%s\n' "$body" | grep -qE '^Claude-Session:'; then echo "$short: carries a Claude-Session trailer"; bad=1; fi
             if ! printf '%s\n' "$body" | grep -qF "Signed-off-by: $an <$ae>"; then echo "$short: not signed off by its author ($an <$ae>)"; bad=1; fi
           done

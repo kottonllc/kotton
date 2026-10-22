@@ -478,7 +478,7 @@ mod tests {
     }
 
     /// A sign-off answers for its author only when name and address match exactly: the same
-    /// name at an address that differs in case is another identity, so the commit is unsigned.
+    /// name at an address that differs in case does not match, so the commit is unsigned.
     #[test]
     fn a_sign_off_at_a_differently_cased_address_is_not_the_authors() {
         let elsewhere = ("Austin Herman", "13291882+AustinJHerman@users.noreply.github.com");
@@ -615,5 +615,118 @@ mod tests {
         assert_eq!((BOT_SUFFIX, BOT_DOMAIN), ("[bot]", "@users.noreply.github.com"));
         assert_eq!(PEOPLE, &[OWNER]);
         assert_eq!(FLOOR, "5ea215acfaa9d06f205c60678b89efab16ff0be2");
+    }
+
+    /// The `run:` script of `.github/workflows/signoff.yml`, with the pull request's base and
+    /// head substituted.
+    fn workflow_script(base: &str, head: &str) -> String {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/signoff.yml");
+        let yml = std::fs::read_to_string(path).expect("the workflow reads");
+        let mut lines = yml.lines().skip_while(|l| l.trim() != "run: |").skip(1).peekable();
+        let mut script = String::new();
+        while let Some(l) = lines.next_if(|l| l.starts_with("          ") || l.is_empty()) {
+            script.push_str(l.get(10..).unwrap_or(""));
+            script.push('\n');
+        }
+        assert!(!script.is_empty(), "the workflow has a run: script");
+        script
+            .replace("${{ github.event.pull_request.base.sha }}", base)
+            .replace("${{ github.event.pull_request.head.sha }}", head)
+    }
+
+    /// The workflow's verdict on the one commit on top of `base`: whether it exits 0.
+    fn workflow_passes(r: &Repo, base: &str) -> bool {
+        let head = r.git(&["rev-parse", "HEAD"]);
+        std::process::Command::new("sh")
+            .current_dir(r.path())
+            .args(["-c", &workflow_script(base, &head)])
+            .output()
+            .expect("sh runs")
+            .status
+            .success()
+    }
+
+    /// Cases where the workflow and this check give different verdicts, and why; a case not
+    /// here must agree. Each is asserted to still differ, so fixing one upstream fails the
+    /// test until it is removed from this list.
+    const WORKFLOW_DIFFERS: &[(&str, &str)] = &[
+        (
+            "v04 a differing committer who did not sign",
+            "the workflow asks a sign-off of the author only; this check asks the committer's too when it differs",
+        ),
+        (
+            "an agent's sign-off beside a person's",
+            "the workflow does not read a second `Signed-off-by:` that names an agent; this check refuses it (d)",
+        ),
+        (
+            "a bot's sign-off beside a person's",
+            "the same, for a forge bot's sign-off",
+        ),
+    ];
+
+    /// The two guards hold one rule: for each case, the workflow's exit is 0 exactly when this
+    /// check finds nothing, but for the cases listed in [`WORKFLOW_DIFFERS`].
+    #[test]
+    fn the_workflow_and_this_check_give_the_same_verdict() {
+        let bot = ("claude[bot]", "209825114+claude[bot]@users.noreply.github.com");
+        let person_claude = ("Claude Example", "claude@example.invalid");
+        let claudette = ("Claudette Rivers", "claudette@example.invalid");
+        let named = ("Claude", "claude@example.invalid");
+        let shouted = ("claude", "noreply@anthropic.com");
+        let dependabot = ("dependabot[bot]", "bot@example.invalid");
+        let addressed = ("Some Name", "49699333+Dependabot[Bot]@users.noreply.github.com");
+        let abbott = ("Abbott Example", "abbott@example.invalid");
+        let fable = ("fable-design", "someone@example.invalid");
+        let session = "Claude-Session: https://claude.ai/code/session_0000";
+        let co_claude = format!("Co-Authored-By: {} <{}>", CLAUDE.0, CLAUDE.1);
+        let co_bot = format!("Co-Authored-By: {} <{}>", bot.0, bot.1);
+        let co_ann = format!("Co-Authored-By: {} <{}>", ANN.0, ANN.1);
+        let (so_ann, so_bob, so_owner, so_claude, so_bot) =
+            (sob(ANN), sob(BOB), sob(OWNER), sob(CLAUDE), sob(bot));
+        let (so_pc, so_cl, so_named, so_dep, so_abbott) =
+            (sob(person_claude), sob(claudette), sob(named), sob(dependabot), sob(abbott));
+        #[allow(clippy::type_complexity)]
+        let cases: Vec<(&str, (&str, &str), (&str, &str), Vec<&str>)> = vec![
+            ("v01 signed by its author", ANN, ANN, vec![&so_ann]),
+            ("v02 unsigned", ANN, ANN, vec![]),
+            ("v03 signed by someone else", ANN, ANN, vec![&so_bob]),
+            ("v04 a differing committer who did not sign", ANN, BOB, vec![&so_ann]),
+            ("v05 the owner's assisted commit, no sign-off", OWNER, OWNER, vec![ASSISTED]),
+            ("v06 the owner's assisted commit signed off by claude", OWNER, OWNER, vec![ASSISTED, &so_claude]),
+            ("v07 a person's assisted commit with their sign-off", ANN, ANN, vec![ASSISTED, &so_ann]),
+            ("v08 a person's assisted commit without it", ANN, ANN, vec![ASSISTED]),
+            ("v09 the owner's assisted commit with their sign-off", OWNER, OWNER, vec![ASSISTED, &so_owner]),
+            ("v10 authored as claude", CLAUDE, ANN, vec![&so_ann]),
+            ("v11 committed as claude", ANN, CLAUDE, vec![&so_ann]),
+            ("v12 authored as fable-design", fable, ANN, vec![&so_ann]),
+            ("claude by name and address: a person called Claude Example", person_claude, person_claude, vec![&so_pc]),
+            ("claude by name and address: Claude at another address", named, named, vec![&so_named]),
+            ("claude by name and address: the agent's address in another case", shouted, ANN, vec![&so_ann]),
+            ("claude by name and address: Claudette", claudette, claudette, vec![&so_cl]),
+            ("a bot's name as author", dependabot, ANN, vec![&so_ann]),
+            ("a bot's address as author", addressed, ANN, vec![&so_ann]),
+            ("a forge bot claude[bot] as author", bot, ANN, vec![&so_ann]),
+            ("a person whose name contains bot", abbott, abbott, vec![&so_abbott]),
+            ("a bot's sign-off beside a person's", ANN, ANN, vec![&so_ann, &so_bot]),
+            ("an agent's sign-off beside a person's", ANN, ANN, vec![&so_ann, &so_claude]),
+            ("a dependabot sign-off, authored by it", dependabot, dependabot, vec![&so_dep]),
+            ("an assisted commit with a Claude-Session trailer", OWNER, OWNER, vec![GATES, ASSISTED, &so_owner, session]),
+            ("an assisted commit naming claude as co-author", OWNER, OWNER, vec![GATES, ASSISTED, &so_owner, &co_claude]),
+            ("an assisted commit naming a bot as co-author", OWNER, OWNER, vec![GATES, ASSISTED, &so_owner, &co_bot]),
+            ("an assisted commit naming a person as co-author", OWNER, OWNER, vec![GATES, ASSISTED, &so_owner, &co_ann]),
+            ("the owner's gates and assisted-by commit, signed", OWNER, OWNER, vec![GATES, ASSISTED, &so_owner]),
+        ];
+        let mut unexpected = Vec::new();
+        for (name, author, committer, trailers) in cases {
+            let (r, base) = repo();
+            commit_as(&r, "f", author, committer, &trailers);
+            let ours = rules(&r, &base).is_empty();
+            let theirs = workflow_passes(&r, &base);
+            let listed = WORKFLOW_DIFFERS.iter().any(|(n, _)| *n == name);
+            if (ours == theirs) == listed {
+                unexpected.push(format!("{name}: this check passes it: {ours}; the workflow: {theirs}; listed as differing: {listed}"));
+            }
+        }
+        assert!(unexpected.is_empty(), "{unexpected:#?}");
     }
 }
