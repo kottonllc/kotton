@@ -15,12 +15,6 @@ set -eu
 self=$(readlink -f -- "$0" 2>/dev/null || printf '%s\n' "$0")
 here=$(CDPATH='' cd -- "$(dirname -- "$self")" && pwd)
 
-# The window runs on X11 when a session offers both, unless KUID_WAYLAND=1 asks
-# otherwise — the same choice `prefer_x11` in xtask makes for `just desktop::run`.
-if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${DISPLAY:-}" ] && [ -z "${KUID_WAYLAND:-}" ]; then
-    unset WAYLAND_DISPLAY
-fi
-
 RUST_LOG=${RUST_LOG:-warn}
 export RUST_LOG
 exec "$here/bin/kuserd"
