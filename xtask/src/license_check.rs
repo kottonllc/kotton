@@ -206,37 +206,17 @@ pub struct Shipped {
     pub parts: &'static [Part],
 }
 
-/// The desktop: its binaries from the workspace, and the three guest apps `kuserd` embeds
-/// (`bundled.rs`) — the shell of which the archive also carries as `share/kotton/shell`.
-pub const DESKTOP: Shipped = Shipped {
-    name: "desktop",
+/// The system: the binaries `cargo xtask release` packs, from the workspace, with their
+/// packages' default features. It carries no guest app.
+pub const SYSTEM: Shipped = Shipped {
+    name: "system",
     verb: "cargo xtask release",
-    parts: &[
-        Part {
-            workspace: ".",
-            roots: crate::release::BINS,
-            target: None,
-            features: Some(crate::release::FEATURES),
-        },
-        Part {
-            workspace: "guest/apps/kotton-shell/logic",
-            roots: &["kotton-shell-logic"],
-            target: Some("wasm32-wasip2"),
-            features: None,
-        },
-        Part {
-            workspace: "guest/apps/kotton-editor/logic",
-            roots: &["kotton-editor-logic"],
-            target: Some("wasm32-wasip2"),
-            features: None,
-        },
-        Part {
-            workspace: "guest/apps/kotton-records/logic",
-            roots: &["kotton-records-logic"],
-            target: Some("wasm32-wasip2"),
-            features: None,
-        },
-    ],
+    parts: &[Part {
+        workspace: ".",
+        roots: crate::release::BINS,
+        target: None,
+        features: None,
+    }],
 };
 
 pub const RELAY: Shipped = Shipped {
@@ -261,7 +241,7 @@ pub const VAULT: Shipped = Shipped {
     }],
 };
 
-pub const ARCHIVES: [Shipped; 3] = [DESKTOP, RELAY, VAULT];
+pub const ARCHIVES: [Shipped; 3] = [SYSTEM, RELAY, VAULT];
 
 /// The file every archive carries at its top.
 pub const FILE: &str = "THIRD-PARTY-NOTICES";
@@ -925,23 +905,6 @@ pub fn fonts_in(text: &str) -> Result<Vec<(String, String, String)>, String> {
         .collect()
 }
 
-/// Every font [`FONTS`] says `carried_by` embeds, named in `text` at its pinned version
-/// with its licence's text written out. The desktop's release test reads its archive's
-/// notices with this, since `kuid` is in what that archive ships.
-pub fn check_fonts_named(text: &str, carried_by: &str) -> Result<(), String> {
-    let named = fonts_in(text)?;
-    for f in FONTS.iter().filter(|f| f.carried_by == carried_by) {
-        if !named.iter().any(|(fam, v, l)| fam == f.family && v == f.version && l == f.license) {
-            return Err(format!("{FILE} does not name the font {} {} ({}), which {carried_by} embeds", f.family, f.version, f.license));
-        }
-        let says = FONT_LICENSES.iter().find(|(id, _)| *id == f.license).map(|(_, s)| *s).unwrap_or("");
-        if says.is_empty() || !text.contains(says) {
-            return Err(format!("{FILE} names {} and does not carry the text of {}", f.family, f.license));
-        }
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------------------
 // The verb
 
@@ -1235,11 +1198,11 @@ pub fn run(repo: &Path) {
     }
 }
 
-/// `cargo xtask third-party-notices desktop|relay|vault`: print what that archive's
+/// `cargo xtask third-party-notices system|relay|vault`: print what that archive's
 /// `THIRD-PARTY-NOTICES` would be, without building it.
 pub fn print(repo: &Path, args: &[String]) {
     let Some(a) = args.first().and_then(|n| ARCHIVES.iter().find(|a| a.name == n.as_str())) else {
-        eprintln!("usage: cargo xtask third-party-notices desktop|relay|vault");
+        eprintln!("usage: cargo xtask third-party-notices system|relay|vault");
         std::process::exit(2);
     };
     let rev = crate::release::revision(repo);
@@ -1495,28 +1458,15 @@ mod tests {
         assert!(found.len() == 1 && found[0].contains("Geist-Variable.ttf: sha256"), "{found:?}");
     }
 
-    /// The desktop ships `kuid`, which embeds both fonts, so its notices name each at its
-    /// pinned version with the OFL's text written out; the relay ships neither, so its
-    /// notices name no font.
+    /// No archive ships a crate that carries a font — `kuid`, the one that embedded them, is
+    /// not built here — so no archive's notices name one, and each is held to its shape.
     #[test]
-    fn the_desktops_notices_name_the_fonts_kuid_embeds_and_the_relays_name_none() {
-        let t = notices(&repo(), &DESKTOP, "test", None).unwrap();
-        check_notices(&t).unwrap();
-        check_fonts_named(&t, "kuid").unwrap();
-        let named = fonts_in(&t).unwrap();
-        assert_eq!(
-            named,
-            vec![
-                ("Geist".to_string(), "1.800".to_string(), "OFL-1.1".to_string()),
-                ("Geist Mono".to_string(), "1.700".to_string(), "OFL-1.1".to_string()),
-            ]
-        );
-        assert!(t.contains("SIL OPEN FONT LICENSE Version 1.1"));
-        assert!(t.contains("Geist 1.800 (ui/fonts/OFL.txt), Geist Mono 1.700 (ui/fonts/OFL.txt)"), "one text, both fonts");
-
-        let relay = notices(&repo(), &RELAY, "test", None).unwrap();
-        assert!(fonts_in(&relay).unwrap().is_empty());
-        assert!(check_fonts_named(&relay, "kuid").is_err());
+    fn no_archives_notices_name_a_font_while_none_ships_the_crate_that_carries_one() {
+        for shipped in [SYSTEM, RELAY] {
+            let t = notices(&repo(), &shipped, "test", None).unwrap();
+            check_notices(&t).unwrap();
+            assert!(fonts_in(&t).unwrap().is_empty(), "{} names a font", shipped.name);
+        }
     }
 
     /// A fonts section is held to its own shape, as the package table is: its count is its

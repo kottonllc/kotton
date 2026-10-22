@@ -198,7 +198,7 @@ pub fn named<'a>(built: &'a [PathBuf], name: &str) -> Option<&'a Path> {
 
 /// What `cargo xtask out` answers, for its usage line and its refusal.
 const OUT_USAGE: &str = "cargo xtask out [target|xtask|dist|root|relay|bindwatch|guest/<app>\
-     |merge|release|release/workspace|release/relay|release/guest/<app>]";
+     |merge|release|release/workspace|release/relay]";
 
 /// `cargo xtask out [what]` — print where that output lives, so a script or a recipe asks
 /// rather than composes. Each private target is asked of the module that builds there.
@@ -216,9 +216,6 @@ pub fn run(args: &[String]) {
         "release" => crate::release::target(),
         "release/workspace" => crate::release::workspace_target(),
         "release/relay" => crate::release_server::target_of(&crate::release_server::RELAY),
-        s if s.starts_with("release/guest/") => {
-            crate::release::guest_target(&s["release/guest/".len()..])
-        }
         other => {
             eprintln!("usage: {OUT_USAGE} — `{other}` is none of those");
             std::process::exit(2);

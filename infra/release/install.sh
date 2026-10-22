@@ -32,7 +32,7 @@ rm -rf "$staging"
 mkdir "$staging"
 # LICENSE and NOTICES are Kotton's own terms, and THIRD-PARTY-NOTICES everyone
 # else's: the prefix keeps all three, so what is installed says what it is under.
-cp -R "$here/bin" "$here/share" "$here/kotton-start" "$here/REVISION" \
+cp -R "$here/bin" "$here/kotton-start" "$here/REVISION" \
     "$here/THIRD-PARTY-NOTICES" "$here/LICENSE" "$here/NOTICES" "$staging/"
 if [ -e "$prefix" ]; then
     rm -rf "$prefix.previous"

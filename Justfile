@@ -325,6 +325,9 @@ lint:
     # Both server units say MemoryDenyWriteExecute=yes; this holds that neither closure links
     # a crate that emits code at run time.
     cargo xtask wx-check
+    # Every binary an archive packs links only the system's crates and crates.io; the crates
+    # here today that are not the system's are printed as the cuts still owed.
+    cargo xtask ship-check
     # One feature set for every test build, so the shared crates are compiled once. When it
     # fails: `cargo xtask workspace-hack`.
     cargo xtask workspace-hack-check

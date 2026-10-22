@@ -11,7 +11,8 @@
 # it asserts that no cargo, rustc or python is on it and no GTK headers are, then
 # runs the steps `docs/use/first-hour.md` gives a friend, with **no network**
 # (`--network none`): install.sh, kotton-start, `kotton id create` at a terminal
-# (util-linux `script` makes one), `kotton id list`.
+# (util-linux `script` makes one), `kotton id list`. The archive is the system: the
+# daemons and the CLI (`xtask/src/release.rs`).
 #
 # TASK-a-friend-cannot-install-kotton-without-a-toolchain.
 set -eu
@@ -72,9 +73,6 @@ docker run --rm --network none --security-opt seccomp=unconfined -u friend -w /h
     grep -q "created" create.log || { say "FAIL — kotton id create did not say it created"; cat create.log; exit 1; }
     kotton id list | grep -q friend || { say "FAIL — kotton id list does not show friend"; exit 1; }
     say "kotton id create friend, from the installed prefix, at a terminal: done"
-    cmp -s "$HOME/.local/opt/kotton/share/kotton/shell/app.wasm" "$HOME/.local/share/kotton/system/shell/app.wasm" \
-        || { say "FAIL — the daemon did not stage the shell it shipped with"; exit 1; }
-    say "the daemon staged the shell it shipped with"
     kill "$daemon" 2>/dev/null || true
     say "PASS"
 '
