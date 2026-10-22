@@ -1,0 +1,32 @@
+# Every commit a pull request brings is signed off by the person it is authored as, is not
+# authored or committed as an agent, and carries no agent as a co-author. CONTRIBUTING.md,
+# "Every commit is signed off". Runs on every pull request and on nothing else.
+name: signoff
+on:
+  pull_request:
+jobs:
+  signoff:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a57b4d5a6c3d2d6a5ad8b5fd6ba43ad5c # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: every commit is signed off by its author, and no agent made one
+        run: |
+          set -eu
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          bad=0
+          for c in $(git rev-list "$base".."$head"); do
+            an=$(git log -1 --format=%an "$c"); ae=$(git log -1 --format=%ae "$c")
+            cn=$(git log -1 --format=%cn "$c"); ce=$(git log -1 --format=%ce "$c")
+            body=$(git log -1 --format=%B "$c")
+            short=$(git log -1 --format='%h %s' "$c")
+            case "$ae $ce" in *noreply@anthropic.com*) echo "$short: authored or committed as an agent ($an <$ae>, $cn <$ce>)"; bad=1 ;; esac
+            case "$an $cn" in *Claude*|*claude*|*Copilot*|*copilot*) echo "$short: authored or committed as an agent ($an / $cn)"; bad=1 ;; esac
+            if printf '%s\n' "$body" | grep -qiE '^Co-Authored-By:.*(claude|copilot|anthropic)'; then echo "$short: an agent is named as a co-author"; bad=1; fi
+            if printf '%s\n' "$body" | grep -qE '^Claude-Session:'; then echo "$short: carries a Claude-Session trailer"; bad=1; fi
+            if ! printf '%s\n' "$body" | grep -qF "Signed-off-by: $an <$ae>"; then echo "$short: not signed off by its author ($an <$ae>)"; bad=1; fi
+          done
+          [ "$bad" = 0 ] && echo "signoff: OK — every commit is signed off by its author, none made as an agent"
+          exit "$bad"

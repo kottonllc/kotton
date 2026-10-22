@@ -1,10 +1,10 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Start Kotton: the daemon, which starts the window and everything else it needs
-# from beside itself. Ctrl-C stops it.
+# Start Kotton: the daemon, which starts everything else it needs from beside
+# itself. It runs in this terminal; leave it running (Ctrl-C stops it) and type
+# the rest in another terminal.
 #
-# There is no identity to name here and no passphrase to type: the window makes
-# your identity on a new machine and unlocks it on one that has one (DEC-0077).
+# Make your identity from another terminal with `kotton id create <name>`.
 #
 #   kotton-start
 #   RUST_LOG=info kotton-start       say more about what it is doing

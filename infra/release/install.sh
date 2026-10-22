@@ -47,7 +47,7 @@ ln -sf "$prefix/kotton-start" "$bindir/kotton-start"
 
 echo "Kotton $(sed -n 1p "$prefix/REVISION") is installed in $prefix."
 echo
-echo "  kotton-start              start it, and leave it running; with a GPU the window opens too"
+echo "  kotton-start              start the daemon in this terminal, and leave it running"
 echo "  kotton id create <name>   then, from another terminal: make your identity"
 echo "  kotton                    and enter Kotton's shell as it"
 echo "  kotton --help             everything else"
