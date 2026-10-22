@@ -17,17 +17,28 @@ jobs:
           base="${{ github.event.pull_request.base.sha }}"
           head="${{ github.event.pull_request.head.sha }}"
           bad=0
+          lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+          # An identity is an agent's when its address is the Anthropic no-reply address, its
+          # name is fable-design, or either names a forge bot ([bot]). Compared ignoring case.
+          is_agent() {
+            case "$(lower "$1")" in fable-design|*"[bot]") return 0 ;; esac
+            case "$(lower "$2")" in noreply@anthropic.com|*"[bot]@users.noreply.github.com") return 0 ;; esac
+            return 1
+          }
           for c in $(git rev-list "$base".."$head"); do
             an=$(git log -1 --format=%an "$c"); ae=$(git log -1 --format=%ae "$c")
             cn=$(git log -1 --format=%cn "$c"); ce=$(git log -1 --format=%ce "$c")
             body=$(git log -1 --format=%B "$c")
             short=$(git log -1 --format='%h %s' "$c")
-            case "$ae $ce" in *noreply@anthropic.com*) echo "$short: authored or committed as an agent ($an <$ae>, $cn <$ce>)"; bad=1 ;; esac
-            for n in "$an" "$cn"; do case "$n" in fable-design|*"[bot]") echo "$short: authored or committed as an agent ($n)"; bad=1 ;; esac; done
-            case "$ae $ce" in *"[bot]@users.noreply.github.com"*) echo "$short: authored or committed as a forge bot ($an <$ae>, $cn <$ce>)"; bad=1 ;; esac
-            if printf '%s\n' "$body" | grep -qiE '^Co-Authored-By:.*(<noreply@anthropic.com>|\[bot\]@users\.noreply\.github\.com>)'; then echo "$short: an agent is named as a co-author"; bad=1; fi
+            if is_agent "$an" "$ae" || is_agent "$cn" "$ce"; then echo "$short: authored or committed as an agent ($an <$ae>, $cn <$ce>)"; bad=1; fi
+            printf '%s\n' "$body" | grep -iE '^(Co-Authored-By|Signed-off-by):' | while IFS= read -r line; do
+              who=${line#*:}; who=${who# }
+              n=${who%%<*}; n=${n% }; e=${who#*<}; e=${e%%>*}
+              if is_agent "$n" "$e"; then echo "$short: an agent is named in a trailer: $line"; exit 1; fi
+            done || bad=1
             if printf '%s\n' "$body" | grep -qE '^Claude-Session:'; then echo "$short: carries a Claude-Session trailer"; bad=1; fi
             if ! printf '%s\n' "$body" | grep -qF "Signed-off-by: $an <$ae>"; then echo "$short: not signed off by its author ($an <$ae>)"; bad=1; fi
+            if [ "$cn <$ce>" != "$an <$ae>" ] && ! printf '%s\n' "$body" | grep -qF "Signed-off-by: $cn <$ce>"; then echo "$short: not signed off by its committer ($cn <$ce>)"; bad=1; fi
           done
-          [ "$bad" = 0 ] && echo "signoff: OK — every commit is signed off by its author, none made as an agent"
+          [ "$bad" = 0 ] && echo "signoff: OK — every commit is signed off by its author and committer, none made as or naming an agent"
           exit "$bad"

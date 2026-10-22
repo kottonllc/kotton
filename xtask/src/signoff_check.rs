@@ -646,26 +646,8 @@ mod tests {
             .success()
     }
 
-    /// Cases where the workflow and this check give different verdicts, and why; a case not
-    /// here must agree. Each is asserted to still differ, so fixing one upstream fails the
-    /// test until it is removed from this list.
-    const WORKFLOW_DIFFERS: &[(&str, &str)] = &[
-        (
-            "v04 a differing committer who did not sign",
-            "the workflow asks a sign-off of the author only; this check asks the committer's too when it differs",
-        ),
-        (
-            "an agent's sign-off beside a person's",
-            "the workflow does not read a second `Signed-off-by:` that names an agent; this check refuses it (d)",
-        ),
-        (
-            "a bot's sign-off beside a person's",
-            "the same, for a forge bot's sign-off",
-        ),
-    ];
-
     /// The two guards hold one rule: for each case, the workflow's exit is 0 exactly when this
-    /// check finds nothing, but for the cases listed in [`WORKFLOW_DIFFERS`].
+    /// check finds nothing.
     #[test]
     fn the_workflow_and_this_check_give_the_same_verdict() {
         let bot = ("claude[bot]", "209825114+claude[bot]@users.noreply.github.com");
@@ -677,6 +659,9 @@ mod tests {
         let addressed = ("Some Name", "49699333+Dependabot[Bot]@users.noreply.github.com");
         let abbott = ("Abbott Example", "abbott@example.invalid");
         let fable = ("fable-design", "someone@example.invalid");
+        let cased = ("Some Name", "NoReply@Anthropic.COM");
+        let co_dep = format!("Co-Authored-By: {} <{}>", dependabot.0, dependabot.1);
+        let so_cased = sob(cased);
         let session = "Claude-Session: https://claude.ai/code/session_0000";
         let co_claude = format!("Co-Authored-By: {} <{}>", CLAUDE.0, CLAUDE.1);
         let co_bot = format!("Co-Authored-By: {} <{}>", bot.0, bot.1);
@@ -703,6 +688,10 @@ mod tests {
             ("claude by name and address: Claude at another address", named, named, vec![&so_named]),
             ("claude by name and address: the agent's address in another case", shouted, ANN, vec![&so_ann]),
             ("claude by name and address: Claudette", claudette, claudette, vec![&so_cl]),
+            ("a differing committer who signed", ANN, BOB, vec![&so_ann, &so_bob]),
+            ("an agent at a differently cased address as author", cased, ANN, vec![&so_ann]),
+            ("an agent at a differently cased address as sign-off", ANN, ANN, vec![&so_ann, &so_cased]),
+            ("an assisted commit naming a bot by name as co-author", OWNER, OWNER, vec![GATES, ASSISTED, &so_owner, &co_dep]),
             ("a bot's name as author", dependabot, ANN, vec![&so_ann]),
             ("a bot's address as author", addressed, ANN, vec![&so_ann]),
             ("a forge bot claude[bot] as author", bot, ANN, vec![&so_ann]),
@@ -722,9 +711,8 @@ mod tests {
             commit_as(&r, "f", author, committer, &trailers);
             let ours = rules(&r, &base).is_empty();
             let theirs = workflow_passes(&r, &base);
-            let listed = WORKFLOW_DIFFERS.iter().any(|(n, _)| *n == name);
-            if (ours == theirs) == listed {
-                unexpected.push(format!("{name}: this check passes it: {ours}; the workflow: {theirs}; listed as differing: {listed}"));
+            if ours != theirs {
+                unexpected.push(format!("{name}: this check passes it: {ours}; the workflow: {theirs}"));
             }
         }
         assert!(unexpected.is_empty(), "{unexpected:#?}");
