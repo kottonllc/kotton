@@ -35,9 +35,8 @@
 //! 3. **The renderer stack is not in it.** `kuid-desktop` and `kuid-gpu` pull wgpu, vello and
 //!    blitz; forcing those on every member would make `cargo test -p kotton-store` compile a
 //!    GPU stack. A package only [`LEAVES`] reach is left to their own feature sets, and the
-//!    generator prints the list. The features the renderer turns on in *shared* packages are
-//!    in the union, so `cargo test -p kuid --features kuid-desktop` shares every crate it has
-//!    in common with the rest of the loop.
+//!    generator prints the list. This tree holds no renderer, so no member is a leaf today and
+//!    every member is unified; the rule stays named for the day one is.
 //!
 //! One more thing hakari does that is needed here too: cargo builds a host dependency with
 //! the target profile's debuginfo when the same package is also a target dependency, so a
@@ -72,13 +71,8 @@ const PLATFORMS: &[&str] = &[
 
 /// Members whose own closure is the renderer stack. A package only these reach is not
 /// unified, so the GPU and layout crates are never forced on a member that does not draw.
+/// Neither is in this tree, so nothing is a leaf here.
 pub const LEAVES: &[&str] = &["kuid", "kotton-css-support"];
-
-/// The reference resolution: the whole workspace with every feature the loop's gates turn
-/// on. `kuid-desktop` and `kuid-gpu` enable features in shared packages (`rustix`,
-/// `hashbrown`, `num-traits`), and unless the union carries them, the kuid gate compiles its
-/// own copy of everything above those.
-const REF_FEATURES: &str = "kuid/kuid-desktop,kuid/kuid-gpu";
 
 /// A package on one side of the build. `host` is a build script's or proc-macro's world.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -307,7 +301,9 @@ fn resolve_all(
     members: &[Member],
     target: Option<&str>,
 ) -> Result<(Resolution, Vec<(String, Resolution)>), String> {
-    let reference = cargo_tree(&["--workspace", "--features", REF_FEATURES], target)?;
+    // The whole workspace with its default features: no gate here turns on a feature the
+    // members' own selections do not.
+    let reference = cargo_tree(&["--workspace"], target)?;
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)

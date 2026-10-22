@@ -10,9 +10,11 @@
 //! `client/web/e2e/pair.mjs`; the two sides talk in JSON lines.
 //!
 //! It needs three things a Rust toolchain does not bring: `node`, the
-//! `playwright` package resolvable by it, and `client/web/assets/pair.wasm`
-//! (`cargo xtask build-web`, which `just test` runs). A missing one fails with
-//! the command that supplies it, never silently.
+//! `playwright` package resolvable by it, and `client/web/assets/pair.wasm`.
+//! This repository does not build that file: the web half of pairing belongs to
+//! the gateway and the portal, which are not here, so these cases fail here
+//! naming the missing file, never silently. Nothing to do until the gateway and
+//! the portal have repositories of their own.
 
 use crate::common::khttpd::{self, free_port};
 use crate::common::{TestEnv, TEST_PASSPHRASE};
@@ -193,7 +195,7 @@ async fn a_phone_pairs_by_six_digits_and_sees_the_files_at_home() {
     let wasm = repo_root().join("client/web/assets/pair.wasm");
     assert!(
         wasm.exists(),
-        "{} is missing — run `cargo xtask build-web` (just test does)",
+        "{} is missing: this repository does not build the web half of pairing, so this case cannot run here. Nothing to do until the gateway and the portal have repositories of their own",
         wasm.display()
     );
 
@@ -322,7 +324,7 @@ async fn a_phone_reads_out_three_words_while_the_ceremony_is_still_running() {
     let wasm = repo_root().join("client/web/assets/pair.wasm");
     assert!(
         wasm.exists(),
-        "{} is missing — run `cargo xtask build-web` (just test does)",
+        "{} is missing: this repository does not build the web half of pairing, so this case cannot run here. Nothing to do until the gateway and the portal have repositories of their own",
         wasm.display()
     );
 
@@ -422,7 +424,7 @@ async fn a_phone_messages_a_stranger_and_is_told_one_word() {
     let wasm = repo_root().join("client/web/assets/pair.wasm");
     assert!(
         wasm.exists(),
-        "{} is missing — run `cargo xtask build-web` (just test does)",
+        "{} is missing: this repository does not build the web half of pairing, so this case cannot run here. Nothing to do until the gateway and the portal have repositories of their own",
         wasm.display()
     );
 
@@ -621,7 +623,7 @@ async fn a_phone_counts_what_is_unread_and_stops_counting_it_once_read() {
     let wasm = repo_root().join("client/web/assets/pair.wasm");
     assert!(
         wasm.exists(),
-        "{} is missing — run `cargo xtask build-web` (just test does)",
+        "{} is missing: this repository does not build the web half of pairing, so this case cannot run here. Nothing to do until the gateway and the portal have repositories of their own",
         wasm.display()
     );
 

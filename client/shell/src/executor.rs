@@ -132,7 +132,6 @@ impl ShellExecutor {
     }
 
     /// Return (name, help_text) for every registered command, sorted by name.
-    /// Used by `cargo xtask gen-docs` to emit `docs/shell/reference.md`.
     pub fn command_docs(&self) -> Vec<(String, &'static str)> {
         self.registry.command_docs()
     }

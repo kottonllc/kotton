@@ -56,7 +56,7 @@ const UNIX_ONLY: &[&str] = &[
 ];
 
 const ROOTS: &[&str] = &[
-    "core", "client", "system", "guest", "tools", "xtask", "tests", "infra",
+    "core", "client", "tools", "xtask", "tests", "infra",
 ];
 
 /// True if `line` is a `#[cfg(…)]` or `#![cfg(…)]` whose predicate is false

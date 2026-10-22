@@ -28,7 +28,7 @@
 //! names it** (decision 0014, `docs/design/decisions/`). Cargo keys a workspace's own crates
 //! by their path relative to the workspace root, so checkouts that build into one target
 //! share one freshness record per crate, and a build there can be another tree's. A
-//! developer's convenience build — `build-apps`, `build-relay`, bindwatch, `dev` — asks
+//! developer's convenience build — `build-apps`, `build-relay`, bindwatch — asks
 //! [`own_target`], which follows the variable, because a warm shared cache is the point of
 //! exporting it. A build whose output ships or gates — what `release` and `release-server`
 //! pack and test, and what `merge` checks — asks [`private_target`], which is `out/<what>`
@@ -100,7 +100,7 @@ pub fn workspace_target() -> PathBuf {
 }
 
 /// The target directory for a **developer's convenience build** of a workspace of its own —
-/// a guest app for `build-apps` or `dev`, the relay for `build-relay`, bindwatch — named `sub`
+/// a guest app for `build-apps`, the relay for `build-relay`, bindwatch — named `sub`
 /// under `out/`, **or `CARGO_TARGET_DIR` when that is exported**: such a build follows the
 /// variable, so a fleet that shares a warm cache shares it here too. Never for an output that
 /// ships or gates; that is [`private_target`] (decision 0014).

@@ -17,8 +17,8 @@ build:
 # **Named on purpose, and nothing in the product reaches it.** It is kept as a
 # build-time seam rather than a fallback: at 1440x900 a CPU frame costs ~19ms, of which
 # ~18ms is rasterisation, and a window that rasterises in software is the first
-# impression the ruling declines to ship. `just desktop::shot` is the one recipe that
-# builds it, as that ruling's documented contributor opt-in.
+# impression the ruling declines to ship. It stays buildable as that ruling's documented
+# contributor opt-in.
 build-cpu:
     cargo build --bin kuid --features kuid/kuid-desktop
 

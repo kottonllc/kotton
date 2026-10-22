@@ -58,19 +58,6 @@ ps scenario:
 remote host recipe scenario:
     DOCKER_HOST=ssh://{{host}} just stack::{{recipe}} {{scenario}}
 
-# Hand the images binaries built here instead of compiling inside docker:
-# fills infra/prebuilt/ from a host release build, for `ARTIFACTS=prebuilt`.
-# Behind a mirror or a proxy this is how the images get built at all — see
-# the argument list at the top of infra/Dockerfile.
-prebuilt:
-    cargo build --release --bin kuserd --bin khttpd --bin kvaultd --bin kotton --bin kscenario
-    cargo run --release -p xtask -- build-web
-    rm -rf infra/prebuilt/web && mkdir -p infra/prebuilt
-    # Where cargo put them, asked rather than composed (`cargo xtask out`).
-    t="$(cargo xtask out target)/release" && cp "$t/kuserd" "$t/khttpd" "$t/kvaultd" "$t/kotton" "$t/kscenario" infra/prebuilt/
-    cp "$(cargo xtask build-relay --release)" infra/prebuilt/
-    cp -r client/web infra/prebuilt/web
-
 # Build every image once, without running anything.
 build:
     docker build -f infra/Dockerfile --target node -t kotton-node .

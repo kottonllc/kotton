@@ -16,8 +16,7 @@ set working-directory := ".."
 # or it does not.
 #
 # `cpu` builds the other seam, which nothing in the product reaches and nothing measures.
-# It exists for a contributor whose machine cannot open a window at all, and
-# `desktop::shot` below is the one recipe that passes it — see the note there.
+# It exists for a contributor whose machine cannot open a window at all.
 #
 #   just desktop::build          the shipped compositor
 #   just desktop::build cpu      the CPU seam, named on purpose
@@ -62,38 +61,6 @@ build-release:
 # designation and this staging carries the body. So a rebuild reaches the logged-in desk.
 run user="" render="gpu": (build render)
     cargo xtask "run::desktop" {{user}}
-
-# A picture of the window, on a machine that cannot show one (Linux).
-#
-# **This is a contributor's opt-in, not a shipped path.** The window renders on the
-# GPU, and one thing was left open — "what a contributor without a GPU does …
-# the answer may be a documented opt-in rather than an amendment". This is that opt-in.
-# Nothing in the product knows it exists; the GPU is still where the window is meant to
-# render, and `just desktop::run` is still how a person opens one.
-#
-# What it does: starts `Xvfb` on a free display, runs `desktop::run` against it on the
-# CPU renderer with no user, waits for the window, and writes a PNG of it to a path it
-# prints. It stops kuserd, kuid and the framebuffer on the way out, including when it
-# fails — so `just kill` afterwards is belt and braces, not a step.
-#
-#   just desktop::shot                       → .kotton.shot/desktop.png
-#   just desktop::shot /tmp/window.png       → somewhere else
-#
-# With no user named, the window onboards, so the picture is the welcome
-# screen. It is a picture, not a session: there is no window manager on the framebuffer,
-# so nothing has keyboard focus and nothing can be typed into.
-#
-# `cargo xtask doctor --tier desktop` has a row for each of the two packages this needs
-# (`xvfb`, `scrot`), and reports them met on a machine that already has a display.
-#
-# **`cpu` is passed here on purpose, and is the only recipe that passes it.** Every other
-# recipe defaults to the GPU renderer; this one is that rule's
-# documented contributor opt-in, and the machines it is for — a container, a build machine, an
-# agent's checkout — have no adapter, so a `gpu` build would refuse to open the window
-# there is no point photographing. Do not "fix" this line by removing the argument.
-[linux]
-shot out="" render="cpu": (build render)
-    cargo xtask "run::shot" "{{out}}"
 
 # Boot a machine that nobody has ever logged into, and watch it draw.
 #

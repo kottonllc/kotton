@@ -55,4 +55,4 @@ cargo test --package kotton-shell
 
 ## Future Work
 
-See [docs/shell/reference.md](../../docs/shell/reference.md) for the full command reference.
+Inside `kotton repl`, `help` lists every command and `help <command>` shows the help for that one.

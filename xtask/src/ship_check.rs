@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `ship-check`: every binary an archive packs links only the system's crates, and crates.io.
 //!
-//! This repository is the system (kotton-protocol RFC 0001): the user daemon, the device
-//! daemon, the QUIC acceptor, the sync watcher, and the crates they share. It was cut out of
+//! This repository is the system, as kotton-protocol's repository plan names it: the user
+//! daemon, the device daemon, the QUIC acceptor, the sync watcher, and the crates they share. It was cut out of
 //! the reference (`kotton-ahead`), which held everything, and the cut is only as good as what
 //! the binaries link: one path dependency on a crate that belongs elsewhere links it back in,
 //! and nothing in the build says so. This check says so.
@@ -76,7 +76,8 @@ pub(crate) const SYSTEM_CRATES: &[&str] = &[
     "kotton-secret",
     "kotton-device",
     "kotton-session",
-    // The CLI, here until it has a repository of its own (RFC 0001: `kotton-cli`).
+    // The CLI, here until it has a repository of its own (`kotton-cli` in kotton-protocol's
+    // repository plan).
     "kotton-cli",
     "kotton",
     "kotton-operator",
@@ -91,14 +92,14 @@ pub(crate) const SYSTEM_CRATES: &[&str] = &[
 /// still owed.
 pub(crate) struct NotTheSystems {
     pub(crate) name: &'static str,
-    /// Where RFC 0001 puts it, or that it does not.
+    /// Where kotton-protocol's repository plan puts it, or that it does not.
     pub(crate) belongs: &'static str,
     /// The cut, one of the seven kottonllc/kotton#18 tracks.
     pub(crate) cut: &'static str,
 }
 
-/// The findings: crates here today, linked into what ships, that RFC 0001 does not make the
-/// system's. Reported on every run and refused by none, until each cut lands and deletes its
+/// The findings: crates here today, linked into what ships, that kotton-protocol's repository
+/// plan does not make the system's. Reported on every run and refused by none, until each cut lands and deletes its
 /// entry.
 pub(crate) const NOT_THE_SYSTEMS: &[NotTheSystems] = &[
     NotTheSystems {
@@ -113,12 +114,12 @@ pub(crate) const NOT_THE_SYSTEMS: &[NotTheSystems] = &[
     },
     NotTheSystems {
         name: "kotton-msg",
-        belongs: "RFC 0001 names no repository for messaging",
+        belongs: "kotton-protocol's repository plan names no repository for messaging",
         cut: "kuserd links kotton-msg: place messaging in a repository, then cut it from the user daemon",
     },
     NotTheSystems {
         name: "kotton-org",
-        belongs: "RFC 0001 names no repository for orgs",
+        belongs: "kotton-protocol's repository plan names no repository for orgs",
         cut: "kuserd and kotton-peer link kotton-org: place orgs in a repository, then cut them from the system",
     },
     NotTheSystems {
@@ -133,7 +134,7 @@ pub(crate) const NOT_THE_SYSTEMS: &[NotTheSystems] = &[
     },
     NotTheSystems {
         name: "kotton-grant",
-        belongs: "RFC 0001 does not place it; what any side must verify is kotton-protocol's",
+        belongs: "kotton-protocol's repository plan does not place it; what any side must verify is kotton-protocol's",
         cut: "kotton-record, kotton-app and kuserd link kotton-grant: decide whether grants are the protocol's or the system's, then cut or admit",
     },
 ];

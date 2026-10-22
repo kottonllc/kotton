@@ -25,25 +25,18 @@
 //!
 //! Three concepts, not eleven. Each gate names the one it means.
 
-/// The four trust regions, in dependency order.
+/// The trust regions this tree holds, in dependency order.
 ///
-/// `core/` acts on a principal's authority; `client/` only asks; `system/` holds a channel
-/// handed at spawn; `guest/` is confined. `tier-check` holds the boundaries.
-pub const REGIONS: &[&str] = &["core", "client", "system", "guest"];
+/// `core/` acts on a principal's authority; `client/` only asks. `tier-check` holds the
+/// boundary. The reference's other two, `system/` and `guest/`, are not in this tree.
+pub const REGIONS: &[&str] = &["core", "client"];
 
 /// Every top-level root that holds compilable code.
 ///
 /// The regions plus the roots that are not regions: `infra/` (the relay, which is not a node),
 /// `tools/` (test instruments), `xtask/` (the gates themselves) and `tests/` (the integration
 /// harness). A gate asking *"where is the code"* means this.
-pub const CODE_ROOTS: &[&str] = &[
-    "core", "client", "system", "guest", "infra", "tools", "xtask", "tests",
-];
-
-/// Where a surface lives — the roots `rsx-check` reads.
-///
-/// Narrower than [`CODE_ROOTS`] on purpose: a daemon draws nothing.
-pub const SURFACE_ROOTS: &[&str] = &["guest/apps", "guest/sdk", "system", "core/kuid"];
+pub const CODE_ROOTS: &[&str] = &["core", "client", "infra", "tools", "xtask", "tests"];
 
 #[cfg(test)]
 mod tests {
@@ -59,7 +52,7 @@ mod tests {
     /// OK over nothing.
     #[test]
     fn every_named_root_exists() {
-        for list in [REGIONS, CODE_ROOTS, SURFACE_ROOTS] {
+        for list in [REGIONS, CODE_ROOTS] {
             for r in list {
                 assert!(
                     repo().join(r).is_dir(),

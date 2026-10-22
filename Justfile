@@ -180,13 +180,6 @@ test:
     cargo build --bin kotton --bin kotton-mock-runner --bin kuserd --bin khttpd --bin kotton-runner --bin kinferd --bin kvaultd
     # `confinement` runs real components in the real runner; this builds them.
     cargo xtask build-apps
-    # The guest apps' own tests, on the host. They are `workspace.exclude`d and
-    # pin wasm32-wasip2, so nothing above this line reaches them: a `cargo test`
-    # at the root walks past them, and one inside them builds a wasm binary the
-    # machine cannot run. Without this the shell's surface tests would be a file
-    # nobody executes. See `cargo xtask surface-test`.
-    cargo xtask surface-test
-    cargo xtask build-web
     # The relay is its own workspace; the relay tests spawn this binary, from `out/relay`.
     cargo xtask build-relay
     cargo xtask bind-check
@@ -199,8 +192,8 @@ test:
     # itself, and every renderer test here draws into an image with `vello_cpu`.
     cargo xtask bind-check -- -p kuid --features kuid/kuid-desktop,kuid/kuid-gpu
     # And the seam still has to compile. `anyrender_vello_cpu` stays in the
-    # tree as a build-time opt-in — it is what `just desktop::shot` builds, on a machine
-    # that cannot open a window at all — so it is code the project still owns. `check`
+    # tree as a build-time opt-in, for a machine that cannot open a window at all, so it
+    # is code the project still owns. `check`
     # rather than `test`: the ruling says this path is unmeasured, and the two feature
     # sets share every test but the type alias under them.
     cargo check -p kuid --features kuid/kuid-desktop --all-targets
@@ -312,15 +305,15 @@ lint:
     # infra/relay declares its own `[workspace]`, so the `cargo clippy` above never reaches
     # it. It is held to `-D warnings` the same way.
     cargo clippy --manifest-path infra/relay/Cargo.toml --target-dir {{relay_target}} --all-targets -- -D warnings
-    # Reads docs/design/principles.md: the principles its table marks enforced, against the code,
-    # and refuses when the table marks one the check does not inspect, or the reverse.
+    # The principles it inspects (II, III and IV), against the code.
     cargo xtask constitution-check
     cargo xtask tier-check
     cargo xtask blindness-check
     cargo xtask vault-check
     cargo xtask key-reach-check
-    # The weights parser opens nothing. An allow-list rather than a deny-list of networking
-    # crates, plus a source grep, because `std::net` needs no dependency at all.
+    # The inference runtime's crate, core/infer, opens nothing. An allow-list rather than a
+    # deny-list of networking crates, plus a source grep, because `std::net` needs no
+    # dependency at all.
     cargo xtask infer-check
     # Both server units say MemoryDenyWriteExecute=yes; this holds that neither closure links
     # a crate that emits code at run time.
@@ -335,40 +328,33 @@ lint:
     cargo xtask residency-check
     # A device-config key with a reader and no writer is a switch nothing can flip.
     cargo xtask config-key-check
-    # The token palette meets the contrast it claims, in both themes.
-    cargo xtask contrast-check
-    # One definition of a design value: ui/tokens.css is the only stylesheet that declares one.
-    cargo xtask token-block-check
-    # Every service in infra/ composes onto one machine.
+    # The relay and the vault compose onto one machine.
     cargo xtask port-check
-    # Every fix `doctor` prints is a command the platform's page under docs/use/ gives.
-    cargo xtask runbook-check
     # Every dependency carries a licence Kotton may ship under, every crate and source file
     # declares its directory's, and LICENSE states the same boundary.
     cargo xtask license-check
     cargo xtask link-check
     # The documents a reader is sent to say what is true, not what happened: no file under
-    # docs/, ui/ or papers/, no root *.md, no .wit file of the app contract
-    # (guest/sdk/kotton-app/wit/), no string literal under xtask/src/ (the lines a gate
-    # prints; a named file's test fixtures may hold a timestamp) and no Rust comment under the
-    # trees host-word-check reads (but the files the check still lists as not yet swept) names
-    # a record or narrates a date; and no file beside them (this Justfile, just/*.just, the
+    # docs/, no root *.md, no string literal under xtask/src/ (the lines a gate prints; a
+    # named file's test fixtures may hold a timestamp) and no Rust comment under the trees
+    # host-word-check reads (but the files the check still lists as not yet swept) names a
+    # record or narrates a date; and no file beside them (this Justfile, just/*.just, the
     # workflows, the root manifests) names a record.
     cargo xtask docs-present-check
-    # docs/{cli,shell}/reference.md are generated from the command trees; checked, never
-    # rewritten, so a dirty copy cannot go green. And the guides under docs/use/ type the lines
-    # the shell prints, held here because the shell's tests read no page.
+    # docs/cli/reference.md is generated from the CLI's command tree; checked, never
+    # rewritten, so a dirty copy cannot go green.
     cargo xtask-docs docs-check
-    # Every `kotton` command a guide under docs/use/ tells you to run is one the binary has.
+    # Every `kotton` command README.md gives is one the binary has (held through the reference
+    # above), and every script it runs from a checkout is in this tree. A page added later is
+    # gated by naming it here: `cargo xtask claim-check <page>…`.
     cargo xtask claim-check
     # What a person reads says *host* for the machine and *instance*, *relay* or *vault* for
     # what runs on it, never *box*: the root *.md (README.md, CONTRIBUTING.md, CLAUDE.md and
-    # their kin), the essays under papers/, the design under docs/design/ and its decisions,
-    # the guides, the installer, infra's READMEs, the two references, the text the artboards
-    # under ui/ink show, and the string literals of the shell, the CLI, the window, xtask,
-    # infra/relay, and every crate under core/ but kuid, its sources and its tests.
+    # their kin), the installer, infra's READMEs, the CLI reference, and the string literals
+    # of the shell, the CLI, xtask, infra/relay, and every crate under core/, its sources and
+    # its tests.
     cargo xtask host-word-check
-    # A path named in the orientation docs exists.
+    # A path named in CLAUDE.md, CONTRIBUTING.md or README.md exists.
     cargo xtask facts-check
     # Every UserRequest variant has a domain, and every assignment names a real variant.
     cargo xtask request-domains
@@ -390,8 +376,6 @@ lint:
     cargo xtask relay-address-check
     # Every file under tests/tests/suite/ is compiled into the one integration binary.
     cargo xtask suite-check
-    # A string literal containing {} inside rsx! is not interpolation.
-    cargo xtask rsx-check
     # GitHub Actions runs the release workflow on a pushed tag and the lint workflow on a
     # pull request, on Linux, and nothing else.
     cargo xtask actions-check

@@ -1,31 +1,35 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `claim-check`: a guide may not tell a reader to run a `kotton` command the binary lacks.
+//! `claim-check`: a page may not tell a reader to run a `kotton` command the binary lacks.
 //!
-//! The commands a person is told to type are the one part of a guide that is mechanically
+//! The commands a person is told to type are the one part of a page that is mechanically
 //! checkable, and `docs/cli/reference.md` is generated from the real command tree and held to
-//! it by `docs-check` — so every guide under `docs/use/` is held to the reference, and through
-//! it to the binary. A guide that teaches a command the binary does not have is worse than no
-//! guide.
+//! it by `docs-check` — so every page this reads is held to the reference, and through it to
+//! the binary. A page that teaches a command the binary does not have is worse than no page.
 //!
-//! It reads the commands, not the sentence beside them: whether a guide's prose is true stays
+//! **What it reads:** `README.md`, always — it is the page of commands this repository
+//! gives — and every page named on its command line, so a page added later is gated by naming
+//! it in the `just lint` line that runs this. A page that cannot be read is refused, not
+//! skipped: a gate over a page it never opened is a gate over nothing.
+//!
+//! It reads the commands, not the sentence beside them: whether a page's prose is true stays
 //! a reviewer's job.
 //!
-//! **And the scripts a guide runs from a checkout.** A guide installs a release with
+//! **And the scripts a page runs from a checkout.** The README installs a release with
 //! `git clone … https://github.com/kottonllc/kotton && sh kotton/install.sh`, so every
-//! `sh kotton/<path>` in a fenced block must name a file this tree has: a guide that runs a
+//! `sh kotton/<path>` in a fenced block must name a file this tree has: a page that runs a
 //! script the checkout lacks fails at the reader's first line, exactly as a missing command
 //! does. A release tag is a commit on `main`, so a tree this gate passed is the tree the tag
 //! holds.
 
-/// The user layer. Every Markdown file directly in it is a guide this gate reads.
-const USE_DIR: &str = "docs/use";
+/// The page every run reads, whatever else it is given.
+const README: &str = "README.md";
 const CLI_REF: &str = "docs/cli/reference.md";
 
 /// Every `kotton …` invocation inside a fenced block, longest-first against the real tree.
 ///
-/// The commands a user is told to type are the one part of a guide that is mechanically
+/// The commands a user is told to type are the one part of a page that is mechanically
 /// checkable, and `docs/cli/reference.md` is already generated from the command tree and
-/// gated by `docs-check` — so a guide can be held to it for free. A flag or an argument is
+/// gated by `docs-check` — so a page can be held to it for free. A flag or an argument is
 /// not a subcommand, so the longest known prefix wins and the rest is the user's input.
 fn unknown_commands(text: &str, known: &[String]) -> Vec<String> {
     let mut out = Vec::new();
@@ -65,7 +69,7 @@ fn unknown_commands(text: &str, known: &[String]) -> Vec<String> {
 }
 
 /// Every `sh kotton/<path>` inside a fenced block whose `<path>` `exists` does not hold, as
-/// the `kotton/<path>` the guide typed.
+/// the `kotton/<path>` the page typed.
 ///
 /// `kotton/` is the directory `git clone https://github.com/kottonllc/kotton` makes, so the
 /// rest is a path in this tree. An archive's directory (`kotton-relay-<rev>-…/install.sh`) is
@@ -103,54 +107,72 @@ fn known_commands(cli_ref: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every guide under [`USE_DIR`], as repo-relative paths, sorted.
+/// The pages a run reads: [`README`], then each page `args` names, in order and once each.
 ///
-/// The directory rather than a list of names: a page in `docs/use/` is gated because of
-/// where it is, so a new guide cannot be added and left ungated.
-pub(crate) fn gated_pages(root: &std::path::Path) -> Vec<String> {
-    let mut pages: Vec<String> = std::fs::read_dir(root.join(USE_DIR))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            (name.ends_with(".md") && e.path().is_file()).then(|| format!("{USE_DIR}/{name}"))
-        })
-        .collect();
-    pages.sort();
+/// Repo-relative, as typed; `--` is not a page. A page named twice is read once.
+pub(crate) fn gated_pages(args: &[String]) -> Vec<String> {
+    let mut pages = vec![README.to_string()];
+    for a in args {
+        let a = a.replace('\\', "/");
+        if a != "--" && !pages.contains(&a) {
+            pages.push(a);
+        }
+    }
     pages
 }
 
-pub fn run(_args: &[String]) {
-    let root = crate::out::root();
-    let read = |rel: &str| std::fs::read_to_string(root.join(rel)).ok();
-    let Some(cli) = read(CLI_REF) else {
-        eprintln!("claim-check: could not read {CLI_REF}. Run from the workspace root.");
-        std::process::exit(1);
-    };
-    let known = known_commands(&cli);
-    let pages = gated_pages(&root);
+/// Every finding over `pages`, as the line the gate prints, given each page's text (or `None`
+/// for one that could not be read), the known command tree and what the tree holds.
+fn findings(
+    pages: &[(String, Option<String>)],
+    known: &[String],
+    exists: impl Fn(&str) -> bool,
+) -> Vec<String> {
     let mut bad: Vec<String> = Vec::new();
-    for rel in &pages {
-        let Some(doc) = read(rel) else { continue };
-        for cmd in unknown_commands(&doc, &known) {
+    for (rel, doc) in pages {
+        let Some(doc) = doc else {
+            bad.push(format!(
+                "{rel} could not be read. A page this gate is given and cannot open is refused, \
+                 not skipped."
+            ));
+            continue;
+        };
+        for cmd in unknown_commands(doc, known) {
             bad.push(format!(
                 "{rel} tells a reader to run `{cmd}`, which is not in the generated command \
-                 tree. A guide that teaches a command the binary does not have is worse than \
-                 no guide."
+                 tree. A page that teaches a command the binary does not have is worse than \
+                 no page."
             ));
         }
-        for script in missing_scripts(&doc, |p| root.join(p).is_file()) {
+        for script in missing_scripts(doc, &exists) {
             bad.push(format!(
                 "{rel} tells a reader to run `sh {script}`, and a checkout has no such file: \
                  `kotton/` is the clone, so the rest is a path in this tree."
             ));
         }
     }
+    bad
+}
+
+pub fn run(args: &[String]) {
+    let root = crate::out::root();
+    let read = |rel: &str| std::fs::read_to_string(root.join(rel)).ok();
+    let Some(cli) = read(CLI_REF) else {
+        eprintln!(
+            "claim-check: could not read {CLI_REF}. Run from the workspace root; \
+             `cargo xtask-docs gen-docs` writes it."
+        );
+        std::process::exit(1);
+    };
+    let known = known_commands(&cli);
+    let pages: Vec<(String, Option<String>)> =
+        gated_pages(args).into_iter().map(|rel| { let doc = read(&rel); (rel, doc) }).collect();
+    let bad = findings(&pages, &known, |p| root.join(p).is_file());
     if bad.is_empty() {
+        let names: Vec<&str> = pages.iter().map(|(rel, _)| rel.as_str()).collect();
         println!(
-            "claim-check: OK — every `kotton` command the {} guides under {USE_DIR}/ give is one the binary has, and every script they run from a checkout is in this tree.",
-            pages.len()
+            "claim-check: OK — every `kotton` command {} gives is one the binary has, and every script it runs from a checkout is in this tree.",
+            names.join(", ")
         );
         return;
     }
@@ -165,20 +187,45 @@ pub fn run(_args: &[String]) {
 mod tests {
     use super::*;
 
-    /// **Every page in `docs/use/` is gated, by being there** — the platform pages, the relay
-    /// and vault guides and the index alike, with no list a new page has to be added to.
+    /// **The README is always read, and a page named on the command line is read beside it**,
+    /// once, however often it is named; `--` is not a page.
     #[test]
-    fn every_page_in_docs_use_is_gated() {
+    fn the_readme_and_every_named_page_are_gated() {
+        assert_eq!(gated_pages(&[]), vec!["README.md"]);
+        let args: Vec<String> =
+            ["--", "docs/a.md", "README.md", "docs/a.md"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(gated_pages(&args), vec!["README.md", "docs/a.md"]);
+    }
+
+    /// **A page that names a verb the binary lacks is refused, and a page that cannot be read
+    /// is refused rather than skipped.**
+    #[test]
+    fn an_invented_verb_and_an_unread_page_are_both_findings() {
+        let known: Vec<String> =
+            ["kotton", "kotton id create"].iter().map(|s| s.to_string()).collect();
+        let pages = vec![
+            ("README.md".to_string(), Some("```sh\nkotton id create alice\nkotton frobnicate\n```\n".to_string())),
+            ("docs/gone.md".to_string(), None),
+        ];
+        let bad = findings(&pages, &known, |_| true);
+        assert_eq!(bad.len(), 2, "{bad:?}");
+        assert!(bad[0].starts_with("README.md tells a reader to run `kotton frobnicate`"), "{bad:?}");
+        assert!(bad[1].starts_with("docs/gone.md could not be read"), "{bad:?}");
+    }
+
+    /// **This tree's README passes against this tree's generated reference.** The gate's own
+    /// run says the same; this holds it in `cargo test` too, so a verb renamed in the CLI with
+    /// the README left behind fails here as well as in `just lint`.
+    #[test]
+    fn this_readme_names_only_commands_the_reference_has() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let pages = gated_pages(root);
-        for page in [
-            "README.md", "first-hour.md", "linux.md", "wsl2.md", "the-window.md",
-            "build-a-release.md", "run-a-relay.md",
-            "run-a-vault.md", "recover-and-start-over.md",
-        ] {
-            assert!(pages.contains(&format!("{USE_DIR}/{page}")), "{page} is not gated: {pages:?}");
-        }
-        assert!(pages.iter().all(|p| p.ends_with(".md") && !p["docs/use/".len()..].contains('/')));
+        let cli = std::fs::read_to_string(root.join(CLI_REF)).expect("the generated reference");
+        let readme = std::fs::read_to_string(root.join(README)).expect("README.md");
+        let known = known_commands(&cli);
+        assert!(known.len() > 10, "the reference parsed to {known:?}");
+        let pages = vec![(README.to_string(), Some(readme))];
+        let bad = findings(&pages, &known, |p| root.join(p).is_file());
+        assert!(bad.is_empty(), "{bad:?}");
     }
 
     #[test]
@@ -204,8 +251,8 @@ mod tests {
         assert!(unknown_commands(doc, &known).is_empty());
     }
 
-    /// **A script a guide runs from the clone is one the tree has**, and the install the guides
-    /// give, the root `install.sh`, is one of them; an archive's own `install.sh` is not the
+    /// **A script a page runs from the clone is one the tree has**, and the install the README
+    /// gives, the root `install.sh`, is one of them; an archive's own `install.sh` is not the
     /// checkout's and is not read.
     #[test]
     fn a_script_run_from_the_checkout_is_one_the_tree_has() {

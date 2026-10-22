@@ -41,7 +41,6 @@ pub use utils::{expand_vars, normalize_path, parse_command};
 pub use commands::{scaffold_files, typed_lines, TypedLines, SDK_FROM_REPOSITORY};
 
 /// Return `(name, help_text)` for every shell command, sorted alphabetically.
-/// Used by `cargo xtask gen-docs` to emit `docs/shell/reference.md`.
 pub fn shell_command_docs() -> Vec<(String, &'static str)> {
     ShellExecutor::new().command_docs()
 }

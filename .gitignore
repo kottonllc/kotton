@@ -28,9 +28,9 @@ target-*/
 # to `guest/apps/` and two build artifacts started showing up as
 # untracked. `**/app.wasm` matches at any depth, wherever a region puts them next.
 **/app.wasm
-# The browser's half of the pairing ceremony, built by `cargo xtask build-web`.
+# The browser's half of the pairing ceremony, built in the reference; this repository does not build it.
 /client/web/assets/pair.wasm
-# Staged from ui/tokens.css by `cargo xtask build-web`. The phone
+# Staged from ui/tokens.css by the reference's web build, which is not here. The phone
 # is served from a directory and cannot include_str! the way the shell does.
 /client/web/assets/tokens.css
 /node_modules/
