@@ -30,7 +30,7 @@
 //!    exit — a check marked as measured against `main` ends `@<the origin/main it measured>` —
 //!    then `Assisted-by: Claude Code`, and last the owner's own `Signed-off-by:` (name and
 //!    address from `signoff_check::PEOPLE`), because a commit authored as a person is
-//!    certified by that person (CONTRIBUTING.md, "Every commit is signed off"). A check or
+//!    certified by that person ("A merge commit is a commit", CONTRIBUTING.md). A check or
 //!    build that could not start, or was killed, is
 //!    refused as not run, never as a tree that fails.
 //! 6. **Pushes `main`**, and if the push is refused (someone else merged first), takes the
@@ -773,6 +773,10 @@ mod tests {
             )),
             "one trailer block naming every step and its exit:\n{body}"
         );
+        // `signoff-check` over the range holding only the merge the gate made passes.
+        let (n, found) = crate::signoff_check::check(&fx.clone, &[&main_before, &tip])
+            .expect("the range reads");
+        assert_eq!((n, found.len()), (1, 0), "{found:#?}");
     }
 
     /// A tip check that fails stops the merge before it is made, and leaves the checkout on
@@ -832,15 +836,17 @@ mod tests {
         let base = fx.head("HEAD");
         fx.branch_adds_a_caller(&base);
         g(&fx.clone, &["checkout", "--quiet", MAIN]);
-        let r = merge(
-            &fx.clone,
-            "side",
-            "Merge: side\n\nAssisted-by: Claude Code",
-            Options { fetch: false, push: false },
-            &[],
-            |_| Vec::new(),
-        );
-        assert!(matches!(r, Err(Refusal::Message(_))), "{r:?}");
+        for trailer in ["Assisted-by: Claude Code", "Signed-off-by: A <a@example.invalid>"] {
+            let r = merge(
+                &fx.clone,
+                "side",
+                &format!("Merge: side\n\n{trailer}"),
+                Options { fetch: false, push: false },
+                &[],
+                |_| Vec::new(),
+            );
+            assert!(matches!(r, Err(Refusal::Message(_))), "{trailer}: {r:?}");
+        }
     }
 
     /// A branch brought current with `main` and buildable: the common start of the tests below.
