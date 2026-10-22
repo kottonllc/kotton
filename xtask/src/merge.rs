@@ -30,7 +30,7 @@
 //!    exit — a check marked as measured against `main` ends `@<the origin/main it measured>` —
 //!    then `Assisted-by: Claude Code`, and last the owner's own `Signed-off-by:` (name and
 //!    address from `signoff_check::PEOPLE`), because a commit authored as a person is
-//!    certified by that person ("A merge commit is a commit", CONTRIBUTING.md). A check or
+//!    certified by that person (CONTRIBUTING.md, "Every commit is signed off": a merge commit is a commit). A check or
 //!    build that could not start, or was killed, is
 //!    refused as not run, never as a tree that fails.
 //! 6. **Pushes `main`**, and if the push is refused (someone else merged first), takes the
