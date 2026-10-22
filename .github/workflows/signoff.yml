@@ -27,28 +27,21 @@ jobs:
             return 1
           }
           # Trailers are read with git's own parser, so a line in the body is not one.
-          trailer_values() { git log -1 --format="%(trailers:key=$2,valueonly,unfold)" "$1" | sed '/^$/d'; }
+          trailer_values() { git log -1 --format="%(trailers:key=$2,valueonly,unfold)" "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d'; }
           for c in $(git rev-list "$base".."$head"); do
             an=$(git log -1 --format=%an "$c"); ae=$(git log -1 --format=%ae "$c")
             cn=$(git log -1 --format=%cn "$c"); ce=$(git log -1 --format=%ce "$c")
             short=$(git log -1 --format='%h %s' "$c")
             if is_agent "$an" "$ae" || is_agent "$cn" "$ce"; then echo "$short: authored or committed as an agent ($an <$ae>, $cn <$ce>)"; bad=1; fi
-            author_signed=0; committer_signed=0
             for key in Signed-off-by Co-Authored-By; do
               trailer_values "$c" "$key" | while IFS= read -r who; do
-                who=$(trim "$who"); n=$(trim "${who%%<*}"); e=${who#*<}; e=$(trim "${e%%>*}")
+                n=$(trim "${who%%<*}"); e=${who#*<}; e=$(trim "${e%%>*}")
                 if is_agent "$n" "$e"; then echo "$short: an agent is named in a trailer: $key: $who"; exit 1; fi
               done || bad=1
             done
-            while IFS= read -r who; do
-              who=$(trim "$who")
-              [ "$who" = "$an <$ae>" ] && author_signed=1
-              [ "$who" = "$cn <$ce>" ] && committer_signed=1
-            done <<EOF
-          $(trailer_values "$c" Signed-off-by)
-          EOF
-            if [ "$author_signed" = 0 ]; then echo "$short: not signed off by its author ($an <$ae>)"; bad=1; fi
-            if [ "$cn <$ce>" != "$an <$ae>" ] && [ "$committer_signed" = 0 ]; then echo "$short: not signed off by its committer ($cn <$ce>)"; bad=1; fi
+            sobs=$(trailer_values "$c" Signed-off-by)
+            if ! printf '%s\n' "$sobs" | grep -qxF "$an <$ae>"; then echo "$short: not signed off by its author ($an <$ae>)"; bad=1; fi
+            if [ "$cn <$ce>" != "$an <$ae>" ] && ! printf '%s\n' "$sobs" | grep -qxF "$cn <$ce>"; then echo "$short: not signed off by its committer ($cn <$ce>)"; bad=1; fi
             if [ -n "$(trailer_values "$c" Claude-Session)" ]; then echo "$short: carries a Claude-Session trailer"; bad=1; fi
           done
           [ "$bad" = 0 ] && echo "signoff: OK — every commit is signed off by its author and committer, none made as or naming an agent"
