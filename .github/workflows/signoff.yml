@@ -8,7 +8,7 @@ jobs:
   signoff:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a57b4d5a6c3d2d6a5ad8b5fd6ba43ad5c # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: every commit is signed off by its author, and no agent made one

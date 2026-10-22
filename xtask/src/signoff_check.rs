@@ -2,10 +2,6 @@
 //! `signoff-check`: every commit on this branch is certified by a person, and none is made
 //! as an agent.
 //!
-//! `DEC-0091`, as amended 2026-09-30 and 2026-10-02;
-//! `TASK-every-commit-carries-a-sign-off-and-nothing-checks-it`,
-//! `TASK-an-agent-commit-may-carry-a-session-url-and-an-agent-co-author-and-nothing-refuses-them`.
-//!
 //! ## Why this exists
 //!
 //! A contribution to Kotton is certified, not granted: a commit carries the Developer
@@ -14,7 +10,7 @@
 //! the CLA it replaced was named in two documents and checked by nothing
 //! (`TASK-cla-assistant-is-named-in-two-documents-and-installed-nowhere`). This is the check.
 //!
-//! ## The rules, as DEC-0091's amendments write them
+//! ## The rules (CONTRIBUTING.md, "Every commit is signed off")
 //!
 //! - **(a)** No commit is authored or committed as an agent identity: any name at an address on
 //!   [`AGENT_ADDRESSES`], one of [`AGENT_IDENTITIES`], or a forge bot ([`BOT_SUFFIX`]).
@@ -543,12 +539,13 @@ mod tests {
 
     const GATES: &str = "Gates: cargo test -p xtask 0";
 
-    /// The owner's commit shape as the amendment writes it passes.
+    /// The owner's `Gates:` and `Assisted-by:` commit with no sign-off is refused: (b) excuses no one.
     #[test]
     fn the_owners_gates_and_assisted_by_commit_without_a_sign_off_fails() {
         assert_eq!(judge(OWNER, OWNER, &[GATES, ASSISTED]), vec![Rule::NoAuthorSignoff]);
     }
 
+    /// The owner's commit shape, with the owner's own sign-off last, passes.
     #[test]
     fn the_owners_gates_and_assisted_by_commit_passes() {
         assert_eq!(judge(OWNER, OWNER, &[GATES, ASSISTED, &sob(OWNER)]), vec![]);
