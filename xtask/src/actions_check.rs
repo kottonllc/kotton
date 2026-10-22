@@ -28,7 +28,9 @@
 //!   choose what runs. No other trigger, in any spelling — **except in [`LINT`], by name**,
 //!   whose `on` is a mapping whose only key is `pull_request`, empty: the fast gate on every
 //!   pull request, and nothing else. Any other file with `pull_request` is refused, and so is
-//!   [`LINT`] with any trigger beside it or any filter on it;
+//!   [`LINT`] with any trigger beside it or any filter on it. [`SIGNOFF`] is the second file
+//!   admitted on `pull_request`, by name, on the same terms: the sign-off check every
+//!   repository is born with, and it may do less than [`LINT`] (below);
 //! - **`jobs`**: a non-empty mapping; each job a mapping whose keys are among [`JOB_KEYS`],
 //!   with `runs-on` **exactly one of [`RUNNERS`]** — the standard GitHub-hosted Linux labels,
 //!   so no list, no label group, no self-hosted runner and no larger runner
@@ -41,7 +43,13 @@
 //!   does not read, and no `<<` merge key, which would bring keys this never saw.
 //!
 //! What the steps do is not this check's business: it holds *when* a workflow runs and *on
-//! what*, which is what spends the budget.
+//! what*, which is what spends the budget. [`SIGNOFF`] is the one exception, because it is
+//! admitted for one purpose, reading commits: its top-level keys are `name`, `on` and `jobs`
+//! alone; it has one job, whose keys are `runs-on` and `steps`; its steps are exactly two,
+//! `actions/checkout` pinned to a full commit (with at most `fetch-depth` and
+//! `persist-credentials`) and then one `run`, each with at most a `name`; and nowhere in it
+//! is a secret or the token named. A second action, a third step, an `env` or a secret is
+//! refused, so the file cannot grow into a second gate with its own reach.
 //!
 //! Enforcing: it is green on the tree it lands on, so it blocks nobody, and the failure it
 //! closes cost a month's budget.
@@ -57,6 +65,14 @@ const DIR: &str = ".github/workflows";
 /// request. Named rather than recognised by what it runs, because what its steps do is not
 /// this check's business and a name cannot drift into a second one.
 const LINT: &str = "lint.yml";
+
+/// The second workflow admitted on `pull_request`, by file name: every commit a pull request
+/// brings is signed off by its author and none is made as an agent. Every repository takes it
+/// at its first commit; its steps are held to [`signoff_shape`].
+const SIGNOFF: &str = "signoff.yml";
+
+/// The one action [`SIGNOFF`] may use, pinned to a full commit.
+const CHECKOUT: &str = "actions/checkout@";
 
 /// Top-level keys a workflow may carry. Anything else — including a YAML merge key `<<`,
 /// which the parser leaves unresolved — is refused rather than guessed at.
@@ -123,14 +139,106 @@ pub(crate) fn refusals(file: &str, text: &str) -> Vec<String> {
     }
     match top.get(&Yaml::String("on".into())) {
         None => out.push("no `on:` — a workflow here runs on a pushed tag, and says so".into()),
-        Some(on) if file == LINT => lint_trigger(&mut out, on),
+        Some(on) if file == LINT || file == SIGNOFF => pull_request_trigger(&mut out, file, on),
         Some(on) => triggers(&mut out, on),
     }
     match top.get(&Yaml::String("jobs".into())) {
         None => out.push("no `jobs:`".into()),
         Some(jobs) => check_jobs(&mut out, jobs),
     }
+    if file == SIGNOFF {
+        signoff_shape(&mut out, top, text);
+    }
     out
+}
+
+/// What [`SIGNOFF`] may do: read the pull request's commits, and nothing else.
+fn signoff_shape(out: &mut Vec<String>, top: &yaml_rust2::yaml::Hash, text: &str) {
+    for k in top.keys() {
+        let k = key(k);
+        if !["name", "on", "jobs"].contains(&k.as_str()) {
+            out.push(format!("`{k}` in {SIGNOFF} — it carries `name`, `on` and `jobs` and nothing else"));
+        }
+    }
+    for word in ["secrets", "github.token", "GITHUB_TOKEN"] {
+        if text.contains(word) {
+            out.push(format!("{SIGNOFF} names `{word}` — it reads commits and is handed no secret"));
+        }
+    }
+    let Some(Yaml::Hash(jobs)) = top.get(&Yaml::String("jobs".into())) else {
+        return;
+    };
+    if jobs.len() != 1 {
+        out.push(format!("{SIGNOFF} has {} jobs — it has one", jobs.len()));
+    }
+    for (name, job) in jobs {
+        let name = key(name);
+        let Yaml::Hash(job) = job else { continue };
+        for k in job.keys() {
+            let k = key(k);
+            if !["runs-on", "steps"].contains(&k.as_str()) {
+                out.push(format!("`jobs.{name}.{k}` in {SIGNOFF} — its job carries `runs-on` and `steps` and nothing else"));
+            }
+        }
+        let steps = match job.get(&Yaml::String("steps".into())) {
+            Some(Yaml::Array(steps)) => steps,
+            _ => {
+                out.push(format!("`jobs.{name}.steps` in {SIGNOFF} is not a list of steps"));
+                continue;
+            }
+        };
+        if steps.len() != 2 {
+            out.push(format!(
+                "`jobs.{name}.steps` in {SIGNOFF} has {} steps — it has two: the checkout, then one `run`",
+                steps.len()
+            ));
+        }
+        for (i, step) in steps.iter().enumerate() {
+            let Yaml::Hash(step) = step else {
+                out.push(format!("`jobs.{name}.steps[{i}]` in {SIGNOFF} is not a step"));
+                continue;
+            };
+            let allowed: &[&str] = if i == 0 { &["name", "uses", "with"] } else { &["name", "run"] };
+            for k in step.keys() {
+                let k = key(k);
+                if !allowed.contains(&k.as_str()) {
+                    out.push(format!(
+                        "`jobs.{name}.steps[{i}].{k}` in {SIGNOFF} — step {i} carries {} and nothing else",
+                        allowed.join(", ")
+                    ));
+                }
+            }
+            if i == 0 {
+                let pinned = match step.get(&Yaml::String("uses".into())) {
+                    Some(Yaml::String(u)) => u
+                        .strip_prefix(CHECKOUT)
+                        .is_some_and(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())),
+                    _ => false,
+                };
+                if !pinned {
+                    out.push(format!(
+                        "`jobs.{name}.steps[0].uses` in {SIGNOFF} is not `{CHECKOUT}<a full commit>` — the first step is the checkout, pinned"
+                    ));
+                }
+                if let Some(with) = step.get(&Yaml::String("with".into())) {
+                    let Yaml::Hash(with) = with else {
+                        out.push(format!("`jobs.{name}.steps[0].with` in {SIGNOFF} is not a mapping"));
+                        continue;
+                    };
+                    for k in with.keys() {
+                        let k = key(k);
+                        if !["fetch-depth", "persist-credentials"].contains(&k.as_str()) {
+                            out.push(format!(
+                                "`jobs.{name}.steps[0].with.{k}` in {SIGNOFF} — the checkout takes `fetch-depth` and `persist-credentials` and nothing else"
+                            ));
+                        }
+                    }
+                }
+            } else if !matches!(step.get(&Yaml::String("run".into())), Some(Yaml::String(_))) {
+                out.push(format!("`jobs.{name}.steps[{i}]` in {SIGNOFF} has no `run` — after the checkout it runs one shell step"));
+            }
+        }
+    }
 }
 
 fn triggers(out: &mut Vec<String>, on: &Yaml) {
@@ -164,11 +272,11 @@ fn triggers(out: &mut Vec<String>, on: &Yaml) {
     }
 }
 
-/// [`LINT`]'s trigger: `pull_request`, empty, and nothing beside it.
-fn lint_trigger(out: &mut Vec<String>, on: &Yaml) {
+/// [`LINT`]'s and [`SIGNOFF`]'s trigger: `pull_request`, empty, and nothing beside it.
+fn pull_request_trigger(out: &mut Vec<String>, file: &str, on: &Yaml) {
     let Yaml::Hash(on) = on else {
         out.push(format!(
-            "`on` is {} — {LINT} runs on a mapping of `pull_request:` and nothing else",
+            "`on` is {} — {file} runs on a mapping of `pull_request:` and nothing else",
             shape(on)
         ));
         return;
@@ -181,17 +289,17 @@ fn lint_trigger(out: &mut Vec<String>, on: &Yaml) {
                 let empty = matches!(v, Yaml::Null) || matches!(v, Yaml::Hash(h) if h.is_empty());
                 if !empty {
                     out.push(format!(
-                        "`on.pull_request` carries settings — in {LINT} it is admitted only empty, so every pull request runs the same gate"
+                        "`on.pull_request` carries settings — in {file} it is admitted only empty, so every pull request runs the same gate"
                     ));
                 }
             }
             other => out.push(format!(
-                "`on.{other}` is a trigger {LINT} does not admit — it runs on `pull_request` and nothing else"
+                "`on.{other}` is a trigger {file} does not admit — it runs on `pull_request` and nothing else"
             )),
         }
     }
     if !pr {
-        out.push(format!("`on` has no `pull_request:` — {LINT} is the pull-request gate"));
+        out.push(format!("`on` has no `pull_request:` — {file} runs on every pull request"));
     }
 }
 
@@ -336,8 +444,8 @@ pub fn run(_args: &[String]) {
         let n = std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0);
         println!(
             "actions-check: OK — {n} workflow file(s) under {DIR}, each admitted: triggered only by `push` \
-             with `tags` (and at most an empty `workflow_dispatch`), or {LINT} by an empty `pull_request` \
-             and nothing else, every job on a standard `ubuntu-` runner with only named job keys, so no \
+             with `tags` (and at most an empty `workflow_dispatch`), or {LINT} or {SIGNOFF} by an empty \
+             `pull_request` and nothing else ({SIGNOFF} only as a pinned checkout and one shell step), every job on a standard `ubuntu-` runner with only named job keys, so no \
              reusable-workflow job and no merge key."
         );
         return;
@@ -347,8 +455,8 @@ pub fn run(_args: &[String]) {
         println!("  {file}\n    {why}");
     }
     println!(
-        "\nActions runs the release workflow on a tag and {LINT} on a pull request, and nothing \n\
-         else. This admits a workflow only if every trigger, runner and job form is one it names."
+        "\nActions runs the release workflow on a tag and {LINT} and {SIGNOFF} on a pull request, \n\
+         and nothing else. This admits a workflow only if every trigger, runner and job form is one it names."
     );
     std::process::exit(1);
 }
@@ -604,5 +712,72 @@ mod tests {
         assert!(!planted("lint.yml", matrix).is_empty(), "a matrix admitted in lint.yml");
         let mac = "on:\n  pull_request:\njobs:\n  lint:\n    runs-on: macos-latest\n";
         assert!(!planted("lint.yml", mac).is_empty(), "a macOS runner admitted in lint.yml");
+    }
+
+    /// The sign-off workflow this repository carries.
+    const SIGNOFF_TEXT: &str = include_str!("../../.github/workflows/signoff.yml");
+
+    /// **The sign-off workflow is admitted, by its name and beside lint.yml**, and the same
+    /// file under any other name is refused on its trigger.
+    #[test]
+    fn the_signoff_workflow_passes_under_its_own_name() {
+        assert_eq!(refusals("signoff.yml", SIGNOFF_TEXT), Vec::<String>::new());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lint.yml"), LINT_GOOD).unwrap();
+        std::fs::write(dir.path().join("release.yml"), GOOD).unwrap();
+        std::fs::write(dir.path().join("signoff.yml"), SIGNOFF_TEXT).unwrap();
+        assert_eq!(check_dir(dir.path()), Vec::<(String, String)>::new());
+        for name in ["signoff.yaml", "sign-off.yml", "Signoff.yml", "dco.yml"] {
+            let got = planted(name, SIGNOFF_TEXT);
+            assert!(
+                got.iter().any(|(_, why)| why.contains("on.pull_request")),
+                "{name} admitted on pull_request: {got:?}"
+            );
+        }
+    }
+
+    /// **Planted: the sign-off workflow doing more than reading commits** — another action, a
+    /// third step, an unpinned or floating checkout, a setting the checkout does not need, a
+    /// secret or the token, an `env`, a second job, a key on its job, a filter or a second
+    /// trigger — each refused, and each for a reason that names the file.
+    #[test]
+    fn the_signoff_workflow_may_only_check_out_and_run_one_step() {
+        let pin = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262";
+        let base = |steps: &str| {
+            format!("name: signoff\non:\n  pull_request:\njobs:\n  signoff:\n    runs-on: ubuntu-24.04\n    steps:\n{steps}")
+        };
+        let checkout = format!("      - uses: {pin} # v4.4.0\n        with:\n          fetch-depth: 0\n");
+        let run = "      - name: every commit is signed off\n        run: |\n          echo ok\n";
+        let good = base(&format!("{checkout}{run}"));
+        assert_eq!(refusals("signoff.yml", &good), Vec::<String>::new());
+        let planted_forms = [
+            base(&format!("{checkout}      - uses: actions/setup-node@0123456789abcdef0123456789abcdef01234567\n{run}")),
+            base(&format!("{checkout}{run}{run}")),
+            base(run),
+            base(&format!("      - uses: actions/checkout@v4\n{run}")),
+            base(&format!("      - uses: actions/checkout@11d5960a\n{run}")),
+            base(&format!("      - uses: evil/checkout@11d5960a326750d5838078e36cf38b85af677262\n{run}")),
+            base(&format!("{checkout}          token: x\n{run}")),
+            base(&format!("{checkout}      - run: echo ${{{{ secrets.X }}}}\n")),
+            base(&format!("{checkout}      - run: echo ${{{{ github.token }}}}\n")),
+            base(&format!("{checkout}      - run: echo hi\n        env:\n          A: b\n")),
+            base(&format!("{checkout}      - uses: {pin}\n")),
+            format!("{good}  second:\n    runs-on: ubuntu-24.04\n    steps:\n{checkout}{run}"),
+            good.replace("    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write\n"),
+            good.replace("    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    timeout-minutes: 5\n"),
+            good.replace("name: signoff\n", "name: signoff\nenv:\n  A: b\n"),
+            good.replace("name: signoff\n", "name: signoff\npermissions:\n  contents: write\n"),
+            good.replace("  pull_request:\n", "  pull_request:\n    branches: [main]\n"),
+            good.replace("  pull_request:\n", "  pull_request:\n  push:\n    tags: [v*]\n"),
+            good.replace("  pull_request:\n", "  pull_request_target:\n"),
+        ];
+        for text in planted_forms {
+            let got = refusals("signoff.yml", &text);
+            assert!(!got.is_empty(), "admitted, and should not be:\n{text}");
+            assert!(
+                got.iter().all(|r| r.contains("signoff.yml") || r.starts_with("`on.") || r.starts_with("`on`") || r.contains("is not a job key")),
+                "a refusal that does not say why:\n{text}\n{got:?}"
+            );
+        }
     }
 }

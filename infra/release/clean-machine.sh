@@ -13,9 +13,7 @@
 # (`--network none`): install.sh, kotton-start, `kotton id create` at a terminal
 # (util-linux `script` makes one), `kotton id list`.
 #
-# The one thing it cannot show is the window: a container has no GPU, and the
-# archive's window renders on one (DEC-0076). What it shows is everything short
-# of that. TASK-a-friend-cannot-install-kotton-without-a-toolchain.
+# TASK-a-friend-cannot-install-kotton-without-a-toolchain.
 set -eu
 
 archive=${1:?usage: sh infra/release/clean-machine.sh <archive.tar.gz> [base-image]}

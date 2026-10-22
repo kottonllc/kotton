@@ -4,9 +4,9 @@ Kotton — a build for a friend
 Pre-alpha. Put nothing in it you cannot afford to lose.
 
 This archive is everything Kotton needs to run: the daemons, the sandbox that
-runs apps, the window, the command line, and the shell the window draws. It
-needs no Rust, no Python and no development packages. It holds no key, no
-account and nothing that reports anywhere; installing it copies files.
+runs apps, the command line, and the shell it enters. It needs no Rust, no
+Python and no development packages. It holds no key, no account and nothing
+that reports anywhere; installing it copies files.
 
 Install
 -------
@@ -21,9 +21,9 @@ Start
 
     kotton-start
 
-Then, from another terminal, `kotton id create <name>` makes your identity and
-`kotton` enters Kotton's shell as it; on a machine with a GPU the window opens
-and asks the same. Nobody issues the identity and no server is told.
+That starts the daemon in this terminal. Leave it running, and type the rest in
+another terminal: `kotton id create <name>` makes your identity and `kotton`
+enters Kotton's shell as it. Nobody issues the identity and no server is told.
 
 From another terminal, `kotton --help` is everything else. Every command takes
 --help, and that is the authority on its arguments.
@@ -37,9 +37,6 @@ and later. Older ones (Ubuntu 22.04, Debian 12) will not run it.
 The runtime libraries a desktop usually already has — on Ubuntu 24.04 the
 packages libgtk-3-0t64, libxdo3, libayatana-appindicator3-1 and libssl3t64.
 No development packages.
-
-A GPU the window can render on. Without one Kotton runs without a window, says
-so, and the command line still works.
 
 REVISION says which commit this was built from and what it was built for.
 THIRD-PARTY-NOTICES names every library it is built from, its version and its
