@@ -23,11 +23,10 @@
 //! - **(c)** Every other commit carries a `Signed-off-by:` whose name and address are exactly
 //!   its author's, and, when the committer differs, a second that is exactly the committer's.
 //! - **(d)** No `Signed-off-by:` names an agent identity, on any commit: *"AI agents MUST NOT
-//!   add Signed-off-by tags"*, the kernel's rule the amendment keeps. The record writes this
-//!   inside (b); it is held on every commit because the reason for it is not specific to (b).
+//!   add Signed-off-by tags"*, the kernel's rule. It is held on every commit, whoever authored it.
 //! - **(e)** A commit carrying `Assisted-by:` carries no `Claude-Session:` trailer and no
-//!   `Co-Authored-By:` naming an agent identity (DEC-0091, amended 2026-10-02: the loop's agent
-//!   commit ends with `Gates:` then `Assisted-by: Claude Code`, and nothing else).
+//!   `Co-Authored-By:` naming an agent identity. An agent-assisted commit ends with `Gates:`,
+//!   then `Assisted-by: Claude Code`, then its author's own `Signed-off-by:`.
 //!
 //! Every finding carries the [`Rule`] it breaks, so a test can say which rule a commit fails
 //! and not only that it fails: a commit refused by two rules stays refused when one of them is
@@ -47,7 +46,7 @@
 //! It is not identity, and it proves no one agreed to anything. A trailer is a written claim
 //! anyone can type, and so is the author field it is compared with; that is the DCO's ordinary
 //! trust level everywhere it is used, and this gate does not raise it. It holds that every
-//! commit on the branch *carries* the claim in the form DEC-0091 asks for, so a missing
+//! commit on the branch *carries* the claim in the form CONTRIBUTING.md asks for, so a missing
 //! certificate is found at `just lint` and not by nobody. `.github/workflows/signoff.yml` holds
 //! the same rule on every pull request; this holds it at `just lint`, before one is opened.
 //!
@@ -478,11 +477,15 @@ mod tests {
         assert_eq!(judge(ANN, ANN, &[&sob(ANN), &sob(CLAUDE)]), vec![Rule::AgentSignoff]);
     }
 
-    /// The owner is matched exactly: the owner's name at another address is not the owner.
+    /// A sign-off answers for its author only when name and address match exactly: the same
+    /// name at an address that differs in case is another identity, so the commit is unsigned.
     #[test]
-    fn the_owner_is_matched_exactly() {
+    fn a_sign_off_at_a_differently_cased_address_is_not_the_authors() {
         let elsewhere = ("Austin Herman", "13291882+AustinJHerman@users.noreply.github.com");
-        assert_eq!(judge(elsewhere, elsewhere, &[ASSISTED]), vec![Rule::NoAuthorSignoff]);
+        assert_eq!(
+            judge(OWNER, OWNER, &[ASSISTED, &sob(elsewhere)]),
+            vec![Rule::NoAuthorSignoff]
+        );
     }
 
     /// `Claude` is an agent at its own address only; a person called Claude signs for
@@ -534,8 +537,8 @@ mod tests {
         assert_eq!(judge(model, model, &[&sob(model)]), vec![Rule::AgentAuthor, Rule::AgentSignoff]);
     }
 
-    // (e), DEC-0091 amended 2026-10-02: the loop's agent commit ends with `Gates:` then
-    // `Assisted-by: Claude Code`, and nothing else.
+    // (e): an agent-assisted commit ends with `Gates:`, then `Assisted-by: Claude Code`, then
+    // its author's own `Signed-off-by:`.
 
     const GATES: &str = "Gates: cargo test -p xtask 0";
 
