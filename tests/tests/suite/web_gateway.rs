@@ -206,7 +206,7 @@ async fn a_relay_change_is_a_forwarding_address() {
     use kotton_wire::ipc::RelayState;
 
     let wasm = repo_root().join("client/web/assets/pair.wasm");
-    assert!(wasm.exists(), "{} is missing — run `cargo xtask build-web`", wasm.display());
+    assert!(wasm.exists(), "{} is missing: this repository does not build the web half of pairing, so this case cannot run here. Nothing to do until the gateway and the portal have repositories of their own", wasm.display());
 
     let (relay_a, addr_a) = relay::spawn().await;
     let (_relay_b, addr_b) = relay::spawn().await;
@@ -282,7 +282,7 @@ async fn a_phone_reaches_home_through_the_relay() {
     let wasm = repo_root().join("client/web/assets/pair.wasm");
     assert!(
         wasm.exists(),
-        "{} is missing — run `cargo xtask build-web` (just test does)",
+        "{} is missing: this repository does not build the web half of pairing, so this case cannot run here. Nothing to do until the gateway and the portal have repositories of their own",
         wasm.display()
     );
 

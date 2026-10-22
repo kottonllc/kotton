@@ -192,8 +192,8 @@ test:
     # itself, and every renderer test here draws into an image with `vello_cpu`.
     cargo xtask bind-check -- -p kuid --features kuid/kuid-desktop,kuid/kuid-gpu
     # And the seam still has to compile. `anyrender_vello_cpu` stays in the
-    # tree as a build-time opt-in — it is what `just desktop::shot` builds, on a machine
-    # that cannot open a window at all — so it is code the project still owns. `check`
+    # tree as a build-time opt-in, for a machine that cannot open a window at all, so it
+    # is code the project still owns. `check`
     # rather than `test`: the ruling says this path is unmeasured, and the two feature
     # sets share every test but the type alias under them.
     cargo check -p kuid --features kuid/kuid-desktop --all-targets

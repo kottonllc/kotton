@@ -151,21 +151,6 @@ enum Probe {
     /// `.pc` file ([`Probe::PkgConfig`] is the better question where there is one) that
     /// the build links; a library only loaded at run time keeps [`Probe::Lib`].
     Links(&'static str),
-    /// A binary that is only needed where there is **no** display server, found on
-    /// `PATH` — met, not missing, on a machine that has one.
-    ///
-    /// The virtual framebuffer and the screenshot tool are `just desktop::shot`'s, and
-    /// that recipe is `DEC-0076`'s documented opt-in for a contributor whose machine
-    /// cannot open a window at all. Asked flatly, they would report MISSING on every
-    /// ordinary Linux desktop and send a person to install two packages their window
-    /// does not use — which is the failure the `only:` field exists to prevent, one
-    /// axis over: not "wrong platform" but "wrong machine on the right platform". The
-    /// point of this file is to be believed.
-    ///
-    /// A display is the whole condition: with `DISPLAY` or `WAYLAND_DISPLAY` set there
-    /// is already a server to draw into, so there is nothing to stand up. This is the
-    /// same idiom [`Probe::WindowManager`] uses to skip where it cannot apply.
-    WhenNoDisplay(&'static str),
     /// A window manager owns `$DISPLAY`.
     ///
     /// Not an installed thing — a *running* one, and the only requirement here
@@ -576,29 +561,6 @@ pub(crate) const NEEDS: &[Need] = &[
         // tell a person to install the tool that just answered them.
         fix: &[],
     },
-    // The last two rows are `just desktop::shot`'s, and they are the only rows here that
-    // a machine with a display does not need — see `Probe::WhenNoDisplay`. A contributor
-    // whose container has no X or Wayland server has no window at all, and `DEC-0076`
-    // anticipated exactly that: "the answer may be a documented opt-in rather than an
-    // amendment." These name the packages that opt-in needs.
-    Need {
-        what: "Xvfb — a virtual framebuffer",
-        probe: Probe::WhenNoDisplay("Xvfb"),
-        tier: Tier::Desktop,
-        only: &["linux"],
-        also: &[],
-        breaks: "`just desktop::shot` has no display to open a window on",
-        fix: &[("linux", Fix::Apt("xvfb"))],
-    },
-    Need {
-        what: "scrot — a picture of the window",
-        probe: Probe::WhenNoDisplay("scrot"),
-        tier: Tier::Desktop,
-        only: &["linux"],
-        also: &[],
-        breaks: "`just desktop::shot` draws the window and cannot save it",
-        fix: &[("linux", Fix::Apt("scrot"))],
-    },
     // The server tier: what `cargo xtask release-server relay|vault` builds with
     // (`release_server.rs`, measured 2026-09-26 on Ubuntu 24.04). Both servers are built for
     // `x86_64-unknown-linux-musl` and static. `git`, `tar` and `sha256sum` are used too, and
@@ -715,14 +677,6 @@ fn check(probe: &Probe) -> Verdict {
                 .is_ok_and(|o| o.status.success()),
         ),
         Probe::OnPath(b) => verdict(on_path(b)),
-        Probe::WhenNoDisplay(b) => {
-            if std::env::var_os("DISPLAY").is_some()
-                || std::env::var_os("WAYLAND_DISPLAY").is_some()
-            {
-                return Verdict::Met;
-            }
-            verdict(on_path(b))
-        }
         Probe::Target(t) => verdict(
             Command::new("rustup")
                 .args(["target", "list", "--installed"])
@@ -1630,7 +1584,7 @@ GPU1:
             assert!(
                 !matches!(
                     n.probe,
-                    Probe::WindowManager | Probe::HardwareGpu | Probe::WhenNoDisplay(_)
+                    Probe::WindowManager | Probe::HardwareGpu
                 ),
                 "`{}` is about running the window",
                 n.what
@@ -1642,11 +1596,11 @@ GPU1:
                 n.what
             );
         }
-        for absent in ["xprop", "vulkaninfo", "Xvfb", "scrot", "just", "rg", "git"] {
+        for absent in ["xprop", "vulkaninfo", "just", "rg", "git"] {
             assert!(
                 !build.iter().any(|n| matches!(
                     n.probe,
-                    Probe::Bin(b) | Probe::OnPath(b) | Probe::WhenNoDisplay(b) if b == absent
+                    Probe::Bin(b) | Probe::OnPath(b) if b == absent
                 )),
                 "the build tier asks for `{absent}`"
             );
