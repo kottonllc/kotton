@@ -10,8 +10,7 @@ set working-directory := ".."
 # wrongly, and it needs neither Docker nor a registry (docs/use/build-a-release.md).
 # `box`, which built and pushed images to ghcr.io, went with that ruling.
 
-# **The build a friend installs**: the daemons, the runner, the window, the CLI and the shell as one
-# archive, `out/dist/kotton-<sha>-<os>-<arch>.tar.gz`, that needs no Rust, no Python and no
+# **The build a friend installs**: the system's daemons and the CLI as one archive, `out/dist/kotton-<sha>-<os>-<arch>.tar.gz`, that needs no Rust, no Python and no
 # development headers where it is unpacked.
 #
 # One recipe for every platform, because it is `cargo xtask release` and that is Rust:

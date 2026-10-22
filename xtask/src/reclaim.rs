@@ -15,7 +15,7 @@
 //! It works inside this checkout's large build caches — the workspace's target as cargo
 //! reports it (`out/target`, or `$CARGO_TARGET_DIR`), xtask's `out/xtask`, the merge
 //! gate's two under `out/merge` (`merge::caches`), and the release builds' under
-//! `out/release` — the workspace's, the relay's and each bundled app's (`release::caches`) —
+//! `out/release` — the workspace's and the relay's (`release::caches`) —
 //! and nowhere else; a cache that does not exist is skipped. The guest apps'
 //! `out/guest/*`, the relay's `out/relay`, `/opt` and every other directory are not
 //! reachable from those roots, so they are untouched by construction rather than by a list

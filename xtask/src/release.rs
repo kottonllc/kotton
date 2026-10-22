@@ -1,28 +1,37 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `cargo xtask release` and `cargo xtask release-test` — the build a friend installs.
+//! `cargo xtask release` and `cargo xtask release-test` — the system's archive.
 //!
 //! `TASK-a-friend-cannot-install-kotton-without-a-toolchain`, `DEC-0075` row 4. Until
 //! this, the only way into Kotton was a build on the machine that would run it, and a
 //! friend is someone who does not have the toolchain.
 //!
-//! `release` builds the desktop profile `--release`, lays it out as one directory, packs
-//! that into one archive, and then **runs `release-test` on the archive it just made** —
-//! so no archive leaves this command that has not been installed into a clean directory
-//! and made an identity from there. The test is not a separate step somebody may skip; a
-//! release that fails it prints no archive name and exits non-zero.
+//! `release` builds the system's binaries ([`BINS`]) `--release`, lays them out as one
+//! directory, packs that into one archive, and then **runs `release-test` on the archive it
+//! just made** — so no archive leaves this command that has not been installed into a clean
+//! directory and made an identity from there. The test is not a separate step somebody may
+//! skip; a release that fails it prints no archive name and exits non-zero.
+//!
+//! ## What the archive is
+//!
+//! This repository is the system (kotton-protocol RFC 0001): the user daemon, the device
+//! daemon, the QUIC acceptor and the sync watcher. The archive packs those four and the CLI,
+//! `kotton`, which moves to a repository of its own; it is packed here until the distribution
+//! (`kotton-dist`) composes the CLI's archive with this one, because the lines a person runs
+//! to install and start Kotton need it. No window, no inference runtime, no web gateway, no
+//! sandbox runner and no guest app: none of them is built here, and `cargo xtask ship-check`
+//! holds what each packed binary links to this repository's crates.
 //!
 //! ## The layout, and why it is the whole design
 //!
 //! ```text
 //! kotton-<rev>-<os>-<arch>/
-//!   bin/            the daemons, the runner, the window, the CLI  (BINS)
-//!   share/kotton/shell/app.wasm, manifest.toml                     the shell every path draws
+//!   bin/            the daemons and the CLI                         (BINS)
 //!   kotton-start    the launcher: execs bin/kuserd
 //!   install.sh      copies the tree into a prefix, links two names
 //!   README.txt
 //!   REVISION        the commit, whether the tree was clean, the target
-//!   THIRD-PARTY-NOTICES  every dependency the binaries and the three bundled apps are
-//!                   built from, its version, its license and its license texts
+//!   THIRD-PARTY-NOTICES  every dependency the binaries are built from, its version, its
+//!                   license and its license texts
 //!   LICENSE         Kotton's own license, the repository root's            (OWN)
 //!   NOTICES         Kotton's own notice, the repository root's
 //! ```
@@ -31,12 +40,10 @@
 //! (`license_check::notices`), never by hand, and the pack refuses to write one naming a
 //! license `cargo xtask license-check` would refuse.
 //!
-//! The daemon finds everything it starts **beside its own executable** — the sidecars
-//! always did (`sidecar_bin`), the runner does since this landed (`resolve_runner`), and
-//! the shell is staged from `../share/kotton/shell` by the daemon itself at start
-//! (`kuserd::installed`). So nothing in the installed tree names the machine it was built
-//! on, and the process boundaries are the source tree's: one binary per process, each
-//! the one `cargo build` made, none merged into another.
+//! The daemon finds everything it starts **beside its own executable** (`sidecar_bin`).
+//! So nothing in the installed tree names the machine it was built on, and the process
+//! boundaries are the source tree's: one binary per process, each the one `cargo build`
+//! made, none merged into another.
 //!
 //! ## What it deliberately does not carry
 //!
@@ -49,64 +56,46 @@
 //! ## Where it builds
 //!
 //! In a target only this checkout writes, whatever `CARGO_TARGET_DIR` says (decision 0014):
-//! the desktop's binaries under `out/release/workspace` ([`workspace_target`]) and each
-//! bundled app under `out/release/guest/<app>` ([`guest_target`]). An archive is the build it
-//! names; in a target other checkouts build into, cargo can take another tree's artifact for
-//! this one's, and it would be packed under this commit.
-//!
-//! The shell the archive carries is the component the release's own build of it left under
-//! `out/release/guest/kotton-shell` ([`pack_shell`]), never the checkout's
-//! `guest/apps/kotton-shell/app.wasm`, which a convenience `build-apps` or `dev` also writes.
-//! `kuserd` embeds the bundled apps from those checkout paths when it compiles, so the apps
-//! a release's binaries embed are what the release's own app build wrote there just before
-//! the workspace build. `--no-build` builds nothing: it packs the binaries as the last
-//! release build left them, so the apps they embed are the ones that build embedded, and the
-//! shell from that build's own component, refusing, with the path, when there is none.
+//! `out/release/workspace` ([`workspace_target`]). An archive is the build it names; in a
+//! target other checkouts build into, cargo can take another tree's artifact for this one's,
+//! and it would be packed under this commit. `--no-build` builds nothing: it packs the
+//! binaries as the last release build left them there.
 //!
 //! ## Which platforms
 //!
 //! The recipe runs where `cargo` runs, and names the archive for the platform it ran on;
-//! there is no cross-build and no CI, so a platform's archive is made on a machine of that
-//! platform. `tar` and `sh` are what the pack and the installer assume, which is Linux and
-//! macOS; Windows is measured in the record, not claimed here.
+//! there is no cross-build, so a platform's archive is made on a machine of that platform.
+//! `tar` and `sh` are what the pack and the installer assume, which is Linux and macOS;
+//! Windows is measured in the record, not claimed here.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Every binary the installed tree carries, each a process of its own.
+/// Every binary the installed tree carries, each a process of its own: the system's four
+/// daemons, and the CLI the install's lines need until the distribution composes its archive
+/// beside this one (the module header). Each is a `[[bin]]` of this workspace, built with its
+/// package's default features and nothing else.
 ///
-/// `just desktop::build-release`'s list plus `khttpd`, which `kuserd` also starts by
-/// name from beside itself (`supervise_khttpd`) when the web shell is on — a sidecar
-/// the daemon can reach for and the archive lacked would be the three-retries-then-
-/// `No such file or directory` failure `just/headless.just` records for `ksyncd`.
-/// `the_pack_carries_every_sidecar_the_daemon_starts_by_name` holds this list against
-/// the daemon's source.
-pub const BINS: &[&str] = &[
-    "kotton",
-    "kdeviced",
-    "kuserd",
-    "kotton-runner",
-    "kinferd",
-    "ksyncd",
-    "kquicd",
-    "kuid",
-    "khttpd",
+/// `the_pack_carries_every_sidecar_the_daemon_starts_by_name` holds this list against the
+/// daemon's source, and `cargo xtask ship-check` holds what each of them links.
+pub const BINS: &[&str] = &["kuserd", "kdeviced", "kquicd", "ksyncd", "kotton"];
+
+/// Binaries `kuserd` still starts by name from beside itself, none of which this repository
+/// builds or the archive carries, each with the switch that starts it and the repository
+/// kotton-protocol RFC 0001 gives it. With the switch off the daemon never reaches for it;
+/// with it on, the daemon's supervisor finds no file and says so. `kuid`'s switch is on by
+/// default and reached wherever a display is (on Linux, `DISPLAY` or `WAYLAND_DISPLAY` set),
+/// so on a desktop the installed daemon looks for a window it was not shipped.
+/// The cut is the daemon's: its code that starts them goes with them, and this list shrinks
+/// to nothing as it does. `the_pack_carries_every_sidecar_the_daemon_starts_by_name` holds
+/// it to exactly the names the daemon's source still starts and the archive does not carry.
+pub(crate) const STARTED_BUT_NOT_BUILT_HERE: &[(&str, &str)] = &[
+    ("kinferd", "`inference.enabled`; the inference runtime is kotton-infer's"),
+    ("khttpd", "the web shell's switch; the gateway is kotton-web's"),
+    ("kuid", "`display-server.enabled`, on unless set false; the window is kotton-compositor's"),
+    ("kotton-runner", "an app launch (`resolve_runner`); the sandbox host is still to be cut as a process of the system's"),
 ];
-
-/// The renderer the archive ships, per `DEC-0076`: the GPU. The same features
-/// `just desktop::build-release` passes.
-pub(crate) const FEATURES: &str = "kuid/kuid-desktop,kuid/kuid-gpu";
-
-/// The guest app the archive carries as its shell.
-const SHELL_APP: &str = "kotton-shell";
-
-/// The shell's manifest, from the checkout: a source file, not a build output.
-const SHELL_MANIFEST: &str = "guest/apps/kotton-shell/manifest.toml";
-
-/// The shell's two files in `share/kotton/shell/`: the component the release's own build of
-/// [`SHELL_APP`] made ([`pack_shell`]), and [`SHELL_MANIFEST`].
-const SHELL: [&str; 2] = ["app.wasm", "manifest.toml"];
 
 /// Where every archive — the desktop's and both servers' — carries its own installer: at its
 /// top directory, under this name. The checkout's `install.sh` runs it from there, so the two
@@ -150,13 +139,12 @@ pub fn release(workspace_root: &Path, args: &[String]) {
         std::process::exit(1);
     }
 
-    let mut plan = plan(workspace_root);
     if !no_build {
-        build(&mut plan);
+        build(&mut build_command(workspace_root));
     }
 
     let dist = crate::out::dist();
-    let archive = pack(workspace_root, &dist, &rev, plan.apps).unwrap_or_else(|e| {
+    let archive = pack(workspace_root, &dist, &rev).unwrap_or_else(|e| {
         eprintln!("release: {e}");
         std::process::exit(1);
     });
@@ -250,76 +238,43 @@ const WORKSPACE: &str = "release/workspace";
 /// Under `out/`, where `release-server` builds the relay, a workspace of its own.
 pub(crate) const RELAY: &str = "release/relay";
 
-/// Under `out/`, where the release builds the guest app `app` it bundles.
-fn guest(app: &str) -> String {
-    format!("release/guest/{app}")
-}
-
 /// Where the release builds the workspace — the desktop's binaries, and the vault
 /// `release-server` packs: `out/release/workspace`, never `CARGO_TARGET_DIR`.
 pub(crate) fn workspace_target() -> PathBuf {
     crate::out::private_target(WORKSPACE)
 }
 
-/// Where the release builds the guest app `app` it bundles: `out/release/guest/<app>`, never
-/// `CARGO_TARGET_DIR`. `kuserd` embeds the apps it is compiled beside, and the archive
-/// carries the shell, so these ship as surely as the binaries do.
-pub(crate) fn guest_target(app: &str) -> PathBuf {
-    crate::out::private_target(&guest(app))
-}
-
 /// The build caches the release builds leave under the checkout at `root`, one per target it
-/// hands cargo — the workspace's, the relay's and each guest app's: what `reclaim` prunes
-/// alongside the merge gate's.
+/// hands cargo — the workspace's and the relay's: what `reclaim` prunes alongside the merge
+/// gate's.
 pub(crate) fn caches(root: &Path) -> Vec<PathBuf> {
-    let mut caches = vec![
+    vec![
         crate::out::private_target_in(root, WORKSPACE),
         crate::out::private_target_in(root, RELAY),
-    ];
-    caches.extend(crate::guest_app_names().map(|app| crate::out::private_target_in(root, &guest(app))));
-    caches
+    ]
 }
 
-/// Where the desktop's binaries are once [`build_command`] has run.
+/// Where the system's binaries are once [`build_command`] has run.
 fn built_dir() -> PathBuf {
     workspace_target().join("release")
 }
 
-/// The desktop's build: every binary in [`BINS`], `--release`, with the archive's features,
-/// into [`workspace_target`].
+/// The system's build: every binary in [`BINS`], `--release`, with its package's default
+/// features, into [`workspace_target`]. `release` runs exactly this, so what a test reads of
+/// it is what runs.
 fn build_command(workspace_root: &Path) -> Command {
     let mut cargo = Command::new("cargo");
     cargo.args(["build", "--release"]);
     for b in BINS {
         cargo.args(["--bin", b]);
     }
-    cargo.args(["--features", FEATURES]).arg("--target-dir").arg(workspace_target());
+    cargo.arg("--target-dir").arg(workspace_target());
     cargo.current_dir(workspace_root);
     cargo
 }
 
-/// What the release builds, and where: the target each bundled app builds in, which `build`
-/// hands `build_apps` and `pack` reads the shell from, and the desktop's build command.
-/// `build` runs exactly this and nothing else, so what a test reads of it is what runs.
-struct Build {
-    apps: fn(&str) -> PathBuf,
-    desktop: Command,
-}
-
-fn plan(workspace_root: &Path) -> Build {
-    Build {
-        apps: guest_target,
-        desktop: build_command(workspace_root),
-    }
-}
-
-fn build(plan: &mut Build) {
-    // The apps first, in this process, so they build in the release's own targets and not in
-    // a developer's. `build_apps` also writes each component to `<app dir>/app.wasm`, and
-    // `kuserd` embeds those when it compiles (`bundled_apps_present`), so the binary the
-    // desktop build makes next embeds what this build just wrote there.
-    crate::build_apps(false, plan.apps);
-    let status = plan.desktop.status().unwrap_or_else(|e| {
+fn build(cargo: &mut Command) {
+    let status = cargo.status().unwrap_or_else(|e| {
         eprintln!("release: could not start cargo build --release: {e}");
         std::process::exit(1);
     });
@@ -333,31 +288,8 @@ fn exe(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
 
-/// Copy the shell into `into`: its component from where the release's own build of it went
-/// (`apps(SHELL_APP)`), never the checkout's `guest/apps/kotton-shell/app.wasm`, which a
-/// convenience `build-apps` or `dev` also writes; and its manifest from the checkout. With
-/// `--no-build` the component is the one the last release build left there, and none there
-/// is a refusal naming where it was looked for.
-fn pack_shell(workspace_root: &Path, app_target: &Path, into: &Path) -> Result<(), String> {
-    let wasm = crate::guest_wasm(app_target, SHELL_APP)
-        .ok_or_else(|| format!("build-apps does not build {SHELL_APP}, the shell the archive carries"))?;
-    if !wasm.is_file() {
-        return Err(format!(
-            "{} is not there: the archive carries the shell the release's own build made, never the checkout's copy\n  build it: cargo xtask release (without --no-build)",
-            wasm.display()
-        ));
-    }
-    copy(&wasm, &into.join(SHELL[0]))?;
-    copy(&workspace_root.join(SHELL_MANIFEST), &into.join(SHELL[1]))
-}
-
 /// Lay the tree out under `out/dist/<name>/` and pack it as `out/dist/<name>.tar.gz`.
-fn pack(
-    workspace_root: &Path,
-    dist: &Path,
-    rev: &Revision,
-    apps: fn(&str) -> PathBuf,
-) -> Result<PathBuf, String> {
+fn pack(workspace_root: &Path, dist: &Path, rev: &Revision) -> Result<PathBuf, String> {
     let name = archive_name(rev);
     let root = dist.join(&name);
     if root.exists() {
@@ -365,10 +297,7 @@ fn pack(
             .map_err(|e| format!("cannot clear {}: {e}", root.display()))?;
     }
     let bin = root.join("bin");
-    let shell = root.join("share").join("kotton").join("shell");
-    for d in [&bin, &shell] {
-        std::fs::create_dir_all(d).map_err(|e| format!("cannot create {}: {e}", d.display()))?;
-    }
+    std::fs::create_dir_all(&bin).map_err(|e| format!("cannot create {}: {e}", bin.display()))?;
 
     // Where `build` put them: the release's own target, never `CARGO_TARGET_DIR`.
     let release = built_dir();
@@ -377,7 +306,6 @@ fn pack(
         copy(&src, &bin.join(exe(b)))
             .map_err(|e| format!("{e}\n  build it: cargo xtask release (without --no-build)"))?;
     }
-    pack_shell(workspace_root, &apps(SHELL_APP), &shell)?;
     for f in LOOSE {
         copy(&workspace_root.join("infra/release").join(f), &root.join(f))?;
     }
@@ -387,7 +315,7 @@ fn pack(
     std::fs::write(
         root.join("REVISION"),
         format!(
-            "{}{}\nbuilt for {}\nrenderer gpu\n",
+            "{}{}\nbuilt for {}\n",
             rev.sha,
             if rev.dirty {
                 " (a tree with uncommitted changes: not a release)"
@@ -398,7 +326,7 @@ fn pack(
         ),
     )
     .map_err(|e| format!("cannot write REVISION: {e}"))?;
-    let notices = crate::license_check::notices(workspace_root, &crate::license_check::DESKTOP, &name, None)?;
+    let notices = crate::license_check::notices(workspace_root, &crate::license_check::SYSTEM, &name, None)?;
     std::fs::write(root.join(crate::license_check::FILE), notices)
         .map_err(|e| format!("cannot write {}: {e}", crate::license_check::FILE))?;
 
@@ -429,7 +357,6 @@ pub(crate) fn copy(src: &Path, dst: &Path) -> Result<(), String> {
 /// Every path the archive may hold, relative to its top directory, sorted.
 fn expected_entries() -> Vec<String> {
     let mut v: Vec<String> = BINS.iter().map(|b| format!("bin/{}", exe(b))).collect();
-    v.extend(SHELL.iter().map(|d| format!("share/kotton/shell/{d}")));
     v.extend(LOOSE.iter().map(|f| f.to_string()));
     v.extend(OWN.iter().map(|f| f.to_string()));
     v.push("REVISION".to_string());
@@ -448,12 +375,11 @@ fn expected_entries() -> Vec<String> {
 ///    (`license_check::check_notices`), and runs `install.sh` into a prefix under a fresh
 ///    directory, with a `HOME` there too, so the platform-default base directory is a new
 ///    one — and the installed prefix keeps the notices, and Kotton's own [`OWN`];
-/// 3. runs `kotton-start` from the installed prefix — the launcher a person runs —
-///    and waits for the daemon's socket;
+/// 3. runs `kotton --help` from the installed prefix, and then `kotton-start` from there —
+///    the launcher a person runs — and waits for the daemon's socket;
 /// 4. runs `kotton id create friend` from the installed prefix **at a terminal**, the
 ///    way a person does, pressing Enter to take the suggested passphrase;
-/// 5. runs `kotton id list` and finds the identity, and checks the daemon staged the
-///    shell it shipped with into the new base directory.
+/// 5. runs `kotton id list` and finds the identity.
 ///
 /// Every process gets an empty environment except `HOME` and a `PATH` of the system
 /// directories only, so no `cargo`, `rustc` or checkout on this machine can be what
@@ -653,9 +579,6 @@ fn install_test_in(archive: &Path, scratch: &Path, home: &Path, top: &str) -> Re
         .map_err(|e| format!("the archive carries no readable {}: {e}", crate::license_check::FILE))?;
     let listed = crate::license_check::check_notices(&notices)?;
     println!("release-test: {} lists {listed} third-party packages", crate::license_check::FILE);
-    // `kuid` embeds the faces the shell is set in, so the archive that ships it names them.
-    crate::license_check::check_fonts_named(&notices, "kuid")?;
-    println!("release-test: {} names the fonts kuid embeds", crate::license_check::FILE);
     let own: Vec<(&str, Vec<u8>)> = OWN
         .iter()
         .map(|f| {
@@ -686,15 +609,23 @@ fn install_test_in(archive: &Path, scratch: &Path, home: &Path, top: &str) -> Re
     }
     println!("release-test: the installed prefix keeps {}", OWN.join(" and "));
     let kotton = prefix.join("bin").join(exe("kotton"));
+    let out = command(&kotton)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run kotton --help: {e}"))?;
+    if !out.status.success() || out.stdout.is_empty() {
+        return Err(format!("`kotton --help` from the installed prefix failed:\n{}", said(&out)));
+    }
+    println!("release-test: `kotton --help` from the installed prefix succeeded");
 
-    // 3. Start it, as a person does. Its base directory and its door are where the
-    //    daemon's own rules put them in the environment `command` gives it, asked of
+    // 3. Start it, as a person does. Its door is where the
+    //    daemon's own rules put it in the environment `command` gives it, asked of
     //    those rules rather than joined here. A hand join is tier 3 without the move
     //    to `/tmp/kotton-<hash>/`, so under a long `TMPDIR`, which the scratch `HOME`
     //    sits in, it would wait 60 s at a door nobody opened
     //    (`TASK-two-harnesses-still-derive-a-daemons-door-by-a-copy-of-the-rule`).
     let env = |key: &str| envs.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_string());
-    let base = kotton_common::paths::base_dir_in(&env).map_err(|e| e.to_string())?;
     // The door is `kotton_common::paths::kuserd_door_in` over the environment
     // `command` gives the `kuserd` that `kotton-start` execs; `kotton-start` adds only
     // `RUST_LOG`, which it does not read. Off unix the door is a named pipe, not a path
@@ -773,7 +704,7 @@ fn install_test_in(archive: &Path, scratch: &Path, home: &Path, top: &str) -> Re
         }
         println!("release-test: `kotton id create {FRIEND}` from the installed prefix succeeded");
 
-        // 5. The identity is there, and the daemon staged the shell it shipped with.
+        // 5. The identity is there.
         let out = command(&kotton)
             .args(["id", "list"])
             .stdin(Stdio::null())
@@ -785,21 +716,6 @@ fn install_test_in(archive: &Path, scratch: &Path, home: &Path, top: &str) -> Re
                 said(&out)
             ));
         }
-        let shipped =
-            std::fs::read(prefix.join("share/kotton/shell/app.wasm")).map_err(|e| e.to_string())?;
-        let staged = std::fs::read(base.join("system/shell/app.wasm")).map_err(|e| {
-            format!(
-                "the daemon staged no shell into {}: {e}\n{}",
-                base.display(),
-                daemon_log(scratch)
-            )
-        })?;
-        if shipped != staged {
-            return Err("the staged shell is not the one the archive shipped".into());
-        }
-        println!(
-            "release-test: the daemon staged the shell it shipped with into the new base directory"
-        );
         Ok(())
     })();
 
@@ -811,7 +727,7 @@ fn install_test_in(archive: &Path, scratch: &Path, home: &Path, top: &str) -> Re
     outcome
 }
 
-/// Stop the launcher's daemon and anything it started (`kuid`, the sidecars), which
+/// Stop the launcher's daemon and anything it started (the sidecars), which
 /// run from the installed prefix and would otherwise outlive the test.
 fn stop(daemon: &mut std::process::Child) {
     #[cfg(unix)]
@@ -832,7 +748,7 @@ fn stop(daemon: &mut std::process::Child) {
     let _ = daemon.wait();
 }
 
-/// Anything still running out of the installed prefix — a sidecar or a window the
+/// Anything still running out of the installed prefix — a sidecar the
 /// daemon started and did not take down with it. Named in the test's output rather
 /// than left behind, so a daemon that orphans its children is seen.
 fn stop_what_it_left(prefix: &Path) -> Vec<String> {
@@ -941,12 +857,16 @@ mod tests {
         assert_eq!(found, joined);
     }
 
-    /// Every name the daemon starts through `sidecar_bin("…")` is in the archive.
+    /// Every name the daemon starts by name from beside itself — through `sidecar_bin("…")`,
+    /// and the runner through `resolve_runner` — is in the archive, or is on
+    /// [`STARTED_BUT_NOT_BUILT_HERE`], and not both; and every name on that list is one the
+    /// daemon still starts.
     ///
-    /// The list in [`BINS`] is a second statement of which processes the daemon
-    /// reaches for, and a second statement is only safe while something compares
-    /// them: a sidecar added to the daemon and not to the archive is a friend's
-    /// install that retries it three times and gives up.
+    /// The list in [`BINS`] is a second statement of which processes the daemon reaches for,
+    /// and a second statement is only safe while something compares them: a sidecar added to
+    /// the daemon and to neither list is a friend's install that retries it three times and
+    /// gives up. The second list is the cut still owed: an entry the daemon no longer starts
+    /// fails here, so it is deleted when the cut lands rather than outliving it.
     #[test]
     fn the_pack_carries_every_sidecar_the_daemon_starts_by_name() {
         let src =
@@ -961,21 +881,31 @@ mod tests {
             !named.is_empty(),
             "no sidecar_bin(\"…\") calls found — did the daemon move?"
         );
+        if src.contains("fn resolve_runner(") {
+            named.push("kotton-runner".to_string());
+        }
+        let not_built: Vec<&str> = STARTED_BUT_NOT_BUILT_HERE.iter().map(|(n, _)| *n).collect();
         for n in &named {
+            let packed = BINS.contains(&n.as_str());
+            let owed = not_built.contains(&n.as_str());
             assert!(
-                BINS.contains(&n.as_str()),
-                "the daemon starts `{n}` by name and the archive does not carry it"
+                packed || owed,
+                "the daemon starts `{n}` by name, the archive does not carry it, and STARTED_BUT_NOT_BUILT_HERE does not name it"
+            );
+            assert!(!(packed && owed), "`{n}` is packed and also listed as not built here");
+        }
+        for n in &not_built {
+            assert!(
+                named.iter().any(|m| m == n),
+                "the daemon no longer starts `{n}`: delete it from STARTED_BUT_NOT_BUILT_HERE"
             );
         }
-        // And the runner, which it finds beside itself by `resolve_runner`.
-        assert!(BINS.contains(&"kotton-runner"));
     }
 
-    /// **The desktop's archive is built, and packed from, targets only this checkout
-    /// writes**, with `CARGO_TARGET_DIR` exported elsewhere. Read from the plan `build` runs
-    /// and nothing else: the apps target it hands `build_apps` is `out/release/guest/<app>`
-    /// for every app, the desktop's command hands cargo `out/release/workspace`, and the pack
-    /// reads the binaries from there.
+    /// **The system's archive is built, and packed from, a target only this checkout
+    /// writes**, with `CARGO_TARGET_DIR` exported elsewhere. Read from the command `release`
+    /// runs and nothing else: it hands cargo `out/release/workspace`, and the pack reads the
+    /// binaries from there.
     #[test]
     fn the_desktop_release_builds_in_a_target_of_its_own_under_an_exported_cargo_target_dir() {
         crate::out::exported::run(
@@ -985,76 +915,46 @@ mod tests {
             ),
             |exported| {
                 let root = crate::out::root();
-                let plan = plan(&root);
-                let apps_under = root.join("out").join("release").join("guest");
-                for app in crate::guest_app_names() {
-                    let target = (plan.apps)(app);
-                    assert_eq!(target, apps_under.join(app), "build_apps is handed the release's target for {app}");
-                    crate::out::exported::assert_private(app, &target, exported);
-                }
-                let dir = target_dir_of(&plan.desktop);
+                let dir = target_dir_of(&build_command(&root));
                 assert_eq!(dir, workspace_target());
-                crate::out::exported::assert_private("the desktop build", &dir, exported);
+                crate::out::exported::assert_private("the system build", &dir, exported);
                 assert!(built_dir().starts_with(&dir), "the pack reads where the build wrote");
-                crate::out::exported::assert_private("the desktop pack", &built_dir(), exported);
+                crate::out::exported::assert_private("the system pack", &built_dir(), exported);
             },
         );
     }
 
-    /// **The archive's shell is the component the release's own build made**: the pack copies
-    /// it from under the apps target `build` hands `build_apps`, and never from the
-    /// checkout's `guest/apps/kotton-shell/app.wasm`, which a convenience build also writes.
+    /// **The release builds exactly [`BINS`], with no feature named**: each binary is a
+    /// `--bin` of the one command `release` runs, and nothing else is asked of cargo — no
+    /// `--features`, so no renderer and no other process's switch rides along.
     #[test]
-    fn the_shell_is_packed_from_the_release_builds_own_component() {
-        let root = crate::out::root();
-        let shell_target = (plan(&root).apps)(SHELL_APP);
-        let wasm = crate::guest_wasm(&shell_target, SHELL_APP).expect("build_apps builds the shell");
-        assert!(wasm.starts_with(guest_target(SHELL_APP)), "{}", wasm.display());
-        assert_ne!(wasm, root.join("guest/apps/kotton-shell/app.wasm"));
-
-        // And the copy is that file's bytes: a stand-in target holding a component the
-        // checkout's copy cannot be.
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("target");
-        let made = crate::guest_wasm(&target, SHELL_APP).unwrap();
-        std::fs::create_dir_all(made.parent().unwrap()).unwrap();
-        std::fs::write(&made, b"the release build's own shell").unwrap();
-        let into = tmp.path().join("shell");
-        std::fs::create_dir_all(&into).unwrap();
-        pack_shell(&root, &target, &into).unwrap();
-        assert_eq!(std::fs::read(into.join("app.wasm")).unwrap(), b"the release build's own shell");
-        assert!(into.join("manifest.toml").is_file());
-    }
-
-    /// **`--no-build` with no shell from a release build is a refusal naming where it looked**,
-    /// whatever the checkout's own `app.wasm` holds; nothing is packed in its place.
-    #[test]
-    fn no_build_without_the_release_builds_shell_is_refused_naming_it() {
-        let root = crate::out::root();
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("target");
-        let into = tmp.path().join("shell");
-        std::fs::create_dir_all(&into).unwrap();
-        let refused = pack_shell(&root, &target, &into).expect_err("no component, no pack");
-        let wanted = crate::guest_wasm(&target, SHELL_APP).unwrap();
-        assert!(refused.contains(&wanted.display().to_string()), "{refused}");
-        assert!(refused.contains("cargo xtask release"), "{refused}");
-        assert!(!into.join("app.wasm").exists(), "nothing was packed in its place");
+    fn the_release_builds_exactly_the_system_and_names_no_feature() {
+        let args: Vec<String> = build_command(&crate::out::root())
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let bins: Vec<&str> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i > 0 && args[i - 1] == "--bin")
+            .map(|(_, a)| a.as_str())
+            .collect();
+        assert_eq!(bins, BINS, "{args:?}");
+        assert!(!args.iter().any(|a| a.starts_with("--features") || a == "--all-features"), "{args:?}");
+        assert_eq!(BINS, ["kuserd", "kdeviced", "kquicd", "ksyncd", "kotton"]);
+        for e in expected_entries() {
+            assert!(!e.starts_with("share/"), "the archive carries no guest app: {e}");
+        }
     }
 
     /// What `reclaim` prunes for the release is exactly where the release's builds go, read
-    /// from the commands and the plan they run: the desktop's `--target-dir`, the relay's
-    /// (the vault shares the desktop's), and the apps target `build` hands `build_apps` for
-    /// every app — as `merge::caches` is held to the gate's targets.
+    /// from the commands they run: the system's `--target-dir` and the relay's (the vault
+    /// shares the system's) — as `merge::caches` is held to the gate's targets.
     #[test]
     fn the_release_caches_are_the_targets_the_release_builds_in() {
         use crate::release_server::{build_command as server_build, RELAY, SERVERS, TARGET};
         let root = crate::out::root();
-        let plan = plan(&root);
-        let mut passed = vec![target_dir_of(&plan.desktop), target_dir_of(&server_build(&root, &RELAY, TARGET))];
-        let apps: Vec<_> = crate::guest_app_names().collect();
-        assert!(apps.contains(&SHELL_APP), "the shell the archive carries is built: {apps:?}");
-        passed.extend(apps.iter().map(|app| (plan.apps)(app)));
+        let passed = vec![target_dir_of(&build_command(&root)), target_dir_of(&server_build(&root, &RELAY, TARGET))];
         assert_eq!(caches(&root), passed);
         for server in SERVERS {
             let dir = target_dir_of(&server_build(&root, &server, TARGET));
@@ -1069,34 +969,6 @@ mod tests {
         at.and_then(|i| args.get(i + 1))
             .map(PathBuf::from)
             .unwrap_or_else(|| panic!("names no --target-dir: {args:?}"))
-    }
-
-    /// The desktop release recipe and this list agree: whatever `just
-    /// desktop::build-release` builds for a person to run is in the archive.
-    #[test]
-    fn the_pack_carries_what_the_desktop_release_builds() {
-        let just = std::fs::read_to_string(workspace().join("just/desktop.just")).unwrap();
-        let line = just
-            .lines()
-            .skip_while(|l| !l.starts_with("build-release:"))
-            .nth(1)
-            .expect("desktop.just has a build-release recipe");
-        let built: Vec<&str> = line
-            .split("--bin ")
-            .skip(1)
-            .filter_map(|p| p.split_whitespace().next())
-            .collect();
-        assert!(!built.is_empty());
-        for b in built {
-            assert!(
-                BINS.contains(&b),
-                "`desktop::build-release` builds `{b}` and the archive does not carry it"
-            );
-        }
-        assert!(
-            line.contains(FEATURES),
-            "the archive's renderer is not the desktop release's: {line}"
-        );
     }
 
     /// The loose files the pack copies exist in the tree, and the launcher and the
@@ -1129,7 +1001,7 @@ mod tests {
 
         let missing: String = good
             .lines()
-            .filter(|l| !l.ends_with("/kuid"))
+            .filter(|l| !l.ends_with("/kuserd"))
             .map(|l| format!("{l}\n"))
             .collect();
         assert!(check_entries(&missing).is_err());
@@ -1141,7 +1013,8 @@ mod tests {
             "elsewhere/owner.key".to_string(),
             format!("{top}/../owner.key"),
             format!("{top}/keys/"),
-            format!("{top}/bin/kuid"),
+            // A second entry under a real name, which `tar` would unpack over the first.
+            format!("{top}/bin/kuserd"),
         ] {
             let listing = format!("{top}/\n{good}{planted}\n");
             let err = check_entries(&listing).expect_err(&planted);
@@ -1207,7 +1080,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tree = dir.path().join("kotton-abc-linux-x86_64");
         std::fs::create_dir_all(tree.join("bin")).unwrap();
-        std::fs::create_dir_all(tree.join("share/kotton/shell")).unwrap();
         std::fs::write(tree.join("bin/kotton"), b"#!/bin/sh\n").unwrap();
         for f in ["install.sh", "kotton-start"] {
             std::fs::copy(workspace().join("infra/release").join(f), tree.join(f)).unwrap();

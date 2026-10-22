@@ -1,8 +1,8 @@
-# Publishes the desktop, the relay, the vault and the host (the relay and the vault in one
+# Publishes the system, the relay, the vault and the host (the relay and the vault in one
 # archive) as a GitHub Release, on a pushed tag and on nothing else.
 #
 # What it does: builds `cargo xtask release-server relay`, `vault` and `host`, then `cargo xtask
-# release` for the Linux desktop, on one Linux runner — each install-tested before it is named,
+# release` for the Linux system, on one Linux runner — each install-tested before it is named,
 # exactly as on the owner's PC — writes SHA256SUMS over the four archives, and attaches all five
 # files to the release for the tag. It signs nothing. The owner
 # signs SHA256SUMS on their own machine and attaches SHA256SUMS.sig by hand
@@ -52,7 +52,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     # A ceiling against a hung step, not an estimate: the servers take about a quarter of an
-    # hour on 4 vCPU, and the desktop's build, nine binaries each optimised whole at link time,
+    # hour on 4 vCPU, and the system's build, five binaries each optimised whole at link time,
     # is the longest of the three and not yet timed on a runner.
     timeout-minutes: 120
     permissions:
@@ -81,11 +81,11 @@ jobs:
           cargo xtask doctor --tier server
 
       # What `cargo xtask doctor --tier build` names, installed; then doctor itself, which exits
-      # non-zero on anything still missing. That tier is what `cargo xtask release` builds with:
-      # the wasm target and clang build the bundled apps, python3 runs stylo's build script, kuid
-      # links fontconfig, GTK, pango and libxdo, and the host build links the system's OpenSSL
-      # for sqlcipher (OPENSSL_NO_VENDOR, .cargo/config.toml); pkg-config finds the libraries
-      # that ship a .pc file, and libxdo is linked by name.
+      # non-zero on anything still missing. `cargo xtask release` itself needs only pkg-config, a
+      # C compiler and the system's OpenSSL, which sqlcipher links (OPENSSL_NO_VENDOR,
+      # .cargo/config.toml). The tier still names what the window and the bundled apps built
+      # with — the wasm target, clang, python3, fontconfig, GTK, pango and libxdo — none of which
+      # this repository builds; they are installed so doctor passes until its rows are cut.
       #
       # Not `doctor --tier desktop`. That tier is the build's rows and then what the window needs
       # to run, a window manager on a display and a GPU, and a runner has neither, so it would
@@ -107,13 +107,12 @@ jobs:
       - name: Build and install-test the host
         run: cargo xtask release-server host
 
-      # The GPU renderer, as the archive ships, built on a runner with no GPU: compiling it
-      # needs none, and the install test opens no window. It runs the installed `kotton-start`
-      # with only HOME and PATH set, so the daemon sees no DISPLAY and starts no kuid; it makes
-      # an identity at a terminal and checks the daemon staged the shell the archive carries. As
-      # the runner's user it cannot make a network namespace, so it says it is not offline: that
-      # the archive reaches no network is shown where the test runs as root, not here.
-      - name: Build and install-test the desktop
+      # The system: the four daemons and the CLI (xtask/src/release.rs), no window and no guest
+      # app. The install test runs the installed `kotton --help` and `kotton-start` with only
+      # HOME and PATH set, and makes an identity at a terminal. As the runner's user it cannot
+      # make a network namespace, so it says it is not offline: that the archive reaches no
+      # network is shown where the test runs as root, not here.
+      - name: Build and install-test the system
         run: cargo xtask release
 
       - name: Write SHA256SUMS
@@ -171,6 +170,6 @@ jobs:
             gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" kotton-[0-9a-f]*-linux-x86_64.tar.gz kotton-relay-*.tar.gz kotton-vault-*.tar.gz kotton-host-*.tar.gz SHA256SUMS
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
-              --notes "The Linux desktop, the relay, the vault, and the host (the relay and the vault together), built by cargo xtask release and cargo xtask release-server from $GITHUB_SHA. Verify before installing: docs/use/first-hour.md for the desktop, docs/use/run-a-host.md for a host. SHA256SUMS.sig is attached by the owner, signed off GitHub; until it is, the sums prove only that the bytes arrived whole." \
+              --notes "The Linux system (the daemons and the CLI), the relay, the vault, and the host (the relay and the vault together), built by cargo xtask release and cargo xtask release-server from $GITHUB_SHA. Verify before installing: docs/use/first-hour.md for the system, docs/use/run-a-host.md for a host. SHA256SUMS.sig is attached by the owner, signed off GitHub; until it is, the sums prove only that the bytes arrived whole." \
               kotton-[0-9a-f]*-linux-x86_64.tar.gz kotton-relay-*.tar.gz kotton-vault-*.tar.gz kotton-host-*.tar.gz SHA256SUMS
           fi
