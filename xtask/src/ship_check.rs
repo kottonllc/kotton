@@ -18,7 +18,7 @@
 //! - **a path crate in this repository** must be on [`SYSTEM_CRATES`], the allow-list: the
 //!   system's own crates, and the crates the CLI, the relay and the vault are built from while
 //!   they are still here. On [`NOT_THE_SYSTEMS`] instead, it is a **finding**: printed, with
-//!   the crates it is a dependency of and the issue that cuts it, and not refused, because
+//!   the crates it is a dependency of and the cut, tracked in kottonllc/kotton#18, and not refused, because
 //!   today's binaries link it and the cut is work of its own. On neither, it is refused: a new
 //!   crate is judged before it ships.
 //! - **a path crate outside this repository**, or **a crate from git or any registry but
@@ -93,8 +93,8 @@ pub(crate) struct NotTheSystems {
     pub(crate) name: &'static str,
     /// Where RFC 0001 puts it, or that it does not.
     pub(crate) belongs: &'static str,
-    /// The issue to open for the cut.
-    pub(crate) issue: &'static str,
+    /// The cut, one of the seven kottonllc/kotton#18 tracks.
+    pub(crate) cut: &'static str,
 }
 
 /// The findings: crates here today, linked into what ships, that RFC 0001 does not make the
@@ -104,37 +104,37 @@ pub(crate) const NOT_THE_SYSTEMS: &[NotTheSystems] = &[
     NotTheSystems {
         name: "kotton-app",
         belongs: "the app surface is kotton-protocol's; running a guest is the sandbox host's, a process of its own that holds no keys",
-        issue: "kuserd links kotton-app: move the app host out of the user daemon into the sandbox host",
+        cut: "kuserd links kotton-app: move the app host out of the user daemon into the sandbox host",
     },
     NotTheSystems {
         name: "kotton-surface",
         belongs: "windows are the compositor's (kotton-compositor)",
-        issue: "kuserd links kotton-surface: cut the window registry from the user daemon",
+        cut: "kuserd links kotton-surface: cut the window registry from the user daemon",
     },
     NotTheSystems {
         name: "kotton-msg",
         belongs: "RFC 0001 names no repository for messaging",
-        issue: "kuserd links kotton-msg: place messaging in a repository, then cut it from the user daemon",
+        cut: "kuserd links kotton-msg: place messaging in a repository, then cut it from the user daemon",
     },
     NotTheSystems {
         name: "kotton-org",
         belongs: "RFC 0001 names no repository for orgs",
-        issue: "kuserd and kotton-peer link kotton-org: place orgs in a repository, then cut them from the system",
+        cut: "kuserd and kotton-peer link kotton-org: place orgs in a repository, then cut them from the system",
     },
     NotTheSystems {
         name: "kotton-outbound",
         belongs: "mediated outbound HTTP for confined extensions, which goes with the sandbox host",
-        issue: "kotton-app links kotton-outbound: it leaves the system with the app host",
+        cut: "kotton-app links kotton-outbound: it leaves the system with the app host",
     },
     NotTheSystems {
         name: "kotton-infer",
         belongs: "the inference runtime is kotton-infer's",
-        issue: "kotton-wire links kotton-infer: the protocol names inference's messages without linking its mechanism",
+        cut: "kotton-wire links kotton-infer: the protocol names inference's messages without linking its mechanism",
     },
     NotTheSystems {
         name: "kotton-grant",
         belongs: "RFC 0001 does not place it; what any side must verify is kotton-protocol's",
-        issue: "kotton-record and kuserd link kotton-grant: decide whether grants are the protocol's or the system's, then cut or admit",
+        cut: "kotton-record, kotton-app and kuserd link kotton-grant: decide whether grants are the protocol's or the system's, then cut or admit",
     },
 ];
 
@@ -317,7 +317,7 @@ pub(crate) fn ship_check(repo: &Path) {
             let Some((bins, through)) = owed.get(c.name) else { continue };
             println!("  {}: linked into {}; a dependency of {}", c.name, join(bins), join(through));
             println!("    {}", c.belongs);
-            println!("    issue to open: {}", c.issue);
+            println!("    cut (kottonllc/kotton#18): {}", c.cut);
         }
     }
     println!("\nship-check: the daemon still starts by name, and the archive does not carry:");

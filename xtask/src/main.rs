@@ -640,15 +640,16 @@ pub(crate) fn guest_wasm(target_dir: &Path, app: &str) -> Option<PathBuf> {
 
 /// Where `build-apps` and `dev` build the guest app `app`: a developer's convenience build,
 /// so `out/guest/<app>`, or `CARGO_TARGET_DIR` when that is exported (`out::own_target`).
-/// `release` builds the apps it bundles in a target of its own (`release::guest_target`).
+/// `release` builds no guest app and packs none: the system's archive carries the daemons and
+/// the CLI alone (`release::BINS`).
 fn guest_target(app: &str) -> PathBuf {
     out::own_target(&format!("guest/{app}"))
 }
 
 /// Build every guest app and test fixture for `wasm32-wasip2`, each into `target_of(<app>)`,
-/// and copy each component to `<app dir>/app.wasm`, where `kuserd` embeds it from and the
-/// desktop's archive packs the shell from. The caller names the target: a convenience build
-/// passes [`guest_target`], a release `release::guest_target` (decision 0014).
+/// and copy each component to `<app dir>/app.wasm`, where `kuserd`'s build embeds it from when
+/// it is there. The caller names the target; [`guest_target`] is the only one passed, since
+/// `release` calls none of this.
 pub(crate) fn build_apps(force: bool, target_of: fn(&str) -> PathBuf) {
     const TARGET: &str = GUEST_TRIPLE;
     // Paths are the checkout's, whatever directory this was run from.
