@@ -316,32 +316,6 @@ pub(crate) struct Need {
     pub(crate) fix: &'static [(&'static str, Fix)],
 }
 
-#[cfg(test)]
-impl Need {
-    /// A row with nothing but a name and its fixes, for a gate's test to plant.
-    pub(crate) fn for_test(what: &'static str, fix: &'static [(&'static str, Fix)]) -> Need {
-        Need {
-            what,
-            probe: Probe::Bin(what),
-            tier: Tier::Test,
-            only: &[],
-            also: &[],
-            breaks: "",
-            fix,
-        }
-    }
-
-    /// The same row, limited to `only`.
-    pub(crate) fn only(self, only: &'static [&'static str]) -> Need {
-        Need { only, ..self }
-    }
-
-    /// The same row, also asked for by `also`.
-    pub(crate) fn also(self, also: &'static [Tier]) -> Need {
-        Need { also, ..self }
-    }
-}
-
 /// Everything this checkout needs, and the smallest thing each one gates.
 pub(crate) const NEEDS: &[Need] = &[
     Need {
@@ -354,7 +328,6 @@ pub(crate) const NEEDS: &[Need] = &[
         // The platform's own package manager where its page sets the machine up with one:
         // `docs/use/macos.md` brews `just` and `docs/use/windows.md` scoops it, and a
         // `cargo install` there is a second route to a tool the page already installed.
-        // `runbook-check` holds this row to those pages.
         fix: &[
             ("macos", Fix::Brew("just")),
             ("windows", Fix::Scoop("just")),
@@ -459,8 +432,7 @@ pub(crate) const NEEDS: &[Need] = &[
             // with scoop and names `llvm` in the same line as openssl, python, just and
             // ripgrep. The first version of this row said `winget install LLVM.LLVM` — in
             // the same commit that added `llvm` to that scoop line. One dependency, one
-            // commit, two package managers, and nothing that could notice until
-            // `runbook-check`.
+            // commit, two package managers.
             ("windows", Fix::Scoop("llvm")),
         ],
     },
@@ -931,14 +903,6 @@ fn links_against(compiler: &str, lib: &str) -> Option<bool> {
     linked
 }
 
-/// The one-line refusal a gate prints when its own tool is missing.
-pub fn refuse(tool: &str) -> String {
-    format!(
-        "`{tool}` is not available, so this check cannot verify anything. It is refusing rather \
-         than reporting OK. Run `cargo xtask doctor` for the fix."
-    )
-}
-
 /// Every fix for a requirement on this platform: the entries naming it, or the
 /// entries naming no platform. Empty where nothing here knows how to install it.
 pub(crate) fn fixes_for(need: &Need, os: &str) -> Vec<Fix> {
@@ -1385,7 +1349,7 @@ GPU1:
         assert_eq!(fixes_for(just, "freebsd"), vec![Fix::Cargo("just")]);
         // Pinned because it was wrong once: `docs/use/windows.md` sets this machine up
         // with scoop, and a fix line naming a second package manager sends a person to
-        // install one they do not have. `runbook-check` now holds every row to its page.
+        // install one they do not have.
         let clang = NEEDS.iter().find(|n| n.what == "clang").unwrap();
         assert_eq!(fixes_for(clang, "windows"), vec![Fix::Scoop("llvm")]);
         assert_eq!(fixes_for(clang, "linux"), vec![Fix::Apt("clang")]);
@@ -1799,26 +1763,6 @@ GPU1:
         assert_eq!(off.len(), 1);
         assert!(matches!(off[0].probe, Probe::Os("linux")));
         assert!(fixes_for(off[0], "macos").is_empty());
-    }
-
-    /// **Every word the server tier tells a person to install is a word the guide uses.**
-    /// `docs/use/build-a-release.md` shows the shape of what `doctor --tier server` prints.
-    /// Since 2026-09-29 the comparison is `runbook-check`'s, which holds every row to its
-    /// platform's page and the server rows to this one
-    /// (`TASK-the-doctor-s-fix-lines-are-not-held-to-the-runbooks`); this keeps the name the
-    /// records cite, runs that gate over this page, and holds that the page runs `doctor`.
-    #[test]
-    fn the_server_fixes_are_the_guides_words() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let read = |p: &str| std::fs::read_to_string(root.join(p)).ok();
-        let text = read("docs/use/build-a-release.md").expect("docs/use/build-a-release.md exists");
-        assert!(text.contains("cargo xtask doctor --tier server"), "the guide does not run the check");
-        let found = crate::runbook_check::findings(NEEDS, &read, "").expect("every page reads");
-        let server: Vec<_> = found
-            .iter()
-            .filter(|f| f.page == "docs/use/build-a-release.md")
-            .collect();
-        assert!(server.is_empty(), "{server:#?}");
     }
 
     #[test]

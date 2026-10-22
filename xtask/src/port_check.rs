@@ -27,20 +27,16 @@
 //!
 //!    Where one service is defined twice, the two definitions must agree — a relay published
 //!    on 7700 in one file and 7701 in the other is a README that lies in one of them.
-//! 2. **Every published port is in the table** in `infra/README.md`. A default nobody wrote
-//!    down is how this happened once already; a list is fine, an unchecked one is not
-//!    (`xtask/src/tree.rs`).
 //!
-//! `scenarios/` is excluded on purpose: those are test topologies the conductor drives, with
-//! their own networks, and they are not something anybody rents.
+//! The reference also holds every published port to a port table in `infra/README.md`. This
+//! tree has no such page, so that half is not here: a rule over a page that is absent
+//! measures nothing.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The compose files that describe a service somebody runs.
-const SERVICES: &[&str] = &["infra/relay", "infra/vault", "infra/gateway"];
-
-const TABLE: &str = "infra/README.md";
+const SERVICES: &[&str] = &["infra/relay", "infra/vault"];
 
 /// One service's ports, grouped by the compose file that declared them — so the two
 /// definitions of a service defined twice can be compared against each other.
@@ -121,31 +117,6 @@ pub(crate) fn published_in(text: &str, file: &str) -> Vec<Published> {
     out
 }
 
-/// The ports the table in `infra/README.md` names.
-pub(crate) fn table_ports(text: &str) -> Vec<(u16, bool)> {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let t = line.trim();
-        if !t.starts_with('|') {
-            continue;
-        }
-        let cells: Vec<&str> = t.trim_matches('|').split('|').map(str::trim).collect();
-        if cells.len() < 2 {
-            continue;
-        }
-        let Ok(port) = cells[0].parse::<u16>() else {
-            continue;
-        };
-        let proto = cells[1].to_ascii_lowercase();
-        if proto == "udp" {
-            out.push((port, true));
-        } else if proto == "tcp" {
-            out.push((port, false));
-        }
-    }
-    out
-}
-
 pub fn run() {
     let mut all: Vec<Published> = Vec::new();
     for dir in SERVICES {
@@ -210,27 +181,10 @@ pub fn run() {
         }
     }
 
-    // 2. Every port is in the table.
-    let Ok(table) = std::fs::read_to_string(TABLE) else {
-        eprintln!("port-check: cannot read {TABLE}");
-        std::process::exit(1);
-    };
-    let named = table_ports(&table);
-    for p in &all {
-        if !named.contains(&p.key()) {
-            findings.push(format!(
-                "{} is published by {} and {TABLE} does not name it. A default nobody wrote \
-                 down is how the 7710 collision happened",
-                p.label(),
-                p.file
-            ));
-        }
-    }
-
     if findings.is_empty() {
         println!(
             "port-check: OK — {} published port(s) across {} service(s), none shared, and \
-             {TABLE} names every one.",
+             each service defined twice publishes the same ports in both.",
             all.len(),
             SERVICES.len()
         );
@@ -244,7 +198,7 @@ pub fn run() {
     }
     println!(
         "\nEvery service in infra/ must compose onto one machine. Take the next free port in \
-         the 77xx range, name it in {TABLE}, and give it an override variable."
+         the 77xx range, and give it an override variable."
     );
     std::process::exit(1);
 }
@@ -304,23 +258,7 @@ mod tests {
         assert_ne!(a[0].key(), b[0].key());
     }
 
-    /// The table is read from the markdown it is written in, so the two cannot drift.
-    #[test]
-    fn the_table_is_read_out_of_the_readme() {
-        let md = concat!(
-            "| Port | Proto | Service |\n",
-            "| ---: | --- | --- |\n",
-            "| 7700 | TCP | relay |\n",
-            "| 7712 | UDP | gateway |\n",
-            "Some prose that is not a row.\n",
-        );
-        let got = table_ports(md);
-        assert!(got.contains(&(7700, false)));
-        assert!(got.contains(&(7712, true)));
-        assert_eq!(got.len(), 2, "the header and the prose are not rows");
-    }
-
-    /// The tree as it actually stands passes both rules. This is the test that goes red the
+    /// The tree as it actually stands passes. This is the test that goes red the
     /// day somebody adds a fourth service and picks a port that is already taken.
     #[test]
     fn the_real_services_compose_onto_one_host() {
@@ -336,9 +274,6 @@ mod tests {
             "no ports parsed — the gate would pass vacuously"
         );
 
-        let table = std::fs::read_to_string(root.join(TABLE)).expect("infra/README.md");
-        let named = table_ports(&table);
-
         for (i, a) in all.iter().enumerate() {
             for b in all.iter().skip(i + 1) {
                 assert!(
@@ -349,11 +284,6 @@ mod tests {
                     b.service
                 );
             }
-            assert!(
-                named.contains(&a.key()),
-                "{} is not named in {TABLE}",
-                a.label()
-            );
         }
     }
 }

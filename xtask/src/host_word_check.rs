@@ -2,51 +2,34 @@
 //! `host-word-check`: what a person reads says *host* for the machine, and *instance*, *relay*
 //! or *vault* for what runs on it — never *box*.
 //!
-//! A relay and a vault are two instances under two keys even on one machine (`docs/design/
-//! nodes.md`), and a word for "the machine that runs every service" taught the opposite. The
-//! pages a person meets first, the essays, the design, the guides, the installer, the
-//! artboards the window is drawn from, and the copy of the shell, the CLI, the window, the
-//! release tooling, the relay and the daemons were rewritten without it, and so were the
-//! messages and fixtures of their tests; this keeps the word from coming back.
+//! A relay and a vault are two instances under two keys even on one machine, and a word for
+//! "the machine that runs every service" taught the opposite. The pages a person meets first,
+//! the installer, and the copy of the shell, the CLI, the release tooling, the relay and the
+//! daemons were written without it, and so were the messages and fixtures of their tests;
+//! this keeps the word from coming back.
 //!
 //! **What it reads, every line:** every `*.md` at the root — `README.md`, `CONTRIBUTING.md`,
-//! `CLAUDE.md` and their kin; every `.md` under `papers/`, the two essays and their index;
-//! every `.md` under `docs/design/`, `docs/design/decisions/` among them; every file under
-//! `docs/use/` and `infra/release/`; `infra/README.md` and every `infra/*/README.md`; and the
-//! two generated references, `docs/cli/reference.md` and `docs/shell/reference.md` — which
-//! carry the CLI's help, its doc comments included, as a person sees it.
+//! `CLAUDE.md` and their kin; every file under `infra/release/`; every `infra/*/README.md`; and
+//! the generated CLI reference, `docs/cli/reference.md`, which carries the CLI's help, its doc
+//! comments included, as a person sees it.
 //!
 //! **What it reads, string literals only:** every `.rs` file under `client/shell/src/` and
-//! `client/cli/src/`; the window's, under `guest/apps/kotton-shell/logic/src/`; the lines
-//! `cargo xtask` prints, under `xtask/src/`; the relay's, under `infra/relay/src/` and
-//! `infra/relay/tests/`; and every crate under `core/` but `kuid`, its `src/` and its
-//! `tests/` — a server's and a daemon's sentences reach a person as an error or a hint, and a
-//! test's message and fixture are what a contributor reads when one fails. A literal is what
+//! `client/cli/src/`; the lines `cargo xtask` prints, under `xtask/src/`; the relay's, under
+//! `infra/relay/src/` and `infra/relay/tests/`; and every crate under `core/`, its `src/` and
+//! its `tests/` — a server's and a daemon's sentences reach a person as an error or a hint, and
+//! a test's message and fixture are what a contributor reads when one fails. A literal is what
 //! a person can be shown; an identifier (`Box::new`, a test named for the case it holds) and a
 //! comment are not, so neither is read. A literal may be a stylesheet, so CSS's own words that
 //! hold *box* (`box-shadow`, `border-box`, …) are not the word inside one.
 //!
-//! **What it reads, the text a page shows:** every `.html` file under `ui/ink/`, the artboards
-//! the window is drawn from, so a sentence there is the next one the window says. What lies
-//! between tags is read, and so is the value of an attribute a page shows (the ten in
-//! [`SHOWN`]: `alt`, `aria-label`, `placeholder`, `title`, `value` and their kin); a tag's
-//! name, its other attributes (`class`, `id`, `style`, `href`) and a comment are markup, not
-//! copy. A `<style>` element's
-//! text lies between tags, so CSS's words are not the word there either. The rest of `ui/` is
-//! not read: `tokens.css` is a stylesheet whose comments speak of CSS's box model,
-//! `portal-reference.html` renders the tokens rather than a screen, and `ui/ink/README.md` is
-//! the narrative of the boards, which quotes the owner's own words as written.
+//! Every path named here is one this tree holds, and a test holds that it is: a path that
+//! moved would otherwise be read as nothing and pass.
 //!
-//! **What it does not read.** `core/kuid`, because there the word is not copy: its literals
-//! are stylesheets and the raster tests over them, where a box is CSS's box model. `DCO.md`,
-//! the Developer Certificate of Origin, a text copied verbatim that cannot be reworded. And
-//! nine files under the paths above that hold the word as their subject: the four decisions
-//! that are about the word itself — 0003, which retires it, and 0013, 0015 and 0016, which draw
-//! this check around more of the tree and name what still holds it as an identifier (the
-//! refused credential's `box=` line, `Role::Box`, CSS's box model) — and a decision is not
-//! edited after it is made; this check's own tests, which plant it; the compose file's test,
-//! which names the retired recipes to hold that they are gone; `peer`'s `operator.rs`, which
-//! reads the refused credential form's `box` line, a format, to name what it dropped; `wire`'s
+//! **What it does not read.** `DCO.md`, the Developer Certificate of Origin, a text copied
+//! verbatim that cannot be reworded. And five files under the paths above that hold the word
+//! as their subject: this check's own tests, which plant it; the compose file's test, which
+//! names the retired recipes to hold that they are gone; `peer`'s `operator.rs`, which reads
+//! the refused credential form's `box` line, a format, to name what it dropped; `wire`'s
 //! `line.rs`, whose tests hand the parser a line of kind `box` to hold that it is refused; and
 //! `record`'s SQLite store, whose tests keep a note titled *boxes*.
 //!
@@ -63,21 +46,16 @@
 use std::path::{Path, PathBuf};
 
 /// Trees read whole, every file, recursively.
-const TREES: &[&str] = &["docs/use", "infra/release"];
-
-/// Trees whose `.md` files are read whole, recursively: the essays and the design.
-const MD_TREES: &[&str] = &["papers", "docs/design"];
+const TREES: &[&str] = &["infra/release"];
 
 /// Files read whole, by path; every `*.md` at the root is read beside them.
-const FILES: &[&str] = &["infra/README.md", "docs/cli/reference.md", "docs/shell/reference.md"];
+const FILES: &[&str] = &["docs/cli/reference.md"];
 
-/// Trees whose `.rs` files are read for string literals only: every crate under `core/` but
-/// `kuid`, by its `src/` and its `tests/`, beside the shell, the CLI, the window, `xtask` and
-/// the relay. `docs-present-check` reads the comments of the same trees.
+/// Trees whose `.rs` files are read for string literals only: every crate under `core/`, by
+/// its `src/` and its `tests/`, beside the shell, the CLI, `xtask` and the relay. `docs-present-check` reads the comments of the same trees.
 pub const RUST_TREES: &[&str] = &[
     "client/shell/src",
     "client/cli/src",
-    "guest/apps/kotton-shell/logic/src",
     "xtask/src",
     "infra/relay/src",
     "infra/relay/tests",
@@ -94,8 +72,6 @@ pub const RUST_TREES: &[&str] = &[
     "core/infer/src",
     "core/ipc/src",
     "core/kdeviced/src",
-    "core/khttpd/src",
-    "core/kinferd/src",
     "core/kquicd/src",
     "core/ksyncd/src",
     "core/kuserd/src",
@@ -119,26 +95,7 @@ pub const RUST_TREES: &[&str] = &[
     "core/surface/src",
     "core/sync/src",
     "core/sys/src",
-    "core/time/src",
-    "core/wasm/src",
     "core/wire/src",
-];
-
-/// Trees whose `.html` files are read for the text a page shows ([`html_text`]).
-const HTML_TREES: &[&str] = &["ui/ink"];
-
-/// The attributes whose value a page shows a person.
-const SHOWN: &[&str] = &[
-    "alt",
-    "aria-description",
-    "aria-label",
-    "aria-roledescription",
-    "aria-valuetext",
-    "content",
-    "label",
-    "placeholder",
-    "title",
-    "value",
 ];
 
 /// Files under the paths above that hold the word as their subject, not as copy, or that are
@@ -146,13 +103,6 @@ const SHOWN: &[&str] = &[
 const NOT_READ: &[&str] = &[
     // The Developer Certificate of Origin, a text copied verbatim.
     "DCO.md",
-    // The decisions about the word itself: 0003 retires it, and 0013, 0015 and 0016 draw this
-    // check around more of the tree and name what holds it as an identifier or as CSS's. A
-    // decision is not edited after it is made.
-    "docs/design/decisions/0003-the-machine-is-a-host-and-what-runs-on-it-is-an-instance.md",
-    "docs/design/decisions/0013-host-word-check-reads-the-window-xtask-and-the-daemons-whose-copy-reaches-a-person.md",
-    "docs/design/decisions/0015-host-word-check-reads-the-artboards.md",
-    "docs/design/decisions/0016-host-word-check-reads-every-crate-under-core-but-the-display-server.md",
     // This check's own tests, which plant the word.
     "xtask/src/host_word_check.rs",
     // Names the retired `box` recipes to hold that the compose file does not.
@@ -199,11 +149,6 @@ pub fn files(root: &Path) -> Vec<String> {
         walk(&root.join(tree), &mut found);
         out.extend(found.iter().map(|p| rel(p)));
     }
-    for tree in MD_TREES {
-        let mut found = Vec::new();
-        walk(&root.join(tree), &mut found);
-        out.extend(found.iter().filter(|p| p.extension().is_some_and(|x| x == "md")).map(|p| rel(p)));
-    }
     for file in FILES {
         if root.join(file).is_file() {
             out.push(file.to_string());
@@ -234,11 +179,6 @@ pub fn files(root: &Path) -> Vec<String> {
                 .map(|p| rel(p)),
         );
     }
-    for tree in HTML_TREES {
-        let mut found = Vec::new();
-        walk(&root.join(tree), &mut found);
-        out.extend(found.iter().filter(|p| p.extension().is_some_and(|x| x == "html")).map(|p| rel(p)));
-    }
     out.retain(|p| !NOT_READ.contains(&p.as_str()));
     out.sort();
     out.dedup();
@@ -264,8 +204,6 @@ pub fn findings(root: &Path) -> Vec<String> {
         let Ok(text) = std::fs::read_to_string(root.join(&rel)) else { continue };
         let hits = if rel.ends_with(".rs") {
             string_literals(&text).into_iter().flat_map(|(line, lit)| in_text(&without_css(&lit), line)).collect()
-        } else if rel.ends_with(".html") && HTML_TREES.iter().any(|t| rel.starts_with(&format!("{t}/"))) {
-            in_text(&without_css(&html_text(&text)), 1)
         } else {
             let mut hits = in_text(&text, 1);
             hits.extend(in_text_unshipped(&text, 1));
@@ -283,91 +221,6 @@ pub fn without_css(lit: &str) -> String {
     let mut out = lit.to_string();
     for word in CSS_WORDS {
         out = out.replace(word, &" ".repeat(word.len()));
-    }
-    out
-}
-
-/// The text of an HTML page that a person is shown, with its markup blanked to spaces and its
-/// newlines kept, so a finding names the line it is on: what lies between tags, and the value
-/// of each attribute in [`SHOWN`]. A tag's name, its other attributes and a comment are
-/// blanked. A `<` that does not open a tag, a comment or a declaration is text.
-pub fn html_text(src: &str) -> String {
-    let c: Vec<char> = src.chars().collect();
-    let mut out = String::with_capacity(src.len());
-    let blank = |out: &mut String, ch: char| out.push(if ch == '\n' { '\n' } else { ' ' });
-    let mut i = 0;
-    while i < c.len() {
-        let opens = c[i] == '<' && c.get(i + 1).is_some_and(|n| n.is_ascii_alphabetic() || matches!(n, '/' | '!'));
-        if !opens {
-            out.push(c[i]);
-            i += 1;
-            continue;
-        }
-        if c[i..].starts_with(&['<', '!', '-', '-']) {
-            let end = (i + 4..c.len()).find(|&k| c[k..].starts_with(&['-', '-', '>'])).map_or(c.len(), |k| k + 3);
-            c[i..end].iter().for_each(|&ch| blank(&mut out, ch));
-            i = end;
-            continue;
-        }
-        // The `<` and the tag's name, then each attribute, to the `>` outside a quoted value.
-        while i < c.len() && !c[i].is_whitespace() && c[i] != '>' {
-            blank(&mut out, c[i]);
-            i += 1;
-        }
-        loop {
-            while i < c.len() && (c[i].is_whitespace() || c[i] == '/') {
-                blank(&mut out, c[i]);
-                i += 1;
-            }
-            if i >= c.len() {
-                break;
-            }
-            if c[i] == '>' {
-                blank(&mut out, c[i]);
-                i += 1;
-                break;
-            }
-            let start = i;
-            while i < c.len() && !c[i].is_whitespace() && !matches!(c[i], '=' | '>' | '/') {
-                blank(&mut out, c[i]);
-                i += 1;
-            }
-            let name = c[start..i].iter().collect::<String>().to_ascii_lowercase();
-            while i < c.len() && c[i].is_whitespace() {
-                blank(&mut out, c[i]);
-                i += 1;
-            }
-            if c.get(i) != Some(&'=') {
-                continue;
-            }
-            blank(&mut out, '=');
-            i += 1;
-            while i < c.len() && c[i].is_whitespace() {
-                blank(&mut out, c[i]);
-                i += 1;
-            }
-            let quote = match c.get(i) {
-                Some(&q @ ('"' | '\'')) => {
-                    blank(&mut out, q);
-                    i += 1;
-                    Some(q)
-                }
-                _ => None,
-            };
-            let shown = SHOWN.contains(&name.as_str());
-            while i < c.len() && quote.map_or(!c[i].is_whitespace() && c[i] != '>', |q| c[i] != q) {
-                if shown {
-                    out.push(c[i]);
-                } else {
-                    blank(&mut out, c[i]);
-                }
-                i += 1;
-            }
-            if quote.is_some() && i < c.len() {
-                blank(&mut out, c[i]);
-                i += 1;
-            }
-        }
     }
     out
 }
@@ -581,30 +434,17 @@ mod tests {
     /// One file of each kind the check reads, each saying *host* and the words that only look
     /// like the one refused.
     const CLEAN: &[(&str, &str)] = &[
-        ("docs/use/run-a-relay.md", "# Run a relay\n\nOn the host, as root. Your sandbox, your inbox, a boxed set.\n"),
-        ("docs/use/nested/page.md", "The instance is a relay.\n"),
         ("infra/release/install-server.sh", "#!/bin/sh\n# as root, on the host\necho \"already on this host\"\n"),
         ("infra/release/README.txt", "A host runs the vault.\n"),
-        ("infra/README.md", "# infra\n\nNo host? Read the guides.\n"),
         ("infra/relay/README.md", "| File | On the host |\n"),
         ("docs/cli/reference.md", "# Command-Line Help for `kotton`\n"),
-        ("docs/shell/reference.md", "# Shell Command Reference\n"),
         ("client/shell/src/commands/mint.rs", "fn mint() -> &'static str { \"On the host, as root:\" }\n"),
         ("client/cli/src/kotton.rs", "fn main() { println!(\"{}\", \"the vault's line\"); }\n"),
-        (
-            "guest/apps/kotton-shell/logic/src/components/overlays/settings.rs",
-            "const A: &str = \"The vault printed six digits in its own terminal\";\n",
-        ),
         ("xtask/src/release_server.rs", "fn f() { println!(\"a fix reaches a host only as a release\"); }\n"),
         ("core/device/src/users/pairing.rs", "const A: &str = \"On the host, `kvaultd invite sam`\";\n"),
         ("core/kuserd/src/agent/operator.rs", "const A: &str = \"the vault did not answer\";\n"),
         ("core/kvaultd/src/peer.rs", "const A: &str = \"said under the vault's operator credential\";\n"),
-        ("core/wasm/src/sandbox.rs", "const A: &str = \"a host's landlord verbs are not available\";\n"),
         ("core/app/src/daemon/apps.rs", "const A: &str = \"people at a host\";\n"),
-        (
-            "ui/ink/Settings-networks-invite.dc.html",
-            "<p style=\"margin: 0; box-sizing: border-box;\">Their data is sealed before the vault sees it.</p>\n",
-        ),
         ("core/grant/src/lib.rs", "const A: &str = \"a grant the vault holds\";\n"),
         ("core/peer/src/pairing.rs", "const A: &str = \"http://host-relay:7700\";\n"),
         ("core/kvaultd/tests/install.rs", "const A: &str = \"the scratch host's root\";\n"),
@@ -612,9 +452,6 @@ mod tests {
         ("README.md", "# Kotton\n\nA rented host runs your relay and your vault.\n"),
         ("CONTRIBUTING.md", "# Contributing\n\nA sandbox, an inbox.\n"),
         ("CLAUDE.md", "# CLAUDE.md\n\nThe host keeps what it cannot open.\n"),
-        ("papers/confinement-thesis.md", "# The confinement thesis\n\nA host keeps what it cannot open.\n"),
-        ("docs/design/nodes.md", "# Nodes\n\nA relay and a vault are two instances, even on one host.\n"),
-        ("docs/design/decisions/0001-a-relay.md", "# 0001: A relay\n\nThe relay on your host is yours.\n"),
     ];
 
     /// A line that promises a window or a GPU is refused by file and line, in a script's
@@ -651,38 +488,23 @@ mod tests {
     #[test]
     fn each_path_kind_is_refused_by_file_and_line() {
         let planted: &[(&str, &str, &str)] = &[
-            ("docs/use/run-a-relay.md", "On the box, as root.", "box"),
-            ("docs/use/nested/page.md", "```sh\nscp it root@box:\n```", "box"),
             ("infra/release/install-server.sh", "# when the BOX has none", "BOX"),
             ("infra/release/install-server.sh", "made=\"already on this box\"", "box"),
             ("infra/release/README.txt", "Two boxes, one person.", "boxes"),
             ("infra/release/allowed_signers", "# the box's key", "box"),
-            ("infra/README.md", "**Starting from nothing — no box?**", "box"),
             ("infra/vault/README.md", "| File | On a Box |", "Box"),
             ("docs/cli/reference.md", "* `reset` — wipe this box", "box"),
-            ("docs/shell/reference.md", "mint — make the key a box runs", "box"),
             ("client/shell/src/commands/mint.rs", "const A: &str = \"the box's line\";", "box"),
             ("client/cli/src/kotton.rs", "const B: &[u8] = b\"a box\";", "box"),
             ("client/cli/src/kotton.rs", "const C: &str = r#\"a \"quoted\" box\"#;", "box"),
             ("client/shell/src/commands/mint.rs", "const D: &str = \"a line\\nbox\";", "box"),
-            (
-                "guest/apps/kotton-shell/logic/src/components/overlays/settings.rs",
-                "p { \"The box printed six digits in its own terminal, on the \" }",
-                "box",
-            ),
-            ("guest/apps/kotton-shell/logic/src/view.rs", "const E: &str = \"Invite \\u{2014} asking the box\";", "box"),
             ("xtask/src/release_server.rs", "fn g() { println!(\"a fix reaches a box only as a release\"); }", "box"),
             ("xtask/src/doctor.rs", "const F: &str = \"the target a box runs\";", "box"),
             ("core/device/src/users/pairing.rs", "const G: &str = \"At the box, `kvaultd invite sam`\";", "box"),
             ("core/kuserd/src/agent/operator.rs", "const H: &str = \"the box did not answer\";", "box"),
             ("core/kvaultd/src/peer.rs", "const I: &str = \"said under the box's operator credential\";", "box"),
-            ("core/wasm/src/sandbox.rs", "const J: &str = \"a box's landlord verbs are not available\";", "box"),
             ("core/app/src/daemon/apps.rs", "const K: &str = \"people at a box\";", "box"),
             ("core/app/src/daemon/apps.rs", "const L: &str = \"box-shadow: 0 1px red; on the box\";", "box"),
-            ("ui/ink/Settings-networks-invite.dc.html", "<span class=\"note\">The box never learns it.</span>", "box"),
-            ("ui/ink/Pairing.dc.html", "<input placeholder=\"x\" value=\"the box's name\">", "box"),
-            ("ui/ink/Home.dc.html", "<img alt='A box, awake' src=\"box.png\">", "box"),
-            ("ui/ink/Notice.dc.html", "<style>.n { box-shadow: none; }</style><b>On the box</b>", "box"),
             ("core/grant/src/lib.rs", "const M: &str = \"a grant the box holds\";", "box"),
             ("core/peer/src/pairing.rs", "const N: &str = \"http://box-relay:7700\";", "box"),
             ("core/kvaultd/tests/install.rs", "fn t() { assert!(false, \"{} is inside the box\", 1); }", "box"),
@@ -692,12 +514,6 @@ mod tests {
             ("README.md", "Run it on a rented box.", "box"),
             ("CONTRIBUTING.md", "A box is a host.", "box"),
             ("CLAUDE.md", "The BOX keeps it.", "BOX"),
-            ("AGENTS.md", "One box per agent.", "box"),
-            ("papers/confinement-thesis.md", "The box keeps what it cannot open.", "box"),
-            ("papers/README.md", "Two essays, two boxes.", "boxes"),
-            ("docs/design/nodes.md", "One box runs every service.", "box"),
-            ("docs/design/decisions/0001-a-relay.md", "The relay on your box is yours.", "box"),
-            ("docs/design/decisions/README.md", "A Box is a host.", "Box"),
         ];
         for (path, line, says) in planted {
             let mut files: Vec<(&str, String)> = CLEAN.iter().map(|(p, t)| (*p, t.to_string())).collect();
@@ -722,46 +538,6 @@ mod tests {
 
         let dir = tree(&[("client/cli/src/help.rs", "const H: &str = \"one\n  two\n  three box\";\n")]);
         assert_eq!(findings(dir.path()), vec!["client/cli/src/help.rs:3: says `box`".to_string()]);
-    }
-
-    /// **A sentence in an artboard is refused by file and line**: the invite artboard's own
-    /// sentence, on the line it is drawn on, under the markup a `.dc.html` carries.
-    #[test]
-    fn a_sentence_in_an_artboard_is_refused_by_file_and_line() {
-        let board = "<!doctype html>\n\
-<html lang=\"en\"><head><title>Invite someone</title></head>\n\
-<body><div style=\"width: 460px; box-shadow: 0 24px 48px rgba(0,0,0,0.5);\">\n\
-<p style=\"margin: 0;\">One invite joins them to the whole network. Her data is sealed before the box sees \
-it, and the box counts bytes and nothing else.</p>\n\
-</div></body></html>\n";
-        let dir = tree(&[("ui/ink/Settings-networks-invite.dc.html", board)]);
-        assert_eq!(
-            findings(dir.path()),
-            vec![
-                "ui/ink/Settings-networks-invite.dc.html:4: says `box`".to_string(),
-                "ui/ink/Settings-networks-invite.dc.html:4: says `box`".to_string(),
-            ]
-        );
-    }
-
-    /// **Markup in an artboard is not copy, and CSS's words are not the word there**: an inline
-    /// `style` that says `box-shadow` or `border-box`, a `<style>` element that does, a class or
-    /// an id named *box*, an `href` or `src` naming a file, and a comment. The text a page shows
-    /// keeps its lines, so what follows them is named by the line it is on.
-    #[test]
-    fn markup_and_css_words_in_an_artboard_are_not_the_word() {
-        let board = "<!-- the box,\n  drawn -->\n\
-<style>.card { box-sizing: border-box; box-shadow: 0 1px red; }</style>\n\
-<div class=\"box\" id='box' style=\"box-shadow: 0 18px 48px rgba(0,0,0,0.55); box-sizing: border-box\">\n\
-<a href=\"box.html\"><img src=box.png alt=\"A vault, awake\"></a> 2 < 3 and 4 > 1\n\
-<span title=\"the host\">The vault counts bytes.</span></div>\n";
-        let dir = tree(&[("ui/ink/Settings-networks-yours.dc.html", board)]);
-        assert_eq!(findings(dir.path()), Vec::<String>::new());
-        let text = html_text(board);
-        assert_eq!(text.lines().count(), board.lines().count());
-        assert!(text.contains("A vault, awake") && text.contains("2 < 3 and 4 > 1"), "{text:?}");
-        assert!(text.contains("the host") && text.contains("The vault counts bytes."), "{text:?}");
-        assert_eq!(in_text(&without_css(&html_text(&format!("{board}<p>a box</p>\n"))), 1), vec![(7, "box".to_string())]);
     }
 
     /// **An identifier or a comment in Rust is not copy**: `Box::new`, a variant named `Box`, a
@@ -840,11 +616,31 @@ fn recovery_works_while_the_boxs_relay_is_down<'a>(x: &'a str) -> Box<dyn Fn()> 
     fn css_words_in_a_literal_are_not_the_word() {
         let css = "const S: &str = \".card { box-sizing: border-box; box-shadow: 0 1px red; \\
                    background-clip: padding-box; box-decoration-break: clone; }\";\n";
-        let dir = tree(&[("guest/apps/kotton-shell/logic/src/style.rs", css)]);
+        let dir = tree(&[("client/shell/src/style.rs", css)]);
         assert_eq!(findings(dir.path()), Vec::<String>::new());
         assert_eq!(in_text(&without_css("a box-shadow\non the box"), 1), vec![(2, "box".to_string())]);
-        let dir = tree(&[("docs/use/page.md", "Its box-shadow.\n")]);
-        assert_eq!(findings(dir.path()), vec!["docs/use/page.md:1: says `box`".to_string()]);
+        let dir = tree(&[("infra/release/README.txt", "Its box-shadow.\n")]);
+        assert_eq!(findings(dir.path()), vec!["infra/release/README.txt:1: says `box`".to_string()]);
+    }
+
+    /// **Every path this check names is one the tree holds.** A tree that moved is walked as
+    /// an empty directory and a file that moved is skipped, and either reads as a clean pass
+    /// over nothing; this makes the move fail here instead.
+    #[test]
+    fn every_named_path_exists() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask has a parent");
+        let mut missing: Vec<&str> = Vec::new();
+        for tree in TREES.iter().chain(RUST_TREES) {
+            if !root.join(tree).is_dir() {
+                missing.push(tree);
+            }
+        }
+        for file in FILES.iter().chain(NOT_READ) {
+            if !root.join(file).is_file() {
+                missing.push(file);
+            }
+        }
+        assert_eq!(missing, Vec::<&str>::new(), "host-word-check names paths this tree does not hold");
     }
 
     /// **Every crate under `core/` but `kuid` is read, by its `src/` and its `tests/`**, as

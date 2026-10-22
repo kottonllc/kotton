@@ -28,27 +28,19 @@ colored = "2.1"
 yaml-rust2 = { version = "=0.13.0", default-features = false }
 
 # `gen-docs` / `docs-check` are the only subcommands that need the real command
-# trees, and depending on them unconditionally made every *other* check pay for
+# tree, and depending on it unconditionally made every *other* check pay for
 # kotton-runtime, ring and libsqlite3-sys: 5m53s to link a binary whose actual
 # work is reading and writing Markdown in 37ms. `just lint` runs `cargo clippy`
 # over the workspace anyway, so the docs checks cost nothing extra there; what
 # this buys is a cheap `cargo xtask` for every other check.
 kotton-cli = { path = "../client/cli", optional = true }
-kotton-shell = { path = "../client/shell", optional = true }
 # clap is not used directly — it is here for the derive the `Cli` type carries.
 clap = { version = "4.5", features = ["derive"], optional = true }
 clap-markdown = { version = "0.1", optional = true }
 
 [features]
-cli-docs = ["dep:kotton-cli", "dep:kotton-shell", "dep:clap", "dep:clap-markdown"]
+cli-docs = ["dep:kotton-cli", "dep:clap", "dep:clap-markdown"]
 
 [dev-dependencies]
 workspace-hack = { path = "../tools/workspace-hack" }
 tempfile = "3.8"
-# What a release crate states that a file of this tree's must agree with, held here because
-# the file is this tree's and a release crate's tests read only what the release ships:
-# `guest/examples/hello` is what the shell's `app new` writes (`scaffold_fixture_tests`), and
-# `ui/tokens.css`'s door timer is the daemon's (`token_block_check`). Test-only, so the
-# `cargo xtask` binary links neither.
-kotton-shell = { path = "../client/shell" }
-kotton-peer = { path = "../core/peer" }

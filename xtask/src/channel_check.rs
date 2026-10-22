@@ -58,10 +58,9 @@ const CHANNELS: &[(&str, &str, &str)] = &[
     // storage verb, rather than being refused for one.
     ("ContactRequest", "ContactResponse", "peer"),
     ("DeviceRequest", "DeviceResponse", "kdeviced"),
-    // Inherited, not bound: kuid is handed this channel at spawn.
-    ("KuidRequest", "KuidResponse", "kuid"),
-    // The same channel, the other way. `kuid` reports what it observed and
-    // `kuserd` accepts it — a second type rather than a second transport,
+    // The window's channel, the other way: `kuid`, which is not in this tree, is the
+    // acceptor of `KuidRequest` in the reference and has no row here. `kuid` reports what it
+    // observed and `kuserd` accepts it — a second type rather than a second transport,
     // because RFC-0082's rule is one acceptor per request *type*, not one
     // direction per channel.
     //
@@ -72,12 +71,9 @@ const CHANNELS: &[(&str, &str, &str)] = &[
     // that carries less than it does — and this check caught that on the first
     // run after the row was written.
     ("FromCompositor", "()", "kuserd"),
-    // The inference channel (RFC-0085). Inherited, not bound: `kinferd` is
-    // handed a pair of pipes at spawn and there is no path to it, which is the
-    // whole of IN1's refusal of a model server on a loopback port.
-    ("InferRequest", "InferResponse", "kinferd"),
-    // The same channel, the other way, and a row for the same reason
-    // `FromCompositor` has one: `kuserd` reads this type off the pipe itself,
+    // The inference channel, the other way: `kinferd`, which is not in this tree, is the
+    // acceptor of `InferRequest` in the reference and has no row here. A row for the same
+    // reason `FromCompositor` has one: `kuserd` reads this type off the pipe itself,
     // so it is an acceptor of it. No wrapper is needed here where the
     // compositor needed one — `kinferd` raises nothing of its own, so every
     // frame on the up direction is an answer.

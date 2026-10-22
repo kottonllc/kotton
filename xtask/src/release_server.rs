@@ -3122,7 +3122,7 @@ mod tests {
     }
 
     /// **The relay's operator verbs are typed as root or as the relay's user**, wherever
-    /// `docs/use/run-a-relay.md`, the relay's README and its unit write them: they write the state
+    /// the relay's README and its unit write them: they write the state
     /// directory the running relay owns and give what they write to its owner, so either
     /// typist leaves a file the relay reads
     /// (`TASK-a-relay-operator-verb-typed-as-root-locks-every-operator-out-until-the-relay-restarts`).
@@ -3136,7 +3136,7 @@ mod tests {
     #[test]
     fn the_relays_operator_verbs_are_typed_as_its_user() {
         let user = unit_value(&read(RELAY.unit_src), "User").unwrap().to_string();
-        for doc in ["docs/use/run-a-relay.md", "infra/relay/README.md", RELAY.unit_src] {
+        for doc in ["infra/relay/README.md", RELAY.unit_src] {
             let verbs = relay_operator_verbs(&read(doc));
             assert!(!verbs.is_empty(), "{doc}: no relay operator verb found — did it move?");
             for v in verbs {
@@ -3176,12 +3176,16 @@ mod tests {
             .any(|typist| verb.strip_prefix(typist.as_str()).is_some_and(|rest| rest.starts_with(bare)))
     }
 
-    /// **The port table is unchanged:** each port the env files listen on publicly is a
-    /// row of `infra/README.md`'s table, and the relay's STUN stays on loopback, as the
-    /// compose file (which never published it) left it.
+    /// **The ports are unchanged:** each port the env files listen on publicly is one the
+    /// compose files publish (`port-check` holds those to one host), and the relay's STUN
+    /// stays on loopback, as the compose file (which never published it) left it.
     #[test]
-    fn the_env_files_listen_on_the_port_tables_ports() {
-        let table = crate::port_check::table_ports(&read("infra/README.md"));
+    fn the_env_files_listen_on_the_composed_ports() {
+        let table: Vec<(u16, bool)> = ["infra/relay", "infra/vault"]
+            .iter()
+            .flat_map(|dir| crate::port_check::published_in(&read(&format!("{dir}/docker-compose.yml")), dir))
+            .map(|p| (p.port, p.udp))
+            .collect();
         let relay = env_pairs(&read(RELAY.env_src)).unwrap();
         let get = |pairs: &[(String, String)], k: &str| pairs.iter().find(|(key, _)| key == k).unwrap().1.clone();
         assert_eq!(get(&relay, "KOTTON_RELAY_BIND"), "0.0.0.0:7700");

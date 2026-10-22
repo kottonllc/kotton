@@ -10,15 +10,7 @@
 //! true.
 //!
 //! **What it reads, for every rule.** Every `.md`, `.css`, `.html` and `.py` file under
-//! `docs/`, `ui/` and `papers/`, and every `*.md` at the root.
-//!
-//! **And the app contract, for every rule** ([`CONTRACT`]): every `.wit` file in
-//! `guest/sdk/kotton-app/wit/`, one level. Its comments are the prose an app author reads to
-//! learn what each import is and what links it, so a record cited there sends them to nothing
-//! and a date narrated there is a claim about a day, exactly as on a page. Every line is read:
-//! the WIT around the comments is kebab-case names and types, which hold no record stem and
-//! no date. Nothing date-shaped in the contract is a value, so nothing is excepted; a
-//! timestamp format is named as *RFC 3339*, which is the IETF's spelling and not a record's.
+//! `docs/`, and every `*.md` at the root.
 //!
 //! **What it reads for record names only** ([`NAMES_ONLY`]): the files a contributor meets
 //! beside the documents — the root `Justfile`, `Cargo.toml`, `.gitignore`, `.env.example` and
@@ -65,8 +57,6 @@
 //! - `ISSUES.md`, which is transient (the issues to open when the repository goes public,
 //!   deleted when they are), and `DCO.md`, which is a verbatim copy of someone else's text;
 //!   `LICENSE` and `NOTICES` are not read;
-//! - the drawings under `ui/ink/` (`*.html`), whose words are what a screen shows: a date on
-//!   a drawn phone is a sample date, and the records app's drawings draw records;
 //! - the files in [`NOT_READ`], literals and comments alike: this check's own tests, which
 //!   plant record names and dates to hold that each is refused. A file whose subject is a
 //!   record name joins it, with the reason, when its comments are swept; and, for dates
@@ -85,7 +75,7 @@ use std::path::{Path, PathBuf};
 const ROOT_EXCEPTED: &[&str] = &["ISSUES.md", "DCO.md"];
 
 /// The directories read, recursively.
-const TREES: &[&str] = &["docs", "ui", "papers"];
+const TREES: &[&str] = &["docs"];
 
 /// Files beside the documents, read for record names only: a root file by name, or a directory
 /// and the extension of the files in it that are read (one level, not recursive).
@@ -140,7 +130,7 @@ pub const COMMENT_TREES: &[&str] = crate::host_word_check::RUST_TREES;
 /// How many paths [`COMMENTS_NOT_READ`] holds. The check refuses a list whose length is not
 /// this, so the list does not grow in length unnoticed; a stage that sweeps files lowers it by
 /// as many. It does not catch a swap: one path off and another on leaves the length as it was.
-pub const UNSWEPT_FILES: usize = 314;
+pub const UNSWEPT_FILES: usize = 264;
 
 /// Files under [`COMMENT_TREES`] whose comments still cite a record or narrate a date, and are
 /// not read in them until they are swept. A path joins the list only as a line in the diff,
@@ -252,8 +242,6 @@ pub const COMMENTS_NOT_READ: &[&str] = &[
     "core/kdeviced/src/db/operators_db.rs",
     "core/kdeviced/src/lib.rs",
     "core/kdeviced/src/system.rs",
-    "core/khttpd/src/main.rs",
-    "core/kinferd/src/main.rs",
     "core/kquicd/src/main.rs",
     "core/ksyncd/src/main.rs",
     "core/kvaultd/src/carry.rs",
@@ -358,26 +346,6 @@ pub const COMMENTS_NOT_READ: &[&str] = &[
     "core/sys/src/outbound.rs",
     "core/sys/src/secret/mod.rs",
     "core/sys/src/store/mod.rs",
-    "core/time/src/lib.rs",
-    "core/time/src/provider/os.rs",
-    "core/wasm/src/auth_port.rs",
-    "core/wasm/src/contact_port.rs",
-    "core/wasm/src/device_port.rs",
-    "core/wasm/src/error.rs",
-    "core/wasm/src/extension.rs",
-    "core/wasm/src/fetch_port.rs",
-    "core/wasm/src/file_port.rs",
-    "core/wasm/src/grant_check.rs",
-    "core/wasm/src/grant_port.rs",
-    "core/wasm/src/host_channel.rs",
-    "core/wasm/src/infer_port.rs",
-    "core/wasm/src/limits.rs",
-    "core/wasm/src/message_port.rs",
-    "core/wasm/src/operators_port.rs",
-    "core/wasm/src/record_port.rs",
-    "core/wasm/src/runner.rs",
-    "core/wasm/src/sandbox.rs",
-    "core/wasm/src/surface_port.rs",
     "core/wire/src/grant.rs",
     "core/wire/src/ipc/browser_inner.rs",
     "core/wire/src/ipc/contact_request.rs",
@@ -394,30 +362,6 @@ pub const COMMENTS_NOT_READ: &[&str] = &[
     "core/wire/src/runner.rs",
     "core/wire/src/surface.rs",
     "core/wire/src/sys_ipc.rs",
-    "guest/apps/kotton-shell/logic/src/commands/mod.rs",
-    "guest/apps/kotton-shell/logic/src/components/ask.rs",
-    "guest/apps/kotton-shell/logic/src/components/dock.rs",
-    "guest/apps/kotton-shell/logic/src/components/frame.rs",
-    "guest/apps/kotton-shell/logic/src/components/gallery.rs",
-    "guest/apps/kotton-shell/logic/src/components/glyph.rs",
-    "guest/apps/kotton-shell/logic/src/components/lock.rs",
-    "guest/apps/kotton-shell/logic/src/components/menubar.rs",
-    "guest/apps/kotton-shell/logic/src/components/mod.rs",
-    "guest/apps/kotton-shell/logic/src/components/notice.rs",
-    "guest/apps/kotton-shell/logic/src/components/overlays/calendar.rs",
-    "guest/apps/kotton-shell/logic/src/components/overlays/contacts.rs",
-    "guest/apps/kotton-shell/logic/src/components/overlays/files.rs",
-    "guest/apps/kotton-shell/logic/src/components/overlays/messages.rs",
-    "guest/apps/kotton-shell/logic/src/components/overlays/settings.rs",
-    "guest/apps/kotton-shell/logic/src/components/overlays/settings_raster.rs",
-    "guest/apps/kotton-shell/logic/src/components/pairing.rs",
-    "guest/apps/kotton-shell/logic/src/components/phone.rs",
-    "guest/apps/kotton-shell/logic/src/components/phone_home.rs",
-    "guest/apps/kotton-shell/logic/src/components/welcome.rs",
-    "guest/apps/kotton-shell/logic/src/engine.rs",
-    "guest/apps/kotton-shell/logic/src/lib.rs",
-    "guest/apps/kotton-shell/logic/src/state.rs",
-    "guest/apps/kotton-shell/logic/src/view.rs",
     "infra/relay/src/admission.rs",
     "infra/relay/src/circuit.rs",
     "infra/relay/src/identity.rs",
@@ -437,7 +381,6 @@ pub const COMMENTS_NOT_READ: &[&str] = &[
     "xtask/src/channel_check.rs",
     "xtask/src/compose_file_tests.rs",
     "xtask/src/config_key_check.rs",
-    "xtask/src/contrast_check.rs",
     "xtask/src/doctor.rs",
     "xtask/src/infer_check.rs",
     "xtask/src/license_check.rs",
@@ -452,12 +395,9 @@ pub const COMMENTS_NOT_READ: &[&str] = &[
     "xtask/src/request_domains.rs",
     "xtask/src/residency_check.rs",
     "xtask/src/rg.rs",
-    "xtask/src/runbook_check.rs",
     "xtask/src/scope_check.rs",
     "xtask/src/seed.rs",
-    "xtask/src/shot.rs",
     "xtask/src/signoff_check.rs",
-    "xtask/src/token_block_check.rs",
     "xtask/src/tree.rs",
     "xtask/src/windows_check.rs",
     "xtask/src/wire_check.rs",
@@ -585,25 +525,6 @@ fn comment_findings(rel: &str, text: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// The app contract: directories whose `.wit` files are read for every rule, one level.
-pub const CONTRACT: &[&str] = &["guest/sdk/kotton-app/wit"];
-
-/// Every `.wit` file directly in a [`CONTRACT`] directory, relative to `root`, sorted.
-pub fn contract_files(root: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    for dir in CONTRACT {
-        let Ok(entries) = std::fs::read_dir(root.join(dir)) else { continue };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if e.path().is_file() && name.ends_with(".wit") {
-                out.push(format!("{dir}/{name}"));
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
 /// The extensions read under [`TREES`].
 const EXTENSIONS: &[&str] = &["md", "css", "html", "py"];
 
@@ -616,11 +537,9 @@ const NARRATION: &[&str] = &["Written 20", "Measured 20", "Updated 20", "Indexed
 pub fn run(root: &Path) {
     let found = findings(root);
     if found.is_empty() {
-        let wit = contract_files(root).len();
         println!(
-            "docs-present-check: OK — {} files under docs/, ui/, papers/ and the root, {wit} .wit file{} of the app contract, the string literals of {} .rs files under xtask/src and the comments of {} .rs files under the trees host-word-check reads ({} more not yet swept) name no record and narrate no date, and {} beside them name no record",
+            "docs-present-check: OK — {} files under docs/ and the root, the string literals of {} .rs files under xtask/src and the comments of {} .rs files under the trees host-word-check reads ({} more not yet swept) name no record and narrate no date, and {} beside them name no record",
             files(root).len(),
-            if wit == 1 { "" } else { "s" },
             rust_files(root).len(),
             comment_files(root).len() - COMMENTS_NOT_READ.len(),
             COMMENTS_NOT_READ.len(),
@@ -649,9 +568,6 @@ pub fn files(root: &Path) -> Vec<String> {
             let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
             let ext = rel.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
             if !EXTENSIONS.contains(&ext) {
-                continue;
-            }
-            if rel.starts_with("ui/ink/") && ext == "html" {
                 continue;
             }
             out.push(rel);
@@ -707,14 +623,6 @@ fn findings_in(root: &Path, unswept: &[&str], count: usize) -> Vec<String> {
                 continue;
             }
             if let Some(what) = finding(line, fenced) {
-                out.push(format!("{rel}:{}: {what}", i + 1));
-            }
-        }
-    }
-    for rel in contract_files(root) {
-        let Ok(text) = std::fs::read_to_string(root.join(&rel)) else { continue };
-        for (i, line) in text.lines().enumerate() {
-            if let Some(what) = finding(line, false) {
                 out.push(format!("{rel}:{}: {what}", i + 1));
             }
         }
@@ -922,8 +830,7 @@ mod tests {
         ("docs/README.md", "# docs\n\nFour ways in.\n"),
         ("docs/use/first-hour.md", "Run `kotton id create`.\n\n```\nCreated 2026-10-12\n```\n"),
         ("docs/design/decisions/README.md", "A decision is a numbered file: 0001-the-relay.md.\n"),
-        ("ui/tokens.css", "/* The ground is warm. */\n:root { --color-bg: #111; }\n"),
-        ("papers/README.md", "Why the project exists.\n"),
+        ("docs/cli/reference.md", "# Command-Line Help for `kotton`\n"),
     ];
 
     #[test]
@@ -942,12 +849,12 @@ mod tests {
             ("docs/README.md", "The tree is `governance/` no longer.", "governance/"),
             ("README.md", "Identity (RFC-0075) is self-issued.", "`RFC-0075`"),
             ("CONTRIBUTING.md", "As DEC-0091 says.", "`DEC-0091`"),
-            ("papers/README.md", "Filed as TASK-the-papers-are-long.", "`TASK-the-papers-are-long`"),
-            ("ui/README.md", "An IDEA-tracker-app note.", "`IDEA-tracker-app`"),
+            ("docs/cli/reference.md", "Filed as TASK-the-papers-are-long.", "`TASK-the-papers-are-long`"),
+            ("docs/style.css", "/* An IDEA-tracker-app note. */", "`IDEA-tracker-app`"),
             ("docs/use/macos.md", "Written 2026-09-17 on a laptop.", "Written 2026"),
-            ("ui/tokens.css", "/* Measured 2026-09-20 against the ground. */", "Measured 2026"),
+            ("docs/tokens.css", "/* Measured 2026-09-20 against the ground. */", "Measured 2026"),
             ("docs/use/wsl2.md", "Updated 2026-09-26.", "Updated 2026"),
-            ("papers/ownership-thesis.md", "Indexed 2026-08-01.", "Indexed 2026"),
+            ("docs/ownership-thesis.md", "Indexed 2026-08-01.", "Indexed 2026"),
             ("SECURITY.md", "Published since 2026-09-30.", "since 2026"),
             ("docs/use/the-window.md", "The dock moved on 2026-09-21, and the bar with it.", "2026-09-21"),
         ];
@@ -966,13 +873,12 @@ mod tests {
         }
     }
 
-    /// The drawings, `ISSUES.md` and `DCO.md` are not read, and a date in a fenced block is a
-    /// command's output, not narration — but a record name in one is still a record name.
-    /// Nothing under `papers/` is excepted.
+    /// `ISSUES.md` and `DCO.md` are not read, and a date in a fenced block is a command's
+    /// output, not narration — but a record name in one is still a record name. Nothing under
+    /// `docs/` is excepted.
     #[test]
     fn the_exceptions_are_exactly_the_named_ones() {
         let dir = tree(&[
-            ("ui/ink/Records.dc.html", "<span>RFC-0088 · 2026-09-23</span>"),
             ("ISSUES.md", "Scanned since 2026-09-30, from TASK-scan-history."),
             ("DCO.md", "Developer Certificate of Origin 2004-2006"),
             ("docs/use/first-hour.md", "```\nsynced 2026-10-12 10:00\n```\n"),
@@ -981,12 +887,10 @@ mod tests {
 
         let dir = tree(&[("docs/use/first-hour.md", "```\nkotton show RFC-0084\n```\n")]);
         assert_eq!(findings(dir.path()).len(), 1);
-        for paper in ["papers/README.md", "papers/01-property.md", "papers/federalist-map.md"] {
-            let dir = tree(&[(paper, "As DEC-0001 rules.")]);
-            assert_eq!(findings(dir.path()).len(), 1, "{paper} is not read");
+        for page in ["docs/README.md", "docs/cli/reference.md", "docs/a/b/c.html"] {
+            let dir = tree(&[(page, "As DEC-0001 rules.")]);
+            assert_eq!(findings(dir.path()).len(), 1, "{page} is not read");
         }
-        let dir = tree(&[("ui/README.md", "drawn 2026-09-23")]);
-        assert_eq!(findings(dir.path()).len(), 1, "ui/'s own README is read");
     }
 
     /// **The files beside the documents are read for record names, and only for them.** A
@@ -1014,36 +918,6 @@ mod tests {
             (".github/workflows/release.yml", "#   actions/checkout v4.4.0, resolved 2026-09-29\n"),
             ("just/nested/deep.just", "# RFC-0001, one level only\n"),
             ("tools/Justfile", "# RFC-0001, root only\n"),
-        ]);
-        assert_eq!(findings(dir.path()), Vec::<String>::new());
-    }
-
-    /// **The app contract is read for every rule, as a page is.** A record name and a narrated
-    /// date planted in a `.wit` comment are each refused by file and line; a `.wit` outside the
-    /// contract's directory, or below it, is not read.
-    #[test]
-    fn the_app_contract_is_read_for_records_and_dates() {
-        let wit = "guest/sdk/kotton-app/wit/kotton-app.wit";
-        let clean = "// SPDX-License-Identifier: Apache-2.0\npackage kotton:app;\n\n/// Linked for every app.\ninterface system {\n  /// An RFC 3339 timestamp.\n  now: func() -> string;\n}\n";
-        let dir = tree(&[(wit, clean)]);
-        assert_eq!(findings(dir.path()), Vec::<String>::new());
-        assert_eq!(contract_files(dir.path()), vec![wit.to_string()]);
-
-        for (line, says) in [
-            ("  /// The layers only the designated app may draw (RFC-0087).", "names the record `RFC-0087`"),
-            ("  /// `set-title` was removed on 2026-09-22.", "narrates a date (`2026-09-22`)"),
-            ("  /// Linked since 2026-08-26 for the shell.", "narrates a date (`since 2026`)"),
-            ("  /// See `TASK-the-launch-export-is-called-by-nothing`.", "names the record `TASK-the-launch-export-is-called-by-nothing`"),
-        ] {
-            let text = format!("{clean}{line}\n");
-            let dir = tree(&[(wit, &text)]);
-            assert_eq!(findings(dir.path()), vec![format!("{wit}:9: {says}")], "{line:?}");
-        }
-
-        let dir = tree(&[
-            ("guest/sdk/kotton-app/wit/deps/wasi.wit", "/// RFC-0001, 2026-09-22\n"),
-            ("guest/sdk/other/wit/x.wit", "/// RFC-0001, 2026-09-22\n"),
-            ("guest/sdk/kotton-app/wit/notes.txt", "RFC-0001, 2026-09-22\n"),
         ]);
         assert_eq!(findings(dir.path()), Vec::<String>::new());
     }
@@ -1124,8 +998,8 @@ mod tests {
         assert_eq!(findings(dir.path()), vec!["xtask/src/gate.rs:2: names the record `RFC-`".to_string()]);
         let dir = tree(&[("docs/README.md", "# docs\n\nAs DEC 85 rules.\n")]);
         assert_eq!(findings(dir.path()), vec!["docs/README.md:3: names the record `DEC 85`".to_string()]);
-        let dir = tree(&[("ui/ink/README.md", "# Drawings\n\nrule 3 of the RFC, drawn.\n")]);
-        assert_eq!(findings(dir.path()), vec!["ui/ink/README.md:3: names the record `RFC`".to_string()]);
+        let dir = tree(&[("docs/cli/README.md", "# Drawings\n\nrule 3 of the RFC, drawn.\n")]);
+        assert_eq!(findings(dir.path()), vec!["docs/cli/README.md:3: names the record `RFC`".to_string()]);
     }
 
     /// **xtask's printed lines are read for narrated dates, as a page is.** A date planted in a
@@ -1248,7 +1122,7 @@ mod open {
             ("xtask/src/gate.rs", "// see governance/records/", "a path into governance/, which is not in the tree"),
             ("core/store/src/lib.rs", "// since 2026-08-30 the store packs", "narrates a date (`since 2026`)"),
             ("core/peer/src/lib.rs", "/// Measured 2026-09-15 on the owner's machine.", "narrates a date (`Measured 2026`)"),
-            ("guest/apps/kotton-shell/logic/src/view.rs", "// Until 2026-08-26 this drew nothing.", "narrates a date (`2026-08-26`)"),
+            ("client/shell/src/view.rs", "// Until 2026-08-26 this drew nothing.", "narrates a date (`2026-08-26`)"),
         ];
         for (path, line, says) in planted {
             let text = format!("fn a() {{}}\n{line}\nfn b() {{}}\n");
@@ -1275,11 +1149,11 @@ mod open {
     #[test]
     fn only_the_comment_is_read() {
         let src = "const URL: &str = \"https://example.org/RFC-0001\"; // an RFC 3339 timestamp\nconst C: char = '/';\nfn f() -> u8 { 1 } // fine\n";
-        let dir = tree(&[("core/time/src/lib.rs", src)]);
+        let dir = tree(&[("core/sys/src/lib.rs", src)]);
         assert_eq!(findings(dir.path()), Vec::<String>::new());
 
-        let dir = tree(&[("core/time/src/lib.rs", "let x = 1; // since 2026-09-02\n")]);
-        assert_eq!(findings(dir.path()), vec!["core/time/src/lib.rs:1: narrates a date (`since 2026`)".to_string()]);
+        let dir = tree(&[("core/sys/src/lib.rs", "let x = 1; // since 2026-09-02\n")]);
+        assert_eq!(findings(dir.path()), vec!["core/sys/src/lib.rs:1: narrates a date (`since 2026`)".to_string()]);
     }
 
     /// **A comment outside the trees is not read**: the display server, which `host-word-check`

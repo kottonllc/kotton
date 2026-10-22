@@ -135,13 +135,9 @@ pub const VENDORED: &[(&str, &str, &str)] = &[
 /// The workspaces whose packages reach something a person is handed, each with its own
 /// lockfile. Every package each resolves is held to [`ALLOWED`], dev-dependencies too:
 /// a test dependency is one `[dependencies]` line from a shipped one.
-pub const WORKSPACES: &[&str] = &[
-    ".",
-    "infra/relay",
-    "guest/apps/kotton-shell/logic",
-    "guest/apps/kotton-editor/logic",
-    "guest/apps/kotton-records/logic",
-];
+///
+/// The reference adds its three guest apps' workspaces; this tree holds no guest app.
+pub const WORKSPACES: &[&str] = &[".", "infra/relay"];
 
 /// The source trees whose files carry an SPDX header, and what counts as a source file.
 /// Every tree `LICENSE` lists, `docs/design/` aside: it is prose, and holds no source.
@@ -251,17 +247,16 @@ pub const FILE: &str = "THIRD-PARTY-NOTICES";
 /// `DEC-0089`: it keeps its own terms, stated beside it.
 pub const FONT_DIR: &str = "ui/fonts/";
 
-/// A font carried in [`FONT_DIR`], pinned: the file, what it is, its licence and the file
-/// beside it that states it, the sha256 the build embeds, and the crate that embeds it —
-/// so an archive names it exactly when that crate is in what the archive ships.
+/// A font carried in [`FONT_DIR`]: what it is, its licence and the file beside it that states
+/// it, and the crate that embeds it — so an archive names it exactly when that crate is in
+/// what the archive ships. The reference also pins each font's file by sha256; this tree holds
+/// no `ui/fonts/`, so there is no file to pin.
 pub struct Font {
-    pub file: &'static str,
     pub family: &'static str,
     pub version: &'static str,
     pub license: &'static str,
     pub license_file: &'static str,
     pub source: &'static str,
-    pub sha256: &'static str,
     pub carried_by: &'static str,
 }
 
@@ -274,56 +269,22 @@ pub const FONT_LICENSES: &[(&str, &str)] = &[("OFL-1.1", "SIL OPEN FONT LICENSE 
 /// (its integrity sha512 checked on download), whose `LICENSE.txt` is `OFL.txt` here.
 pub const FONTS: &[Font] = &[
     Font {
-        file: "ui/fonts/Geist-Variable.ttf",
         family: "Geist",
         version: "1.800",
         license: "OFL-1.1",
         license_file: "ui/fonts/OFL.txt",
         source: "https://github.com/vercel/geist-font",
-        sha256: "cdcc4815cbf5f9882fa74e48f8ab410a0495781a58ff7316570f664e7e987753",
         carried_by: "kuid",
     },
     Font {
-        file: "ui/fonts/GeistMono-Variable.ttf",
         family: "Geist Mono",
         version: "1.700",
         license: "OFL-1.1",
         license_file: "ui/fonts/OFL.txt",
         source: "https://github.com/vercel/geist-font",
-        sha256: "0e1af3f507a1c8dfbb03d13ffad585834cd45ed7ccb78c756c7ce7873d180d30",
         carried_by: "kuid",
     },
 ];
-
-/// What is wrong with [`FONT_DIR`] as it stands: a file no [`FONTS`] row names, a font whose
-/// bytes are not its pin, a licence [`FONT_LICENSES`] does not list or whose file does not
-/// say it. `files` is the directory's listing, repository-relative.
-fn font_findings(repo: &Path, files: &[String]) -> Vec<String> {
-    let mut findings = Vec::new();
-    for f in files {
-        if !FONTS.iter().any(|t| t.file == f || t.license_file == f) {
-            findings.push(format!(
-                "{f}: in {FONT_DIR} and not in FONTS — a font the build could embed with no licence or pin recorded"
-            ));
-        }
-    }
-    for t in FONTS {
-        match file_sha256(&repo.join(t.file)) {
-            Ok(h) if h == t.sha256 => {}
-            Ok(h) => findings.push(format!("{}: sha256 {h}, and FONTS pins {}", t.file, t.sha256)),
-            Err(e) => findings.push(e),
-        }
-        match FONT_LICENSES.iter().find(|(id, _)| *id == t.license) {
-            None => findings.push(format!("{}: `{}` is not a licence FONT_LICENSES allows", t.file, t.license)),
-            Some((_, says)) => match std::fs::read_to_string(repo.join(t.license_file)) {
-                Ok(text) if text.contains(says) => {}
-                Ok(_) => findings.push(format!("{}: does not say `{says}`, which {} is under", t.license_file, t.file)),
-                Err(e) => findings.push(format!("{}: {e}", t.license_file)),
-            },
-        }
-    }
-    findings
-}
 
 // ---------------------------------------------------------------------------------------
 // SPDX expressions
@@ -1117,14 +1078,6 @@ pub fn run(repo: &Path) {
         }
     }
 
-    // 2b. Every file carried from ui/fonts/ is pinned, and its licence is beside it.
-    // Read from disk rather than the index, so a file dropped in is seen before it is added.
-    let mut font_files: Vec<String> = std::fs::read_dir(repo.join(FONT_DIR))
-        .map(|d| d.flatten().map(|e| format!("{FONT_DIR}{}", e.file_name().to_string_lossy())).collect())
-        .unwrap_or_default();
-    font_files.sort();
-    failures.extend(font_findings(repo, &font_files));
-
     // 3. Every crate's license field: present, and one LICENSE carries.
     let license = match workspace_license(repo) {
         Ok(l) => l,
@@ -1428,34 +1381,6 @@ mod tests {
         assert!(!t.contains("\ntokio-tungstenite\t0.21.0\t"), "a dev-dependency reached the notices");
         assert!(t.contains("infra/relay/Cargo.lock  sha256 "));
         assert!(t.contains("kotton-relay"), "Kotton's own crates are named");
-    }
-
-    /// `ui/fonts/` as it stands: every file a font [`FONTS`] pins or the licence beside
-    /// one, every font's bytes its pin. And the walk argues back — a file dropped in beside
-    /// them, or a font whose bytes moved, is a finding.
-    #[test]
-    fn the_carried_fonts_are_pinned_and_licensed_beside_them() {
-        let listing: Vec<String> = std::fs::read_dir(repo().join(FONT_DIR))
-            .unwrap()
-            .flatten()
-            .map(|e| format!("{FONT_DIR}{}", e.file_name().to_string_lossy()))
-            .collect();
-        assert_eq!(font_findings(&repo(), &listing), Vec::<String>::new());
-        assert!(listing.iter().any(|f| f == "ui/fonts/OFL.txt"), "{listing:?}");
-
-        let mut planted = listing.clone();
-        planted.push("ui/fonts/Inter.ttf".into());
-        let found = font_findings(&repo(), &planted);
-        assert!(found.len() == 1 && found[0].contains("Inter.ttf"), "{found:?}");
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(FONT_DIR)).unwrap();
-        for f in &listing {
-            std::fs::copy(repo().join(f), dir.path().join(f)).unwrap();
-        }
-        std::fs::write(dir.path().join("ui/fonts/Geist-Variable.ttf"), b"not the pinned bytes").unwrap();
-        let found = font_findings(dir.path(), &listing);
-        assert!(found.len() == 1 && found[0].contains("Geist-Variable.ttf: sha256"), "{found:?}");
     }
 
     /// No archive ships a crate that carries a font — `kuid`, the one that embedded them, is

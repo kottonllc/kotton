@@ -8,8 +8,6 @@ mod seed;
 
 #[cfg(feature = "cli-docs")]
 use kotton_cli::Cli;
-#[cfg(feature = "cli-docs")]
-use kotton_shell::shell_command_docs;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -57,15 +55,9 @@ pub fn today() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-mod contrast_check;
 mod doctor;
 mod merge;
 mod port_check;
-mod one_sandbox_check;
-mod principles_page;
-mod shot;
-mod token_block_check;
-mod toml_read;
 mod tree;
 mod caller_check;
 mod relay_address_check;
@@ -80,19 +72,12 @@ mod release;
 mod release_server;
 mod remote_request;
 mod residency_check;
-mod runbook_check;
 mod scope_check;
 mod suite_check;
 mod wire_check;
 mod actions_check;
 #[cfg(test)]
 mod git_fixture;
-// The lines the guides type, held to the lines the shell prints: `docs-check` runs it.
-#[cfg(any(test, feature = "cli-docs"))]
-mod guide_lines;
-// `guest/examples/hello`, held to what `kotton app new` writes.
-#[cfg(test)]
-mod scaffold_fixture_tests;
 mod docs_present_check;
 mod host_word_check;
 mod signoff_check;
@@ -116,7 +101,6 @@ fn main() {
         #[cfg(feature = "cli-docs")]
         Some("gen-docs") => {
             gen_docs();
-            gen_shell_docs();
         }
         #[cfg(not(feature = "cli-docs"))]
         Some(cmd @ ("gen-docs" | "docs-check")) => {
@@ -144,7 +128,6 @@ fn main() {
             let force = std::env::args().any(|a| a == "--force");
             build_apps(force, guest_target);
         }
-        Some("build-web") => build_web(),
         Some("build-relay") => {
             let rest: Vec<String> = args.collect();
             build_relay(&rest);
@@ -169,11 +152,6 @@ fn main() {
             let rest: Vec<String> = args.collect();
             release_server::release_server_test(&rest);
         }
-        Some("surface-test") => surface_test(),
-        Some("dev") => {
-            let force = std::env::args().any(|a| a == "--force");
-            dev(force);
-        }
         Some("run::headless") => {
             // Headless entry is identity-first — you're identified by your key, not
             // a username. There is no named path: the REPL always onboards (enter
@@ -189,12 +167,6 @@ fn main() {
             // window onboards (`DEC-0077`); with one it opens that existing identity.
             let user = args.next().filter(|u| !u.is_empty());
             run(user.as_deref(), workspace_root, Profile::Desktop);
-        }
-        Some("run::shot") => {
-            // A contributor's tool, not a shipped path — `DEC-0076`'s "documented opt-in"
-            // for a machine with no display. Prefer `just desktop::shot`, which builds.
-            let rest: Vec<String> = std::env::args().skip(2).collect();
-            shot::run(workspace_root, &rest);
         }
         Some("demo::sync") => {
             demo_sync(workspace_root);
@@ -277,18 +249,9 @@ fn main() {
             let rest: Vec<String> = args.collect();
             merge::run(&rest);
         }
-        Some("contrast-check") => {
-            contrast_check::run();
-        }
-        Some("token-block-check") => {
-            token_block_check::run();
-        }
         Some("port-check") => {
             port_check::run();
         }
-        // Every fix `doctor` prints is a command the platform's page under docs/use/ gives
-        // (TASK-the-doctor-s-fix-lines-are-not-held-to-the-runbooks).
-        Some("runbook-check") => runbook_check::run(),
         // Every dependency's license is one Kotton may ship under, every crate and source
         // file says Kotton's, and every archive's notices can be made
         // (TASK-a-release-carries-its-third-party-notices-and-every-dependency-has-a-known-license).
@@ -333,15 +296,9 @@ fn main() {
         Some("wire-surface") => {
             wire_check::wire_check(true);
         }
-        Some("rsx-check") => {
-            rsx_check();
-        }
-        Some("repaint-check") => {
-            repaint_check();
-        }
         other => {
             eprintln!(
-                "Unknown subcommand: {}\n\nAvailable:\n  gen-docs                                                   Re-generate docs/cli/reference.md and docs/shell/reference.md (cargo xtask-docs)\n  gen-types                                                  Re-generate the TypeScript type surface from ts-rs annotations\n  build-apps [--force]                                       Compile bundled WASM apps for wasm32-wasip2\n  build-web                                                  Build the browser's half of the pairing ceremony into client/web/assets\n  build-relay [cargo args]                                   Build kotton-relay into out/relay (or CARGO_TARGET_DIR) and print the binary's path\n  out [what]                                                 Print where a build output lives: target, xtask, relay, dist, bindwatch, guest/<app>, merge, release[/workspace|/relay]\n  release [--allow-dirty] [--no-build]                       Build the system's daemons and the CLI --release, pack them as one archive under out/dist/, and install-test it — prefer `just release::desktop`\n  release-test <archive>                                     Install an archive into a clean directory, run `kotton --help`, start it, and run `kotton id create` from it\n  release-server relay|vault|host [--not-a-release] [--no-build]  Build the relay or the vault for Linux, or both as the host's archive, pack it with its systemd units and SHA256SUMS under out/dist/, install-test it, and print its sha256\n  release-server-test <archive> [--relay <archive>]          Install a server or host archive into a clean root, start it there, and read /health or its first log line\n  surface-test                                               Run the guest apps' own tests, on the host triple\n  dev [--force]                                              Build apps + daemon, then spawn kuserd with KOTTON_BASE_DIR=./.kotton.dev\n  run::headless                                              Run headless (kuserd + REPL). Assumes built — prefer `just headless::run`\n  run::desktop [user]                                        Run with the kuid display server; no user means the window onboards — prefer `just desktop::run`\n  run::first-run                                             Wipe .kotton.firstrun and start the daemon there with no user — prefer `just desktop::first-run`\n  run::shot [out.png]                                        Linux: run the desktop under an Xvfb framebuffer and write a PNG of the window — prefer `just desktop::shot`\n  demo::sync                                                 Two-node encrypted file transfer demo (QUIC mTLS)\n  doctor [--tier T]                                          Check this checkout has what it needs (lint | test | build | desktop | server)\n  constitution-check                                         Read docs/design/principles.md's table, refuse when the principles it marks enforced are not the ones the check inspects, and check the code against them\n  tier-check                                                 Check core/ crate deps obey the region and platform-seam rules\n  blindness-check                                            Check terminal storage backends hold no key material\n  vault-check                                                Check the vault names none of the crates that carry plaintext verbs, the apps or the display\n  infer-check                                                Check the inference runtime links and names no socket\n  wx-check                                                   Check a server whose unit says MemoryDenyWriteExecute=yes links no code-emitting crate\n  ship-check                                                 Check every binary an archive packs links only the system's crates and crates.io, and print the cuts still owed\n  bind-check [-- args]                                       Run the tests and fail if any binds a non-loopback socket (Linux)\n  key-reach-check                                            Check only entitled crates can name SealingKeys\n  residency-check                                            Check `device` may name a user store but not enumerate one\n  scope-check                                                Check a declared IPC scope names verbs the channel has\n  channel-check                                              Check one acceptor serves one request type\n  caller-check                                               Check no request is accepted without being told who sent it\n  relay-address-check                                        Check a relay's address is compared in one place\n  config-key-check                                           Check every device-config key read is also written\n  request-domains                                            Check every UserRequest variant has a domain\n  wire-check                                                 Check the request, relay-operator, operator-verb and response wire surfaces match their recordings in core/wire\n  wire-surface                                               Re-record those surfaces after a deliberate wire change\n  remote-request[-check]                                     Re-generate, or check, RemoteRequest from required_trust()'s Remote arms\n  windows-check                                              Check no Unix-only path is compiled on Windows too\n  suite-check                                                Check every integration test file is compiled into the suite\n  rsx-check                                                  Check no string literal in rsx! carries braces it means as interpolation\n  repaint-check                                              Check no guest stylesheet runs an animation that never stops\n  contrast-check                                             Check the token palette meets the contrast it claims, in both themes\n  token-block-check                                          Check ui/tokens.css is the only stylesheet that declares a design value\n  port-check                                                 Check every service in infra/ composes onto one machine\n  runbook-check                                              Check every fix `doctor` prints is a command a docs/use/ page gives\n  license-check                                              Check every dependency's licence, every crate's and file's own, and LICENSE's table\n  third-party-notices                                        Print an archive's THIRD-PARTY-NOTICES\n  link-check                                                 Check relative Markdown links in docs/, ui/, papers/, .claude/skills/ and the root docs, and that none holds a merge-conflict marker\n  docs-check                                                 Check the generated reference docs match `gen-docs` output, and the guides type the lines the shell prints (cargo xtask-docs)\n  docs-present-check                                         Check no page under docs/, ui/, papers/ or at the root, no line of the app contract's WIT, no line xtask prints and no Rust comment under the trees host-word-check reads (but the files not yet swept) names a record or narrates a date, and no file beside the pages names a record\n  claim-check                                                Check every `kotton` command a guide tells you to run is one the binary has\n  host-word-check                                            Check the copy a person reads says host, instance, relay or vault\n  facts-check                                                Check repo paths named in the orientation docs exist\n  actions-check                                              Check every GitHub workflow is the release on a pushed tag or the pull-request lint, on Linux\n  signoff-check                                              Check no commit since origin/main is made as an agent and each is certified by a person\n  workspace-hack[-check]                                     Re-generate, or check, the one feature set every test build shares\n  merge <branch> -m <msg> [--no-fetch] [--no-push]           Merge a branch current with main into main, build the merged tree, run signoff-check at the tip, commit as the owner and push\n  worktrees [--prune]                                        Report each worktree's branch, age and out/ size; remove merged ones\n  reclaim [--dry-run]                                        Reclaim disk from this checkout's build caches\n  seed                                                       Populate a running daemon with a plausible household, through the real CLI",
+                "Unknown subcommand: {}\n\nAvailable:\n  gen-docs                                                   Re-generate docs/cli/reference.md (cargo xtask-docs)\n  gen-types                                                  Re-generate the TypeScript type surface from ts-rs annotations\n  build-apps [--force]                                       Compile bundled WASM apps for wasm32-wasip2\n  build-relay [cargo args]                                   Build kotton-relay into out/relay (or CARGO_TARGET_DIR) and print the binary's path\n  out [what]                                                 Print where a build output lives: target, xtask, relay, dist, bindwatch, guest/<app>, merge, release[/workspace|/relay]\n  release [--allow-dirty] [--no-build]                       Build the system's daemons and the CLI --release, pack them as one archive under out/dist/, and install-test it — prefer `just release::desktop`\n  release-test <archive>                                     Install an archive into a clean directory, run `kotton --help`, start it, and run `kotton id create` from it\n  release-server relay|vault|host [--not-a-release] [--no-build]  Build the relay or the vault for Linux, or both as the host's archive, pack it with its systemd units and SHA256SUMS under out/dist/, install-test it, and print its sha256\n  release-server-test <archive> [--relay <archive>]          Install a server or host archive into a clean root, start it there, and read /health or its first log line\n  run::headless                                              Run headless (kuserd + REPL). Assumes built — prefer `just headless::run`\n  run::desktop [user]                                        Run with the kuid display server; no user means the window onboards — prefer `just desktop::run`\n  run::first-run                                             Wipe .kotton.firstrun and start the daemon there with no user — prefer `just desktop::first-run`\n  demo::sync                                                 Two-node encrypted file transfer demo (QUIC mTLS)\n  doctor [--tier T]                                          Check this checkout has what it needs (lint | test | build | desktop | server)\n  constitution-check                                         Check the code against the principles it inspects: II, III and IV\n  tier-check                                                 Check core/ crate deps obey the region and platform-seam rules\n  blindness-check                                            Check terminal storage backends hold no key material\n  vault-check                                                Check the vault names none of the crates that carry plaintext verbs, the apps or the display\n  infer-check                                                Check core/infer links and names no socket\n  wx-check                                                   Check a server whose unit says MemoryDenyWriteExecute=yes links no code-emitting crate\n  ship-check                                                 Check every binary an archive packs links only the system's crates and crates.io, and print the cuts still owed\n  bind-check [-- args]                                       Run the tests and fail if any binds a non-loopback socket (Linux)\n  key-reach-check                                            Check only entitled crates can name SealingKeys\n  residency-check                                            Check `device` may name a user store but not enumerate one\n  scope-check                                                Check a declared IPC scope names verbs the channel has\n  channel-check                                              Check one acceptor serves one request type\n  caller-check                                               Check no request is accepted without being told who sent it\n  relay-address-check                                        Check a relay's address is compared in one place\n  config-key-check                                           Check every device-config key read is also written\n  request-domains                                            Check every UserRequest variant has a domain\n  wire-check                                                 Check the request, relay-operator, operator-verb and response wire surfaces match their recordings in core/wire\n  wire-surface                                               Re-record those surfaces after a deliberate wire change\n  remote-request[-check]                                     Re-generate, or check, RemoteRequest from required_trust()'s Remote arms\n  windows-check                                              Check no Unix-only path is compiled on Windows too\n  suite-check                                                Check every integration test file is compiled into the suite\n  port-check                                                 Check the relay and the vault compose onto one machine\n  license-check                                              Check every dependency's licence, every crate's and file's own, and LICENSE's table\n  third-party-notices                                        Print an archive's THIRD-PARTY-NOTICES\n  link-check                                                 Check relative Markdown links in docs/ and the root docs, and that none holds a merge-conflict marker\n  docs-check                                                 Check docs/cli/reference.md matches `gen-docs` output (cargo xtask-docs)\n  docs-present-check                                         Check no page under docs/ or at the root, no line xtask prints and no Rust comment under the trees host-word-check reads (but the files not yet swept) names a record or narrates a date, and no file beside the pages names a record\n  claim-check [page…]                                        Check every `kotton` command README.md (and each page named) gives is one the binary has, and every script it runs is in the tree\n  host-word-check                                            Check the copy a person reads says host, instance, relay or vault\n  facts-check                                                Check repo paths named in CLAUDE.md, README.md and CONTRIBUTING.md exist\n  actions-check                                              Check every GitHub workflow is the release on a pushed tag or the pull-request lint, on Linux\n  signoff-check                                              Check no commit since origin/main is made as an agent and each is certified by a person\n  workspace-hack[-check]                                     Re-generate, or check, the one feature set every test build shares\n  merge <branch> -m <msg> [--no-fetch] [--no-push]           Merge a branch current with main into main, build the merged tree, run signoff-check at the tip, commit as the owner and push\n  worktrees [--prune]                                        Report each worktree's branch, age and out/ size; remove merged ones\n  reclaim [--dry-run]                                        Reclaim disk from this checkout's build caches\n  seed                                                       Populate a running daemon with a plausible household, through the real CLI",
                 other.unwrap_or("<none>")
             );
             std::process::exit(1);
@@ -378,167 +335,6 @@ fn build_relay(extra: &[String]) {
         std::process::exit(1);
     });
     println!("{}", bin.display());
-}
-
-/// Compile the browser's half of the pairing ceremony (`client/web-pair`) for
-/// `wasm32-unknown-unknown` and place it where `client/web` loads it from.
-///
-/// One artifact, not committed: `client/web/assets/pair.wasm`. The page is
-/// otherwise static, so this is the whole build of the shell a phone sees.
-fn build_web() {
-    const TARGET: &str = "wasm32-unknown-unknown";
-    let status = Command::new("rustup")
-        .args(["target", "add", TARGET])
-        .status()
-        .expect("failed to run rustup");
-    if !status.success() {
-        eprintln!("Failed to add {TARGET} via rustup. Install rustup and retry.");
-        std::process::exit(1);
-    }
-    println!("Building kotton-web-pair for {TARGET}…");
-    // Where the wasm landed is read from cargo's own report of the build, not composed
-    // from a target layout (`out::build_artifacts`).
-    let built = out::build_artifacts(Command::new("cargo").args([
-        "build",
-        "-p",
-        "kotton-web-pair",
-        "--target",
-        TARGET,
-        "--release",
-    ]))
-    .unwrap_or_else(|| {
-        eprintln!("kotton-web-pair did not build");
-        std::process::exit(1);
-    });
-    let built = out::named(&built, "kotton_web_pair.wasm")
-        .unwrap_or_else(|| {
-            eprintln!("cargo built kotton-web-pair and reported no kotton_web_pair.wasm");
-            std::process::exit(1);
-        })
-        .to_path_buf();
-    let dest = Path::new("client/web/assets/pair.wasm");
-    fs::copy(&built, dest).unwrap_or_else(|e| {
-        eprintln!("copy {} -> {}: {e}", built.display(), dest.display());
-        std::process::exit(1);
-    });
-    let size = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
-    println!("Wrote {} ({size} bytes)", dest.display());
-
-    stage_tokens();
-}
-
-/// Put `ui/tokens.css` where the browser can load it (`DEC-0062`).
-///
-/// One artifact, not committed, exactly as `pair.wasm` above: the phone is served
-/// from a directory rather than compiled, so it cannot `include_str!` the tokens
-/// the way the shell does. The choices were a copy somebody maintains by hand —
-/// which is what `ink.css` was, and what this change exists to end — or a copy the
-/// build makes. This is the second one. `token-block-check` fails if a stale or
-/// hand-edited version ever diverges.
-fn stage_tokens() {
-    let src = Path::new("ui/tokens.css");
-    let dest = Path::new("client/web/assets/tokens.css");
-    fs::copy(src, dest).unwrap_or_else(|e| {
-        eprintln!("copy {} -> {}: {e}", src.display(), dest.display());
-        std::process::exit(1);
-    });
-    println!("Wrote {} (from {})", dest.display(), src.display());
-}
-
-/// Run the guest apps' own tests, on the host.
-///
-/// # Why this is a subcommand and not a line in the Justfile
-///
-/// Every guest app is `workspace.exclude`d and carries a `.cargo/config.toml`
-/// pinning `wasm32-wasip2`, so `cargo test` at the repository root never reaches
-/// one and `cargo test` inside one builds a wasm binary the machine cannot run.
-/// The tests therefore need the **host** triple named explicitly, and the host
-/// triple is not something a Justfile recipe can name portably. `rustc -vV` is.
-///
-/// Found 2026-09-08: the shell's surfaces had no tests at all, and the first
-/// three written for them would have run nowhere. A test nothing runs is the
-/// same failure as a floor nothing compares against — it looks like coverage in
-/// the diff and is absent from the gate.
-fn surface_test() {
-    let out = Command::new("rustc")
-        .arg("-vV")
-        .output()
-        .expect("failed to run rustc");
-    let vv = String::from_utf8_lossy(&out.stdout);
-    let Some(host) = vv
-        .lines()
-        .find_map(|l| l.strip_prefix("host: "))
-        .map(str::trim)
-    else {
-        eprintln!("surface-test: `rustc -vV` printed no host triple:\n{vv}");
-        std::process::exit(1);
-    };
-
-    // (manifest, features). The gallery feature is what carries `dioxus-ssr`,
-    // which is how a component is rendered to a string to be asserted on.
-    //
-    // The SDK is here for the same reason the shell is: it is `workspace.exclude`d
-    // and pins wasm32-wasip2, so a root `cargo test` walks past it. Its render
-    // path gained tests with RFC-0087 stage 1 — that a render commits to the
-    // surface it was handed rather than to a global — and without this line they
-    // would be a file nobody executes, which is the failure this whole command
-    // exists to prevent.
-    let crates = [
-        ("guest/sdk/kotton-app/Cargo.toml", "dioxus"),
-        ("guest/apps/kotton-shell/logic/Cargo.toml", "gallery"),
-        // The records app's five views, drawn through `dioxus-ssr` over the
-        // converter's fixture records and generated tasks beside them.
-        ("guest/apps/kotton-records/logic/Cargo.toml", "preview"),
-    ];
-
-    for (manifest, features) in crates {
-        println!("surface-test: {manifest} on {host}");
-        let status = Command::new("cargo")
-            .args([
-                "test",
-                "--manifest-path",
-                manifest,
-                "--features",
-                features,
-                "--target",
-                host,
-            ])
-            .status()
-            .expect("failed to run cargo test");
-        if !status.success() {
-            eprintln!("surface-test: FAILED for {manifest}");
-            std::process::exit(1);
-        }
-    }
-
-    // **And what the records app would send the compositor**, written where
-    // kuid's tests replay it (`records_surface` in `core/kuid/src/main.rs`):
-    // the layout floor at phone and desktop width, and the page-size
-    // measurement, are the compositor's to take, over this app's own patches.
-    // After the tests rather than beside them, so a red view never writes a page.
-    println!("surface-test: writing the records app's pages to gallery/records");
-    let status = Command::new("cargo")
-        .args([
-            "run",
-            "--quiet",
-            "--manifest-path",
-            "guest/apps/kotton-records/logic/Cargo.toml",
-            "--features",
-            "preview",
-            "--target",
-            host,
-            "--bin",
-            "pages",
-            "--",
-            "gallery/records",
-        ])
-        .status()
-        .expect("failed to run cargo run");
-    if !status.success() {
-        eprintln!("surface-test: FAILED writing the records app's pages");
-        std::process::exit(1);
-    }
-    println!("surface-test: OK \u{2014} the guest apps' own tests pass on the host.");
 }
 
 /// Every guest app and test fixture `build_apps` builds, as
@@ -611,9 +407,8 @@ const GUEST_APPS: [(&str, &str, &str, &str); 9] = [
         "kotton_files_probe",
         ".",
     ),
-    // What `kotton app new hello` writes, the SDK's dependency line aside:
-    // `the_scaffold_is_the_fixture_build_apps_compiles` (`scaffold_fixture_tests`) holds the
-    // two to each other, and building it here holds the scaffold to the SDK.
+    // What `kotton app new hello` writes, the SDK's dependency line aside; building it here
+    // holds the scaffold to the SDK.
     ("guest/examples/hello", "hello", "hello", "."),
     // The worked example an author copies once `hello` is not enough. Its `Cargo.toml` says
     // the gate compiles it; building it here is what makes that true, so a change to the SDK
@@ -806,80 +601,6 @@ fn stage_system_shell(base: &Path) {
         }
     }
     println!("  → {} (the shell every path runs)", dst.display());
-}
-
-/// Build apps + daemon, kill any stale kuserd, then spawn a fresh one pointing
-/// at `./.kotton.dev` so development state never touches `C:\\ProgramData\\Kotton`.
-fn dev(force: bool) {
-    // 1. Build WASM apps.
-    build_apps(force, guest_target);
-
-    // 2. Build daemon.
-    println!("\nBuilding kuserd…");
-    let status = Command::new("cargo")
-        .args(["build", "-p", "kuserd"])
-        .status()
-        .expect("failed to spawn cargo build");
-    if !status.success() {
-        eprintln!("cargo build -p kuserd failed");
-        std::process::exit(1);
-    }
-
-    // 3. Kill any running kuserd so we can replace it.
-    #[cfg(target_os = "windows")]
-    let _ = Command::new("taskkill")
-        .args(["/F", "/IM", "kuserd.exe"])
-        .output();
-    #[cfg(not(target_os = "windows"))]
-    let _ = Command::new("pkill").args(["-f", "kuserd"]).output();
-
-    // 4. Spawn fresh agent with dev base dir.
-    // Ensure .kotton.dev directory exists.
-    fs::create_dir_all(".kotton.dev").expect("failed to create .kotton.dev/");
-
-    // Stage the shell into the same dir handed to the child below, so a dev
-    // daemon with no user has something to draw.
-    stage_system_shell(&staging_base(Some(".kotton.dev")));
-
-    println!("\nSpawning kuserd with KOTTON_BASE_DIR=./.kotton.dev…");
-    // Read KUSERD_IPC_NAME from the environment (populated from .env by the
-    // shell or `just`) so the dev daemon uses the right pipe name. Fall back
-    // to "kuserd-dev" if not set.
-    let ipc_name = std::env::var("KUSERD_IPC_NAME").unwrap_or_else(|_| "kuserd-dev".to_string());
-    let rust_log_dev = std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string());
-    println!("[dev] IPC name: {ipc_name}");
-    let child = Command::new(bin_path("kuserd"))
-        .env("KOTTON_BASE_DIR", "./.kotton.dev")
-        .env("KUSERD_IPC_NAME", &ipc_name)
-        .env("RUST_LOG", &rust_log_dev)
-        .env("KOTTON_RUNNER", bin_path("kotton-runner"))
-        .spawn();
-
-    match child {
-        Ok(mut c) => {
-            println!("[dev] kuserd running (pid {}).", c.id());
-            println!("[dev] Press Ctrl-C to stop.");
-
-            // On Windows, Ctrl-C is broadcast to every process in the console
-            // group.  Without a handler, xtask exits with STATUS_CONTROL_C_EXIT
-            // (0xC000013A) before c.wait() returns, and cargo reports a spurious
-            // error.  Registering a no-op handler here tells the OS that xtask
-            // has "handled" the signal — kuserd still receives it, handles it
-            // cleanly, and c.wait() returns normally.
-            #[cfg(windows)]
-            // SAFETY: standard Win32 call; the function pointer is valid for
-            // the lifetime of this process.
-            unsafe {
-                SetConsoleCtrlHandler(Some(noop_ctrl_handler), 1);
-            }
-
-            let _ = c.wait();
-        }
-        Err(e) => {
-            eprintln!("[dev] Failed to spawn kotton-agent: {e}");
-            std::process::exit(1);
-        }
-    }
 }
 
 /// Run profile — selects whether the GUI shell (kuid + the WASM apps) is part of the
@@ -1820,10 +1541,6 @@ fn gen_types() {
 /// Path of the generated CLI reference, relative to the workspace root.
 #[cfg(feature = "cli-docs")]
 const CLI_REFERENCE_PATH: &str = "docs/cli/reference.md";
-/// Path of the generated shell reference, relative to the workspace root.
-#[cfg(feature = "cli-docs")]
-const SHELL_REFERENCE_PATH: &str = "docs/shell/reference.md";
-
 /// Build the CLI reference Markdown. Pure — `gen-docs` writes it, `docs-check`
 /// compares it against what is committed.
 #[cfg(feature = "cli-docs")]
@@ -1855,31 +1572,6 @@ fn cli_reference_markdown() -> String {
     )
 }
 
-/// Build the shell reference Markdown. Pure, for the same reason as
-/// [`cli_reference_markdown`].
-#[cfg(feature = "cli-docs")]
-fn shell_reference_markdown() -> String {
-    let commands = shell_command_docs();
-
-    let mut md = String::from(
-        "<!-- Generated by `cargo xtask gen-docs`. Do not edit by hand. -->\n\
-         <!-- Re-generate: `just gen::docs` -->\n\n\
-         # Shell Command Reference\n\n\
-         These commands are available in the Kotton interactive shell (`kotton repl`).\n\n",
-    );
-
-    for (name, help) in &commands {
-        md.push_str(&format!("## `{}`\n\n", name));
-        if help.is_empty() {
-            md.push_str("_No description available._\n\n");
-        } else {
-            md.push_str(&format_help_as_markdown(help));
-        }
-    }
-
-    md
-}
-
 #[cfg(feature = "cli-docs")]
 fn gen_docs() {
     let out_path = Path::new(CLI_REFERENCE_PATH);
@@ -1888,165 +1580,6 @@ fn gen_docs() {
     fs::write(out_path, cli_reference_markdown()).expect("failed to write reference.md");
 
     println!("Wrote {}", out_path.display());
-}
-
-#[cfg(feature = "cli-docs")]
-fn gen_shell_docs() {
-    let out_path = Path::new(SHELL_REFERENCE_PATH);
-    fs::create_dir_all(
-        out_path
-            .parent()
-            .expect("SHELL_REFERENCE_PATH has a parent"),
-    )
-    .expect("failed to create docs/shell/");
-    fs::write(out_path, shell_reference_markdown())
-        .expect("failed to write docs/shell/reference.md");
-
-    println!("Wrote {}", out_path.display());
-}
-
-/// Parse a structured plain-text help string and emit Markdown.
-///
-/// Expected format (all sections optional):
-/// ```text
-/// <command> â€” <one-line description>
-///
-/// USAGE:
-///   <usage line>
-///   <usage line>
-///
-/// FLAGS:
-///   --flag   description
-///
-/// EXAMPLES:
-///   <example line>
-///
-/// NOTES:
-///   Prose text here.
-/// ```
-///
-/// `USAGE`, `FLAGS`, `EXAMPLES` sections are wrapped in fenced code blocks.
-/// `NOTES` / `NOTE` sections are emitted as plain paragraphs.
-#[cfg(feature = "cli-docs")]
-fn format_help_as_markdown(help: &str) -> String {
-    let mut out = String::new();
-    let lines: Vec<&str> = help.lines().collect();
-    let mut i = 0;
-
-    // Skip leading blank lines.
-    while i < lines.len() && lines[i].trim().is_empty() {
-        i += 1;
-    }
-
-    // First non-empty line is the one-liner summary.
-    if i < lines.len() {
-        out.push_str(lines[i].trim());
-        out.push_str("\n\n");
-        i += 1;
-    }
-
-    // Parse the rest into sections.
-    while i < lines.len() {
-        let trimmed = lines[i].trim();
-
-        if is_section_header(trimmed) {
-            let heading = header_title_case(trimmed.trim_end_matches(':'));
-            i += 1;
-
-            // Collect body lines until the next section header.
-            let mut body: Vec<&str> = Vec::new();
-            while i < lines.len() && !is_section_header(lines[i].trim()) {
-                body.push(lines[i]);
-                i += 1;
-            }
-            // Trim trailing blank lines.
-            while body
-                .last()
-                .map(|l: &&str| l.trim().is_empty())
-                .unwrap_or(false)
-            {
-                body.pop();
-            }
-
-            if body.is_empty() {
-                continue;
-            }
-
-            out.push_str(&format!("**{}:**\n\n", heading));
-
-            let is_prose = heading == "Notes" || heading == "Note";
-            if is_prose {
-                // Emit as a plain paragraph, stripping leading 2-space indent.
-                for line in &body {
-                    let l = if line.starts_with("  ") {
-                        &line[2..]
-                    } else {
-                        line.trim()
-                    };
-                    if l.is_empty() {
-                        out.push('\n');
-                    } else {
-                        out.push_str(l);
-                        out.push('\n');
-                    }
-                }
-                out.push('\n');
-            } else {
-                // Emit as a fenced code block, stripping the 2-space indent.
-                out.push_str("```\n");
-                for line in &body {
-                    let l = if line.starts_with("  ") {
-                        &line[2..]
-                    } else {
-                        *line
-                    };
-                    out.push_str(l);
-                    out.push('\n');
-                }
-                out.push_str("```\n\n");
-            }
-        } else {
-            // Skip blank or un-sectioned lines between sections.
-            i += 1;
-        }
-    }
-
-    out
-}
-
-/// Returns true if `s` looks like an all-caps section header (e.g. `USAGE:`,
-/// `FLAGS (configure):`).
-#[cfg(feature = "cli-docs")]
-fn is_section_header(s: &str) -> bool {
-    if !s.ends_with(':') || s.len() < 2 {
-        return false;
-    }
-    let body = &s[..s.len() - 1]; // strip trailing ':'
-                                  // Must start with an uppercase ASCII letter.
-    let mut chars = body.chars();
-    if !chars
-        .next()
-        .map(|c| c.is_ascii_uppercase())
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    // Remaining chars: uppercase letters, spaces, digits, hyphens, parens.
-    chars.all(|c| {
-        c.is_ascii_uppercase() || c == ' ' || c.is_ascii_digit() || c == '-' || c == '(' || c == ')'
-    })
-}
-
-/// Convert an ALL-CAPS section header word to Title Case.
-/// e.g. "FLAGS (AD-HOC SYNC)" â†’ "Flags (ad-hoc sync)"
-#[cfg(feature = "cli-docs")]
-fn header_title_case(s: &str) -> String {
-    let lower = s.to_lowercase();
-    let mut chars = lower.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().to_string() + chars.as_str(),
-    }
 }
 
 // ── Constitution compliance checks ───────────────────────────────────────────────
@@ -2061,7 +1594,7 @@ const ARTICLE_IV_CAPABILITY: &str = "core/schemas/src/capability.rs";
 
 /// One inspection constitution-check runs, and the principle it stands for.
 struct Inspection {
-    /// The principle's number on `docs/design/principles.md`.
+    /// The principle's number, as Kotton's principles number it.
     principle: &'static str,
     /// What the inspection holds, in a phrase.
     holds: &'static str,
@@ -2070,11 +1603,12 @@ struct Inspection {
 
 /// Every inspection constitution-check runs, each paired with the principle it stands for.
 ///
-/// This is the only list: the check runs exactly these, and the set of principles named here
-/// must equal the set `docs/design/principles.md` marks enforced. An inspection added here for
-/// a principle the page does not mark, or a principle marked on the page with no inspection
-/// here, refuses the gate (see [`principles_page::drift`]).
-const INSPECTIONS: [Inspection; 9] = [
+/// This is the only list: the check runs exactly these. The reference also holds this list to
+/// the principles page's table of what is enforced; this tree holds no such page, so that
+/// comparison is not made here, and the inspections whose subject is absent from this tree —
+/// Principle VIII's, which read the sandbox in `core/wasm` and the apps under `guest/` — are
+/// not run here.
+const INSPECTIONS: [Inspection; 5] = [
     Inspection {
         principle: "II",
         holds: "no device-daemon handler takes a GrantEnvelope as authentication",
@@ -2106,91 +1640,37 @@ const INSPECTIONS: [Inspection; 9] = [
         holds: "CapabilityTarget has no admin, root or system variant",
         run: no_privileged_capability_target,
     },
-    Inspection {
-        principle: "VIII",
-        holds: "the sandbox adds WASI to a linker, an app's or the fetcher's, only in \
-                add_wasi_without_sockets, which adds exactly the interfaces the check lists, and \
-                nothing in core/wasm adds all of WASI at once or imports a WASI path by a glob",
-        run: one_sandbox_check::the_app_linker_links_no_socket,
-    },
-    Inspection {
-        principle: "VIII",
-        holds: "the app and occupant worlds import only the interfaces they name today, and \
-                reach no other through a use",
-        run: one_sandbox_check::the_contract_offers_no_network,
-    },
-    Inspection {
-        principle: "VIII",
-        holds: "no crate under guest/apps declares or resolves a crate on a list of network \
-                crates, or names std::net, tokio::net or the WASI socket and HTTP interfaces",
-        run: one_sandbox_check::no_bundled_app_reaches_the_network,
-    },
-    Inspection {
-        principle: "VIII",
-        holds: "every capability a bundled app's manifest declares links an interface the app \
-                world imports, or none, and a manifest whose capabilities cannot be read is \
-                refused",
-        run: one_sandbox_check::every_bundled_app_asks_only_for_the_world,
-    },
 ];
 
-/// Checks the code against the principles `docs/design/principles.md` marks enforced, and the
-/// page against the check.
+/// Checks the code against the principles [`INSPECTIONS`] stand for.
 ///
-/// It reads the page's table (see [`principles_page`]) and refuses when the set of principles
-/// whose State is `enforced` differs from the set [`INSPECTIONS`] stands for, naming each
-/// principle that differs either way, or when a row of the table cannot be read. Then it runs
-/// every inspection. The "Article" numbers in its messages are the principles' numbers on
-/// that page.
+/// Every inspection runs, and a file one reads that is missing is a failure of the gate rather
+/// than a pass (`read_required`). The "Article" numbers in its messages are the principles'
+/// numbers.
 ///
 /// This is fast: it inspects source files without compiling. Run locally with
 /// `cargo xtask constitution-check`; `just lint` runs it on every pull request.
 fn constitution_check() {
     let mut violations: Vec<String> = Vec::new();
 
-    // Resolve inspected paths against the repository the command is *run in* — asked
-    // of git, the way `measure_check` always has — not the process CWD and not the
-    // directory xtask was compiled in. `env!("CARGO_MANIFEST_DIR")` stood here and is
-    // fixed at build time, so an xtask binary carried in from a removed worktree read
-    // three present files as missing and stopped `just lint` at this gate
-    // (`TASK-constitution-check-resolves-its-files-against-where-xtask-was-built`).
+    // Resolve inspected paths against the repository the command is *run in* — asked of git —
+    // not the process CWD and not the directory xtask was compiled in.
     let root = &out::root();
-
-    // The page first: what it marks enforced against what the inspections stand for.
-    let inspected: Vec<&str> = INSPECTIONS.iter().map(|i| i.principle).collect();
-    let mut held: Vec<String> = Vec::new();
-    if let Some(page) = read_required(root, principles_page::PAGE, &mut violations) {
-        match principles_page::read(&page) {
-            Ok(principles) => {
-                violations.extend(principles_page::drift(&principles, &inspected));
-                held = principles
-                    .iter()
-                    .filter(|p| p.enforced)
-                    .map(|p| p.number.clone())
-                    .collect();
-            }
-            Err(why) => violations.push(format!(
-                "constitution-check is BROKEN: {}: {why}. Which principles the page marks \
-                 enforced is unread, so nothing holds the page and the check together.",
-                principles_page::PAGE
-            )),
-        }
-    }
 
     for inspection in &INSPECTIONS {
         (inspection.run)(root, &mut violations);
     }
 
+    let mut held: Vec<&str> = INSPECTIONS.iter().map(|i| i.principle).collect();
+    held.dedup();
+
     // ── Report ────────────────────────────────────────────────────────────────
     if violations.is_empty() {
         println!(
-            "constitution-check: OK, {} principles ({}) held by {} inspections, and {} marks \
-             the same {} enforced.",
+            "constitution-check: OK, {} principles ({}) held by {} inspections.",
             held.len(),
             held.join(", "),
             INSPECTIONS.len(),
-            principles_page::PAGE,
-            held.len()
         );
     } else {
         eprintln!("PRINCIPLE VIOLATIONS ({}):", violations.len());
@@ -2202,9 +1682,8 @@ fn constitution_check() {
             eprintln!("  {:<5} {}", i.principle, i.holds);
         }
         eprintln!(
-            "\nSee docs/design/principles.md for the principle each line names. A violation \
-             must be fixed, or the principle amended in the open by a pull request against \
-             that page, before this check will pass."
+            "\nA violation must be fixed, or the principle amended in the open by a pull \
+             request, before this check will pass."
         );
         std::process::exit(1);
     }
@@ -2436,54 +1915,16 @@ fn only_the_handshake_skips_authentication(root: &Path, violations: &mut Vec<Str
 /// **The rule that bites is the reverse edge.** "`client/` may depend on `core/`"
 /// forbids nothing — it is already true. The `core` row is the one that does work:
 /// it forbids `core/store` from depending on `client/cli`, which Cargo permits and
-/// nothing else here would have caught. The same asymmetry is why `guest` is listed
-/// at all: Cargo's `workspace.exclude` separates the *build*, not the source graph.
+/// nothing else here would have caught.
+///
+/// The reference has two more regions, `system/` (the trusted-path occupant, held to a crate
+/// list) and `guest/` (the confined apps). This tree holds neither, so neither has a row: a
+/// rule over a region that is absent reads nothing. A region added here is a top-level
+/// directory holding Rust, which `tree`'s tests refuse until it is named.
 const REGIONS: &[(&str, &[&str])] = &[
     ("core", &["core"]),
     ("client", &["core", "client"]),
-    // `system/` takes no region list — see `SYSTEM_ALLOWED`.
-    ("system", &[]),
-    ("guest", &["guest"]),
 ];
-
-/// What a `system/` crate may name, by crate rather than by region.
-///
-/// The occupant of the trusted-path slot holds a channel handed to it at spawn and
-/// nothing else. `DEC-0029` ruled the shape — *"channel only, shared component rlib,
-/// no privileged imports"* — because a component only ever built in-tree accumulates
-/// in-tree dependencies, and being our own first third-party occupant is the only
-/// honest test of replaceability.
-///
-/// A region prefix cannot state that rule: "may depend on `core/`" is exactly what
-/// the occupant may **not** do. So this is a crate list, and it is deliberately the
-/// four `core/kuid` already depends on today — the presumptive first occupant
-/// already satisfies the rule, which is the cheapest moment to write it down.
-const SYSTEM_ALLOWED: &[&str] = &["core/common", "core/ipc", "core/sys", "core/wire"];
-
-/// Region edges that exist, are understood, and are not yet fixed.
-///
-/// **Every entry states what removes it**, on `ADVISORY.md`'s rule: an exception with
-/// no removal trigger is a carve-out, and a carve-out is how a rule stops being one.
-const REGION_EXCEPTIONS: &[(&str, &str, &str)] = &[(
-    "guest/apps/kotton-shell/logic",
-    "client/shell",
-    "The shell's command engine, compiled into the guest's own WASM with \
-     `default-features = false` so it reaches user data solely through the `ShellHost` \
-     port. Deliberate and confined — but it means one crate spans the line, with a \
-     feature flag doing the region's job. Removed when `shell` splits into a portable \
-     engine and its client wrapper.",
-), (
-    "guest/apps/kotton-shell/logic",
-    "core/msg/src/share/bounds.rs",
-    "A `#[path]` include, not a Cargo dependency, so the check below never matches it and it \
-     is declared here so that it is declared somewhere. Stands on the region rule's reason and \
-     not its letter: a guest's reach is its WIT import set, and this file gives the shell two numbers, \
-     two sentences and a comparison — the node's share bounds and its refusal, so the share \
-     sheet refuses from a listing's size before it reads a file — reaching no key, store or \
-     host. Removed when the share's bounds and sentences reach the shell by a host read (an \
-     occupant verb answering the node's rule), or when tier-check reads source includes and \
-     this one is allowlisted there with its reason.",
-)];
 
 /// Every `Cargo.toml` under `root`, depth-first, skipping `target/`.
 fn manifests_under(root: &Path) -> Vec<std::path::PathBuf> {
@@ -2519,6 +1960,10 @@ fn region_check(violations: &mut Vec<String>) {
     for (region, allowed) in REGIONS {
         let root = Path::new(region);
         if !root.exists() {
+            violations.push(format!(
+                "tier-check: the region `{region}/` is not a directory here, so its rule reads \
+                 nothing. Repoint REGIONS in xtask/src/main.rs."
+            ));
             continue;
         }
         for manifest in manifests_under(root) {
@@ -2539,27 +1984,11 @@ fn region_check(violations: &mut Vec<String>) {
                 if !crate::tree::REGIONS.contains(&to_region) {
                     continue;
                 }
-                if REGION_EXCEPTIONS
-                    .iter()
-                    .any(|(f, t, _)| *f == from && to.starts_with(t))
-                {
-                    continue;
-                }
-                let permitted = if *region == "system" {
-                    SYSTEM_ALLOWED
-                        .iter()
-                        .any(|a| to == *a || to.starts_with(&format!("{a}/")))
-                } else {
-                    allowed.contains(&to_region)
-                };
-                if !permitted {
-                    let rule = if *region == "system" {
-                        format!("`system/` may name only: {}", SYSTEM_ALLOWED.join(", "))
-                    } else {
-                        format!("`{region}/` may depend on: {}", allowed.join(", "))
-                    };
+                if !allowed.contains(&to_region) {
                     violations.push(format!(
-                        "{from} depends on {to} — crossing a region boundary. {rule}"
+                        "{from} depends on {to} — crossing a region boundary. `{region}/` may \
+                         depend on: {}",
+                        allowed.join(", ")
                     ));
                 }
             }
@@ -3346,15 +2775,13 @@ fn collect_rust(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn link_check() {
-    // Every directory a reader is sent into, recursively: the guides, the design and the
-    // references under docs/, the design system, the papers, and the skills agents read
-    // mid-task. Named at `.claude/skills` and not `.claude`, because `.claude/worktrees/`
-    // can hold whole checkouts of this repo and walking it would scan every branch's copy.
-    let roots = [Path::new("docs"), Path::new("ui"), Path::new("papers"), Path::new(".claude/skills")];
+    // Every directory a reader is sent into, recursively: here, `docs/`, which holds the
+    // generated CLI reference.
+    let roots = [Path::new("docs")];
     // The root's Markdown is files, not a directory, so a root-walk cannot reach them.
     // Listed rather than globbed, so adding one is a deliberate act of putting it under the
-    // gate; `ISSUES.md` is transient and not listed.
-    const ROOT_DOCS: [&str; 6] = ["AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", "DCO.md", "README.md", "SECURITY.md"];
+    // gate.
+    const ROOT_DOCS: [&str; 5] = ["CLAUDE.md", "CONTRIBUTING.md", "DCO.md", "README.md", "SECURITY.md"];
     let mut md_files: Vec<PathBuf> = Vec::new();
     for root in roots {
         if !root.exists() {
@@ -3456,7 +2883,7 @@ fn link_check() {
 
     if broken.is_empty() {
         println!(
-            "link-check: OK — every relative link in docs/, ui/, papers/, .claude/skills/ and the root docs resolves and none holds a merge-conflict marker ({} files scanned), and no Rust doc comment links to one by path.",
+            "link-check: OK — every relative link in docs/ and the root docs resolves and none holds a merge-conflict marker ({} files scanned), and no Rust doc comment links to one by path.",
             md_files.len()
         );
     } else {
@@ -3475,76 +2902,34 @@ fn link_check() {
     }
 }
 
-/// Check that the generated reference docs match what `gen-docs` would write, and that the
-/// guides under `docs/use/` type the lines the shell prints (`guide_lines`).
+/// Check that the generated CLI reference matches what `gen-docs` would write.
 ///
-/// `docs/cli/reference.md` and `docs/shell/reference.md` both carry a "Do not edit
-/// by hand" header, but nothing enforced it: the generator was never in the gate, so
-/// the two largest files under `docs/` could drift from the CLI they document without
-/// any signal. This makes that drift a check failure instead of a discovery.
+/// `docs/cli/reference.md` carries a "Do not edit by hand" header, and this is what makes it
+/// true: the reference is generated from the command tree, and `claim-check` holds the
+/// commands `README.md` gives to it, so a reference that drifted from the binary would let a
+/// page name a verb the binary lacks.
 ///
-/// It compares in memory and never writes — a check that repairs the tree would go
-/// green on a dirty working copy and hide the very drift it exists to catch.
+/// It compares in memory and never writes — a check that repairs the tree would go green on a
+/// dirty working copy and hide the very drift it exists to catch.
 ///
-/// Comparison is line-ending agnostic. `core.autocrlf` is true on Windows and the repo
-/// has no `.gitattributes`, so the working copy is CRLF while the generator emits LF; a
-/// byte comparison would fail on every Windows checkout no matter how fresh the file,
-/// which is worse than no check — a permanently-red gate teaches people to skip it.
+/// Comparison is line-ending agnostic: a Windows checkout with `core.autocrlf` holds the file
+/// as CRLF while the generator emits LF, and a byte comparison would fail there however fresh
+/// the file.
 #[cfg(feature = "cli-docs")]
 fn docs_check() {
-    /// Compare ignoring line-ending style (see the note on [`docs_check`]).
-    fn same_ignoring_newlines(a: &str, b: &str) -> bool {
-        a.replace("\r\n", "\n") == b.replace("\r\n", "\n")
-    }
-
-    let expected = [
-        (CLI_REFERENCE_PATH, cli_reference_markdown()),
-        (SHELL_REFERENCE_PATH, shell_reference_markdown()),
-    ];
-
-    let mut stale: Vec<&str> = Vec::new();
-    for (path, want) in &expected {
-        match fs::read_to_string(path) {
-            Ok(have) if same_ignoring_newlines(&have, want) => {}
-            _ => stale.push(path),
+    let want = cli_reference_markdown();
+    match fs::read_to_string(CLI_REFERENCE_PATH) {
+        Ok(have) if have.replace("\r\n", "\n") == want.replace("\r\n", "\n") => {
+            println!("docs-check: OK — {CLI_REFERENCE_PATH} matches the command tree.");
         }
-    }
-
-    // The guides type lines the shell prints, and the shell's tests read no page: a release
-    // of the shell ships without them. So the pages are held to the shell here.
-    let (typed, untyped) = guide_lines::check(&out::root());
-    if !untyped.is_empty() {
-        eprintln!("docs-check: {} line(s) the shell prints that a guide does not type:\n", untyped.len());
-        for f in &untyped {
-            eprintln!("  {f}");
+        _ => {
+            eprintln!(
+                "docs-check: {CLI_REFERENCE_PATH} is out of date or missing.\n\nRun `cargo \
+                 xtask-docs gen-docs` and commit the result. The file is generated from the \
+                 CLI's command tree — edit the commands, not the Markdown."
+            );
+            std::process::exit(1);
         }
-        eprintln!(
-            "\nEach is `kotton_shell::typed_lines`, which the shell's own test holds to what its \
-             verbs print. Change the page to type the line, or the verb and the page together."
-        );
-    }
-
-    if stale.is_empty() && untyped.is_empty() {
-        println!(
-            "docs-check: OK — both generated references match the source ({} files), and the \
-             guides type the {typed} lines of the shell's they name.",
-            expected.len()
-        );
-    } else if stale.is_empty() {
-        std::process::exit(1);
-    } else {
-        eprintln!(
-            "docs-check: {} generated doc(s) out of date:\n",
-            stale.len()
-        );
-        for p in &stale {
-            eprintln!("  {p}");
-        }
-        eprintln!(
-            "\nRun `cargo xtask gen-docs` and commit the result. These files are generated \
-             from the CLI and shell command trees — edit the commands, not the Markdown."
-        );
-        std::process::exit(1);
     }
 }
 
@@ -3552,11 +2937,9 @@ fn docs_check() {
 
 /// Check that repo paths named in the orientation docs actually exist.
 ///
-/// `.github/copilot-instructions.md` is what `CLAUDE.md` calls "canonical project facts"
-/// and what every agent session reads. On 2026-08-17 its repo-layout block still listed
-/// `00_static`, `01_platform`, `03_providers`, `04_services`, `07_shell`, `08_cli` and
-/// `09_wasm` — seven directories that do not exist, several renamed months earlier. A
-/// stale file that everyone is told to trust is worse than a stale file nobody reads.
+/// The orientation docs are the pages a contributor and an agent are told to read first:
+/// here `CLAUDE.md`, `CONTRIBUTING.md` and `README.md`. A stale path in a file everyone is
+/// told to trust is worse than a stale path in a file nobody reads.
 ///
 /// This checks **existence, not accuracy**: that a path named in prose is a real path.
 /// Whether the description beside it is true stays a human's job.
@@ -3567,12 +2950,7 @@ fn docs_check() {
 fn facts_check() {
     // What agents and contributors are told to trust: a path one of these names that does
     // not exist is a door into nothing.
-    const SOURCES: [&str; 4] = [
-        ".github/copilot-instructions.md",
-        "docs/README.md",
-        "AGENTS.md",
-        "CLAUDE.md",
-    ];
+    const SOURCES: [&str; 3] = ["CLAUDE.md", "CONTRIBUTING.md", "README.md"];
 
     let mut missing: Vec<String> = Vec::new();
     let mut checked = 0usize;
@@ -3683,174 +3061,6 @@ fn repo_path_candidate(token: &str) -> Option<String> {
         return None;
     }
     Some(t.trim_end_matches('/').to_string())
-}
-
-/// No endless CSS animation in a surface stylesheet.
-///
-/// Measured 2026-08-26 on the running desktop: one full-window repaint of the
-/// 1200x800 shell costs **~50 ms** (10% of a core at a 500 ms frame budget, and a
-/// saturated core at any budget below that, because the frame simply takes
-/// longer than the budget). kuid repaints the whole window — there is no damage
-/// tracking — so *anything* animating holds a core for as long as it animates.
-///
-/// A transition is fine: it lasts 200 ms, spends four frames and stops. An
-/// `infinite` animation never stops. One blinking caret took kuid from 0% to 90%
-/// of a core, permanently, and it looks identical in a screenshot — which is why
-/// this is a check and not a note.
-///
-/// Lift this the day repaint is damage-tracked or GPU-backed, not before.
-fn repaint_check() {
-    fn collect_css(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if path.file_name().is_some_and(|n| n == "target") {
-                    continue;
-                }
-                collect_css(&path, out);
-            } else if path.extension().is_some_and(|e| e == "css") {
-                out.push(path);
-            }
-        }
-    }
-
-    let mut found: Vec<String> = Vec::new();
-    let mut files = 0usize;
-    for root in tree::SURFACE_ROOTS {
-        let mut paths: Vec<PathBuf> = Vec::new();
-        collect_css(Path::new(root), &mut paths);
-        for path in &paths {
-            files += 1;
-            let Ok(text) = fs::read_to_string(path) else {
-                continue;
-            };
-            for (n, line) in text.lines().enumerate() {
-                // Strip a trailing comment so prose about the rule does not trip it.
-                let code = line.split("/*").next().unwrap_or(line);
-                if code.contains("animation") && code.contains("infinite") {
-                    found.push(format!(
-                        "  {}:{}\n    {}",
-                        path.display().to_string().replace('\\', "/"),
-                        n + 1,
-                        code.trim()
-                    ));
-                }
-            }
-        }
-    }
-    if found.is_empty() {
-        println!("repaint-check: OK — no endless animation in {files} surface stylesheet(s).");
-        return;
-    }
-    eprintln!(
-        "repaint-check: an endless CSS animation holds a CPU core for as long as it runs.\n\n{}\n\n\
-         kuid repaints the whole window on the CPU — one frame of the 1200x800 desktop is\n\
-         ~50ms — so `infinite` means a permanently saturated core, invisible in a screenshot.\n\
-         A transition is fine: it ends. Make it finite, or drop it until repaint is\n\
-         damage-tracked.",
-        found.join("\n")
-    );
-    std::process::exit(1);
-}
-
-/// A string literal that looks like `rsx!` interpolation but is not.
-///
-/// Inside `rsx!`, a bare `"{name}"` **as a child** is interpolated by the macro.
-/// The same text as an *expression* — `"{name}".to_owned()` — is plain Rust, and
-/// Rust does not interpolate string literals. It compiles, and it renders the
-/// braces.
-///
-/// Found 2026-08-21: fourteen of thirty-three gallery captions had been
-/// rendering the literal `{caption}` from three such call sites, long enough
-/// that nobody knew. It never errored, which is the whole problem — this is the
-/// same family as a header parser that truncates a phrase to its first word, or
-/// a CSS rule naming a class that does not exist. Each looked right in the
-/// source and was wrong in the output.
-///
-/// So it is gated rather than remembered. The check is deliberately narrow:
-/// a literal containing `{` immediately followed by `.to_owned()` or
-/// `.to_string()`. `format!("{x}")` is correct and untouched; a child string is
-/// untouched; only the shape that is always a bug is refused.
-fn rsx_check() {
-    // Surfaces only. The rest of the tree does not use `rsx!`.
-    const ROOTS: [&str; 3] = ["guest/apps", "guest/sdk", "system"];
-
-    let hazard = |line: &str| -> bool {
-        let bytes = line.as_bytes();
-        let mut i = 0;
-        while let Some(q) = line[i..].find('"') {
-            let start = i + q + 1;
-            let Some(rel) = line[start..].find('"') else {
-                return false;
-            };
-            let end = start + rel;
-            let lit = &line[start..end];
-            let after = &line[end + 1..];
-            // A `{` preceded by `\u` is a unicode escape, not interpolation.
-            // Without this the check condemns every `\u{2014}` in the tree, which
-            // is most of them -- and a gate that cries wolf is one people learn
-            // to pass with an allow rather than a fix.
-            let interpolates = lit
-                .match_indices('{')
-                .any(|(at, _)| !lit[..at].ends_with("\\u"));
-            if interpolates
-                && (after.starts_with(".to_owned()") || after.starts_with(".to_string()"))
-            {
-                return true;
-            }
-            i = end + 1;
-            if i >= bytes.len() {
-                break;
-            }
-        }
-        false
-    };
-
-    let mut hits: Vec<String> = Vec::new();
-    let mut scanned = 0usize;
-    for root in ROOTS {
-        let mut files: Vec<PathBuf> = Vec::new();
-        collect_rust(Path::new(root), &mut files);
-        for file in &files {
-            let Ok(text) = fs::read_to_string(file) else {
-                continue;
-            };
-            scanned += 1;
-            for (n, line) in text.lines().enumerate() {
-                if hazard(line) {
-                    hits.push(format!(
-                        "{}:{}\n      {}",
-                        file.display().to_string().replace('\\', "/"),
-                        n + 1,
-                        line.trim()
-                    ));
-                }
-            }
-        }
-    }
-
-    if hits.is_empty() {
-        println!(
-            "rsx-check: OK - no string literal pretends to interpolate ({scanned} files scanned)."
-        );
-        return;
-    }
-    eprintln!(
-        "rsx-check: {} literal(s) that look like interpolation and are not:\n",
-        hits.len()
-    );
-    for h in &hits {
-        eprintln!("  {h}");
-    }
-    eprintln!(
-        "\nInside `rsx!` a bare \"{{x}}\" child is interpolated by the macro; as an\n\
-         expression it is plain Rust and yields the braces verbatim. Use the value\n\
-         directly - `x.to_string()` - or `format!(\"{{x}}\")`."
-    );
-    std::process::exit(1);
 }
 
 /// Recursively collect `*.md` files under `dir`, skipping `archive/` subtrees.
@@ -4138,10 +3348,6 @@ mod tests {
         for rel in [
             ARTICLE_II_KDEVICED,
             ARTICLE_IV_CAPABILITY,
-            one_sandbox_check::WIT,
-            one_sandbox_check::MANIFEST_SCHEMA,
-            one_sandbox_check::BUNDLED_APPS,
-            one_sandbox_check::APP_LINKER_FILE,
         ] {
             assert!(
                 root.join(rel).exists(),
