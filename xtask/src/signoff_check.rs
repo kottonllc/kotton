@@ -19,11 +19,11 @@
 //! - **(a)** No commit is authored or committed as an agent identity: any name at an address on
 //!   [`AGENT_ADDRESSES`], one of [`AGENT_IDENTITIES`], or a forge bot ([`BOT_SUFFIX`]).
 //!   A commit an agent makes is authored as the person who directed it.
-//! - **(b)** A commit carrying an `Assisted-by:` trailer and authored by a person on [`PEOPLE`]
-//!   — the owner, who certifies that work by signing the release (DEC-0088) — needs no
-//!   `Signed-off-by:`. One that also carries the owner's own sign-off passes: redundant, not
-//!   wrong. Any other `Assisted-by:` commit is held to (c), the kernel's rule for a contributor
-//!   using an assistant.
+//! - **(b)** There is no exemption: a commit carrying an `Assisted-by:` trailer is held to (c)
+//!   like any other, whoever authored it, the owner included. An agent cannot certify, so the
+//!   person it was made for does, with their own `Signed-off-by:` (CONTRIBUTING.md, "Every
+//!   commit is signed off"). [`PEOPLE`] no longer excuses anyone; it names the owner for the
+//!   commits `cargo xtask merge` makes.
 //! - **(c)** Every other commit carries a `Signed-off-by:` whose name and address are exactly
 //!   its author's, and, when the committer differs, a second that is exactly the committer's.
 //! - **(d)** No `Signed-off-by:` names an agent identity, on any commit: *"AI agents MUST NOT
@@ -52,8 +52,8 @@
 //! anyone can type, and so is the author field it is compared with; that is the DCO's ordinary
 //! trust level everywhere it is used, and this gate does not raise it. It holds that every
 //! commit on the branch *carries* the claim in the form DEC-0091 asks for, so a missing
-//! certificate is found at `just lint` and not by nobody. `.githooks/commit-msg` is the
-//! contributor's own convenience beside it and enforces nothing; this does.
+//! certificate is found at `just lint` and not by nobody. `.github/workflows/signoff.yml` holds
+//! the same rule on every pull request; this holds it at `just lint`, before one is opened.
 //!
 //! Usage: `cargo xtask signoff-check`
 
@@ -87,9 +87,8 @@ pub(crate) const AGENT_ADDRESSES: &[&str] = &["noreply@anthropic.com"];
 pub(crate) const BOT_SUFFIX: &str = "[bot]";
 pub(crate) const BOT_DOMAIN: &str = "@users.noreply.github.com";
 
-/// The people whose own `Assisted-by:` commits need no sign-off (DEC-0091, amended
-/// 2026-09-30): the owner, who certifies agent-assisted work by signing the release
-/// (DEC-0088), at their GitHub no-reply address — *"fine for now"*. Matched exactly, name and
+/// The people `cargo xtask merge` commits as: the owner, at their GitHub no-reply address.
+/// No `Assisted-by:` commit is excused from a sign-off for being theirs. Matched exactly, name and
 /// address. A change of address, or a second person, is an edit to this list and nothing else.
 pub(crate) const PEOPLE: &[(&str, &str)] =
     &[("Austin Herman", "13291882+austinjherman@users.noreply.github.com")];
@@ -136,11 +135,6 @@ impl Ident {
                 self.name.eq_ignore_ascii_case(n)
                     && e.is_none_or(|e| self.email.eq_ignore_ascii_case(e))
             })
-    }
-
-    /// One of [`PEOPLE`], exactly.
-    fn is_listed_person(&self) -> bool {
-        PEOPLE.iter().any(|(n, e)| self.is(n, e))
     }
 
     /// `Name <email>`, the form a trailer takes.
@@ -225,10 +219,7 @@ pub(crate) fn verdict(c: &Commit) -> Vec<(Rule, String)> {
             why.push((Rule::AgentCoAuthor, format!("carries `Assisted-by:` and `Co-Authored-By: {a}`, which names an agent; the agent is never an author")));
         }
     }
-    // (b) — the owner's own assisted work is certified by the release signature.
-    if c.assisted && c.author.is_listed_person() {
-        return why;
-    }
+    // (b) — there is no exemption: an assisted commit is held to (c) like any other.
     // (c)
     if !c.author.is_agent() && !signed(&c.author) {
         why.push((Rule::NoAuthorSignoff, format!("carries no `Signed-off-by: {}` for its author", c.author)));
@@ -318,14 +309,14 @@ pub fn run(root: &Path) {
         Ok((n, found)) if found.is_empty() => {
             println!(
                 "signoff-check: OK — {n} commit(s) since {MAIN_REF}: none made as an agent, and \
-                 each signed off by its author and committer or the owner's own assisted work \
-                 (CONTRIBUTING.md, \"Sign off\")"
+                 each signed off by its author and committer \
+                 (CONTRIBUTING.md, \"Every commit is signed off\")"
             );
         }
         Ok((n, found)) => {
             eprintln!(
                 "signoff-check: FAILED — {} finding(s) in {n} commit(s) since {MAIN_REF} \
-                 (CONTRIBUTING.md, \"Sign off\"):",
+                 (CONTRIBUTING.md, \"Every commit is signed off\"):",
                 found.len()
             );
             for f in &found {
@@ -335,7 +326,7 @@ pub fn run(root: &Path) {
                 "\n  Sign off with `git commit -s`; commits already made on your own branch, \
                  `git rebase --signoff {MAIN_REF}`. A commit an agent made is authored as the \
                  person who directed it and carries `Assisted-by: <tool>` — and that person's \
-                 own sign-off, unless they are the owner. An agent never signs off, never \
+                 own sign-off, with no exemption. An agent never signs off, never \
                  co-authors, and leaves no `Claude-Session:`."
             );
             std::process::exit(1);
@@ -431,13 +422,13 @@ mod tests {
     }
 
     #[test]
-    fn v05_the_owners_assisted_commit_with_no_sign_off_passes() {
-        assert_eq!(judge(OWNER, OWNER, &[ASSISTED]), vec![]);
+    fn v05_the_owners_assisted_commit_with_no_sign_off_fails() {
+        assert_eq!(judge(OWNER, OWNER, &[ASSISTED]), vec![Rule::NoAuthorSignoff]);
     }
 
     #[test]
     fn v06_the_owners_assisted_commit_signed_off_by_claude_fails() {
-        assert_eq!(judge(OWNER, OWNER, &[ASSISTED, &sob(CLAUDE)]), vec![Rule::AgentSignoff]);
+        assert_eq!(judge(OWNER, OWNER, &[ASSISTED, &sob(OWNER), &sob(CLAUDE)]), vec![Rule::AgentSignoff]);
     }
 
     #[test]
@@ -479,8 +470,7 @@ mod tests {
 
     // Beyond the twelve: the halves of (b) and (d) none of them isolates.
 
-    /// (b) wants the trailer *and* the owner: the owner's commit without `Assisted-by:` is an
-    /// ordinary commit and signs off.
+    /// (b) excuses no one: the owner's commit, with or without `Assisted-by:`, signs off.
     #[test]
     fn the_owners_commit_without_assisted_by_needs_a_sign_off() {
         assert_eq!(judge(OWNER, OWNER, &[]), vec![Rule::NoAuthorSignoff]);
@@ -527,7 +517,7 @@ mod tests {
         let (r, main) = repo();
         commit_as(&r, "old", CLAUDE, CLAUDE, &[]);
         let floor = r.git(&["rev-parse", "HEAD"]);
-        commit_as(&r, "new", OWNER, OWNER, &[ASSISTED]);
+        commit_as(&r, "new", OWNER, OWNER, &[ASSISTED, &sob(OWNER)]);
         let (n, found) = check(r.path(), &[&main, &floor]).expect("the branch reads");
         assert_eq!((n, found.len()), (1, 0), "{found:#?}");
         let (n, found) = check(r.path(), &[&main]).expect("the branch reads");
@@ -555,14 +545,19 @@ mod tests {
 
     /// The owner's commit shape as the amendment writes it passes.
     #[test]
+    fn the_owners_gates_and_assisted_by_commit_without_a_sign_off_fails() {
+        assert_eq!(judge(OWNER, OWNER, &[GATES, ASSISTED]), vec![Rule::NoAuthorSignoff]);
+    }
+
+    #[test]
     fn the_owners_gates_and_assisted_by_commit_passes() {
-        assert_eq!(judge(OWNER, OWNER, &[GATES, ASSISTED]), vec![]);
+        assert_eq!(judge(OWNER, OWNER, &[GATES, ASSISTED, &sob(OWNER)]), vec![]);
     }
 
     #[test]
     fn an_assisted_commit_carrying_claude_session_fails() {
         let session = "Claude-Session: https://claude.ai/code/session_0000";
-        assert_eq!(judge(OWNER, OWNER, &[GATES, ASSISTED, session]), vec![Rule::SessionTrailer]);
+        assert_eq!(judge(OWNER, OWNER, &[GATES, ASSISTED, &sob(OWNER), session]), vec![Rule::SessionTrailer]);
         // A contributor's assisted commit, signed off as the kernel asks, is held to it too.
         assert_eq!(
             judge(ANN, ANN, &[ASSISTED, &sob(ANN), session]),
@@ -575,7 +570,7 @@ mod tests {
         for agent in [CLAUDE, ("Claude Opus 5.5", "noreply@anthropic.com"), ("fable-design", "x@example.invalid")] {
             let co = format!("Co-Authored-By: {} <{}>", agent.0, agent.1);
             assert_eq!(
-                judge(OWNER, OWNER, &[GATES, ASSISTED, &co]),
+                judge(OWNER, OWNER, &[GATES, ASSISTED, &sob(OWNER), &co]),
                 vec![Rule::AgentCoAuthor],
                 "{co}"
             );
@@ -586,7 +581,7 @@ mod tests {
     #[test]
     fn an_assisted_commit_naming_a_person_as_co_author_passes() {
         let co = format!("Co-Authored-By: {} <{}>", ANN.0, ANN.1);
-        assert_eq!(judge(OWNER, OWNER, &[GATES, ASSISTED, &co]), vec![]);
+        assert_eq!(judge(OWNER, OWNER, &[GATES, ASSISTED, &sob(OWNER), &co]), vec![]);
     }
 
     /// A forge bot is an agent: a name ending in `[bot]`, or a GitHub no-reply address whose
@@ -597,7 +592,7 @@ mod tests {
         assert_eq!(judge(bot, ANN, &[&sob(ANN)]), vec![Rule::AgentAuthor]);
         assert_eq!(judge(ANN, ANN, &[&sob(ANN), &sob(bot)]), vec![Rule::AgentSignoff]);
         let co = format!("Co-Authored-By: {} <{}>", bot.0, bot.1);
-        assert_eq!(judge(OWNER, OWNER, &[GATES, ASSISTED, &co]), vec![Rule::AgentCoAuthor]);
+        assert_eq!(judge(OWNER, OWNER, &[GATES, ASSISTED, &sob(OWNER), &co]), vec![Rule::AgentCoAuthor]);
         // Either half alone is enough.
         let named = ("dependabot[bot]", "bot@example.invalid");
         assert_eq!(judge(named, ANN, &[&sob(ANN)]), vec![Rule::AgentAuthor]);

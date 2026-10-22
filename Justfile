@@ -393,8 +393,8 @@ lint:
     # pull request, on Linux, and nothing else.
     cargo xtask actions-check
     # A contribution is certified, not granted: every commit since origin/main carries its
-    # author's `Signed-off-by:` (or is the owner's own `Assisted-by:` commit), and none is
-    # made as an agent. `.githooks/commit-msg` is the convenience; this is the enforcement.
+    # author's `Signed-off-by:`, with no exemption, and none is made as an agent.
+    # `.github/workflows/signoff.yml` holds the same rule on a pull request.
     cargo xtask signoff-check
 
 # What each worktree costs on disk, and what is reclaimable.
