@@ -28,7 +28,10 @@
 //!    this checkout, whatever `CARGO_TARGET_DIR` says: see below.
 //! 5. **Commits as the owner**, with one trailer block naming every step above with its real
 //!    exit — a check marked as measured against `main` ends `@<the origin/main it measured>` —
-//!    and `Assisted-by: Claude Code`. A check or build that could not start, or was killed, is
+//!    then `Assisted-by: Claude Code`, and last the owner's own `Signed-off-by:` (name and
+//!    address from `signoff_check::PEOPLE`), because a commit authored as a person is
+//!    certified by that person (CONTRIBUTING.md, "Every commit is signed off": a merge commit is a commit). A check or
+//!    build that could not start, or was killed, is
 //!    refused as not run, never as a tree that fails.
 //! 6. **Pushes `main`**, and if the push is refused (someone else merged first), takes the
 //!    merge commit back off the local `main` so the next attempt starts from origin's.
@@ -82,7 +85,7 @@ const REMOTE: &str = "origin";
 const ORIGIN_MAIN: &str = "refs/remotes/origin/main";
 
 /// Trailer keys the recipe writes itself, so a message carrying one would end with two blocks.
-const OWN_TRAILERS: &[&str] = &["Gates:", "Assisted-by:"];
+const OWN_TRAILERS: &[&str] = &["Gates:", "Assisted-by:", "Signed-off-by:"];
 
 /// One command the recipe runs and whose exit it reports.
 #[derive(Clone, Debug)]
@@ -431,7 +434,7 @@ pub(crate) fn merge(
     // 5. Commit as the owner, with one trailer block.
     let (name, email) = crate::signoff_check::PEOPLE[0];
     let full = format!(
-        "{}\n\nGates: {gates}\nAssisted-by: Claude Code\n",
+        "{}\n\nGates: {gates}\nAssisted-by: Claude Code\nSigned-off-by: {name} <{email}>\n",
         message.trim_end()
     );
     let committed = Command::new("git")
@@ -765,10 +768,15 @@ mod tests {
         assert!(
             body.trim_end().ends_with(&format!(
                 "\n\nGates: cargo check --workspace --all-targets --locked 0; at-the-tip 0 @{short}\n\
-                 Assisted-by: Claude Code"
+                 Assisted-by: Claude Code\n\
+                 Signed-off-by: {name} <{email}>"
             )),
             "one trailer block naming every step and its exit:\n{body}"
         );
+        // `signoff-check` over the range holding only the merge the gate made passes.
+        let (n, found) = crate::signoff_check::check(&fx.clone, &[&main_before, &tip])
+            .expect("the range reads");
+        assert_eq!((n, found.len()), (1, 0), "{found:#?}");
     }
 
     /// A tip check that fails stops the merge before it is made, and leaves the checkout on
@@ -828,15 +836,17 @@ mod tests {
         let base = fx.head("HEAD");
         fx.branch_adds_a_caller(&base);
         g(&fx.clone, &["checkout", "--quiet", MAIN]);
-        let r = merge(
-            &fx.clone,
-            "side",
-            "Merge: side\n\nAssisted-by: Claude Code",
-            Options { fetch: false, push: false },
-            &[],
-            |_| Vec::new(),
-        );
-        assert!(matches!(r, Err(Refusal::Message(_))), "{r:?}");
+        for trailer in ["Assisted-by: Claude Code", "Signed-off-by: A <a@example.invalid>"] {
+            let r = merge(
+                &fx.clone,
+                "side",
+                &format!("Merge: side\n\n{trailer}"),
+                Options { fetch: false, push: false },
+                &[],
+                |_| Vec::new(),
+            );
+            assert!(matches!(r, Err(Refusal::Message(_))), "{trailer}: {r:?}");
+        }
     }
 
     /// A branch brought current with `main` and buildable: the common start of the tests below.
