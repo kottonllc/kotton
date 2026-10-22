@@ -183,6 +183,20 @@ pub fn boundary_license(path: &str) -> &'static str {
 /// cannot outlive its reason.
 pub const HEADERS_NOT_YET: &[(&str, &str)] = &[];
 
+/// Every path a constant here names that this tree does not hold, each with why it is still
+/// named. `every_named_path_exists` holds the constants to the tree and to this list, so a
+/// path cannot go missing unstated, and an entry here cannot outlive its absence. Read by
+/// that test alone.
+#[cfg(test)]
+pub const ABSENT_HERE: &[(&str, &str)] = &[
+    ("guest/", "LICENSE's table names it (HEADER_TREES and LICENSE are held to each other); LICENSE is the owner's, #5"),
+    ("scenarios/", "LICENSE's table names it; LICENSE is the owner's, #5"),
+    ("ui/", "LICENSE's table names it; LICENSE is the owner's, #5"),
+    ("guest/sdk/", "BOUNDARY draws it Apache-2.0 and LICENSE names it; LICENSE is the owner's, #5"),
+    ("guest/examples/", "BOUNDARY draws it Apache-2.0 and LICENSE names it; LICENSE is the owner's, #5"),
+    ("guest/extensions/", "BOUNDARY draws it Apache-2.0 and LICENSE names it; LICENSE is the owner's, #5"),
+];
+
 /// One part of an archive: a workspace, the roots in it whose closure ships (a package
 /// name or a `[[bin]]` name), the target it is built for, and the features it is built with.
 #[derive(Clone, Copy, Debug)]
@@ -242,49 +256,14 @@ pub const ARCHIVES: [Shipped; 3] = [SYSTEM, RELAY, VAULT];
 /// The file every archive carries at its top.
 pub const FILE: &str = "THIRD-PARTY-NOTICES";
 
-/// Where material written by others and carried as files rather than crates sits — the
-/// faces the shell is set in (`TASK-the-desktop-is-set-in-geist-and-layered-as-the-mock-up`).
-/// `DEC-0089`: it keeps its own terms, stated beside it.
-pub const FONT_DIR: &str = "ui/fonts/";
-
-/// A font carried in [`FONT_DIR`]: what it is, its licence and the file beside it that states
-/// it, and the crate that embeds it — so an archive names it exactly when that crate is in
-/// what the archive ships. The reference also pins each font's file by sha256; this tree holds
-/// no `ui/fonts/`, so there is no file to pin.
-pub struct Font {
-    pub family: &'static str,
-    pub version: &'static str,
-    pub license: &'static str,
-    pub license_file: &'static str,
-    pub source: &'static str,
-    pub carried_by: &'static str,
-}
-
 /// The licences a carried font may be under. A font is not a crate, so [`ALLOWED`] does not
 /// speak for it: the OFL's terms reach the font and its derivatives, never a document set
 /// in it or a program that embeds it.
+///
+/// No archive here writes a fonts section: the fonts were embedded by `kuid`, which this tree
+/// does not hold, and their table went with it. A notices file that carries one is still held
+/// to this list by [`check_notices`].
 pub const FONT_LICENSES: &[(&str, &str)] = &[("OFL-1.1", "SIL OPEN FONT LICENSE Version 1.1")];
-
-/// Every file in [`FONT_DIR`] that is a font. Taken from the `geist` package on npm at 1.7.2
-/// (its integrity sha512 checked on download), whose `LICENSE.txt` is `OFL.txt` here.
-pub const FONTS: &[Font] = &[
-    Font {
-        family: "Geist",
-        version: "1.800",
-        license: "OFL-1.1",
-        license_file: "ui/fonts/OFL.txt",
-        source: "https://github.com/vercel/geist-font",
-        carried_by: "kuid",
-    },
-    Font {
-        family: "Geist Mono",
-        version: "1.700",
-        license: "OFL-1.1",
-        license_file: "ui/fonts/OFL.txt",
-        source: "https://github.com/vercel/geist-font",
-        carried_by: "kuid",
-    },
-];
 
 // ---------------------------------------------------------------------------------------
 // SPDX expressions
@@ -743,28 +722,6 @@ pub fn notices(repo: &Path, shipped: &Shipped, revision: &str, target: Option<&s
         out.push_str(r);
         out.push('\n');
     }
-    let carried: Vec<&Font> = FONTS.iter().filter(|f| ours.contains_key(f.carried_by)).collect();
-    if !carried.is_empty() {
-        out.push_str(&format!("\nFonts, carried from {FONT_DIR}: {}\n", carried.len()));
-        out.push_str("family\tversion\tlicense\tsource\tlicense texts\n");
-        for f in &carried {
-            let text = std::fs::read_to_string(repo.join(f.license_file))
-                .map_err(|e| format!("{}: {e}", f.license_file))?
-                .replace("\r\n", "\n");
-            let who = format!("{} {} ({})", f.family, f.version, f.license_file);
-            let n = match texts.iter().position(|(t, _)| *t == text) {
-                Some(i) => {
-                    texts[i].1.push(who);
-                    i
-                }
-                None => {
-                    texts.push((text, vec![who]));
-                    texts.len() - 1
-                }
-            };
-            out.push_str(&format!("{}\t{}\t{}\t{}\t[{}]\n", f.family, f.version, f.license, f.source, n + 1));
-        }
-    }
     out.push_str(&format!("\nLicense texts: {}\n", texts.len()));
     for (i, (text, who)) in texts.iter().enumerate() {
         out.push_str(&format!("\n======== [{}] {}\n\n", i + 1, who.join(", ")));
@@ -829,7 +786,7 @@ pub fn check_notices(text: &str) -> Result<usize, String> {
             return Err(format!("{FILE}: the font {family} {version} is under `{license}`, which FONT_LICENSES does not allow"));
         }
     }
-    let font_rows = text.lines().skip_while(|l| !l.starts_with("Fonts, carried from ")).skip(2).take_while(|l| !l.is_empty());
+    let font_rows = text.lines().skip_while(|l| !l.starts_with("Fonts carried: ")).skip(2).take_while(|l| !l.is_empty());
     for row in font_rows {
         let f: Vec<&str> = row.split('\t').collect();
         cited(f[0], f.get(4).copied().unwrap_or(""))?;
@@ -840,11 +797,11 @@ pub fn check_notices(text: &str) -> Result<usize, String> {
     Ok(count)
 }
 
-/// The fonts a notices file names — family, version and licence — from its `Fonts, carried
-/// from` section, or none when it has no such section. Refuses a section whose count is not
+/// The fonts a notices file names — family, version and licence — from its `Fonts carried`
+/// section, or none when it has no such section. Refuses a section whose count is not
 /// its rows, or a row that is not family, version, licence, source, texts.
 pub fn fonts_in(text: &str) -> Result<Vec<(String, String, String)>, String> {
-    let mut lines = text.lines().skip_while(|l| !l.starts_with("Fonts, carried from "));
+    let mut lines = text.lines().skip_while(|l| !l.starts_with("Fonts carried: "));
     let Some(head) = lines.next() else { return Ok(Vec::new()) };
     let count: usize = head
         .rsplit_once(": ")
@@ -1136,11 +1093,10 @@ pub fn run(repo: &Path) {
             );
         }
         println!(
-            "license-check: OK — {judged} package entries across {} workspaces' lockfiles allowed ({} clarified), notices made for {}, {crates} crates declare a license LICENSE carries, {headed} source files carry their crate's SPDX header, {} fonts in {FONT_DIR} match their pins",
+            "license-check: OK — {judged} package entries across {} workspaces' lockfiles allowed ({} clarified), notices made for {}, {crates} crates declare a license LICENSE carries, LICENSE carries every first-party text and names every directory the boundary draws, and {headed} source files carry their crate's SPDX header",
             WORKSPACES.len(),
             clarified_used.len(),
             made.join(", "),
-            FONTS.len()
         );
     } else {
         for f in &failures {
@@ -1394,11 +1350,38 @@ mod tests {
         }
     }
 
+    /// **Every path the constants here name is in this tree, or is on [`ABSENT_HERE`] with its
+    /// reason** — and nothing is on that list that the tree holds or no constant names.
+    #[test]
+    fn every_named_path_exists() {
+        let root = repo();
+        let named: Vec<&str> = HEADER_TREES
+            .iter()
+            .copied()
+            .chain(BOUNDARY.iter().map(|(d, _)| *d))
+            .chain(WORKSPACES.iter().copied())
+            .collect();
+        let mut unstated: Vec<&str> = Vec::new();
+        for p in &named {
+            let here = root.join(p).exists();
+            let stated = ABSENT_HERE.iter().any(|(a, _)| a == p);
+            if !here && !stated {
+                unstated.push(p);
+            }
+        }
+        assert_eq!(unstated, Vec::<&str>::new(), "named here, absent from the tree, and not on ABSENT_HERE");
+        for (p, why) in ABSENT_HERE {
+            assert!(!root.join(p).exists(), "{p} is on ABSENT_HERE and the tree holds it — delete the entry");
+            assert!(named.contains(p), "{p} is on ABSENT_HERE and no constant names it — delete the entry");
+            assert!(!why.is_empty(), "{p} is on ABSENT_HERE with no reason");
+        }
+    }
+
     /// A fonts section is held to its own shape, as the package table is: its count is its
     /// rows, and a row cites a licence text that is written out.
     #[test]
     fn a_notices_fonts_section_is_held_to_its_own_shape() {
-        let fonts = "\nFonts, carried from ui/fonts/: 1\nfamily\tversion\tlicense\tsource\tlicense texts\nGeist\t1.800\tOFL-1.1\thttps://z\t[2]\n";
+        let fonts = "\nFonts carried: 1\nfamily\tversion\tlicense\tsource\tlicense texts\nGeist\t1.800\tOFL-1.1\thttps://z\t[2]\n";
         let base = sample();
         let (head, tail) = base.split_at(base.find("\nLicense texts: ").unwrap());
         let two = tail.replace("License texts: 1", "License texts: 2")

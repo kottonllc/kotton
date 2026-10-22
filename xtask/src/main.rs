@@ -433,7 +433,7 @@ pub(crate) fn guest_wasm(target_dir: &Path, app: &str) -> Option<PathBuf> {
     Some(target_dir.join(GUEST_TRIPLE).join("release").join(format!("{lib}.wasm")))
 }
 
-/// Where `build-apps` and `dev` build the guest app `app`: a developer's convenience build,
+/// Where `build-apps` builds the guest app `app`: a developer's convenience build,
 /// so `out/guest/<app>`, or `CARGO_TARGET_DIR` when that is exported (`out::own_target`).
 /// `release` builds no guest app and packs none: the system's archive carries the daemons and
 /// the CLI alone (`release::BINS`).
@@ -923,8 +923,8 @@ fn first_run(workspace_root: &Path) {
         Ok(mut c) => {
             #[cfg(windows)]
             // SAFETY: standard Win32 call; the function pointer is valid for the
-            // lifetime of this process. Same reason as `dev`: Ctrl-C reaches the
-            // daemon, and this process waits for it instead of dying first.
+            // lifetime of this process. Ctrl-C reaches the daemon, and this
+            // process waits for it instead of dying first.
             unsafe {
                 SetConsoleCtrlHandler(Some(noop_ctrl_handler), 1);
             }
