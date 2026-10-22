@@ -1,0 +1,36 @@
+[package]
+name = "kotton-sync"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+# Above `store`, not below it. The crate that used to hold this name is now
+# `kotton-sealed`, and `store` depends on that one.
+kotton-store = { path = "../store" }
+kotton-record = { path = "../record" }
+# `PeerLinks` names a peer client and a paired node; both are below `sync`.
+kotton-peer = { path = "../peer" }
+kotton-wire = { path = "../wire" }
+kotton-device = { path = "../device" }
+kotton-common = { path = "../common" }
+kotton-schemas = { path = "../schemas" }
+kotton-sys = { path = "../sys" }
+tokio = { workspace = true }
+notify = "6"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+async-trait = { workspace = true }
+anyhow = "1.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tempfile = "3"
+kotton-secret = { path = "../secret" }
+kotton-fs = { path = "../fs" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

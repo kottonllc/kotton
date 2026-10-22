@@ -1,0 +1,15 @@
+[package]
+name = "kotton-common"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }

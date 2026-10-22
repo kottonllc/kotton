@@ -1,0 +1,51 @@
+[package]
+name = "kotton-app"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+kotton-common = { path = "../common" }
+kotton-crypto = { path = "../crypto" }
+kotton-diag = { path = "../diag" }
+kotton-grant = { path = "../grant" }
+kotton-identity = { path = "../identity" }
+kotton-wire = { path = "../wire" }
+# `extension_host` composes the network half of an extension's confinement
+# from `outbound`'s per-extension policy. The direction is safe: `outbound`
+# depends on `sys` and `crypto` only.
+kotton-outbound = { path = "../outbound" }
+thiserror = "2.0"
+kotton-schemas = { path = "../schemas" }
+kotton-sys = { path = "../sys" }
+# The operating-system sandbox the runner is spawned under (DEC-0074). `proc`
+# depends on `sys` alone, so the direction is safe.
+kotton-proc = { path = "../proc" }
+
+anyhow = "1.0"
+async-trait = { workspace = true }
+base64 = "0.22"
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+blake3 = { workspace = true }
+hex = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { version = "1.6", features = ["v4"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Test-only: `MemoryObjectStorage` backs the quarantine and extension-host
+# tests. Dev-only on purpose — this domain must not reach the object store in
+# production, which is what the `Host` trait each of those files takes exists
+# to prevent.
+kotton-store = { path = "../store" }
+tempfile = "3.8"
+
+[lints]
+workspace = true

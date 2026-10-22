@@ -1,0 +1,113 @@
+[package]
+name = "kotton-integration-tests"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+build = "build.rs"
+
+# This crate exists solely to run integration tests against a live daemon.
+# There are no library targets — only the `tests/` directory.
+
+[dev-dependencies]
+workspace-hack = { path = "../tools/workspace-hack" }
+kotton-pty-drive = { path = "../tools/pty-drive" }
+kuserd         = { path = "../core/kuserd" }
+kvaultd        = { path = "../core/kvaultd" }
+kdeviced       = { path = "../core/kdeviced" }
+kotton     = { path = "../client/kotton-client" }
+# The REPL's registry, as the REPL builds it, and the shapes it answers in
+# (`repl_verbs`): the shell verbs are tested where they are dispatched.
+kotton-shell = { path = "../client/shell" }
+kotton-cli = { path = "../client/cli" }
+kotton-sys = { path = "../core/sys" }
+# The runtime crate dissolved on 2026-08-22 (RFC-0080); these are the crates its
+# re-exports pointed at all along.
+kotton-device = { path = "../core/device" }
+kotton-identity = { path = "../core/identity" }
+kotton-peer = { path = "../core/peer" }
+kotton-org = { path = "../core/org" }
+kotton-wire = { path = "../core/wire" }
+# The inference types the suite composes a context out of (RFC-0085).
+kotton-infer = { path = "../core/infer" }
+kotton-pair = { path = "../core/pair" }
+kotton-secret = { path = "../core/secret", features = ["test-utils"] }
+kotton-record = { path = "../core/record" }
+# The record-file converter and its schema, and the membership check a grant is held to
+# (`project_records`, RFC-0088).
+kotton-record-file = { path = "../client/record-file" }
+kotton-grant = { path = "../core/grant" }
+kotton-crypto = { path = "../core/crypto" }
+kotton-store = { path = "../core/store", features = ["test-support"] }
+kotton-fs = { path = "../core/fs" }
+kotton-app = { path = "../core/app" }
+# The grant vocabulary `runner_confinement` reads the daemon's runner profile in.
+kotton-proc = { path = "../core/proc" }
+kotton-diag = { path = "../core/diag" }
+async-trait = "0.1"
+# Why a relayed delivery failed, kept in a failing test's output
+# (`common::relay::env_on`).
+tracing-subscriber = { workspace = true }
+kotton-schemas = { path = "../core/schemas" }
+kotton-common = { path = "../core/common" }
+
+kotton-ipc = { path = "../core/ipc" }
+kotton-net = { path = "../core/net" }
+# The rendezvous-handle policy under test is the shipped one, not a re-derivation.
+ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
+aes-kw = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+base64 = "0.22"
+blake3 = { workspace = true }
+rand = "0.8"
+quinn = "0.11"
+tokio    = { version = "1.35", features = ["full"] }
+tempfile = "3.8"
+uuid     = { version = "1.6", features = ["v4"] }
+serde_json = "1.0"
+hex = "0.4"
+rustls = { version = "0.23", features = ["ring"] }
+
+# Serialize tests that mutate process-wide env vars (KOTTON_RUNNER / MOCK_RUNNER_MODE).
+# Note: kotton-mock-runner is NOT listed here — it is a bin-only crate and
+# cannot be a Cargo library dep. It is a workspace member, so `cargo build
+# --workspace` (or `cargo test --workspace`) builds it automatically. The
+# path to the binary is emitted by build.rs via MOCK_RUNNER_BIN.
+#
+# The consequence, which build.rs got wrong until 2026-09-03: a *package-scoped*
+# run — `cargo test -p kotton-integration-tests` — does not build it, and the
+# tests that spawn it fail. `common::mock_runner_bin` turns that into a message
+# naming the fix instead of `No such file or directory`.
+serial_test = "3"
+axum = { workspace = true }
+# `default-features = false` is load-bearing, not tidiness. reqwest's defaults
+# enable `default-tls` -> native-tls -> openssl-sys, and Cargo unifies features
+# across the workspace, so this one line re-enabled OpenSSL for every crate --
+# including `core/net`, which had already asked for rustls. Linking libcrypto is
+# what put `OPENSSL_cleanup` in the atexit chain, where it freed globals out from
+# under ~100 live threads at process exit
+# (TASK-integration-test-segfault-at-exit).
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+rusty-s3 = "0.10"
+s3s = "0.14"
+s3s-fs = "0.14"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
+# A pty for `common/cli.rs`. `rpassword` opens `/dev/tty` and puts it in raw mode
+# rather than reading stdin — deliberately, so a credential never lands in a
+# shell's history — so half of the identity ceremony cannot be driven by a
+# subprocess test without giving the child a controlling terminal
+# (`TASK-no-test-walks-the-cli-the-way-a-person-does`).
+#
+# A crate rather than `libc::openpty` + `pre_exec` in the harness, because
+# `unsafe_code = "deny"` is a workspace lint with teeth and a test harness is the
+# worst place to open a hole in it: the exception would be permanent, it would sit
+# in the one crate nobody reviews for safety, and "it is only tests" is how a deny
+# becomes an allow. This puts the unsafe behind a maintained boundary instead.
+portable-pty = "0.9"
+
+[lints]
+workspace = true

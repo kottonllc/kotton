@@ -1,0 +1,25 @@
+# The JSON surface of the operator verb channel. Generated — do not hand-edit.
+# Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
+# Variants sorted by name; fields in declaration order, which is the order
+# serde writes them. See xtask/src/wire_check.rs for why this file exists.
+# variants: 10
+Digits
+    pool: String
+Drop
+    pool: String
+Invite
+    pool: String
+    #[serde(default)]
+    quota: Option<u64>
+    ttl_seconds: u64
+Move
+    relay: String
+Pools
+ReadRule
+RelayInvite
+SetQuota
+    pool: String
+    quota: u64
+SetRule
+    rule: crate::rendezvous::AdmissionRule
+Stand

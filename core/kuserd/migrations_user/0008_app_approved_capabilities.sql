@@ -1,0 +1,21 @@
+-- Store what the user approved, separately from what the app declared.
+--
+-- Until this column existed the sandbox built both its capability set and its
+-- component linker from `manifest.toml` — the app's own declaration — so an app
+-- the user approved for nothing still ran with everything it asked for
+-- (TASK-the-approval-is-signed-but-not-enforced). The install-time consent gate
+-- recorded the decision in a signed GrantEnvelope; nothing read it back, and
+-- bundled apps have no envelope at all because no user key exists at boot.
+--
+-- The envelope is the *attestation* — proof the user's key endorsed a grant.
+-- This column is the *decision*, which exists whether or not a key was around to
+-- sign it. Conflating the two is what left the gap.
+--
+-- JSON-encoded `Vec<CapabilityGrant>`, not the display strings in
+-- `capabilities`: the sandbox needs the structured grants back, and parsing them
+-- out of "vfs.read:/notes" would be a second, lossier encoding of the same fact.
+--
+-- The default is the empty string rather than '[]' so that "never approved" and
+-- "approved nothing" stay distinguishable. Rows written before this migration
+-- read as the former, and the daemon reinstalls bundled apps to fill them in.
+ALTER TABLE app_registry ADD COLUMN approved_json TEXT NOT NULL DEFAULT '';

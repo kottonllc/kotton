@@ -1,0 +1,31 @@
+[package]
+name = "kotton-identity"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+kotton-common = { path = "../common" }
+kotton-crypto = { path = "../crypto" }
+kotton-wire = { path = "../wire" }
+kotton-sys = { path = "../sys" }
+# PlatformBinding: sealing a PIN vault to hardware where the machine offers it.
+kotton-secret = { path = "../secret" }
+
+anyhow = "1.0"
+ed25519-dalek = { workspace = true }
+hex = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tempfile = "3.8"
+tokio = { workspace = true }
+# The counting double the credential-ladder test stands in the binding seam.
+kotton-secret = { path = "../secret", features = ["test-utils"] }
+
+[lints]
+workspace = true

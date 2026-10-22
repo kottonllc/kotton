@@ -1,0 +1,50 @@
+[package]
+name = "kotton-proc"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+kotton-sys = { path = "../sys" }
+
+anyhow = "1.0"
+async-trait = "0.1"
+tokio = { version = "1", features = ["process", "io-util", "sync"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
+
+# Landlock and seccomp are raw syscalls and two kernel structs (see
+# `provider/sandbox/linux.rs`), so what is needed here is the syscall stub and
+# the constants — not a sandbox crate in the dependency closure of the daemon
+# that spawns the process it is confining.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+# The Windows provider (`provider/sandbox/windows.rs`): an AppContainer, the
+# ACEs for its SID, a job object, and the `CreateProcessW` that attaches them.
+# `windows-sys` at the version `core/ipc` already depends on, so this adds
+# features to a crate already in the tree rather than a crate.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+# `provider/os.rs` has had `#[tokio::test]` unit tests since before this file
+# named a dev-dependency, so `cargo test -p kotton-proc` did not compile. It
+# passed unnoticed because `cargo test --workspace` unifies features and some
+# other member asks for `macros`: a gate that cannot perceive the crate on its own.
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "process", "io-util"] }
+workspace-hack = { path = "../../tools/workspace-hack" }
+
+[lints]
+workspace = true

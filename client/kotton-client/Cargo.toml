@@ -1,0 +1,36 @@
+[package]
+name = "kotton"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+kotton-sys = { path = "../../core/sys" }
+kotton-ipc = { path = "../../core/ipc" }
+kotton-wire = { path = "../../core/wire" }
+kotton-schemas = { path = "../../core/schemas" }
+kotton-common = { path = "../../core/common" }
+# `model` carries `ModelManifest` unchanged from the person's file to the
+# record in their store (RFC-0085); the client restates none of its fields.
+kotton-infer = { path = "../../core/infer" }
+# The record-file converter: `records_import` and `records_export` map a record file to a
+# row of `sh.kotton.governance.record` and back through it (RFC-0088 rule 2).
+kotton-record-file = { path = "../record-file" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+# Whole-file content hash for chunked writes (RFC-0048).
+blake3 = "1"
+thiserror = "1.0"
+tokio = { version = "1.41", features = ["full"] }
+rpassword = "7"
+tracing = "0.1"
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tokio-test = "0.4"
+tempfile = "3"
+
+[lints]
+workspace = true

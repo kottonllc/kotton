@@ -1,0 +1,22 @@
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: infra/relay/Dockerfile
+    image: kotton-relay:latest
+    restart: unless-stopped
+    ports:
+      - "${KOTTON_RELAY_BIND:-0.0.0.0:7700}:7700"
+    environment:
+      KOTTON_RELAY_BIND: "0.0.0.0:7700"
+      KOTTON_RELAY_TTL: "${KOTTON_RELAY_TTL:-60}"
+      # Uncomment to disable auth requirement on peer-address lookups (dev only):
+      # KOTTON_RELAY_NO_AUTH_LOOKUP: "true"
+      # Uncomment for TLS (mount certs as a volume and set paths):
+      # KOTTON_RELAY_TLS_CERT: "/certs/relay.crt"
+      # KOTTON_RELAY_TLS_KEY: "/certs/relay.key"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7700/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

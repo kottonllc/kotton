@@ -1,0 +1,26 @@
+[package]
+name    = "kotton-mock-runner"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+# This binary mimics `kotton-runner` for integration tests.
+# It reads RunnerInput / RunnerMessage JSON from stdin and writes RunnerOutput
+# JSON to stdout, with behaviour controlled by the MOCK_RUNNER_MODE env var.
+#
+# Modes:
+#   (default) — responds based on the op: Launch → Launched, Message → MessageHandled
+#   "error"   — always responds with RunnerOutput::Error
+#   "exit"    — exits immediately without writing any output
+
+[[bin]]
+name = "kotton-mock-runner"
+path = "src/main.rs"
+
+[dependencies]
+kotton-wire = { path = "../../../core/wire" }
+serde_json = "1.0"
+
+[dev-dependencies]
+workspace-hack = { path = "../../../tools/workspace-hack" }

@@ -1,0 +1,66 @@
+[build]
+# Every build output lives under one gitignored `out/` at the repository root — the
+# workspace's here, xtask's, each guest app's, the relay's, bindwatch's, the merge gate's
+# (`out/merge`), the release builds' (`out/release`) and the release archives (`out/dist`)
+# beside it (`xtask/src/out.rs` hands cargo the rest; `cargo xtask out <what>` prints each).
+# A relative path in a config file resolves against the directory holding `.cargo/`, so
+# this is `<checkout>/out/target` wherever in the checkout cargo runs. `CARGO_TARGET_DIR`
+# still wins over this key when a person or a fleet exports it, and over every developer
+# convenience build; a build that ships or gates — the merge gate's and every release
+# build — names a `--target-dir` of its own under `out/` and never follows the variable
+# (docs/design/decisions/0014). One thing to delete (`just clean`), one thing to `du`
+# (TASK-build-outputs-live-under-out-and-the-tooling-reads-where-cargo-put-them).
+target-dir = "out/target"
+
+[alias]
+# `--target-dir out/xtask`, on every xtask alias: the xtask binary lands unhashed at
+# `<target>/debug/xtask`, so a build cache shared across worktrees served one worktree
+# another's xtask (measured 2026-09-15, "Unknown subcommand" for a gate that existed).
+# The rule was "export a private target directory for every `cargo xtask`", written in
+# three files and, on 2026-09-18, followed by none of the agents it was written for. A
+# `--target-dir` flag wins over `CARGO_TARGET_DIR`, so xtask stays private to its
+# checkout even under a shared cache — the one output that deliberately does not follow
+# the variable. A relative flag resolves against the working directory; every alias
+# here is run from the checkout root, as its `--manifest-path` already requires.
+xtask = "run --manifest-path xtask/Cargo.toml --target-dir out/xtask --"
+# The owner's daily view, as one word. `cargo dash` is short enough to type without
+# deciding to — which is the whole design goal, since the thing it replaces is scrolling a
+# 299-line board to reach a section that is usually one line.
+dash = "run -q --manifest-path xtask/Cargo.toml --target-dir out/xtask -- dash"
+# `gen-docs` / `docs-check` need the `cli-docs` feature, which pulls kotton-cli and
+# kotton-shell in to walk the real command trees. Every other subcommand reads and
+# writes Markdown, so it builds in seconds without them — which is the whole point
+# of the split (TASK-xtask-drags-in-the-whole-workspace).
+xtask-docs = "run --manifest-path xtask/Cargo.toml --target-dir out/xtask --features cli-docs --"
+
+# Link with LLVM's lld instead of MSVC's link.exe. This workspace links far more
+# than it compiles — 39 integration test files means 39 binaries, and a change to a
+# low crate relinks all of them — so linker speed sets the edit-test cycle.
+#
+# `rust-lld.exe` ships inside the toolchain and resolves by bare name (rustc looks
+# in its own sysroot), so this needs no install and no machine-specific path, unlike
+# OPENSSL_DIR below. Scoped to the MSVC target, so non-Windows builds are untouched.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+
+[env]
+# stylo (Blitz CSS engine) requires Python 3 for its build script.
+# python.exe on Windows resolves to a Windows Store stub; point stylo at the
+# real interpreter installed by scoop.
+PYTHON3 = { value = "python3", force = false }
+
+# OpenSSL — prefer the system OpenSSL over a from-source build.
+# bundled-sqlcipher links against system OpenSSL; OPENSSL_NO_VENDOR prevents
+# openssl-sys from triggering a Perl-based vendored build in any shell.
+# On Linux/macOS openssl is found automatically via pkg-config — nothing to set.
+#
+# OPENSSL_DIR is machine-specific, so it is NOT committed here. On Windows, set it
+# yourself: in a gitignored `.env` (loaded by `just`, see `.env.example`), or in
+# your shell/system environment for raw `cargo build` outside `just`.
+OPENSSL_NO_VENDOR = { value = "1", force = false }
+# …except for the one build that vendors on purpose. A released vault is
+# `x86_64-unknown-linux-musl`, and there is no musl libcrypto on a builder, so `kvaultd`
+# turns on `bundled-sqlcipher-vendored-openssl` for musl alone (core/kvaultd/Cargo.toml).
+# openssl-sys reads `<TARGET>_OPENSSL_NO_VENDOR` before the bare name, so this reaches
+# that target's build and no other.
+X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_NO_VENDOR = { value = "0", force = false }

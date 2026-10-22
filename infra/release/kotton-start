@@ -1,0 +1,26 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Start Kotton: the daemon, which starts the window and everything else it needs
+# from beside itself. Ctrl-C stops it.
+#
+# There is no identity to name here and no passphrase to type: the window makes
+# your identity on a new machine and unlocks it on one that has one (DEC-0077).
+#
+#   kotton-start
+#   RUST_LOG=info kotton-start       say more about what it is doing
+#
+# Written for `cargo xtask release` (TASK-a-friend-cannot-install-kotton-without-a-toolchain).
+set -eu
+
+self=$(readlink -f -- "$0" 2>/dev/null || printf '%s\n' "$0")
+here=$(CDPATH='' cd -- "$(dirname -- "$self")" && pwd)
+
+# The window runs on X11 when a session offers both, unless KUID_WAYLAND=1 asks
+# otherwise — the same choice `prefer_x11` in xtask makes for `just desktop::run`.
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${DISPLAY:-}" ] && [ -z "${KUID_WAYLAND:-}" ]; then
+    unset WAYLAND_DISPLAY
+fi
+
+RUST_LOG=${RUST_LOG:-warn}
+export RUST_LOG
+exec "$here/bin/kuserd"

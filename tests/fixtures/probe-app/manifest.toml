@@ -1,0 +1,18 @@
+[app]
+id      = "sh.kotton.probe"
+name    = "Probe"
+version = "0.1.0"
+
+# Two capabilities, on purpose. The test that installs this approves the
+# apps grant and withholds the schema one, then shows the guest cannot reach
+# schema — not "is told no", but has no such import to call.
+#
+# **One-shot**: no `kind`, so `AppKind::Subprocess`, the default. A one-shot
+# runner reads its input to EOF and has no channel to ask the daemon on, so it
+# is handed no `files` handle — which is why this probe no longer asks for
+# `files.read`. It did until 2026-09-24, on `/probe`, and the grant could reach
+# nothing: a declaration the runner could not honour. Both capabilities here
+# are ones a one-shot runner serves in full.
+[capabilities]
+"apps.launch" = []
+"schema.read" = ["sh.kotton.probe"]

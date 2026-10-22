@@ -1,0 +1,1539 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! Device-pairing **ceremony entry points**, and the tests for the verbs they run.
+//!
+//! Not in `peer`'s tier, for two different reasons.
+//!
+//! The three ceremony functions hold the daemon's `SessionMap`: they are the
+//! ceremony's plumbing — a spawned task, an mpsc channel streaming progress to
+//! the IPC client, and on join a minted session, because a joining device holds
+//! no mnemonic to log in with afterward. The protocol they orchestrate lives in
+//! [`kotton_peer::daemon::nodes`]. The asymmetry with `finalize_enrolled_node`,
+//! which moved, is real: **joining an existing identity issues a session;
+//! enrolling does not.**
+//!
+//! The tests stay for a blunter reason: they build a runtime to make a user
+//! resident, and a crate that names the runtime crate cannot live in `peer` —
+//! that is the cycle this whole move exists to escape. They exercise `peer`'s
+//! functions from here, where naming it is legal.
+//!
+//! Both follow `peer` once `agent::sessions` moves to `core/session`.
+use kotton_session::service::tokens as sessions;
+use kotton_peer::daemon::nodes::{
+    PendingConfirms,
+    StreamingConfirmer,
+    WARM_KEY_TTL_SECONDS,
+    ceremony_failure,
+    ceremony_failure_copy,
+    finalize_enrolled_node,
+    json_err,
+    load_device_operational_key,
+    load_signing_key,
+    record_own_device_member,
+    resolve_data_keys,
+    wire_own_device_allowlist,
+};
+use kotton_wire::ipc::UserResponse;
+use kotton_peer::daemon::db as network_db;
+use ed25519_dalek::SigningKey;
+use hex;
+use kotton_ipc::HandlerOutput;
+use kotton_peer::pairing::{
+    encode_connection_code, open_pair_listener, parse_connection_code,
+    run_enroll_issuer_committed, run_enroll_join_committed, Invite,
+};
+use kotton_peer::relay_keys::relay_id;
+use crate::users::DeviceUsers as _;
+use crate::DeviceRuntime;
+use kotton_schemas::membership::Posture;
+use kotton_common::crypto::kdf_labels;
+use sqlx::SqlitePool;
+use std::collections::HashSet;
+use std::io;
+use std::sync::{Arc, RwLock};
+use tokio::sync::mpsc;
+use uuid::Uuid;
+use kotton_common::time::now_secs;
+
+/// Persist a joiner-side enrollment outcome (the `device join` completion): store
+/// the delivered KEL + adopt the AID, persist the FROST share/warm/delegation/CEK,
+/// record the issuer as a paired node, issue a session (the join cryptographically
+/// authenticates this device), then live-refresh + record membership + wire sync.
+///
+/// The single joiner-completion path for the pairing ceremony.
+// Allowed: the daemon state a join's completion writes, as `handle_device_add` below takes it.
+#[allow(clippy::too_many_arguments)]
+pub async fn finalize_joined_node(
+    runtime: &DeviceRuntime,
+    users: &dyn crate::users::residency::Residency,
+    db: &Arc<SqlitePool>,
+    sessions: &sessions::SessionMap,
+    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    user_id: &str,
+    warm_key: &SigningKey,
+    joined: kotton_peer::pairing::JoinedNode,
+) -> io::Result<UserResponse> {
+    // Adopt the did:kel AID as this device's user identity (the joiner
+    // cannot reconstruct the AID itself). Blind / did:key-only enrollment carries
+    // no KEL — fall back to the preserved root DID. Compute it from the delivered
+    // KEL *in memory* — do NOT write yet.
+    let user_did = match joined.kel.first() {
+        Some(inception) => inception.aid.to_string(),
+        None => joined.root_did.to_string(),
+    };
+    // Provision BEFORE writing anything: this validates that `user_id` is either
+    // free or already this same identity (a name colliding with a *different*
+    // local identity is rejected), and creates the user directory. Doing it first
+    // means a collision fails clean — no half-written KEL over another user's.
+    // `None` is the idempotent re-join: nothing new was provisioned, so there is
+    // nothing new to make resident. The `reload_user_runtime` below swaps in a
+    // CEK-refreshed handle either way.
+    if let Some(user_rt) = runtime
+        .provision_joined_user(user_id, &user_did)
+        .map_err(|e| io::Error::other(format!("provision joined user: {e}")))?
+    {
+        users.insert(user_id.to_string(), user_rt);
+    }
+    // Now the identity + directory exist — store the delivered KEL.
+    for event in &joined.kel {
+        kotton_identity::kel_store::append_event(runtime.base_dir(), user_id, event)
+            .map_err(|e| io::Error::other(format!("store delivered KEL: {e}")))?;
+    }
+    // This node can now admit a device that proves control of the identity's
+    // root — the tip it will verify against, and the recovery authorities a
+    // phrase-only device can claim. Learned here, at the moment the
+    // chain arrives, so the listener that is already up sees it without a restart.
+    runtime.admission().learn_chain(&joined.kel);
+    if let Some(bundle) = joined.recovery_bundle.as_deref() {
+        kotton_identity::provisioning::write_recovery_bundle_raw(
+            runtime.base_dir(),
+            user_id,
+            bundle,
+        )
+        .map_err(|e| io::Error::other(format!("keep delivered recovery bundle: {e}")))?;
+    }
+
+    // Full/Cosigner deliver share + delegation + group key; only Full also delivers
+    // the operational data keys. Blind delivers none.
+    if let (Some(share), Some(delegation), Some(pubkey_package)) = (
+        joined.frost_share.as_ref(),
+        joined.warm_key_delegation.as_ref(),
+        joined.pubkey_package.as_ref(),
+    ) {
+        let secrets = runtime.secrets();
+        let warm_delegation_json = serde_json::to_string(delegation).map_err(json_err)?;
+        secrets
+            .set_secret(&kdf_labels::frost_share(user_id), &share.0)
+            .map_err(|e| io::Error::other(format!("persist frost share: {e}")))?;
+        secrets
+            .set_secret(&kdf_labels::frost_pubkey_package(user_id), pubkey_package)
+            .map_err(|e| io::Error::other(format!("persist group public-key package: {e}")))?;
+        secrets
+            .set_secret(
+                &kdf_labels::warm_signing_key(user_id),
+                &hex::encode(warm_key.to_bytes()),
+            )
+            .map_err(|e| io::Error::other(format!("persist warm key: {e}")))?;
+        secrets
+            .set_secret(
+                &kdf_labels::warm_key_delegation(user_id),
+                &warm_delegation_json,
+            )
+            .map_err(|e| io::Error::other(format!("persist warm delegation: {e}")))?;
+        // The data capability, when this posture was granted one. Both domain
+        // roots persist together: `master_secret` is what lets `resolve_user_keys`
+        // build a mount whose `K_log` matches the rest of the fleet, so this
+        // device can open the sealed record log it receives and encrypt its own
+        // record database at rest.
+        if let Some(keys) = joined.data_keys.as_ref() {
+            secrets
+                .set_secret(&kdf_labels::operational_cek(user_id), &hex::encode(keys.cek))
+                .map_err(|e| io::Error::other(format!("persist operational cek: {e}")))?;
+            secrets
+                .set_secret(
+                    &kdf_labels::operational_cek_epoch(user_id),
+                    &keys.cek_epoch.to_string(),
+                )
+                .map_err(|e| io::Error::other(format!("persist cek epoch: {e}")))?;
+            secrets
+                .set_secret(
+                    &kdf_labels::master_secret_keychain_key(user_id),
+                    &hex::encode(keys.master_secret),
+                )
+                .map_err(|e| io::Error::other(format!("persist master secret: {e}")))?;
+        }
+    }
+
+    // A node that was handed no data keys — a vault, a co-signer — cannot write
+    // the membership set, which is sealed under them; the allowlist row below is
+    // the whole of what it keeps about the issuer, and that is by design.
+    let keyless = joined.data_keys.is_none();
+    let node = joined.peer;
+    let now = now_secs();
+    let addresses_json = serde_json::to_string(&node.addresses).map_err(json_err)?;
+    network_db::insert_paired_node(
+        db,
+        &node.id,
+        user_id,
+        &node.device_did.to_string(),
+        &node.public_key,
+        &addresses_json,
+        now,
+        None,
+    )
+    .await?;
+    // The relay the issuer announced, when the ceremony learned one — see
+    // `finalize_enrolled_node`.
+    if let Some(relay) = node.relay_url.as_deref() {
+        network_db::update_paired_node_relay(db, user_id, &node.device_did.to_string(), Some(relay)).await?;
+    }
+    paired_keys.write().unwrap().insert(node.public_key);
+
+    // Completing the join cryptographically authenticates this device (it proved
+    // its operational key + ran the committed handshake). It holds no mnemonic to
+    // log in with afterward, so issue a session now.
+    let token = Uuid::new_v4().to_string();
+    sessions::insert(sessions, token.clone(), user_id.to_string());
+
+    // Live-refresh so the delivered CEK applies immediately; then record membership
+    // + wire sync/allowlist. Best-effort (applies on next load on failure).
+    match runtime.reload_user_runtime(user_id).await {
+        Ok(user_rt) => {
+            // The reload builds the refreshed runtime; swapping it in for the
+            // stale one is the daemon's act. In-flight
+            // requests holding the old handle finish against it.
+            let store = std::sync::Arc::clone(&user_rt);
+            users.insert(user_id.to_string(), user_rt);
+            if keyless {
+                tracing::info!(
+                    user_id,
+                    "joined blind: the membership set is sealed under keys this node does not hold, so only the allowlist row is kept"
+                );
+            } else if let Err(e) =
+                record_own_device_member(store.as_ref(), &node, Posture::Full).await
+            {
+                tracing::warn!(
+                    user_id,
+                    "failed to record issuer membership after join: {e}"
+                );
+            } else {
+                wire_own_device_allowlist(store.as_ref(), db, paired_keys, user_id, &node)
+                    .await;
+            }
+        }
+        Err(e) => tracing::warn!(
+            user_id,
+            "failed to refresh user runtime after join (CEK applies on next restart): {e}"
+        ),
+    }
+
+    Ok(UserResponse::PairingComplete {
+        node,
+        session_token: Some(kotton_wire::ipc::SecretText::new(token)),
+        relay_offer: None,
+    })
+}
+
+/// Issuer side of the streamed `device add` ceremony. Opens a bootstrap
+/// listener, streams `PairAdvertising` (with the interim connection code) →
+/// `PairShowCode` → `PairAwaitingPeer` → `PairTransferring` → `PairingComplete` |
+/// `PairFailed`, and confirms the SAS via `PairConfirmCode`.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_device_add(
+    runtime: Arc<DeviceRuntime>,
+    users: Arc<dyn crate::users::residency::Residency>,
+    db: Arc<SqlitePool>,
+    device_db: Arc<SqlitePool>,
+    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    pending: PendingConfirms,
+    user_id: String,
+    as_name: Option<String>,
+    ttl_seconds: u64,
+    port: u16,
+    posture: Posture,
+) -> io::Result<HandlerOutput<UserResponse>> {
+    let secrets = runtime.secrets();
+    // This device announces its OWN name to the joiner; `--as`
+    // overrides the persisted device name for this ceremony only.
+    let self_name = match as_name {
+        Some(n) => n,
+        None => crate::config::ops::resolve_device_name(&device_db).await,
+    };
+    let identity_key = load_signing_key(&user_id, secrets)?;
+    let op_key = load_device_operational_key(secrets)?;
+    // A `Full` enrollment must hand over the whole data domain; enrolling one
+    // with a partial capability would produce a device that reads files but is
+    // silently absent from record sync. Fail the ceremony instead.
+    let data_keys = resolve_data_keys(&user_id, secrets)?;
+    if matches!(posture, Posture::Full) && data_keys.is_none() {
+        return Err(io::Error::other(
+            "cannot enroll a Full device: this device does not hold the complete \
+             operational data capability (CEK + master_secret). Log in with the \
+             recovery mnemonic on this device first, then retry.",
+        ));
+    }
+    let issuer_kel = kotton_identity::kel_store::load_chain(runtime.base_dir(), &user_id)
+        .unwrap_or_default();
+    // The phrase-sealed recovery copy rides along to a blind node so a device
+    // holding only the phrase can get it back from there. Only the
+    // blind posture carries it — see `PairingPayload::BlindRelay`.
+    let issuer_recovery_bundle = if matches!(posture, Posture::BlindStorage) {
+        kotton_identity::provisioning::read_recovery_bundle_raw(runtime.base_dir(), &user_id)
+            .unwrap_or_default()
+    } else {
+        None
+    };
+    let warm_key_expires_at = now_secs() + WARM_KEY_TTL_SECONDS;
+
+    // Fresh offer id + bootstrap listener (its cert presents the operational key).
+    let mut sid = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut sid);
+    let (_unused_legacy_code, listen_addr, expires_at, endpoint) =
+        open_pair_listener(&op_key, port, ttl_seconds)
+            .await
+            .map_err(|e| io::Error::other(format!("open device-add listener: {e}")))?;
+    let code = encode_connection_code(&sid, listen_addr);
+
+    // Advertise an anonymous mDNS offer so a joiner on the same LAN
+    // can discover this by browsing — no code, no typed address. Best-effort: if
+    // mDNS is unavailable/blocked, the hand-carried code still works (the fallback
+    // ladder). The handle is held in the ceremony task and withdraws the offer when
+    // the ceremony ends. Skipped in local-only mode (same-machine dev/CI): the
+    // multicast socket would make the OS firewall prompt, and discovery is moot when
+    // both daemons share a host — the joiner uses the connection code.
+    let mdns_offer = if kotton_peer::local_only() {
+        None
+    } else {
+        match kotton_net::advertise_pairing_offer(
+            &hex::encode(sid),
+            listen_addr.port(),
+        ) {
+            Ok(offer) => Some(offer),
+            Err(e) => {
+                tracing::warn!("mDNS pairing advertisement failed (code still works): {e}");
+                None
+            }
+        }
+    };
+
+    let (tx, rx) = mpsc::channel::<UserResponse>(16);
+    // Owned handle for the ceremony task: `Arc`-backed, so this is the same
+    // residency map the daemon holds, not a snapshot of it.
+    let users: Arc<dyn crate::users::residency::Residency> = Arc::clone(&users);
+    tokio::spawn(async move {
+        // Hold the mDNS offer for the ceremony's lifetime; dropping it withdraws.
+        let _mdns_offer = mdns_offer;
+        if tx
+            .send(UserResponse::PairAdvertising { code: kotton_wire::ipc::SecretText::new(code), expires_at })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let confirmer = StreamingConfirmer {
+            tx: tx.clone(),
+            token: Uuid::new_v4().to_string(),
+            pending,
+            ttl: std::time::Duration::from_secs(ttl_seconds),
+        };
+        let result = run_enroll_issuer_committed(
+            &identity_key,
+            sid,
+            data_keys,
+            posture,
+            &self_name,
+            runtime.peer_listen_addr(),
+            endpoint,
+            ttl_seconds,
+            warm_key_expires_at,
+            issuer_kel,
+            issuer_recovery_bundle,
+            &confirmer,
+        )
+        .await;
+        let frame = match result {
+            Ok(enrolled) => {
+                let _ = tx.send(UserResponse::PairTransferring).await;
+                match finalize_enrolled_node(
+                    runtime.secrets(),
+                    match users.get(&user_id) {
+                        Some(rt) => rt,
+                        None => {
+                            let _ = tx.send(UserResponse::Error {
+                                message: format!("user runtime '{user_id}' is not loaded"),
+                            }).await;
+                            return;
+                        }
+                    }
+                    .as_ref(),
+                    &db,
+                    &paired_keys,
+                    &user_id,
+                    posture,
+                    enrolled,
+                )
+                .await
+                {
+                    Ok(node) => UserResponse::PairingComplete {
+                        node,
+                        session_token: None,
+                        relay_offer: None,
+                    },
+                    Err(e) => UserResponse::PairFailed {
+                        reason: format!("Added the device, but saving it failed: {e}"),
+                    },
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "device-add ceremony failed");
+                UserResponse::PairFailed {
+                    reason: ceremony_failure_copy(&e.to_string()),
+                }
+            }
+        };
+        let _ = tx.send(frame).await;
+    });
+    Ok(HandlerOutput::Stream(rx))
+}
+
+/// The issuer half of the six-digit ceremony with the transport reversed, for a
+/// gateway on a host this node can reach but that cannot reach this node. The
+/// gateway printed a code — its address and the session id — and is listening;
+/// this node dials it, shows the six digits it derives, and on the person's yes
+/// admits it under `Posture::Gateway`. The gateway is handed whom it serves and
+/// which relay to dial, and nothing that opens anything.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_gateway_enroll(
+    runtime: Arc<DeviceRuntime>,
+    users: Arc<dyn crate::users::residency::Residency>,
+    db: Arc<SqlitePool>,
+    device_db: Arc<SqlitePool>,
+    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    pending: PendingConfirms,
+    user_id: String,
+    code: String,
+    ttl_seconds: u64,
+) -> io::Result<HandlerOutput<UserResponse>> {
+    use kotton_peer::pairing::{parse_connection_code, run_enroll_issuer_dialing};
+
+    let (sid, addr) = parse_connection_code(code.trim())
+        .map_err(|e| io::Error::other(format!("gateway code: {e}")))?;
+    let secrets = runtime.secrets();
+    let self_name = crate::config::ops::resolve_device_name(&device_db).await;
+    let identity_key = load_signing_key(&user_id, secrets)?;
+    let op_key = load_device_operational_key(secrets)?;
+    let relay_url = runtime.reachability().nat().relay_url;
+    if relay_url.is_empty() {
+        return Err(io::Error::other(
+            "this node has no relay set, so a gateway would have nothing to dial — \
+             `kotton config relay set <url>` first",
+        ));
+    }
+    let handout = kotton_wire::peer::GatewayHandout {
+        user_id: user_id.clone(),
+        relay_url,
+        node_label: self_name.clone(),
+    };
+
+    let (tx, rx) = mpsc::channel::<UserResponse>(16);
+    tokio::spawn(async move {
+        if tx.send(UserResponse::PairConnecting).await.is_err() {
+            return;
+        }
+        let confirmer = StreamingConfirmer {
+            tx: tx.clone(),
+            token: Uuid::new_v4().to_string(),
+            pending,
+            ttl: std::time::Duration::from_secs(ttl_seconds),
+        };
+        let result = run_enroll_issuer_dialing(
+            &identity_key,
+            &op_key,
+            sid,
+            addr,
+            &self_name,
+            runtime.peer_listen_addr(),
+            Posture::Gateway,
+            Vec::new(),
+            None,
+            Some(handout),
+            &confirmer,
+        )
+        .await;
+        let frame = match result {
+            Ok(enrolled) => {
+                let _ = tx.send(UserResponse::PairTransferring).await;
+                let store = match users.get(&user_id) {
+                    Some(rt) => rt,
+                    None => {
+                        let _ = tx
+                            .send(UserResponse::Error {
+                                message: format!("user runtime '{user_id}' is not loaded"),
+                            })
+                            .await;
+                        return;
+                    }
+                };
+                match finalize_enrolled_node(
+                    runtime.secrets(),
+                    store.as_ref(),
+                    &db,
+                    &paired_keys,
+                    &user_id,
+                    Posture::Gateway,
+                    enrolled,
+                )
+                .await
+                {
+                    Ok(node) => UserResponse::PairingComplete {
+                        node,
+                        session_token: None,
+                        relay_offer: None,
+                    },
+                    Err(e) => UserResponse::PairFailed {
+                        reason: format!("Admitted the gateway, but saving it failed: {e}"),
+                    },
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "gateway-enrol ceremony failed");
+                UserResponse::PairFailed {
+                    reason: ceremony_failure_copy(&e.to_string()),
+                }
+            }
+        };
+        let _ = tx.send(frame).await;
+    });
+    Ok(HandlerOutput::Stream(rx))
+}
+
+/// Joiner side of the streamed `device join` ceremony. Dials the issuer
+/// using the interim connection `code` (sid + addr) and streams `PairConnecting` →
+/// `PairShowCode` → `PairAwaitingPeer` → `PairTransferring` → `PairingComplete`
+/// (with a session token) | `PairFailed`.
+/// What a joiner will accept from the issuer's payload.
+///
+/// The issuer decides what it hands over (a `Posture`); the joiner decides what
+/// it will keep. A vault holds no key and can be given none, so
+/// it joins under `BlindOnly`: a payload carrying data keys or a signing share
+/// is refused before anything is written, and the keys the ceremony delivered
+/// are dropped with the frame that carried them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinPolicy {
+    /// Keep whatever the issuer's posture delivers — a device.
+    Any,
+    /// Keep only what a blind enrolment carries: the chain and the sealed
+    /// recovery copy. Refuse a payload with keys in it.
+    BlindOnly,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_device_join(
+    runtime: Arc<DeviceRuntime>,
+    users: Arc<dyn crate::users::residency::Residency>,
+    db: Arc<SqlitePool>,
+    device_db: Arc<SqlitePool>,
+    sessions: sessions::SessionMap,
+    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    pending: PendingConfirms,
+    user_id: String,
+    code: String,
+    as_name: Option<String>,
+    policy: JoinPolicy,
+) -> io::Result<HandlerOutput<UserResponse>> {
+    let node_key = load_device_operational_key(runtime.secrets())?;
+    let warm_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    // This device announces its OWN name to the issuer; `--as` overrides the
+    // persisted device name for this ceremony only.
+    let self_name = match as_name {
+        Some(n) => n,
+        None => crate::config::ops::resolve_device_name(&device_db).await,
+    };
+
+    // An empty code means "discover on the LAN" (an mDNS browse); a
+    // non-empty code carries (sid, addr) directly (the interim/off-LAN fallback).
+    let (sid, candidates): ([u8; 16], Vec<std::net::SocketAddr>) = if code.trim().is_empty() {
+        if kotton_peer::local_only() {
+            // No LAN in local-only mode — the multicast browse would prompt the
+            // firewall and find nothing. Require the connection code instead.
+            return Err(io::Error::other(
+                "local-only pairing (KOTTON_PAIR_LOCAL_ONLY) has no LAN discovery — \
+                 pass the connection code shown by `device add`",
+            ));
+        }
+        let offers =
+            kotton_net::browse_pairing_offers(std::time::Duration::from_secs(5))
+                .map_err(|e| io::Error::other(format!("mDNS browse failed: {e}")))?;
+        match offers.as_slice() {
+            [] => {
+                return Err(io::Error::other(
+                    "no device is offering to pair on this network — run `device add` on your \
+                     other device, or pass a connection code",
+                ))
+            }
+            [offer] => {
+                // The label is not on the wire; the joiner learns it over the
+                // encrypted channel (PairInfo) after connecting. One offer → preselect.
+                let raw = hex::decode(&offer.sid_hex)
+                    .map_err(|e| io::Error::other(format!("bad offer sid hex: {e}")))?;
+                let sid: [u8; 16] = raw
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| io::Error::other("offer sid must be 16 bytes"))?;
+                // The peer advertises every interface address (Wi-Fi, VPN, IPv6,
+                // link-local). Keep only the ones we can actually dial, IPv4 first —
+                // picking one blindly is what made discovery a coin toss.
+                let candidates =
+                    kotton_peer::pairing::rank_dial_candidates(&offer.addresses);
+                if candidates.is_empty() {
+                    return Err(io::Error::other(
+                        "the pairing offer advertised no address reachable from here — \
+                         make sure both devices are on the same network",
+                    ));
+                }
+                (sid, candidates)
+            }
+            offers => {
+                return Err(io::Error::other(format!(
+                    "{} devices are offering to pair; pick one by passing its connection code \
+                     (name-based disambiguation is not wired yet)",
+                    offers.len()
+                )))
+            }
+        }
+    } else {
+        let (sid, mut addr) = parse_connection_code(&code)
+            .map_err(|e| io::Error::other(format!("invalid connection code: {e}")))?;
+        // A code minted from a `0.0.0.0` bind advertises an unspecified IP; treat it
+        // as loopback (same-host). mDNS addresses are already concrete, so this only
+        // affects the code path.
+        if addr.ip().is_unspecified() {
+            addr.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        }
+        (sid, vec![addr])
+    };
+    // The dial + handshake + human-comparison window.
+    let ttl_seconds = 120u64;
+    // Where this node answers the protocol, announced during the ceremony so the
+    // issuer records that rather than the bootstrap socket (`announce_bytes`).
+    let peer_listen_addr = runtime.peer_listen_addr();
+
+    let (tx, rx) = mpsc::channel::<UserResponse>(16);
+    // Owned handle for the ceremony task: `Arc`-backed, so this is the same
+    // residency map the daemon holds, not a snapshot of it.
+    let users: Arc<dyn crate::users::residency::Residency> = Arc::clone(&users);
+    tokio::spawn(async move {
+        if tx.send(UserResponse::PairConnecting).await.is_err() {
+            return;
+        }
+        let confirmer = StreamingConfirmer {
+            tx: tx.clone(),
+            token: Uuid::new_v4().to_string(),
+            pending,
+            ttl: std::time::Duration::from_secs(ttl_seconds),
+        };
+        // Rung 1 (mDNS/code + human SAS): the SAS comparison authenticates, so no
+        // out-of-band key is pinned. Rungs 2/4 will pass the pinned issuer key.
+        let result = run_enroll_join_committed(
+            &node_key,
+            &warm_key,
+            sid,
+            &candidates,
+            &self_name,
+            peer_listen_addr,
+            &confirmer,
+            None,
+        )
+        .await;
+        let frame = match result {
+            Ok(joined)
+                if policy == JoinPolicy::BlindOnly
+                    && (joined.data_keys.is_some()
+                        || joined.frost_share.is_some()
+                        || joined.warm_key_delegation.is_some()) =>
+            {
+                // Dropped here, unwritten: the vault never holds what it was
+                // handed, and the issuer learns why on its own frame.
+                tracing::warn!(user_id = %user_id, "a vault refused a payload carrying keys");
+                UserResponse::PairFailed {
+                    reason: "this node is a vault: it keeps sealed bytes and holds no key, so \
+                             enrol it blind (`device add --blind`)"
+                        .to_string(),
+                }
+            }
+            Ok(joined) => {
+                let _ = tx.send(UserResponse::PairTransferring).await;
+                match finalize_joined_node(
+                    &runtime, &*users,
+                    &db,
+                    &sessions,
+                    &paired_keys,
+                    &user_id,
+                    &warm_key,
+                    joined,
+                )
+                .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => UserResponse::PairFailed {
+                        reason: format!("Joined, but saving your keys failed: {e}"),
+                    },
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "device-join ceremony failed");
+                UserResponse::PairFailed {
+                    reason: ceremony_failure_copy(&e.to_string()),
+                }
+            }
+        };
+        let _ = tx.send(frame).await;
+    });
+    Ok(HandlerOutput::Stream(rx))
+}
+
+
+/// The vault an admit is held to, and why: the vault whose operator credential
+/// this person keeps pins its vault's key (`OperatorCredential.vault`).
+#[derive(Debug, Clone)]
+pub struct PinnedVault {
+    /// The vault, as its operator credential names it — for the refusal's sentence.
+    pub vault: String,
+    /// The vault's operational key the credential pins.
+    pub key: [u8; 32],
+}
+
+/// The six digits, confirmed by the key instead of by a person.
+///
+/// Only ever handed to a ceremony that holds the other end to a pinned key
+/// ([`kotton_peer::pairing::Transport::pinned_to`]): the vault signs its key
+/// over the channel's transcript, and the ceremony is refused before anything
+/// is handed over if that key is not the pinned one, so a node between the two
+/// cannot pass however the digits are answered. Emits no frame — there is
+/// nothing for a person to read, and never a code to fall back to.
+struct TheKeyConfirms;
+
+#[async_trait::async_trait]
+impl kotton_peer::pair_channel::SasConfirmer for TheKeyConfirms {
+    async fn confirm(&self, _sas: u32, _peer_label: Option<&str>) -> bool {
+        true
+    }
+}
+
+/// What the person is told when the vault that answered is not the one the
+/// credential pins: both keys, and that nothing left this device.
+fn not_the_pinned_vault(vault: &str, refused: &kotton_peer::pairing::NotThePinnedKey) -> String {
+    format!(
+        "the vault that answered is not the vault your operator credential for '{vault}' pins: \
+         it proved key {}, and the credential pins {} — nothing was handed over. The vault that \
+         answered is not the vault the credential was enrolled with, and no six digits stand in \
+         for its key.",
+        hex::encode(refused.answered),
+        hex::encode(refused.pinned),
+    )
+}
+
+/// Why an invite refuses a posture other than blind, and the command that adds
+/// such a device instead — carrying the posture asked for, so a person who typed
+/// `--cosigner` is not sent to a bare `device add`, which hands over more, and a
+/// gateway is not sent to `device join`, since it prints the code and this node
+/// admits it. Every arm is written out, so a new posture fails to compile here
+/// rather than inheriting a sentence; the one posture an invite admits never
+/// reaches this function, because [`admits_by_code`] is its only caller and
+/// admits blind before asking for a sentence — the guard and its explanation are
+/// two functions on purpose, so the refusal names a command for every posture
+/// it refuses.
+fn not_blind_refusal(posture: Posture) -> String {
+    let add = adds_instead(posture);
+    let instead = match posture {
+        Posture::BlindStorage => {
+            unreachable!("admits_by_code admits the blind posture before asking for a refusal")
+        }
+        Posture::Full | Posture::Cosigner => format!(
+            "A device that would hold keys joins the other way round: run `{add}` here and \
+             `device join <code>` on it"
+        ),
+        Posture::Gateway => format!(
+            "A gateway is admitted by its own code: the gateway prints the code, and this \
+             node admits it with `{add}`"
+        ),
+    };
+    format!(
+        "an invite admits a vault, and a vault keeps what it cannot read — so this \
+         door takes the blind posture only. {instead}"
+    )
+}
+
+/// The one `device add` that adds a device of `posture`, as data the refusal
+/// interpolates and the test holds — so no test has to pick a command out of
+/// prose, and a sentence that named a second `device add` would fail the test
+/// that counts them. Exhaustive for the same reason as [`not_blind_refusal`].
+fn adds_instead(posture: Posture) -> &'static str {
+    match posture {
+        Posture::Full => "device add",
+        Posture::Cosigner => "device add --cosigner",
+        Posture::Gateway => "device add --gateway <code>",
+        Posture::BlindStorage => {
+            unreachable!("admits_by_code admits the blind posture before asking for a refusal")
+        }
+    }
+}
+
+/// A vault's invite as its code names it: where the ceremony
+/// meets and under which words, the key the meeting relay must prove before it
+/// is dialled, the key the vault must prove inside the channel, and the relay's
+/// *invited* admission key when the code carries one — what the dial presents
+/// at a relay whose rule is *the people I invite*, which refuses a stranger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Invited {
+    pub(crate) invite: Invite,
+    pub(crate) relay_key: [u8; 32],
+    pub(crate) vault_key: [u8; 32],
+    pub(crate) admission: Option<kotton_net::rendezvous::AdmissionKey>,
+}
+
+/// What an admit is handed, read: a vault's invite, or a listening vault's
+/// connection code.
+#[derive(Debug)]
+enum AdmitCode {
+    Invite(Invited),
+    Dial([u8; 16], std::net::SocketAddr),
+}
+
+/// What an admit says of an invite in the form that named no key.
+pub(crate) const KEYLESS_INVITE: &str = "this invite is in the form that names no key (`relay#words`), so \
+     neither its relay nor its vault could be held to anything — ask for the invite again: an invite \
+     now begins `kotton-invite:`";
+
+/// Read the code an admit is handed. A code in the one grammar is read by its
+/// one parser (`kotton_wire::line::Code`): a vault's invite is admitted, and a
+/// relay's invite or an instance's line is refused naming what takes it. A
+/// `relay#words` invite named no key, and is refused. Anything else is a
+/// listening vault's connection code.
+fn read_admit_code(code: &str) -> io::Result<AdmitCode> {
+    use kotton_wire::line::{Code, InviteCode, INVITE_PREFIX, LINE_PREFIX};
+    let code = code.trim();
+    if code.starts_with(INVITE_PREFIX) || code.starts_with(LINE_PREFIX) {
+        return match Code::parse(code).map_err(io::Error::other)? {
+            Code::Invite(read @ InviteCode::Vault { key, relay_key, invited, .. }) => Ok(AdmitCode::Invite(Invited {
+                invite: Invite::of(&read).expect("a vault's invite meets at its relay"),
+                relay_key,
+                vault_key: key,
+                admission: invited.map(kotton_net::rendezvous::AdmissionKey::from_bytes),
+            })),
+            Code::Invite(InviteCode::Relay { .. }) => Err(io::Error::other(
+                "this is a relay's invite: it is stood at, not admitted — paste it at Settings' door, or \
+                 `relay set <invite>` on this device",
+            )),
+            Code::Line(_) => Err(io::Error::other(
+                "this is a vault's or a relay's line, which names an instance and makes nobody a member — an \
+                 admit takes a vault's invite (`kotton-invite:vault:…`)",
+            )),
+        };
+    }
+    if code.contains('#') {
+        return Err(io::Error::other(KEYLESS_INVITE));
+    }
+    let (sid, addr) = kotton_peer::pairing::parse_connection_code(code)
+        .map_err(|e| io::Error::other(format!("connection code: {e}")))?;
+    Ok(AdmitCode::Dial(sid, addr))
+}
+
+/// The relay an invite met at, as the line the ceremony's last frame offers it
+/// in: its key, and the address it was met at as the hint.
+pub(crate) fn relay_offered(url: &str, key: [u8; 32]) -> String {
+    kotton_wire::line::InstanceLine { kind: kotton_wire::ipc::OperatedService::Relay, hint: url.to_string(), key }.to_text()
+}
+
+/// What the person is told when the vault that answered is not the one the
+/// invite names: both keys, and that nothing left this device.
+fn not_the_invited_vault(refused: &kotton_peer::pairing::NotThePinnedKey) -> String {
+    format!(
+        "the vault that answered is not the vault the invite names: it proved key {}, and the invite names {} \
+         — nothing was handed over. Whoever answered holds the invite's words and not the vault's key; ask \
+         for the invite again.",
+        hex::encode(refused.answered),
+        hex::encode(refused.pinned),
+    )
+}
+
+/// What the person is told when the relay an invite meets at is not the one
+/// it names.
+fn not_the_invited_relay(refused: &kotton_peer::pairing::NotTheInvitedRelay) -> String {
+    format!(
+        "the relay at {} did not prove the key the invite names, so it was not dialled and nothing was handed \
+         over ({}). Check that the invite was pasted whole, or ask for it again.",
+        refused.url, refused.why
+    )
+}
+
+/// Admit a vault by its invite, or a node **listening** for this one by its
+/// code, under `posture`. Only `BlindStorage` is
+/// admitted this way today — a vault. A Full or co-signing device joins the
+/// other way round, dialling this node, because what those receive is not
+/// something to send to whoever printed a code.
+///
+/// **An invite is held to the two keys its code names**: the meeting relay must prove its key before it is dialled
+/// ([`kotton_peer::pairing::NotTheInvitedRelay`]), and the vault must prove its
+/// key inside the channel before this side says anything about itself
+/// ([`kotton_peer::pairing::NotThePinnedKey`]). A stand-in at either is refused
+/// and nothing is handed over. The six digits stay the standing check: an
+/// invite is a bearer at member level, and the person compares them.
+///
+/// `pinned`, when given, is the vault the person's operator credential names
+/// (`vault invite <v> --me`): the invite must be one and name the
+/// same key, the six digits are confirmed by the key ([`TheKeyConfirms`]) and
+/// never shown, and a vault that proves another key is refused before anything
+/// is handed over.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_device_admit(
+    runtime: Arc<DeviceRuntime>,
+    users: Arc<dyn crate::users::residency::Residency>,
+    db: Arc<SqlitePool>,
+    device_db: Arc<SqlitePool>,
+    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    pending: PendingConfirms,
+    user_id: String,
+    code: String,
+    ttl_seconds: u64,
+    posture: Posture,
+    pinned: Option<PinnedVault>,
+) -> io::Result<HandlerOutput<UserResponse>> {
+    use kotton_peer::pairing::{run_enroll_issuer_dialing, run_enroll_issuer_relayed};
+
+    admits_by_code(posture)?;
+    let (invite, dial) = match read_admit_code(&code)? {
+        AdmitCode::Invite(invited) => (Some(invited), None),
+        AdmitCode::Dial(sid, addr) => (None, Some((sid, addr))),
+    };
+    match (&pinned, &invite) {
+        (Some(_), None) => {
+            return Err(io::Error::other(
+                "an admit held to an operated vault takes the invite its operator minted (`kotton-invite:vault:…`); \
+                 a connection code dials a port, and is not one",
+            ))
+        }
+        // The credential and the code must name one vault, or the admit is
+        // refused before anything is dialled.
+        (Some(p), Some(inv)) if p.key != inv.vault_key => {
+            return Err(io::Error::other(format!(
+                "the vault this invite names is not the vault your operator credential for '{}' pins: the invite \
+                 names key {}, and the credential pins {} — nothing was dialled, and nothing was handed over",
+                p.vault,
+                hex::encode(inv.vault_key),
+                hex::encode(p.key)
+            )))
+        }
+        _ => {}
+    }
+    let secrets = runtime.secrets();
+    let self_name = crate::config::ops::resolve_device_name(&device_db).await;
+    let identity_key = load_signing_key(&user_id, secrets)?;
+    let op_key = load_device_operational_key(secrets)?;
+    let issuer_kel = kotton_identity::kel_store::load_chain(runtime.base_dir(), &user_id)
+        .unwrap_or_default();
+    let issuer_recovery_bundle =
+        kotton_identity::provisioning::read_recovery_bundle_raw(runtime.base_dir(), &user_id)
+            .unwrap_or_default();
+    // Admitting an invite never sets this device's relay: a device that has
+    // none is offered the relay the vault was met at, by its key, in the
+    // ceremony's last frame, and stands there only on the person's yes. A
+    // device that has one keeps it; the vault reserves at its own and the
+    // pair resolves the difference.
+    let own_relay_url = runtime.reachability().nat().relay_url;
+    let relay_offer = invite
+        .as_ref()
+        .filter(|_| own_relay_url.is_empty())
+        .map(|inv| relay_offered(&inv.invite.relay_url, inv.relay_key));
+
+    let (tx, rx) = mpsc::channel::<UserResponse>(16);
+    tokio::spawn(async move {
+        if tx.send(UserResponse::PairConnecting).await.is_err() {
+            return;
+        }
+        let streaming = StreamingConfirmer {
+            tx: tx.clone(),
+            token: Uuid::new_v4().to_string(),
+            pending,
+            ttl: std::time::Duration::from_secs(ttl_seconds),
+        };
+        let confirmer: &dyn kotton_peer::pair_channel::SasConfirmer = match &pinned {
+            Some(_) => &TheKeyConfirms,
+            None => &streaming,
+        };
+        let result = match (&invite, dial) {
+            (Some(inv), _) => {
+                // What the ceremony's one dial presents: at this device's own
+                // relay by its own records — the relay it stands at, or a
+                // relay its person operates at the address their credential
+                // names — the key this machine holds there; anywhere else,
+                // the invited key the code carried and nothing of this
+                // device's — the one choice every dial to an address another
+                // party supplied makes (`RelayKeyring`). An operator taking
+                // their own vault's offer meets it at the relay they operate,
+                // and presents *mine*, which *only my devices* reads.
+                let nat = runtime.reachability().nat();
+                let admission = runtime.reachability().relay_keys().presenting_on_a_dial(
+                    &inv.invite.relay_url,
+                    inv.admission.clone(),
+                    &nat.relay_url,
+                    relay_id(nat.relay_key.as_deref()).as_ref(),
+                );
+                run_enroll_issuer_relayed(
+                    &inv.invite,
+                    inv.relay_key,
+                    &admission,
+                    &identity_key,
+                    &op_key,
+                    &self_name,
+                    runtime.peer_listen_addr(),
+                    &own_relay_url,
+                    posture,
+                    issuer_kel,
+                    issuer_recovery_bundle,
+                    confirmer,
+                    Some(inv.vault_key),
+                )
+                .await
+            }
+            (None, Some((sid, addr))) => {
+                run_enroll_issuer_dialing(
+                    &identity_key,
+                    &op_key,
+                    sid,
+                    addr,
+                    &self_name,
+                    runtime.peer_listen_addr(),
+                    posture,
+                    issuer_kel,
+                    issuer_recovery_bundle,
+                    None,
+                    confirmer,
+                )
+                .await
+            }
+            (None, None) => unreachable!("a code is an invite or a connection code"),
+        };
+        let frame = match result {
+            Ok(enrolled) => {
+                let _ = tx.send(UserResponse::PairTransferring).await;
+                let store = match users.get(&user_id) {
+                    Some(rt) => rt,
+                    None => {
+                        let _ = tx
+                            .send(UserResponse::Error {
+                                message: format!("user runtime '{user_id}' is not loaded"),
+                            })
+                            .await;
+                        return;
+                    }
+                };
+                match finalize_enrolled_node(
+                    runtime.secrets(),
+                    store.as_ref(),
+                    &db,
+                    &paired_keys,
+                    &user_id,
+                    posture,
+                    enrolled,
+                )
+                .await
+                {
+                    Ok(node) => match refused_as(&runtime, node.clone(), &user_id).await {
+                        None => UserResponse::PairingComplete {
+                            node,
+                            session_token: None,
+                            relay_offer,
+                        },
+                        Some(message) => UserResponse::PairFailed {
+                            reason: admitted_but_refused(&user_id, &message),
+                        },
+                    },
+                    Err(e) => UserResponse::PairFailed {
+                        reason: format!("Admitted, but recording the node failed: {e}"),
+                    },
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "admit-by-code ceremony failed");
+                let reason = match (
+                    &pinned,
+                    e.downcast_ref::<kotton_peer::pairing::NotThePinnedKey>(),
+                    e.downcast_ref::<kotton_peer::pairing::NotTheInvitedRelay>(),
+                ) {
+                    (Some(p), Some(refused), _) => not_the_pinned_vault(&p.vault, refused),
+                    (None, Some(refused), _) => not_the_invited_vault(refused),
+                    (_, _, Some(refused)) => not_the_invited_relay(refused),
+                    _ => ceremony_failure(&e),
+                };
+                UserResponse::PairFailed { reason }
+            }
+        };
+        let _ = tx.send(frame).await;
+    });
+    Ok(HandlerOutput::Stream(rx))
+}
+
+/// The one posture an admit by code takes, refused before anything else runs.
+/// It is also why [`refused_as`] says a vault's verb only to a vault: the admit
+/// is its one caller, and a Full or Cosigner admit never reaches the ceremony,
+/// so it never reaches the check after it. That check holds no posture test of its
+/// own, since this one is what makes it unnecessary.
+fn admits_by_code(posture: Posture) -> io::Result<()> {
+    match posture {
+        Posture::BlindStorage => Ok(()),
+        refused => Err(io::Error::other(not_blind_refusal(refused))),
+    }
+}
+
+/// How long the admit waits to hear whether the vault keeps for this device.
+/// A relayed vault reserves for the new pair on its registrar's next pass, a
+/// second or so, and a dial in that gap is answered by nobody; past this, the
+/// admit completes unchecked and the first sync is where a refusal shows.
+const STANDING_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long a refusal must hold before the admit reports it. The vault records
+/// its half of the pairing *after* the channel closes, and this device's half
+/// completes when the channel does, so the first answer can predate the
+/// vault's record: a re-admit under the right name is refused as the old
+/// tenant until the vault has written the new one. A refusal that is still the
+/// answer this long after it was first heard is the vault's standing, not its
+/// lag; an answer in between clears it.
+const REFUSAL_HOLDS: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ask the vault just admitted, under this device's own user, whether it keeps
+/// for this device — `VaultCapacity`, a tenant's verb, which the vault answers
+/// only to a key paired to the pool the request names. The vault's refusal,
+/// when it holds for [`REFUSAL_HOLDS`]; `None` when it answers anything else,
+/// or cannot be reached within [`STANDING_WAIT`].
+///
+/// This is the whole of the check that the name the vault was given
+/// (`kvaultd invite <name>`) is the name this device syncs as: the pairing says
+/// which pool the device's key is in, and every later request names the
+/// device's user, so the one question that compares them is a request. It adds
+/// nothing to the enrolment and nothing to the wire — a verb the device would
+/// say at its first sync anyway, said before the person has anything to sync.
+async fn refused_as(runtime: &DeviceRuntime, node: kotton_wire::peer::PairedNode, user_id: &str) -> Option<String> {
+    let started = tokio::time::Instant::now();
+    let mut refused: Option<(tokio::time::Instant, String)> = None;
+    loop {
+        // One attempt, bounded: a dial down the whole NAT ladder can outlast
+        // the wait on its own.
+        let attempt = async {
+            let client = runtime.open_peer_client(node.clone(), user_id, None).await.ok()?;
+            client
+                .send(&kotton_wire::ipc::UserRequest::VaultCapacity {
+                    user_id: user_id.to_string(),
+                })
+                .await
+                .ok()
+        };
+        let answer = tokio::time::timeout(REFUSAL_HOLDS, attempt).await.ok().flatten();
+        match answer {
+            // The vault's refusal of a stranger, and nothing else: a node that
+            // is not a vault answers a vault's verb with an error that says
+            // nothing about this device's standing there.
+            Some(UserResponse::Error { message }) if message.contains(crate::users::admission::NOT_PAIRED_WITH) => {
+                let since = refused.as_ref().map_or_else(tokio::time::Instant::now, |(t, _)| *t);
+                if since.elapsed() >= REFUSAL_HOLDS {
+                    return Some(message);
+                }
+                refused = Some((since, message));
+            }
+            Some(_) => return None,
+            None => {}
+        }
+        if started.elapsed() >= STANDING_WAIT + REFUSAL_HOLDS {
+            if refused.is_none() {
+                tracing::warn!(node = %node.id, "the admitted vault did not answer in time; its standing is unchecked");
+            }
+            return refused.map(|(_, message)| message);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// What the admit prints when the vault it just admitted refuses this device:
+/// the vault's own sentence, and what to type. When the vault holds this
+/// device's key under another pool, it has said which
+/// ([`crate::users::admission::paired_as_another`]), and the way out is the
+/// operator's: invite again under this device's user. Dropping the tenant the
+/// key was paired to is not a way out — `tenancy::drop_tenant` sweeps the key's
+/// row, which leaves the device paired nowhere and still refused — so it is
+/// named only as the cleanup after the new invite is admitted.
+fn admitted_but_refused(user_id: &str, message: &str) -> String {
+    let what_to_do = if message.contains(crate::users::admission::PAIRED_AS_ANOTHER) {
+        format!(
+            "The vault was given another name for this device than it syncs as. On the host, invite again \
+             under this device's user — `kvaultd invite {user_id}` (or `vault invite [<v>] {user_id}` \
+             from the desktop that holds its credential) — and admit that invite here first. Once \
+             it is admitted, the other tenant can be dropped on the host, if it was only ever this \
+             device's."
+        )
+    } else {
+        format!(
+            "On the host, `kvaultd invite {user_id}` (or `vault invite [<v>] {user_id}` from the desktop \
+             that holds its credential), and admit that invite here."
+        )
+    };
+    format!("Admitted, but the vault will not keep for this device as `{user_id}`: {message}. {what_to_do}")
+}
+
+/// Why no invite is minted at a relay that shows no key: a code names its
+/// relay by its key, and the admitting device holds the relay to it.
+const RELAY_SHOWS_NO_KEY: &str = "the relay this invite would meet at shows no key of its own, so an \
+     invite could not name it — nothing was minted. A relay of today proves its key; upgrade it";
+
+/// Why no invite is minted by a node that presents a key at its relay and may
+/// hand on none — an invitee there, or a person beside the relay's operator on
+/// one machine: the relay reads a key, and the invite could carry none.
+const CANNOT_CARRY_A_KEY: &str = "this node presents a key at its relay, and holds no key there it may \
+     hand on — so an invite minted here would carry no key the relay reads, and its holder would be refused \
+     there. Nothing was minted. An invite to a relay that reads a key is minted where that relay's invited \
+     key is kept: by its operator, or by a vault its operator told it to";
+
+/// Why no invite is minted when its handle could not be reserved, in the
+/// words of the cause: a relay that answered and refused this node by its rule
+/// would refuse whoever was handed the invite too; a relay that was not reached
+/// says nothing about its rule, and is named with what went wrong.
+fn not_minted(relay_url: &str, why: &kotton_peer::pairing::InviteNotReserved) -> String {
+    use kotton_peer::pairing::InviteNotReserved;
+    match why {
+        InviteNotReserved::Refused(answer) => format!(
+            "the relay at {relay_url} refused this node's reservation for the invite ({answer}), so it would \
+             refuse whoever was handed the invite too — nothing was minted. Its rule reads a key this node \
+             does not hold; the relay's operator tells a vault its keys (`vault stand <the vault>` on their \
+             desktop)"
+        ),
+        InviteNotReserved::Unreachable(error) => format!(
+            "could not reach the relay at {relay_url} to reserve the invite ({error}) — nothing was minted. \
+             Check that the relay is up and reachable from here, then ask for the invite again"
+        ),
+    }
+}
+
+/// Mint an invite and wait to be admitted through the relay: reserve under
+/// the invite's handle at this node's relay, stream the invite
+/// (`PairAdvertising`), and run the joiner half when a device dials —
+/// `PairShowCode` → `PairTransferring` → `PairingComplete` | `PairFailed`, the
+/// frames every joiner half streams, so whatever drives one drives them all.
+/// Nothing listens on a public port; the node needs a relay, which it needs to
+/// be reachable after pairing anyway — no second public port, and no code
+/// carrying an address.
+///
+/// `relay_url` is the relay the invite meets at, handed in by the caller that
+/// just refused its absence in its own words — a vault names its settings
+/// file (`kvaultd`'s `NO_RELAY`), a device its `kotton config relay set`
+/// (`kuserd`'s `NO_RELAY_FOR_AN_INVITE`). This function does not read the URL
+/// itself, so there is no path into it that skipped that check, and it keeps
+/// no refusal of its own to backstop one.
+///
+/// `offered` is the relay's *invited* key the caller may hand on with this
+/// invite — a vault's, told it by its operator with its reach set; a person's
+/// own, held as that relay's operator — read by the caller, which knows whose
+/// keys are whose: another person's on the same machine are never carried. It
+/// rides in the code so the invite also admits its holder's first contact at a
+/// relay whose rule is *the people I invite*.
+/// The invite's handle is reserved before the code is handed out, so a relay
+/// that refuses this node refuses the mint, never the person handed it.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_device_invite(
+    runtime: Arc<DeviceRuntime>,
+    relay_url: String,
+    offered: Option<kotton_net::rendezvous::AdmissionKey>,
+    users: Arc<dyn crate::users::residency::Residency>,
+    db: Arc<SqlitePool>,
+    device_db: Arc<SqlitePool>,
+    sessions: sessions::SessionMap,
+    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    pending: PendingConfirms,
+    user_id: String,
+    ttl_seconds: u64,
+    as_name: Option<String>,
+    policy: JoinPolicy,
+) -> io::Result<HandlerOutput<UserResponse>> {
+    use kotton_peer::pairing::run_enroll_join_relayed;
+
+    let node_key = load_device_operational_key(runtime.secrets())?;
+    let warm_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let self_name = match as_name {
+        Some(n) => n,
+        None => crate::config::ops::resolve_device_name(&device_db).await,
+    };
+    let invite = Invite::new(&relay_url);
+    // The code names the relay by its key and this node by its own: the
+    // key recorded for this node's relay, or — none
+    // recorded — the key it proves now. A relay that shows none cannot be
+    // named, and nothing is minted.
+    let relay_key = match relay_id(runtime.reachability().nat().relay_key.as_deref()) {
+        Some(k) => k,
+        None => kotton_peer::relay_key::prove_relay(&invite.relay_url, None)
+            .await
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other(RELAY_SHOWS_NO_KEY))?,
+    };
+    // The relay's *invited* key rides in the code when the caller may hand it
+    // on (`offered`). A node that presents a key at its relay and may hand on
+    // none (`CANNOT_CARRY_A_KEY`) would mint a code carrying no key the relay
+    // reads, so nothing is minted.
+    let invited = offered;
+    if invited.is_none() && runtime.reachability().present_at_own_relay().is_some() {
+        return Err(io::Error::other(CANNOT_CARRY_A_KEY));
+    }
+    // The vault reserves the invite's handle at its own relay, presenting the
+    // key its operator told it with its reach set (`StandAt`) — and does so
+    // before the code is handed to anyone, so a relay that refuses this node
+    // refuses the mint rather than the person handed the code.
+    let admission = runtime.reachability().present_at_own_relay();
+    let reserved = kotton_peer::pairing::reserve_invite(&invite, admission.as_ref())
+        .await
+        .map_err(|e| io::Error::other(not_minted(&invite.relay_url, &e)))?;
+    let code = invite.code_for(node_key.verifying_key().to_bytes(), relay_key, invited.as_ref()).to_text();
+    let expires_at = (now_secs() as u64).checked_add(ttl_seconds).ok_or_else(|| {
+        io::Error::other(format!("an invite of {ttl_seconds}s expires past any timestamp"))
+    })?;
+    // Announced, not merely bound: a relayed circuit observes no address for
+    // the other side to complete a bare port with, so a host that has a public
+    // address says it here: a host has one public address.
+    let peer_listen_addr = runtime.announced_peer_addr();
+
+    let (tx, rx) = mpsc::channel::<UserResponse>(16);
+    tokio::spawn(async move {
+        if tx
+            .send(UserResponse::PairAdvertising { code: kotton_wire::ipc::SecretText::new(code), expires_at })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let confirmer = StreamingConfirmer {
+            tx: tx.clone(),
+            token: Uuid::new_v4().to_string(),
+            pending,
+            ttl: std::time::Duration::from_secs(ttl_seconds),
+        };
+        let result = run_enroll_join_relayed(
+            &invite,
+            reserved,
+            &warm_key,
+            &node_key,
+            ttl_seconds,
+            &self_name,
+            peer_listen_addr,
+            &confirmer,
+        )
+        .await;
+        let frame = match result {
+            Ok(joined)
+                if policy == JoinPolicy::BlindOnly
+                    && (joined.data_keys.is_some()
+                        || joined.frost_share.is_some()
+                        || joined.warm_key_delegation.is_some()) =>
+            {
+                tracing::warn!(user_id = %user_id, "a vault refused a payload carrying keys");
+                UserResponse::PairFailed {
+                    reason: "this node is a vault: it keeps sealed bytes and holds no key, so \
+                             admit it blind"
+                        .to_string(),
+                }
+            }
+            Ok(joined) => {
+                let _ = tx.send(UserResponse::PairTransferring).await;
+                match finalize_joined_node(
+                    &runtime, &*users, &db, &sessions, &paired_keys, &user_id, &warm_key, joined,
+                )
+                .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => UserResponse::PairFailed {
+                        reason: format!("Admitted, but saving failed: {e}"),
+                    },
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "invite ceremony failed");
+                UserResponse::PairFailed {
+                    reason: ceremony_failure_copy(&e.to_string()),
+                }
+            }
+        };
+        let _ = tx.send(frame).await;
+    });
+    Ok(HandlerOutput::Stream(rx))
+}
+
+
+#[cfg(test)]
+mod admit_tests {
+    use super::{admits_by_code, admitted_but_refused, adds_instead, not_minted};
+    use crate::users::admission::{paired_as_another, NOT_PAIRED_WITH};
+    use kotton_schemas::membership::Posture;
+
+    /// **An invite that was not minted says which cause stopped it**:
+    /// only a relay that answered and refused names its rule; one that was not
+    /// reached is named with its address and the error, and says nothing of a
+    /// rule or a key it could not have learned.
+    #[test]
+    fn a_relay_not_reached_is_not_said_to_have_refused_by_its_rule() {
+        use kotton_peer::pairing::InviteNotReserved;
+        const AT: &str = "http://relay.example:7700";
+        let refused = not_minted(AT, &InviteNotReserved::Refused("the relay refused: HTTP error: 403 Forbidden".into()));
+        assert!(refused.contains("refused this node's reservation") && refused.contains("rule reads a key"), "{refused}");
+        assert!(refused.contains("nothing was minted"), "{refused}");
+        let unreached = not_minted(AT, &InviteNotReserved::Unreachable("Connection refused (os error 111)".into()));
+        assert!(unreached.contains("could not reach the relay at http://relay.example:7700"), "{unreached}");
+        assert!(unreached.contains("Connection refused (os error 111)"), "the error is named: {unreached}");
+        assert!(unreached.contains("nothing was minted"), "{unreached}");
+        assert!(
+            !unreached.contains("rule") && !unreached.contains("refused this node") && !unreached.contains("key"),
+            "a relay never reached was said to have refused by its rule: {unreached}"
+        );
+    }
+
+    /// What the admit prints when the vault holds this device under another
+    /// tenant: both names, the invite to type first, and dropping the other
+    /// tenant only after it — a drop alone leaves the device paired nowhere.
+    #[test]
+    fn a_device_paired_as_another_tenant_is_told_to_invite_first_and_drop_after() {
+        let vault = format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice': {}", paired_as_another("sam", "alice"));
+        let said = admitted_but_refused("alice", &vault);
+        assert!(said.contains("tenant `sam`, and asked as `alice`"), "{said}");
+        let invite = said.find("kvaultd invite alice").expect(&said);
+        let drop = said.find("dropped").expect(&said);
+        assert!(invite < drop, "the invite comes before the drop: {said}");
+        assert!(said.contains("Once it is admitted, the other tenant can be dropped"), "{said}");
+        assert!(!said.contains("; or drop"), "dropping is not offered as an alternative: {said}");
+    }
+
+    /// The tenant check after an admit says a vault's verb, so only a blind
+    /// admit may reach it: every other posture is refused before the ceremony,
+    /// and so before the check.
+    #[test]
+    fn only_a_blind_admit_reaches_the_vaults_tenant_check() {
+        assert!(admits_by_code(Posture::BlindStorage).is_ok());
+        for posture in [Posture::Full, Posture::Cosigner, Posture::Gateway] {
+            let refused = admits_by_code(posture).expect_err("only blind is admitted by code");
+            assert!(refused.to_string().contains("blind posture only"), "{refused}");
+        }
+    }
+
+    /// The posture `device add` gives a device for these words, read the way
+    /// `DeviceCommand::add` (`client/shell/src/commands/device.rs`) reads them:
+    /// `--browser` is not a device at all, `--gateway` with a value admits a
+    /// gateway, then `--blind`, then `--cosigner`, and otherwise Full. Anything
+    /// that is not `device add` parses as no posture. A mirror, since this crate
+    /// cannot reach the shell's; it is kept to the four lines that decide.
+    fn device_add_parses(command: &str) -> Option<Posture> {
+        let words: Vec<&str> = command.split_whitespace().collect();
+        let args = words.strip_prefix(&["device", "add"])?;
+        if args.contains(&"--browser") {
+            return None;
+        }
+        if let Some(at) = args.iter().position(|a| *a == "--gateway") {
+            return args.get(at + 1).map(|_| Posture::Gateway);
+        }
+        Some(if args.contains(&"--blind") {
+            Posture::BlindStorage
+        } else if args.contains(&"--cosigner") {
+            Posture::Cosigner
+        } else {
+            Posture::Full
+        })
+    }
+
+    /// Every posture the admit refuses is handed a `device add` that adds a
+    /// device *of that posture* — never a bare one, which is a Full join code, and
+    /// a gateway is never sent to `device join`, since it prints the code and this
+    /// node admits it.
+    #[test]
+    fn every_refused_posture_is_named_the_device_add_that_adds_it() {
+        for posture in [Posture::Full, Posture::Cosigner, Posture::Gateway, Posture::BlindStorage] {
+            let Err(refused) = admits_by_code(posture) else { continue };
+            let said = refused.to_string();
+            // The command is data, held directly: it adds a device of this posture.
+            let add = adds_instead(posture);
+            assert_eq!(device_add_parses(add), Some(posture), "{posture:?} adds by `{add}`");
+            // And the sentence carries that command, backticked, and no other
+            // `device add` — a second one would be a wider hint slipped in after
+            // the right one, which is what this test exists to refuse.
+            let adds: Vec<&str> = said
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .filter(|quoted| quoted.starts_with("device add"))
+                .collect();
+            assert_eq!(adds, vec![add], "{posture:?} names exactly one `device add`: {said}");
+            if posture == Posture::Gateway {
+                assert!(!said.contains("device join"), "a gateway does not join: {said}");
+                assert!(said.contains("prints the code"), "{said}");
+            }
+        }
+    }
+
+    /// The posture guard is the daemon's, and it is the only one: the shell sends
+    /// whatever posture it was asked for, so a device that would hold keys is
+    /// turned away here, before anything is dialled or read, with the sentence
+    /// that says how such a device joins instead, with no flag that has one
+    /// legal value.
+    #[tokio::test]
+    async fn admit_refuses_every_posture_that_could_hold_keys() {
+        use kotton_schemas::membership::Posture;
+        use kotton_store::runtime::user::UserStore;
+        use std::collections::{HashMap, HashSet};
+        use std::sync::{Arc, RwLock};
+
+        struct NobodyResident;
+        impl crate::users::residency::Residency for NobodyResident {
+            fn insert(&self, _: String, _: Arc<UserStore>) {}
+            fn get(&self, _: &str) -> Option<Arc<UserStore>> {
+                None
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(
+            crate::runtime::DeviceRuntime::new_with_secrets(
+                temp.path().to_path_buf(),
+                crate::config::RuntimeConfig::default(),
+                Arc::new(kotton_secret::MemorySecrets::new()),
+            )
+            .await
+            .unwrap(),
+        );
+        let pool = Arc::new(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
+        for posture in [Posture::Full, Posture::Cosigner] {
+            let refused = super::handle_device_admit(
+                runtime.clone(),
+                Arc::new(NobodyResident),
+                pool.clone(),
+                pool.clone(),
+                Arc::new(RwLock::new(HashSet::new())),
+                Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                "alice".into(),
+                "https://relay.example#amber-otter-kite".into(),
+                120,
+                posture,
+                None,
+            )
+            .await;
+            let Err(e) = refused else { panic!("{posture:?} was admitted by invite") };
+            let said = e.to_string();
+            assert!(said.contains("keeps what it cannot read"), "{posture:?}: {said}");
+            assert!(said.contains("`device join <code>` on it"), "{posture:?}: {said}");
+            // The fix it names carries the posture asked for: a bare `device add`
+            // is Full, and would hand a co-signer more than was asked.
+            let add = if posture == Posture::Cosigner { "`device add --cosigner`" } else { "`device add`" };
+            assert!(said.contains(add), "{posture:?}: {said}");
+        }
+    }
+
+    /// A key the vault holds under no tenant is told to be invited, and not
+    /// told of a tenant to drop, since the vault named none.
+    #[test]
+    fn a_device_paired_nowhere_is_told_to_be_invited_and_of_no_tenant() {
+        let said = admitted_but_refused("alice", &format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice'"));
+        assert!(said.contains("kvaultd invite alice"), "{said}");
+        // From the desktop, the vault is named only where it operates several.
+        assert!(said.contains("`vault invite [<v>] alice`"), "{said}");
+        assert!(!said.contains("drop"), "{said}");
+    }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "kotton-context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+kotton-common = { path = "../common" }
+kotton-sys = { path = "../sys" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }

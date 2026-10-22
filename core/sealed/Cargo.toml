@@ -1,0 +1,19 @@
+[package]
+name = "kotton-sealed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+kotton-sys = { path = "../sys" }
+# For `to_object_key` — sync and fs must address the same key space exactly.
+kotton-schemas = { path = "../schemas" }
+kotton-fs = { path = "../fs" }
+anyhow = "1.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }

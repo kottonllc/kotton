@@ -1,0 +1,247 @@
+[workspace]
+resolver = "2"
+members = [
+    # core/ — internal node implementation (all publish = false)
+    #
+    # Grouped by authority — "on whose authority does this act?" — rather than by
+    # tier number. The old grouping filed `identity`, `peer`, `org` and `store` as "concrete
+    # provider backends" alongside `crypto` and `net`, which flattened the one distinction
+    # that decides where new code goes. A crate's group here is the answer to that question.
+
+    # tools — development and testing only. Nothing under core/ or client/ may
+    # depend on these; they exist so a tool and a test share one definition
+    # instead of two that drift.
+    "tools/pty-drive",
+
+    # mechanism — nobody's authority; no opinion about who is asking
+    "core/common",
+    "core/sys",
+    "core/pair",
+    "core/proc",
+    # `infer`: the Backend trait and the context a host composes. It
+    # links almost nothing on purpose — `cargo xtask infer-check` holds the list.
+    "core/infer",
+
+    # carrier — names a principal and holds their keys; holds no behaviour, so acts on nothing
+    "core/context",
+
+    # primitives — nobody's authority
+    "core/wire",
+    "core/schemas",
+    "core/crypto",
+    "core/net",
+    "core/fs",
+    "core/diag",
+    "core/ipc",
+
+    # domains — each acts on one principal's authority
+    "core/identity",
+    "core/peer",
+    "core/record",
+    # `sealed` is below `store` (store depends on it); `sync` is above it. Two names
+    # because they are two tiers — see core/sealed/src/lib.rs.
+    "core/sealed",
+    "core/store",
+    "core/sync",
+    "core/org",
+    "core/grant",
+    "core/msg",
+    "core/app",
+    "core/outbound",
+    "core/surface",
+    "core/secret",
+    "core/device",
+
+    # enforcement — decides who is asking
+    "core/session",
+    "core/kuserd",
+    "core/kdeviced",
+    "core/kvaultd",
+
+    # the scenario harness: drives a real topology of the above (infra/scenarios)
+    "core/kquicd",
+    "core/ksyncd",
+    # `kinferd`: the inference runtime as its own keyless process,
+    # reached only over the pipe pair `kuserd` hands it at spawn.
+
+    # dissolving — the move to domains; does not exist in the target
+
+    # `wasm` acts on the app principal's authority — `grant_check.rs` is the 8-step
+    # `check_grant`, that principal's whole enforcement path. It is not a consumer: it is
+    # a crate that *decides whether a guest may act*, which is authority of its own.
+
+    # client/ — host, unprivileged. No authority of its own; it asks.
+    # The region is the rule: nothing in core/ may depend on anything here.
+    "client/kotton-client",   # native client SDK (CLI, host)
+    "client/kotton-operator", # device-operator SDK (kctl)
+    "client/shell",
+    "client/cli",
+    "client/record-file",     # a governance record's file and its row; the one header parser
+
+    # xtask - Internal code-generation tasks (cargo xtask gen-docs, etc.)
+    "xtask",
+
+    # Test instruments — not part of a node. `css-support` measures what the
+    # renderer we ship actually supports, so the design system's floor is a
+    # test rather than an assumption.
+
+    # Integration test harness — tests daemon + SDK as black boxes
+    "tests",
+
+    # Test fixtures — compiled as part of the workspace so integration tests can
+    # locate their binaries via CARGO_BIN_EXE_* / MOCK_RUNNER_BIN env vars.
+    "tests/fixtures/mock-runner",
+]
+
+exclude = [
+    # One feature set for every test build. Every member dev-depends on it, and it
+    # must never be a member itself: a member is a root of every build run here, and its
+    # test features would reach the binaries a person is handed. `xtask/src/workspace_hack.rs`
+    # says why it has this shape; `cargo xtask workspace-hack` writes it and
+    # `workspace-hack-check` in `just lint` holds it.
+    "tools/workspace-hack",
+    # tools/floor-bench — benchmarks a *backend candidate* (llama-cpp-2) and must not
+    # be built by `cargo build --workspace`. The backend is chosen by
+    # measurement and that choice is unmade; a tool that measures a candidate must not
+    # quietly make it a dependency of the tree. Nothing in core/ or client/ may
+    # path-depend on it.
+    "tools/floor-bench",
+    # guest/ — confined. Targets wasm32-wasip2, built via `cargo xtask build-apps`.
+    # Cargo enforces the build separation; the region rule enforces the source one,
+    # which cargo does not: nothing here may path-depend on core/ or client/.
+    "guest/sdk/kotton-app",    # lib dependency of the app crates (path dep)
+    "guest/apps/kotton-shell",  # WASM component — build via `cargo xtask build-apps`
+    "guest/apps/kotton-editor", # WASM component — build via `cargo xtask build-apps`
+    "guest/apps/kotton-records", # WASM component — build via `cargo xtask build-apps`
+    "tests/fixtures/probe-app", # WASM component; a fixture asking for two capabilities
+    # Confined extensions — WASM components targeting the `fetcher`
+    # world rather than `app`, so they bind WIT directly instead of via the SDK.
+    "guest/extensions/feed-reader",
+    # The worked example an app author copies. In-tree so the same gate compiles it;
+    # an out-of-tree author swaps its path dependency for a git URL and rev.
+    "guest/examples/notes",
+    # What `kotton app new` writes, kept here so `cargo xtask build-apps` compiles it.
+    "guest/examples/hello",
+    # Test instrument, not part of the node: an LD_PRELOAD cdylib that watches the suite
+    # for non-loopback binds. Excluded so nothing can depend on it and so a normal build
+    # never pays for it; `cargo xtask bind-check` builds it on demand.
+    "tools/bindwatch",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+authors = ["Kotton LLC"]
+repository = "https://github.com/kottonllc/kotton"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Cryptography
+aes-kw = "0.2"  # AES-256-KW (RFC 3394) — per-object DEK wrapping
+chacha20poly1305 = "0.10"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+frost-ed25519 = { version = "2.2", features = ["serde"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+curve25519-dalek = { version = "4.1", features = ["digest"] }
+sha2 = "0.10"
+blake3 = "1.5"
+hkdf = "0.12"
+rand = "0.8"
+getrandom = { version = "0.2", features = ["js"] }
+argon2 = "0.5"
+bip39 = "2.0"
+
+# Versioning
+semver = { version = "1.0", features = ["serde"] }
+# HTTP/Web
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+hyper = "1.0"
+
+# AWS
+aws-config = "1.1"
+aws-sdk-s3 = "1.13"
+
+# JWT
+jsonwebtoken = "9.2"
+
+# Time
+time = { version = "0.3", features = ["serde", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# WebSocket
+tokio-tungstenite = "0.21"
+
+# UUID
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Config
+dotenvy = "0.15"
+
+# Windows binary metadata — embeds ProductName/CompanyName/FileDescription into the
+# .exe so the OS firewall dialog, Task Manager, and file properties show "Kotton …"
+# instead of a bare path. Build-dependency, gated to `cfg(windows)` per crate.
+winresource = "0.1"
+
+# ── Workspace-wide lint configuration ────────────────────────────────────────
+# Each crate opts in with `[lints] workspace = true` in its own Cargo.toml.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# Warn on common correctness issues without requiring full pedantic mode.
+# Upgrade individual rules to deny as the codebase matures.
+dbg_macro = "warn"
+todo = "warn"
+
+# ── Dev profile ───────────────────────────────────────────────────────────────
+# Optimize DEPENDENCIES at opt-level 3 even in debug builds, while keeping our own
+# crates unoptimized (fast incremental builds, debuggable). This is the standard fix
+# for software-rendered apps: `kuid` rasterizes the whole desktop on the CPU via
+# `vello_cpu` (GPU is blocked on Windows — see compositor/01), and an UNOPTIMIZED
+# software rasterizer is unusably slow (10–50× the release cost). Optimizing the
+# vello_cpu / blitz / parley / stylo dependency tree makes `just desktop::run`
+# (a debug build) fluid without forcing a full release build.
+# First rebuild after adding this recompiles all deps optimized (one-time, ~minutes);
+# subsequent builds are cached and fast.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Debug info is what makes linking dominate this workspace's build. `tests/tests/`
+# is 39 files, so it is 39 separate binaries, each statically linking the tree —
+# and touching a low crate like `kotton-runtime` relinks essentially all of them.
+# Measured at full `debug = true`: ~6s to link one test binary and 4.06 GB of
+# executables in `target/debug/deps`, which is how `just test` reached 20 minutes
+# without a single slow test in it.
+#
+# `line-tables-only` keeps file and line numbers in backtraces and panic output —
+# the thing that makes a failing test legible — and drops the variable-inspection
+# data a step debugger would want. If you need to step through code, override this
+# locally rather than raising it for everyone.
+[profile.dev]
+debug = "line-tables-only"
+
+# ── Release profile ───────────────────────────────────────────────────────────
+[profile.release]
+lto = true          # link-time optimisation for smaller, faster binaries
+strip = true        # strip debug symbols from the final binary
+codegen-units = 1   # single codegen unit for maximum inlining

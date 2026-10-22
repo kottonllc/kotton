@@ -1,0 +1,47 @@
+[package]
+name = "kotton-wire"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[features]
+# Enable TypeScript type generation for IPC wire types.
+# Run: `cargo test -p kotton-wire export_ts_bindings` with TS_RS_EXPORT_DIR set.
+ts-types = ["dep:ts-rs", "kotton-schemas/ts-types"]
+
+[dependencies]
+# Same-tier dep: kotton-schemas is also layer 02 but has no dep on kotton-wire
+# (no cycle). GrantEnvelope wraps Vec<CapabilityGrant> defined there.
+kotton-schemas = { path = "../schemas" }
+kotton-pair = { path = "../pair" }
+# The inference channel's frames carry `Context`, `ModelManifest` and `Metering`
+# (RFC-0085). They live beside the trait that consumes them so the two cannot
+# drift, and this edge runs the same direction as `kotton-pair` above — a
+# primitive naming a mechanism, never the reverse.
+kotton-infer = { path = "../infer" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+hex = "0.4"
+# Compact wire encoding for bulk sealed blobs — a Vec<u8> in JSON is a 4x array
+# of numbers; base64 keeps it ~1.33x. Encoding only (see src/base64_bytes.rs).
+base64 = "0.22"
+
+# TypeScript codegen (opt-in, used by cargo xtask gen-types)
+ts-rs = { version = "10", features = ["serde-compat"], optional = true }
+
+# Time for timestamps
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Error handling
+thiserror = "2.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }

@@ -1,0 +1,83 @@
+[package]
+name = "kotton-device"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "The machine's own authority — device identity and node configuration."
+
+[dependencies]
+anyhow = "1.0"
+
+# Platform traits (keypair generation for the device's operational key).
+kotton-sys = { path = "../sys" }
+# Ed25519 + did:key derivation for the device identity.
+kotton-crypto = { path = "../crypto" }
+# Reachability parameters belong to the peer domain and are re-exported into
+# RuntimeConfig rather than redefined here.
+kotton-peer = { path = "../peer" }
+# `network` builds transports and discovery from this machine's config.
+# Domain -> primitive, which is the legal direction; a `net` that named
+# TransportConfig would be the inversion.
+kotton-net = { path = "../net" }
+# `runtime` — `DeviceRuntime` and the services it starts (RFC-0080 step 6).
+# None of these is a path to a user's data: `record` for the schema registry,
+# `surface` for the window table, `secret` for sealed custody, `session` for
+# the auth service. The crate still names no `UserStore`, which is the
+# invariant this whole move was arranged around.
+kotton-record = { path = "../record" }
+# device may *name* a user's store; it may not enumerate or resolve one — that is
+# residency, and residency stays in the daemon (RFC-0080 step 6). Added 2026-08-24:
+# without it, 44 operations that are methods on the machine had to live in kuserd as
+# an extension trait, and three files had no home at all.
+kotton-store = { path = "../store" }
+kotton-fs = { path = "../fs" }
+# `users::models` installs a model: the manifest is `ModelManifest`, unchanged,
+# and this crate writes it as a record. Domain -> mechanism tier, the legal
+# direction; `infer` names nothing here and must not (RFC-0085 IN1).
+kotton-infer = { path = "../infer" }
+kotton-schemas = { path = "../schemas" }
+kotton-ipc = { path = "../ipc" }
+kotton-session = { path = "../session" }
+chrono = { version = "0.4", features = ["serde"] }
+hostname = "0.4"
+kotton-secret = { path = "../secret" }
+# The machine implements `identity`'s ProvisioningHost; identity must not
+# know this crate exists, so the impl lives on this side.
+kotton-identity = { path = "../identity" }
+kotton-common = { path = "../common" }
+bs58 = "0.5"
+blake3 = "1"
+rand = "0.8"
+kotton-wire = { path = "../wire" }
+# `config::db` — this machine's `device_config` table. Moved out of `kuserd` on
+# 2026-08-24: it is the machine's own configuration storage, not the daemon's.
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+async-trait = "0.1"
+ed25519-dalek = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+kotton-diag = { path = "../diag" }
+uuid = { version = "1", features = ["v4"] }
+# `registry` records the component versions a user's data was written with.
+semver = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = "2.5"
+hex = "0.4"
+
+# Identity-drift warnings when the crypto library tag changes.
+tracing = { workspace = true }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tempfile = "3.8"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+# `a_fresh_node_makes_its_base_dir_and_system_owner_only` sets its process's
+# umask, safely (the workspace denies `unsafe`). Already in the tree.
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1.1", features = ["fs", "process"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,80 @@
+[package]
+name = "kvaultd"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+# lib target lets integration tests construct a Vault in-process, the way they
+# construct a DeviceDaemon.
+[lib]
+name = "kvaultd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kvaultd"
+path = "src/main.rs"
+
+# What a keeper links, and — checked by `cargo xtask vault-check` — what it does
+# not: `kotton-app`, `kotton-surface`, `kotton-msg`, `kotton-wasm`. A vault is
+# the binary in which the apps, the sandbox, the display and every plaintext
+# verb do not exist (RFC-0084 V1).
+[dependencies]
+kotton-sys = { path = "../sys" }
+kotton-wire = { path = "../wire" }
+kotton-schemas = { path = "../schemas" }
+kotton-ipc = { path = "../ipc" }
+kotton-net = { path = "../net" }
+kotton-peer = { path = "../peer" }
+kotton-device = { path = "../device" }
+kotton-store = { path = "../store" }
+kotton-fs = { path = "../fs" }
+kotton-identity = { path = "../identity" }
+kotton-secret = { path = "../secret" }
+kotton-session = { path = "../session" }
+kotton-common = { path = "../common" }
+kotton-crypto = { path = "../crypto" }
+kotton-diag = { path = "../diag" }
+
+serde_json = "1.0"
+# The credential type the S3 shelf takes; the client itself is `kotton-store`'s.
+rusty-s3 = "0.10"
+hex = "0.4"
+anyhow = "1.0"
+async-trait = "0.1"
+tokio = { version = "1.41", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+base64 = "0.22"
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { workspace = true }
+tracing-log = "0.2"
+
+# A released vault is `x86_64-unknown-linux-musl` and static (`cargo xtask release-server
+# vault`, DEC-0085). sqlcipher, under `kotton-record`'s `bundled-sqlcipher`, links
+# OpenSSL's libcrypto, and a musl builder has none, so on musl — and only there — the
+# vault builds OpenSSL from source and links it in. Resolver 2 turns a target-specific
+# dependency's features on only for that target: the desktop and every -gnu build link the
+# system's OpenSSL as before. `.cargo/config.toml` sets `OPENSSL_NO_VENDOR=1` for every
+# build and lifts it for this target alone, by openssl-sys's target-prefixed name.
+[target.'cfg(target_env = "musl")'.dependencies]
+libsqlite3-sys = { version = "0.28", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+# The uid a vault runs as, which its state directory must be owned by
+# (`instance::own_state_dir`): `geteuid`, safely, as the workspace denies
+# `unsafe`. Already in the tree.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["process"] }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tempfile = "3.8"
+# A sealed write is checked against its content hash; a test must declare one.
+blake3 = { workspace = true }
+
+[lints]
+workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = { workspace = true }

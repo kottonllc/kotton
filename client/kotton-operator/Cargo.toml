@@ -1,0 +1,17 @@
+[package]
+name = "kotton-operator"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+kotton-ipc = { path = "../../core/ipc" }
+kotton-wire = { path = "../../core/wire" }
+
+tokio = { version = "1.41", features = ["full"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }

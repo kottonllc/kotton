@@ -1,0 +1,21 @@
+# The JSON surface of the relay operator channel. Generated — do not hand-edit.
+# Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
+# Variants sorted by name; fields in declaration order, which is the order
+# serde writes them. See xtask/src/wire_check.rs for why this file exists.
+# variants: 7
+Anyone
+OnlyMyDevices
+PeopleIInvite
+ReadRule
+Refused
+    reason: String
+Rule
+    rule: AdmissionRule
+    mine_epoch: u64
+    invited_epoch: u64
+SetRule
+    rule: AdmissionRule
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mine: Option<String>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    invited: Option<String>

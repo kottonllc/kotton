@@ -1,0 +1,81 @@
+[package]
+name = "kotton-store"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[features]
+# `write_file_to` / `read_file_from` — a mount named directly rather than routed.
+# Moved here with the VFS (RFC-0080 step 8); the feature had to follow the
+# methods, or enabling it on the runtime would gate nothing.
+test-support = []
+
+[dependencies]
+toml = "0.8"
+anyhow = "1.0"
+# Platform traits
+kotton-sys = { path = "../sys" }
+# `kotton_common::fs::create_dir_all_owner_only`: a user's `data/` may be what makes
+# `users/<id>` and the base dir (TASK-the-base-dir-and-system-are-said-to-be-0700-and-nothing-makes-them-so).
+kotton-common = { path = "../common" }
+kotton-schemas = { path = "../schemas" }
+# Same-tier: RFC-0044 path blinding. Precedent: providers-network -> providers-crypto.
+kotton-context = { path = "../context" }
+kotton-crypto = { path = "../crypto" }
+kotton-wire = { path = "../wire" }
+
+# Async runtime
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+bytes = "1.5"
+
+# Encryption
+aes-kw = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+
+# Azure (optional - feature gated)
+# azure_storage = "0.20"
+# azure_storage_blobs = "0.20"
+
+# IPFS (optional - feature gated)
+# ipfs-api-backend-hyper = "0.6"
+
+# Manifest serialization (RFC-0045)
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = "2.0"
+
+# Observability (skipped-superblock warnings, packer progress)
+tracing = { workspace = true }
+
+# `Sealed` — replication's view of a store. Acyclic: `sync` depends only on
+# `sys` and `fs`, and takes a `&dyn SealedObjectAccess` rather than a store.
+kotton-sealed = { path = "../sealed" }
+rusty-s3 = "0.10"
+# The list reply is read here rather than by rusty-s3's typed parser, which
+# demands fields (ETag) some servers omit from a listing.
+roxmltree = "0.20"
+time = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
+# **Dev-only, deliberately** (RFC-0080 step 5): this domain takes a filesystem, so
+# it cannot name a host OS even by accident — which is what keeps a bare-metal
+# port a substitution rather than a rewrite. It was briefly a real dependency on
+# 2026-08-21; `Fs` and `to_object_key` moved to where their users are instead.
+kotton-fs = { path = "../fs" }
+s3s = "0.14"
+s3s-fs = "0.14"
+tempfile = "3.8"
+
+[lints]
+workspace = true

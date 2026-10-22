@@ -1,0 +1,46 @@
+# kotton-relay configuration reference
+#
+# The relay reads configuration from environment variables (or CLI flags).
+# This file documents every tunable and its default.
+#
+# In Docker / docker-compose, set these as environment variables.
+# On bare-metal, pass them as flags: kotton-relay --bind 0.0.0.0:7700 ...
+#
+# Environment variable → CLI flag mapping:
+#
+#   KOTTON_RELAY_BIND           --bind
+#   KOTTON_RELAY_TTL            --ttl
+#   KOTTON_RELAY_TLS_CERT       --tls-cert
+#   KOTTON_RELAY_TLS_KEY        --tls-key
+#   KOTTON_RELAY_NO_AUTH_LOOKUP --no-auth-lookup
+
+# ── Network ───────────────────────────────────────────────────────────────────
+
+# Address and port the relay listens on.
+# Default: 0.0.0.0:7700  (all interfaces, plain HTTP)
+# For TLS, set KOTTON_RELAY_TLS_CERT and KOTTON_RELAY_TLS_KEY and use port 7701.
+KOTTON_RELAY_BIND = "0.0.0.0:7700"
+
+# ── Peer-address store ────────────────────────────────────────────────────────
+
+# Seconds before a registered peer address expires.
+# Nodes re-announce on each daemon start and periodically; 60s is conservative.
+# Increase for nodes that restart infrequently; decrease for faster eviction.
+KOTTON_RELAY_TTL = "60"
+
+# ── TLS ───────────────────────────────────────────────────────────────────────
+
+# PEM certificate and private key for TLS.
+# Both must be set together; if neither is set, plain HTTP is used.
+# TLS termination via a reverse proxy (nginx, Caddy) is also supported —
+# in that case leave these unset and let the proxy handle TLS.
+#
+# KOTTON_RELAY_TLS_CERT = "/etc/kotton/relay.crt"
+# KOTTON_RELAY_TLS_KEY  = "/etc/kotton/relay.key"
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+# When true, peer-address lookups do not require a signed Authorization header.
+# Safe for private / firewalled relays; NOT recommended on public relays.
+# Default: false  (auth required)
+KOTTON_RELAY_NO_AUTH_LOOKUP = "false"

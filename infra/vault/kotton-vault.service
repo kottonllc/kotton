@@ -1,0 +1,91 @@
+# The vault, run by systemd on a host (DEC-0085). `install.sh` places this file
+# in /etc/systemd/system; `systemctl enable --now kotton-vault` starts it now and
+# at every boot. What it runs is /usr/local/bin/kvaultd, the one binary the
+# archive carries, and what it is told is /etc/kotton/vault.env, which a person
+# edits and a later install never overwrites.
+#
+# `After=kotton-relay.service` orders it behind a relay on the same host, as the
+# compose file's `depends_on` did, and does not require one: a vault stands at
+# whichever relay its owner's desktop tells it, and starts on its own.
+#
+# It runs as kotton-vault, a system user of its own that install.sh makes when
+# the host has none, and holds no more of the host than that user does: it reads
+# bytes a stranger wrote, so it does not do it as root
+# (TASK-the-relay-and-the-vault-run-as-root-on-a-box). systemd makes its state
+# and runtime directories owned by that user and, by its documentation (not yet
+# run), hands a state directory an older release left root's to that user at the
+# next start. `kvaultd invite`,
+# `tenants`, `drop` and `operator` are typed bare at the host's shell, as root or
+# as kotton-vault: they read /etc/kotton/vault.env as this unit does, write
+# nothing themselves, only speak to the door this service makes, and the door
+# asks nothing of its caller's uid.
+
+[Unit]
+Description=Kotton vault: keeps a person's sealed pools and cannot read them
+Documentation=https://github.com/kottonllc/kotton/blob/main/docs/use/run-a-vault.md
+Wants=network-online.target
+After=network-online.target kotton-relay.service
+
+[Service]
+User=kotton-vault
+Group=kotton-vault
+EnvironmentFile=/etc/kotton/vault.env
+ExecStart=/usr/local/bin/kvaultd
+Restart=on-failure
+RestartSec=5
+StateDirectory=kotton-vault
+StateDirectoryMode=0700
+# The door's socket: XDG_RUNTIME_DIR in vault.env names this directory, so a
+# verb at the host's shell, reading the same file, finds the socket the service made.
+RuntimeDirectory=kotton-vault
+RuntimeDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
+# What the binary never reaches for, taken away
+# (TASK-the-relay-and-the-vault-units-are-still-rated-exposed). Run under systemd
+# 255 on Ubuntu 24.04 with it serving, its reservation listener started at a
+# relay, and `kvaultd tenants` reaching its door; traced there, it opens
+# AF_INET, AF_INET6 and AF_UNIX (its door)
+# sockets and nothing else — no AF_NETLINK, since it lists no interfaces. A call
+# outside the filter fails with EPERM rather than killing the process, so one
+# path nobody traced fails in its own log line instead of taking every
+# connection down with it. Empty CapabilityBoundingSet= is the bounding set
+# only: a non-root service under NoNewPrivileges= holds no capability anyway.
+CapabilityBoundingSet=
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+# The rest systemd-analyze counts, each one line for a binary that never reaches
+# for it (TASK-the-relay-and-the-vault-units-leave-ten-directives-unset-that-nobody-has-run).
+# Traced outside systemd while it served at a relay with `kvaultd tenants` at
+# its door, it made no SysV or POSIX IPC object and no writable and executable
+# mapping, asked for no realtime scheduling, and read no /proc file but its
+# own. PrivateUsers= maps only root and this unit's user; the door asks nothing
+# of its caller's uid, and the verbs typed at it run outside the unit.
+# None of these six has run under systemd yet: a host that will not start with
+# one names it in the journal. Why RootDirectory=, PrivateNetwork=,
+# IPAddressDeny= and DeviceAllow= are not set is in that record.
+RemoveIPC=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+ProtectProc=invisible
+ProcSubset=pid
+PrivateUsers=yes
+
+[Install]
+WantedBy=multi-user.target

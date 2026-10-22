@@ -1,0 +1,48 @@
+[package]
+name = "kotton-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+kotton-sys = { path = "../sys" }
+
+async-trait = "0.1"
+tokio = { version = "1.41", features = ["io-util", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+# The pipe path a `NamedPipe`'s name opens at: `kotton_common::paths::pipe_path`.
+kotton-common = { path = "../common" }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Pipes",
+    "Win32_System_WindowsProgramming",
+] }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tokio = { version = "1.41", features = ["full"] }
+tempfile = "3.8"
+
+[features]
+# The OS acceptor — a listener on a filesystem path, and the client and
+# `ChannelAcceptor` built on it. Default-on, so every existing consumer is
+# unchanged; a process that only reads frames on descriptors it was handed takes
+# `default-features = false` and stops linking `tokio/net`, and with it `socket2`.
+#
+# `kinferd` is the reason this exists. It parses untrusted weights and reaches
+# its daemon over inherited pipes, so a socket type in its closure is reach it
+# has no use for — `CLAUDE.md`'s second design test asks what makes a check
+# necessary, and `infer-check`'s rule against `kinferd` opening a socket is
+# answered better by it not linking one.
+default = ["os-provider"]
+os-provider = ["tokio/net"]
+test-utils = []
+
+[lints]
+workspace = true

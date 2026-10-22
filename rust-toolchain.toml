@@ -1,0 +1,6 @@
+[toolchain]
+# One version, not a channel: `just lint` holds the workspace to `-D warnings`, and a
+# toolchain that moved under it would fail every pull request on a lint nobody wrote. A newer
+# compiler is a pull request that bumps this line and sweeps what the new clippy says.
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]

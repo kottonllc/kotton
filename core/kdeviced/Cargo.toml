@@ -1,0 +1,36 @@
+[package]
+name = "kdeviced"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+kotton-sys = { path = "../sys" }
+kotton-wire = { path = "../wire" }
+kotton-ipc = { path = "../ipc" }
+kotton-crypto = { path = "../crypto" }
+kotton-common = { path = "../common" }
+kotton-secret = { path = "../secret" }
+hex = "0.4"
+
+tokio = { version = "1.41", features = ["full"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+uuid = { version = "1.6", features = ["v4"] }
+rand = "0.8"
+base64 = "0.22"
+ed25519-dalek = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { workspace = true }
+tracing-log = "0.2"
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tempfile = "3.8"
+
+[lints]
+workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = { workspace = true }

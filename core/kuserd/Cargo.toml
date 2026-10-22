@@ -1,0 +1,99 @@
+[package]
+name = "kuserd"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+# lib target lets integration tests import DeviceDaemon directly.
+[lib]
+name = "kuserd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kuserd"
+path = "src/main.rs"
+
+[dependencies]
+kotton-sys = { path = "../sys" }
+kotton-wire = { path = "../wire" }
+# The inference channel's types (RFC-0085). The daemon composes the context and
+# reads the tokens; the weights parser lives in `kinferd`, which this crate
+# spawns and never links.
+kotton-infer = { path = "../infer" }
+kotton-schemas = { path = "../schemas" }
+kotton-ipc = { path = "../ipc" }
+kotton-net = { path = "../net" }
+kotton-peer = { path = "../peer" }
+kotton-pair = { path = "../pair" }
+kotton-device = { path = "../device" }
+kotton-sync = { path = "../sync" }
+kotton-record = { path = "../record" }
+kotton-surface = { path = "../surface" }
+kotton-secret = { path = "../secret" }
+kotton-diag = { path = "../diag" }
+kotton-session = { path = "../session" }
+kotton-common = { path = "../common" }
+kotton-crypto = { path = "../crypto" }
+kotton-identity = { path = "../identity" }
+kotton-org = { path = "../org" }
+kotton-grant = { path = "../grant" }
+kotton-msg = { path = "../msg" }
+kotton-app = { path = "../app" }
+# The operating-system sandbox every guest process is spawned under (DEC-0074).
+kotton-proc = { path = "../proc" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+blake3 = { workspace = true }
+hmac = "0.12"
+hex = "0.4"
+thiserror = "1.0"
+anyhow = "1.0"
+tokio = { version = "1.41", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+async-trait = "0.1"
+uuid = { version = "1.6", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+hostname = "0.4"
+tracing = "0.1"
+tracing-subscriber = { workspace = true }
+tracing-log = "0.2"
+argon2 = { version = "0.5", features = ["std"] }
+ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
+aes-kw = { workspace = true }
+hkdf = { workspace = true }
+rand = "0.8"
+base64 = "0.22"
+frost-ed25519 = { workspace = true }
+notify = { version = "6", features = ["macos_fsevent"] }
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+axum = { version = "0.7", features = ["ws"] }
+tokio-rustls = "0.26"
+rcgen = "0.13"
+bs58 = "0.5"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+hyper = { version = "1", features = ["full"] }
+tower = { version = "0.4", features = ["util"] }
+# Promoted from dev-dependencies 2026-08-20: the maintenance loop packs and compacts
+# the user's store, and had been reaching those two functions through
+# `kotton_runtime::user`, which only re-exports them from here.
+kotton-store = { path = "../store" }
+# The daemon may name a host OS; `store` may not. See UserStore::local_store_with.
+kotton-fs = { path = "../fs" }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tempfile = "3.8"
+env_logger = "0.11"
+# Enable MemorySecrets (feature-gated) for the enrollment handler tests.
+kotton-secret = { path = "../secret", features = ["test-utils"] }
+
+[lints]
+workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = { workspace = true }

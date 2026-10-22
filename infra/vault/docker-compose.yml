@@ -1,0 +1,120 @@
+# The relay and the vault as containers, for the scenarios (infra/scenarios/),
+# which `include:` this file and build both from this tree: `rental.yml` wires
+# them into a topology with a NAT and a second machine on one host.
+#
+# **This is not how a host runs them.** Since DEC-0085 a host runs two released
+# binaries under systemd — `cargo xtask release-server relay|vault`, and the
+# units and env files beside it in infra/relay/ and infra/vault/
+# (docs/use/run-a-vault.md). The environment below is the same environment those env
+# files carry, and `release_server`'s tests hold the two to each other, so a
+# variable the host needs and the scenario lacks fails a test rather than a host.
+#
+# **One variable.** A deployment has one public address, and everything on it is
+# reached there: the address the vault announces and the relay listens at
+# (`TASK-a-box-has-one-public-address`). Which relay the vault stands at is not
+# configuration: its owner's desktop tells it
+# (`TASK-the-desktop-tells-the-vault-which-relays-to-stand-at`).
+#
+# The relay listens at KOTTON_RELAY_BIND (default 0.0.0.0:7700); the vault on
+# 7710/udp. Nothing listens to be admitted: `kvaultd invite` meets the person's
+# device at the relay (RFC-0084 V8, DEC-0068).
+
+services:
+  relay:
+    image: kotton-relay:local
+    build:
+      context: ../..
+      dockerfile: infra/relay/Dockerfile
+      args:
+        # The escape hatches `infra/Dockerfile` documents, forwarded. They were
+        # documented and not wired until 2026-09-12: `ARTIFACTS=prebuilt` on the
+        # `docker compose` line did nothing, because compose passes no build
+        # args unless a file says to, so a machine that cannot reach the Rust
+        # base image could not build these at all — which is the one case the
+        # argument exists for.
+        ARTIFACTS: ${ARTIFACTS:-builder}
+        BUILDER_BASE: ${BUILDER_BASE:-rust:1-slim-bookworm}
+        RUNTIME_BASE: ${RUNTIME_BASE:-debian:bookworm-slim}
+        # Same story, 2026-09-14: `APT=0` and `NPM=0` were documented in
+        # `infra/Dockerfile` and not forwarded, so a prepared base could not
+        # tell the build to skip the package steps it no longer needs.
+        APT: ${APT:-1}
+    restart: unless-stopped
+    ports:
+      - "${KOTTON_RELAY_BIND:-0.0.0.0:7700}:7700"
+    environment:
+      KOTTON_RELAY_BIND: "0.0.0.0:7700"
+      KOTTON_RELAY_TTL: "${KOTTON_RELAY_TTL:-60}"
+      # The relay's one rule — who may use it — and the operators who may set
+      # it, kept here so a restart keeps the last rule it was given. This is the
+      # relay's own configuration and none of what it carries: two admission
+      # keys, counts, a time, and the operators' public keys
+      # (TASK-a-relays-admission-rule-is-set-by-its-operator-over-the-wire).
+      # Until an operator sets a rule, the relay admits every signed handle, as
+      # it always has.
+      KOTTON_RELAY_STATE_DIR: /var/lib/kotton-relay
+    volumes:
+      - relay-state:/var/lib/kotton-relay
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7700/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  vault:
+    image: kotton-vault:local
+    build:
+      context: ../..
+      dockerfile: infra/Dockerfile
+      target: vault
+      args:
+        # The escape hatches `infra/Dockerfile` documents, forwarded. They were
+        # documented and not wired until 2026-09-12: `ARTIFACTS=prebuilt` on the
+        # `docker compose` line did nothing, because compose passes no build
+        # args unless a file says to, so a machine that cannot reach the Rust
+        # base image could not build these at all — which is the one case the
+        # argument exists for.
+        ARTIFACTS: ${ARTIFACTS:-builder}
+        BUILDER_BASE: ${BUILDER_BASE:-rust:1-slim-bookworm}
+        RUNTIME_BASE: ${RUNTIME_BASE:-debian:bookworm-slim}
+        # Same story, 2026-09-14: `APT=0` and `NPM=0` were documented in
+        # `infra/Dockerfile` and not forwarded, so a prepared base could not
+        # tell the build to skip the package steps it no longer needs.
+        APT: ${APT:-1}
+        NPM: ${NPM:-1}
+    restart: unless-stopped
+    depends_on:
+      - relay
+    ports:
+      - "${KOTTON_VAULT_BIND:-0.0.0.0:7710}:7710/udp"
+    environment:
+      KOTTON_BASE_DIR: /var/lib/kotton
+      KOTTON_PEER_LISTEN_PORT: "7710"
+      # The host's one address, handed to the vault itself: it is what the vault
+      # tells the device that admits it through the relay, since over a relayed
+      # circuit nothing observes an address to complete the announced port with
+      # (`TASK-a-box-has-one-public-address`, the second row). Unset, the vault
+      # announces only its port and is reached through its relay.
+      KOTTON_PUBLIC_ADDR: "${KOTTON_PUBLIC_ADDR:-}"
+      # No relay is named here (`TASK-the-desktop-tells-the-vault-which-relays-to-stand-at`,
+      # RFC-0084 V12): a vault stands where its owner's desktop tells it, and
+      # keeps that in its own state. `KOTTON_RELAY_URL` stood here from
+      # 2026-09-11 to 2026-09-29 and is read by nothing now.
+      # The one meter: bytes each pool may hold. 0 or unset is no quota.
+      KVAULTD_QUOTA_BYTES: "${KVAULTD_QUOTA_BYTES:-0}"
+      # Where the pools rest: `local` (the volume below) or `s3` (a bucket,
+      # named by the KVAULTD_S3_* variables — see the README).
+      KVAULTD_SHELF: "${KVAULTD_SHELF:-local}"
+      KVAULTD_S3_ENDPOINT: "${KVAULTD_S3_ENDPOINT:-}"
+      KVAULTD_S3_BUCKET: "${KVAULTD_S3_BUCKET:-}"
+      KVAULTD_S3_REGION: "${KVAULTD_S3_REGION:-us-east-1}"
+      KVAULTD_S3_PREFIX: "${KVAULTD_S3_PREFIX:-}"
+      KVAULTD_S3_ACCESS_KEY: "${KVAULTD_S3_ACCESS_KEY:-}"
+      KVAULTD_S3_SECRET_KEY: "${KVAULTD_S3_SECRET_KEY:-}"
+      RUST_LOG: "${RUST_LOG:-info}"
+    volumes:
+      - vault-data:/var/lib/kotton
+
+volumes:
+  vault-data:
+  relay-state:

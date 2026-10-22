@@ -1,0 +1,37 @@
+[package]
+name = "kotton-org"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+kotton-common = { path = "../common" }
+kotton-crypto = { path = "../crypto" }
+kotton-identity = { path = "../identity" }
+kotton-sys = { path = "../sys" }
+kotton-wire = { path = "../wire" }
+kotton-schemas = { path = "../schemas" }
+
+anyhow = "1.0"
+ed25519-dalek = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+quinn = "0.11"
+serde = { workspace = true }
+serde_json = { workspace = true }
+frost-ed25519 = { workspace = true }
+hex = "0.4"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+uuid = { version = "1.6", features = ["v4"] }
+rand = "0.8"
+base64 = "0.22"
+tracing = { workspace = true }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+ed25519-dalek = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

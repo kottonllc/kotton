@@ -1,0 +1,26 @@
+[package]
+name = "ksyncd"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+kotton-sys = { path = "../sys" }
+kotton-wire = { path = "../wire" }
+kotton-ipc = { path = "../ipc" }
+kotton-common = { path = "../common" }
+
+tokio = { version = "1.41", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { workspace = true }
+tracing-log = "0.2"
+
+[lints]
+workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = { workspace = true }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }

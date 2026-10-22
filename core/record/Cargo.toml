@@ -1,0 +1,54 @@
+[package]
+name = "kotton-record"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+# The record verbs check a schema grant before acting; `grant` owns that table.
+kotton-grant = { path = "../grant" }
+kotton-wire = { path = "../wire" }
+# Platform abstraction
+kotton-sys = { path = "../sys" }
+# `open` derives the per-user database key from the keychain.
+kotton-crypto = { path = "../crypto" }
+kotton-common = { path = "../common" }
+
+# Schema types
+kotton-schemas = { path = "../schemas" }
+anyhow = { workspace = true }
+# `import` stamps a record with when it arrived, and resolves an `.ics` DURATION
+# against its DTSTART. Already a dependency of eight core crates.
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+# Database - sqlx for the connection pool (`open_sqlite`); rusqlite for RecordStore
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher"] }
+
+# Async
+async-trait = "0.1"
+tokio = { version = "1.35", features = ["full"] }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Hex encoding for SQLCipher key
+hex = "0.4"
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tokio = { version = "1.35", features = ["full", "test-util", "macros"] }
+tempfile = "3.8"
+
+[lints]
+workspace = true

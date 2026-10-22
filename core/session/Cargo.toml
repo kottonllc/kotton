@@ -1,0 +1,33 @@
+[package]
+name = "kotton-session"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+# `lock_policy` — the per-user PIN and lock mode. Moved out of `kuserd` on
+# 2026-08-24: deciding whether a PIN unlocks a session is this crate's question,
+# not the daemon's.
+kotton-crypto = { path = "../crypto" }
+kotton-wire = { path = "../wire" }
+argon2 = "0.5"
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+serde = { version = "1", features = ["derive"] }
+kotton-sys = { path = "../sys" }
+# `tokens` stamps expiry with the shared clock.
+kotton-common = { path = "../common" }
+tracing = "0.1"
+
+async-trait = "0.1"
+thiserror = "2.0"
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tempfile = "3"
+rand = "0.8"
+tokio = { version = "1.42", features = ["full"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,9 @@
+# The key that signs a Kotton release's SHA256SUMS (DEC-0088). One line per key, in the format
+# `ssh-keygen -Y verify -f allowed_signers` reads (ssh-keygen(1), ALLOWED SIGNERS).
+#
+# The owner's release key, committed 2026-09-29 from the public half `ssh-keygen -t ed25519
+# -f <key> -C release@kotton` wrote on the owner's machine. The private half never leaves that
+# machine and is never put in GitHub (DEC-0088).
+#
+# A second key is a second line; retiring one is a commit that deletes it.
+release@kotton namespaces="kotton-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDfffhYqjAva76Ns3J6UIAi0DSbduubQrJN/pd1J4YR2

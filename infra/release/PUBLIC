@@ -1,0 +1,84 @@
+# What the public repository holds: one path per line, relative to the root of this one, a
+# directory meaning everything under it that git tracks. `tools/export-public.sh <out>` copies
+# exactly these into <out>, writes the three pages below from their `.public.md` sources, and
+# proves the result builds and tests on its own. A line starting with `#` is a note, and a
+# blank line is nothing.
+#
+# The release: seven binaries (kuserd, kdeviced, kquicd, ksyncd, kotton, kvaultd, the relay),
+# kotton-start, install.sh, and the prose that is the release.
+
+# The workspace, its lock and its toolchain. The script rewrites `members` to the crates below
+# and leaves every other line as it is.
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+.cargo/config.toml
+.gitignore
+.gitleaks.toml
+
+# The seven binaries.
+core/kuserd
+core/kdeviced
+core/kquicd
+core/ksyncd
+core/kvaultd
+client/cli
+infra/relay
+
+# What they link: every workspace crate `cargo tree --edges normal,build` reaches from the
+# seven. `app`, `surface`, `msg`, `org`, `outbound`, `infer` and `grant` are here because
+# `kuserd` or `kvaultd` still links them, not because the release needs what they do.
+core/app
+core/common
+core/context
+core/crypto
+core/device
+core/diag
+core/fs
+core/grant
+core/identity
+core/infer
+core/ipc
+core/msg
+core/net
+core/org
+core/outbound
+core/pair
+core/peer
+core/proc
+core/record
+core/schemas
+core/sealed
+core/secret
+core/session
+core/store
+core/surface
+core/sync
+core/sys
+core/wire
+client/kotton-client
+client/kotton-operator
+client/record-file
+client/shell
+
+# What only a test build reaches: every member dev-depends on it, and it is `exclude`d.
+tools/workspace-hack
+
+# The tooling and the suite. `xtask` is whole here; what of it reads pages this tree does not
+# hold is cut in the public repository, not on the way there.
+xtask
+tools/pty-drive
+tests
+Justfile
+just
+.github/workflows
+
+# Installing and running a release.
+install.sh
+infra/release
+infra/vault
+
+LICENSE
+NOTICES
+DCO.md
+SECURITY.md

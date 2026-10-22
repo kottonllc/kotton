@@ -1,0 +1,36 @@
+[package]
+name = "kotton-pair"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "The committed ephemeral-ECDH pairing handshake and its AEAD channel — pure mechanism, shared by the node and the browser"
+
+[dependencies]
+anyhow = { workspace = true }
+hkdf = "0.12"
+# The balanced PAKE a spoken code keys (RFC-0022). No default features: its
+# `getrandom` feature would pull an RNG this crate already supplies explicitly.
+spake2 = { version = "0.4", default-features = false }
+sha2 = "0.10"
+ring = "0.17"
+rand = { workspace = true }
+# Not the workspace line: that one turns on `js`, which routes randomness
+# through wasm-bindgen glue and puts imports in the binary that only that
+# toolchain can satisfy. `custom` lets the browser shim (`client/web-pair`)
+# register one function the page provides — `crypto.getRandomValues` — and is
+# inert on every native target, which keep using the OS.
+getrandom = { version = "0.2", default-features = false, features = ["custom"] }
+x25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }

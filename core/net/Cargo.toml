@@ -1,0 +1,65 @@
+[package]
+name = "kotton-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+kotton-sys = { path = "../sys" }
+kotton-wire = { path = "../wire" }
+kotton-crypto = { path = "../crypto" }
+
+async-trait = "0.1"
+tokio = { version = "1.48", features = ["net", "io-util", "time", "sync", "macros", "rt-multi-thread"] }
+mdns-sd = "0.11"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+hex = "0.4"
+serde_json = "1.0"
+thiserror = "2.0"
+libp2p = { version = "0.54", features = ["kad", "tcp", "noise", "yamux", "tokio"] }
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+tokio-tungstenite = "0.21"
+futures = "0.3"
+base64 = "0.21"
+url = "2.5"
+rand = "0.8"
+rcgen = "0.13"
+# X.509 parsing for structural extraction of a cert's SubjectPublicKeyInfo — the
+# same key material rustls verifies the handshake signature against. Prevents the
+# parser-differential where a byte-scan matches a key planted elsewhere in the DER.
+x509-parser = "0.16"
+ed25519-dalek = { workspace = true }
+sha1 = "0.10"
+hmac = "0.12"
+sha2 = { workspace = true }
+md5 = "0.7"
+tracing = "0.1"
+
+# Platform-specific network monitoring
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Foundation",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+system-configuration = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Using sysfs + procfs (simpler than D-Bus)
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tokio = { version = "1.48", features = ["full"] }
+anyhow = "1.0"
+
+
+[lints]
+workspace = true

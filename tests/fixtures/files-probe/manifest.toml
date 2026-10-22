@@ -1,0 +1,13 @@
+[app]
+id      = "sh.kotton.filesprobe"
+name    = "Files probe"
+version = "0.1.0"
+# Long-lived: a file is read and written by asking the daemon, and only a
+# long-lived runner has a channel to ask on. A one-shot app is handed no
+# `files` handle.
+kind    = "long-lived"
+
+# Read and write on the person's whole tree — the grant the shell holds.
+[capabilities]
+"files.read"  = ["/"]
+"files.write" = ["/"]

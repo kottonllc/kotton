@@ -1,0 +1,623 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! What a vault answers on the authenticated peer transport (RFC-0084 V1).
+//!
+//! Thirteen verbs, and nothing else exists here to be reached. Nine are a
+//! tenant's: sealed read, write and list; the recovery packet, kept and
+//! returned; where this vault reserves; how much it keeps; and the doors held
+//! for a person and what arrived at them. Four are the landlord's — an invite,
+//! the tenants, one pool's quota, dropping one pool — and are reached by one
+//! connection only, the one whose key is the vault's operator credential
+//! (`crate::operator`). The full daemon admits a blind node to a wider set and
+//! relies on the node's having no key to make the rest fail. This file is the
+//! shape in which that reliance is unnecessary — the plaintext verbs are not
+//! refused, they are absent.
+//!
+//! **Who reaches which verb is one table, [`reaches`], and it is the whole of
+//! the decision.** A standing is what `peer_standing` says the connection is to
+//! the pool it names; the table says what each standing may say:
+//!
+//! | standing | the ten a tenant says | the landlord's six |
+//! |---|---|---|
+//! | `Paired` — a tenant's device, to its own pool | yes | no |
+//! | `Claim` — a phrase-only device | `RecoveryFetch` of its own identity only | no |
+//! | `Operator` — the vault's operator credential | **no** | yes |
+//! | `Stranger` | no | no |
+//!
+//! The operator's row is the one the design turns on: it reads no pack,
+//! fetches no recovery copy, writes nothing and holds no door, because a
+//! credential that sets numbers and mints invites has no use for any of them
+//! (Article VII). And the invite it mints admits blind, as at the door.
+
+use crate::control::ControlContext;
+use crate::host::VaultHost;
+use crate::meter::Meter;
+use crate::residency::Pools;
+use kotton_device::users::admission::{paired_as_another, peer_standing, PeerStanding, NOT_PAIRED_WITH};
+use kotton_device::users::files::SealedReassembly;
+use kotton_device::users::residency::Residency as _;
+use kotton_device::users::DeviceUsers as _;
+use kotton_device::DeviceRuntime;
+use kotton_sys::store::SyncableStore;
+use kotton_wire::ipc::{UserRequest, UserResponse};
+use sqlx::SqlitePool;
+use std::sync::Arc;
+
+/// What the peer handler holds for the listener's lifetime.
+pub struct PeerContext {
+    pub runtime: Arc<DeviceRuntime>,
+    pub pools: Pools,
+    pub db: Arc<SqlitePool>,
+    pub meter: Arc<Meter>,
+    /// Chunks of a large sealed object arrive as separate requests and
+    /// accumulate here until complete.
+    pub reassembly: SealedReassembly,
+    /// Held for reading by every request that touches a pool, and for writing
+    /// by the landlord's drop of a tenant while it takes their standing away
+    /// (`tenancy::drop_tenant`, step 1), so no write lands in a pool after its
+    /// tenant is dropped, and a request that waited finds them gone.
+    /// Serialises; decides nothing.
+    pub tenancy: tokio::sync::RwLock<()>,
+    /// One landlord's drop at a time, held for the whole of it — the shelf
+    /// walk included, which `tenancy` is not.
+    pub drops: tokio::sync::Mutex<()>,
+}
+
+/// The verbs a vault answers, as the sentence a refused caller reads.
+const VERBS: &str = "ReadSealed, WriteSealed, ListSealed, RecoveryFetch, RecoveryStore, NodeRelay, VaultCapacity, HoldDoors, TakeDeliveries, CarryFrame, and to its operator DeviceInvite, InviteDigits, Tenants, SetQuota, DropTenant, StandAt";
+
+/// The ten verbs a tenant's device says to its own pool.
+pub fn is_tenant_verb(request: &UserRequest) -> bool {
+    matches!(
+        request,
+        UserRequest::ReadSealed { .. }
+            | UserRequest::WriteSealed { .. }
+            | UserRequest::ListSealed { .. }
+            | UserRequest::RecoveryFetch { .. }
+            | UserRequest::RecoveryStore { .. }
+            | UserRequest::NodeRelay { .. }
+            | UserRequest::VaultCapacity { .. }
+            | UserRequest::HoldDoors { .. }
+            | UserRequest::TakeDeliveries { .. }
+            | UserRequest::CarryFrame { .. }
+    )
+}
+
+/// The landlord's six, which only the operator's key reaches here: the four
+/// verbs over pools; reading the six digits a ceremony an invite of theirs
+/// started is waiting on (`InviteDigits`), which the vault's own terminal
+/// prints at the host and nothing else shows the desktop that minted it; and
+/// telling the vault where to stand (`StandAt`, RFC-0084 V11). That last is on
+/// this row and no other because the operator is the one party that
+/// introduces the vault to its relays and minted the keys that ride with them;
+/// no tenant can reach it, so no tenant can move the vault or set the key
+/// another tenant is handed.
+pub fn is_landlord_verb(request: &UserRequest) -> bool {
+    matches!(
+        request,
+        UserRequest::DeviceInvite { .. }
+            | UserRequest::InviteDigits { .. }
+            | UserRequest::Tenants
+            | UserRequest::SetQuota { .. }
+            | UserRequest::DropTenant { .. }
+            | UserRequest::StandAt { .. }
+    )
+}
+
+/// Whether a connection of `standing` may say `request` — the table in the
+/// module note, and the only place the vault decides it. A claim's further
+/// condition, that the identity fetched is the one claimed, is `handle`'s,
+/// because it needs the vault's own records to check.
+pub fn reaches(standing: &PeerStanding, request: &UserRequest) -> bool {
+    match standing {
+        PeerStanding::Paired => is_tenant_verb(request),
+        PeerStanding::Claim { .. } => matches!(request, UserRequest::RecoveryFetch { .. }),
+        PeerStanding::Operator => is_landlord_verb(request),
+        PeerStanding::Stranger => false,
+    }
+}
+
+pub async fn handle(control: &ControlContext, peer_did: &str, request: UserRequest) -> UserResponse {
+    use kotton_crypto::did::DidKeyMethod;
+    use kotton_wire::did::Did;
+    let ctx: &PeerContext = &control.peer;
+
+    // Which pool the request names — `None` for one addressed to the vault as
+    // a whole, which is the operator's `Tenants` alone. Anything else is not a
+    // vault's verb, and is refused before anyone's standing is asked about.
+    let pool: Option<String> = match &request {
+        UserRequest::ReadSealed { user_id, .. }
+        | UserRequest::ListSealed { user_id, .. }
+        | UserRequest::WriteSealed { user_id, .. }
+        | UserRequest::RecoveryFetch { user_id }
+        | UserRequest::RecoveryStore { user_id, .. }
+        | UserRequest::NodeRelay { user_id }
+        | UserRequest::VaultCapacity { user_id }
+        | UserRequest::HoldDoors { user_id, .. }
+        | UserRequest::TakeDeliveries { user_id, .. }
+        | UserRequest::CarryFrame { user_id, .. }
+        | UserRequest::DeviceInvite { user_id, .. }
+        | UserRequest::InviteDigits { user_id }
+        | UserRequest::SetQuota { user_id, .. }
+        | UserRequest::DropTenant { user_id } => Some(user_id.clone()),
+        UserRequest::Tenants | UserRequest::StandAt { .. } => None,
+        other => {
+            return UserResponse::Error {
+                message: format!(
+                    "a vault keeps and answers {VERBS}; {} is not a vault's verb",
+                    other.variant_name()
+                ),
+            }
+        }
+    };
+
+    // Standing is decided under this, so a drop in progress is waited out and
+    // then its tenant's devices are strangers (`PeerContext::tenancy`).
+    let steady = ctx.tenancy.read().await;
+
+    let peer_pubkey: Option<[u8; 32]> = Did::parse(peer_did)
+        .ok()
+        .and_then(|d| DidKeyMethod::to_public_key(&d).ok())
+        .map(|vk| vk.to_bytes());
+
+    // Who is asking, to this pool. A vault grants no guest session, so a
+    // stranger is refused here and there is no second door.
+    let standing = match peer_standing(
+        &ctx.runtime,
+        &ctx.db,
+        &ctx.runtime.paired_keys(),
+        peer_did,
+        peer_pubkey,
+        pool.as_deref(),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            return UserResponse::Error {
+                message: format!("authorization check failed: {e}"),
+            }
+        }
+    };
+    if !reaches(&standing, &request) {
+        let held = held_by(&ctx.db, &standing, peer_pubkey, pool.as_deref()).await;
+        return refusal(&standing, peer_did, pool.as_deref(), held.as_deref(), &request);
+    }
+    if let PeerStanding::Claim { aid } = &standing {
+        let own = pool.as_deref().and_then(|p| ctx.runtime.user_aid(p));
+        if own.as_deref() != Some(aid) {
+            return refusal(&standing, peer_did, pool.as_deref(), None, &request);
+        }
+    }
+
+    // The landlord's verbs take their own locks — a drop takes `tenancy` for
+    // writing — so standing's read is let go before they run.
+    //
+    // **Each is kept under the key that said it** (`operator_acts`,
+    // `TASK-a-device-has-operators-not-an-operator`). A vault admits a set of
+    // operator keys, so "the operator did it" names nobody; the key the
+    // connection authenticated as at the handshake does. It is known here —
+    // `Operator` standing is decided from it — and the act is kept *before* it
+    // runs: a record that cannot be written refuses the act, so nothing an
+    // operator does goes unkept. Its outcome is marked after.
+    if matches!(standing, PeerStanding::Operator) {
+        drop(steady);
+        let Some(key) = peer_pubkey else {
+            return refusal(&standing, peer_did, pool.as_deref(), None, &request);
+        };
+        let verb = request.variant_name();
+        let pool = pool.unwrap_or_default();
+        let id = match kotton_peer::daemon::db::record_operator_act(&ctx.db, &key, verb, &pool).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(error = %e, verb, "an operator's act could not be kept, so it did not run");
+                return UserResponse::Error {
+                    message: format!("{verb} was not run: it could not be kept under the key that said it: {e}"),
+                };
+            }
+        };
+        let answer = crate::control::landlord(control, &key, request).await;
+        if !matches!(answer, UserResponse::Error { .. }) {
+            if let Err(e) = kotton_peer::daemon::db::operator_act_done(&ctx.db, id).await {
+                // The act is kept, under its key; only its outcome is not.
+                tracing::error!(error = %e, verb, "an operator's act ran but its outcome was not kept");
+            }
+        }
+        return answer;
+    }
+
+    let host = VaultHost {
+        runtime: &ctx.runtime,
+        pools: &ctx.pools,
+    };
+    let result: std::io::Result<UserResponse> = match request {
+        UserRequest::ReadSealed {
+            user_id,
+            mount,
+            path,
+            offset,
+            length,
+        } => kotton_device::users::files::read_sealed(&host, user_id, mount, path, offset, length).await,
+        UserRequest::ListSealed {
+            user_id,
+            mount,
+            prefix,
+        } => kotton_device::users::files::list_sealed(&host, user_id, mount, prefix).await,
+        UserRequest::WriteSealed {
+            user_id,
+            mount,
+            path,
+            blob,
+            domain_id,
+            offset,
+            total_size,
+            content_hash,
+        } => {
+            // The meter's one decision, made before any byte is buffered: does
+            // the whole object fit? Checked on the first chunk, so a large
+            // object is refused once rather than after occupying a buffer.
+            if offset == 0 {
+                if let Some(shelf) = ctx.pools.get(&user_id).and_then(|s| pool_shelf(&s)) {
+                    if let Err(full) = ctx.meter.admits(&user_id, shelf.as_ref(), total_size).await {
+                        return UserResponse::VaultFull {
+                            held: full.held,
+                            quota: full.quota,
+                        };
+                    }
+                }
+            }
+            let written = blob.len() as u64;
+            let resp = kotton_device::users::files::write_sealed(
+                &host,
+                user_id.clone(),
+                mount,
+                path,
+                blob,
+                domain_id,
+                offset,
+                total_size,
+                content_hash,
+                Some(&ctx.reassembly),
+            )
+            .await;
+            if matches!(resp, Ok(UserResponse::Ok)) {
+                ctx.meter.add(&user_id, written);
+            }
+            resp
+        }
+        UserRequest::RecoveryFetch { user_id } => {
+            let base = ctx.runtime.base_dir();
+            let kel = kotton_identity::kel_store::load_chain(base, &user_id).unwrap_or_default();
+            let bundle =
+                kotton_identity::provisioning::read_recovery_bundle_raw(base, &user_id).unwrap_or_default();
+            Ok(UserResponse::RecoveryMaterial { kel, bundle })
+        }
+        UserRequest::RecoveryStore { user_id, bundle, kel } => {
+            // The events that authorize the copy, before the copy. A vault that
+            // cannot extend its chain is a vault that will refuse to serve what
+            // it just accepted, so the failure belongs here.
+            if let Err(e) = kotton_device::users::admission::adopt_chain_extension(
+                &ctx.runtime,
+                &user_id,
+                &kel,
+            ) {
+                return UserResponse::Error {
+                    message: format!(
+                        "the key events offered with the recovery copy do not replay: {e}"
+                    ),
+                };
+            }
+            match kotton_identity::provisioning::write_recovery_bundle_raw(
+                ctx.runtime.base_dir(),
+                &user_id,
+                &bundle,
+            ) {
+                Ok(()) => {
+                    tracing::info!(peer_did = %peer_did, user_id = %user_id, "kept a delivered recovery copy");
+                    Ok(UserResponse::Ok)
+                }
+                Err(e) => Ok(UserResponse::Error {
+                    message: format!("could not keep the recovery copy: {e}"),
+                }),
+            }
+        }
+        UserRequest::NodeRelay { .. } => {
+            // The first relay of the reach set, by its key and address. A
+            // tenant is one of *the people I invite*: handed the invited key for
+            // it, and never *mine*.
+            let (relay_url, relay_key, admission) = crate::reach::for_tenant(&ctx.runtime);
+            Ok(UserResponse::NodeRelayResult {
+                relay_url,
+                relay_key,
+                admission,
+            })
+        }
+        UserRequest::VaultCapacity { user_id } => Ok(capacity(ctx, &user_id).await),
+        // The doors held for a person (`DEC-0056`): a device of theirs hands
+        // them over and takes what arrived. Paired standing was checked above.
+        UserRequest::HoldDoors { user_id, doors } => {
+            Ok(crate::doors::hold(&ctx.runtime, &ctx.db, &user_id, doors).await)
+        }
+        UserRequest::TakeDeliveries { user_id, ack } => {
+            Ok(crate::doors::take(&ctx.db, &user_id, ack).await)
+        }
+        // What the person's outbox holds, carried while no device of theirs
+        // is awake (`carry`). Paired standing was checked above.
+        UserRequest::CarryFrame { user_id, messages, drop } => {
+            Ok(crate::carry::carry(&ctx.db, &user_id, messages, drop).await)
+        }
+        // Every other variant was refused above: the landlord's six went to
+        // `control::landlord` and nothing else reaches this far, which
+        // `each_standing_reaches_exactly_its_row_of_the_table` holds. Should
+        // the table ever widen past this match, the verb is refused — never a
+        // panic in the handler — and a new verb here is a deliberate diff.
+        other => Ok(UserResponse::Error {
+            message: format!("{} is reached by no body at this vault", other.variant_name()),
+        }),
+    };
+    result.unwrap_or_else(|e| UserResponse::Error {
+        message: e.to_string(),
+    })
+}
+
+/// What a refused caller reads: the sentence for its standing.
+/// The pool a stranger's key is paired to here, when it is paired to one —
+/// read only for a `Stranger` refused a request that names a pool.
+///
+/// **Only a key already paired at this vault learns a name, and the name is
+/// its own pool's.** A key paired nowhere gets `None`, and so today's sentence,
+/// which names nothing it did not send. Nor does the sentence say whether the
+/// pool the request named exists: it reads the same either way. So the one
+/// thing disclosed is what the operator already told that device's person by
+/// inviting it — the name its pairing is under — and it is what they need to
+/// see when their device asks under another
+/// (`TASK-a-vault-invite-names-a-tenant-the-device-does-not-sync-as`).
+async fn held_by(
+    db: &Arc<SqlitePool>,
+    standing: &PeerStanding,
+    peer_pubkey: Option<[u8; 32]>,
+    pool: Option<&str>,
+) -> Option<String> {
+    let (PeerStanding::Stranger, Some(key), Some(_)) = (standing, peer_pubkey, pool) else {
+        return None;
+    };
+    match kotton_peer::daemon::db::paired_node_for_pubkey(db, &key).await {
+        Ok(found) => found.map(|(user_id, _)| user_id),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read which pool a refused key is paired to");
+            None
+        }
+    }
+}
+
+/// The sentence a refused caller reads. `held` is the pool a stranger's key
+/// is paired to at this vault ([`held_by`]), `None` for a key paired nowhere.
+fn refusal(
+    standing: &PeerStanding,
+    peer_did: &str,
+    pool: Option<&str>,
+    held: Option<&str>,
+    request: &UserRequest,
+) -> UserResponse {
+    let message = match standing {
+        PeerStanding::Paired => format!(
+            "{} is the landlord's, said under the vault's operator credential; a tenant's device does \
+             not say it",
+            request.variant_name()
+        ),
+        PeerStanding::Claim { .. } => "a device admitted on a recovery claim may only fetch the identity \
+                                       it claimed"
+            .to_string(),
+        PeerStanding::Operator => format!(
+            "the operator credential says the landlord's four verbs and nothing else; {} is a \
+             tenant's",
+            request.variant_name()
+        ),
+        PeerStanding::Stranger => match (pool, held) {
+            (Some(user_id), Some(held)) => format!(
+                "peer {peer_did} {NOT_PAIRED_WITH} '{user_id}': {}",
+                paired_as_another(held, user_id)
+            ),
+            (Some(user_id), None) => format!("peer {peer_did} {NOT_PAIRED_WITH} '{user_id}'"),
+            (None, _) => format!("peer {peer_did} is not this vault's operator"),
+        },
+    };
+    UserResponse::Error { message }
+}
+
+/// The shelf a pool rests on: its "local" mount, which on a vault is the
+/// sealed-only stack straight over the shelf, so the listing is the shelf's.
+pub fn pool_shelf(store: &kotton_store::runtime::user::UserStore) -> Option<Arc<dyn SyncableStore>> {
+    store.get_remote("local")
+}
+
+/// The meter's readout for a pool: measured now if never measured, and the
+/// pool's own quota (the default when the landlord set it none).
+pub async fn capacity(ctx: &PeerContext, user_id: &str) -> UserResponse {
+    let held = match ctx.meter.held(user_id) {
+        Some(h) => h,
+        None => {
+            let measured = match ctx.pools.get(user_id).and_then(|s| pool_shelf(&s)) {
+                Some(shelf) => Meter::measure(shelf.as_ref()).await,
+                None => 0,
+            };
+            ctx.meter.set(user_id, measured);
+            measured
+        }
+    };
+    UserResponse::VaultCapacityResult {
+        held,
+        quota: ctx.meter.quota(user_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One of each verb a tenant's device says to its pool — the ten.
+    fn tenant_verbs() -> Vec<UserRequest> {
+        let u = || "alice".to_string();
+        vec![
+            UserRequest::ReadSealed {
+                user_id: u(),
+                mount: "local".into(),
+                path: "p".into(),
+                offset: 0,
+                length: 0,
+            },
+            UserRequest::WriteSealed {
+                user_id: u(),
+                mount: "local".into(),
+                path: "p".into(),
+                blob: vec![1],
+                domain_id: "d".into(),
+                offset: 0,
+                total_size: 1,
+                content_hash: "h".into(),
+            },
+            UserRequest::ListSealed {
+                user_id: u(),
+                mount: "local".into(),
+                prefix: String::new(),
+            },
+            UserRequest::RecoveryFetch { user_id: u() },
+            UserRequest::RecoveryStore {
+                user_id: u(),
+                bundle: String::new(),
+                kel: vec![],
+            },
+            UserRequest::NodeRelay { user_id: u() },
+            UserRequest::VaultCapacity { user_id: u() },
+            UserRequest::HoldDoors {
+                user_id: u(),
+                doors: vec![],
+            },
+            UserRequest::TakeDeliveries {
+                user_id: u(),
+                ack: vec![],
+            },
+            UserRequest::CarryFrame {
+                user_id: u(),
+                messages: vec![],
+                drop: vec![],
+            },
+        ]
+    }
+
+    /// The landlord's six.
+    fn landlord_verbs() -> Vec<UserRequest> {
+        vec![
+            UserRequest::DeviceInvite {
+                user_id: "sam".into(),
+                ttl_seconds: 60,
+                as_name: None,
+            },
+            UserRequest::InviteDigits {
+                user_id: "sam".into(),
+            },
+            UserRequest::Tenants,
+            UserRequest::SetQuota {
+                user_id: "sam".into(),
+                quota: 1 << 30,
+            },
+            UserRequest::DropTenant {
+                user_id: "sam".into(),
+            },
+            UserRequest::StandAt { relays: vec![] },
+        ]
+    }
+
+    /// The standing table, row by row (the module note's, and the record's):
+    /// the operator reaches the five and not one verb a tenant's standing
+    /// reaches — no sealed read, no write, no recovery packet; a tenant's
+    /// device reaches its ten and none of the five; a claim reaches the
+    /// recovery fetch alone; a stranger reaches nothing. The sets are the
+    /// module's own predicates, and they are checked disjoint here too, so a
+    /// verb added to both is caught by this test rather than by review.
+    #[test]
+    fn each_standing_reaches_exactly_its_row_of_the_table() {
+        let claim = PeerStanding::Claim { aid: "did:kel:x".into() };
+        for verb in landlord_verbs() {
+            let name = verb.variant_name();
+            assert!(reaches(&PeerStanding::Operator, &verb), "the operator says {name}");
+            assert!(!reaches(&PeerStanding::Paired, &verb), "a tenant's device does not say {name}");
+            assert!(!reaches(&claim, &verb), "a claim does not say {name}");
+            assert!(!reaches(&PeerStanding::Stranger, &verb), "a stranger does not say {name}");
+            assert!(!is_tenant_verb(&verb), "{name} is not a tenant's verb as well");
+        }
+        for verb in tenant_verbs() {
+            let name = verb.variant_name();
+            assert!(reaches(&PeerStanding::Paired, &verb), "a tenant's device says {name}");
+            assert!(
+                !reaches(&PeerStanding::Operator, &verb),
+                "the operator credential does not say {name}"
+            );
+            assert_eq!(
+                reaches(&claim, &verb),
+                matches!(verb, UserRequest::RecoveryFetch { .. }),
+                "a claim says the recovery fetch and nothing else: {name}"
+            );
+            assert!(!reaches(&PeerStanding::Stranger, &verb), "a stranger does not say {name}");
+            assert!(!is_landlord_verb(&verb), "{name} is not the landlord's as well");
+        }
+        // And a verb that is neither — a plaintext read — no standing reaches.
+        let plaintext = UserRequest::ReadFile {
+            user_id: "alice".into(),
+            path: "notes.txt".into(),
+            offset: 0,
+            length: 0,
+        };
+        for standing in [PeerStanding::Paired, claim, PeerStanding::Operator, PeerStanding::Stranger] {
+            assert!(!reaches(&standing, &plaintext), "{standing:?} reaches a plaintext read");
+        }
+    }
+
+    /// A vault's peer database with `sam`'s device paired, by its key.
+    async fn a_vault_with_sams_device(sams: [u8; 32]) -> Arc<SqlitePool> {
+        let db = Arc::new(SqlitePool::connect("sqlite::memory:").await.expect("db"));
+        kotton_device::db::MIGRATOR.run(db.as_ref()).await.expect("migrations");
+        kotton_peer::daemon::db::insert_paired_node(&db, "sams-laptop", "sam", "did:key:zSam", &sams, "[]", 0, Some("full"))
+            .await
+            .expect("sam's device paired");
+        db
+    }
+
+    /// The refusal a key reads when its request names a pool it is not paired
+    /// to (`TASK-a-vault-invite-names-a-tenant-the-device-does-not-sync-as`).
+    /// A key paired here, to another pool, reads its own pool's name and the
+    /// one it asked as; a key paired nowhere reads today's sentence, which
+    /// names no pool it did not send — and the same whether the pool it named
+    /// exists or not.
+    #[tokio::test]
+    async fn a_refused_key_learns_its_own_pool_and_a_key_paired_nowhere_learns_none() {
+        let sams = [7u8; 32];
+        let db = a_vault_with_sams_device(sams).await;
+        let asked = UserRequest::VaultCapacity { user_id: "alice".into() };
+        let said = |held: Option<String>| match refusal(&PeerStanding::Stranger, "did:key:zPeer", Some("alice"), held.as_deref(), &asked) {
+            UserResponse::Error { message } => message,
+            other => panic!("a stranger is refused: {other:?}"),
+        };
+
+        // Sam's device, asking as alice: both names, its own pool first.
+        let held = held_by(&db, &PeerStanding::Stranger, Some(sams), Some("alice")).await;
+        assert_eq!(held.as_deref(), Some("sam"));
+        let message = said(held);
+        assert!(
+            message.contains("this device is paired here as tenant `sam`, and asked as `alice`"),
+            "{message}"
+        );
+
+        // A key paired nowhere: today's sentence, and no pool it did not name.
+        let nowhere = held_by(&db, &PeerStanding::Stranger, Some([9u8; 32]), Some("alice")).await;
+        assert_eq!(nowhere, None);
+        let message = said(nowhere);
+        assert_eq!(message, "peer did:key:zPeer is not paired with user 'alice'");
+        assert!(!message.contains("sam"), "a key paired nowhere learned a pool: {message}");
+
+        // Only a stranger's refusal is looked up; and one naming no pool —
+        // the operator's `Tenants` — is not.
+        assert_eq!(held_by(&db, &PeerStanding::Paired, Some(sams), Some("alice")).await, None);
+        assert_eq!(held_by(&db, &PeerStanding::Stranger, Some(sams), None).await, None);
+        assert_eq!(held_by(&db, &PeerStanding::Stranger, None, Some("alice")).await, None);
+    }
+}

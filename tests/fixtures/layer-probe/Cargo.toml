@@ -1,0 +1,31 @@
+[package]
+name    = "kotton-layer-probe"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+
+# A guest that imports `kotton:app/layer-surface` and does nothing else with it.
+#
+# Its whole purpose is to be *linked*, like `probe-app` next door: a component's
+# imports are the interfaces its code names, so naming `layer-surface` here is
+# what makes RFC-0087's fourth invariant observable at instantiation. An
+# undesignated app that imports it must fail to instantiate, because the host
+# adds that interface to the linker only for the app the person designated.
+#
+# Built by `cargo xtask build-apps` into `app.wasm` beside this file, and loaded
+# by `the_system_layer_is_a_world_not_a_check` in `core/wasm/src/sandbox.rs`.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# `occupant` rather than the default feature: `layer-surface` is in `world
+# occupant` and nowhere else, so a crate built against `world app` could not name
+# it — which is the property under test, stated as a build flag. `data` comes
+# with it because the SDK's occupant-only session module parses JSON frames.
+kotton-app = { path = "../../../guest/sdk/kotton-app", features = ["occupant", "data"] }
+
+# Own workspace root: this crate targets wasm32-wasip2 and is excluded from the
+# repo workspace, like the guest apps.
+[workspace]

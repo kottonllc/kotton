@@ -1,0 +1,26 @@
+[package]
+name = "kotton-schemas"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "User record schema definitions, NSID types, capability grants, and core schema vocabulary for the Kotton data layer."
+
+[features]
+# Enable TypeScript type generation for capability types.
+ts-types = ["dep:ts-rs"]
+
+[dependencies]
+kotton-common = { path = "../common" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+chrono = { version = "0.4", features = ["serde"] }
+toml = "0.8"
+ts-rs = { version = "10", features = ["serde-compat"], optional = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }

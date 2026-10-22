@@ -1,0 +1,672 @@
+# The JSON surface of the IPC request enum. Generated — do not hand-edit.
+# Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
+# Variants sorted by name; fields in declaration order, which is the order
+# serde writes them. See xtask/src/wire_check.rs for why this file exists.
+# variants: 191
+AddRecoveryPhrase
+    user_id: String
+AppGetBundlePath
+    app_id: String
+AppGetRole
+    role: String
+AppGrants
+    app_id: String
+AppInstall
+    user_id: String
+    manifest_toml: String
+    wasm_bytes: Vec<u8>
+    approved: Vec<CapabilityGrant>
+    #[serde(default)]
+    bindings: Vec<(String, String)>
+AppInstallPreview
+    user_id: String
+    manifest_toml: String
+    wasm_bytes: Vec<u8>
+AppLaunch
+    app_id: String
+    #[serde(default)]
+    launch_args: Vec<(String, String)>
+AppList
+AppMessage
+    app_id: String
+    msg: String
+AppRegisterBundle
+    app_id: String
+    name: String
+    version: String
+    capabilities_json: String
+    bundle_path: String
+    dev: bool
+AppSetRole
+    role: String
+    app_id: String
+AppUninstall
+    app_id: String
+AppVerify
+    app_id: String
+ApplyRecordChangeset
+    user_id: String
+    nsid: String
+    rows: Vec<SyncChangesetRow>
+AsOperator
+    user_id: String
+    name: String
+    verb: crate::ipc::vault_request::OperatorVerb
+Authenticate
+    token: crate::ipc::SecretText
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<Vec<String>>
+BindDeviceHardware
+    user_id: String
+    credential: crate::ipc::vault_request::SecretText
+BrowserDeviceList
+    user_id: String
+BrowserDeviceRevoke
+    user_id: String
+    name: String
+BrowserFrame
+    #[serde(with = "crate::base64_bytes")]
+    bytes: Vec<u8>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    channel: Option<String>
+BrowserOutbound
+    channel: String
+CallerInfo
+CarryFrame
+    user_id: String
+    messages: Vec<crate::ipc::CarriedMessage>
+    drop: Vec<String>
+ConfigStatus
+ConfirmMnemonic
+    user_id: String
+ContactAdd
+    user_id: String
+    contact_did: String
+ContactList
+    user_id: String
+ContactPairJoin
+    user_id: String
+    code: crate::ipc::SecretText
+    as_name: Option<String>
+ContactPairStart
+    user_id: String
+    as_name: Option<String>
+    ttl_seconds: u64
+CreateUser
+    user_id: String
+    passphrase: crate::ipc::vault_request::SecretText
+DaemonSidecars
+DaemonStatus
+DeleteFile
+    user_id: String
+    path: String
+DeviceAdd
+    user_id: String
+    #[serde(default)]
+    as_name: Option<String>
+    ttl_seconds: u64
+    port: u16
+    #[serde(default)]
+    posture: kotton_schemas::membership::Posture
+DeviceAdmit
+    user_id: String
+    code: crate::ipc::SecretText
+    ttl_seconds: u64
+    posture: kotton_schemas::membership::Posture
+    #[serde(default)]
+    operator_of: Option<String>
+DeviceInvite
+    user_id: String
+    ttl_seconds: u64
+    #[serde(default)]
+    as_name: Option<String>
+DeviceJoin
+    user_id: String
+    code: crate::ipc::SecretText
+    #[serde(default)]
+    as_name: Option<String>
+DeviceName
+    #[serde(default)]
+    new_name: Option<String>
+DropTenant
+    user_id: String
+ExtensionInstall
+    user_id: String
+    manifest_toml: String
+    wasm_bytes: Vec<u8>
+ExtensionList
+    user_id: String
+ExtensionRemove
+    user_id: String
+    extension_id: String
+FrostSignRound
+    user_id: String
+    payload: String
+GatewayEnroll
+    user_id: String
+    code: crate::ipc::SecretText
+    ttl_seconds: u64
+GetActiveSession
+GetAuthorizedClients
+    user_id: String
+GetDeviceCert
+    user_id: String
+GetHandlerFor
+    nsid: String
+GetKeyHealth
+    user_id: String
+GetLockPolicy
+    user_id: String
+GetNodeIdentity
+GetRecoveryStatus
+    user_id: String
+GetUnlockMethods
+    user_id: String
+GetUnlockState
+    user_id: String
+GrantImport
+    user_id: String
+    envelope_json: String
+GrantRevoke
+    user_id: String
+    envelope_id: String
+HoldDoors
+    user_id: String
+    doors: Vec<crate::ipc::HeldDoor>
+Import
+    user_id: String
+    format: ImportFormat
+    source_name: String
+    content: Vec<u8>
+InferenceSet
+    enabled: bool
+Introduce
+    user_id: String
+    addr: String
+    token: crate::ipc::SecretText
+    #[serde(default)]
+    router: Option<String>
+InviteDigits
+    user_id: String
+IpcSessions
+ListConflicts
+    user_id: String
+ListFiles
+    user_id: String
+    prefix: String
+ListHandlers
+ListSealed
+    user_id: String
+    mount: String
+    prefix: String
+ListUsers
+LocalDoor
+    #[serde(default)]
+    answer: Option<String>
+LockCustody
+    user_id: String
+LockSession
+LoginWithRecoveryKey
+    recovery_key: crate::ipc::vault_request::SecretText
+    device_name: Option<String>
+    user_id: Option<String>
+LogoutUser
+    user_id: String
+MessageChannelCreate
+    user_id: String
+    channel_did: String
+MessageChannelGrantKey
+    user_id: String
+    channel_did: String
+    member_did: String
+    backfill: bool
+MessageChannelHistory
+    user_id: String
+    channel_did: String
+    before_id: Option<String>
+    limit: u32
+MessageChannelLeave
+    user_id: String
+    channel_did: String
+MessageChannelRemoveMember
+    user_id: String
+    channel_did: String
+    member_did: String
+MessageChannelSend
+    user_id: String
+    channel_did: String
+    body: String
+MessageDecryptChannel
+    user_id: String
+    channel_did: String
+    body: String
+    nonce: String
+MessageDecryptDm
+    user_id: String
+    body: String
+    nonce: String
+    ephemeral_pub: String
+MessageDeliveries
+    user_id: String
+    peer_did: String
+MessageMarkRead
+    user_id: String
+    peer_did: String
+    filed_at: u64
+    message_id: String
+MessagePollInbox
+    user_id: String
+MessageSend
+    user_id: String
+    recipient_did: String
+    body: String
+    thread_id: Option<String>
+MessageUnreadCount
+    user_id: String
+MintPrincipalSession
+    user_id: String
+    evidence: PrincipalEvidence
+ModelAdd
+    user_id: String
+    manifest: kotton_infer::ModelManifest
+ModelList
+    user_id: String
+ModelRemove
+    user_id: String
+    model: String
+ModelUse
+    user_id: String
+    model: String
+    rebuild_index: bool
+ModelWeights
+    user_id: String
+    #[serde(with = "crate::base64_bytes")]
+    data: Vec<u8>
+    offset: u64
+    total_size: u64
+    content_hash: String
+MountEvict
+    user_id: String
+    node_id: String
+    local_path: String
+MountList
+    user_id: String
+MountPath
+    user_id: String
+    node_id: String
+    remote_path: String
+    local_path: String
+    cache_budget_bytes: Option<u64>
+    pins: Vec<String>
+NetworkStatus
+    user_id: String
+NodeList
+    user_id: String
+NodeRelay
+    user_id: String
+NodeRevoke
+    user_id: String
+    node_id: String
+OperatorEnrol
+    user_id: String
+    credential: crate::ipc::vault_request::SecretText
+OperatorEnrolLines
+    user_id: String
+    lines: Vec<crate::ipc::vault_request::LineToEnrol>
+OperatorForget
+    user_id: String
+    service: crate::ipc::vault_request::OperatedService
+    name: String
+OperatorHeld
+    user_id: String
+    service: crate::ipc::vault_request::OperatedService
+OperatorMint
+    user_id: String
+    service: crate::ipc::vault_request::OperatedService
+    #[serde(default)]
+    name: Option<String>
+    #[serde(default)]
+    rule: Option<crate::rendezvous::AdmissionRule>
+OperatorMints
+    user_id: String
+OrgFrostJoin
+    user_id: String
+    name: String
+    org_did: String
+    share_hex: crate::ipc::vault_request::SecretText
+    participant_idx: u16
+OrgFrostNew
+    user_id: String
+    name: String
+    threshold: u16
+    total: u16
+OrgFrostSignBegin
+    user_id: String
+    org_did: String
+    member_did: String
+    caps: Vec<String>
+    ttl_secs: Option<i64>
+    node_did: Option<String>
+OrgFrostSignContribute
+    user_id: String
+    session_id: String
+    org_did: String
+    message_hex: String
+    coordinator_id_hex: String
+    coordinator_commitment_hex: String
+OrgFrostSignFinalize
+    user_id: String
+    session_id: String
+    cosigner_id_hex: String
+    cosigner_commitment_hex: String
+    cosigner_share_hex: crate::ipc::vault_request::SecretText
+OrgGrantIssue
+    user_id: String
+    org_did: String
+    member_did: String
+    caps: Vec<String>
+    ttl_secs: Option<i64>
+    node_did: Option<String>
+OrgGrantList
+    user_id: String
+    org_did: String
+OrgList
+    user_id: String
+OrgMemberRemove
+    user_id: String
+    org_did: String
+    member_did: String
+OrgNew
+    user_id: String
+    name: String
+OrgRootCreate
+    user_id: String
+    org_did: String
+    name: String
+OrgRootInvite
+    user_id: String
+    root: String
+    member: String
+OrgShow
+    user_id: String
+    org_did: String
+PairConfirmCode
+    user_id: String
+    token: crate::ipc::SecretText
+    matches: bool
+PairNodeEphemeral
+    user_id: String
+    label: String
+    paths: Vec<String>
+    permissions: SessionPermissions
+    ttl_seconds: u64
+    #[serde(default)]
+    guest_ephemeral_pubkey: Option<[u8; 32]>
+PeerAdd
+    user_id: String
+    label: String
+    peer_did: String
+    peer_pubkey_hex: String
+    peer_addr: std::net::SocketAddr
+PurgeFile
+    user_id: String
+    path: String
+QueryEvents
+    category: Option<String>
+    level: Option<String>
+    since: Option<i64>
+    limit: Option<u32>
+QuicGatewaySet
+    enabled: Option<bool>
+    port: Option<u16>
+    bind: Option<String>
+    #[serde(default)]
+    allow: Option<String>
+QuicGatewayStatus
+ReachStatus
+    user_id: String
+ReadFile
+    user_id: String
+    path: String
+    offset: u64
+    length: u32
+ReadSealed
+    user_id: String
+    mount: String
+    path: String
+    offset: u64
+    length: u32
+RecordDelete
+    user_id: String
+    schema_nsid: String
+    record_id: String
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<String>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_id: Option<String>
+RecordInsert
+    user_id: String
+    schema_nsid: String
+    record: serde_json::Value
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<String>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_id: Option<String>
+RecordOpen
+    user_id: String
+    url: String
+RecordQuery
+    user_id: String
+    schema_nsid: String
+    field_eq: Vec<(String, serde_json::Value)>
+    limit: Option<usize>
+    offset: Option<usize>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<String>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_id: Option<String>
+RecordSearch
+    user_id: String
+    nsid: Option<String>
+    text: Option<String>
+    limit: Option<u32>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_id: Option<String>
+RecordSyncAvailable
+    user_id: String
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    nsids: Vec<String>
+Recover
+    user_id: String
+    recovery_key: crate::ipc::vault_request::SecretText
+    passphrase: crate::ipc::vault_request::SecretText
+RecoveryFetch
+    user_id: String
+RecoveryStore
+    user_id: String
+    bundle: String
+    #[serde(default)]
+    kel: Vec<crate::kel::KelEvent>
+RegisterHandler
+    app_id: String
+    nsid: String
+RelayStand
+    user_id: String
+    code: crate::ipc::vault_request::SecretText
+RemoteAdd
+    user_id: String
+    name: String
+    backend: RemoteBackend
+    credentials: Option<crate::ipc::SecretValue>
+RemoteCacheClear
+    user_id: String
+    name: String
+RemoteCredentialsSet
+    user_id: String
+    name: String
+    credentials: crate::ipc::SecretValue
+RemoteList
+    user_id: String
+RemoteRemove
+    user_id: String
+    name: String
+RendezvousSet
+    url: Option<String>
+RendezvousStatus
+ResolveConflict
+    user_id: String
+    path: String
+    keep: Option<String>
+RotateIdentity
+    user_id: String
+    recovery_key: crate::ipc::vault_request::SecretText
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential: Option<crate::ipc::vault_request::SecretText>
+SchemaGet
+    user_id: String
+    nsid: String
+SchemaGrantList
+    app_id: String
+SchemaGrantRevoke
+    app_id: String
+    nsid: String
+SchemaGrantSet
+    app_id: String
+    nsid: String
+    can_read: bool
+    can_write: bool
+    can_register: bool
+SchemaList
+    user_id: String
+SchemaQuotaSet
+    app_id: String
+    nsid: String
+    record_quota: i64
+    byte_quota: i64
+SchemaRegister
+    user_id: String
+    definition_json: String
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_id: Option<String>
+SessionEnd
+    user_id: String
+    session_id: String
+SessionList
+    user_id: String
+SetDefaultHandler
+    app_id: String
+    nsid: String
+SetLockPolicy
+    user_id: String
+    mode: LockMode
+    auto_lock_minutes: u32
+    pin: Option<crate::ipc::vault_request::SecretText>
+SetQuota
+    user_id: String
+    quota: u64
+StandAt
+    relays: Vec<crate::rendezvous::Stand>
+StorageReload
+    user_id: String
+SubscribeEvents
+    category: Option<String>
+    level: Option<String>
+SyncAvailable
+    user_id: String
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<String>
+SyncAwait
+    user_id: String
+    job_id: String
+    timeout_secs: u64
+SyncConfigure
+    user_id: String
+    node_id: String
+    path: String
+    watch: bool
+SyncMount
+    user_id: String
+    mount: String
+    remote: String
+    direction: Option<SyncDirection>
+SyncRuleList
+    user_id: String
+SyncRuleRemove
+    user_id: String
+    node_id: String
+    path: String
+SyncStatus
+    user_id: String
+SyncTrigger
+    user_id: String
+    node_id: Option<String>
+TakeDeliveries
+    user_id: String
+    ack: Vec<String>
+Tenants
+ThresholdSign
+    user_id: String
+    message_hex: String
+TrustAdd
+    user_id: String
+    org_did: String
+TrustList
+    user_id: String
+TrustRemove
+    user_id: String
+    org_did: String
+TurnSet
+    url: Option<String>
+UnlockWithPin
+    user_id: String
+    pin: crate::ipc::vault_request::SecretText
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    repair: bool
+UnregisterHandler
+    app_id: String
+    nsid: String
+VaultCapacity
+    user_id: String
+VerifyEventLog
+    user_id: String
+VfsReport
+    connected_peers: Vec<String>
+VfsWatch
+    user_id: String
+    paths: Vec<String>
+WebShellPair
+    user_id: String
+    ttl_seconds: u64
+WebShellSet
+    enabled: Option<bool>
+    port: Option<u16>
+    bind: Option<String>
+    static_dir: Option<String>
+    #[serde(default)]
+    allow: Option<String>
+WebShellStatus
+WindowClosed
+    instance_id: String
+WindowList
+WindowOpened
+    app_id: String
+    instance_id: String
+    title: String
+WriteFile
+    user_id: String
+    path: String
+    #[serde(with = "crate::base64_bytes")]
+    data: Vec<u8>
+    offset: u64
+    total_size: u64
+    content_hash: String
+WriteSealed
+    user_id: String
+    mount: String
+    path: String
+    #[serde(with = "crate::base64_bytes")]
+    blob: Vec<u8>
+    domain_id: String
+    offset: u64
+    total_size: u64
+    content_hash: String

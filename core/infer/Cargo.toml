@@ -1,0 +1,26 @@
+[package]
+name = "kotton-infer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "The inference mechanism (RFC-0085): the Backend trait, the model manifest, and the context a host composes — no socket, no key, no store"
+
+# Deliberately tiny, and held that way by `cargo xtask infer-check`.
+#
+# RFC-0085 IN1 puts the weights parser in a process that cannot open the store;
+# the crate underneath it therefore links nothing that could open anything. The
+# check reads an ALLOW-list rather than a deny-list of known networking crates,
+# because a deny-list passes every socket-opening crate nobody thought of.
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

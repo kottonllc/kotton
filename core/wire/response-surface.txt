@@ -1,0 +1,485 @@
+# The JSON surface of the IPC response channel. Generated — do not hand-edit.
+# Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
+# Variants sorted by name; fields in declaration order, which is the order
+# serde writes them. See xtask/src/wire_check.rs for why this file exists.
+# variants: 187
+ActiveSession
+    user_id: String
+AppBundlePath
+    app_id: String
+    bundle_path: Option<String>
+AppBundleRegistered
+    app_id: String
+AppGrants
+    app_id: String
+    name: String
+    requested: Vec<CapabilityGrant>
+    requested_display: Vec<String>
+    approved: Option<Vec<CapabilityGrant>>
+    approved_display: Vec<String>
+    envelopes: Vec<AppGrantEnvelope>
+AppInstallPreview
+    app_id: String
+    name: String
+    version: String
+    wasm_hash: String
+    requested: Vec<CapabilityGrant>
+    requested_display: Vec<String>
+    shapes: Vec<kotton_schemas::CapabilityShape>
+    publisher_verified: bool
+AppInstalled
+    app_id: String
+    name: String
+    capabilities: Vec<String>
+AppLaunched
+    app_id: String
+    #[serde(default)]
+    patches: Vec<Vec<u8>>
+AppList
+    apps: Vec<InstalledApp>
+AppMessageDelivered
+    #[serde(default)]
+    patches: Vec<Vec<u8>>
+AppNotFound
+    app_id: String
+AppRole
+    role: String
+    app_id: String
+AppRoleSet
+    role: String
+    app_id: String
+AppUninstalled
+AppVerifyResult
+    app_id: String
+    stored_hash: String
+    computed_hash: String
+    matches: bool
+AuthorizedClients
+    dids: Vec<String>
+    pubkey_hexes: Vec<String>
+BrowserDeviceRevoked
+    channels_closed: u32
+BrowserDevices
+    browsers: Vec<super::types::BrowserDevice>
+BrowserFrame
+    #[serde(with = "crate::base64_bytes")]
+    bytes: Vec<u8>
+CallerInfoResponse
+    os_user: String
+    has_active_session: bool
+    session_user_id: Option<String>
+    transport: String
+ChangesetApplied
+ChannelCreated
+    channel_did: String
+ChannelKeyGrantCreated
+    grant: serde_json::Value
+ChannelSent
+    message_id: String
+    fanout: Vec<crate::ipc::MemberDelivery>
+ConfigStatus
+    items: Vec<ConfigItem>
+ConflictList
+    conflicts: Vec<(String, Vec<String>)>
+ContactAdded
+    did: String
+ContactListing
+    contacts: Vec<(String, Option<String>)>
+ContactPaired
+    did: String
+    label: String
+CustodyLocked
+DaemonSidecarsResult
+    sidecars: Vec<crate::ipc::types::SidecarInfo>
+DaemonStatusInfo
+    version: String
+    uptime_secs: u64
+    user_count: u32
+    app_count: u32
+    event_count: u64
+    error_count: u64
+    last_event_secs_ago: u64
+Decrypted
+    plaintext: String
+DefaultHandlerSet
+Deliveries
+    items: Vec<crate::ipc::PendingDelivery>
+DeviceBound
+    backend: String
+DeviceCert
+    signing_key_bytes: crate::ipc::SecretBytes
+DeviceNameInfo
+    name: String
+DoorsHeld
+    held: u32
+    through_epoch: u64
+Error
+    message: String
+EventList
+    events: Vec<EventEntry>
+EventLogIntegrity
+    ok: bool
+    first_broken_at: Option<u64>
+EventStream
+    event: EventEntry
+EventStreamEnd
+ExtensionInstalled
+    extension_id: String
+    name: String
+    class: String
+    content_hash: String
+    signed: bool
+    consent_summary: Vec<String>
+ExtensionList
+    extensions: Vec<InstalledExtension>
+ExtensionRemoved
+    extension_id: String
+FileData
+    #[serde(with = "crate::base64_bytes")]
+    data: Vec<u8>
+    total_size: u64
+FileList
+    files: Vec<String>
+FrameCarried
+    carried: u32
+    carrying: Vec<crate::ipc::Carrying>
+    room: u32
+FrostSignReply
+    payload: String
+GrantImported
+    envelope_id: String
+GrantRevoked
+HandlerInfo
+    entry: HandlerEntry
+HandlerList
+    entries: Vec<HandlerEntry>
+HandlerNotFound
+    nsid: String
+HandlerRegistered
+HandlerUnregistered
+IdentityRotated
+    new_key_hex: String
+Imported
+    schema_nsid: String
+    imported: u32
+    skipped: u32
+Introduced
+    addr: String
+InviteDigits
+    digits: Vec<u32>
+IpcSessionsResult
+    sessions: Vec<crate::ipc::types::IpcSessionInfo>
+KeyHealthInfo
+    0: KeyHealth
+LocalDoorResult
+    answer: String
+    #[serde(default)]
+    remaining_secs: Option<u64>
+    #[serde(default)]
+    listening: Option<String>
+    network_known: bool
+LockPolicy
+    mode: LockMode
+    auto_lock_minutes: u32
+LockPolicySet
+LoginSuccessful
+    user_id: String
+    device_fingerprint: String
+    session_token: crate::ipc::SecretText
+MessageDeliveries
+    readings: Vec<crate::ipc::DeliveryReading>
+MessageHistory
+    messages: Vec<serde_json::Value>
+MessageRead
+    moved: bool
+MessageSent
+    message_id: String
+    #[serde(default)]
+    delivery: Option<crate::ipc::Delivery>
+MessageUnread
+    count: u64
+MnemonicConfirmed
+ModelInstalled
+    id: String
+    active: bool
+ModelList
+    models: Vec<crate::ipc::InstalledModel>
+MountEvicted
+    freed_bytes: u64
+MountList
+    mounts: Vec<MountConfig>
+Mounted
+    config: MountConfig
+NetworkStatusResult
+    peers: Vec<crate::ipc::types::PeerStatus>
+    quic_gateway: crate::ipc::types::GatewaySummary
+    http_gateway: crate::ipc::types::GatewaySummary
+    rendezvous_url: Option<String>
+    relay: crate::ipc::types::RelayReadout
+    sync: crate::ipc::types::SyncStatusResult
+NoActiveSession
+NodeIdentity
+    device_did: String
+    signing_pubkey_hex: String
+NodeList
+    nodes: Vec<PairedNode>
+NodePaired
+    node: PairedNode
+NodeRelayResult
+    relay_url: Option<String>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relay_key: Option<String>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admission: Option<crate::rendezvous::RelayAdmission>
+NodeRevoked
+NotAllowed
+NotInScope
+Ok
+OperatorEnrolled
+    name: String
+    service: crate::ipc::vault_request::OperatedService
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unstood: Option<crate::ipc::vault_request::Unstood>
+OperatorEnrolledLines
+    lines: Vec<crate::ipc::vault_request::LineEnrolled>
+OperatorForgotten
+    name: String
+    service: crate::ipc::vault_request::OperatedService
+    key: String
+    answered: bool
+OperatorHeld
+    names: Vec<String>
+OperatorMinted
+    name: String
+    key: String
+OperatorMints
+    mints: Vec<crate::ipc::vault_request::MintWaiting>
+OrgCreated
+    org_did: String
+OrgFrostContributed
+    cosigner_id_hex: String
+    cosigner_commitment_hex: String
+    cosigner_share_hex: crate::ipc::vault_request::SecretText
+OrgFrostCreated
+    org_did: String
+    shares: Vec<(u16, crate::ipc::vault_request::SecretText)>
+OrgFrostJoined
+    org_did: String
+OrgFrostSignSession
+    session_id: String
+    message_hex: String
+    coordinator_id_hex: String
+    coordinator_commitment_hex: String
+OrgFrostSigned
+    envelope_id: String
+    envelope_json: String
+OrgGrantIssued
+    envelope_id: String
+    envelope_json: String
+OrgGrantList
+    grants: Vec<OrgGrantEntry>
+OrgInfo
+    org_did: String
+    name: String
+    owner_did: String
+    created_at: i64
+OrgList
+    orgs: Vec<OrgEntry>
+OrgMemberRemoved
+    revoked_count: u32
+OrgRootCreated
+    root: String
+    owner: String
+    delegation: OrgRootDelegation
+OrgRootInvited
+    member: String
+    added: bool
+    grant_json: String
+PairAdvertising
+    code: crate::ipc::vault_request::SecretText
+    expires_at: u64
+PairAwaitingPeer
+PairConfirmAck
+PairConnected
+PairConnecting
+PairFailed
+    reason: String
+PairShowCode
+    token: crate::ipc::SecretText
+    sas: u32
+    peer_label: Option<String>
+PairTransferring
+PairingComplete
+    node: PairedNode
+    #[serde(default)]
+    session_token: Option<crate::ipc::SecretText>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relay_offer: Option<String>
+PrincipalSession
+    token: crate::ipc::SecretText
+QuicGatewayStatusResult
+    enabled: bool
+    port: u16
+    bind: String
+    #[serde(default)]
+    allow: Option<String>
+    running: bool
+ReachStatusResult
+    relay: crate::ipc::types::RelayReadout
+RecordDeleted
+RecordInserted
+    record_id: String
+RecordOpenNotFound
+    url: String
+RecordOpenResult
+    record: serde_json::Value
+    nsid: String
+RecordQueryResult
+    records: Vec<serde_json::Value>
+Recovered
+    did: String
+    new_key_hex: String
+    #[serde(default)]
+    sealed_copy_removed: bool
+RecoveryMaterial
+    kel: Vec<crate::kel::KelEvent>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bundle: Option<String>
+RecoveryPhraseAdded
+    recovery_key: crate::ipc::vault_request::SecretText
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    copies_delivered_to: Vec<PairedNode>
+RecoveryStatus
+    mnemonic_confirmed: bool
+    pin_set: bool
+    escrow_set: bool
+    guardian_count: u8
+RelayInvite
+    invite: crate::ipc::vault_request::SecretText
+RelayRule
+    rule: crate::rendezvous::AdmissionRule
+RemoteAdded
+    name: String
+RemoteList
+    remotes: Vec<String>
+RendezvousSet
+RendezvousStatus
+    0: crate::rendezvous::RendezvousStatusInfo
+SchemaGetResult
+    definition_json: String
+SchemaGrantListResult
+    grants: Vec<SchemaGrantEntry>
+SchemaGrantRevoked
+SchemaGrantUpdated
+SchemaList
+    schemas: Vec<String>
+SchemaNotFound
+    nsid: String
+SchemaQuotaUpdated
+SchemaRegistered
+SealedDomainMismatch
+    expected: String
+    got: String
+SealedList
+    entries: Vec<SealedListEntry>
+SealedObject
+    #[serde(with = "crate::base64_bytes")]
+    blob: Vec<u8>
+    domain_id: String
+    total_size: u64
+SessionEnded
+SessionList
+    sessions: Vec<EphemeralSession>
+SessionLocked
+SurfaceClosed
+    app_id: String
+SurfaceInputEvent
+    app_id: String
+    event: crate::ipc::types::InputEventPayload
+SurfaceOk
+SyncAck
+SyncComplete
+    pushed: u32
+    pulled: u32
+    skipped: u32
+    transfers: Vec<(SyncDirection, String, u64)>
+SyncConfigured
+    rule: SyncRule
+SyncJobFailed
+    job_id: String
+    message: String
+SyncJobTimeout
+    job_id: String
+SyncOutcomeMsg
+    job_id: String
+    outcome: SyncOutcome
+SyncRuleList
+    rules: Vec<SyncRule>
+SyncRuleRemoved
+SyncStarted
+    job_id: String
+    targets: u32
+SyncStatusResult
+    0: crate::ipc::types::SyncStatusResult
+TenantDropped
+    tenant: super::VaultTenant
+ThresholdSigned
+    signature_hex: String
+TrustAdded
+TrustRemoved
+TrustedIssuers
+    dids: Vec<String>
+TurnSet
+UnlockFailed
+    attempts_remaining: u8
+UnlockMethods
+    pin: bool
+    recovery_key: bool
+UnlockOk
+    session_token: crate::ipc::SecretText
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repaired: Option<Vec<String>>
+UnlockRateLimited
+    retry_after_secs: u64
+UnlockState
+    session_live: bool
+    session_until: Option<i64>
+    custody: crate::ipc::CustodyState
+UserCreated
+    did: String
+    device_fingerprint: String
+    session_token: crate::ipc::SecretText
+UserList
+    users: Vec<String>
+UserLoggedOut
+VaultCapacityResult
+    held: u64
+    quota: Option<u64>
+VaultFull
+    held: u64
+    quota: u64
+VaultTenants
+    tenants: Vec<super::VaultTenant>
+VfsChanged
+    path: String
+    kind: VfsChangeKind
+    timestamp_secs: u64
+VfsWatchEnd
+VfsWatchFailed
+    reason: String
+VfsWatchReady
+WeakCredential
+    message: String
+WebShellPairReady
+WebShellStatusResult
+    enabled: bool
+    port: u16
+    bind: String
+    #[serde(default)]
+    allow: Option<String>
+    #[serde(skip_serializing_if = "Option::is_none")]
+    static_dir: Option<String>
+    running: bool
+WindowAck
+WindowList
+    windows: Vec<WindowStateDto>

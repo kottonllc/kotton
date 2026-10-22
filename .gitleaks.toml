@@ -1,0 +1,16 @@
+# gitleaks configuration for kotton
+# https://github.com/gitleaks/gitleaks
+
+title = "Kotton gitleaks config"
+
+# The default rules, and nothing taken away. gitleaks reads this file from the directory it
+# scans, and a config with no rules and no `[extend]` is a scanner with no rules:
+# once this file held only a title, so `gitleaks git` run in this repository reported
+# "no leaks found" having looked for nothing.
+[extend]
+useDefault = true
+
+# No allowlist. With the rules on, the history carries 72 findings, nearly all `did:key:z6Mk…`
+# public keys, each classified by hand when the history was scanned. An allowlist
+# written to silence those would also silence the next value of the same shape that is not a
+# public key, so the classification stays in the record and the scanner stays loud.

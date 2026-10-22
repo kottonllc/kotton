@@ -1,0 +1,55 @@
+[package]
+name = "kotton-sys"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+# Async trait support
+async-trait = "0.1"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# URL parsing
+url = { version = "2.5", features = ["serde"] }
+
+# UUID support (for Bluetooth service UUIDs)
+uuid = { version = "1.6", features = ["serde", "v4"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Binary data handling
+bytes = "1.5"
+
+# Async runtime. `io-util` and `time` are what this crate uses — `tokio::io` and
+# `tokio::time`, and nothing else. It asked for `full` until 2026-09-16, which
+# turned on `net` for all 34 crates that depend on it, because cargo unifies a
+# dependency's features across the graph. That put `socket2` and `mio` in
+# `kinferd`'s closure — the process that parses untrusted weights — where
+# `infer-check` then needed a rule saying it must not open a socket. A crate that
+# does not link a socket type needs no such rule.
+tokio = { version = "1.41", features = ["io-util", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.27", features = ["signal"] }
+
+[features]
+default = []
+test-utils = []
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+futures = "0.3"
+tempfile = "3.8"
+tokio-test = "0.4"
+
+[lints]
+workspace = true

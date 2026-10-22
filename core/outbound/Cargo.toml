@@ -1,0 +1,32 @@
+[package]
+name = "kotton-outbound"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Mediated outbound HTTP for confined extensions — resolves, refuses local destinations, performs the request."
+
+[dependencies]
+# The contract this crate implements (NetMediator, OutboundRequest, the
+# forbidden-destination rule).
+kotton-sys = { path = "../sys" }
+# The keyed-HMAC oracle in `policy`: the extension composes a string, the host
+# keys the HMAC with the credential, and only the digest goes back. This is how
+# derived-signature schemes work without the secret crossing the boundary.
+kotton-crypto = { path = "../crypto" }
+
+async-trait = "0.1"
+# HTTP client. rustls only (no OpenSSL), no default features: this crate exists
+# to make a *narrow* outbound path, so it takes nothing it does not use.
+reqwest = { version = "0.12", features = ["rustls-tls", "stream"], default-features = false }
+tokio = { version = "1.48", features = ["net", "sync", "time", "macros", "rt-multi-thread"] }
+url = "2.5"
+thiserror = "2.0"
+tracing = "0.1"
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tokio = { version = "1.48", features = ["full"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "kotton-pty-drive"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+portable-pty = "0.8"
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }

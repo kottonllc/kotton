@@ -1,0 +1,23 @@
+[package]
+name = "kotton-record-file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "A governance record file and its row: the one header parser the board and the converter share, and the byte-exact map between a record file and a row of sh.kotton.governance.record (RFC-0088)"
+
+# Deliberately light. `xtask` depends on this for the header parser, and every gate in
+# `just lint` pays for what this links — see the note on `kotton-cli` in xtask/Cargo.toml.
+# The schema is carried as JSON so that `kotton-schemas` (and its `toml`, `chrono`) stays a
+# dev-dependency, where a test holds the JSON to the typed definition.
+[dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+kotton-schemas = { path = "../../core/schemas" }

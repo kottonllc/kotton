@@ -1,0 +1,25 @@
+# gitleaks' findings in the exported tree, each classified by hand: its fingerprint
+# (file:rule:line, as gitleaks prints it) and why it is not a secret. `tools/export-public.sh`
+# hands gitleaks these fingerprints and nothing broader, so a new finding, or this one moved to
+# another line, is reported until someone reads it and adds it here with its reason.
+client/shell/src/commands/device.rs:generic-api-key:875  a 64-hex test value in a did:key, to test how a long DID is shortened
+client/shell/src/commands/peer.rs:generic-api-key:365  a did:key, a public key, as a test fixture
+client/shell/src/out.rs:generic-api-key:309  a 64-hex test value in a did:key, to test how a long DID is shortened
+core/crypto/src/provider/kdf.rs:generic-api-key:557  a did:key, a public key, as a test fixture
+core/device/src/identity.rs:generic-api-key:72  a Rust type name, not a value
+core/device/src/runtime/mod.rs:generic-api-key:986  the first 30 hex of SHA-256 of "test", a test value cut short on purpose
+core/kuserd/src/agent/app_host.rs:generic-api-key:749  a placeholder DID a test names, not a key
+core/secret/src/provider/file.rs:generic-api-key:470  SHA-256 of "test", a well-known hash, as a test value
+core/store/src/runtime/user/files.rs:generic-api-key:1166  a placeholder DID a test names, not a key
+core/wire/src/did/core.rs:generic-api-key:113  the did:key example the W3C did:key spec gives: a public key
+core/wire/src/did/core.rs:generic-api-key:126  the did:key example the W3C did:key spec gives: a public key
+core/wire/src/did/core.rs:generic-api-key:36  the did:key example the W3C did:key spec gives: a public key
+core/wire/src/did/core.rs:generic-api-key:9  the did:key example the W3C did:key spec gives: a public key
+core/wire/src/did/document.rs:generic-api-key:94  the did:key example the W3C did:key spec gives: a public key
+core/wire/src/did/document.rs:generic-api-key:98  the did:key example the W3C did:key spec gives: a public key
+core/wire/src/ipc/response.rs:generic-api-key:1441  a 20-hex test token, asserted never to be printed
+infra/vault/vault.env:generic-api-key:46  an empty setting in a template; it carries no value
+tests/tests/suite/guest_files.rs:generic-api-key:274  a placeholder DID a test names, not a key
+tests/tests/suite/guest_files.rs:generic-api-key:286  a placeholder DID a test names, not a key
+tests/tests/suite/guest_files.rs:generic-api-key:338  a placeholder DID a test names, not a key
+tests/tests/suite/restarted_daemon.rs:generic-api-key:214  a placeholder DID a test names, not a key

@@ -1,0 +1,2006 @@
+﻿// SPDX-License-Identifier: AGPL-3.0-or-later
+//! Background sync engine (RFC-0019).
+//!
+//! Provides [`SyncEngine`] — a coalescing scheduler, per-target serialised
+//! workers, an observable job registry, and a typed result.
+//!
+//! ## Two execution paths
+//!
+//! 1. **Background loop** — started by [`SyncEngine::spawn_background`].
+//!    Runs all configured sync rules on a 5-minute timer, or whenever
+//!    [`SyncEngine::wake_background`] is called (e.g. from the VFS watcher or
+//!    a peer-push notification). Passes are untracked (fire-and-forget).
+//!
+//! 2. **IPC-triggered** — called by the `SyncTrigger` / `SyncAwait` dispatch
+//!    arms. Creates a tracked `JobId`; callers block via `await_job` until
+//!    the pass finishes, fails, or times out.
+//!
+//! In both paths a per-target running-set prevents two concurrent passes for
+//! the same `(user_id, node_id)` pair.
+//!
+//! # Tier note
+//! This module lives in `06_daemon` for the `device_sync` sprint. The sync
+//! logic belongs in `05_runtime`; migration is tracked in
+//! `IDEA-tier-discipline`.
+
+use kotton_peer::membership::Membership as _;
+use kotton_peer::daemon::db as network_db;
+use kotton_wire::ipc::{SyncChangesetRow, SyncOutcome, UserRequest, VfsChangeKind};
+use kotton_wire::remote::{RemoteBackend, RemoteConfig};
+use kotton_store::runtime::user::sync::Outbound;
+use kotton_record::RecordStore;
+use kotton_device::DeviceRuntime;
+use notify::{EventKind, RecursiveMode, Watcher};
+use sqlx::SqlitePool;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
+use tokio::sync::{watch, Notify, Semaphore};
+use tokio::time::{Duration, interval};
+use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// Public VFS change frame type (used by VfsWatch subscribers)
+// ---------------------------------------------------------------------------
+
+/// A single VFS change event broadcast from `spawn_fs_watcher` to active
+/// `VfsWatch` IPC subscribers (RFC-0017).
+///
+/// Fields: `(path, kind, timestamp_secs)`
+pub type VfsChangeFrame = (String, VfsChangeKind, u64);
+
+// ---------------------------------------------------------------------------
+// Polling interval
+// ---------------------------------------------------------------------------
+
+/// Polling interval for the background sync loop (5 minutes per RFC-0008).
+const POLL_INTERVAL_SECS: u64 = 300;
+
+/// A mount is maintained at least this often while the daemon runs. Time rather
+/// than a segment count: RFC-0047 made the same call for object snapshots, and a
+/// count heuristic drifts the moment two subsystems append at different rates.
+pub const MAINTENANCE_INTERVAL_SECS: u64 = 3600;
+/// No sync for this long means the machine is quiet enough for the expensive
+/// half (compaction). The floor below keeps that from running constantly.
+const IDLE_AFTER_SECS: u64 = 120;
+/// Even when idle, do not maintain more often than this.
+const MAINTENANCE_FLOOR_SECS: u64 = 300;
+/// How soon the loop tries again while a hand-over is still waiting to enter the
+/// log — because the mount was held by another writer, or because the wake that
+/// announced it arrived while a pass was running and was not stored
+/// (`wake_background` keeps no permit; RFC-0071's defect list names it).
+const HAND_OVER_RETRY_MILLIS: u64 = 1_000;
+/// Retention window handed to the snapshot: history newer than this survives
+/// intact. Mirrors the store's own default (RFC-0047's 24h full-granularity
+/// window) rather than reaching into that crate's provider module for it.
+const MAINTENANCE_KEEP_FULL_SECS: u64 = 24 * 60 * 60;
+
+/// Default semaphore size: at most 4 concurrent target pairs.
+const DEFAULT_MAX_PARALLEL: usize = 4;
+
+// ---------------------------------------------------------------------------
+// Job state
+// ---------------------------------------------------------------------------
+
+type SyncTarget = (String, String); // (user_id, node_id)
+
+/// Observed state of a tracked sync job.
+#[derive(Debug, Clone)]
+pub enum JobState {
+    Queued,
+    Running,
+    Complete(SyncOutcome),
+    Failed(String),
+}
+
+struct JobEntry {
+    tx: watch::Sender<JobState>,
+    created_at: Instant,
+}
+
+/// Result returned by [`SyncEngine::await_job`].
+pub enum AwaitResult {
+    Complete(SyncOutcome),
+    Failed(String),
+    /// The job id was not found (already evicted or never created).
+    NotFound,
+    /// The timeout elapsed before the job completed.
+    Timeout,
+}
+
+/// `user_id`'s live store, or an error naming why not.
+///
+/// Was `handlers::active_user`, which took the daemon's `UserRegistry` directly.
+/// Only this file ever called it, so it travels with the engine rather than
+/// staying behind as the one daemon type the engine still had to name. The
+/// resolution is the same; the parameter is the seam.
+fn active_user(
+    resources: &dyn crate::SyncHost,
+    user_id: &str,
+) -> anyhow::Result<Arc<kotton_store::runtime::user::UserStore>> {
+    resources
+        .user_store(user_id)
+        .ok_or_else(|| anyhow::anyhow!("user '{user_id}' is not active"))
+}
+
+// ---------------------------------------------------------------------------
+// SyncEngine
+// ---------------------------------------------------------------------------
+
+/// Central sync scheduler.  Wrap in `Arc` and share across the daemon.
+pub struct SyncEngine {
+    db: Arc<SqlitePool>,
+    runtime: Arc<DeviceRuntime>,
+    /// The host's live per-user resources. A field rather than a parameter on
+    /// each method, for the same reason `runtime` is one: the engine outlives any
+    /// single call and every pass needs it (RFC-0080 step 6).
+    ///
+    /// A trait rather than the daemon's three locator types, so nothing in this
+    /// file names something that exists only in a binary crate.
+    resources: Arc<dyn crate::SyncHost>,
+    semaphore: Arc<Semaphore>,
+    jobs: Arc<Mutex<HashMap<String, JobEntry>>>,
+    /// Currently-running (user_id, node_id) pairs — prevents double-dispatch.
+    running: Arc<Mutex<HashSet<SyncTarget>>>,
+    /// Wakes the background loop (from non-async contexts such as the VFS watcher).
+    notify: Arc<Notify>,
+    /// Live mTLS allowlist — reprojected from membership after each sync pass, so a
+    /// member admitted on another of the user's nodes (pulled in by the pass) is
+    /// admitted here without a restart (RFC-0024 computed view).
+    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    /// When each user's mount was last maintained (monotonic, for the due test).
+    last_maintenance: Arc<Mutex<HashMap<String, Instant>>>,
+    /// The same event in wall-clock seconds, for reporting it to a human.
+    last_maintenance_secs: Arc<Mutex<HashMap<String, i64>>>,
+    /// When any sync last ran, for the idle signal.
+    last_activity: Arc<Mutex<Instant>>,
+    /// The people with a hand-over written into their tree and not yet in its
+    /// log (RFC-0090, *A device of your own*): maintenance packs their mount on
+    /// the next loop whatever its clock says, under the same lock as ever. Set by
+    /// [`Self::hand_over_landed`], cleared when the pack starts — so a write that
+    /// lands during that pack sets it again and is taken by the next one.
+    hand_overs: Arc<Mutex<HashSet<String>>>,
+    /// Unix seconds of the last pass that actually ran, per user.
+    ///
+    /// `SyncStatus` reported a hardcoded "never" before this, so the CLI said a
+    /// sync had never happened no matter what the engine had been doing — the
+    /// product misreporting itself, which RFC-0071's defect list names.
+    last_sync_at: Arc<RwLock<HashMap<String, i64>>>,
+}
+
+impl SyncEngine {
+    /// Create a new engine wrapping `db` and `runtime`.
+    pub fn new(
+        db: Arc<SqlitePool>,
+        runtime: Arc<DeviceRuntime>,
+        resources: Arc<dyn crate::SyncHost>,
+        paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            db,
+            runtime,
+            resources,
+            semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_PARALLEL)),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::new(Mutex::new(HashSet::new())),
+            notify: Arc::new(Notify::new()),
+            paired_keys,
+            last_sync_at: Arc::new(RwLock::new(HashMap::new())),
+            last_maintenance: Arc::new(Mutex::new(HashMap::new())),
+            last_maintenance_secs: Arc::new(Mutex::new(HashMap::new())),
+            last_activity: Arc::new(Mutex::new(Instant::now())),
+            hand_overs: Arc::new(Mutex::new(HashSet::new())),
+        })
+    }
+
+    /// The per-user pool holding `user_id`'s sync rules; `None` (with a log)
+    /// when the user's database cannot be opened — a rule that cannot be read
+    /// is a pass that does not run, not a crash.
+    async fn user_pool(&self, user_id: &str) -> Option<Arc<SqlitePool>> {
+        self.resources.agent_db(user_id).await
+    }
+
+    /// When this user's last sync pass ran, in unix seconds.
+    pub fn last_sync_at(&self, user_id: &str) -> Option<i64> {
+        self.last_sync_at.read().unwrap().get(user_id).copied()
+    }
+
+    /// When this user's mount was last maintained, in unix seconds.
+    ///
+    /// Reported rather than acted on: maintenance that runs invisibly is
+    /// indistinguishable from maintenance that never runs, and this session has
+    /// found six mechanisms that were the second thing while looking like the
+    /// first.
+    pub fn last_maintenance_at(&self, user_id: &str) -> Option<i64> {
+        self.last_maintenance_secs
+            .lock()
+            .unwrap()
+            .get(user_id)
+            .copied()
+    }
+
+    /// Record that a pass ran for `user_id`.
+    fn mark_synced(&self, user_id: &str) {
+        let now = kotton_common::time::now_secs();
+        self.last_sync_at
+            .write()
+            .unwrap()
+            .insert(user_id.to_string(), now);
+    }
+
+    /// Wake the background loop.  Cheap; safe to call from blocking threads.
+    pub fn wake_background(&self) {
+        self.notify.notify_waiters();
+    }
+
+    /// A hand-over to a device of `user_id`'s has been written into their tree,
+    /// and somebody is waiting to see it in the log.
+    ///
+    /// The write lands loose; it enters the log only when a packing pass commits
+    /// it, and the share sheet says *sent* only then
+    /// (`TASK-a-hand-over-is-not-in-the-log-until-the-next-packing-pass`). So the
+    /// mount is marked for the next loop and the loop is woken: maintenance then
+    /// packs it whatever its clock and the idle floor say, under the mount's lock
+    /// like every other writer, and nothing else changes — no pass of its own,
+    /// and none outside that lock.
+    pub fn hand_over_landed(&self, user_id: &str) {
+        self.hand_overs.lock().unwrap().insert(user_id.to_string());
+        self.wake_background();
+    }
+
+    /// Whether any hand-over is waiting to enter a log.
+    fn any_hand_over_waiting(&self) -> bool {
+        !self.hand_overs.lock().unwrap().is_empty()
+    }
+
+    /// Whether a hand-over of `user_id`'s is waiting to enter their log —
+    /// marked by [`Self::hand_over_landed`] and not yet taken by a pack.
+    pub fn hand_over_waiting(&self, user_id: &str) -> bool {
+        self.hand_overs.lock().unwrap().contains(user_id)
+    }
+
+    /// The one thing the host's file verbs may tell this engine: that a
+    /// hand-over landed. See [`HandOverSignal`].
+    pub fn hand_over_signal(self: &Arc<Self>) -> HandOverSignal {
+        HandOverSignal(Arc::clone(self))
+    }
+
+    /// Enqueue a sync pass for matching rules and return a trackable `(job_id,
+    /// target_count)`.  Non-blocking: returns as soon as the worker task is
+    /// spawned.  Targets that are already running are skipped (coalescing).
+    pub async fn enqueue(
+        self: &Arc<Self>,
+        user_id: &str,
+        node_id: Option<&str>,
+    ) -> (String, u32) {
+        // 1. Resolve matching targets, from the user's own database (3b-v).
+        let rules = match self.user_pool(user_id).await {
+            Some(pool) => network_db::list_sync_rules(&pool, user_id)
+                .await
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let mut seen: HashSet<SyncTarget> = HashSet::new();
+        let targets: Vec<SyncTarget> = rules
+            .iter()
+            .filter(|r| node_id.is_none_or(|n| r.node_id == n))
+            .filter_map(|r| {
+                let key = (user_id.to_string(), r.node_id.clone());
+                seen.insert(key.clone()).then_some(key)
+            })
+            .collect();
+
+        let target_count = targets.len() as u32;
+        let job_id = Uuid::new_v4().to_string();
+
+        // 2. Create a job entry so callers can await it immediately.
+        let (tx, _rx) = watch::channel(JobState::Queued);
+        self.jobs.lock().unwrap().insert(
+            job_id.clone(),
+            JobEntry {
+                tx: tx.clone(),
+                created_at: Instant::now(),
+            },
+        );
+
+        if targets.is_empty() {
+            // No matching rules — complete immediately with zero counts.
+            let _ = tx.send(JobState::Complete(SyncOutcome {
+                files: 0,
+                bytes: 0,
+                records: 0,
+                conflicts_resolved: 0,
+                duration_ms: 0,
+            }));
+            return (job_id, 0);
+        }
+
+        // 3. Filter out already-running targets (coalescing).
+        let to_spawn: Vec<SyncTarget> = {
+            let mut running = self.running.lock().unwrap();
+            targets
+                .into_iter()
+                .filter(|t| running.insert(t.clone()))
+                .collect()
+        };
+
+        if to_spawn.is_empty() {
+            // All targets already running — complete immediately.
+            let _ = tx.send(JobState::Complete(SyncOutcome {
+                files: 0,
+                bytes: 0,
+                records: 0,
+                conflicts_resolved: 0,
+                duration_ms: 0,
+            }));
+            return (job_id, target_count);
+        }
+
+        // 4. Spawn aggregate worker task.
+        let engine = Arc::clone(self);
+        let job_id_task = job_id.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(JobState::Running);
+            let start = Instant::now();
+            let mut agg = SyncOutcome {
+                files: 0,
+                bytes: 0,
+                records: 0,
+                conflicts_resolved: 0,
+                duration_ms: 0,
+            };
+            let mut first_error: Option<String> = None;
+
+            for target in &to_spawn {
+                let _permit = engine.semaphore.acquire().await.ok();
+                match sync_node_with_outcome(&engine.db, &engine.runtime, &*engine.resources, &engine.paired_keys, &target.0, &target.1)
+                    .await
+                {
+                    Ok(o) => {
+                        engine.mark_synced(&target.0);
+                        agg.files += o.files;
+                        agg.bytes += o.bytes;
+                        agg.records += o.records;
+                        agg.conflicts_resolved += o.conflicts_resolved;
+                    }
+                    Err(e) => {
+                        if first_error.is_none() {
+                            first_error = Some(e);
+                        }
+                    }
+                }
+                engine.running.lock().unwrap().remove(target);
+            }
+
+            agg.duration_ms = start.elapsed().as_millis() as u64;
+
+            let final_state = if let Some(err) = first_error {
+                JobState::Failed(err)
+            } else {
+                JobState::Complete(agg)
+            };
+
+            if let Some(entry) = engine.jobs.lock().unwrap().get(&job_id_task) {
+                let _ = entry.tx.send(final_state);
+            }
+
+            // Evict old completed jobs (simple TTL: 120 s, cap 256 entries).
+            engine.evict_old_jobs();
+        });
+
+        (job_id, target_count)
+    }
+
+    /// Block until job `job_id` completes, fails, or `timeout` elapses.
+    pub async fn await_job(&self, job_id: &str, timeout: Duration) -> AwaitResult {
+        let rx = {
+            let jobs = self.jobs.lock().unwrap();
+            jobs.get(job_id).map(|e| e.tx.subscribe())
+        };
+        let Some(mut rx) = rx else {
+            return AwaitResult::NotFound;
+        };
+
+        let result = tokio::time::timeout(timeout, async move {
+            // Check the current value first (job may already be done).
+            loop {
+                {
+                    let state = rx.borrow();
+                    match &*state {
+                        JobState::Complete(o) => return Ok(o.clone()),
+                        JobState::Failed(msg) => return Err(msg.clone()),
+                        _ => {}
+                    }
+                }
+                if rx.changed().await.is_err() {
+                    return Err("job dropped unexpectedly".to_string());
+                }
+            }
+        })
+        .await;
+
+        match result {
+            Ok(Ok(outcome)) => AwaitResult::Complete(outcome),
+            Ok(Err(msg)) => AwaitResult::Failed(msg),
+            Err(_) => AwaitResult::Timeout,
+        }
+    }
+
+    /// Maintain every quiet user's mount: pack, snapshot, then compact.
+    ///
+    /// **The component that holds the mount maintains it.** This lives in the
+    /// sync engine because the engine is what claims a mount today — not because
+    /// maintenance is a sync concern. A device-scoped maintenance sidecar could
+    /// not do this work at all: snapshotting reads the sealed log, which needs
+    /// `K_log`, which a device-scoped process deliberately does not have. The
+    /// keys are here, so the work is here.
+    ///
+    /// The order is fixed and not an implementation detail. Packing turns loose
+    /// objects into segments, snapshotting collapses those segments, and only
+    /// then can compaction see what is genuinely unreferenced. Run out of order
+    /// — or concurrently — and the compactor reclaims packs a packing pass has
+    /// written but not yet committed.
+    async fn maintain_quiet_users(&self) {
+        let idle = {
+            let last = *self.last_activity.lock().unwrap();
+            last.elapsed().as_secs() >= IDLE_AFTER_SECS
+        };
+
+        let users: Vec<String> = self.resources.user_ids();
+
+        // **A mark for a person whose store is not resident is dropped.** One
+        // who locks before the pack leaves `user_ids`, so nothing below would
+        // ever clear their mark and the loop would retry each second until they
+        // unlocked. The mark has nothing to say meanwhile: their loose writes
+        // are packed once they unlock and the store is resident again.
+        self.hand_overs
+            .lock()
+            .unwrap()
+            .retain(|marked| users.iter().any(|u| u == marked));
+
+        for user_id in users {
+            // **A hand-over waiting makes the mount due**, whatever the clock
+            // below says — first sight, the idle floor and the interval alike.
+            // Those rules keep the expensive half off a busy machine; a person
+            // who has just chosen a device is waiting on this mount's log, and
+            // a pass run now packs exactly what a later one would.
+            let handed_over = self.hand_overs.lock().unwrap().contains(&user_id);
+            let due = {
+                let mut last = self.last_maintenance.lock().unwrap();
+                match last.get(&user_id) {
+                    // First sight starts the clock; it does not fire.
+                    //
+                    // A mount seen a moment ago is not overdue, and daemon
+                    // startup is the worst moment to take one: the user is
+                    // enrolling, pairing and syncing, and maintenance would hold
+                    // the mount through all of it. Measured, that is what it
+                    // costs — the same pass that takes ~20 ms on a quiet machine
+                    // took **25 s** competing with a starting daemon, not because
+                    // it had more to do (it scanned 0 segments and exported 1
+                    // row) but because it was starved while holding the lock.
+                    //
+                    // Nothing is skipped by waiting: the idle trigger below
+                    // brings the first pass along within minutes of the machine
+                    // going quiet, which is when it is cheap.
+                    None => {
+                        last.insert(user_id.clone(), Instant::now());
+                        false
+                    }
+                    Some(t) => {
+                        let secs = t.elapsed().as_secs();
+                        secs >= MAINTENANCE_INTERVAL_SECS
+                            || (idle && secs >= MAINTENANCE_FLOOR_SECS)
+                    }
+                }
+            };
+            if !due && !handed_over {
+                continue;
+            }
+
+            // Claim the mount itself, and only if it is free.
+            //
+            // This is the whole correctness argument, and an earlier version of
+            // this loop got it wrong: it consulted the engine's `running` set,
+            // which is a coalescing set the manual `SyncMount` path never joins,
+            // so maintenance ran on top of a user's own sync and lost a record.
+            // The mount's lock has no such blind spot — every writer takes it.
+            //
+            // `try_lock` rather than `lock`: maintenance is never urgent, so it
+            // yields to real work and comes back next tick instead of queueing
+            // ahead of it.
+            //
+            // A hand-over yields too, and stays marked: the loop comes back for
+            // it within `HAND_OVER_RETRY_MILLIS`, not at the next tick.
+            let Some(_mount_lock) = self.runtime.try_lock_mount(&user_id, "local") else {
+                tracing::debug!(user_id, "maintenance: mount busy, deferring");
+                continue;
+            };
+
+            // Cleared before the pack, not after: the file verbs take no mount
+            // lock, so a hand-over can land while this pass runs, and whether
+            // the pass sees it is a race. Cleared first, that write marks the
+            // mount again and the next loop — soon, because it is marked — packs
+            // it.
+            self.hand_overs.lock().unwrap().remove(&user_id);
+
+            if !due {
+                // Only the hand-over: pack, which is what puts it in the log,
+                // and leave the snapshot and the compaction to their own clock.
+                // A person handing a file over is the opposite of the quiet the
+                // idle rule waits for, and the maintenance clock is not reset,
+                // so the expensive half still comes when it would have.
+                self.pack_handed_over(&user_id).await;
+                continue;
+            }
+
+            self.maintain_one(&user_id).await;
+            self.last_maintenance
+                .lock()
+                .unwrap()
+                .insert(user_id.clone(), Instant::now());
+            self.last_maintenance_secs
+                .lock()
+                .unwrap()
+                .insert(user_id.clone(), kotton_common::time::now_secs());
+        }
+    }
+
+    /// Pack `user_id`'s mount for a hand-over, and nothing else — the first step
+    /// of [`Self::maintain_one`], run without the other two. The caller holds
+    /// the mount's lock.
+    async fn pack_handed_over(&self, user_id: &str) {
+        let Some(store) = self
+            .resources
+            .user_store(user_id)
+            .and_then(|user_rt| user_rt.get_remote("local"))
+        else {
+            return;
+        };
+        match kotton_store::runtime::pack_mount(&*store, "local").await {
+            Ok(Some(s)) => tracing::info!(
+                user_id,
+                packed = s.files_packed,
+                "maintenance: packed a hand-over into the log"
+            ),
+            Ok(None) => {}
+            // Not marked again: a pack that keeps failing would then spin
+            // the loop each second. So a failed hand-over waits for the
+            // clock's own pass — a limit of this unit, filed as
+            // `TASK-a-hand-over-whose-pack-failed-waits-for-the-clock`.
+            Err(e) => tracing::warn!(user_id, error = %e, "maintenance: packing a hand-over failed"),
+        }
+    }
+
+    /// One user's mount, in the one safe order. Every step is best-effort and
+    /// logged: a store with no pack layer answers `None` to all three, which is
+    /// a correct answer and not a failure.
+    async fn maintain_one(&self, user_id: &str) {
+        // The runtime handle is held for the whole pass. It used to be dropped
+        // here, under a comment saying nothing below needed it — which was not
+        // true: `snapshot_records` re-resolved the same user internally, so the
+        // narrow borrow described the code rather than what it did. Now that the
+        // resolution is the caller's (RFC-0080 step 6), the handle is visible and
+        // the pass makes one lookup. Holding it is harmless: the remote set
+        // carries its own lock, so a handle here does not block a `remote add`
+        // the way it did when that path went through `Arc::get_mut`.
+        let Some(user_rt) = self.resources.user_store(user_id) else {
+            return;
+        };
+        let Some(store) = user_rt.get_remote("local") else {
+            return;
+        };
+
+        match kotton_store::runtime::pack_mount(&*store, "local").await {
+            Ok(Some(s)) if s.files_packed > 0 => {
+                tracing::info!(user_id, packed = s.files_packed, "maintenance: packed loose objects")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(user_id, error = %e, "maintenance: packing failed"),
+        }
+
+        // Record state rides the same snapshot segment as the objects (RFC-0046
+        // slice 5), so this one call bounds both halves of the log. `keep_full_secs`
+        // is the retention window, not a switch: segments newer than it survive.
+        // This pass is best-effort and returns nothing, so a store that will not
+        // open is logged and skipped rather than propagated.
+        let record_store = match self.resources.record_store(user_id) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, user_id, "maintenance: record store unavailable");
+                return;
+            }
+        };
+        let Some(mount_store) = user_rt.get_remote("local") else {
+            tracing::warn!(user_id, "maintenance: no local mount; nothing to snapshot");
+            return;
+        };
+        match kotton_record::replication::snapshot_records(
+            &self.runtime.schema_registry,
+            &record_store,
+            mount_store.as_ref(),
+            MAINTENANCE_KEEP_FULL_SECS,
+        )
+        .await
+        {
+            Ok(Some(s)) if s.segments_subsumed > 0 => tracing::info!(
+                user_id,
+                subsumed = s.segments_subsumed,
+                "maintenance: snapshotted the log"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(user_id, error = %e, "maintenance: snapshot failed"),
+        }
+
+        match kotton_store::runtime::compact_mount(&*store, "local").await {
+            Ok(Some(s)) if s.packs_rewritten > 0 => {
+                tracing::info!(user_id, rewritten = s.packs_rewritten, "maintenance: compacted")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(user_id, error = %e, "maintenance: compaction failed"),
+        }
+    }
+
+    /// Start the background polling loop as a detached tokio task.
+    pub fn spawn_background(self: Arc<Self>) {
+        tokio::spawn(async move {
+            // Initial reconciliation pass on startup.
+            self.run_background_pass().await;
+
+            let mut ticker = interval(Duration::from_secs(POLL_INTERVAL_SECS));
+            ticker.tick().await; // discard the immediate first tick
+
+            loop {
+                // Registered before the hand-over check, so a hand-over that
+                // lands between the two still wakes this wait.
+                let woken = self.notify.notified();
+                tokio::pin!(woken);
+                woken.as_mut().enable();
+                let waiting = self.any_hand_over_waiting();
+                let retry = tokio::select! {
+                    _ = ticker.tick() => false,
+                    _ = &mut woken => {
+                        tracing::debug!("sync_engine: triggered by background wake");
+                        false
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(HAND_OVER_RETRY_MILLIS)), if waiting => true,
+                };
+                // A hand-over goes into the log before the pass dials anyone:
+                // the pass in front of it can be a slow peer, and the person
+                // is watching the sheet. The pass then carries the packed copy.
+                if self.any_hand_over_waiting() {
+                    self.maintain_quiet_users().await;
+                }
+                if retry {
+                    continue;
+                }
+                self.run_background_pass().await;
+                self.maintain_quiet_users().await;
+            }
+        });
+    }
+
+    /// Evict completed job entries older than 120 s, keeping at most 256 total.
+    fn evict_old_jobs(&self) {
+        const TTL_SECS: u64 = 120;
+        const MAX_JOBS: usize = 256;
+
+        let mut jobs = self.jobs.lock().unwrap();
+        let now = Instant::now();
+
+        // Remove entries that are done AND older than TTL.
+        jobs.retain(|_, entry| {
+            let done = matches!(
+                *entry.tx.borrow(),
+                JobState::Complete(_) | JobState::Failed(_)
+            );
+            if done && now.duration_since(entry.created_at).as_secs() > TTL_SECS {
+                return false;
+            }
+            true
+        });
+
+        // If still over cap, evict oldest completed entries.
+        if jobs.len() > MAX_JOBS {
+            let mut completed_ages: Vec<(String, Instant)> = jobs
+                .iter()
+                .filter(|(_, e)| {
+                    matches!(*e.tx.borrow(), JobState::Complete(_) | JobState::Failed(_))
+                })
+                .map(|(id, e)| (id.clone(), e.created_at))
+                .collect();
+            completed_ages.sort_by_key(|(_, t)| *t);
+            let to_remove = jobs.len().saturating_sub(MAX_JOBS);
+            for (id, _) in completed_ages.into_iter().take(to_remove) {
+                jobs.remove(&id);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Background pass (untracked)
+    // -----------------------------------------------------------------------
+
+    async fn run_background_pass(&self) {
+        // Each loaded user's rules from their own database (3b-v) — the old
+        // machine-wide scan is gone with the machine-wide table.
+        let loaded_users: Vec<String> = self.resources.user_ids();
+        let mut rules_with_user = Vec::new();
+        for user_id in &loaded_users {
+            if let Some(pool) = self.user_pool(user_id).await {
+                match network_db::list_sync_rules(&pool, user_id).await {
+                    Ok(rules) => rules_with_user.extend(
+                        rules
+                            .into_iter()
+                            // `watch` is what this background pass is for. A rule
+                            // with it off says "sync only when explicitly
+                            // triggered", which is what `sync now` still does —
+                            // the rule is skipped here, not disabled.
+                            //
+                            // It was read by nothing until now: `sync list`
+                            // displayed the flag and the daemon synced every rule
+                            // regardless, so the UI reported a mode that did not
+                            // exist (RFC-0071's defect list).
+                            .filter(|r| r.watch)
+                            .map(|r| (user_id.clone(), r)),
+                    ),
+                    Err(e) => {
+                        tracing::warn!(user_id, error = %e, "sync_engine: failed to load sync rules")
+                    }
+                }
+            }
+        }
+
+        if rules_with_user.is_empty() {
+            return;
+        }
+
+        tracing::debug!(count = rules_with_user.len(), "sync_engine: running background pass");
+
+        let mut seen: HashSet<SyncTarget> = HashSet::new();
+        for (user_id, rule) in &rules_with_user {
+            let target: SyncTarget = (user_id.clone(), rule.node_id.clone());
+            if !seen.insert(target.clone()) {
+                continue;
+            }
+            // Skip if an IPC-triggered job is already running for this target.
+            // Maintenance needs no check of its own here: it holds the mount's
+            // lock, which this pass takes before it writes anything.
+            {
+                let mut running = self.running.lock().unwrap();
+                if running.contains(&target) {
+                    tracing::debug!(
+                        user_id,
+                        node_id = rule.node_id,
+                        "sync_engine: background pass: target already running, skipping"
+                    );
+                    continue;
+                }
+                running.insert(target.clone());
+            }
+            match sync_node_with_outcome(&self.db, &self.runtime, &*self.resources, &self.paired_keys, user_id, &rule.node_id).await {
+                Ok(o) => {
+                    self.mark_synced(user_id);
+                    *self.last_activity.lock().unwrap() = Instant::now();
+                    tracing::info!(
+                    user_id,
+                    node_id = rule.node_id,
+                    files = o.files,
+                    records = o.records,
+                    "sync_engine: background pass complete"
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    error = %e, user_id, node_id = rule.node_id,
+                    "sync_engine: background pass failed"
+                ),
+            }
+            self.running.lock().unwrap().remove(&target);
+        }
+    }
+}
+
+/// What the host's `files` verbs hold of the sync engine: the one call that says
+/// a hand-over landed ([`SyncEngine::hand_over_landed`]).
+///
+/// A handle rather than the engine, because a person's file tree has no
+/// business enqueuing a sync, awaiting a job or reading a peer's status, and a
+/// field of type `Arc<SyncEngine>` would let it.
+#[derive(Clone)]
+pub struct HandOverSignal(Arc<SyncEngine>);
+
+impl HandOverSignal {
+    /// A hand-over to a device of `user_id`'s has been written into their tree.
+    pub fn landed(&self, user_id: &str) {
+        self.0.hand_over_landed(user_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Core sync logic (used by both paths)
+// ---------------------------------------------------------------------------
+
+/// Open a peer connection and run file + record sync for one (user, node) pair.
+/// Returns a [`SyncOutcome`] summarising the transfer, or a string error.
+async fn sync_node_with_outcome(
+    db: &Arc<SqlitePool>,
+    runtime: &Arc<DeviceRuntime>,
+    resources: &dyn crate::SyncHost,
+    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    user_id: &str,
+    node_id: &str,
+) -> Result<SyncOutcome, String> {
+    let start = Instant::now();
+
+    // 1. Resolve the paired node record from the DB.
+    let node = match network_db::get_paired_node_by_id(db, user_id, node_id).await {
+        Ok(Some(n)) => n,
+        Ok(None) => {
+            return Err(format!(
+                "sync_engine: paired node '{node_id}' not found for user '{user_id}'"
+            ))
+        }
+        Err(e) => return Err(format!("sync_engine: DB lookup failed: {e}")),
+    };
+
+    // 2. Open the QUIC connection to the peer.
+    let prev_addr = node.addresses.first().copied();
+    let prev_relay = node.relay_url.clone();
+    let device_did = node.device_did.to_string();
+    let client = match resources.open_peer_client(node, user_id, resources.user_store(user_id).as_deref()).await {
+        Ok(c) => {
+            // Refresh the stored address from the live connection so the next
+            // sync dials the current address first (RFC-0024 reachability), and
+            // the relay the peer said it reserves at (RFC-0083 R5).
+            kotton_peer::daemon::nodes::refresh_observed_peer_address(
+                db,
+                user_id,
+                &device_did,
+                prev_addr,
+                c.observed_direct_addr(),
+            )
+            .await;
+            kotton_peer::daemon::nodes::refresh_peer_relay(
+                db,
+                user_id,
+                &device_did,
+                prev_relay.as_deref(),
+                c.learned_relay(),
+            )
+            .await;
+            c
+        }
+        Err(e) => {
+            return Err(format!(
+                "sync_engine: peer connection failed (will retry): {e}"
+            ))
+        }
+    };
+
+    // 3. Register as a transient (non-persisted) remote for file sync.
+    let remote_name = format!("__sync_bg__{node_id}");
+    let storage = Arc::new(client) as Arc<dyn kotton_sys::store::SyncableStore>;
+    let config = RemoteConfig {
+        // The peer's DID, not the node's name: the remote's configuration is
+        // where every push through it learns who is on the other end
+        // (`sync_mount_with_records`), and `RemoteBackend::Kotton` says this
+        // field is the paired node's `device_did`. A paired node's id is often
+        // a label, which no member set holds.
+        backend: RemoteBackend::Kotton {
+            peer_did: device_did.clone(),
+            label: node_id.to_string(),
+        },
+        cache_dir: None,
+        key_format: kotton_wire::remote::KeyFormat::default(),
+    };
+    if let Err(e) =
+        active_user(resources, user_id)
+            .and_then(|user_rt| user_rt.add_remote(remote_name.clone(), storage, config))
+    {
+        return Err(format!(
+            "sync_engine: failed to register transient remote: {e}"
+        ));
+    }
+
+    // 4. Run bidirectional LWW file sync, with record sync riding alongside it
+    //    (RFC-0046). Always clean up the transient remote.
+    //
+    //    No pre-sync pack here. Packing toward a peer that holds no data keys is
+    //    `sync_mount_with_records`'s, inside the pass's own mount lock, because
+    //    the `SyncMount` request reaches the same peers by the same function and
+    //    did not pack while the guard lived on this path alone.
+    let file_result =
+        sync_mount_with_records(runtime, resources, user_id, "local", &remote_name, None).await;
+    let _ = active_user(resources, user_id)
+        .and_then(|user_rt| user_rt.remove_remote(&remote_name));
+
+    use kotton_wire::ipc::SyncDirection;
+    let (files_transferred, bytes_transferred, pushed_paths) = match file_result {
+        Ok(r) => {
+            tracing::info!(
+                user_id,
+                node_id,
+                pushed = r.pushed,
+                pulled = r.pulled,
+                skipped = r.skipped,
+                "sync_engine: file sync pass complete",
+            );
+            let total_bytes: u64 = r
+                .transfers
+                .iter()
+                .map(|(_, _, b)| *b)
+                .sum();
+            let pushed: Vec<String> = r
+                .transfers
+                .into_iter()
+                .filter_map(|(dir, key, _)| {
+                    if matches!(dir, SyncDirection::Push) {
+                        Some(key)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let count = r.pushed + r.pulled;
+            (count, total_bytes, pushed)
+        }
+        Err(e) => {
+            return Err(format!("sync_engine: file sync pass failed: {e}"));
+        }
+    };
+
+    // The pass may have pulled new membership records; reproject them into the
+    // live mTLS allowlist so a member admitted on another of the user's nodes is
+    // admitted here without a restart (RFC-0024). Additive + best-effort.
+    if let Some(store) = resources.user_store(user_id) {
+        kotton_peer::daemon::nodes::project_membership_into_allowlist(
+            store.as_ref(),
+            db,
+            paired_keys,
+            user_id,
+        )
+        .await;
+    }
+
+    // Reconnect for notifications (the transient remote was consumed above).
+    let node2 = match network_db::get_paired_node_by_id(db, user_id, node_id).await {
+        Ok(Some(n)) => n,
+        _ => {
+            // Return partial outcome — file sync succeeded.
+            return Ok(SyncOutcome {
+                files: files_transferred,
+                bytes: bytes_transferred,
+                records: 0,
+                conflicts_resolved: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+            });
+        }
+    };
+    let client2 = match resources.open_peer_client(node2, user_id, resources.user_store(user_id).as_deref()).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                error = %e, user_id, node_id,
+                "sync_engine: peer reconnect for notifications failed"
+            );
+            return Ok(SyncOutcome {
+                files: files_transferred,
+                bytes: bytes_transferred,
+                records: 0,
+                conflicts_resolved: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+            });
+        }
+    };
+
+    // 5. Notify the peer that we pushed files so it can pull.
+    let sync_avail = UserRequest::SyncAvailable {
+        user_id: user_id.to_string(),
+        paths: pushed_paths,
+    };
+    if let Err(e) = client2.send(&sync_avail).await {
+        tracing::warn!(
+            error = %e, user_id, node_id,
+            "sync_engine: failed to send SyncAvailable to peer"
+        );
+    }
+
+    // 6. Record sync pass.
+    let pushed_nsids =
+        run_record_sync(&client2, resources, user_id, node_id, &device_did)
+            .await;
+
+    // 7. Notify the peer of pushed record NSIDs.
+    if !pushed_nsids.is_empty() {
+        let rsa = UserRequest::RecordSyncAvailable {
+            user_id: user_id.to_string(),
+            nsids: pushed_nsids.clone(),
+        };
+        if let Err(e) = client2.send(&rsa).await {
+            tracing::warn!(
+                error = %e, user_id, node_id,
+                "sync_engine: failed to send RecordSyncAvailable to peer"
+            );
+        }
+    }
+
+    Ok(SyncOutcome {
+        files: files_transferred,
+        bytes: bytes_transferred,
+        records: pushed_nsids.len() as u32,
+        conflicts_resolved: 0,
+        duration_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+/// Whether `peer_did` holds the data capability — i.e. may be sent material that
+/// is not sealed (RFC-0036).
+///
+/// Fails closed: an unknown DID, an unreadable membership set, or a member with
+/// no recorded posture all answer `false`. A peer we cannot classify is treated
+/// as one that must not receive plaintext.
+/// Whether `peer_did` holds the data keys for `user_id` — i.e. whether replicating
+/// records to it can succeed at all.
+///
+/// `pub` since the engine left `kuserd` (2026-08-24). It is a coherent question about
+/// replication eligibility rather than an internal step, and the daemon's integration
+/// tests ask it directly. Widening it was a judgement call: the alternative was a
+/// second `SyncHost` implementation in this crate for the tests to run against, which
+/// can drift from the one that ships.
+pub async fn peer_holds_data_keys(resources: &dyn crate::SyncHost, user_id: &str, peer_did: &str) -> bool {
+    use kotton_schemas::membership::Posture;
+    let Some(rt) = resources.user_store(user_id) else {
+        return false;
+    };
+    let Ok(members) = rt.list_members().await else {
+        return false;
+    };
+    members
+        .iter()
+        .find(|m| m.did == peer_did)
+        .map(|m| matches!(m.posture, Some(Posture::Full)))
+        .unwrap_or(false)
+}
+
+/// Run one object sync pass with **record sync riding alongside it** (RFC-0046).
+///
+/// The single place records and objects sync together, called by both sync entry
+/// points — the manual/SDK `SyncMount` handler and the background engine — so a
+/// record reaches a peer whichever way a sync is triggered. Four steps:
+///
+/// 0. **Toward a peer that holds no data keys, send only packs**
+///    ([`ensure_packed_for_peer`]): pack the mount first, so nothing is left
+///    behind, and have the transfer send packs and superblocks and nothing else
+///    ([`Outbound::PacksOnly`]), so a loose object never crosses whatever
+///    landed after the pack. It is here and not in either caller for the reason
+///    the lock below is: until 2026-10-08 the background engine packed first and
+///    the `SyncMount` request did not, so a manual push handed a blind vault
+///    every loose object at its own sealed length (RFC-0070 M3).
+/// 1. **`log_records`** — seal this device's record changes into the history log
+///    *before* the pack push, so they replicate as sealed segments inside packs.
+/// 2. **`sync_mount`** — the object sync, which moves the packs (segments
+///    included, now over the RFC-0048 chunked transport) and reconciles.
+/// 3. **`apply_record_segments`** — merge any record segments the peer's packs
+///    just delivered into the record store.
+///
+/// Because records travel as sealed segments in packs, this is safe toward a
+/// **blind** peer too — the very reason the old plaintext push had to refuse them
+/// (RFC-0041 B3). The record steps are fail-soft: a record failure is logged but
+/// does not sink the object sync, whose result is what callers report.
+pub async fn sync_mount_with_records(
+    runtime: &DeviceRuntime,
+    resources: &dyn crate::SyncHost,
+    user_id: &str,
+    mount: &str,
+    remote: &str,
+    direction: Option<kotton_wire::ipc::SyncDirection>,
+) -> anyhow::Result<kotton_wire::remote::SyncResult> {
+    // Claim the mount for the whole pass — sealing records into the log, moving
+    // the packs, and reconciling the manifest are one indivisible write.
+    //
+    // The lock is taken *here*, in the one function both sync entry points call,
+    // rather than in each caller. A rule every caller must remember is a rule
+    // that holds until someone adds a caller: the engine's `running` set was
+    // exactly that, and the manual `SyncMount` handler never joined it.
+    let _mount_lock = runtime.lock_mount(user_id, mount).await;
+
+    // Resolve once, for the whole locked pass. This used to happen three times —
+    // inside `log_records`, here, and inside `apply_record_segments` — which sat
+    // badly with a lock whose whole purpose is to make the three steps one
+    // indivisible write: an eviction landing mid-pass could have let the halves
+    // run against different handles. One lookup, one handle, one pass.
+    let user_rt = resources
+        .user_store(user_id)
+        .ok_or_else(|| anyhow::anyhow!("user '{user_id}' not found (session locked?)"))?;
+
+    let store = resources.record_store(user_id)?;
+    // Resolving which mount carries the record log is the daemon's: it is the
+    // only side holding both the user's store and the record domain. The
+    // wrappers that used to do it were forwarding and nothing else (RFC-0080
+    // step 3).
+    let mount_store = user_rt
+        .get_remote(mount)
+        .ok_or_else(|| anyhow::anyhow!("mount '{mount}' not found for user '{user_id}'"))?;
+
+    // Who is on the other end is the remote's own configuration, so this asks
+    // it rather than being told by each caller. Before any write, so a refusal
+    // leaves the mount as it found it.
+    let outbound = match user_rt.peer_of(remote) {
+        Some(peer_did) => {
+            let pushes = !matches!(direction, Some(kotton_wire::ipc::SyncDirection::Pull));
+            ensure_packed_for_peer(resources, user_id, &peer_did, mount, mount_store.as_ref(), pushes)
+                .await
+                .map_err(anyhow::Error::msg)?
+        }
+        // Not a peer: a directory in the person's own key domain.
+        None => Outbound::Everything,
+    };
+
+    if let Err(e) =
+        kotton_record::replication::log_records(&store, mount_store.as_ref()).await
+    {
+        tracing::warn!(error = %e, user_id, "sync: log_records before sync failed");
+    }
+
+    let result = user_rt.sync_mount(mount, remote, direction, outbound).await?;
+
+    match kotton_record::replication::apply_record_segments(
+        &runtime.schema_registry,
+        &store,
+        mount_store.as_ref(),
+    )
+    .await
+    {
+        Ok(n) if n > 0 => {
+            tracing::info!(user_id, rows = n, "sync: applied record segments from the log")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, user_id, "sync: apply_record_segments after sync failed"),
+    }
+
+    // Whatever the host caches out of the store is refreshed from what just
+    // arrived — here, for the reason the lock above is taken here: both entry
+    // points pass through this function, and a hook each caller had to
+    // remember would be missed by the next one.
+    resources.pass_landed(user_id).await;
+
+    Ok(result)
+}
+
+/// What a pass may send toward `peer_did`, packing `mount` first when the peer
+/// holds no data keys (RFC-0070 M3, carried over from RFC-0045).
+///
+/// A keyless peer receives only sealed bytes — but object **sizes** are a
+/// channel that packing exists to close, and loose objects on the wire reopen
+/// it. So toward such a peer the answer is [`Outbound::PacksOnly`]: the
+/// transfer sends packs and superblocks and withholds anything loose. That is
+/// the property, and it holds at the transfer, not here — ordinary file writes
+/// take no mount lock, so a write can land between this pack and the transfer
+/// whatever lock the pass holds. The pack before a push is what keeps
+/// everything written so far from being left behind; a mount with **no pack
+/// layer at all** is refused rather than pushed nothing, since `pack_loose() ==
+/// None` means it could never send its files. A pull sends the peer nothing, so
+/// it packs nothing.
+///
+/// A peer that does hold the data keys is one of the user's own `Full` devices,
+/// already sees plaintext by construction, and needs none of this.
+///
+/// Private, with one caller: [`sync_mount_with_records`], which both entry
+/// points sync by. A guard each entry point had to remember was a guard the
+/// `SyncMount` request forgot.
+async fn ensure_packed_for_peer(
+    resources: &dyn crate::SyncHost,
+    user_id: &str,
+    peer_did: &str,
+    mount: &str,
+    store: &dyn kotton_sys::store::SyncableStore,
+    pushes: bool,
+) -> Result<Outbound, String> {
+    if peer_holds_data_keys(resources, user_id, peer_did).await {
+        return Ok(Outbound::Everything);
+    }
+    if !pushes {
+        return Ok(Outbound::PacksOnly);
+    }
+    match kotton_store::runtime::pack_mount(store, mount).await {
+        Ok(Some(summary)) => {
+            tracing::debug!(
+                user_id,
+                peer_did,
+                files = summary.files_packed,
+                "sync: pre-push pack pass for a keyless peer"
+            );
+            Ok(Outbound::PacksOnly)
+        }
+        Ok(None) => Err(format!(
+            "refusing to sync mount '{mount}' to {peer_did} — the peer holds no data keys \
+             and this mount has no pack layer, so its files could only cross loose, \
+             their sizes in the clear (RFC-0070 M3)"
+        )),
+        Err(e) => Err(format!(
+            "pre-sync pack pass on '{mount}' failed, not syncing to a keyless peer: {e}"
+        )),
+    }
+}
+
+/// Push this device's record changesets to a peer.
+///
+/// **Fails closed toward a peer without the data capability (RFC-0041 B3).**
+/// `ApplyRecordChangeset` carries CRDT rows as structured **plaintext** under the
+/// `master_secret` domain — the one data path sealed object replication does not
+/// cover. A `BlindStorage` has no key to open them and no business holding them,
+/// so the pass is skipped rather than attempted.
+///
+/// The skip is a stated gap, not a silent one: a hosted replica holds this user's
+/// files but not their records until the sealed changeset log exists. Reporting it
+/// as "synced" would be the worst outcome, because it would *look* complete.
+async fn run_record_sync(
+    client: &kotton_peer::KottonPeerObjectStorage,
+    // No `runtime` here any more. Opening this user's record store used to need
+    // `base_dir()` and `secrets()` off the machine; `UserResources` closes over
+    // both, so the parameter had nothing left to do.
+    resources: &dyn crate::SyncHost,
+    user_id: &str,
+    node_id: &str,
+    peer_did: &str,
+) -> Vec<String> {
+    if !peer_holds_data_keys(resources, user_id, peer_did).await {
+        tracing::info!(
+            user_id,
+            node_id,
+            peer_did,
+            "sync_engine: skipping record sync — peer holds no data keys, and changesets \
+             are not yet sealed (RFC-0041 B3)"
+        );
+        return vec![];
+    }
+
+    let store = match resources.record_store(user_id) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                error = %e, user_id, node_id,
+                "sync_engine: cannot open record store for record sync"
+            );
+            return vec![];
+        }
+    };
+
+    let local_changeset = match store.export_changeset(0).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                error = %e, user_id, node_id,
+                "sync_engine: export_changeset failed"
+            );
+            return vec![];
+        }
+    };
+
+    if local_changeset.is_empty() {
+        return vec![];
+    }
+
+    let mut nsid_map: HashMap<String, Vec<kotton_record::ChangesetRow>> =
+        HashMap::new();
+    for row in local_changeset {
+        nsid_map.entry(row.schema_nsid.clone()).or_default().push(row);
+    }
+
+    let mut pushed_nsids: Vec<String> = vec![];
+
+    for (nsid, rows) in nsid_map {
+        let wire_rows: Vec<SyncChangesetRow> = rows
+            .iter()
+            .map(|r| SyncChangesetRow {
+                id: r.id.clone(),
+                schema_nsid: r.schema_nsid.clone(),
+                body: r.body.clone(),
+                updated_at: r.updated_at,
+                deleted_at: r.deleted_at,
+                // Records travel with their root (RFC-0071 R17), and with the
+                // place they were filed in.
+                root: r.root.clone(),
+                filed_at: r.filed_at,
+            })
+            .collect();
+
+        let req = UserRequest::ApplyRecordChangeset {
+            user_id: user_id.to_string(),
+            nsid: nsid.clone(),
+            rows: wire_rows,
+        };
+        match client.send(&req).await {
+            Ok(_) => {
+                pushed_nsids.push(nsid.clone());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e, user_id, node_id, nsid = %nsid,
+                    "sync_engine: ApplyRecordChangeset to peer failed"
+                );
+            }
+        }
+    }
+
+    if !pushed_nsids.is_empty() {
+        tracing::info!(
+            user_id,
+            node_id,
+            nsid_count = pushed_nsids.len(),
+            "sync_engine: record sync pass complete",
+        );
+    }
+
+    pushed_nsids
+}
+
+// ---------------------------------------------------------------------------
+// VFS filesystem watcher (RFC-0017)
+// ---------------------------------------------------------------------------
+
+/// Spawn a filesystem watch task that calls [`SyncEngine::wake_background`]
+/// whenever a file is created, modified, or deleted under `<base_dir>/users/`.
+/// It also broadcasts a [`VfsChangeFrame`] to all active `VfsWatch` subscribers.
+///
+/// The watcher runs in a blocking thread (as required by the `notify` crate)
+/// and only wakes the tokio runtime when events arrive.
+/// Stops the watcher thread when dropped, releasing its inotify instance.
+///
+/// The thread used to have no way to end. Its loop was `for event in rx`, and the
+/// sender lived inside the `Watcher` owned by that same thread's stack — so the
+/// sender could not drop while the thread ran, the loop could not end, and the
+/// thread held its kernel watch handle for the life of the process.
+///
+/// That is a leak in a long-running `kuserd` too, not only in tests: every sync
+/// engine restart took another instance and never gave one back. `Linux
+/// fs.inotify.max_user_instances` defaults to 128, so the 129th silently fails to
+/// register.
+///
+/// Found on 2026-08-24 by consolidating the integration tests into one binary.
+/// As 42 processes it was invisible — each exit reclaimed its instances. As one
+/// process the 128 ran out partway through the suite and `vfs_watch` waited
+/// forever for an event whose watcher had never registered.
+#[must_use = "dropping this immediately stops the watcher; hold it for as long as \
+              the watch should live"]
+pub struct FsWatcherHandle {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    ready: watch::Receiver<FsWatchState>,
+}
+
+/// What the watcher thread has managed to do, as a subscriber can observe it.
+///
+/// It exists because *registered* was a fact only the log knew. `spawn_fs_watcher`
+/// returns before its thread has created an inotify instance, so a caller that
+/// subscribes and immediately writes a file can have the write land before there
+/// is anything to catch it — no error, no frame, and nothing that says which of
+/// the two happened. `VfsWatch`'s first frame is derived from this, so the answer
+/// reaches the subscriber rather than only the operator reading logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsWatchState {
+    /// The thread has not finished registering yet.
+    Starting,
+    /// The watch over `<base>/users/` is registered; changes under it are
+    /// broadcast from here on.
+    Watching,
+    /// Registration failed. No change will ever be delivered.
+    ///
+    /// The reason travels with it for the same reason the state exists at all:
+    /// each of the three failure sites already logs its `notify` error, and a
+    /// log is not a place a subscriber can read. `Arc<str>` because every
+    /// subscriber clones the state out of the `watch` channel.
+    Failed(Arc<str>),
+}
+
+impl FsWatcherHandle {
+    /// A receiver on the watcher's state, for handing to whoever needs to know
+    /// whether the watch is up — `kuserd`'s `VfsWatch` handler, one per
+    /// subscription. Read it with [`wait_until_watching`].
+    pub fn state(&self) -> watch::Receiver<FsWatchState> {
+        self.ready.clone()
+    }
+}
+
+/// Resolve once the watch is registered, or report why it never will be.
+///
+/// `Ok(())` means a write under `<base>/users/` from this point on is observed.
+/// It reads a *state*, not an event, so a caller that arrives after registration
+/// gets the answer immediately rather than waiting for a transition that has
+/// already happened.
+///
+/// `Err(reason)` is `Failed`, or a dropped sender — the watcher thread has ended,
+/// so the watch is gone either way, and the caller's business is the same: say so
+/// rather than wait. The reason is carried rather than reduced to a bool because
+/// the one caller that matters, `kuserd`'s `VfsWatch` handler, puts it on the wire
+/// for a client that cannot read this process's logs.
+pub async fn wait_until_watching(
+    rx: &mut watch::Receiver<FsWatchState>,
+) -> Result<(), Arc<str>> {
+    loop {
+        match &*rx.borrow_and_update() {
+            FsWatchState::Watching => return Ok(()),
+            FsWatchState::Failed(reason) => return Err(Arc::clone(reason)),
+            FsWatchState::Starting => {}
+        }
+        if rx.changed().await.is_err() {
+            return Err(Arc::from(
+                "the filesystem watcher stopped before the watch was registered",
+            ));
+        }
+    }
+}
+
+impl Drop for FsWatcherHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn spawn_fs_watcher(
+    base_dir: std::path::PathBuf,
+    engine: Arc<SyncEngine>,
+    vfs_tx: tokio::sync::broadcast::Sender<VfsChangeFrame>,
+) -> FsWatcherHandle {
+    let watch_dir = base_dir.join("users");
+    if !watch_dir.exists() {
+        if let Err(e) = kotton_common::fs::create_dir_all_owner_only(&watch_dir) {
+            tracing::warn!(
+                error = %e,
+                path = %watch_dir.display(),
+                "fs_watcher: could not create users dir, skipping watch"
+            );
+            // A channel born in its final state, so a subscriber reads the
+            // reason rather than a closed channel.
+            let (_failed_tx, failed_rx) = watch::channel(FsWatchState::Failed(
+                Arc::from(format!(
+                    "could not create {}: {e}",
+                    watch_dir.display()
+                )),
+            ));
+            return FsWatcherHandle {
+                stop: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                ready: failed_rx,
+            };
+        }
+    }
+
+    let (ready_tx, ready_rx) = watch::channel(FsWatchState::Starting);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+
+    std::thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = match notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                // `error`, not `warn`: nothing recovers from this and nothing else
+                // reports it. A caller waiting on VfsChanged waits forever, which
+                // is how the inotify exhaustion above presented — as a hang.
+                tracing::error!(error = %e, "fs_watcher: failed to create watcher; no VFS change events will be delivered");
+                let _ = ready_tx.send(FsWatchState::Failed(Arc::from(format!(
+                    "could not create a filesystem watcher: {e}"
+                ))));
+                return;
+            }
+        };
+
+        if let Err(e) = watcher.watch(&watch_dir, RecursiveMode::Recursive) {
+            tracing::error!(error = %e, path = %watch_dir.display(), "fs_watcher: failed to watch path; no VFS change events will be delivered");
+            let _ = ready_tx.send(FsWatchState::Failed(Arc::from(format!(
+                "could not watch {}: {e}",
+                watch_dir.display()
+            ))));
+            return;
+        }
+
+        tracing::info!(path = %watch_dir.display(), "fs_watcher: watching for changes");
+        // The same fact the line above tells an operator, told to subscribers.
+        let _ = ready_tx.send(FsWatchState::Watching);
+
+        loop {
+            // A timed receive rather than `for … in rx`, so the thread can notice
+            // the handle was dropped. The blocking form could never return: the
+            // sender is owned by `watcher`, which is owned by this stack.
+            // The channel carries `Result<Event, notify::Error>`, so the outer
+            // Result is the receive and the inner one is the watch.
+            let event_result = match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(inner) => inner,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if thread_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        tracing::debug!("fs_watcher: handle dropped, releasing watch");
+                        break;
+                    }
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            match event_result {
+                Ok(event) => {
+                    if matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    ) {
+                        tracing::debug!(?event.kind, "fs_watcher: change detected, waking sync engine");
+                        engine.wake_background();
+
+                        // Broadcast to VfsWatch subscribers (RFC-0017).
+                        let kind = match event.kind {
+                            EventKind::Create(_) => VfsChangeKind::Created,
+                            EventKind::Remove(_) => VfsChangeKind::Deleted,
+                            _ => VfsChangeKind::Modified,
+                        };
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        for path in &event.paths {
+                            let _ = vfs_tx.send((
+                                path.to_string_lossy().into_owned(),
+                                kind.clone(),
+                                now,
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "fs_watcher: watch error");
+                }
+            }
+        }
+        // `watcher` drops here, which is what returns the inotify instance.
+    });
+
+    FsWatcherHandle {
+        stop,
+        ready: ready_rx,
+    }
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+    use kotton_store::runtime::user::UserStore;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// A host for the scheduling tests.
+    ///
+    /// Not a stand-in for `kuserd`'s `DaemonUserResources` — these four tests are
+    /// about *when* a maintenance pass is due, which is engine-internal clock logic
+    /// the host plays no part in. The tests that do depend on real host behaviour
+    /// (peer eligibility, packing) stayed in `kuserd` against the real one, because
+    /// there a second implementation could drift and pass while the shipped one
+    /// fails.
+    struct TestHost {
+        users: Mutex<HashMap<String, Arc<UserStore>>>,
+        base: std::path::PathBuf,
+        secrets: Arc<dyn kotton_sys::secret::SecretsStore + Send + Sync>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::UserResources for TestHost {
+        fn user_ids(&self) -> Vec<String> {
+            self.users.lock().unwrap().keys().cloned().collect()
+        }
+        fn user_store(&self, user_id: &str) -> Option<Arc<UserStore>> {
+            self.users.lock().unwrap().get(user_id).cloned()
+        }
+        fn record_store(&self, user_id: &str) -> anyhow::Result<Arc<kotton_record::SqliteRecordStore>> {
+            Ok(Arc::new(kotton_record::open::user_record_store(
+                &self.base, user_id, self.secrets.as_ref(),
+            )?))
+        }
+        async fn agent_db(&self, _user_id: &str) -> Option<Arc<sqlx::SqlitePool>> {
+            None
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::PeerLinks for TestHost {
+        async fn open_peer_client(
+            &self,
+            _node: kotton_wire::peer::PairedNode,
+            _user_id: &str,
+            _loaded: Option<&UserStore>,
+        ) -> anyhow::Result<kotton_peer::KottonPeerObjectStorage> {
+            // These four tests never dial: maintenance packs a local mount. A panic
+            // here is the assertion that that stays true.
+            unreachable!("maintenance scheduling must not open a peer link")
+        }
+    }
+    // `resources` is an `Arc<DaemonUserResources>`; the methods are the trait's.
+    
+    // Only the tests need this now: they build the daemon's host, so they name
+    // daemon types on purpose. The engine's own body no longer names any.
+    
+
+    /// Returns the registry too — the engine holds a clone of the same one, so a
+    /// test that needs alice's runtime must be handed the registry she was
+    /// registered into rather than making an empty one of its own.
+    pub(super) async fn engine() -> (
+        tempfile::TempDir,
+        Arc<DeviceRuntime>,
+        Arc<SyncEngine>,
+        Arc<dyn crate::SyncHost>,
+    ) {
+        let mut users: HashMap<String, Arc<UserStore>> = HashMap::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets: Arc<dyn kotton_sys::secret::SecretsStore + Send + Sync> =
+            Arc::new(kotton_secret::MemorySecrets::new());
+        let rt = DeviceRuntime::new_with_secrets(
+            dir.path().to_owned(),
+            kotton_device::config::RuntimeConfig::default(),
+            secrets,
+        )
+        .await
+        .expect("DeviceRuntime");
+        // `UserStore::create`, not the daemon's `create_user`: that lives on
+        // `kuserd`'s `DeviceUsers` extension trait, and this is a real store with
+        // real keys built through `store`'s own public constructor.
+        let alice_rt = Arc::new(
+            UserStore::create(
+                "alice",
+                "did:key:zAlice",
+                dir.path().join("users").join("alice"),
+                // With a log key, as an unlocked person's store has: without one
+                // a pass packs nothing into a log, and the hand-over tests would
+                // be asking a store that cannot answer them.
+                kotton_store::runtime::keys::UserKeys::new(Some([7u8; 32]))
+                    .with_log("did:key:zAlice", &[3u8; 32]),
+                &kotton_store::LocalShelves(kotton_fs::provider::os::OsFilesystem::new()),
+            )
+            .expect("create user store"),
+        );
+        users.insert("alice".to_string(), alice_rt);
+        let rt = Arc::new(rt);
+
+        let db = Arc::new(
+            kotton_record::open_sqlite(&dir.path().join("agent.db"))
+                .await
+                .expect("db"),
+        );
+        let resources: Arc<dyn crate::SyncHost> = Arc::new(TestHost {
+            users: Mutex::new(users),
+            base: dir.path().to_owned(),
+            secrets: rt.secrets_arc(),
+        });
+        let engine = SyncEngine::new(
+            Arc::clone(&db),
+            Arc::clone(&rt),
+            Arc::clone(&resources) as Arc<dyn crate::SyncHost>,
+            rt.paired_keys(),
+        );
+        (dir, rt, engine, resources)
+    }
+
+    /// Age `user_id`'s maintenance clock past the interval, so a pass is due.
+    ///
+    /// First sight deliberately starts the clock rather than firing (daemon
+    /// startup is the worst moment to take a mount), so a test that wants the
+    /// pass to run has to say the mount has been sitting there a while.
+    fn make_due(engine: &Arc<SyncEngine>, user_id: &str) {
+        let overdue = Instant::now()
+            .checked_sub(Duration::from_secs(MAINTENANCE_INTERVAL_SECS + 1))
+            .expect("clock far enough from process start to age");
+        engine
+            .last_maintenance
+            .lock()
+            .unwrap()
+            .insert(user_id.to_string(), overdue);
+    }
+
+    /// Maintenance does not fire the moment it first sees a mount.
+    ///
+    /// Measured: the pass costs ~20 ms on a quiet machine and **25 s** when it
+    /// runs against a starting daemon — starved while holding the mount lock,
+    /// with nothing to do (0 segments scanned, 1 row exported). Firing at t=0
+    /// put the most expensive possible moment first.
+    #[tokio::test]
+    async fn a_newly_seen_mount_is_not_maintained_immediately() {
+        let (_dir, _rt, engine, _resources) = engine().await;
+
+        engine.maintain_quiet_users().await;
+        assert!(
+            engine.last_maintenance_at("alice").is_none(),
+            "a mount first seen this tick must not be maintained on that tick"
+        );
+
+        // Started, not skipped: once the clock says it is due, it runs.
+        make_due(&engine, "alice");
+        engine.maintain_quiet_users().await;
+        assert!(
+            engine.last_maintenance_at("alice").is_some(),
+            "a mount that has gone an interval without maintenance must be maintained"
+        );
+    }
+
+    /// The defect this exists for: loose objects were never packed, so the log
+    /// was never built, never snapshotted and never compacted. Slice 5's
+    /// mechanism shipped and nothing called it.
+    ///
+    /// A maintenance pass turns writes into a packed, committed store.
+    #[tokio::test]
+    async fn maintenance_packs_a_mount_that_nothing_else_would_have_packed() {
+        let (_dir, _rt, engine, resources) = engine().await;
+        let user_rt = resources.user_store("alice").expect("user runtime");
+
+        for i in 0..3 {
+            user_rt
+                .write_file(&format!("/notes/{i}.md"), b"something worth keeping")
+                .await
+                .expect("write");
+        }
+
+        engine.maintain_one("alice").await;
+
+        // The files survive the pass — the point is that they moved into packs,
+        // not that maintenance is destructive.
+        for i in 0..3 {
+            assert_eq!(
+                user_rt
+                    .read_file(&format!("/notes/{i}.md"))
+                    .await
+                    .expect("read after maintenance"),
+                b"something worth keeping",
+                "maintenance must not lose a file it packed"
+            );
+        }
+    }
+
+    /// Maintenance and sync must never hold one mount at once: a packing pass
+    /// writes packs before committing a manifest, and to the compactor those are
+    /// indistinguishable from crash debris.
+    ///
+    /// The claim being tested is the *mount's* lock, not a set private to this
+    /// engine. The earlier version of this test held a `maintaining` set that the
+    /// manual `SyncMount` path never consulted, so it passed while maintenance
+    /// ran on top of a user's sync and lost a record.
+    #[tokio::test]
+    async fn a_mount_held_by_anyone_is_not_maintained() {
+        let (_dir, rt, engine, _users) = engine().await;
+        make_due(&engine, "alice");
+
+        // Whoever holds it — another maintenance pass, a background sync, or a
+        // sync the user triggered over IPC — takes the same lock.
+        let held = rt.lock_mount("alice", "local").await;
+
+        engine.maintain_quiet_users().await;
+        assert!(
+            engine.last_maintenance_at("alice").is_none(),
+            "a mount someone else holds must not be maintained underneath them"
+        );
+
+        // And it is deferred, not abandoned: the next tick picks it up.
+        drop(held);
+        engine.maintain_quiet_users().await;
+        assert!(
+            engine.last_maintenance_at("alice").is_some(),
+            "maintenance must resume once the mount is free"
+        );
+    }
+
+    /// **A hand-over is packed whatever the maintenance clock says**
+    /// (`TASK-a-hand-over-is-not-in-the-log-until-the-next-packing-pass`).
+    ///
+    /// The mount was seen a moment ago and the machine is busy, so by the clock
+    /// nothing is due — and the control shows that is so: the write stays loose.
+    /// Once a hand-over is said to have landed, the same call packs it into the
+    /// log, and only packs: the snapshot and the compaction keep their clock.
+    #[tokio::test]
+    async fn a_hand_over_is_packed_whatever_the_maintenance_clock_says() {
+        let (_dir, _rt, engine, resources) = engine().await;
+        let alice = resources.user_store("alice").expect("alice's store");
+
+        // First sight starts the clock; the engine was made a moment ago, so the
+        // machine is not idle either. Nothing is due by any rule but this one.
+        engine.maintain_quiet_users().await;
+        alice.write_file("/Inbox/beach.jpg", b"a photo of the beach").await.expect("write");
+        engine.maintain_quiet_users().await;
+        assert_eq!(
+            alice.file_logged("/Inbox/beach.jpg").await.expect("logged"),
+            None,
+            "control: with nothing due and no hand-over, the write must still be loose"
+        );
+
+        engine.hand_over_landed("alice");
+        engine.maintain_quiet_users().await;
+        assert!(
+            alice.file_logged("/Inbox/beach.jpg").await.expect("logged").is_some(),
+            "a hand-over must be in the log after the next maintenance, whatever its clock"
+        );
+        assert!(!engine.hand_over_waiting("alice"), "a hand-over packed is no longer waiting");
+        assert!(
+            engine.last_maintenance_at("alice").is_none(),
+            "a hand-over packs and nothing more: the snapshot and compaction keep their own clock"
+        );
+    }
+
+    /// **A hand-over does not pack on top of another writer** — Done-when's
+    /// *without a packing pass running on top of another writer of the mount*.
+    /// It waits, still marked, and is packed once the mount is free.
+    #[tokio::test]
+    async fn a_hand_over_waits_for_a_mount_another_writer_holds() {
+        let (_dir, rt, engine, resources) = engine().await;
+        let alice = resources.user_store("alice").expect("alice's store");
+        alice.write_file("/Inbox/beach.jpg", b"a photo of the beach").await.expect("write");
+        engine.hand_over_landed("alice");
+
+        let held = rt.lock_mount("alice", "local").await;
+        engine.maintain_quiet_users().await;
+        assert_eq!(
+            alice.file_logged("/Inbox/beach.jpg").await.expect("logged"),
+            None,
+            "a mount another writer holds must not be packed underneath it"
+        );
+        assert!(engine.hand_over_waiting("alice"), "a deferred hand-over must stay marked");
+
+        drop(held);
+        engine.maintain_quiet_users().await;
+        assert!(
+            alice.file_logged("/Inbox/beach.jpg").await.expect("logged").is_some(),
+            "the hand-over must be packed once the mount is free"
+        );
+    }
+
+    /// **A mark for a person whose store is not resident does not outlive the
+    /// next maintenance.** Someone who locks before their pack drops out of
+    /// the resident users; were their mark kept, nothing would clear it and the
+    /// loop would retry each second until they unlocked.
+    #[tokio::test]
+    async fn a_hand_over_mark_for_a_person_not_resident_is_dropped() {
+        let (_dir, _rt, engine, _resources) = engine().await;
+        engine.hand_over_landed("carol");
+        assert!(engine.hand_over_waiting("carol"), "the mark is set before maintenance");
+
+        engine.maintain_quiet_users().await;
+        assert!(
+            !engine.hand_over_waiting("carol"),
+            "a mark for a person with no resident store must be dropped"
+        );
+        assert!(!engine.any_hand_over_waiting(), "and nothing is left to retry for");
+    }
+
+    /// **The bound**: on an engine whose loop runs, a hand-over is in the log
+    /// within seconds — not at the five-minute tick, and not after the hour.
+    ///
+    /// The loop is given time to park on its wait first, so the wake is what
+    /// moves it: without [`SyncEngine::hand_over_landed`]'s wake the loop
+    /// sleeps to its tick and this fails at its deadline.
+    ///
+    /// The deadline is thirty seconds, not five, because what fills it is the
+    /// pack, and a pack is slow in an unoptimised build: measured 2026-10-08,
+    /// 4.8 s for two small files in `kuserd`'s test build. That is the pass's
+    /// own cost, the same a later pass would pay; what this holds is that the
+    /// pass starts now rather than at a tick 300 s off.
+    #[tokio::test]
+    async fn a_hand_over_is_in_the_log_within_seconds_on_a_running_engine() {
+        let (_dir, _rt, engine, resources) = engine().await;
+        let alice = resources.user_store("alice").expect("alice's store");
+        Arc::clone(&engine).spawn_background();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        alice.write_file("/Inbox/beach.jpg", b"a photo of the beach").await.expect("write");
+        engine.hand_over_signal().landed("alice");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if alice.file_logged("/Inbox/beach.jpg").await.expect("logged").is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a hand-over was not in the log within thirty seconds of landing"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// And when nothing is in the way it does run — otherwise the tests above
+    /// would pass on a pass that never fires at all.
+    #[tokio::test]
+    async fn a_quiet_user_is_maintained() {
+        let (_dir, _rt, engine, _resources) = engine().await;
+        make_due(&engine, "alice");
+        engine.maintain_quiet_users().await;
+        assert!(
+            engine.last_maintenance_at("alice").is_some(),
+            "a quiet mount must actually be maintained"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fs_watch_readiness_tests {
+    use super::maintenance_tests::engine;
+    use super::*;
+
+    /// The watcher says when it is up.
+    ///
+    /// `spawn_fs_watcher` returns before its thread has created an inotify
+    /// instance, and until 2026-09-19 *registered* was a fact only the log line
+    /// `fs_watcher: watching for changes` knew. A subscriber could not tell "no
+    /// file has changed" from "the watch is not up", so a write made straight
+    /// after subscribing could vanish with no error
+    /// (`TASK-a-watcher-test-times-out-under-a-loaded-suite`). This is the
+    /// signal that replaced the log as the answer, and `VfsWatch`'s first frame
+    /// is derived from it.
+    ///
+    /// The deadline is a hang guard. The assertion is on the state, not on time.
+    #[tokio::test]
+    async fn the_watcher_reports_when_its_watch_is_registered() {
+        let (dir, _rt, engine, _resources) = engine().await;
+        let (vfs_tx, _vfs_rx) = tokio::sync::broadcast::channel(16);
+        let handle = spawn_fs_watcher(dir.path().to_owned(), Arc::clone(&engine), vfs_tx);
+
+        let mut state = handle.state();
+        let watching = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            wait_until_watching(&mut state),
+        )
+        .await
+        .expect("the watcher reaches a terminal state rather than staying `Starting`");
+        assert_eq!(
+            watching,
+            Ok(()),
+            "the watch over <base>/users/ registers"
+        );
+        assert_eq!(*state.borrow(), FsWatchState::Watching);
+    }
+
+    /// A failure is not a bare "no": the reason the watcher thread had — the one
+    /// it writes to the log — is carried in the state, because `kuserd` puts it on
+    /// the wire in `VfsWatchFailed` for a client that cannot read this process's
+    /// logs. A `Failed` with nothing in it would make that field a fixed sentence.
+    #[tokio::test]
+    async fn a_failed_watch_carries_the_reason_it_failed() {
+        // A base whose `users` cannot be created: the parent is a file.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("not-a-directory");
+        std::fs::write(&base, b"").expect("write the blocking file");
+
+        let (_dir2, _rt, engine, _resources) = engine().await;
+        let (vfs_tx, _vfs_rx) = tokio::sync::broadcast::channel(16);
+        let handle = spawn_fs_watcher(base.clone(), Arc::clone(&engine), vfs_tx);
+
+        let mut state = handle.state();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            wait_until_watching(&mut state),
+        )
+        .await
+        .expect("a watcher that cannot start says so rather than staying `Starting`");
+
+        let reason = outcome.expect_err("the watch cannot be registered here");
+        assert!(
+            reason.contains("users"),
+            "the reason names the path it could not watch, got {reason:?}"
+        );
+    }
+
+    /// And the signal is not simply "yes" on a handle nobody is holding: dropping
+    /// the handle stops the thread, and a caller arriving afterwards is told the
+    /// watch is gone instead of waiting for a readiness that will never come.
+    #[tokio::test]
+    async fn a_dropped_handle_reports_no_watch_rather_than_waiting() {
+        let (dir, _rt, engine, _resources) = engine().await;
+        let (vfs_tx, _vfs_rx) = tokio::sync::broadcast::channel(16);
+        let handle = spawn_fs_watcher(dir.path().to_owned(), Arc::clone(&engine), vfs_tx);
+        let mut state = handle.state();
+        // Take the state first, then stop the watcher: this is the ordering a
+        // subscription has when a daemon shuts down underneath it.
+        drop(handle);
+
+        // `Watching` may already have been observed before the drop landed; what
+        // must not happen is an await that never resolves.
+        let settled = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            wait_until_watching(&mut state),
+        )
+        .await;
+        assert!(
+            settled.is_ok(),
+            "a subscription must never wait forever on a watcher that has stopped"
+        );
+    }
+}

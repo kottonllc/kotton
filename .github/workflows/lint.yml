@@ -1,0 +1,59 @@
+# Runs `just lint` on every pull request, on one Linux runner, and nothing else.
+#
+# `just lint` is the fast gate a change must pass, and this is the same command a contributor
+# runs on their own machine (CONTRIBUTING.md). It does not run `just test`, it builds nothing
+# for release, and it holds no write token. `cargo xtask actions-check`, in `just lint`,
+# admits `pull_request` as a trigger for this file by name and for no other, so the gate cannot
+# quietly grow into a CI that runs on every push.
+#
+# The toolchain is the one `rust-toolchain.toml` names — one version, with clippy and rustfmt —
+# which the runner's rustup reads and installs on the first `cargo` it runs, exactly as a
+# contributor's rustup does on a clean clone; there is no separate install step to disagree
+# with the file, and `just lint` holds the workspace to `-D warnings` on that version alone. `just` is installed from crates.io because the Justfile's modules need a newer
+# `just` than the runner's distribution carries. The apt line is what
+# `cargo xtask doctor --tier lint` names on Linux: `rg`, and the system libraries the
+# workspace clippy links with no window feature on (fontconfig under the shell's CSS engine,
+# OpenSSL under the encrypted database) with the compiler and pkg-config that find them.
+# `doctor` itself then runs, and exits non-zero on anything still missing, so a library the
+# gate grows to need is named here before clippy fails on it.
+#
+# Every `uses:` is pinned to a full commit SHA with its version in a trailing comment, as in
+# release.yml; do not "update" it back to a tag.
+
+name: lint
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The pull request's own head, not GitHub's synthetic merge commit: `signoff-check`
+          # reads every commit since origin/main and certifies each, and the synthetic merge is
+          # nobody's. Full history, so refs/remotes/origin/main is there to read from.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install what `cargo xtask doctor --tier lint` names
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep pkg-config build-essential libfontconfig-dev libssl-dev python3
+          cargo install just --locked
+          cargo xtask doctor --tier lint
+
+      - name: just lint
+        run: just lint

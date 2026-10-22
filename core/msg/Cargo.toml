@@ -1,0 +1,31 @@
+[package]
+name = "kotton-msg"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+[dependencies]
+kotton-common = { path = "../common" }
+kotton-crypto = { path = "../crypto" }
+kotton-wire = { path = "../wire" }
+kotton-sys = { path = "../sys" }
+
+anyhow = "1.0"
+async-trait = { workspace = true }
+base64 = "0.22"
+ed25519-dalek = { workspace = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+hex = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+uuid = { version = "1.6", features = ["v4"] }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
