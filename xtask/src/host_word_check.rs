@@ -53,6 +53,12 @@
 //! The word is *box* or *boxes*, whole (`\bbox(es)?\b`, any case), so *box's* is found and
 //! *sandbox*, *inbox* and *boxed* are not. It exits 1 naming the file and line of each
 //! finding.
+//!
+//! **What this tree does not ship.** It ships no window and needs no GPU, so a plain-text file
+//! the check reads (a page, a script, a README; not Rust or HTML, which are read for string
+//! literals and shown text) does not say *window*, *windows* or *GPU* (`\bwindow(s)?\b` and
+//! `\bGPU\b`, any case): a sentence that promises a thing the binary cannot do teaches the
+//! wrong thing as *box* does. No file read here needs the word, so none is exempt.
 
 use std::path::{Path, PathBuf};
 
@@ -261,7 +267,9 @@ pub fn findings(root: &Path) -> Vec<String> {
         } else if rel.ends_with(".html") && HTML_TREES.iter().any(|t| rel.starts_with(&format!("{t}/"))) {
             in_text(&without_css(&html_text(&text)), 1)
         } else {
-            in_text(&text, 1)
+            let mut hits = in_text(&text, 1);
+            hits.extend(in_text_unshipped(&text, 1));
+            hits
         };
         for (line, word) in hits {
             out.push(format!("{rel}:{line}: says `{word}`"));
@@ -394,6 +402,36 @@ pub fn in_text(text: &str, first: usize) -> Vec<(usize, String)> {
     }
     out
 }
+
+/// Each whole *window*, *windows* or *GPU* in `text`, any case, as the line it is on (counting
+/// from `first`) and the word as written: what this tree ships none of.
+pub fn in_text_unshipped(text: &str, first: usize) -> Vec<(usize, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let mut out = Vec::new();
+    let mut line = first;
+    for i in 0..chars.len() {
+        if chars[i] == '\n' {
+            line += 1;
+            continue;
+        }
+        if i > 0 && is_word(chars[i - 1]) {
+            continue;
+        }
+        for word in UNSHIPPED {
+            let w: Vec<char> = word.chars().collect();
+            let end = i + w.len();
+            if lower.get(i..end) == Some(&w[..]) && !chars.get(end).copied().is_some_and(is_word) {
+                out.push((line, chars[i..end].iter().collect()));
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// The words a plain-text file does not say: `windows` before `window`, so the longer is found.
+const UNSHIPPED: &[&str] = &["windows", "window", "gpu"];
 
 /// The string literals in Rust source — `"…"`, `b"…"`, `r#"…"#` and `br"…"` — each with the
 /// line it starts on, its escapes read as a space. Comments, char literals and lifetimes are
@@ -578,6 +616,26 @@ mod tests {
         ("docs/design/nodes.md", "# Nodes\n\nA relay and a vault are two instances, even on one host.\n"),
         ("docs/design/decisions/0001-a-relay.md", "# 0001: A relay\n\nThe relay on your host is yours.\n"),
     ];
+
+    /// A line that promises a window or a GPU is refused by file and line, in a script's
+    /// comment, a README and a root page; a line that does not is passed.
+    #[test]
+    fn a_line_promising_a_window_or_a_gpu_is_refused() {
+        let dir = tree(&[
+            ("infra/release/kotton-start", "#!/bin/sh\n# Starts the daemon; the window opens.\n"),
+            ("infra/release/README.txt", "Needs a GPU.\nWindows too.\n"),
+            ("README.md", "# Kotton\n\nStarts the daemon in this terminal.\n"),
+        ]);
+        assert_eq!(
+            findings(dir.path()),
+            vec![
+                "infra/release/README.txt:1: says `GPU`".to_string(),
+                "infra/release/README.txt:2: says `Windows`".to_string(),
+                "infra/release/kotton-start:2: says `window`".to_string(),
+            ]
+        );
+        assert_eq!(in_text_unshipped("a windowed, a gpus, a subwindow", 1), vec![]);
+    }
 
     #[test]
     fn a_clean_tree_passes() {
