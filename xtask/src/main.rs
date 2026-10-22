@@ -625,10 +625,6 @@ const GUEST_APPS: [(&str, &str, &str, &str); 9] = [
 const GUEST_TRIPLE: &str = "wasm32-wasip2";
 
 /// The name each guest app's target is named for: its directory's last component.
-pub(crate) fn guest_app_names() -> impl Iterator<Item = &'static str> {
-    GUEST_APPS.iter().map(|(dir, ..)| guest_app_name(dir))
-}
-
 fn guest_app_name(dir: &'static str) -> &'static str {
     dir.rsplit('/').next().expect("an app directory has a name")
 }

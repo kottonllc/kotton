@@ -905,23 +905,6 @@ pub fn fonts_in(text: &str) -> Result<Vec<(String, String, String)>, String> {
         .collect()
 }
 
-/// Every font [`FONTS`] says `carried_by` embeds, named in `text` at its pinned version
-/// with its licence's text written out. The desktop's release test reads its archive's
-/// notices with this, since `kuid` is in what that archive ships.
-pub fn check_fonts_named(text: &str, carried_by: &str) -> Result<(), String> {
-    let named = fonts_in(text)?;
-    for f in FONTS.iter().filter(|f| f.carried_by == carried_by) {
-        if !named.iter().any(|(fam, v, l)| fam == f.family && v == f.version && l == f.license) {
-            return Err(format!("{FILE} does not name the font {} {} ({}), which {carried_by} embeds", f.family, f.version, f.license));
-        }
-        let says = FONT_LICENSES.iter().find(|(id, _)| *id == f.license).map(|(_, s)| *s).unwrap_or("");
-        if says.is_empty() || !text.contains(says) {
-            return Err(format!("{FILE} names {} and does not carry the text of {}", f.family, f.license));
-        }
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------------------
 // The verb
 
