@@ -28,7 +28,10 @@
 //!    this checkout, whatever `CARGO_TARGET_DIR` says: see below.
 //! 5. **Commits as the owner**, with one trailer block naming every step above with its real
 //!    exit — a check marked as measured against `main` ends `@<the origin/main it measured>` —
-//!    and `Assisted-by: Claude Code`. A check or build that could not start, or was killed, is
+//!    then `Assisted-by: Claude Code`, and last the owner's own `Signed-off-by:` (name and
+//!    address from `signoff_check::PEOPLE`), because a commit authored as a person is
+//!    certified by that person (CONTRIBUTING.md, "Every commit is signed off"). A check or
+//!    build that could not start, or was killed, is
 //!    refused as not run, never as a tree that fails.
 //! 6. **Pushes `main`**, and if the push is refused (someone else merged first), takes the
 //!    merge commit back off the local `main` so the next attempt starts from origin's.
@@ -82,7 +85,7 @@ const REMOTE: &str = "origin";
 const ORIGIN_MAIN: &str = "refs/remotes/origin/main";
 
 /// Trailer keys the recipe writes itself, so a message carrying one would end with two blocks.
-const OWN_TRAILERS: &[&str] = &["Gates:", "Assisted-by:"];
+const OWN_TRAILERS: &[&str] = &["Gates:", "Assisted-by:", "Signed-off-by:"];
 
 /// One command the recipe runs and whose exit it reports.
 #[derive(Clone, Debug)]
@@ -431,7 +434,7 @@ pub(crate) fn merge(
     // 5. Commit as the owner, with one trailer block.
     let (name, email) = crate::signoff_check::PEOPLE[0];
     let full = format!(
-        "{}\n\nGates: {gates}\nAssisted-by: Claude Code\n",
+        "{}\n\nGates: {gates}\nAssisted-by: Claude Code\nSigned-off-by: {name} <{email}>\n",
         message.trim_end()
     );
     let committed = Command::new("git")
@@ -765,7 +768,8 @@ mod tests {
         assert!(
             body.trim_end().ends_with(&format!(
                 "\n\nGates: cargo check --workspace --all-targets --locked 0; at-the-tip 0 @{short}\n\
-                 Assisted-by: Claude Code"
+                 Assisted-by: Claude Code\n\
+                 Signed-off-by: {name} <{email}>"
             )),
             "one trailer block naming every step and its exit:\n{body}"
         );
