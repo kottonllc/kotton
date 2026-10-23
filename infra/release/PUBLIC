@@ -5,7 +5,7 @@
 # blank line is nothing.
 #
 # The release: seven binaries (kuserd, kdeviced, kquicd, ksyncd, kotton, kvaultd, the relay),
-# kotton-start, install.sh, and the prose that is the release.
+# kotton-start, and the prose that is the release.
 
 # The workspace, its lock and its toolchain. The script rewrites `members` to the crates below
 # and leaves every other line as it is.
@@ -73,8 +73,8 @@ Justfile
 just
 .github/workflows
 
-# Installing and running a release.
-install.sh
+# Installing and running a release: the archives' own installers. The installer a person
+# runs is the distribution's (kottonllc/kotton-dist).
 infra/release
 infra/vault
 

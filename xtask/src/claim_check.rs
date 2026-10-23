@@ -26,7 +26,8 @@
 //! **And the scripts a page runs from a checkout of this tree.** Every `sh kotton/<path>` in a
 //! fenced block, `kotton/` being the directory a clone of this repository makes, must name a
 //! file this tree has: a page that runs a script the checkout lacks fails at the reader's first
-//! line, exactly as a missing command does.
+//! line, exactly as a missing command does. This tree holds no installer of its own, so a page
+//! still telling a reader to `sh kotton/install.sh` is refused here.
 
 /// The page every run reads, whatever else it is given.
 const README: &str = "README.md";
@@ -287,9 +288,10 @@ mod tests {
         assert!(unknown_commands(doc, &known).is_empty());
     }
 
-    /// **A script a page runs from a clone of this tree is one the tree has.** The
-    /// distribution's `kotton-dist/install.sh` and an archive's own `install.sh` are not this
-    /// checkout's and are not read.
+    /// **A script a page runs from a clone of this tree is one the tree has**, and this tree
+    /// holds no installer: `sh kotton/install.sh`, the line the README gave before the
+    /// distribution held it, is refused. The distribution's `kotton-dist/install.sh` and an
+    /// archive's own `install.sh` are not this checkout's and are not read.
     #[test]
     fn a_script_run_from_the_checkout_is_one_the_tree_has() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -301,6 +303,8 @@ mod tests {
              sh kotton/infra/release/clean-machine.sh\n```\n"
         );
         assert!(missing_scripts(&doc, exists).is_empty(), "{:?}", missing_scripts(&doc, exists));
+        let old = "```sh\ngit clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton && sh kotton/install.sh\n```\n";
+        assert_eq!(missing_scripts(old, exists), vec!["kotton/install.sh"]);
         let planted = "```sh\ngit clone https://github.com/kottonllc/kotton && sh kotton/get-kotton.sh\n```\n";
         assert_eq!(missing_scripts(planted, exists), vec!["kotton/get-kotton.sh"]);
         assert!(missing_scripts("Then sh kotton/get-kotton.sh, in prose.\n", exists).is_empty());
