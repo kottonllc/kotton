@@ -925,8 +925,9 @@ mod tests {
         );
     }
 
-    /// Nothing live under that id: not a refusal. The ceremony door meets
-    /// exactly this state when the occupant's instance has already ended.
+    /// Nothing live under that id: not a refusal. The ceremony door is driven
+    /// in exactly this state by
+    /// `kuid_surface::the_shell_that_follows_the_ceremony_carries_the_users_data_mount`.
     #[test]
     fn no_live_instance_is_not_a_refusal() {
         assert_eq!(a_screen_to_replace(None), Ok(()));

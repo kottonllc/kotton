@@ -291,6 +291,29 @@ fn stage_a_shell_for_the_mock() -> tempfile::TempDir {
     base
 }
 
+/// Install the system shell into `user`'s store by hand, through the person's own
+/// install verb: the fixture manifest (see [`shell_manifest`]) and a placeholder module.
+///
+/// A desktop build of `kuserd` embeds the shell, and `auto_install_bundled_apps` installs
+/// it on every user-database open by calling this same `app_install`. This repository
+/// builds no shell, so these cases make the same record themselves. `app_install` hashes
+/// and stores the bytes without opening them as a component, and the mock runner never
+/// loads them, so the record is the one a bundled install makes. The by-hand step adds
+/// one thing: it sets the `shell` role when the registry has none, which the bundled
+/// path does for the shell.
+async fn install_the_shell_by_hand(client: &mut kotton::KottonClient, user: &str) {
+    use crate::common::InstallApprovingAll as _;
+    let manifest = std::fs::read_to_string(shell_manifest()).expect("read the shell's manifest");
+    let (app_id, _, _) = client
+        .app_install_approving_all(user, manifest, b"not a component".to_vec())
+        .await
+        .expect("the shell installs through the person's own verb");
+    assert_eq!(app_id, "sh.kotton.shell", "the fixture is the system shell's manifest");
+    if client.app_get_role("shell").await.expect("app_get_role").is_none() {
+        client.app_set_role("shell", &app_id).await.expect("app_set_role");
+    }
+}
+
 /// **An instance holds two surfaces, and each patch reaches its own.**
 ///
 /// The whole of RFC-0087 stage 2's third clause, end to end on the daemon's
@@ -894,6 +917,235 @@ async fn the_window_nudge_starts_nothing_when_no_designated_app_is_live() {
     assert!(host.committed.lock().unwrap().is_empty(), "nothing was painted");
 }
 
+// ── The occupant world ends when the identity exists ─────────────────────────
+
+/// **The shell a person is looking at after the ceremony is the resident one.**
+///
+/// The welcome screen runs in the occupant world: no user, so no data mount, no
+/// grants, and `occupant: true` granted unconditionally because there is nobody
+/// whose designation could be consulted (`DEC-0050`, `app_launch_system_shell`).
+/// Until 2026-09-20 nothing ended that world — `create-identity` minted the
+/// identity, returned, and the *same* instance carried on drawing a desktop over
+/// a world with no user in it. The first thing the owner opened was the file
+/// browser, and it said *no file capability was granted to this app*, because
+/// `granted_vfs_roots` returns nothing when the sandbox has no `vfs_root` and
+/// this one had none by construction.
+///
+/// So the assertion is the mount: the instance that follows `UserCreated` must
+/// have been handed `base/users/<uid>/data`, which is what `app_launch` computes
+/// and what `app_launch_system_shell` deliberately does not.
+///
+/// **How the mount is observed.** It is sent once, in the init frame, and never
+/// mentioned again — so `MOCK_RUNNER_MODE=report-input` paints it back as the
+/// launch's patch, which `UserResponse::AppLaunched` carries. Nothing else on
+/// the daemon's surface says what an instance was given.
+///
+/// **What it does not pin.** The trigger is one layer up: `compositor_input`
+/// reads who is resident before delivering an input event and calls
+/// `end_the_occupant_world` when that answer has changed across it. Driving that
+/// needs a `CompositorEvent` on the socketpair `kuid` holds, which this harness
+/// cannot inject, so this test calls the daemon method the trigger calls and
+/// says so rather than implying coverage it does not have. It also drives the
+/// ceremony through `CreateUser` rather than through the occupant's
+/// `create-identity`, which is a wrapper over exactly this call — see
+/// `DaemonOccupantHost::create_identity`, whose whole body is `create_user`.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn the_shell_that_follows_the_ceremony_carries_the_users_data_mount() {
+    // SAFETY: `#[serial_test::serial]` means nothing else is running.
+    unsafe { std::env::set_var("MOCK_RUNNER_MODE", "report-input") };
+    let mut env = crate::common::TestEnv::spawn().await;
+
+    // The ceremony, to `UserCreated`.
+    env.client
+        .create_user("owner", crate::common::TEST_PASSPHRASE)
+        .await
+        .expect("create_user");
+
+    // The shell, in the person's store, through the verb the bundled path uses.
+    install_the_shell_by_hand(&mut env.client, "owner").await;
+
+    let resp = env
+        .daemon
+        .end_the_occupant_world("sh.kotton.shell", "owner")
+        .await
+        .expect("the occupant world must end in a resident launch");
+
+    let patches = match resp {
+        kotton_wire::UserResponse::AppLaunched { patches, .. } => patches,
+        other => panic!("expected AppLaunched, got {other:?}"),
+    };
+    let report: serde_json::Value = serde_json::from_slice(&patches[0][1..])
+        .expect("the mock paints its launch frame as raw JSON (format version 0x00)");
+
+    let expected = env
+        .base_dir
+        .join("users")
+        .join("owner")
+        .join("data")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        report["user_vfs_path"].as_str(),
+        Some(expected.as_str()),
+        "the shell that follows the ceremony must carry the user's data mount: {report}"
+    );
+
+    // And it is the *resident* launch, not the occupant one wearing a mount: the
+    // mode the host derived from the session, and the approvals the install
+    // recorded rather than the manifest read as a grant.
+    let mode = report["launch_args"]
+        .as_array()
+        .expect("launch args")
+        .iter()
+        .find(|pair| pair[0] == "mode")
+        .map(|pair| pair[1].clone());
+    assert_eq!(
+        mode.as_ref().and_then(|m| m.as_str()),
+        Some("authenticated"),
+        "a launch for a person who has just enrolled opens on their desktop: {report}"
+    );
+    assert!(
+        report["approved"].as_u64().unwrap_or(0) > 0,
+        "the resident launch runs on the grants the install recorded: {report}"
+    );
+
+    // And it ran the app the person's own registry designates, not a constant:
+    // `db/user_db.rs` seeds that row on the open path, so an identity has one
+    // from the moment it exists.
+    assert_eq!(
+        env.client.app_get_role("shell").await.expect("app_get_role"),
+        Some("sh.kotton.shell".to_string()),
+        "the resident launch runs the designated shell"
+    );
+
+    unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
+}
+
+/// **The shell that follows an unlock carries the person's data mount and DID.**
+///
+/// The owner's report, 2026-09-21: *"when I use the login path, when I use
+/// applications I get grant issues: the terminal for example says `ls: no file
+/// capability was granted to this app`. also noticing that my did is not
+/// displayed in the top status bar."* Both are one defect. The instance drawing
+/// the lock screen was launched for nobody, so it holds no `user_vfs_path` — no
+/// app it raises can be granted a file capability — and no `did`, which is why
+/// the menubar draws an empty fingerprint. `handle_lock_input` then set
+/// `AppMode::Authenticated` on that same instance, and neither field can be
+/// filled in from inside the guest: the shell learns who it runs as from its
+/// launch args, by design.
+///
+/// So the assertion is on the *next* launch's arguments, which is the whole of
+/// what the host tells a shell about who it is running as.
+///
+/// **What this drives, and what it does not.** The unlock is driven through
+/// `DaemonOccupantHost` — the one implementation of `auth.unlock-with-pin`, the
+/// verb the lock screen calls (the shell's `handle_lock_input` →
+/// `kotton_app::session::unlock_with_pin`) — and then the
+/// door that consumes its answer. The layer above, `compositor_input`, needs a
+/// `CompositorEvent` on the socketpair `kuid` holds, which this suite cannot
+/// inject; it is the same limit
+/// `the_shell_that_follows_the_ceremony_carries_the_users_data_mount` states,
+/// and the two methods this calls are the two that path calls.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn the_shell_that_follows_an_unlock_carries_the_users_data_mount_and_did() {
+    // SAFETY: `#[serial_test::serial]` means nothing else is running.
+    unsafe { std::env::set_var("MOCK_RUNNER_MODE", "report-input") };
+    let mut env = crate::common::TestEnv::spawn().await;
+
+    env.client
+        .create_user("owner", crate::common::TEST_PASSPHRASE)
+        .await
+        .expect("create_user");
+
+    // The shell, in the person's store, through the verb the bundled path uses.
+    install_the_shell_by_hand(&mut env.client, "owner").await;
+
+    // ── The unlock, through the host the lock screen calls ───────────────────
+    let unlocked_as = {
+        let host = env.daemon.occupant_host();
+        let token = kotton_app::daemon::apps::OccupantHost::unlock_with_pin(
+            &host,
+            "owner",
+            crate::common::TEST_PASSPHRASE,
+        )
+        .await
+        .expect("the credential that made this identity must open it");
+        assert!(
+            !token.is_empty(),
+            "an accepted credential answers with a session token"
+        );
+        // The one fact the exchange leaves behind: an unlock changes no record
+        // the daemon could read back afterwards, because the person was
+        // registered and loaded before they typed (`DEC-0049`).
+        host.unlocked_as()
+    };
+    assert_eq!(
+        unlocked_as.as_deref(),
+        Some("owner"),
+        "the host must report whom it let in, or the daemon has nobody to relaunch for"
+    );
+
+    // ── What the person is looking at afterwards ─────────────────────────────
+    let resp = env
+        .daemon
+        .end_the_locked_screen("sh.kotton.shell", unlocked_as.as_deref().unwrap())
+        .await
+        .expect("an accepted credential must be followed by a resident launch");
+    let report = launch_report(resp);
+
+    let expected = env
+        .base_dir
+        .join("users")
+        .join("owner")
+        .join("data")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        report["user_vfs_path"].as_str(),
+        Some(expected.as_str()),
+        "the shell that follows an unlock must carry the person's data mount, \
+         or every app it opens says no file capability was granted: {report}"
+    );
+
+    let arg = |key: &str| {
+        report["launch_args"]
+            .as_array()
+            .expect("launch args")
+            .iter()
+            .find(|pair| pair[0] == key)
+            .and_then(|pair| pair[1].as_str())
+            .map(str::to_owned)
+    };
+    let did = arg("did");
+    assert!(
+        did.as_deref().is_some_and(|d| d.starts_with("did:")),
+        "the shell that follows an unlock must be told the person's DID, or the \
+         menubar has no fingerprint to draw: got {did:?} in {report}"
+    );
+    // **And no name beside it**, because this identity was made through the
+    // CLI's door with none. Until 2026-09-24 this line asserted `Some("owner")`:
+    // the launch copied the id into `display_name` and the desktop called the
+    // person by it. An identity with no display name is handed none, and the
+    // shell draws its own fallback rather than an id
+    // (`TASK-the-name-the-welcome-asks-for-goes-nowhere`).
+    assert_eq!(
+        arg("display_name"),
+        None,
+        "an identity with no display name must not be handed its id as one: {report}"
+    );
+    assert_eq!(
+        arg("mode").as_deref(),
+        Some("authenticated"),
+        "a launch for a person who has just unlocked opens on their desktop: {report}"
+    );
+
+    unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
+}
+
 // ── The name the welcome asks for goes somewhere ─────────────────────────────
 
 /// **The flip is tied to the occupant's instance, not to whichever app took the
@@ -1205,6 +1457,167 @@ async fn a_second_boot_with_a_registered_identity_opens_the_lock_screen() {
         names.as_deref(),
         Some(""),
         "an identity with no name gets an empty name slot, never its id"
+    );
+}
+
+/// **A launch for a person whose store holds no keys opens the lock screen and
+/// says why — never a desk** (`TASK-a-roots-failure-is-drawn-as-no-roots`,
+/// clause a).
+///
+/// The owner's screen of 2026-09-24: an account row with a fingerprint, an
+/// empty *Locations*, and a Networking notice saying the node held no key. The
+/// daemon had loaded the person keyless at boot; the credential was right; the
+/// relaunch that followed was for a named person and landed on a store with no
+/// CEK. Two fixes, and this drives both:
+///
+/// 1. **The cause.** The lock screen's door (`DaemonOccupantHost::open_session`)
+///    now rebuilds the keyless resident store with the key the unlock restored,
+///    as the IPC arm always did. After the unlock the resident store holds
+///    keys, and a launch for the person opens on their desk with their mount.
+/// 2. **The rule.** A launch for a named person whose store holds no keys —
+///    modelled here as the rekey having failed, by putting the keyless store
+///    back — is demoted to a launch for nobody: `mode=locked`, no mount, and a
+///    `notice` saying why in one sentence. Mutate `a_person_whose_keys_are_loaded`
+///    in `core/app` and this goes red.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn a_launch_for_a_person_whose_store_holds_no_keys_opens_the_lock_screen_and_says_why() {
+    let base = tempfile::tempdir().expect("tempdir");
+    stage_a_system_shell(base.path());
+
+    // SAFETY: `#[serial_test::serial]` means nothing else is running.
+    let prior_base = std::env::var_os("KOTTON_BASE_DIR");
+    unsafe {
+        std::env::set_var("KOTTON_BASE_DIR", base.path());
+        std::env::set_var("MOCK_RUNNER_MODE", "report-input");
+    }
+    let secrets: std::sync::Arc<dyn kotton_sys::secret::SecretsStore + Send + Sync> =
+        std::sync::Arc::new(kotton_secret::MemorySecrets::new());
+
+    // The first boot: the person makes their identity, through the real verb.
+    {
+        let (daemon, endpoint) =
+            boot_a_daemon_at(base.path(), std::sync::Arc::clone(&secrets)).await;
+        let serving = tokio::spawn({
+            let daemon = std::sync::Arc::clone(&daemon);
+            async move { daemon.run().await }
+        });
+        crate::common::wait_for_daemon(&endpoint, "the first boot").await;
+        let mut client = crate::common::connect_when_ready(&endpoint, "the first boot").await;
+        client
+            .create_user("owner", crate::common::TEST_PASSPHRASE)
+            .await
+            .expect("create_user");
+        // The shell, in the person's store, through the verb the bundled path uses.
+        install_the_shell_by_hand(&mut client, "owner").await;
+        serving.abort();
+    }
+
+    // The second boot loads the person, and loading is not unlocking
+    // (`DEC-0049`): the resident store holds no key.
+    let (daemon, _endpoint) = boot_a_daemon_at(base.path(), secrets).await;
+    let keyless = daemon.users().get("owner").expect("the boot loads the registered user");
+    assert!(
+        keyless.sealing_keys().is_none(),
+        "the fixture is a store loaded before the unlock, which holds no CEK"
+    );
+
+    // The unlock, through the door the lock screen calls — which is the door
+    // that did not rekey the store until 2026-09-24.
+    {
+        let host = daemon.occupant_host();
+        kotton_app::daemon::apps::OccupantHost::unlock_with_pin(
+            &host,
+            "owner",
+            crate::common::TEST_PASSPHRASE,
+        )
+        .await
+        .expect("the credential that made this identity must open it");
+    }
+    let keyed = daemon.users().get("owner").expect("still loaded");
+    assert!(
+        keyed.sealing_keys().is_some(),
+        "the lock screen's door must rebuild the keyless resident store with the restored key"
+    );
+
+    // **The rule.** Model the rekey having failed: the keyless store is back,
+    // the session and the restored secret are not. The relaunch that follows
+    // an unlock is for a named person, and it must not draw a desk over this.
+    daemon.users().insert("owner".to_owned(), std::sync::Arc::clone(&keyless));
+    let resp = daemon
+        .launch_designated_shell("unlocked", Some("owner".to_owned()))
+        .await
+        .expect("a launch for a person with an identity launches something");
+    let report = launch_report(resp);
+    let arg = |report: &serde_json::Value, key: &str| {
+        report["launch_args"]
+            .as_array()
+            .expect("launch args")
+            .iter()
+            .find(|pair| pair[0] == key)
+            .and_then(|pair| pair[1].as_str())
+            .map(str::to_owned)
+    };
+    let over_keyless = (
+        arg(&report, "mode"),
+        arg(&report, "users"),
+        arg(&report, "notice"),
+        report["user_vfs_path"].clone(),
+    );
+
+    // **The cause, fixed.** With the keyed store resident the same launch is
+    // the person's desk, with their mount.
+    daemon.users().insert("owner".to_owned(), keyed);
+    let resp = daemon
+        .launch_designated_shell("unlocked", Some("owner".to_owned()))
+        .await
+        .expect("a launch for a person with keys launches their desk");
+    let report = launch_report(resp);
+    let over_keyed = (arg(&report, "mode"), arg(&report, "notice"), report["user_vfs_path"].clone());
+
+    unsafe {
+        std::env::remove_var("MOCK_RUNNER_MODE");
+        match &prior_base {
+            Some(v) => std::env::set_var("KOTTON_BASE_DIR", v),
+            None => std::env::remove_var("KOTTON_BASE_DIR"),
+        }
+    }
+
+    let (mode, users, notice, mount) = over_keyless;
+    assert_eq!(
+        mode.as_deref(),
+        Some("locked"),
+        "a launch for a person whose store holds no keys opens the lock screen, never a desk"
+    );
+    assert_eq!(users.as_deref(), Some("owner"), "and it is told whose device this is");
+    assert_eq!(
+        notice.as_deref(),
+        Some(kotton_app::daemon::apps::KEYS_NOT_LOADED_NOTICE),
+        "the lock screen is told why, in one sentence"
+    );
+    let notice = notice.unwrap_or_default();
+    assert_eq!(notice.matches('.').count(), 1, "{notice}");
+    assert!(notice.ends_with('.'), "{notice}");
+    assert!(
+        mount.is_null(),
+        "a launch demoted to nobody carries no mount, so the unlock door can replace it: {mount}"
+    );
+
+    let (mode, notice, mount) = over_keyed;
+    assert_eq!(mode.as_deref(), Some("authenticated"), "with keys loaded, the desk");
+    assert_eq!(notice, None, "and nothing to explain");
+    assert_eq!(
+        mount.as_str(),
+        Some(
+            base.path()
+                .join("users")
+                .join("owner")
+                .join("data")
+                .to_string_lossy()
+                .as_ref()
+        ),
+        "with their mount"
     );
 }
 
