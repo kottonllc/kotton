@@ -42,13 +42,11 @@ pub const NSID_CHANNEL_KEY_GRANT: &str = "sh.kotton.channel.key-grant";
 /// An installed model's manifest — the record half of a model (RFC-0085,
 /// *The model as content*; `DEC-0073`).
 ///
-/// The record *is* [`kotton_infer::ModelManifest`]'s fields, plus the two the
+/// The record *is* `kotton_schemas::ModelManifest`'s fields, plus the two the
 /// host owns and the manifest cannot carry: `active` (one model per kind
 /// answers, chosen by the person) and `installed_at`. Its record id is the
 /// weights hash, because that hash is what a model *is* — two manifests naming
 /// it describe the same model however they spell the name.
-///
-/// [`kotton_infer::ModelManifest`]: https://docs.rs/kotton-infer — `core/infer/src/manifest.rs`
 pub const NSID_MODEL: &str = "sh.kotton.model";
 
 // ── Meta schema NSID (schema publication) ────────────────────────────────────

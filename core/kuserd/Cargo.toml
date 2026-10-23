@@ -19,7 +19,9 @@ kotton-sys = { path = "../sys" }
 kotton-wire = { path = "../wire" }
 # The inference channel's types (RFC-0085). The daemon composes the context and
 # reads the tokens; the weights parser lives in `kinferd`, which this crate
-# spawns and never links.
+# spawns and never links. Of the shipped binaries, only this one links it: the
+# wire names a model by `kotton_schemas::ModelManifest`, and `infer_proxy`'s
+# tests hold that type and this crate's to one shape.
 kotton-infer = { path = "../infer" }
 kotton-schemas = { path = "../schemas" }
 kotton-ipc = { path = "../ipc" }

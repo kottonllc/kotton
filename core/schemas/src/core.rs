@@ -303,9 +303,10 @@ fn channel_key_grant() -> SchemaDefinition {
 
 /// An installed model (RFC-0085, `DEC-0073`).
 ///
-/// The first twelve fields are `kotton_infer::ModelManifest`'s, name for name,
-/// so a record body deserialises straight back into a manifest and the manifest
-/// is what gets stored, unchanged in shape. `licence` is the facet `DEC-0043`
+/// The first twelve fields are [`crate::ModelManifest`]'s, name for name, so a
+/// record body deserialises straight back into a manifest and the manifest is
+/// what gets stored, unchanged in shape; a test in [`crate::model_manifest`]
+/// holds the two together. `licence` is the facet `DEC-0043`
 /// added [`FieldType::Record`] for, rather than two flattened columns, because
 /// it is one thing — an identifier and the hash of the text it names.
 ///
