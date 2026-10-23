@@ -9,11 +9,16 @@
 # (docs/use/build-a-release.md): a key GitHub holds would prove only that GitHub's runner built
 # what the repository said, which is true of every fork.
 #
+# It builds no Windows archive. Windows x86_64 is built and tested on every pull request
+# (windows.yml), but `cargo xtask release` packs a Unix-shaped tree on the platform it runs on,
+# and the Windows archive is issue #59.
+#
 # What it must never become: a build on every push. A `push:` trigger on every merge, nine jobs
 # and a macOS runner billed at ten Linux minutes once spent a month's minutes on hundreds of
 # failed runs. `cargo xtask actions-check`, in `just lint`, admits a workflow here only if it
-# runs on a pushed tag (at most an empty `workflow_dispatch` beside it) — or is `lint.yml`, which
-# runs `just lint` on a pull request and nothing else — every job on a plain `ubuntu-…` runner,
+# runs on a pushed tag (at most an empty `workflow_dispatch` beside it) — or is `lint.yml`,
+# `signoff.yml` or `windows.yml`, each admitted by name on a pull request and nothing else —
+# every job on a plain `ubuntu-…` runner but windows.yml's one bounded job on `windows-latest`,
 # with no reusable-workflow job, so none of that comes back by accident.
 #
 # Two jobs, and only the second can write. `build` runs the repository's code and every

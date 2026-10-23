@@ -360,7 +360,8 @@ lint:
     cargo xtask wire-check
     # One acceptor, one request type.
     cargo xtask channel-check
-    # No Unix-only path where Windows will also compile it.
+    # No Unix-only path where Windows will also compile it: the narrow form, before a push, and
+    # for the targets `.github/workflows/windows.yml` does not compile (its module doc says which).
     cargo xtask windows-check
     # A declared IPC scope names verbs the channel actually has.
     cargo xtask scope-check
@@ -373,8 +374,8 @@ lint:
     cargo xtask relay-address-check
     # Every file under tests/tests/suite/ is compiled into the one integration binary.
     cargo xtask suite-check
-    # GitHub Actions runs the release workflow on a pushed tag and the lint workflow on a
-    # pull request, on Linux, and nothing else.
+    # GitHub Actions runs the release workflow on a pushed tag, and the lint, sign-off and
+    # Windows workflows on a pull request, on Linux but for the Windows one, and nothing else.
     cargo xtask actions-check
     # A contribution is certified, not granted: every commit since origin/main carries its
     # author's `Signed-off-by:`, with no exemption, and none is made as an agent.
