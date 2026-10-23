@@ -342,11 +342,16 @@ mod tests {
     }
 
     /// **The arrangement a fleet uses, end to end:** `CARGO_TARGET_DIR` exported to a
-    /// directory outside the checkout, and the relay build, the mock runner and one suite
-    /// module — `vault::`, which spawns relays through `common::relay` and the mock runner
-    /// `build.rs` located — all succeed under it, with their output landing there and
-    /// not under `out/`. Every one of these failed under a shared target on 2026-09-15
-    /// (`TASK-two-builds-break-under-a-shared-target-directory`).
+    /// directory outside the checkout, and the relay build, the mock runner build and one
+    /// suite module — `relay_presence::`, which spawns the relay through `common::relay`
+    /// from the path `build.rs` located — all succeed under it, with their output landing
+    /// there and not under `out/`. Every one of these failed under a shared target on
+    /// 2026-09-15 (`TASK-two-builds-break-under-a-shared-target-directory`).
+    ///
+    /// The module is `relay_presence::`, one case, rather than `vault::`: the question is
+    /// where the build lands and whether the suite finds the relay there, which one case
+    /// answers, and two `vault::` cases wedge when the module runs whole
+    /// (kottonllc/kotton#31), which would fail this for a reason that is not its own.
     ///
     /// Ignored because it is a cold build of the suite into a fresh directory — most of
     /// an hour and about 10 GB on four cores. Run it with
@@ -382,7 +387,7 @@ mod tests {
         step("the suite's runner", &["build", "--bin", "kotton-mock-runner"]);
         step(
             "one suite module",
-            &["test", "-p", "kotton-integration-tests", "--test", "suite", "--", "vault::"],
+            &["test", "-p", "kotton-integration-tests", "--test", "suite", "--", "relay_presence::"],
         );
 
         // And the output is where the variable said, which is the whole claim.
