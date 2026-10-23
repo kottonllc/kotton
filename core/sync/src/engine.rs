@@ -15,8 +15,16 @@
 //! targeting, and it takes the drives the drive record holds
 //! (`kotton_peer::daemon::drives`) and this device's rules for them
 //! (`kotton_peer::daemon::drive_rules`) — a rule names a drive and this
-//! device's direction for it, never a node. Nothing that is not a drive can be
-//! a target, so no check is needed to keep a device out.
+//! device's direction for it, never a node. So what the engine can reach is
+//! exactly what the drive record holds, and the record is as good as its
+//! writers: enrolment, recovery after the proof, and the membership
+//! projection, each of which names a vault. One writer does not yet: a local
+//! session's `PeerAdd { drive: true }` records whatever key it is given as a
+//! drive, and a node so recorded is then reached like any drive — only the
+//! key-domain gate stands in front of it, which the person's own device
+//! passes. That writer goes with #80, which has `Recover` record the drive
+//! from the line after the proof; until it lands, this is the one way a
+//! device can still be made a target.
 //!
 //! **What left, with the mesh.** Rules that named a paired node (any node,
 //! another of the person's devices among them) and a path nothing read; the
@@ -341,7 +349,6 @@ impl SyncEngine {
             let _ = tx.send(JobState::Complete(SyncOutcome {
                 files: 0,
                 bytes: 0,
-                records: 0,
                 conflicts_resolved: 0,
                 duration_ms: 0,
             }));
@@ -362,7 +369,6 @@ impl SyncEngine {
             let _ = tx.send(JobState::Complete(SyncOutcome {
                 files: 0,
                 bytes: 0,
-                records: 0,
                 conflicts_resolved: 0,
                 duration_ms: 0,
             }));
@@ -378,7 +384,6 @@ impl SyncEngine {
             let mut agg = SyncOutcome {
                 files: 0,
                 bytes: 0,
-                records: 0,
                 conflicts_resolved: 0,
                 duration_ms: 0,
             };
@@ -393,7 +398,6 @@ impl SyncEngine {
                         engine.mark_synced(&key.0);
                         agg.files += o.files;
                         agg.bytes += o.bytes;
-                        agg.records += o.records;
                         agg.conflicts_resolved += o.conflicts_resolved;
                     }
                     Err(e) => {
@@ -955,7 +959,6 @@ async fn sync_drive_with_outcome(
     Ok(SyncOutcome {
         files: r.pushed + r.pulled,
         bytes,
-        records: 0,
         conflicts_resolved: 0,
         duration_ms: start.elapsed().as_millis() as u64,
     })

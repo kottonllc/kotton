@@ -296,7 +296,11 @@ async fn two_devices_and_a_drive(
 async fn a_write_on_one_device_reaches_the_other_only_by_way_of_the_drive() {
     init_crypto();
     let vault = spawn_vault("vault").await;
-    let (_a, mut client_a, _b, mut client_b, _drive) = two_devices_and_a_drive(&vault).await;
+    let (a, mut client_a, b, mut client_b, _drive) = two_devices_and_a_drive(&vault).await;
+    // Neither device listens: there is no address at which one could reach the
+    // other, so the drive is the only way between them.
+    assert!(a.daemon.runtime().peer_listen_addr().is_none(), "A runs a peer listener");
+    assert!(b.daemon.runtime().peer_listen_addr().is_none(), "B runs a peer listener");
 
     client_a.write_file(USER, "from-a.txt", b"written on A").await.expect("write on A");
     assert!(client_b.read_file(USER, "from-a.txt").await.is_err(), "B holds A's write before any sync");
@@ -375,4 +379,49 @@ pub(crate) async fn tell_of_the_drive(client: &mut kotton::KottonClient, user: &
         .peer_add_drive(user, "vault", &drive.drive.did, &drive.drive.pubkey_hex, drive.drive.op_addr)
         .await
         .expect("tell the joined device where the drive is");
+}
+
+/// **A drive serving another key domain's packs**: what the key-domain gate is
+/// for, now that a device syncs only with a drive. Two people both named
+/// `user` — the one behind `owner`, and the one behind `other` — each keep a
+/// drive of their own, enrolled the way a person enrols one. The owner keeps
+/// three files on theirs; then the other's vault is made to serve the owner's
+/// pool as the other's own: a landlord's mistake or malice, which a vault that
+/// cannot open what it holds cannot itself notice. Returns both clients, the
+/// three files' names and contents, and both vaults, which stay up while held.
+pub(crate) async fn a_drive_serving_another_domains_packs(
+    owner: kotton::KottonClient,
+    other: kotton::KottonClient,
+    user: &str,
+) -> (kotton::KottonClient, kotton::KottonClient, Vec<(String, Vec<u8>)>, (RunningVault, RunningVault)) {
+    let owners_vault = spawn_vault("the owner's vault").await;
+    let others_vault = spawn_vault("the other's vault").await;
+    let (mut owner, _) = enrol_vault_from(owner, "owners-device", &owners_vault, user, "vault").await;
+    let files: Vec<(String, Vec<u8>)> = (1u8..=3).map(|i| (format!("obj{i}.bin"), vec![i; 64])).collect();
+    for (name, body) in &files {
+        owner.write_file(user, name, body).await.expect("the owner's write");
+    }
+    owner
+        .sync_mount(user, "local", "vault", Some(SyncDirection::Push))
+        .await
+        .expect("the owner keeps their files on their drive");
+    let (other, _) = enrol_vault_from(other, "others-device", &others_vault, user, "vault").await;
+
+    let pool = |vault: &RunningVault| vault.base_path.join("users").join(user).join("data");
+    let (from, to) = (pool(&owners_vault), pool(&others_vault));
+    let _ = std::fs::remove_dir_all(&to);
+    copy_tree(&from, &to);
+    (owner, other, files, (owners_vault, others_vault))
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("the pool's directory");
+    for entry in std::fs::read_dir(from).expect("the owner's pool").flatten() {
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("a pool file copied");
+        }
+    }
 }

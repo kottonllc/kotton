@@ -29,7 +29,7 @@ const NOTE: &[u8] = b"the whole of what alice owns";
 /// landlord would hold (to raise the quota while it serves).
 pub(crate) struct RunningVault {
     _base: tempfile::TempDir,
-    base_path: std::path::PathBuf,
+    pub(crate) base_path: std::path::PathBuf,
     pub(crate) ipc: crate::common::Door,
     op_port: u16,
     pub(crate) vault: Arc<Vault>,

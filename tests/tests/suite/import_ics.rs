@@ -307,42 +307,24 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
     let base_e = tempfile::tempdir().expect("base_e");
     let ipc_e = unique_ipc();
     let secrets_e: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_e = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(
-            base_e.path().to_owned(),
-            ipc_e.clone(),
-            Arc::clone(&secrets_e),
-        )
-        .await
-        .expect("daemon E"),
-    );
-    let op_port_e = free_port();
-    daemon_e
-        .start_peer_listener_background(op_port_e)
-        .await
-        .expect("start E operational listener");
-    let daemon_e =
-        Arc::try_unwrap(daemon_e).unwrap_or_else(|_| panic!("sole arc owner for daemon_e"));
+    let daemon_e = DeviceDaemon::new_with_base_and_secrets(
+        base_e.path().to_owned(),
+        ipc_e.clone(),
+        Arc::clone(&secrets_e),
+    )
+    .await
+    .expect("daemon E");
 
     let base_n = tempfile::tempdir().expect("base_n");
     let ipc_n = unique_ipc();
     let secrets_n: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_n = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(
-            base_n.path().to_owned(),
-            ipc_n.clone(),
-            Arc::clone(&secrets_n),
-        )
-        .await
-        .expect("daemon N"),
-    );
-    let op_port_n = free_port();
-    daemon_n
-        .start_peer_listener_background(op_port_n)
-        .await
-        .expect("start N operational listener");
-    let daemon_n =
-        Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
+    let daemon_n = DeviceDaemon::new_with_base_and_secrets(
+        base_n.path().to_owned(),
+        ipc_n.clone(),
+        Arc::clone(&secrets_n),
+    )
+    .await
+    .expect("daemon N");
 
     let _task_e = tokio::spawn(async move { Arc::new(daemon_e).run().await });
     let _task_n = tokio::spawn(async move { Arc::new(daemon_n).run().await });
@@ -371,7 +353,6 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
     )
     .await;
     // N is told where the drive is; neither device is given the other's address.
-    let _ = (op_port_e, op_port_n);
     crate::drive_sync::tell_of_the_drive(&mut client_n, USER, &drive).await;
 
     // The import happens on E, where the person's export is.

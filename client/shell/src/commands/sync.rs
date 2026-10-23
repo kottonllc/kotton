@@ -63,7 +63,7 @@ impl Command for SyncCommand {
                 .sync_await(&user_id, job_id, 60)
                 .await
                 .map_err(|e| anyhow::anyhow!("sync: {e}"))?;
-            let shape = if outcome.files == 0 && outcome.records == 0 {
+            let shape = if outcome.files == 0 {
                 Out::Note("already in sync".into())
             } else {
                 Out::Confirm {

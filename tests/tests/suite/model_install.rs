@@ -419,22 +419,13 @@ async fn an_installed_model_reaches_a_second_paired_device() {
     let base_e = tempfile::tempdir().expect("base_e");
     let ipc_e = unique_ipc();
     let secrets_e: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_e = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(
-            base_e.path().to_owned(),
-            ipc_e.clone(),
-            Arc::clone(&secrets_e),
-        )
-        .await
-        .expect("daemon E"),
-    );
-    let op_port_e = free_port();
-    daemon_e
-        .start_peer_listener_background(op_port_e)
-        .await
-        .expect("start E operational listener");
-    let daemon_e =
-        Arc::try_unwrap(daemon_e).unwrap_or_else(|_| panic!("sole arc owner for daemon_e"));
+    let daemon_e = DeviceDaemon::new_with_base_and_secrets(
+        base_e.path().to_owned(),
+        ipc_e.clone(),
+        Arc::clone(&secrets_e),
+    )
+    .await
+    .expect("daemon E");
 
     let base_n = tempfile::tempdir().expect("base_n");
     let ipc_n = unique_ipc();
@@ -474,7 +465,6 @@ async fn an_installed_model_reaches_a_second_paired_device() {
     )
     .await;
 
-    let _ = op_port_e;
     crate::drive_sync::tell_of_the_drive(&mut client_n, USER, &drive).await;
 
     // The model, installed on E.

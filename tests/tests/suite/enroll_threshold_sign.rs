@@ -531,27 +531,18 @@ async fn rendezvous_set_applies_live_without_error() {
 async fn file_written_on_one_device_syncs_to_a_joined_device() {
     init_crypto();
 
-    // E = the device that holds the file. Its listener is not what N syncs
-    // from: N takes E's writes from the person's drive.
+    // E = the device that writes the file. Neither device listens for the
+    // other: N takes E's writes from the person's drive.
     let base_e = tempfile::tempdir().expect("base_e");
     let ipc_e = unique_ipc();
     let secrets_e: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_e = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(
-            base_e.path().to_owned(),
-            ipc_e.clone(),
-            Arc::clone(&secrets_e),
-        )
-        .await
-        .expect("daemon E"),
-    );
-    let op_port_e = free_port();
-    daemon_e
-        .start_peer_listener_background(op_port_e)
-        .await
-        .expect("start E operational listener");
-    let daemon_e =
-        Arc::try_unwrap(daemon_e).unwrap_or_else(|_| panic!("sole arc owner for daemon_e"));
+    let daemon_e = DeviceDaemon::new_with_base_and_secrets(
+        base_e.path().to_owned(),
+        ipc_e.clone(),
+        Arc::clone(&secrets_e),
+    )
+    .await
+    .expect("daemon E");
 
     // N = the joining device ("my phone").
     let base_n = tempfile::tempdir().expect("base_n");
@@ -575,7 +566,6 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
 
     // E creates the identity; N joins it (Full → gets the CEK + a usable runtime).
     client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
-    let (did_e_dev, pubkey_e_hex) = client_e.get_node_identity().await.expect("E node identity");
     let (did_n_dev, pubkey_n_hex) = client_n.get_node_identity().await.expect("N node identity");
     // E keeps the person's things on a drive, enrolled before N joins so the
     // join introduces N to it: N receives E's writes by way of the drive.
@@ -611,14 +601,14 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
 
     // N is told where the drive is, as a drive. It is never given E's address:
     // a device does not sync from another device.
-    let _ = (&did_e_dev, &pubkey_e_hex, op_port_e);
     crate::drive_sync::tell_of_the_drive(&mut client_n, "alice", &drive).await;
 
     // E writes a top-level file and a nested one. The nested path is the pull
-    // regression: `SealedListEntry` carries no `is_dir`, so unless the serving
-    // side walks its own tree before answering, a puller sees only the top
-    // level and the sync "succeeds" while silently missing everything below it.
-    // Under RFC-0044 blinding, nested is the general case, not the edge.
+    // regression: `SealedListEntry` carries no `is_dir`, so unless the drive
+    // that serves the pull walks the whole pool before answering, a puller sees
+    // only the top level and the sync "succeeds" while silently missing
+    // everything below it. Under blinding, nested is the general case, not the
+    // edge.
     let files: Vec<(&str, Vec<u8>)> = vec![
         (
             "shared.txt",
@@ -691,47 +681,29 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
 async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
     init_crypto();
 
-    // Both daemons listen, but neither syncs from the other: E pushes its
-    // record segment to the drive, and N applies it on its pass from there.
+    // Neither daemon listens for the other: E pushes its record segment to
+    // the drive, and N applies it on its pass from there.
     let base_e = tempfile::tempdir().expect("base_e");
     let ipc_e = unique_ipc();
     let secrets_e: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_e = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(
-            base_e.path().to_owned(),
-            ipc_e.clone(),
-            Arc::clone(&secrets_e),
-        )
-        .await
-        .expect("daemon E"),
-    );
-    let op_port_e = free_port();
-    daemon_e
-        .start_peer_listener_background(op_port_e)
-        .await
-        .expect("start E operational listener");
-    let daemon_e =
-        Arc::try_unwrap(daemon_e).unwrap_or_else(|_| panic!("sole arc owner for daemon_e"));
+    let daemon_e = DeviceDaemon::new_with_base_and_secrets(
+        base_e.path().to_owned(),
+        ipc_e.clone(),
+        Arc::clone(&secrets_e),
+    )
+    .await
+    .expect("daemon E");
 
     let base_n = tempfile::tempdir().expect("base_n");
     let ipc_n = unique_ipc();
     let secrets_n: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_n = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(
-            base_n.path().to_owned(),
-            ipc_n.clone(),
-            Arc::clone(&secrets_n),
-        )
-        .await
-        .expect("daemon N"),
-    );
-    let op_port_n = free_port();
-    daemon_n
-        .start_peer_listener_background(op_port_n)
-        .await
-        .expect("start N operational listener");
-    let daemon_n =
-        Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
+    let daemon_n = DeviceDaemon::new_with_base_and_secrets(
+        base_n.path().to_owned(),
+        ipc_n.clone(),
+        Arc::clone(&secrets_n),
+    )
+    .await
+    .expect("daemon N");
 
     let _task_e = tokio::spawn(async move { std::sync::Arc::new(daemon_e).run().await });
     let _task_n = tokio::spawn(async move { std::sync::Arc::new(daemon_n).run().await });
@@ -749,7 +721,6 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
         enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
     // N is told where the drive is, as a drive; neither device is given the
     // other's address. A record reaches N by way of the drive.
-    let _ = (op_port_e, op_port_n);
     crate::drive_sync::tell_of_the_drive(&mut client_n, "alice", &drive).await;
 
     // The schema must be registered on both — E to insert, N to build the table

@@ -144,11 +144,6 @@ async fn a_second_device_admitted_to_an_identity_is_handed_the_name_it_already_h
             .await
             .expect("daemon E"),
     );
-    let op_port_e = free_port();
-    daemon_e
-        .start_peer_listener_background(op_port_e)
-        .await
-        .expect("start E operational listener");
 
     // ── N: the device the person adds later ──────────────────────────────────
     let base_n = tempfile::tempdir().expect("base_n");
@@ -212,7 +207,6 @@ async fn a_second_device_admitted_to_an_identity_is_handed_the_name_it_already_h
 
     // E syncs to the drive, and N takes from there the sync that carries the
     // person's members. N is never given E's address.
-    let _ = op_port_e;
     client_e
         .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
         .await

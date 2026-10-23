@@ -40,12 +40,7 @@ async fn a_folder_kept_on_one_device_is_read_on_another() {
     let token = e.client.session_token.clone().expect("create_user binds a session");
     let cli = Cli::for_env(&e);
     cli.seed_session(USER, &token);
-    let op_port_e = free_port();
-    e.daemon
-        .start_peer_listener_background(op_port_e)
-        .await
-        .expect("E listens for its peers");
-    let (did_e, pubkey_e) = e.client.get_node_identity().await.expect("E's node identity");
+    let (did_e, _) = e.client.get_node_identity().await.expect("E's node identity");
 
     // ── N: a second device, joined to the same identity ──────────────────────────
     let n = TestEnv::spawn().await;
@@ -98,7 +93,6 @@ async fn a_folder_kept_on_one_device_is_read_on_another() {
     assert!(searched > 0, "nothing under {} was searched", person.display());
 
     // ── E syncs to the drive; N pulls from there, and reads the folder back ──────
-    let _ = (op_port_e, &pubkey_e);
     alice_e
         .sync_mount(USER, "local", "vault", Some(SyncDirection::Push))
         .await

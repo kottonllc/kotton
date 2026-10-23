@@ -2,8 +2,10 @@
 //! Integration test — two_node_transfer
 //!
 //! Two separate `kuserd` processes, each with its own base directory and IPC
-//! socket, exchange identity via `GetNodeIdentity` + `PeerAdd`, and B attempts
-//! to pull files written on A over a real QUIC mTLS connection.
+//! socket, each with its own "alice" and a real vault enrolled as her drive;
+//! B attempts to pull, from a drive made to serve A's packs, over a real QUIC
+//! mTLS connection. A device syncs only with a drive, never with another
+//! device, so the two processes never dial each other.
 //!
 //! **What this asserts changed with RFC-0041.** Each daemon runs its own
 //! `create_user("alice")`, so the two "alices" are unrelated identities with
@@ -32,7 +34,6 @@
 //! built before running this test (`cargo build --bin kuserd`).
 
 use kotton_sys::ipc::IpcEndpoint;
-use kotton_wire::remote::RemoteBackend;
 use kotton::SyncDirection;
 use std::net::UdpSocket;
 use std::process::{Child, Command, Stdio};
@@ -126,129 +127,52 @@ impl Drop for DaemonProcess {
 // Test
 // ---------------------------------------------------------------------------
 
-/// End-to-end cross-process refusal of cross-domain sealed replication.
+/// End-to-end cross-process refusal of cross-domain sealed replication, toward
+/// a drive.
 ///
-/// Two `kuserd` processes (A = source, B = sink) run in separate OS processes,
-/// each with its own independently created "alice" — two unrelated key
-/// domains. The test:
-/// 1. Spawns A and B, each on their own base dir, IPC socket, and QUIC port.
-/// 2. Queries each daemon's identity via `GetNodeIdentity`.
-/// 3. Registers each as a peer of the other via `PeerAdd`.
-/// 4. Writes 3 files on A.
-/// 5. Adds A as a remote on B and attempts a pull.
-/// 6. Asserts the pull is refused (key-domain mismatch) and that nothing
-///    half-transferred: no file is readable on B, and A still reads its own.
+/// Two `kuserd` processes run in separate OS processes, each with its own
+/// independently created "alice" — two unrelated key domains — and each
+/// enrols a real vault as its own drive. A keeps three files on its drive;
+/// B's vault is then made to serve A's pool as B's own
+/// (`drive_sync::a_drive_serving_another_domains_packs`). B's pull from its
+/// drive is refused as a key-domain mismatch, nothing half-transfers, and A
+/// still reads its own. A device syncs only with a drive, so the two
+/// processes never dial each other, and no test records a device as a drive.
 ///
 /// This is the cross-process twin of the in-process
-/// `peer_sync_across_key_domains_is_refused` (RFC-0041).
-#[tokio::test]
+/// `peer_sync::a_drive_serving_another_key_domain_is_refused`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_node_transfer_across_key_domains_is_refused() {
-    let port_a = free_udp_port();
-    let port_b = free_udp_port();
-
-    let proc_a = DaemonProcess::spawn(port_a);
-    let proc_b = DaemonProcess::spawn(port_b);
-
-    // This test had the only correct version of this wait; it is now the shared
-    // one, so the five files that slept instead get it too.
+    crate::common::init_crypto();
+    let proc_a = DaemonProcess::spawn(free_udp_port());
+    let proc_b = DaemonProcess::spawn(free_udp_port());
     wait_for_daemon(&proc_a.endpoint, "daemon A").await;
     wait_for_daemon(&proc_b.endpoint, "daemon B").await;
 
-    // ── Connect SDK clients ──────────────────────────────────────────────────
     let mut client_a = connect_when_ready(&proc_a.endpoint, "connect client_a").await;
     let mut client_b = connect_when_ready(&proc_b.endpoint, "connect client_b").await;
-
-    // ── Get each daemon's identity ───────────────────────────────────────────
-    let (did_a, pubkey_hex_a) = client_a
-        .get_node_identity()
-        .await
-        .expect("get_node_identity A");
-    let (did_b, pubkey_hex_b) = client_b
-        .get_node_identity()
-        .await
-        .expect("get_node_identity B");
-
-    // ── Create users on both nodes ───────────────────────────────────────────
     client_a.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user A");
     client_b.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user B");
 
-    // ── Cross-register as peers ──────────────────────────────────────────────
-    let addr_a: std::net::SocketAddr = format!("127.0.0.1:{port_a}").parse().unwrap();
-    let addr_b: std::net::SocketAddr = format!("127.0.0.1:{port_b}").parse().unwrap();
-
-    // A trusts B's key so B can connect inbound to A.
-    client_a
-        .peer_add("alice", "node-b", &did_b, &pubkey_hex_b, addr_b)
-        .await
-        .expect("peer_add B into A");
-
-    // B trusts A's key and stores A's listener address for the sync pull —
-    // as its drive, because only a drive is a sync target: a device is refused
-    // before any domain is compared. A node keeping another key domain's things
-    // under the person's name is what the domain gate exists for.
-    client_b
-        .peer_add_drive("alice", "node-a", &did_a, &pubkey_hex_a, addr_a)
-        .await
-        .expect("peer_add A into B as its drive");
-
-    // ── Write 3 objects on A ─────────────────────────────────────────────────
-    for i in 1u8..=3 {
-        client_a
-            .write_file("alice", &format!("transfer{i}.bin"), &[i; 64])
-            .await
-            .expect("write_file A");
-    }
-
-    // ── B adds A as a Kotton remote and pulls ────────────────────────────────
-    client_b
-        .remote_add(
-            "alice",
-            "node-a",
-            RemoteBackend::Kotton {
-                peer_did: did_a.clone(),
-                label: "node-a".to_string(),
-            },
-            None,
-        )
-        .await
-        .expect("remote_add Kotton on B");
+    let (mut client_a, mut client_b, files, _vaults) =
+        crate::drive_sync::a_drive_serving_another_domains_packs(client_a, client_b, "alice").await;
 
     // B's "alice" holds a different CEK than A's — sealed replication across
     // key domains must be refused, not "succeed" by moving blobs B can never
-    // open (RFC-0041).
-    let result = client_b
-        .sync_mount("alice", "local", "node-a", Some(SyncDirection::Pull))
-        .await;
+    // open.
+    let result = client_b.sync_mount("alice", "local", "vault", Some(SyncDirection::Pull)).await;
     match result {
         Err(e) => {
             let msg = e.to_string().to_lowercase();
-            assert!(
-                msg.contains("domain"),
-                "pull must be refused as a key-domain mismatch, got: {e}"
-            );
+            assert!(msg.contains("domain"), "pull must be refused as a key-domain mismatch, got: {e}");
         }
-        Ok(r) => panic!(
-            "cross-domain pull must be refused, but reported pulled={} pushed={}",
-            r.pulled, r.pushed
-        ),
+        Ok(r) => panic!("cross-domain pull must be refused, but reported pulled={} pushed={}", r.pulled, r.pushed),
     }
 
-    // Nothing half-transferred: no unopenable blob is served on B…
-    for i in 1u8..=3 {
-        assert!(
-            client_b
-                .read_file("alice", &format!("transfer{i}.bin"))
-                .await
-                .is_err(),
-            "transfer{i}.bin must not be readable on B — it was never legitimately its"
-        );
-    }
-    // …and A's own copies are untouched by the refusal.
-    for i in 1u8..=3 {
-        let data = client_a
-            .read_file("alice", &format!("transfer{i}.bin"))
-            .await
-            .expect("read_file A");
-        assert_eq!(data, vec![i; 64], "transfer{i}.bin damaged on A");
+    // Nothing half-transferred: nothing of A's is readable on B, and A's own
+    // copies are untouched by the refusal.
+    for (name, body) in &files {
+        assert!(client_b.read_file("alice", name).await.is_err(), "{name} must not be readable on B");
+        assert_eq!(&client_a.read_file("alice", name).await.expect("read_file A"), body, "{name} damaged on A");
     }
 }
