@@ -459,7 +459,9 @@ async fn an_installed_model_reaches_a_second_paired_device() {
         .create_user(USER, crate::common::TEST_PASSPHRASE)
         .await
         .expect("create_user E");
-    let (did_e_dev, pubkey_e_hex) = client_e.get_node_identity().await.expect("E node identity");
+    // E keeps the person's things on a drive, enrolled before N joins so the
+    // join introduces N to it: N receives E's model by way of the drive.
+    let (client_e, drive) = crate::drive_sync::a_drive_for(client_e, "device-e", USER).await;
 
     let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) = enroll_streamed(
@@ -472,11 +474,8 @@ async fn an_installed_model_reaches_a_second_paired_device() {
     )
     .await;
 
-    let e_addr: SocketAddr = format!("127.0.0.1:{op_port_e}").parse().unwrap();
-    client_n
-        .peer_add(USER, "device-e", &did_e_dev, &pubkey_e_hex, e_addr)
-        .await
-        .expect("inject E address into N");
+    let _ = op_port_e;
+    crate::drive_sync::tell_of_the_drive(&mut client_n, USER, &drive).await;
 
     // The model, installed on E.
     let body = weights(0x71);
@@ -485,34 +484,16 @@ async fn an_installed_model_reaches_a_second_paired_device() {
         .await
         .expect("install on E");
 
-    // E logs its records into its own packs (its background pass, driven here).
-    let scratch = base_e.path().join("scratch");
+    // E syncs to the drive — its records logged into the packs it sends — and
+    // N takes everything from there.
     client_e
-        .remote_add(USER, "scratch", RemoteBackend::Local { path: scratch }, None)
+        .sync_mount(USER, "local", "vault", Some(SyncDirection::Push))
         .await
-        .expect("local remote on E");
-    client_e
-        .sync_mount(USER, "local", "scratch", None)
-        .await
-        .expect("E local sync logs its records");
-
-    // N pulls everything from E.
+        .expect("E pushes to the drive");
     client_n
-        .remote_add(
-            USER,
-            "device-e",
-            RemoteBackend::Kotton {
-                peer_did: did_e_dev.clone(),
-                label: "device-e".to_string(),
-            },
-            None,
-        )
+        .sync_mount(USER, "local", "vault", Some(SyncDirection::Pull))
         .await
-        .expect("remote_add E on N");
-    client_n
-        .sync_mount(USER, "local", "device-e", Some(SyncDirection::Pull))
-        .await
-        .expect("N pulls from E");
+        .expect("N pulls from the drive");
 
     // The criterion: the model is on N, both halves of it.
     let listed = client_n.model_list(USER).await.expect("model_list on N");
@@ -664,7 +645,7 @@ async fn a_model_comes_back_from_the_phrase_after_every_device_is_lost() {
 
     let b_op_addr: SocketAddr = format!("127.0.0.1:{op_port_b}").parse().unwrap();
     client_c
-        .peer_add(USER, "blind-vps", &did_b_dev, &pubkey_b_hex, b_op_addr)
+        .peer_add_drive(USER, "blind-vps", &did_b_dev, &pubkey_b_hex, b_op_addr)
         .await
         .expect("tell C where its blind node is");
     client_c

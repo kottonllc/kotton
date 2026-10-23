@@ -432,9 +432,13 @@ fn free_port() -> u16 {
 /// nodes that were never in the same fleet both start at epoch 0 and compare
 /// equal. Only a fingerprint derived from the key itself separates them.
 ///
-/// The positive case — enrolled peers, one key domain, sync over QUIC — is
-/// covered by `enroll_threshold_sign::file_written_on_one_device_syncs_to_a_joined_device`,
-/// which reaches the same transport through a real device-join.
+/// B is told A's node is its drive, because only a drive is a sync target: a
+/// device is refused before any domain is compared. The gate this holds is the
+/// drive's — a node keeping another key domain's things is refused at the
+/// transfer, whatever the node is.
+///
+/// The positive case — one key domain, sync by way of a drive — is covered by
+/// `enroll_threshold_sign::file_written_on_one_device_syncs_to_a_joined_device`.
 #[tokio::test]
 async fn peer_sync_across_key_domains_is_refused() {
     use kuserd::DeviceDaemon;
@@ -520,6 +524,13 @@ async fn peer_sync_across_key_domains_is_refused() {
 
     // ── B syncs from A ────────────────────────────────────────────────────────
     client_b.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user B");
+    // Only a drive is a sync target, so B is told A's node is its drive — a
+    // node keeping another key domain's things under the person's name, which
+    // is what the domain gate exists for whatever the node is.
+    client_b
+        .peer_add_drive("alice", &a_did, &a_did, &hex::encode(a_pubkey), a_addr)
+        .await
+        .expect("record A's node as B's drive");
     client_b
         .remote_add(
             "alice",

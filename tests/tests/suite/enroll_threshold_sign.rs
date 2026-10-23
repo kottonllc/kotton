@@ -15,7 +15,7 @@
 //!      group DID (the DID-preserving split keeps it equal to alice's user DID).
 //!
 //! Self-contained: two in-process daemons on loopback, direct QUIC, no relay.
-//! Reachability over a relay is covered separately by `relay_peer_sync`.
+//! Reachability over a relay is covered separately by `introduction`.
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use kotton_sys::secret::SecretsStore;
@@ -319,7 +319,8 @@ async fn a_locked_coordinator_says_it_is_locked_rather_than_that_it_has_no_co_si
 /// which routes by the co-signer's operational DID (the same op-key DID
 /// enrollment recorded and the co-signer registers its presence/reservation
 /// under). This is the cross-network reachability proof for distributed signing,
-/// the companion to `relay_peer_sync` (which proves the same path for file sync).
+/// the companion to `introduction` (which proves a relayed circuit between two
+/// devices and the introduction that takes them direct).
 ///
 /// Requires a running `kotton-relay` (set `KOTTON_RELAY_ADDR`, e.g. via
 /// `just dev_services`); `#[ignore]`d otherwise, matching the other relay tests.
@@ -522,15 +523,16 @@ async fn rendezvous_set_applies_live_without_error() {
 /// Arc A end-to-end: a file written on one device syncs to a **joined** device of
 /// the **same identity**, and the joined device can **decrypt and read** it. This
 /// is "send a file to my phone": E enrolls N (Full), N joins (gets the operational
-/// CEK + a usable runtime), E writes a file, N pulls it over QUIC mTLS, and the
-/// bytes come back in the clear on N — proving the synced object decrypts with the
-/// delivered CEK. Transport is the same proven path as `two_node_transfer`; the new
-/// thing here is that it works across a FROST device-join. (TERMINAL-RUNTIME-PIVOT.)
+/// CEK + a usable runtime), E writes a file and syncs it to the person's drive, N
+/// pulls it from there, and the bytes come back in the clear on N — proving the
+/// synced object decrypts with the delivered CEK. A device does not sync from
+/// another device: the drive is the one path between them.
 #[tokio::test]
 async fn file_written_on_one_device_syncs_to_a_joined_device() {
     init_crypto();
 
-    // E = the device that holds the file; it must be dialable for N to pull.
+    // E = the device that holds the file. Its listener is not what N syncs
+    // from: N takes E's writes from the person's drive.
     let base_e = tempfile::tempdir().expect("base_e");
     let ipc_e = unique_ipc();
     let secrets_e: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
@@ -575,6 +577,9 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
     client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
     let (did_e_dev, pubkey_e_hex) = client_e.get_node_identity().await.expect("E node identity");
     let (did_n_dev, pubkey_n_hex) = client_n.get_node_identity().await.expect("N node identity");
+    // E keeps the person's things on a drive, enrolled before N joins so the
+    // join introduces N to it: N receives E's writes by way of the drive.
+    let (client_e, drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
 
     let bootstrap_port = free_port();
     let (mut client_e, mut client_n, node_n) =
@@ -604,13 +609,10 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
         "the DID is the operational key's, not a label"
     );
 
-    // Give N E's operational address (loopback stand-in for presence/relay), so the
-    // pull can dial E. Keyed by E's operational DID, as enrollment recorded.
-    let e_op_addr: SocketAddr = format!("127.0.0.1:{op_port_e}").parse().unwrap();
-    client_n
-        .peer_add("alice", "device-e", &did_e_dev, &pubkey_e_hex, e_op_addr)
-        .await
-        .expect("inject E operational address into N");
+    // N is told where the drive is, as a drive. It is never given E's address:
+    // a device does not sync from another device.
+    let _ = (&did_e_dev, &pubkey_e_hex, op_port_e);
+    crate::drive_sync::tell_of_the_drive(&mut client_n, "alice", &drive).await;
 
     // E writes a top-level file and a nested one. The nested path is the pull
     // regression: `SealedListEntry` carries no `is_dir`, so unless the serving
@@ -636,26 +638,21 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
             .unwrap_or_else(|e| panic!("write_file {path} on E: {e}"));
     }
 
-    // …N adds E as a Kotton remote and pulls.
-    client_n
-        .remote_add(
-            "alice",
-            "device-e",
-            RemoteBackend::Kotton {
-                peer_did: did_e_dev.clone(),
-                label: "device-e".to_string(),
-            },
-            None,
-        )
+    // …E sends them to the drive, and N takes them from there.
+    client_e
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
         .await
-        .expect("remote_add E on N");
+        .expect("E pushes to the drive");
     let result = client_n
-        .sync_mount("alice", "local", "device-e", Some(SyncDirection::Pull))
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Pull))
         .await
-        .expect("sync_mount Pull on N");
+        .expect("sync_mount Pull on N from the drive");
+    // The drive holds E's files packed, so what N pulls is packs, not one object
+    // per file: the count says something arrived, and the reads below say all of
+    // it did, nested and large included.
     assert!(
-        result.pulled >= 3,
-        "expected all objects pulled from E (nested + large included), got {}",
+        result.pulled >= 1,
+        "expected E's packs pulled from the drive, got {}",
         result.pulled
     );
 
@@ -677,7 +674,8 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
 /// Arc A for records: a record written on one device reaches a joined device of
 /// the same identity — the record twin of the file-sync test above. E inserts a
 /// record; `log_records` seals it into the history log; the pack push carries
-/// that sealed segment to N; and `apply_record_segments` merges it into N's own
+/// that sealed segment to the drive and N takes it from there; and
+/// `apply_record_segments` merges it into N's own
 /// record store. Proves records ride the same sealed pack path as files
 /// (RFC-0046 slice 4a), through the real daemon sync, with no `ApplyRecordChangeset`
 /// plaintext push involved.
@@ -693,7 +691,8 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
 async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
     init_crypto();
 
-    // Both daemons dialable: E pushes its record segment, N applies on its pass.
+    // Both daemons listen, but neither syncs from the other: E pushes its
+    // record segment to the drive, and N applies it on its pass from there.
     let base_e = tempfile::tempdir().expect("base_e");
     let ipc_e = unique_ipc();
     let secrets_e: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
@@ -743,25 +742,15 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
     let client_n = connect_when_ready(&ipc_n, "client_n").await;
 
     client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
-    let (did_e_dev, pubkey_e_hex) = client_e.get_node_identity().await.expect("E node identity");
+    let (client_e, drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
 
     let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) =
         enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
-    let (did_n_dev, pubkey_n_hex) = client_n.get_node_identity().await.expect("N node identity");
-
-    // Cross-register operational addresses both ways (loopback stand-in for
-    // presence/relay), so E can dial N to push and N can dial E to pull.
-    let e_addr: SocketAddr = format!("127.0.0.1:{op_port_e}").parse().unwrap();
-    let n_addr: SocketAddr = format!("127.0.0.1:{op_port_n}").parse().unwrap();
-    client_n
-        .peer_add("alice", "device-e", &did_e_dev, &pubkey_e_hex, e_addr)
-        .await
-        .expect("inject E address into N");
-    client_e
-        .peer_add("alice", "device-n", &did_n_dev, &pubkey_n_hex, n_addr)
-        .await
-        .expect("inject N address into E");
+    // N is told where the drive is, as a drive; neither device is given the
+    // other's address. A record reaches N by way of the drive.
+    let _ = (op_port_e, op_port_n);
+    crate::drive_sync::tell_of_the_drive(&mut client_n, "alice", &drive).await;
 
     // The schema must be registered on both — E to insert, N to build the table
     // from its own registry when it applies the segment.
@@ -792,39 +781,17 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
         .await
         .expect("record_insert on E");
 
-    // E seals the record into its packs the way its background sync pass would:
-    // the producer (`log_records`) runs on the syncing device, so a sync of E's
-    // local mount — here to a local remote, standing in for E's own background
-    // pass — is what puts the record segment into E's packs. (The joiner dials
-    // the stable node in this model, so E does not push to N.)
-    let scratch = base_e.path().join("scratch");
+    // E's sync to the drive seals the record into its packs (`log_records`
+    // runs on the syncing device) and sends them; N's sync takes them, and
+    // `apply_record_segments` merges the delivered segment into N's store.
     client_e
-        .remote_add("alice", "scratch", RemoteBackend::Local { path: scratch }, None)
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
         .await
-        .expect("local remote on E");
-    client_e
-        .sync_mount("alice", "local", "scratch", None)
-        .await
-        .expect("E local sync logs its records");
-
-    // N syncs from E: it pulls E's packs (the record segment included) and
-    // apply_record_segments merges the delivered segment into N's record store.
+        .expect("E pushes to the drive");
     client_n
-        .remote_add(
-            "alice",
-            "device-e",
-            RemoteBackend::Kotton {
-                peer_did: did_e_dev.clone(),
-                label: "device-e".to_string(),
-            },
-            None,
-        )
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Pull))
         .await
-        .expect("remote_add E on N");
-    client_n
-        .sync_mount("alice", "local", "device-e", None)
-        .await
-        .expect("N sync from E");
+        .expect("N pulls from the drive");
 
     // N sees the record — carried as sealed segments in packs, no plaintext push.
     let recs = client_n
@@ -834,7 +801,7 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
     assert_eq!(
         recs.len(),
         1,
-        "the record written on E reached the joined device N via the sealed log"
+        "the record written on E reached the joined device N via the sealed log, by way of the drive"
     );
     assert_eq!(recs[0]["title"], "reaches my phone");
 }
@@ -1002,135 +969,6 @@ async fn a_blind_storage_receives_ciphertext_it_cannot_read() {
             "the blind storage node returned the plaintext it must not be able to produce"
         );
     }
-}
-
-/// Boot-relay-less live-apply (the whole point of `reconfigure_network`): both nodes
-/// start with **no relay configured**, then a runtime `relay set` (`RendezvousSet`)
-/// makes them reachable — and a file syncs across **via the relay**, no manual
-/// addressing, no restart. Proves the always-running reservation listener picks up a
-/// runtime-set relay live. Requires a running relay (`KOTTON_RELAY_ADDR`).
-#[tokio::test]
-#[ignore = "requires a running kotton-relay; set KOTTON_RELAY_ADDR to enable"]
-async fn relay_set_at_runtime_makes_a_relayless_node_reachable() {
-    init_crypto();
-    let relay_addr = std::env::var("KOTTON_RELAY_ADDR").expect(
-        "this test was asked for and has no relay to run against: start one (`just dev_services`) \
-         and set KOTTON_RELAY_ADDR to its host:port",
-    );
-    let relay_url = format!("http://{relay_addr}");
-    // NOTE: this proves boot-relay-less when KOTTON_RELAY_URL is unset (the case when
-    // run in isolation). We deliberately do NOT remove_var here — it's process-global
-    // and would race with the other relay tests' env. Run this test alone to assert
-    // the relay-less boot path specifically.
-
-    // E (source). Start its peer listener so the always-running reservation listener
-    // runs (it idles until a relay is set).
-    let base_e = tempfile::tempdir().expect("base_e");
-    let ipc_e = unique_ipc();
-    let secrets_e: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_e = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(
-            base_e.path().to_owned(),
-            ipc_e.clone(),
-            Arc::clone(&secrets_e),
-        )
-        .await
-        .expect("daemon E"),
-    );
-    daemon_e
-        .start_peer_listener_background(free_port())
-        .await
-        .expect("E peer listener");
-    let daemon_e = Arc::try_unwrap(daemon_e).unwrap_or_else(|_| panic!("sole arc owner E"));
-
-    let base_n = tempfile::tempdir().expect("base_n");
-    let ipc_n = unique_ipc();
-    let secrets_n: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_n = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(
-            base_n.path().to_owned(),
-            ipc_n.clone(),
-            Arc::clone(&secrets_n),
-        )
-        .await
-        .expect("daemon N"),
-    );
-    daemon_n
-        .start_peer_listener_background(free_port())
-        .await
-        .expect("N peer listener");
-    let daemon_n = Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner N"));
-
-    let _task_e = tokio::spawn(async move { std::sync::Arc::new(daemon_e).run().await });
-    let _task_n = tokio::spawn(async move { std::sync::Arc::new(daemon_n).run().await });
-    wait_for_daemon(&ipc_e, "daemon E").await;
-    wait_for_daemon(&ipc_n, "daemon N").await;
-
-    let mut client_e = connect_when_ready(&ipc_e, "client_e").await;
-    let client_n = connect_when_ready(&ipc_n, "client_n").await;
-
-    // E creates the identity; N joins it.
-    client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
-    let (did_e_dev, pubkey_e_hex) = client_e.get_node_identity().await.expect("E identity");
-
-    let bootstrap_port = free_port();
-    let (mut client_e, mut client_n, _node_n) =
-        enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
-
-    // Live-apply the relay on BOTH nodes — they booted relay-less.
-    client_e
-        .node_rendezvous_set(Some(&relay_url))
-        .await
-        .expect("E relay set");
-    client_n
-        .node_rendezvous_set(Some(&relay_url))
-        .await
-        .expect("N relay set");
-    // Give the reservation listeners a moment to connect to the relay.
-    tokio::time::sleep(Duration::from_millis(600)).await;
-
-    // Pair E's OPERATIONAL identity (DID + key) with a DEAD direct address, so the
-    // dial fails direct and falls through to the relay — reachability comes purely
-    // from the runtime-set relay, no real address. (A join pairs E under its bootstrap
-    // DID; pairing the operational identity for ongoing reach is a separate gap.)
-    let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
-    client_n
-        .peer_add("alice", "device-e", &did_e_dev, &pubkey_e_hex, dead)
-        .await
-        .expect("pair E's operational identity (dead addr → relay)");
-
-    // E writes a file; N pulls it — reachability is purely via the runtime-set relay.
-    let payload: &[u8] = b"reachable via a relay I set at runtime";
-    client_e
-        .write_file("alice", "relayed.txt", payload)
-        .await
-        .expect("write E");
-    client_n
-        .remote_add(
-            "alice",
-            "device-e",
-            RemoteBackend::Kotton {
-                peer_did: did_e_dev.clone(),
-                label: "device-e".to_string(),
-            },
-            None,
-        )
-        .await
-        .expect("remote_add E on N");
-    let result = client_n
-        .sync_mount("alice", "local", "device-e", Some(SyncDirection::Pull))
-        .await
-        .expect("sync pull via runtime-set relay");
-    assert!(
-        result.pulled >= 1,
-        "expected >=1 pulled via the relay, got {}",
-        result.pulled
-    );
-    let data = client_n
-        .read_file("alice", "relayed.txt")
-        .await
-        .expect("read N");
-    assert_eq!(data.as_slice(), payload);
 }
 
 /// End-to-end BlindStorage enrollment (RFC-0036): the issuer enrolls a node
@@ -1621,7 +1459,7 @@ async fn a_user_who_loses_every_device_recovers_everything_from_the_phrase() {
 
     let b_op_addr: SocketAddr = format!("127.0.0.1:{op_port_b}").parse().unwrap();
     client_c
-        .peer_add("alice", "blind-vps", &did_b_dev, &pubkey_b_hex, b_op_addr)
+        .peer_add_drive("alice", "blind-vps", &did_b_dev, &pubkey_b_hex, b_op_addr)
         .await
         .expect("tell C where its blind node is");
     // The phrase proves the identity against the chain the blind node kept, opens

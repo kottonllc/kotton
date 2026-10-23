@@ -65,7 +65,6 @@ mod project_records;
 mod quic_gateway;
 mod record_ops;
 mod relay_circuit;
-mod relay_peer_sync;
 mod relay_presence;
 mod headless;
 mod repl_verbs;

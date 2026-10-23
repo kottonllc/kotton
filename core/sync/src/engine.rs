@@ -1,22 +1,47 @@
 ﻿// SPDX-License-Identifier: AGPL-3.0-or-later
-//! Background sync engine (RFC-0019).
+//! Background sync engine: **a device replicates to its person's drives, and
+//! to nothing else.**
 //!
-//! Provides [`SyncEngine`] — a coalescing scheduler, per-target serialised
-//! workers, an observable job registry, and a typed result.
+//! A drive is a tenancy on a vault: where a person's things live. A device
+//! keeps the folders its person chose current with the drive — it sends its
+//! changes there and takes the drive's changes from there — and no device is a
+//! target of another. That is the storage model the protocol decided ("a
+//! drive is where things live, and a device keeps what its person chose"), and
+//! it is the one path this engine holds: one design to keep, and one place a
+//! person's things are. Two of a person's devices reach each other's writes by
+//! way of a drive.
+//!
+//! **What a pass can name.** [`targets`] is the whole of the engine's
+//! targeting, and it takes the drives the drive record holds
+//! (`kotton_peer::daemon::drives`) and this device's rules for them
+//! (`kotton_peer::daemon::drive_rules`) — a rule names a drive and this
+//! device's direction for it, never a node. Nothing that is not a drive can be
+//! a target, so no check is needed to keep a device out.
+//!
+//! **What left, with the mesh.** Rules that named a paired node (any node,
+//! another of the person's devices among them) and a path nothing read; the
+//! trigger that could name one node (`SyncTrigger { node_id }`, and the CLI's
+//! `sync now --node`), which is now `SyncDrives` and names none; the bare
+//! `sync` that pulled from every paired device in turn, which now syncs this
+//! device's drives; and, inside a pass, telling the other end what was pushed
+//! (`SyncAvailable`, `RecordSyncAvailable`) and pushing record changesets in
+//! the clear to a node holding the data keys. A drive answers none of those;
+//! records reach it as sealed segments in the packs, as before.
 //!
 //! ## Two execution paths
 //!
 //! 1. **Background loop** — started by [`SyncEngine::spawn_background`].
-//!    Runs all configured sync rules on a 5-minute timer, or whenever
-//!    [`SyncEngine::wake_background`] is called (e.g. from the VFS watcher or
-//!    a peer-push notification). Passes are untracked (fire-and-forget).
+//!    Syncs the drives whose rule says `watch`, on a 5-minute timer or whenever
+//!    [`SyncEngine::wake_background`] is called (e.g. from the VFS watcher).
+//!    Passes are untracked (fire-and-forget).
 //!
-//! 2. **IPC-triggered** — called by the `SyncTrigger` / `SyncAwait` dispatch
-//!    arms. Creates a tracked `JobId`; callers block via `await_job` until
-//!    the pass finishes, fails, or times out.
+//! 2. **Asked for** — the `SyncDrives` / `SyncAwait` dispatch arms. Syncs
+//!    every drive this device has, each in the direction its rule chooses and
+//!    both ways where it has none. Creates a tracked `JobId`; callers block via
+//!    `await_job` until the pass finishes, fails, or times out.
 //!
-//! In both paths a per-target running-set prevents two concurrent passes for
-//! the same `(user_id, node_id)` pair.
+//! In both paths a running-set prevents two concurrent passes for the same
+//! drive (the vault's key and the tenancy).
 //!
 //! # Tier note
 //! This module lives in `06_daemon` for the `device_sync` sprint. The sync
@@ -24,11 +49,11 @@
 //! `IDEA-tier-discipline`.
 
 use kotton_peer::membership::Membership as _;
-use kotton_peer::daemon::db as network_db;
-use kotton_wire::ipc::{SyncChangesetRow, SyncOutcome, UserRequest, VfsChangeKind};
+use kotton_peer::daemon::drive_rules::DriveRule;
+use kotton_peer::daemon::drives::Drive;
+use kotton_wire::ipc::{SyncDirection, SyncOutcome, VfsChangeKind};
 use kotton_wire::remote::{RemoteBackend, RemoteConfig};
 use kotton_store::runtime::user::sync::Outbound;
-use kotton_record::RecordStore;
 use kotton_device::DeviceRuntime;
 use notify::{EventKind, RecursiveMode, Watcher};
 use sqlx::SqlitePool;
@@ -82,7 +107,7 @@ const DEFAULT_MAX_PARALLEL: usize = 4;
 // Job state
 // ---------------------------------------------------------------------------
 
-type SyncTarget = (String, String); // (user_id, node_id)
+type SyncTarget = (String, String); // (user_id, "<vault key hex>/<tenancy>")
 
 /// Observed state of a tracked sync job.
 #[derive(Debug, Clone)]
@@ -265,31 +290,39 @@ impl SyncEngine {
         HandOverSignal(Arc::clone(self))
     }
 
-    /// Enqueue a sync pass for matching rules and return a trackable `(job_id,
-    /// target_count)`.  Non-blocking: returns as soon as the worker task is
-    /// spawned.  Targets that are already running are skipped (coalescing).
-    pub async fn enqueue(
-        self: &Arc<Self>,
-        user_id: &str,
-        node_id: Option<&str>,
-    ) -> (String, u32) {
-        // 1. Resolve matching targets, from the user's own database (3b-v).
+    /// The drives a pass for `user_id` syncs ([`targets`]): the drive record's,
+    /// with this device's rules from the person's own database. A record or a
+    /// rule that cannot be read is a pass that syncs nothing, not a crash.
+    async fn drive_targets(&self, user_id: &str, background: bool) -> Vec<DriveTarget> {
+        let drives = match kotton_peer::daemon::drives::list(&self.db, user_id).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(user_id, error = %e, "sync_engine: the drive record does not read");
+                return Vec::new();
+            }
+        };
         let rules = match self.user_pool(user_id).await {
-            Some(pool) => network_db::list_sync_rules(&pool, user_id)
-                .await
-                .unwrap_or_default(),
+            Some(pool) => kotton_peer::daemon::drive_rules::rules(&pool, user_id).await.unwrap_or_else(|e| {
+                tracing::warn!(user_id, error = %e, "sync_engine: failed to load sync rules");
+                Vec::new()
+            }),
             None => Vec::new(),
         };
-        let mut seen: HashSet<SyncTarget> = HashSet::new();
-        let targets: Vec<SyncTarget> = rules
-            .iter()
-            .filter(|r| node_id.is_none_or(|n| r.node_id == n))
-            .filter_map(|r| {
-                let key = (user_id.to_string(), r.node_id.clone());
-                seen.insert(key.clone()).then_some(key)
-            })
-            .collect();
+        targets(&drives, &rules, background)
+    }
 
+    /// Sync `user_id`'s drives now — every drive this device has, each in the
+    /// direction its rule chooses — and return a trackable `(job_id,
+    /// drive_count)`. Non-blocking: returns as soon as the worker task is
+    /// spawned. A drive already being synced is skipped (coalescing).
+    pub async fn enqueue(self: &Arc<Self>, user_id: &str) -> (String, u32) {
+        // 1. The drives, keyed for the running set.
+        let targets: Vec<(SyncTarget, DriveTarget)> = self
+            .drive_targets(user_id, false)
+            .await
+            .into_iter()
+            .map(|t| (target_key(user_id, &t), t))
+            .collect();
         let target_count = targets.len() as u32;
         let job_id = Uuid::new_v4().to_string();
 
@@ -304,7 +337,7 @@ impl SyncEngine {
         );
 
         if targets.is_empty() {
-            // No matching rules — complete immediately with zero counts.
+            // No drives — complete immediately with zero counts.
             let _ = tx.send(JobState::Complete(SyncOutcome {
                 files: 0,
                 bytes: 0,
@@ -316,11 +349,11 @@ impl SyncEngine {
         }
 
         // 3. Filter out already-running targets (coalescing).
-        let to_spawn: Vec<SyncTarget> = {
+        let to_spawn: Vec<(SyncTarget, DriveTarget)> = {
             let mut running = self.running.lock().unwrap();
             targets
                 .into_iter()
-                .filter(|t| running.insert(t.clone()))
+                .filter(|(key, _)| running.insert(key.clone()))
                 .collect()
         };
 
@@ -351,13 +384,13 @@ impl SyncEngine {
             };
             let mut first_error: Option<String> = None;
 
-            for target in &to_spawn {
+            for (key, target) in &to_spawn {
                 let _permit = engine.semaphore.acquire().await.ok();
-                match sync_node_with_outcome(&engine.db, &engine.runtime, &*engine.resources, &engine.paired_keys, &target.0, &target.1)
+                match sync_drive_with_outcome(&engine.db, &engine.runtime, &*engine.resources, &engine.paired_keys, &key.0, target)
                     .await
                 {
                     Ok(o) => {
-                        engine.mark_synced(&target.0);
+                        engine.mark_synced(&key.0);
                         agg.files += o.files;
                         agg.bytes += o.bytes;
                         agg.records += o.records;
@@ -369,7 +402,7 @@ impl SyncEngine {
                         }
                     }
                 }
-                engine.running.lock().unwrap().remove(target);
+                engine.running.lock().unwrap().remove(key);
             }
 
             agg.duration_ms = start.elapsed().as_millis() as u64;
@@ -721,80 +754,46 @@ impl SyncEngine {
     // -----------------------------------------------------------------------
 
     async fn run_background_pass(&self) {
-        // Each loaded user's rules from their own database (3b-v) — the old
-        // machine-wide scan is gone with the machine-wide table.
-        let loaded_users: Vec<String> = self.resources.user_ids();
-        let mut rules_with_user = Vec::new();
-        for user_id in &loaded_users {
-            if let Some(pool) = self.user_pool(user_id).await {
-                match network_db::list_sync_rules(&pool, user_id).await {
-                    Ok(rules) => rules_with_user.extend(
-                        rules
-                            .into_iter()
-                            // `watch` is what this background pass is for. A rule
-                            // with it off says "sync only when explicitly
-                            // triggered", which is what `sync now` still does —
-                            // the rule is skipped here, not disabled.
-                            //
-                            // It was read by nothing until now: `sync list`
-                            // displayed the flag and the daemon synced every rule
-                            // regardless, so the UI reported a mode that did not
-                            // exist (RFC-0071's defect list).
-                            .filter(|r| r.watch)
-                            .map(|r| (user_id.clone(), r)),
-                    ),
-                    Err(e) => {
-                        tracing::warn!(user_id, error = %e, "sync_engine: failed to load sync rules")
-                    }
-                }
+        // Each resident person's drives, from the drive record, that this
+        // device's rules say the background pass syncs (`watch`). A rule with
+        // it off says "sync only when asked", which `sync` still does.
+        let mut work: Vec<(SyncTarget, DriveTarget)> = Vec::new();
+        for user_id in self.resources.user_ids() {
+            for target in self.drive_targets(&user_id, true).await {
+                work.push((target_key(&user_id, &target), target));
             }
         }
-
-        if rules_with_user.is_empty() {
+        if work.is_empty() {
             return;
         }
-
-        tracing::debug!(count = rules_with_user.len(), "sync_engine: running background pass");
+        tracing::debug!(count = work.len(), "sync_engine: running background pass");
 
         let mut seen: HashSet<SyncTarget> = HashSet::new();
-        for (user_id, rule) in &rules_with_user {
-            let target: SyncTarget = (user_id.clone(), rule.node_id.clone());
-            if !seen.insert(target.clone()) {
+        for (key, target) in &work {
+            if !seen.insert(key.clone()) {
                 continue;
             }
-            // Skip if an IPC-triggered job is already running for this target.
-            // Maintenance needs no check of its own here: it holds the mount's
-            // lock, which this pass takes before it writes anything.
+            let (user_id, drive) = (key.0.as_str(), target.drive.node.id.as_str());
+            // Skip a drive an asked-for pass is already syncing. Maintenance
+            // needs no check of its own here: it holds the mount's lock, which
+            // this pass takes before it writes anything.
             {
                 let mut running = self.running.lock().unwrap();
-                if running.contains(&target) {
-                    tracing::debug!(
-                        user_id,
-                        node_id = rule.node_id,
-                        "sync_engine: background pass: target already running, skipping"
-                    );
+                if running.contains(key) {
+                    tracing::debug!(user_id, drive, "sync_engine: background pass: drive already syncing, skipping");
                     continue;
                 }
-                running.insert(target.clone());
+                running.insert(key.clone());
             }
-            match sync_node_with_outcome(&self.db, &self.runtime, &*self.resources, &self.paired_keys, user_id, &rule.node_id).await {
+            match sync_drive_with_outcome(&self.db, &self.runtime, &*self.resources, &self.paired_keys, user_id, target).await {
                 Ok(o) => {
                     self.mark_synced(user_id);
                     *self.last_activity.lock().unwrap() = Instant::now();
-                    tracing::info!(
-                    user_id,
-                    node_id = rule.node_id,
-                    files = o.files,
-                    records = o.records,
-                    "sync_engine: background pass complete"
-                    );
+                    tracing::info!(user_id, drive, files = o.files, "sync_engine: background pass complete");
                 }
-                Err(e) => tracing::warn!(
-                    error = %e, user_id, node_id = rule.node_id,
-                    "sync_engine: background pass failed"
-                ),
+                Err(e) => tracing::warn!(error = %e, user_id, drive, "sync_engine: background pass failed"),
             }
-            self.running.lock().unwrap().remove(&target);
+            self.running.lock().unwrap().remove(key);
         }
     }
 }
@@ -819,42 +818,78 @@ impl HandOverSignal {
 // Core sync logic (used by both paths)
 // ---------------------------------------------------------------------------
 
-/// Open a peer connection and run file + record sync for one (user, node) pair.
-/// Returns a [`SyncOutcome`] summarising the transfer, or a string error.
-async fn sync_node_with_outcome(
+/// One drive a pass syncs, and the direction this device's rule chooses for
+/// it (`None` both ways).
+#[derive(Debug, Clone)]
+pub struct DriveTarget {
+    pub drive: Drive,
+    pub direction: Option<SyncDirection>,
+}
+
+/// **Which drives a pass syncs** — the whole of the engine's targeting, and
+/// what it can name: `drives`, the drives the drive record holds for the
+/// person, and nothing else. A device is never in it, because nothing that is
+/// not a drive is.
+///
+/// A pass the person asked for (`background == false`) syncs every one of
+/// them, each in the direction its rule chooses and both ways where it has
+/// none. The background pass syncs only the drives whose rule says `watch`. A
+/// rule whose drive is no longer recorded syncs nothing.
+pub fn targets(drives: &[Drive], rules: &[DriveRule], background: bool) -> Vec<DriveTarget> {
+    drives
+        .iter()
+        .filter_map(|drive| {
+            let rule = kotton_peer::daemon::drive_rules::rule_for(rules, drive);
+            if background && !rule.is_some_and(|r| r.watch) {
+                return None;
+            }
+            Some(DriveTarget { drive: drive.clone(), direction: rule.and_then(|r| r.direction.clone()) })
+        })
+        .collect()
+}
+
+/// The running-set key for a drive: the vault's key and the tenancy.
+fn target_key(user_id: &str, target: &DriveTarget) -> SyncTarget {
+    let key: String = target.drive.vault_key.iter().map(|b| format!("{b:02x}")).collect();
+    (user_id.to_string(), format!("{key}/{}", target.drive.tenancy))
+}
+
+/// Sync one drive: reach the vault it is kept on through its node, and run the
+/// object pass with the sealed record segments riding in its packs
+/// ([`sync_mount_with_records`]). Returns a [`SyncOutcome`], or why not.
+///
+/// Nothing else crosses. Until the replication model changed, a pass toward a
+/// paired node went on to tell it what had been pushed (`SyncAvailable`,
+/// `RecordSyncAvailable`) and to push this device's record changesets in the
+/// clear to a node holding the data keys — another of the person's devices.
+/// A drive answers none of those, and no device is a target, so they are gone
+/// from the pass: records reach a drive as sealed segments in the packs, and
+/// reach another device from there.
+async fn sync_drive_with_outcome(
     db: &Arc<SqlitePool>,
     runtime: &Arc<DeviceRuntime>,
     resources: &dyn crate::SyncHost,
     paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
     user_id: &str,
-    node_id: &str,
+    target: &DriveTarget,
 ) -> Result<SyncOutcome, String> {
     let start = Instant::now();
+    let node = target.drive.node.clone();
+    let node_id = node.id.clone();
 
-    // 1. Resolve the paired node record from the DB.
-    let node = match network_db::get_paired_node_by_id(db, user_id, node_id).await {
-        Ok(Some(n)) => n,
-        Ok(None) => {
-            return Err(format!(
-                "sync_engine: paired node '{node_id}' not found for user '{user_id}'"
-            ))
-        }
-        Err(e) => return Err(format!("sync_engine: DB lookup failed: {e}")),
-    };
-
-    // 2. Open the QUIC connection to the peer.
+    // 1. Reach the vault through the node the drive is reached through.
     let prev_addr = node.addresses.first().copied();
     let prev_relay = node.relay_url.clone();
-    let device_did = node.device_did.to_string();
+    let vault_did = node.device_did.to_string();
     let client = match resources.open_peer_client(node, user_id, resources.user_store(user_id).as_deref()).await {
         Ok(c) => {
             // Refresh the stored address from the live connection so the next
-            // sync dials the current address first (RFC-0024 reachability), and
-            // the relay the peer said it reserves at (RFC-0083 R5).
+            // sync dials the current address first, and the relay the vault
+            // said it reserves at.
             kotton_peer::daemon::nodes::refresh_observed_peer_address(
                 db,
                 user_id,
-                &device_did,
+                &vault_did,
                 prev_addr,
                 c.observed_direct_addr(),
             )
@@ -862,171 +897,65 @@ async fn sync_node_with_outcome(
             kotton_peer::daemon::nodes::refresh_peer_relay(
                 db,
                 user_id,
-                &device_did,
+                &vault_did,
                 prev_relay.as_deref(),
                 c.learned_relay(),
             )
             .await;
             c
         }
-        Err(e) => {
-            return Err(format!(
-                "sync_engine: peer connection failed (will retry): {e}"
-            ))
-        }
+        Err(e) => return Err(format!("sync_engine: the drive at '{node_id}' did not answer (will retry): {e}")),
     };
 
-    // 3. Register as a transient (non-persisted) remote for file sync.
+    // 2. A transient (non-persisted) remote for the pass.
     let remote_name = format!("__sync_bg__{node_id}");
     let storage = Arc::new(client) as Arc<dyn kotton_sys::store::SyncableStore>;
     let config = RemoteConfig {
-        // The peer's DID, not the node's name: the remote's configuration is
+        // The vault's DID, not the node's name: the remote's configuration is
         // where every push through it learns who is on the other end
-        // (`sync_mount_with_records`), and `RemoteBackend::Kotton` says this
-        // field is the paired node's `device_did`. A paired node's id is often
-        // a label, which no member set holds.
+        // (`sync_mount_with_records`).
         backend: RemoteBackend::Kotton {
-            peer_did: device_did.clone(),
-            label: node_id.to_string(),
+            peer_did: vault_did.clone(),
+            label: node_id.clone(),
         },
         cache_dir: None,
         key_format: kotton_wire::remote::KeyFormat::default(),
     };
     if let Err(e) =
-        active_user(resources, user_id)
-            .and_then(|user_rt| user_rt.add_remote(remote_name.clone(), storage, config))
+        active_user(resources, user_id).and_then(|user_rt| user_rt.add_remote(remote_name.clone(), storage, config))
     {
-        return Err(format!(
-            "sync_engine: failed to register transient remote: {e}"
-        ));
+        return Err(format!("sync_engine: failed to register transient remote: {e}"));
     }
 
-    // 4. Run bidirectional LWW file sync, with record sync riding alongside it
-    //    (RFC-0046). Always clean up the transient remote.
-    //
-    //    No pre-sync pack here. Packing toward a peer that holds no data keys is
-    //    `sync_mount_with_records`'s, inside the pass's own mount lock, because
-    //    the `SyncMount` request reaches the same peers by the same function and
-    //    did not pack while the guard lived on this path alone.
+    // 3. The pass, in this device's direction for the drive. Packing toward a
+    //    keyless vault is `sync_mount_with_records`'s, inside its mount lock.
+    //    The transient remote is always cleaned up.
     let file_result =
-        sync_mount_with_records(runtime, resources, user_id, "local", &remote_name, None).await;
-    let _ = active_user(resources, user_id)
-        .and_then(|user_rt| user_rt.remove_remote(&remote_name));
-
-    use kotton_wire::ipc::SyncDirection;
-    let (files_transferred, bytes_transferred, pushed_paths) = match file_result {
-        Ok(r) => {
-            tracing::info!(
-                user_id,
-                node_id,
-                pushed = r.pushed,
-                pulled = r.pulled,
-                skipped = r.skipped,
-                "sync_engine: file sync pass complete",
-            );
-            let total_bytes: u64 = r
-                .transfers
-                .iter()
-                .map(|(_, _, b)| *b)
-                .sum();
-            let pushed: Vec<String> = r
-                .transfers
-                .into_iter()
-                .filter_map(|(dir, key, _)| {
-                    if matches!(dir, SyncDirection::Push) {
-                        Some(key)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            let count = r.pushed + r.pulled;
-            (count, total_bytes, pushed)
-        }
-        Err(e) => {
-            return Err(format!("sync_engine: file sync pass failed: {e}"));
-        }
-    };
+        sync_mount_with_records(runtime, resources, user_id, "local", &remote_name, target.direction.clone()).await;
+    let _ = active_user(resources, user_id).and_then(|user_rt| user_rt.remove_remote(&remote_name));
+    let r = file_result.map_err(|e| format!("sync_engine: file sync pass failed: {e}"))?;
+    tracing::info!(
+        user_id,
+        drive = %node_id,
+        pushed = r.pushed,
+        pulled = r.pulled,
+        skipped = r.skipped,
+        "sync_engine: drive pass complete",
+    );
+    let bytes: u64 = r.transfers.iter().map(|(_, _, b)| *b).sum();
 
     // The pass may have pulled new membership records; reproject them into the
-    // live mTLS allowlist so a member admitted on another of the user's nodes is
-    // admitted here without a restart (RFC-0024). Additive + best-effort.
+    // live allowlist and the drive record, so a device or a drive admitted on
+    // another of the person's devices is known here without a restart.
+    // Additive and best-effort.
     if let Some(store) = resources.user_store(user_id) {
-        kotton_peer::daemon::nodes::project_membership_into_allowlist(
-            store.as_ref(),
-            db,
-            paired_keys,
-            user_id,
-        )
-        .await;
-    }
-
-    // Reconnect for notifications (the transient remote was consumed above).
-    let node2 = match network_db::get_paired_node_by_id(db, user_id, node_id).await {
-        Ok(Some(n)) => n,
-        _ => {
-            // Return partial outcome — file sync succeeded.
-            return Ok(SyncOutcome {
-                files: files_transferred,
-                bytes: bytes_transferred,
-                records: 0,
-                conflicts_resolved: 0,
-                duration_ms: start.elapsed().as_millis() as u64,
-            });
-        }
-    };
-    let client2 = match resources.open_peer_client(node2, user_id, resources.user_store(user_id).as_deref()).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                error = %e, user_id, node_id,
-                "sync_engine: peer reconnect for notifications failed"
-            );
-            return Ok(SyncOutcome {
-                files: files_transferred,
-                bytes: bytes_transferred,
-                records: 0,
-                conflicts_resolved: 0,
-                duration_ms: start.elapsed().as_millis() as u64,
-            });
-        }
-    };
-
-    // 5. Notify the peer that we pushed files so it can pull.
-    let sync_avail = UserRequest::SyncAvailable {
-        user_id: user_id.to_string(),
-        paths: pushed_paths,
-    };
-    if let Err(e) = client2.send(&sync_avail).await {
-        tracing::warn!(
-            error = %e, user_id, node_id,
-            "sync_engine: failed to send SyncAvailable to peer"
-        );
-    }
-
-    // 6. Record sync pass.
-    let pushed_nsids =
-        run_record_sync(&client2, resources, user_id, node_id, &device_did)
-            .await;
-
-    // 7. Notify the peer of pushed record NSIDs.
-    if !pushed_nsids.is_empty() {
-        let rsa = UserRequest::RecordSyncAvailable {
-            user_id: user_id.to_string(),
-            nsids: pushed_nsids.clone(),
-        };
-        if let Err(e) = client2.send(&rsa).await {
-            tracing::warn!(
-                error = %e, user_id, node_id,
-                "sync_engine: failed to send RecordSyncAvailable to peer"
-            );
-        }
+        kotton_peer::daemon::nodes::project_membership_into_allowlist(store.as_ref(), db, paired_keys, user_id).await;
     }
 
     Ok(SyncOutcome {
-        files: files_transferred,
-        bytes: bytes_transferred,
-        records: pushed_nsids.len() as u32,
+        files: r.pushed + r.pulled,
+        bytes,
+        records: 0,
         conflicts_resolved: 0,
         duration_ms: start.elapsed().as_millis() as u64,
     })
@@ -1222,117 +1151,6 @@ async fn ensure_packed_for_peer(
     }
 }
 
-/// Push this device's record changesets to a peer.
-///
-/// **Fails closed toward a peer without the data capability (RFC-0041 B3).**
-/// `ApplyRecordChangeset` carries CRDT rows as structured **plaintext** under the
-/// `master_secret` domain — the one data path sealed object replication does not
-/// cover. A `BlindStorage` has no key to open them and no business holding them,
-/// so the pass is skipped rather than attempted.
-///
-/// The skip is a stated gap, not a silent one: a hosted replica holds this user's
-/// files but not their records until the sealed changeset log exists. Reporting it
-/// as "synced" would be the worst outcome, because it would *look* complete.
-async fn run_record_sync(
-    client: &kotton_peer::KottonPeerObjectStorage,
-    // No `runtime` here any more. Opening this user's record store used to need
-    // `base_dir()` and `secrets()` off the machine; `UserResources` closes over
-    // both, so the parameter had nothing left to do.
-    resources: &dyn crate::SyncHost,
-    user_id: &str,
-    node_id: &str,
-    peer_did: &str,
-) -> Vec<String> {
-    if !peer_holds_data_keys(resources, user_id, peer_did).await {
-        tracing::info!(
-            user_id,
-            node_id,
-            peer_did,
-            "sync_engine: skipping record sync — peer holds no data keys, and changesets \
-             are not yet sealed (RFC-0041 B3)"
-        );
-        return vec![];
-    }
-
-    let store = match resources.record_store(user_id) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                error = %e, user_id, node_id,
-                "sync_engine: cannot open record store for record sync"
-            );
-            return vec![];
-        }
-    };
-
-    let local_changeset = match store.export_changeset(0).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                error = %e, user_id, node_id,
-                "sync_engine: export_changeset failed"
-            );
-            return vec![];
-        }
-    };
-
-    if local_changeset.is_empty() {
-        return vec![];
-    }
-
-    let mut nsid_map: HashMap<String, Vec<kotton_record::ChangesetRow>> =
-        HashMap::new();
-    for row in local_changeset {
-        nsid_map.entry(row.schema_nsid.clone()).or_default().push(row);
-    }
-
-    let mut pushed_nsids: Vec<String> = vec![];
-
-    for (nsid, rows) in nsid_map {
-        let wire_rows: Vec<SyncChangesetRow> = rows
-            .iter()
-            .map(|r| SyncChangesetRow {
-                id: r.id.clone(),
-                schema_nsid: r.schema_nsid.clone(),
-                body: r.body.clone(),
-                updated_at: r.updated_at,
-                deleted_at: r.deleted_at,
-                // Records travel with their root (RFC-0071 R17), and with the
-                // place they were filed in.
-                root: r.root.clone(),
-                filed_at: r.filed_at,
-            })
-            .collect();
-
-        let req = UserRequest::ApplyRecordChangeset {
-            user_id: user_id.to_string(),
-            nsid: nsid.clone(),
-            rows: wire_rows,
-        };
-        match client.send(&req).await {
-            Ok(_) => {
-                pushed_nsids.push(nsid.clone());
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e, user_id, node_id, nsid = %nsid,
-                    "sync_engine: ApplyRecordChangeset to peer failed"
-                );
-            }
-        }
-    }
-
-    if !pushed_nsids.is_empty() {
-        tracing::info!(
-            user_id,
-            node_id,
-            nsid_count = pushed_nsids.len(),
-            "sync_engine: record sync pass complete",
-        );
-    }
-
-    pushed_nsids
-}
 
 // ---------------------------------------------------------------------------
 // VFS filesystem watcher (RFC-0017)
@@ -2002,5 +1820,78 @@ mod fs_watch_readiness_tests {
             settled.is_ok(),
             "a subscription must never wait forever on a watcher that has stopped"
         );
+    }
+}
+
+#[cfg(test)]
+mod drive_target_tests {
+    //! The shape of what a pass syncs: drives, in this device's direction for
+    //! each, and nothing that is not a drive.
+    use super::{targets, DriveRule, SyncDirection};
+    use kotton_peer::daemon::drives::Drive;
+    use kotton_wire::peer::PairedNode;
+
+    /// A drive under the vault key `[seed; 32]`, reached through the node
+    /// `label`. Targeting reads the key, the tenancy and the node; the DID is
+    /// only a well-formed one.
+    fn a_drive(seed: u8, label: &str) -> Drive {
+        Drive {
+            vault_key: [seed; 32],
+            tenancy: "alice".into(),
+            node: PairedNode {
+                id: label.into(),
+                device_did: kotton_wire::did::Did::parse("did:key:z6MkqQEvkQX8axm6AzW37ZT5bSEJwFnRS7PgYhbrvzKVc4B2").unwrap(),
+                public_key: [seed; 32],
+                paired_at: 0,
+                addresses: vec![],
+                relay_url: None,
+                posture: Some("blind-storage".into()),
+            },
+        }
+    }
+
+    fn a_rule(drive: &Drive, direction: Option<SyncDirection>, watch: bool) -> DriveRule {
+        DriveRule { vault_key: drive.vault_key, tenancy: drive.tenancy.clone(), direction, watch, configured_at: 0 }
+    }
+
+    /// **A pass the person asks for syncs every drive**, each in the direction
+    /// its rule chooses and both ways where it has none.
+    #[test]
+    fn an_asked_for_pass_syncs_every_drive_in_its_rules_direction() {
+        let (home, attic) = (a_drive(1, "home"), a_drive(2, "attic"));
+        let rules = [a_rule(&home, Some(SyncDirection::Pull), false)];
+        let got = targets(&[home.clone(), attic.clone()], &rules, false);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].drive.node.id, "home");
+        assert!(matches!(got[0].direction, Some(SyncDirection::Pull)));
+        assert_eq!(got[1].drive.node.id, "attic");
+        assert!(got[1].direction.is_none(), "a drive with no rule syncs both ways");
+    }
+
+    /// **The background pass syncs only the drives whose rule watches.**
+    #[test]
+    fn the_background_pass_syncs_only_watched_drives() {
+        let (home, attic, shed) = (a_drive(1, "home"), a_drive(2, "attic"), a_drive(3, "shed"));
+        let rules = [a_rule(&home, Some(SyncDirection::Push), true), a_rule(&attic, None, false)];
+        let got = targets(&[home, attic, shed], &rules, true);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].drive.node.id, "home");
+        assert!(matches!(got[0].direction, Some(SyncDirection::Push)));
+    }
+
+    /// **A rule is no target on its own.** A rule kept for a drive that is no
+    /// longer recorded — the only thing a rule can name — syncs nothing, in
+    /// either pass: what a pass can reach is the drive record and nothing else.
+    #[test]
+    fn a_rule_without_its_drive_syncs_nothing() {
+        let gone = a_drive(4, "gone");
+        let rules = [a_rule(&gone, None, true)];
+        assert!(targets(&[], &rules, false).is_empty());
+        assert!(targets(&[], &rules, true).is_empty());
+        // And a rule for one drive does not stand for another tenancy on it.
+        let mut other_tenancy = a_drive(4, "gone");
+        other_tenancy.tenancy = "bob".into();
+        let got = targets(&[other_tenancy], &rules, true);
+        assert!(got.is_empty(), "a rule for alice's tenancy watched bob's");
     }
 }

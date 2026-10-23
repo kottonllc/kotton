@@ -370,11 +370,9 @@ const DRAINED_TABLES: &[(&str, &str, DrainScope)] = &[
         },
     ),
     // 3b-v — the network user tables (user_id columns all along)
-    (
-        "sync_rules",
-        "id, user_id, node_id, path, watch, configured_at",
-        DrainScope::UserId("user_id"),
-    ),
+    // `sync_rules` is not drained: a rule named a paired node, and a rule now
+    // names a drive (`0012_drive_rules.sql`), so a legacy rule has nowhere to
+    // go.
     (
         "mount_configs",
         "id, user_id, node_id, remote_path, local_path, cache_budget_bytes, pins, mounted_at",

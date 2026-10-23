@@ -6,7 +6,9 @@
 //!   `KSYNCD_BOOTSTRAP_TOKEN` environment variable (cleared immediately
 //!   after reading).
 //! - Subscribe to `VfsWatch` on a dedicated IPC connection.
-//! - Send `SyncTrigger` to `kuserd` whenever a `VfsChanged` frame arrives.
+//! - Send `SyncDrives` to `kuserd` whenever a `VfsChanged` frame arrives: the
+//!   engine syncs this device's drives, and nothing else (a device is not a
+//!   sync target).
 //! - Run a 5-minute fallback poll in case the VfsWatch stream is idle.
 //! - Exit cleanly on `VfsWatchEnd` (daemon shutdown), but stay alive on
 //!   `VfsWatchFailed` (no watch) and keep syncing on the fallback poll.
@@ -24,7 +26,7 @@ use tokio::time::{Duration, interval};
 
 /// Scope requested by ksyncd on authenticate.  Minimal — only what Phase 1
 /// needs.  Phase 2 will extend this when sync runs inside ksyncd.
-const KSYNCD_SCOPE: &[&str] = &["SyncTrigger", "SyncRuleList", "VfsWatch", "VfsReport"];
+const KSYNCD_SCOPE: &[&str] = &["SyncDrives", "SyncRuleList", "VfsWatch", "VfsReport"];
 
 /// Fallback sync poll interval (5 minutes).
 const POLL_INTERVAL_SECS: u64 = 300;
@@ -219,25 +221,24 @@ async fn report_peers(
     }
 }
 
-/// Send a `SyncTrigger` request to kuserd.  Errors are logged and ignored —
+/// Send a `SyncDrives` request to kuserd.  Errors are logged and ignored —
 /// the sync engine will catch up on the next poll tick.
 async fn trigger_sync_now(client: &mut IpcClient<UserRequest, UserResponse>, user_id: &str) {
-    let req = UserRequest::SyncTrigger {
+    let req = UserRequest::SyncDrives {
         user_id: user_id.to_string(),
-        node_id: None,
     };
     match client.send(&req).await {
         Ok(UserResponse::SyncStarted { targets, .. }) => {
-            tracing::debug!(targets, "ksyncd: SyncTrigger acknowledged");
+            tracing::debug!(targets, "ksyncd: SyncDrives acknowledged");
         }
         Ok(UserResponse::Error { message }) => {
-            tracing::warn!(%message, "ksyncd: SyncTrigger returned error");
+            tracing::warn!(%message, "ksyncd: SyncDrives returned error");
         }
         Ok(other) => {
-            tracing::warn!(?other, "ksyncd: unexpected SyncTrigger response");
+            tracing::warn!(?other, "ksyncd: unexpected SyncDrives response");
         }
         Err(e) => {
-            tracing::warn!(error = %e, "ksyncd: SyncTrigger IPC error");
+            tracing::warn!(error = %e, "ksyncd: SyncDrives IPC error");
         }
     }
 }

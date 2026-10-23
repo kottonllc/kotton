@@ -103,7 +103,7 @@ pub async fn peer_add(
 
     let now = now_secs();
     // The label IS the paired_nodes primary key — it must be stable and
-    // human-readable so that sync_rules (which FK-reference it) and CLI
+    // human-readable so that mount configs (which FK-reference it) and CLI
     // commands that take a node label all resolve to the same row.
     let id = label.clone();
     let addresses_json = serde_json::to_string(&[peer_addr]).map_err(json_err)?;
@@ -610,48 +610,6 @@ pub async fn threshold_sign(
             message: format!("threshold signing failed: {e}"),
         }),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Sync rules
-// ---------------------------------------------------------------------------
-
-pub async fn sync_configure(
-    db: &Arc<SqlitePool>,
-    user_id: String,
-    node_id: String,
-    path: String,
-    watch: bool,
-) -> io::Result<UserResponse> {
-    let now = now_secs();
-    let rule = network_db::upsert_sync_rule(db, &user_id, &node_id, &path, watch, now).await?;
-    Ok(UserResponse::SyncConfigured { rule })
-}
-
-pub async fn sync_rule_list(
-    db: &Arc<SqlitePool>,
-    user_id: String,
-) -> io::Result<UserResponse> {
-    let rules = network_db::list_sync_rules(db, &user_id).await?;
-    Ok(UserResponse::SyncRuleList { rules })
-}
-
-pub async fn sync_rule_remove(
-    db: &Arc<SqlitePool>,
-    user_id: String,
-    node_id: String,
-    path: String,
-) -> io::Result<UserResponse> {
-    let found = network_db::delete_sync_rule(db, &user_id, &node_id, &path).await?;
-    if !found {
-        return Ok(UserResponse::Error {
-            message: format!(
-                "sync rule '{}:{}' not found for user '{}'",
-                node_id, path, user_id
-            ),
-        });
-    }
-    Ok(UserResponse::SyncRuleRemoved)
 }
 
 // ---------------------------------------------------------------------------

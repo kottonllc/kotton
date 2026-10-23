@@ -11,8 +11,6 @@
 
 use kotton::SyncDirection;
 use kotton_schemas::membership::Posture;
-use kotton_wire::remote::RemoteBackend;
-use std::net::SocketAddr;
 
 use crate::common::cli::{said, Cli};
 use crate::common::{connect_when_ready, enroll_streamed, TestEnv, TEST_PASSPHRASE};
@@ -26,7 +24,8 @@ fn free_port() -> u16 {
 
 /// **A folder kept on one device is read on another.** `kotton keep <folder>` on E copies
 /// the folder into the tree under its own name; run again, it copies nothing; N, joined to
-/// the same identity, pulls from E and reads a file of the folder back, nested one included.
+/// the same identity, pulls from the person's drive what E synced there, and reads a file of
+/// the folder back, nested one included. A device does not sync from another device.
 /// What is kept is recorded sealed in the tree, in E's own file under `/.kept`: nothing on
 /// E's disk holds the folder's path in the clear, and N, the person's own other device, reads
 /// E's record as it reads any file of theirs.
@@ -52,8 +51,11 @@ async fn a_folder_kept_on_one_device_is_read_on_another() {
     let n = TestEnv::spawn().await;
     let mut alice_e = connect_when_ready(&e.endpoint, "alice on E").await;
     alice_e.authenticate(&token).await.expect("present E's session");
+    // E keeps the person's things on a drive, enrolled before N joins so the
+    // join introduces N to it: N reads what E keeps by way of the drive.
+    let (alice_e, drive) = crate::drive_sync::a_drive_for(alice_e, "device-e", USER).await;
     let fresh_n = connect_when_ready(&n.endpoint, "N").await;
-    let (_alice_e, mut alice_n, _) =
+    let (mut alice_e, mut alice_n, _) =
         enroll_streamed(alice_e, fresh_n, USER, "device-n", free_port(), Posture::Full).await;
 
     // ── The folder, on E's computer ──────────────────────────────────────────────
@@ -95,26 +97,18 @@ async fn a_folder_kept_on_one_device_is_read_on_another() {
     let searched = assert_not_in_the_clear(&person, folder.as_bytes());
     assert!(searched > 0, "nothing under {} was searched", person.display());
 
-    // ── N pulls from E, and reads the folder back ────────────────────────────────
-    let e_addr: SocketAddr = format!("127.0.0.1:{op_port_e}").parse().unwrap();
-    alice_n
-        .peer_add(USER, "device-e", &did_e, &pubkey_e, e_addr)
+    // ── E syncs to the drive; N pulls from there, and reads the folder back ──────
+    let _ = (op_port_e, &pubkey_e);
+    alice_e
+        .sync_mount(USER, "local", "vault", Some(SyncDirection::Push))
         .await
-        .expect("N learns where E answers");
-    alice_n
-        .remote_add(
-            USER,
-            "device-e",
-            RemoteBackend::Kotton { peer_did: did_e.clone(), label: "device-e".to_string() },
-            None,
-        )
-        .await
-        .expect("E as a remote of N");
+        .expect("E pushes to the drive");
+    crate::drive_sync::tell_of_the_drive(&mut alice_n, USER, &drive).await;
     let pulled = alice_n
-        .sync_mount(USER, "local", "device-e", Some(SyncDirection::Pull))
+        .sync_mount(USER, "local", "vault", Some(SyncDirection::Pull))
         .await
-        .expect("N pulls from E");
-    assert!(pulled.pulled >= 2, "N pulled {} objects from E", pulled.pulled);
+        .expect("N pulls from the drive");
+    assert!(pulled.pulled >= 1, "N pulled nothing from the drive: {pulled:?}");
 
     for (path, body) in [
         ("/Photos/beach.jpg", &b"sand, and the sea behind it"[..]),

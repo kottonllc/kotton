@@ -31,5 +31,6 @@
 //! Both follow once `agent::sessions` is consolidated into `core/session`.
 
 pub mod db;
+pub mod drive_rules;
 pub mod drives;
 pub mod nodes;

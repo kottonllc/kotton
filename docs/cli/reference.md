@@ -125,7 +125,7 @@ Kotton - Your data sovereignty platform
 * `record` — Record addressing — open records by kotton:// URL
 * `records` — The project's records in a root its org owns — init, invite, import, export
 * `import` — Bring your history with you — read an export (.ics) into your own records
-* `sync` — Sync your files across devices (now, add, list, remove) — shares the REPL's `sync` verb
+* `sync` — Sync this device's drives (now, add, list, remove) — shares the REPL's `sync` verb
 * `issuer` — Trusted-issuer registry (add, remove, list) — shares the REPL's `issuer` verb
 * `cp` — Copy files into and out of your tree — shares the REPL's `cp` verb. `host:` names this computer's own files, a relative one from the directory the command is run in
 * `keep` — Keep a folder of yours in your tree, and copy only what changed when run again — shares the REPL's `keep` verb. The folder is on this computer, a relative one from the directory the command is run in; with no arguments it lists what is kept
@@ -753,39 +753,39 @@ Bring your history with you — read an export (.ics) into your own records
 
 ## `Kotton sync`
 
-Sync your files across devices (now, add, list, remove) — shares the REPL's `sync` verb
+Sync this device's drives (now, add, list, remove) — shares the REPL's `sync` verb
 
 **Usage:** `Kotton sync [OPTIONS] [ARGS]...`
 
 ```text
-sync — sync your files across your devices, or against a named remote
+sync — keep this device's drives current
 
 USAGE:
-  sync                              sync with all your paired devices (two-way)
-  sync now [--node <id>] [--no-wait]  trigger the sync engine over your rules
-  sync [--push | --pull] <remote>   run an ad-hoc sync against a named remote
-  sync add <node> <path> [--watch]  add/update a background sync rule
-  sync list                         list sync rules
-  sync remove <node> <path>         remove a sync rule
+  sync [now] [--no-wait]                       sync this device's drives now
+  sync [--push | --pull] <remote>              run an ad-hoc sync against a drive or a remote
+  sync add <drive> [--push | --pull] [--watch] keep this device's rule for a drive
+  sync list                                    list this device's rules
+  sync remove <drive>                          remove the rule for a drive
 
-FLAGS (ad-hoc sync):
-  --push    transfer local → remote only
-  --pull    transfer remote → local only
-  (none)    bidirectional, last-write-wins by modified timestamp
+A device syncs to your drives, never to another device: your other devices
+get what this one writes by way of a drive.
 
-FLAGS (add):
-  --watch   enable filesystem-watch continuous sync
+FLAGS:
+  --push    this device sends to the drive only
+  --pull    this device takes from the drive only
+  (none)    both ways, last-write-wins by modified timestamp
+  --watch   sync the drive in the background as well as when asked
 
 EXAMPLES:
-  sync s3-backup                               # two-way sync with 's3-backup'
-  sync --push s3-backup                        # push local changes only
-  sync add my-vps /notes --watch         # continuous sync of /notes
-  sync list                                    # show all rules
-  sync remove my-vps /notes                    # remove the rule
+  sync                                 # every drive, now
+  sync add vault --watch               # keep 'vault' current in the background
+  sync add vault --pull                # this device only takes from 'vault'
+  sync list                            # show this device's rules
+  sync remove vault                    # drop the rule for 'vault'
 
 NOTES:
   The local 'local' mount is always the sync source/destination.
-  A paired peer's <remote> is the `remote` column of 'peer list'.
+  A drive is named by its node's id, the `id` column of 'device list'.
 ```
 
 ###### **Arguments:**

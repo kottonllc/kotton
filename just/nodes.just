@@ -4,8 +4,12 @@ set working-directory := ".."
 # Two-node local harness (Arc A — "send a file to my phone"). Two isolated kuserd
 # nodes on ONE machine — "a" = this laptop, "b" = "your phone" — plus a local relay
 # so they reach each other by DID with no manual addressing (the same path verified
-# in tests/relay_peer_sync.rs). The relay is configured AT RUNTIME (`relay set`), not
+# in tests/suite/introduction.rs). The relay is configured AT RUNTIME (`relay set`), not
 # via an env var — nodes boot relay-less and become reachable live.
+#
+# A device syncs to its person's drives and never to another device, so the
+# `sync` below carries a file from A to B only once the person has a drive both
+# reach (a vault enrolled on A before B joins); with none, `sync` says so.
 #
 # Typical session — FIVE terminals:
 #   1) just nodes::relay   # local relay (presence + reachability)

@@ -182,11 +182,14 @@ async fn two_node_transfer_across_key_domains_is_refused() {
         .await
         .expect("peer_add B into A");
 
-    // B trusts A's key and stores A's listener address for the sync pull.
+    // B trusts A's key and stores A's listener address for the sync pull —
+    // as its drive, because only a drive is a sync target: a device is refused
+    // before any domain is compared. A node keeping another key domain's things
+    // under the person's name is what the domain gate exists for.
     client_b
-        .peer_add("alice", "node-a", &did_a, &pubkey_hex_a, addr_a)
+        .peer_add_drive("alice", "node-a", &did_a, &pubkey_hex_a, addr_a)
         .await
-        .expect("peer_add A into B");
+        .expect("peer_add A into B as its drive");
 
     // ── Write 3 objects on A ─────────────────────────────────────────────────
     for i in 1u8..=3 {

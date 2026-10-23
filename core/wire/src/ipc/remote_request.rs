@@ -462,9 +462,12 @@ pub enum RemoteRequest {
     },
     SyncConfigure {
         user_id: String,
-        node_id: String,
-        path: String,
+        drive: String,
+        direction: Option<super::SyncDirection>,
         watch: bool,
+    },
+    SyncDrives {
+        user_id: String,
     },
     SyncMount {
         user_id: String,
@@ -477,15 +480,10 @@ pub enum RemoteRequest {
     },
     SyncRuleRemove {
         user_id: String,
-        node_id: String,
-        path: String,
+        drive: String,
     },
     SyncStatus {
         user_id: String,
-    },
-    SyncTrigger {
-        user_id: String,
-        node_id: Option<String>,
     },
     TrustAdd {
         user_id: String,
@@ -646,12 +644,12 @@ impl From<RemoteRequest> for UserRequest {
             RemoteRequest::SubscribeEvents { category, level } => UserRequest::SubscribeEvents { category, level },
             RemoteRequest::SyncAvailable { user_id, paths } => UserRequest::SyncAvailable { user_id, paths },
             RemoteRequest::SyncAwait { user_id, job_id, timeout_secs } => UserRequest::SyncAwait { user_id, job_id, timeout_secs },
-            RemoteRequest::SyncConfigure { user_id, node_id, path, watch } => UserRequest::SyncConfigure { user_id, node_id, path, watch },
+            RemoteRequest::SyncConfigure { user_id, drive, direction, watch } => UserRequest::SyncConfigure { user_id, drive, direction, watch },
+            RemoteRequest::SyncDrives { user_id } => UserRequest::SyncDrives { user_id },
             RemoteRequest::SyncMount { user_id, mount, remote, direction } => UserRequest::SyncMount { user_id, mount, remote, direction },
             RemoteRequest::SyncRuleList { user_id } => UserRequest::SyncRuleList { user_id },
-            RemoteRequest::SyncRuleRemove { user_id, node_id, path } => UserRequest::SyncRuleRemove { user_id, node_id, path },
+            RemoteRequest::SyncRuleRemove { user_id, drive } => UserRequest::SyncRuleRemove { user_id, drive },
             RemoteRequest::SyncStatus { user_id } => UserRequest::SyncStatus { user_id },
-            RemoteRequest::SyncTrigger { user_id, node_id } => UserRequest::SyncTrigger { user_id, node_id },
             RemoteRequest::TrustAdd { user_id, org_did } => UserRequest::TrustAdd { user_id, org_did },
             RemoteRequest::TrustList { user_id } => UserRequest::TrustList { user_id },
             RemoteRequest::TrustRemove { user_id, org_did } => UserRequest::TrustRemove { user_id, org_did },

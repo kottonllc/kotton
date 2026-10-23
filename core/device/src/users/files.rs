@@ -951,8 +951,8 @@ pub async fn remote_add(
     }
 }
 
-/// Handle `RemoteBackend::Kotton`: look up the paired node, connect via NAT
-/// traversal, then register the live `KottonPeerObjectStorage`.
+/// Handle `RemoteBackend::Kotton`: look up the drive's node, connect via NAT
+/// traversal, then register the live `KottonPeerObjectStorage`. Only a drive.
 async fn remote_add_kotton(
     db: &Arc<SqlitePool>,
     host: &dyn FileHost,
@@ -961,26 +961,42 @@ async fn remote_add_kotton(
     peer_did: String,
     label: String,
 ) -> io::Result<UserResponse> {
-    // 1. Resolve peer_did → PairedNode from the DB.
-    let nodes = match network_db::list_paired_nodes(db, &user_id).await {
+    // 1. Resolve peer_did → the node one of the person's drives is reached
+    //    through. A peer remote is a drive and nothing else: a device
+    //    replicates to its person's drives, and no device is another's
+    //    target, so a paired node the drive record does not name — another of
+    //    the person's own devices — is refused here, the one place a peer
+    //    remote is opened from a request.
+    let drives = match kotton_peer::daemon::drives::nodes(db, &user_id).await {
         Ok(n) => n,
         Err(e) => {
             return Ok(UserResponse::Error {
-                message: format!("failed to list paired nodes: {e}"),
+                message: format!("failed to list your drives: {e}"),
             });
         }
     };
-    let node = match nodes
+    let node = match drives
         .into_iter()
         .find(|n| n.device_did.to_string() == peer_did)
     {
         Some(n) => n,
         None => {
+            let paired = network_db::list_paired_nodes(db, &user_id)
+                .await
+                .map(|nodes| nodes.iter().any(|n| n.device_did.to_string() == peer_did))
+                .unwrap_or(false);
             return Ok(UserResponse::Error {
-                message: format!(
-                    "no paired node with DID '{peer_did}' — pair this device first with \
-                     `kotton pair`"
-                ),
+                message: if paired {
+                    format!(
+                        "'{peer_did}' is not one of your drives: a device is not a sync target — \
+                         devices sync to their drives, never to each other"
+                    )
+                } else {
+                    format!(
+                        "no paired node with DID '{peer_did}' — pair this device first with \
+                         `kotton pair`"
+                    )
+                },
             });
         }
     };
@@ -1112,12 +1128,16 @@ pub async fn sync_mount(
             message: format!("user '{}' not found", user_id),
         });
     };
-    // A paired node is a remote by its id. The ceremony records the node; the
-    // remote — the peer storage opened to it — is derivable from that record and
-    // nothing else, so naming a paired node here opens it, and no client has to
-    // know that a `remote add` stands between `device admit` and `sync`: the
-    // line the product prints after admitting a node — "run `sync <id>`" —
-    // works as typed.
+    // A drive is a remote by the id of the node it is reached through. The
+    // enrolment records the drive; the remote — the peer storage opened to the
+    // vault — is derivable from that record and nothing else, so naming a
+    // drive's node here opens it, and no client has to know that a `remote add`
+    // stands between `device admit` and `sync`: the line the product prints
+    // after admitting a vault — "run `sync <id>`" — works as typed.
+    //
+    // Only a drive. A paired node that is not one — another of the person's
+    // devices — is not a sync target, so it opens no remote here, and
+    // `remote_add_kotton` refuses it by name.
     if !store.list_remotes().contains(&remote) {
         if let Some(node) = network_db::get_paired_node_by_id(db, &user_id, &remote).await? {
             let did = node.device_did.to_string();
@@ -1125,7 +1145,7 @@ pub async fn sync_mount(
                 remote_add_kotton(db, host, user_id.clone(), remote.clone(), did, remote.clone()).await?
             {
                 return Ok(UserResponse::Error {
-                    message: format!("'{remote}' is paired but could not be reached: {message}"),
+                    message: format!("'{remote}' is paired but is not synced with: {message}"),
                 });
             }
         }

@@ -655,11 +655,11 @@ pub enum UserResponse {
     },
 
     // -- Sync engine (RFC-0019) -----------------------------------------------
-    /// A sync pass was enqueued. Returned immediately by `SyncTrigger`.
+    /// A sync pass was enqueued. Returned immediately by `SyncDrives`.
     SyncStarted {
         /// Opaque job identifier — pass to `SyncAwait` to block for the result.
         job_id: String,
-        /// Number of `(user, node)` target pairs that will be synced.
+        /// How many drives the pass syncs.
         targets: u32,
     },
     /// A sync pass completed successfully. Returned by `SyncAwait`.

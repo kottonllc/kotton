@@ -7,17 +7,19 @@ use super::{Command, CommandOutput};
 use crate::out::Out;
 use crate::state::ShellState;
 
-/// sync — synchronise the local mount with a named remote, or manage sync rules.
+/// sync — sync this device's drives, or manage this device's rule for a drive.
 ///
 /// Usage:
 /// ```text
+///   sync [now] [--no-wait]
 ///   sync [--push | --pull] <remote>
-///   sync add <node> <path> [--watch]
+///   sync add <drive> [--push | --pull] [--watch]
 ///   sync list
-///   sync remove <node> <path>
+///   sync remove <drive>
 /// ```
 ///
-/// With no direction flag the sync is bidirectional (last-write-wins).
+/// A device syncs to its person's drives and to nothing else: no device is a
+/// sync target, so nothing here names one.
 pub struct SyncCommand;
 
 #[async_trait]
@@ -26,72 +28,48 @@ impl Command for SyncCommand {
         let user_id = state.user_id.clone();
         let mut client = state.client.lock().await;
 
-        // No args → sync with every paired device (your own machines), two-way.
-        // A paired node is a remote by its id — the daemon opens it when named
-        // (`files::sync_mount`), so this loop names each and nothing more. This
-        // is the demo verb: write a file, run `sync`, it's on your other device.
-        if args.is_empty() {
-            let nodes = client
-                .list_nodes(&user_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("sync: {e}"))?;
-            if nodes.is_empty() {
-                return Ok(CommandOutput::shapes(vec![Out::Note(
-                    "no paired devices yet — run `device add <name>` to add one".to_string(),
-                )]));
-            }
-            let mut rows = Vec::new();
-            for n in &nodes {
-                match client.sync_mount(&user_id, "local", &n.id, None).await {
-                    Ok(r) => rows.push(vec![
-                        n.id.clone(),
-                        r.pushed.to_string(),
-                        r.pulled.to_string(),
-                        r.skipped.to_string(),
-                    ]),
-                    Err(e) => rows.push(vec![n.id.clone(), format!("error: {e}"), String::new(), String::new()]),
-                }
-            }
-            return Ok(CommandOutput::shapes(vec![Out::Table {
-                columns: vec![
-                    "device".into(),
-                    "pushed".into(),
-                    "pulled".into(),
-                    "skipped".into(),
-                ],
-                rows,
-            }]));
+        // `--node` named one paired node — another of the person's devices
+        // among them. A device is not a sync target, so the form is gone.
+        if args.iter().any(|a| a == "--node") {
+            return Ok(CommandOutput::fail(
+                "sync: `--node` is gone — a device is not a sync target",
+                Some("`sync` syncs this device's drives".into()),
+            ));
         }
 
-        // `sync now [--node <id>] [--no-wait]` — trigger the daemon's sync engine
-        // (the configured rules), rather than the client-driven per-device pass the
-        // no-arg `sync` runs. Unified from the former `kotton sync now` (Pillar 4).
-        if args.first().map(String::as_str) == Some("now") {
-            let node = args
-                .windows(2)
-                .find(|w| w[0] == "--node")
-                .map(|w| w[1].clone());
+        // `sync` and `sync now [--no-wait]`: this device's drives, now, each
+        // in the direction its rule chooses.
+        let bare = args.is_empty()
+            || (args.first().map(String::as_str) == Some("now")
+                && args[1..].iter().all(|a| a == "--no-wait" || a == "-n"));
+        if bare {
             let no_wait = args.iter().any(|a| a == "--no-wait" || a == "-n");
-            let job_id = client
-                .sync_trigger(&user_id, node.as_deref())
+            let (job_id, drives) = client
+                .sync_drives(&user_id)
                 .await
-                .map_err(|e| anyhow::anyhow!("sync now: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("sync: {e}"))?;
+            if drives == 0 {
+                return Ok(CommandOutput::shapes(vec![Out::Note(
+                    "this device keeps no drive yet — your things live on a drive; `vault invite --me` makes one"
+                        .to_string(),
+                )]));
+            }
             if no_wait {
                 return Ok(CommandOutput::shapes(vec![Out::Note(format!(
-                    "sync enqueued (job {job_id})"
+                    "syncing {drives} drive(s) (job {job_id})"
                 ))]));
             }
             let outcome = client
                 .sync_await(&user_id, job_id, 60)
                 .await
-                .map_err(|e| anyhow::anyhow!("sync now: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("sync: {e}"))?;
             let shape = if outcome.files == 0 && outcome.records == 0 {
                 Out::Note("already in sync".into())
             } else {
                 Out::Confirm {
                     action: format!(
-                        "synced {} file(s), {} record(s), {} bytes",
-                        outcome.files, outcome.records, outcome.bytes
+                        "synced {} file(s), {} bytes, with {drives} drive(s)",
+                        outcome.files, outcome.bytes
                     ),
                     subject: String::new(),
                 }
@@ -100,27 +78,34 @@ impl Command for SyncCommand {
         }
 
         match args {
-            // -- Sync rule subcommands -------------------------------------------
-            [sub, node, path] if sub == "add" => {
+            // -- This device's rules, one per drive ------------------------------
+            [sub, drive, flags @ ..] if sub == "add" => {
+                let mut direction = None;
+                let mut watch = false;
+                for f in flags {
+                    match f.as_str() {
+                        "--push" => direction = Some(SyncDirection::Push),
+                        "--pull" => direction = Some(SyncDirection::Pull),
+                        "--watch" | "-w" => watch = true,
+                        other => {
+                            return Ok(CommandOutput::fail(
+                                format!("sync add: unknown flag `{other}`"),
+                                Some("usage: sync add <drive> [--push | --pull] [--watch]".into()),
+                            ))
+                        }
+                    }
+                }
                 let rule = client
-                    .configure_sync(&user_id, node, path, false)
+                    .configure_sync(&user_id, drive, direction, watch)
                     .await
                     .map_err(|e| anyhow::anyhow!("sync add: {e}"))?;
                 return Ok(CommandOutput::shapes(vec![Out::Confirm {
-                    action: "sync rule added".into(),
-                    subject: format!("{}:{}", rule.node_id, rule.path),
-                }]));
-            }
-            [sub, node, path, flag]
-                if sub == "add" && (flag == "--watch" || flag == "-w") =>
-            {
-                let rule = client
-                    .configure_sync(&user_id, node, path, true)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("sync add: {e}"))?;
-                return Ok(CommandOutput::shapes(vec![Out::Confirm {
-                    action: "sync rule added (watching)".into(),
-                    subject: format!("{}:{}", rule.node_id, rule.path),
+                    action: format!(
+                        "sync rule kept — {}{}",
+                        direction_said(&rule.direction),
+                        if rule.watch { ", watching" } else { "" }
+                    ),
+                    subject: rule.drive,
                 }]));
             }
             [sub] if sub == "list" => {
@@ -132,29 +117,29 @@ impl Command for SyncCommand {
                     .iter()
                     .map(|r| {
                         vec![
-                            r.node_id.clone(),
-                            r.path.clone(),
+                            if r.drive.is_empty() { format!("(no longer a drive here: {})", r.vault_key) } else { r.drive.clone() },
+                            direction_said(&r.direction).to_string(),
                             if r.watch { "yes" } else { "no" }.to_string(),
                         ]
                     })
                     .collect();
                 return Ok(CommandOutput::shapes(vec![Out::Table {
-                    columns: vec!["node".into(), "path".into(), "watch".into()],
+                    columns: vec!["drive".into(), "direction".into(), "watch".into()],
                     rows,
                 }]));
             }
-            [sub, node, path] if sub == "remove" => {
+            [sub, drive] if sub == "remove" => {
                 client
-                    .remove_sync_rule(&user_id, node, path)
+                    .remove_sync_rule(&user_id, drive)
                     .await
                     .map_err(|e| anyhow::anyhow!("sync remove: {e}"))?;
                 return Ok(CommandOutput::shapes(vec![Out::Confirm {
                     action: "sync rule removed".into(),
-                    subject: format!("{node}:{path}"),
+                    subject: drive.clone(),
                 }]));
             }
 
-            // -- Legacy remote-backend sync ----------------------------------------
+            // -- An ad-hoc sync against a named remote ---------------------------
             _ => {}
         }
 
@@ -225,32 +210,41 @@ impl Command for SyncCommand {
     }
 }
 
+/// A rule's direction, as a person reads it.
+fn direction_said(direction: &Option<SyncDirection>) -> &'static str {
+    match direction {
+        Some(SyncDirection::Push) => "push",
+        Some(SyncDirection::Pull) => "pull",
+        None => "both ways",
+    }
+}
+
 pub(crate) const HELP: &str = "\
-sync — sync your files across your devices, or against a named remote
+sync — keep this device's drives current
 
 USAGE:
-  sync                              sync with all your paired devices (two-way)
-  sync now [--node <id>] [--no-wait]  trigger the sync engine over your rules
-  sync [--push | --pull] <remote>   run an ad-hoc sync against a named remote
-  sync add <node> <path> [--watch]  add/update a background sync rule
-  sync list                         list sync rules
-  sync remove <node> <path>         remove a sync rule
+  sync [now] [--no-wait]                       sync this device's drives now
+  sync [--push | --pull] <remote>              run an ad-hoc sync against a drive or a remote
+  sync add <drive> [--push | --pull] [--watch] keep this device's rule for a drive
+  sync list                                    list this device's rules
+  sync remove <drive>                          remove the rule for a drive
 
-FLAGS (ad-hoc sync):
-  --push    transfer local → remote only
-  --pull    transfer remote → local only
-  (none)    bidirectional, last-write-wins by modified timestamp
+A device syncs to your drives, never to another device: your other devices
+get what this one writes by way of a drive.
 
-FLAGS (add):
-  --watch   enable filesystem-watch continuous sync
+FLAGS:
+  --push    this device sends to the drive only
+  --pull    this device takes from the drive only
+  (none)    both ways, last-write-wins by modified timestamp
+  --watch   sync the drive in the background as well as when asked
 
 EXAMPLES:
-  sync s3-backup                               # two-way sync with 's3-backup'
-  sync --push s3-backup                        # push local changes only
-  sync add my-vps /notes --watch         # continuous sync of /notes
-  sync list                                    # show all rules
-  sync remove my-vps /notes                    # remove the rule
+  sync                                 # every drive, now
+  sync add vault --watch               # keep 'vault' current in the background
+  sync add vault --pull                # this device only takes from 'vault'
+  sync list                            # show this device's rules
+  sync remove vault                    # drop the rule for 'vault'
 
 NOTES:
   The local 'local' mount is always the sync source/destination.
-  A paired peer's <remote> is the `remote` column of 'peer list'.";
+  A drive is named by its node's id, the `id` column of 'device list'.";
