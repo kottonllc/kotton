@@ -8,22 +8,20 @@
 //! tests of the library crates it names. Everything that build compiles is held there, by
 //! rustc, and better than a grep can: an alias, a re-export, a macro, the mirror case.
 //!
-//! This stays for what that build does not compile, and for where it runs:
+//! The job also compiles every test target of the workspace (`cargo test --workspace
+//! --no-run`), the daemons', xtask's and the integration suite's included. So this stays
+//! for two things only:
 //!
-//! - **Code the Windows job never compiles.** `cargo build` builds no test target, and the job
-//!   runs the tests of the library crates alone, so every `#[cfg(test)]` module and `tests/`
-//!   target of the daemons (`kuserd`, `kdeviced`, `kvaultd`, `kquicd`, `ksyncd`), of `xtask`
-//!   and of the integration suite (`tests/`) is read on Windows by this and by nothing else. So is
-//!   `infra/`: the relay is a workspace of its own and is not built there.
+//! - **`infra/`.** The relay is a workspace of its own, released for Linux alone, and is
+//!   not built on Windows. A Unix-only path there is read by this and by nothing else.
 //! - **Before the pull request.** This runs in `just lint`, on the contributor's own Linux
 //!   machine, in seconds. A Windows build there is not available: `ring`'s build script needs a
 //!   Windows C toolchain, and neither clang nor mingw satisfied it in the Linux container this
 //!   was written in. The Windows job answers the whole question once the pull request is
 //!   open; this answers the narrow form of it before a push.
 //!
-//! It leaves when the Windows job compiles every target this reads (`--all-targets` for the
-//! workspace, the suite included, and the relay), at which point a finding here could only be
-//! one rustc already refused there.
+//! It leaves when the relay is either built on Windows or excluded from these roots by a
+//! reason written beside it, and a contributor's slower answer is judged good enough.
 //!
 //! # What it can and cannot see
 //!

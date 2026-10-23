@@ -227,17 +227,14 @@ fn resolve(path: &str, windows: bool, canonical: &dyn Fn(&str) -> Option<String>
         at = &trimmed[..=cut];
     };
     let mut out = found.trim_end_matches(is_separator).to_string();
+    let root = root_len(&out, windows);
     for name in missing.iter().rev() {
         match *name {
             "" | "." => {}
             ".." => {
-                // Up one name, never past a root: `/` (here the empty string), a
-                // drive (`C:`), or a verbatim prefix (`\\?\C:`).
-                if let Some(cut) = out.rfind(is_separator) {
-                    let last = &out[cut + 1..];
-                    if !(last.is_empty() || last.ends_with(':') || last == "?") {
-                        out.truncate(cut);
-                    }
+                // Up one name, never into the root (`root_len`).
+                if let Some(cut) = out.rfind(is_separator).filter(|cut| *cut >= root) {
+                    out.truncate(cut);
                 }
             }
             name => {
@@ -250,6 +247,35 @@ fn resolve(path: &str, windows: bool, canonical: &dyn Fn(&str) -> Option<String>
         out.push(joint);
     }
     Some(out)
+}
+
+/// How much of `path` is its root, which `..` never climbs into. Off Windows the root
+/// is the leading `/`, which [`resolve`] holds as the empty string, so nothing: a
+/// directory named `dir:` there is a name like any other. On Windows: a drive
+/// (`C:`), a verbatim drive or volume (`\\?\C:`, `\\?\Volume{…}`), or a share,
+/// plain (`\\host\share`) or verbatim (`\\?\UNC\host\share`), so `..` from a share
+/// stops at the share and never re-roots onto its host or a drive.
+fn root_len(path: &str, windows: bool) -> usize {
+    if !windows {
+        return 0;
+    }
+    let is_separator = |c: char| c == '/' || c == '\\';
+    // `host\share` at the start of `rest`, as a length: both names, or all there is.
+    let share = |rest: &str| match rest.find(is_separator) {
+        None => rest.len(),
+        Some(i) => i + 1 + rest[i + 1..].find(is_separator).unwrap_or(rest.len() - i - 1),
+    };
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        r"\\?\UNC\".len() + share(rest)
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        r"\\?\".len() + rest.find(is_separator).unwrap_or(rest.len())
+    } else if let Some(rest) = path.strip_prefix(r"\\") {
+        2 + share(rest)
+    } else if path.as_bytes().get(1) == Some(&b':') {
+        2
+    } else {
+        0
+    }
 }
 
 /// One spelling of a resolved path: no `\\?\` verbatim prefix (`\\?\UNC\` back to
@@ -367,11 +393,44 @@ mod secrets_selection_tests {
         assert_eq!(resolve("/short~1/missing/../../x", false, &renamed).as_deref(), Some("/long/x"));
         assert_eq!(resolve("/missing/../../../x", false, &renamed).as_deref(), Some("/x"));
         assert_eq!(resolve("/short~1/./a/.", false, &renamed).as_deref(), Some("/long/name/a"));
+        // Off Windows a name ending in `:` is a name, and `..` leaves it like any other.
+        let colon = |p: &str| -> Option<String> {
+            matches!(p, "/" | "/x:" | "/x:/").then(|| p.trim_end_matches('/').to_string())
+        };
+        assert_eq!(resolve("/x:/missing/../../y", false, &colon).as_deref(), Some("/y"));
         // A backslash is a name's character off Windows, not a separator.
         assert_eq!(resolve(r"/short~1/a\b", false, &renamed).as_deref(), Some(r"/long/name/a\b"));
         let nothing = |_: &str| -> Option<String> { None };
         assert_eq!(resolve("/a/b", false, &nothing), None, "nothing resolves, so nothing is claimed");
         assert_eq!(resolve(r"C:\a\b", true, &nothing), None);
+    }
+
+    /// On Windows, `..` stops at the root the canonical ancestor has: a share stays a
+    /// share (never its host, never a drive), and a drive stays a drive.
+    #[test]
+    fn dot_dot_never_climbs_out_of_a_windows_root() {
+        let share = r"\\?\UNC\host\share";
+        let at_share = |p: &str| -> Option<String> {
+            (p.trim_end_matches('\\') == share).then(|| share.to_string())
+        };
+        assert_eq!(
+            resolve(r"\\?\UNC\host\share\..\x", true, &at_share).as_deref(),
+            Some(r"\\?\UNC\host\share\x")
+        );
+        assert_eq!(
+            resolve(r"\\?\UNC\host\share\missing\..\..\..\x", true, &at_share).as_deref(),
+            Some(r"\\?\UNC\host\share\x")
+        );
+        assert_eq!(spelling(r"\\?\UNC\host\share\x", true), r"\\host\share\x");
+        let drive = |p: &str| -> Option<String> {
+            (p.trim_end_matches('\\') == "C:").then(|| r"\\?\C:\".to_string())
+        };
+        assert_eq!(resolve(r"C:\a\..\..\x", true, &drive).as_deref(), Some(r"\\?\C:\x"));
+        assert_eq!(root_len(r"\\?\UNC\host\share\x", true), share.len());
+        assert_eq!(root_len(r"\\host\share\x", true), r"\\host\share".len());
+        assert_eq!(root_len(r"\\?\C:\x", true), r"\\?\C:".len());
+        assert_eq!(root_len("C:\\x", true), 2);
+        assert_eq!(root_len("/x:/y", false), 0);
     }
 
     /// **A real install named through a missing directory and `..` is not

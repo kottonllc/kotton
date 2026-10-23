@@ -1,5 +1,5 @@
-# Builds the workspace on Windows x86_64 and runs the crate tests that need no daemon, on every
-# pull request, on one Windows runner, and nothing else.
+# Builds the workspace on Windows x86_64, compiles every test target, and runs the tests that
+# need no daemon, on every pull request, on one Windows runner, and nothing else.
 #
 # The protocol names Windows on x86_64 as a device at v0.1.0, and says each device
 # platform is built and tested in the gate on every pull request, so that what a person runs
@@ -11,16 +11,20 @@
 # `windows-latest` for this file alone: one job, with a ceiling on its minutes, every action
 # pinned to a full commit. Windows on arm64 is not built and not promised.
 #
-# What it tests: every library crate's own tests, named below; every other workspace member
-# is built and listed here with why its tests are not run. What it does not, and why each:
-#   - kotton-integration-tests (`tests/`): the suite starts kuserd, kvaultd and the relay as
-#     processes; that is the daemon this job does not run.
-#   - kuserd, kdeviced, kvaultd, kquicd, ksyncd: the daemons themselves. They are built here
-#     (`--workspace`); their tests stand a daemon up or install one, with `/bin/sh`,
-#     `setpriv` and `sha256sum`.
-#   - xtask: the gate's own tooling, which runs on Linux; it is built here.
-#   - kotton-mock-runner (`tests/fixtures/mock-runner`): a fixture binary the suite starts,
-#     with no tests of its own; it is built here.
+# What it holds, by test rather than by crate:
+#   - Every test target in the workspace compiles, under `-D warnings` (`--no-run`): the
+#     integration suite's, xtask's and the daemons' included, run or not.
+#   - Every test of the 35 library crates named in their step below runs.
+#   - The daemons' own unit tests run (`--lib --bins` on kuserd, kdeviced, kvaultd, kquicd and
+#     ksyncd): in-process, no daemon started.
+# What it does not run, and why each:
+#   - kvaultd's `tests/` targets: they install the built vault and drive it with `/bin/sh`,
+#     `setpriv` and `sha256sum`. `--lib --bins` leaves them out; they still compile above.
+#   - The integration suite (`tests/`, kotton-integration-tests): it starts kuserd, kvaultd and
+#     the relay as processes, the daemon this job does not run. It compiles above.
+#   - xtask's tests: the gate's own tooling, written for the Linux it runs on; no job runs
+#     them, here or there. They compile above.
+#   - kotton-mock-runner (`tests/fixtures/mock-runner`): a fixture binary with no tests.
 #
 # `KOTTON_PAIR_LOCAL_ONLY` declares the run same-machine, as `cargo xtask bind-check` does on
 # Linux: every inbound socket binds loopback and no mDNS advertise is made, so no test raises
@@ -92,6 +96,9 @@ jobs:
       - name: cargo build --workspace --locked
         run: cargo build --workspace --locked
 
+      - name: Every test target compiles
+        run: cargo test --workspace --locked --no-run
+
       # `--no-fail-fast`: every test binary runs and every red is named, not the first.
       - name: The crate tests that need no daemon
         run: >-
@@ -104,3 +111,10 @@ jobs:
           -p kotton-surface -p kotton-secret -p kotton-device -p kotton-session -p kotton
           -p kotton-operator -p kotton-shell -p kotton-cli -p kotton-record-file
           -p kotton-pty-drive
+
+      # Runs after a red in the step above too, so one run names every red.
+      - name: The daemons' own unit tests, in-process
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo test --locked --no-fail-fast
+          -p kuserd -p kdeviced -p kvaultd -p kquicd -p ksyncd --lib --bins
