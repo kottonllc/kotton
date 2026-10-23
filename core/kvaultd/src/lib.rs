@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `kvaultd` — the vault: the node a person rents to keep their data (RFC-0084).
 //!
-//! It keeps sealed packs it cannot open, admits the person's devices, holds the
+//! It keeps sealed packs it cannot open, admits the person's devices — the one
+//! that enrolled it, and each other one the identity introduces under its
+//! signature (`devices`) — holds the
 //! sealed recovery copy a phrase-only device needs, and reserves at the person's
 //! relay so they are reachable when nothing of theirs is awake. It is paid by
 //! the byte and it has one meter. Many people's pools live in one process.
@@ -13,6 +15,7 @@
 
 pub mod carry;
 pub mod control;
+pub mod devices;
 pub mod doors;
 pub mod host;
 pub mod instance;
@@ -215,6 +218,7 @@ impl Vault {
         doors::init(&db).await?;
         doors::refresh(&runtime, &db).await;
         carry::init(&db).await?;
+        devices::init(&db).await?;
         let peer = Arc::new(PeerContext {
             runtime: Arc::clone(&runtime),
             pools,

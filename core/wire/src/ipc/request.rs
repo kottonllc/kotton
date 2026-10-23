@@ -589,6 +589,24 @@ pub enum UserRequest {
         messages: Vec<crate::ipc::CarriedMessage>,
         drop: Vec<String>,
     },
+    /// Admit another device of `user_id`'s at this drive, or withdraw one:
+    /// `change` signed under the person's identity (`signature`, Ed25519 over
+    /// [`crate::ipc::TenantDeviceChange::signed_bytes`]).
+    ///
+    /// A vault holds no data keys and cannot read the member list, so the
+    /// device that enrolled it is the one it admits; this is how it learns the
+    /// rest. The device that admitted a new device sends it to every drive the
+    /// person has at the ceremony's end, and the withdrawal at `device revoke`.
+    /// The drive takes it only from a device it already admits for the tenant,
+    /// only under the identity's current key in the key log it keeps, and only
+    /// newer than the last change it took for that key.
+    ///
+    /// Peer-only, from a paired device of the person's. A vault verb.
+    TenantDevice {
+        user_id: String,
+        change: crate::ipc::TenantDeviceChange,
+        signature: Vec<u8>,
+    },
     /// List a mount in **storage-key space** — the keys `ReadSealed`/`WriteSealed`
     /// address, not the caller's logical paths (RFC-0044).
     ///
@@ -2521,6 +2539,7 @@ impl UserRequest {
             Self::BrowserOutbound { .. } => None,
             Self::HoldDoors { user_id, .. } => Some(user_id),
             Self::CarryFrame { user_id, .. } => Some(user_id),
+            Self::TenantDevice { user_id, .. } => Some(user_id),
             Self::TakeDeliveries { user_id, .. } => Some(user_id),
             Self::NodeList { user_id } => Some(user_id),
             Self::NodeRelay { user_id } => Some(user_id),
@@ -2743,6 +2762,7 @@ impl UserRequest {
             Self::BrowserOutbound { .. } => "BrowserOutbound",
             Self::HoldDoors { .. } => "HoldDoors",
             Self::CarryFrame { .. } => "CarryFrame",
+            Self::TenantDevice { .. } => "TenantDevice",
             Self::TakeDeliveries { .. } => "TakeDeliveries",
             Self::ListUsers => "ListUsers",
             Self::Authenticate { .. } => "Authenticate",
@@ -3252,6 +3272,9 @@ impl UserRequest {
             // The vault's doors (`DEC-0056`): served only over a peer connection
             // to a paired device; no gateway session has a use for them.
             Self::HoldDoors { .. } | Self::TakeDeliveries { .. } | Self::CarryFrame { .. } => Local,
+            // A person's other devices, introduced to their drive: served only
+            // over a peer connection, to a vault, from a device it admits.
+            Self::TenantDevice { .. } => Local,
             // An introduction opens a listener on the network this machine is on.
             // It is served only over a peer connection to one of the person's own
             // devices; no session, and no peer's `Remote` origin, reaches it.

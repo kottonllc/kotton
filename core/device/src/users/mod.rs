@@ -35,6 +35,7 @@
 pub mod admission;
 pub mod commands;
 pub mod contacts;
+pub mod drive_devices;
 pub mod pairing;
 pub mod reach;
 pub mod recover;

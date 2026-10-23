@@ -17,6 +17,15 @@
 //! functions from here, where naming it is legal.
 //!
 //! Both follow `peer` once `agent::sessions` moves to `core/session`.
+//!
+//! **A ceremony that admits a full device introduces it to the person's
+//! drives.** A drive holds no data keys and cannot read the member list, so it
+//! admits the device that enrolled it and nobody else until told. When the
+//! issuer's ceremony completes for a `Full` device, the issuer — which holds
+//! the identity — tells each drive the person has enrolled, under the
+//! identity's signature, before it answers `PairingComplete`
+//! ([`crate::users::drive_devices`]); `device revoke` withdraws the device the
+//! same way. A joined device holds a key share and introduces nobody.
 use kotton_session::service::tokens as sessions;
 use kotton_peer::daemon::nodes::{
     PendingConfirms,
@@ -373,11 +382,19 @@ pub async fn handle_device_add(
                 )
                 .await
                 {
-                    Ok(node) => UserResponse::PairingComplete {
-                        node,
-                        session_token: None,
-                        relay_offer: None,
-                    },
+                    Ok(node) => {
+                        // The person's drives admit the device that enrolled
+                        // them and nobody else until told: tell them of this
+                        // one (`drive_devices`).
+                        if posture == Posture::Full {
+                            crate::users::drive_devices::introduce(&runtime, &db, &user_id, &node).await;
+                        }
+                        UserResponse::PairingComplete {
+                            node,
+                            session_token: None,
+                            relay_offer: None,
+                        }
+                    }
                     Err(e) => UserResponse::PairFailed {
                         reason: format!("Added the device, but saving it failed: {e}"),
                     },
@@ -1039,11 +1056,16 @@ pub async fn handle_device_admit(
                 .await
                 {
                     Ok(node) => match refused_as(&runtime, node.clone(), &user_id).await {
-                        None => UserResponse::PairingComplete {
-                            node,
-                            session_token: None,
-                            relay_offer,
-                        },
+                        None => {
+                            if posture == Posture::Full {
+                                crate::users::drive_devices::introduce(&runtime, &db, &user_id, &node).await;
+                            }
+                            UserResponse::PairingComplete {
+                                node,
+                                session_token: None,
+                                relay_offer,
+                            }
+                        }
                         Some(message) => UserResponse::PairFailed {
                             reason: admitted_but_refused(&user_id, &message),
                         },

@@ -115,6 +115,9 @@ const DOMAINS: &[(&str, &[&str])] = &[
             "Introduce",
             "VaultCapacity",
             "NodeRevoke",
+            // A person's other devices, introduced to and withdrawn from the
+            // drives that keep for them, under the identity's signature.
+            "TenantDevice",
             "PeerAdd",
             "GetNodeIdentity",
             "TrustAdd",
