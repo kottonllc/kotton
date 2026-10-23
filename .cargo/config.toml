@@ -64,3 +64,10 @@ OPENSSL_NO_VENDOR = { value = "1", force = false }
 # openssl-sys reads `<TARGET>_OPENSSL_NO_VENDOR` before the bare name, so this reaches
 # that target's build and no other.
 X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_NO_VENDOR = { value = "0", force = false }
+# The checkout's own path, resolved from this file's directory. It keys `kotton-version`'s build
+# script to the tree it runs for. Cargo gives that crate the same hash in every checkout, so
+# worktrees sharing one target directory share one cached run of the script, and each watched
+# path is absolute in whichever tree ran it last. A run made for another path would otherwise
+# look fresh, and a binary would report another tree's tag. `force`: an exported variable of
+# this name must not stand in for the path. core/version/src/git.rs explains why.
+KOTTON_VERSION_TREE = { value = ".", relative = true, force = true }

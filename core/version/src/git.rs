@@ -38,6 +38,36 @@
 //!   only happens in such a tree. Without this, a build of the tree before its `.git` appeared
 //!   (moved back, cloned into place, the same path in a shared target directory) would keep
 //!   reporting `+unknown` on every later build, even on a tag.
+//!
+//! ## Trees at different paths sharing one target directory
+//!
+//! Worktrees here share one target directory. Cargo hashes a workspace member by its path
+//! relative to the workspace root, so every checkout's `kotton-version` gets the same hash, and
+//! all of them share one build-script binary and one cached run. Two things follow, and both
+//! are handled:
+//!
+//! - **The script reads `CARGO_MANIFEST_DIR` when it runs**, with `std::env::var`, never with
+//!   `env!`. A binary compiled in one tree would otherwise ask git about that tree forever.
+//! - **The script declares `rerun-if-env-changed=KOTTON_VERSION_TREE`.** The repository's
+//!   `.cargo/config.toml` sets that variable, with `relative = true`, to the checkout's own path.
+//!   Each watched path above is absolute in whichever tree ran last, so without this key a run
+//!   made for another path looks fresh: a binary built in one tree would report another tree's
+//!   tag. With it, cargo re-runs the script when the path differs. Only this crate is re-run
+//!   and rebuilt, plus what depends on it; other crates do not read the variable and stay
+//!   fresh.
+//!
+//! Declaring `rerun-if-env-changed=CARGO_MANIFEST_DIR` instead does not work, on cargo 1.97.
+//! Cargo compares that declaration against its own environment, and `CARGO_MANIFEST_DIR` is
+//! not set there. With it, a tree built after another still reported the other's commit.
+//!
+//! The proof needs two trees and cargo, so it is the manual script in this crate's pull
+//! request (#44), not a unit test. That script runs both orders: a tree with no `.git`, then a
+//! tagged checkout; and a checkout, then a second checkout with its own tag. Each reports its
+//! own version.
+//!
+//! **Limit:** cargo reads `.cargo/config.toml` from the directory it runs in. A build started
+//! outside the checkout with `--manifest-path` does not see the key, and only that case can
+//! still reuse another tree's run. The fix there is a target directory of its own.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -24,17 +24,29 @@ fn fail(reason: &str) -> ! {
     std::process::exit(1)
 }
 
+fn env(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| fail(&format!("cargo did not set `{name}`")))
+}
+
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-changed=src/derive.rs");
     println!("cargo::rerun-if-changed=src/git.rs");
+    // The tree this build is for: `.cargo/config.toml` sets it to the checkout's own path.
+    // Cargo gives this crate the same hash in every tree, so trees at different paths share
+    // one cached run in a shared target directory. A different path makes that run stale.
+    // `src/git.rs` says why each watched path is there, and why this one is needed too.
+    println!("cargo::rerun-if-env-changed=KOTTON_VERSION_TREE");
+    // Read when the script runs, never with `env!`: a build-script binary compiled in one tree
+    // is reused by every other, and would otherwise ask git about the first.
+    let manifest = env("CARGO_MANIFEST_DIR");
     // `core/version` → the workspace root.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let root = Path::new(&manifest)
         .parent()
         .and_then(Path::parent)
         .expect("core/version has no grandparent");
     // This crate's version is the workspace's (`version.workspace = true`).
-    let workspace = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+    let workspace = semver::Version::parse(&env("CARGO_PKG_VERSION"))
         .unwrap_or_else(|e| fail(&format!("the workspace's version is not semver: {e}")));
     let source = git::source(root, &mut |p| {
         println!("cargo::rerun-if-changed={}", p.display());
