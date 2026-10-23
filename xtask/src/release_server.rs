@@ -1331,6 +1331,13 @@ fn created_as_its_user(root: &Path, server: &Server, system: &StandInSystem, uid
         println!("release-server-test: {} — install.sh asked `runuser -u {user}` for `create`; not root here, so it ran as this user", server.name);
         return Ok(());
     };
+    // Off unix a file has no uid to read, so ownership is said not to be shown rather
+    // than passed in silence; a server is released for Linux alone.
+    #[cfg(not(unix))]
+    println!(
+        "release-server-test: {} — install.sh ran `create` as {user}, uid {n}; this platform reads no file's owner, so what it made is not shown to be uid {n}'s",
+        server.name
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;

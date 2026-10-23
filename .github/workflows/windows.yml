@@ -59,6 +59,10 @@ jobs:
     env:
       OPENSSL_DIR: C:\Program Files\OpenSSL
       KOTTON_PAIR_LOCAL_ONLY: '1'
+      # Held to no warning, as `just lint` holds Linux with clippy: what only Windows
+      # compiles (a `#[cfg(unix)]` helper's caller, a value read on one platform) warns
+      # nowhere else. Set for the job, not a step, so the tests reuse the build.
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
