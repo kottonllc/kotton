@@ -158,6 +158,10 @@ jobs:
       # Attaches to the tag's release, creating it if the owner has not drafted one. Never
       # --clobber: a name already on the release stays as it is, since SHA256SUMS.sig may
       # already vouch for it.
+      #
+      # A tag with a `-` in it is a pre-release (`vX.Y.Z-dev.N`, `vX.Y.Z-rc.N`, kotton-protocol's
+      # VERSIONING.md), and its release is marked as one, whether this creates it or the owner
+      # drafted it: a snapshot promises nothing, and must never show as the latest release.
       - name: Attach the four archives and SHA256SUMS to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -166,10 +170,15 @@ jobs:
           cd release
           ls -l
           sha256sum -c SHA256SUMS
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" kotton-[0-9a-f]*-linux-x86_64.tar.gz kotton-relay-*.tar.gz kotton-vault-*.tar.gz kotton-host-*.tar.gz SHA256SUMS
+            if [ -n "$prerelease" ]; then
+              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease
+            fi
           else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag $prerelease --title "$TAG" \
               --notes "The Linux system (the daemons and the CLI), the relay, the vault, and the host (the relay and the vault together), built by cargo xtask release and cargo xtask release-server from $GITHUB_SHA. Verify before installing: docs/use/first-hour.md for the system, docs/use/run-a-host.md for a host. SHA256SUMS.sig is attached by the owner, signed off GitHub; until it is, the sums prove only that the bytes arrived whole." \
               kotton-[0-9a-f]*-linux-x86_64.tar.gz kotton-relay-*.tar.gz kotton-vault-*.tar.gz kotton-host-*.tar.gz SHA256SUMS
           fi
