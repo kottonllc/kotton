@@ -27,6 +27,7 @@ kotton-record-file = { path = "../record-file" }
 kotton-crypto = { path = "../../core/crypto" }
 kotton-sys = { path = "../../core/sys" }
 kotton-common = { path = "../../core/common" }
+kotton-version = { path = "../../core/version" }
 kotton-secret = { path = "../../core/secret" }
 # `device reset` reads the recovery-bundle count and purges the keychain labels;
 # both rules live here and must not be copied. No sqlx: this crate is the thin

@@ -403,7 +403,7 @@ impl SystemDaemon {
         let children = Arc::clone(&self.children);
         let base = self.base.clone();
         let kuserd_bin = self.kuserd_bin.clone();
-        let version = env!("CARGO_PKG_VERSION").to_string();
+        let version = kotton_version::VERSION.to_string();
         let kctl_sessions = Arc::clone(&self.kctl_sessions);
         let supervised_children = Arc::clone(&self.supervised_children);
 

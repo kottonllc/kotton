@@ -2517,7 +2517,7 @@ pub(super) async fn handle_request(
                 })
                 .unwrap_or(0);
             Ok(UserResponse::DaemonStatusInfo {
-                version: env!("CARGO_PKG_VERSION").to_owned(),
+                version: kotton_version::VERSION.to_owned(),
                 uptime_secs,
                 user_count,
                 app_count,
