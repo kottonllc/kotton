@@ -583,4 +583,95 @@ mod enrollment_tests {
             .unwrap()
             .is_none());
     }
+
+    /// A runtime with alice, a device of hers (`laptop`) and a drive (`vault`)
+    /// whose row has no address, so nothing can reach it.
+    async fn alice_with_a_device_and_an_unreachable_drive(
+        dir: &Path,
+    ) -> (kotton_device::DeviceRuntime, crate::residency::UserRegistry, Arc<SqlitePool>) {
+        let users = crate::residency::UserRegistry::new();
+        let db = migrated_pool(&dir.join("agent.db")).await;
+        let runtime = kotton_device::DeviceRuntime::new_with_secrets(
+            dir.join("rt"),
+            kotton_device::config::RuntimeConfig::default(),
+            Arc::new(MemorySecrets::new()),
+        )
+        .await
+        .unwrap();
+        let (_, alice_rt) = runtime.create_user("alice", TEST_PASSPHRASE).await.unwrap();
+        users.insert("alice".to_string(), alice_rt);
+        for (id, seed, posture) in [("laptop", 6u8, Posture::Full), ("vault", 9u8, Posture::BlindStorage)] {
+            let key = SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
+            let did = DidKeyMethod::from_public_key_bytes(&key).unwrap();
+            network_db::insert_paired_node(&db, id, "alice", &did.to_string(), &key, "[]", 0, Some(posture.as_str()))
+                .await
+                .unwrap();
+        }
+        (runtime, users, db)
+    }
+
+    /// **A revoke on a device that does not hold the identity is refused**,
+    /// and says which device can do it: the drives admit the device until the
+    /// identity withdraws it, so a success here would be untrue. Nothing is
+    /// revoked.
+    #[tokio::test]
+    async fn a_revoke_on_a_device_without_the_identity_is_refused_and_names_the_device_that_can() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, users, db) = alice_with_a_device_and_an_unreachable_drive(dir.path()).await;
+        runtime.secrets().delete_secret(&kdf_labels::identity_signing_key("alice")).unwrap();
+
+        let resp = kotton_device::users::drive_devices::revoke(
+            &runtime,
+            users.get("alice").unwrap().as_ref(),
+            &db,
+            "alice".to_string(),
+            "laptop".to_string(),
+        )
+        .await
+        .unwrap();
+        match resp {
+            UserResponse::Error { message } => {
+                assert!(message.starts_with("not revoked"), "{message}");
+                assert!(message.contains("vault"), "the drive is named: {message}");
+                assert!(message.contains("the device that holds the identity"), "{message}");
+            }
+            other => panic!("a revoke that withdrew from no drive answered {other:?}"),
+        }
+        assert!(
+            network_db::get_paired_node_by_id(&db, "alice", "laptop").await.unwrap().is_some(),
+            "a refused revoke revoked"
+        );
+    }
+
+    /// **A revoke a drive did not take is not reported as success.** The
+    /// device is revoked here, and the answer is an error naming the drive
+    /// that still admits it.
+    #[tokio::test]
+    async fn a_revoke_a_drive_did_not_take_names_the_drive_and_is_not_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, users, db) = alice_with_a_device_and_an_unreachable_drive(dir.path()).await;
+
+        let resp = kotton_device::users::drive_devices::revoke(
+            &runtime,
+            users.get("alice").unwrap().as_ref(),
+            &db,
+            "alice".to_string(),
+            "laptop".to_string(),
+        )
+        .await
+        .unwrap();
+        match resp {
+            UserResponse::Error { message } => {
+                assert!(message.contains("revoked on this device"), "{message}");
+                assert!(message.contains("still admits it: vault ("), "the drive is named: {message}");
+                assert!(message.contains("will not reach it"), "the retry is not invited: {message}");
+                assert!(message.contains("nothing retries the withdrawal yet"), "{message}");
+            }
+            other => panic!("a revoke no drive took answered {other:?}"),
+        }
+        assert!(
+            network_db::get_paired_node_by_id(&db, "alice", "laptop").await.unwrap().is_none(),
+            "the device is still revoked here"
+        );
+    }
 }

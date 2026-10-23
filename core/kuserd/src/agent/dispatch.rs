@@ -1248,14 +1248,9 @@ pub(super) async fn handle_request(
                     message: format!("user runtime '{user_id}' is not loaded"),
                 });
             };
-            kotton_peer::daemon::nodes::node_revoke(
-                user_rt.as_ref(),
-                db,
-                user_id,
-                node_id,
-                paired_keys,
-            )
-            .await
+            // Withdrawn from the person's drives first, then here
+            // (`drive_devices::revoke`), on the runtime's own allowlist.
+            kotton_device::users::drive_devices::revoke(runtime, user_rt.as_ref(), db, user_id, node_id).await
         }
         UserRequest::ThresholdSign {
             user_id,
@@ -3089,6 +3084,10 @@ pub(super) async fn handle_request(
         }),
         UserRequest::CarryFrame { .. } => Ok(UserResponse::Error {
             message: "CarryFrame is a vault's verb, served only over a peer connection"
+                .to_string(),
+        }),
+        UserRequest::TenantDevice { .. } => Ok(UserResponse::Error {
+            message: "TenantDevice is a vault's verb, served only over a peer connection"
                 .to_string(),
         }),
         // The browsers a person admitted, and the revoke that un-admits one

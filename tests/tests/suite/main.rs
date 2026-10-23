@@ -45,6 +45,7 @@ mod http_gateway;
 mod import_ics;
 mod inbox;
 mod vault;
+mod drive_sync;
 mod instance;
 mod introduction;
 mod ipc_hardening;

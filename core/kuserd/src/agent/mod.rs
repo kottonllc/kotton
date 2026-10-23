@@ -4012,6 +4012,9 @@ mod set_lock_policy_tests;
 mod message_open_tests;
 
 #[cfg(test)]
+mod revoke_device_tests;
+
+#[cfg(test)]
 mod co_member_tests;
 
 /// **The two gestures, told apart by the one fact that distinguishes them.**

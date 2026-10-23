@@ -1221,16 +1221,19 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         // The same call the `NodeRevoke` IPC arm makes, with the same arguments,
         // so the surface and the CLI cannot drift about what revoking means: the
         // membership record goes and the live TLS allowlist entry goes with it.
-        kotton_peer::daemon::nodes::node_revoke(
-            user_rt.as_ref(),
-            self.db,
-            user_id,
-            did.to_owned(),
-            &self.runtime.paired_keys(),
-        )
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("revoking the device: {e}"))
+        // The membership record goes, the live TLS allowlist entry with it, and
+        // the person's drives are told to admit the device no longer.
+        // The answer is read, not discarded: a revoke a drive did not take, or
+        // one refused on a device without the identity, is an error to the
+        // person, never a success.
+        match kotton_device::users::drive_devices::revoke(self.runtime, user_rt.as_ref(), self.db, user_id, did.to_owned())
+            .await
+            .map_err(|e| format!("revoking the device: {e}"))?
+        {
+            UserResponse::NodeRevoked => Ok(()),
+            UserResponse::Error { message } => Err(message),
+            other => Err(format!("revoking the device: unexpected reply {other:?}")),
+        }
     }
 
     /// The browsers admitted for this person — the read `BrowserDeviceList`
