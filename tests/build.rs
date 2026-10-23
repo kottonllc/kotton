@@ -62,36 +62,6 @@ fn main() {
 
     println!("cargo:rustc-env=KUSERD_BIN={}", kuserd.display());
 
-    // And `khttpd`, so `gateway_bind` can start a real gateway and read back the
-    // address it actually bound. Neither daemon is a dev-dependency (binary-only
-    // crates cannot be), so the Justfile builds both before the suite runs.
-    #[cfg(windows)]
-    let khttpd = target_dir.join(&profile).join("khttpd.exe");
-    #[cfg(not(windows))]
-    let khttpd = target_dir.join(&profile).join("khttpd");
-
-    println!("cargo:rustc-env=KHTTPD_BIN={}", khttpd.display());
-
-    // And `kinferd`, so `inference_sidecar` can run the real supervisor against
-    // the real process and prove the handed pipe carries a generation
-    // (RFC-0085). Same bargain as the three above: emitted as a path, built only
-    // by a workspace build or by `just test`, checked at the point of use.
-    #[cfg(windows)]
-    let kinferd = target_dir.join(&profile).join("kinferd.exe");
-    #[cfg(not(windows))]
-    let kinferd = target_dir.join(&profile).join("kinferd");
-
-    println!("cargo:rustc-env=KINFERD_BIN={}", kinferd.display());
-
-    // And the real `kotton-runner`, so `confinement` can prove a denial through
-    // the process the daemon actually spawns rather than through the mock.
-    #[cfg(windows)]
-    let runner = target_dir.join(&profile).join("kotton-runner.exe");
-    #[cfg(not(windows))]
-    let runner = target_dir.join(&profile).join("kotton-runner");
-
-    println!("cargo:rustc-env=KOTTON_RUNNER_BIN={}", runner.display());
-
     // And the `kotton` CLI itself, so a test can run a subcommand the way a
     // person does: as its own process, with its own connection, discovering the
     // daemon through the environment.

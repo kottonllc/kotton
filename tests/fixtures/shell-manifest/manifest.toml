@@ -1,0 +1,26 @@
+# The system shell's manifest, copied from guest/apps/kotton-shell/manifest.toml in the
+# reference tree. The shell is not in this repository, so this copy is held to the
+# reference's by hand until the shell has a repository of its own; the suite's
+# kuid_surface cases stage it beside a placeholder app.wasm for the mock runner.
+[app]
+id      = "sh.kotton.shell"
+name    = "Kotton"
+version = "0.1.0"
+kind    = "long-lived"
+role    = "shell"
+
+[capabilities]
+# The shell is the user's own agent over their own per-user VFS (root `/` is this
+# user's data mount). Broad read+write is the user-approved "powerful shell" breadth
+# (RFC-0021/RFC-0028) — local writes to one's own sovereign data are not the threat;
+# egress is. `.kotton/` internals stay blocked by the sandbox regardless of grant.
+"files.read"       = ["/"]
+"files.write"      = ["/"]
+"events.subscribe" = ["*"]
+# The desktop is the privileged launcher/WM: it may launch other installed apps
+# as separate confined guests (compositor/04 — pluggable apps). Each launched app
+# runs under its own grants, not the shell's.
+"apps.launch"      = []
+# Schema access for the shell's Home pane stats and future contacts/calendar views.
+"schema.read"  = ["sh.kotton.contacts", "sh.kotton.calendar", "sh.kotton.messages"]
+"schema.write" = ["sh.kotton.contacts", "sh.kotton.calendar"]

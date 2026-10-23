@@ -19,7 +19,7 @@
 //! route, a key, or a name for the other before the ceremony, and every byte
 //! between them goes through the relay.
 
-use crate::common::{self, InstallApprovingAll as _, TestEnv, TEST_PASSPHRASE};
+use crate::common::{self, TestEnv, TEST_PASSPHRASE};
 use kotton_schemas::membership::Posture;
 use kotton::KottonClient;
 use kotton_wire::ipc::{Delivery, UserResponse};
@@ -1340,7 +1340,7 @@ pub(crate) async fn holding_a_vault(env: &mut TestEnv, user: &str, relay_url: &s
         client_v,
         user,
         "vault",
-        common::khttpd::free_port(),
+        common::free_port(),
         Posture::BlindStorage,
     )
     .await;
@@ -1380,7 +1380,7 @@ pub(crate) async fn spawn_vault_for_test(label: &str) -> TestVault {
             .await
             .expect("vault"),
     );
-    let op_port = common::khttpd::free_port();
+    let op_port = common::free_port();
     vault
         .start_peer_listener_background(op_port)
         .await
@@ -1632,8 +1632,7 @@ async fn conversation(env: &mut TestEnv, user: &str, peer: &str) -> Vec<(String,
 /// second tie, and across two machines a reply can even claim to be earlier.
 /// Neither person's conversation is ordered by that claim any more: each is
 /// ordered by where their own node filed the message, which is strictly
-/// increasing in the order that node filed it. The browser test in `web_surface` draws
-/// the same thing on a real page, once; this one repeats the exchange so that a
+/// increasing in the order that node filed it. This repeats the exchange so that a
 /// coin flip would have shown.
 #[tokio::test]
 async fn a_reply_sent_with_no_wait_reads_after_the_message_it_answers() {
@@ -1676,203 +1675,4 @@ async fn a_reply_sent_with_no_wait_reads_after_the_message_it_answers() {
     // is the flake this record was opened for. What shows the ordering above is
     // a measurement rather than luck is that it fails with the merge key set
     // back to `sent_at` — recorded as a mutation in the record's gate table.
-}
-
-/// A desk standing where `kuid` would, on the daemon's end of the pair: it
-/// answers every frame as the compositor does, keeps what it was sent, and
-/// types on a surface by its handle the way a keyboard over a window would.
-/// Frames are read as JSON, never as a `KuidRequest`, for `channel-check`'s
-/// one-acceptor rule — as `device_operators`' desk reads them.
-struct Desk {
-    seen: std::sync::Arc<std::sync::Mutex<Vec<(std::time::Instant, serde_json::Value)>>>,
-    keys: std::sync::Arc<tokio::sync::Mutex<tokio::io::DuplexStream>>,
-}
-
-impl Desk {
-    async fn attach(daemon: &kuserd::DeviceDaemon) -> Self {
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (kuid_read, daemon_write) = tokio::io::duplex(1 << 20);
-        let (daemon_read, kuid_write) = tokio::io::duplex(1 << 20);
-        let keys = std::sync::Arc::new(tokio::sync::Mutex::new(kuid_write));
-        let (log, answer) = (std::sync::Arc::clone(&seen), std::sync::Arc::clone(&keys));
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt as _;
-            let mut kuid_read = kuid_read;
-            loop {
-                let mut len = [0u8; 4];
-                if kuid_read.read_exact(&mut len).await.is_err() {
-                    break;
-                }
-                let mut body = vec![0u8; u32::from_le_bytes(len) as usize];
-                if kuid_read.read_exact(&mut body).await.is_err() {
-                    break;
-                }
-                let reply = kotton_wire::FromCompositor::Response(kotton_wire::KuidResponse::SurfaceOk);
-                if kotton_ipc::write_frame(&mut *answer.lock().await, &reply).await.is_err() {
-                    break;
-                }
-                let frame: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-                log.lock().unwrap().push((std::time::Instant::now(), frame));
-            }
-        });
-        daemon.desk().attach(daemon_write, daemon_read).await;
-        Desk { seen, keys }
-    }
-
-    /// Every surface opened as `role`, oldest first.
-    fn opened(&self, role: &str) -> Vec<serde_json::Value> {
-        self.seen
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, f)| f["SurfaceOpen"]["role"] == role)
-            .map(|(_, f)| f["SurfaceOpen"]["handle"].clone())
-            .collect()
-    }
-
-    /// Whether anything committed to `handle` after `since` carries `needle`.
-    fn drew_since(&self, handle: &serde_json::Value, since: std::time::Instant, needle: &str) -> bool {
-        self.seen.lock().unwrap().iter().any(|(at, f)| {
-            *at >= since
-                && f["SurfaceCommit"]["handle"] == *handle
-                && f["SurfaceCommit"]["patch"].as_array().is_some_and(|bytes| {
-                    let bytes: Vec<u8> = bytes.iter().filter_map(|b| b.as_u64()).map(|b| b as u8).collect();
-                    String::from_utf8_lossy(&bytes).contains(needle)
-                })
-        })
-    }
-
-    async fn key(&self, handle: &serde_json::Value, key: &str, ctrl: bool) {
-        let event = kotton_wire::CompositorEvent::SurfaceInputEvent {
-            handle: serde_json::from_value(handle.clone()).expect("a surface handle"),
-            event: kotton_wire::ipc::types::InputEventPayload::Key {
-                key: key.to_string(),
-                pressed: true,
-                shift: false,
-                ctrl,
-                alt: false,
-            },
-        };
-        kotton_ipc::write_frame(&mut *self.keys.lock().await, &kotton_wire::FromCompositor::Event(event))
-            .await
-            .expect("the desk types");
-    }
-
-    async fn type_in(&self, handle: &serde_json::Value, text: &str) {
-        for ch in text.chars() {
-            self.key(handle, &ch.to_string(), false).await;
-        }
-    }
-
-    /// Wait for `what` to become true, or fail naming it.
-    async fn until(&self, what: &str, mut holds: impl FnMut(&Self) -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !holds(self) {
-            assert!(std::time::Instant::now() < deadline, "the desk never saw {what}");
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    }
-}
-
-/// **The composer sends through the delivery verb, and the line comes back
-/// into the window from the store** — `TASK-messages-is-the-drawn-one`'s
-/// composer clause, through every layer that is real.
-///
-/// Alice's node runs the real shell in the real runner, designated her shell,
-/// with a desk standing where `kuid` would. Bob is on another node, paired on
-/// a spoken code through a relay. The desk opens Messages turned to Bob
-/// (`/msg <did>` in a terminal), types a line into the composer and presses
-/// `Enter`, which is all a person does. Then:
-/// - Bob's node holds the line, and it opens on Bob's key — so what the
-///   composer called was the delivery verb, which sealed it and handed it over;
-/// - Alice's window draws the line again after the send, with *delivered*
-///   beneath it — read back from her own store (`messages.conversation`, opened
-///   on her key) and from the delivery attempts (`messages.deliveries`); the
-///   shell keeps no copy of what it sent (`send_line` clears the composer and
-///   remembers only whether the call failed).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_composer_sends_a_line_through_the_delivery_verb_and_the_window_reads_it_back() {
-    // The shell is asked of `bins`, which names it beside anything else that is not built.
-    let wasm = std::fs::read(common::bins::require_shell_wasm()).expect("read the shell's component");
-    let manifest = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../guest/apps/kotton-shell/manifest.toml"),
-    )
-    .expect("the shell's manifest");
-
-    let (_relay, relay_addr) = common::relay::spawn().await;
-    let mut a = TestEnv::spawn_with_real_runner_at_relay(&format!("http://{relay_addr}")).await;
-    let mut b = common::relay::env_on(&relay_addr).await;
-    a.client.create_user("alice", TEST_PASSPHRASE).await.expect("alice");
-    let (bob_did, _) = b.client.create_user("bob", TEST_PASSPHRASE).await.expect("bob");
-    let (oa, ob) = pair(&a, &b).await;
-    assert_eq!((oa.failed, ob.failed), (None, None), "the pairing held");
-    mailbox_open(&mut b, "bob").await;
-
-    // The shell, installed as the person installs it and designated as the
-    // default is, so the daemon instantiates it into `world occupant`. A body
-    // the identity was already born with (`bundled`) is the same one.
-    if let Err(e) = a.client.app_install_approving_all("alice", manifest, wasm).await {
-        assert!(e.to_string().contains("already"), "installing the shell: {e}");
-    }
-    assert_eq!(
-        a.client.app_get_role("shell").await.expect("the shell role").as_deref(),
-        Some("sh.kotton.shell"),
-        "the shell is alice's designated shell"
-    );
-
-    let desk = Desk::attach(&a.daemon).await;
-    a.client.app_launch("sh.kotton.shell", vec![]).await.expect("the shell launches");
-    desk.until("the desktop's background", |d| !d.opened("Background").is_empty()).await;
-    let background = desk.opened("Background")[0].clone();
-
-    // Ctrl+1 is the terminal, and `/msg <did>` in it opens Messages turned to
-    // that person.
-    desk.key(&background, "1", true).await;
-    desk.until("a terminal window", |d| d.opened("Window").len() == 1).await;
-    let terminal = desk.opened("Window")[0].clone();
-    desk.type_in(&terminal, &format!("/msg {bob_did}")).await;
-    desk.key(&terminal, "Enter", false).await;
-    desk.until("the Messages window", |d| d.opened("Window").len() == 2).await;
-    let messages = desk.opened("Window")[1].clone();
-    let opened_at = std::time::Instant::now() - std::time::Duration::from_secs(60);
-    desk.until("Bob's empty thread", |d| {
-        d.drew_since(&messages, opened_at, "Nothing between you yet.")
-            && d.drew_since(&messages, opened_at, "Bob from the bakery")
-    })
-    .await;
-
-    // The person writes a line and presses Enter.
-    let line = "the kettle is on";
-    desk.type_in(&messages, line).await;
-    desk.until("the half-written line in the composer", |d| d.drew_since(&messages, opened_at, line)).await;
-    let sent_at = std::time::Instant::now();
-    desk.key(&messages, "Enter", false).await;
-
-    // Back into the window: the line and its word, drawn after the send from
-    // what the store and the delivery attempts say.
-    desk.until("the sent line with its word", |d| {
-        d.drew_since(&messages, sent_at, "delivered") && d.drew_since(&messages, sent_at, line)
-    })
-    .await;
-    assert!(
-        !desk.drew_since(&messages, sent_at, "Not sent"),
-        "the window said the line did not send"
-    );
-
-    // Bob's node holds it, and only Bob's key opens it.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let inbox = loop {
-        let inbox = b.client.message_poll_inbox("bob").await.expect("bob's inbox");
-        if !inbox.is_empty() || std::time::Instant::now() > deadline {
-            break inbox;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    };
-    assert_eq!(inbox.len(), 1, "one line, once: {inbox:?}");
-    let (body, nonce, eph) = crypto_fields(&inbox[0]);
-    assert_ne!(body, line, "what crossed was ciphertext");
-    assert_eq!(
-        b.client.message_decrypt_dm("bob", &body, &nonce, &eph).await.expect("bob opens it"),
-        line
-    );
 }

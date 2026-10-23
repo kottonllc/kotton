@@ -25,7 +25,6 @@
 #![allow(dead_code)]
 
 pub mod bins;
-pub mod khttpd;
 pub mod s3;
 pub mod relay;
 pub mod cli;
@@ -345,8 +344,7 @@ impl TestEnv {
     /// Spin up an isolated daemon and return a connected client.
     ///
     /// Apps run in the mock runner: every test here that launches one wants a
-    /// scripted guest, and the one that wants the real sandbox says so with
-    /// [`Self::spawn_with_real_runner`].
+    /// scripted guest.
     ///
     /// Panics if the daemon cannot be initialised or the client cannot connect
     /// — not expected in normal CI runs.
@@ -384,25 +382,6 @@ impl TestEnv {
             PathBuf::from(mock_runner_bin()),
             Placement::Isolated,
             RelayChoice::None,
-        )
-        .await
-    }
-
-    /// Spin up an isolated daemon whose apps run in the real `kotton-runner`.
-    ///
-    /// The one place the suite drives a real component through the real
-    /// sandbox process; see `confinement`.
-    pub async fn spawn_with_real_runner() -> Self {
-        Self::spawn_with_runner(PathBuf::from(runner_bin())).await
-    }
-
-    /// [`Self::spawn_at_relay`], with apps run in the real `kotton-runner` — for
-    /// a test that drives the real shell on one side of a pairing.
-    pub async fn spawn_with_real_runner_at_relay(relay_url: &str) -> Self {
-        Self::spawn_placed(
-            PathBuf::from(runner_bin()),
-            Placement::Isolated,
-            RelayChoice::At(relay_url.to_string()),
         )
         .await
     }
@@ -1202,6 +1181,11 @@ impl InstallApprovingAll for kotton::KottonClient {
     }
 }
 
+/// A port nothing is listening on right now.
+pub fn free_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+    l.local_addr().expect("reserved port has an address").port()
+}
 
 // ── Spawning the fixture binaries ────────────────────────────────────────────
 
@@ -1209,12 +1193,6 @@ impl InstallApprovingAll for kotton::KottonClient {
 /// suite runs that is not built, with the commands that build them ([`bins`]).
 pub fn mock_runner_bin() -> &'static str {
     bins::require(bins::Bin::MockRunner).to_str().expect("build.rs emits a UTF-8 path")
-}
-
-/// The same, for the real `kotton-runner`, which `confinement` runs a real
-/// component in.
-pub fn runner_bin() -> &'static str {
-    bins::require(bins::Bin::Runner).to_str().expect("build.rs emits a UTF-8 path")
 }
 
 /// The same, for `kuserd`, which `two_node_transfer` spawns.

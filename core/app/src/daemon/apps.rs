@@ -1545,10 +1545,10 @@ const MAX_RUNNER_STDERR: u64 = 1024 * 1024;
 ///
 /// # Why this is public
 ///
-/// The same reason `supervise_kinferd` is: `tests/tests/suite/runner_confinement.rs`
-/// proves the confinement by running **this** function, not a copy of it. A
-/// profile exercised only by a re-implementation of itself proves the
-/// re-implementation.
+/// So a test can prove the confinement by running **this** function, not a copy
+/// of it: a profile exercised only by a re-implementation of itself proves the
+/// re-implementation. No case in this repository's suite calls it from outside the
+/// crate today (kottonllc/kotton#24).
 pub async fn runner_profile(
     runner: &Path,
     input: &RunnerInput,

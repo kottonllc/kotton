@@ -28,8 +28,6 @@ kotton-identity = { path = "../core/identity" }
 kotton-peer = { path = "../core/peer" }
 kotton-org = { path = "../core/org" }
 kotton-wire = { path = "../core/wire" }
-# The inference types the suite composes a context out of (RFC-0085).
-kotton-infer = { path = "../core/infer" }
 kotton-pair = { path = "../core/pair" }
 kotton-secret = { path = "../core/secret", features = ["test-utils"] }
 kotton-record = { path = "../core/record" }
@@ -41,8 +39,6 @@ kotton-crypto = { path = "../core/crypto" }
 kotton-store = { path = "../core/store", features = ["test-support"] }
 kotton-fs = { path = "../core/fs" }
 kotton-app = { path = "../core/app" }
-# The grant vocabulary `runner_confinement` reads the daemon's runner profile in.
-kotton-proc = { path = "../core/proc" }
 kotton-diag = { path = "../core/diag" }
 async-trait = "0.1"
 # Why a relayed delivery failed, kept in a failing test's output

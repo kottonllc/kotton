@@ -260,246 +260,58 @@ async fn with_nobody_resident_the_shell_is_looked_for_on_disk() {
     );
 }
 
-/// A staged system shell actually launches, and paints, with no identity.
-///
-/// This is the end-to-end claim the whole first-run thread is about: a machine
-/// nobody has logged into opens a surface and puts something on it. Everything
-/// else in this file asserts that a guard is in the right place; this asserts
-/// the thing works.
-///
-/// It stages the shell the way `cargo xtask build-apps` does — the real wasm,
-/// the real manifest — so a shell that stops building, or a manifest that stops
-/// parsing, fails here rather than at somebody's first boot.
-#[tokio::test]
-// `KOTTON_RUNNER` is process-global and this is the one test that points it at
-// the *real* runner rather than the mock. Every other consumer sets it to the
-// mock on every spawn, so the value is restored at the end and the serial guard
-// keeps anything from reading it mid-flight.
-#[serial_test::serial]
-async fn a_fresh_machine_draws_its_welcome_screen() {
-    use kotton_app::daemon::apps::{app_launch_system_shell, system_shell_dir};
-
-    // A missing input fails, naming the command that makes it. A test that returns
-    // green when its input is absent is one nobody notices losing.
-    let wasm = crate::common::bins::require_shell_wasm();
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../guest/apps/kotton-shell/manifest.toml");
-
-    let base = tempfile::tempdir().expect("tempdir");
-    let dir = system_shell_dir(base.path());
-    std::fs::create_dir_all(&dir).expect("stage dir");
-    std::fs::copy(wasm, dir.join("app.wasm")).expect("stage wasm");
-    std::fs::copy(&manifest, dir.join("manifest.toml")).expect("stage manifest");
-
-    // The runner this launch must use is the **real** one: the whole point is that
-    // a real component draws a real welcome screen.
-    //
-    // `NullAppHost::runner` is set below rather than `KOTTON_RUNNER`, which is
-    // what this test used to do. `spawn_and_present` reads `host.runner()` and has
-    // since the runner moved onto the host trait on 2026-09-05; the environment
-    // variable stopped being consulted, so this test quietly began running the
-    // *mock* runner, which answers `Launched { patches: [] }` without instantiating
-    // anything. It has been red on `main` since, saying "the welcome screen painted
-    // nothing" — which was true, and about a screen it was no longer drawing.
-    // Where cargo put it, as `build.rs` asked it — never `../target/debug`, which
-    // stopped being the target directory when it moved under `out/`. Asked of
-    // `bins`, which fails naming every binary that is not built.
-    let runner = crate::common::bins::require(crate::common::bins::Bin::Runner).to_path_buf();
-    let host = crate::common::NullAppHost {
-        runner: Some(runner.clone()),
-        ..Default::default()
-    };
-    let live = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-
-    // `occupant: None` — the shell is instantiated into `world occupant` either
-    // way (that is `RunnerInput.occupant`), but with no host to service an auth
-    // call. Launching does not make one, so this exercises the whole path.
-    //
-    // And a launch that *succeeds* is itself the proof that the occupant world
-    // was linked: the shell's `app.wasm` imports `kotton:app/auth`, so if
-    // `app_launch_system_shell` had set `occupant: false` the component would
-    // fail to instantiate with a missing import rather than draw. The welcome
-    // screen needs `create-identity`; there would be no point reaching it in a
-    // world where that verb does not exist.
-    let resp = app_launch_system_shell(&host, base.path(), live, None, None, None, None)
-        .await
-        .expect("the staged shell should launch with no identity");
-
-    let app_id = match resp {
-        kotton_wire::UserResponse::AppLaunched { app_id, patches } => {
-            assert!(!patches.is_empty(), "the welcome screen painted nothing");
-            app_id
-        }
-        other => panic!("expected AppLaunched, got {other:?}"),
-    };
-
-    let opened = host.opened.lock().unwrap().clone();
-    assert_eq!(
-        opened.len(),
-        1,
-        "expected exactly one surface for the shell, got {opened:?}"
-    );
-    let (handle, owner, role, edge, _title) = opened[0].clone();
-    assert_eq!(edge, None, "a background hangs from no edge");
-    assert_eq!(owner, app_id, "the surface should be the shell's");
-    // The pre-identity shell draws the desktop, so its surface opens as the
-    // screen's `Background` — and it opens as one because
-    // `app_launch_system_shell` sets `occupant`, not because anything compared
-    // its id to a constant (RFC-0087).
-    assert_eq!(
-        role,
-        kotton_wire::SurfaceRole::Background,
-        "the shell draws the screen's base, so its surface is a Background"
-    );
-
-    // Everything painted went to the surface that was opened for it. Under
-    // `app_id` keying this could not be asserted, because the patch and the
-    // surface were addressed by the same string whether or not they belonged
-    // together.
-    let committed = host.committed.lock().unwrap().clone();
-    assert!(
-        !committed.is_empty(),
-        "a surface was opened but nothing was committed to it"
-    );
-    assert!(
-        committed.iter().all(|(h, _)| *h == handle),
-        "a patch was committed to a surface this launch did not open"
-    );
-
-    // Back to the value every other test in this binary expects.
-    #[allow(unsafe_code)]
-    unsafe {
-        std::env::set_var("KOTTON_RUNNER", crate::common::mock_runner_bin())
-    };
-}
-
-/// A fresh machine can be **typed into**, not only drawn on.
-///
-/// The sibling of `a_fresh_machine_draws_its_welcome_screen`, and the case whose
-/// absence let first run deadlock on Windows for a person who got as far as
-/// seeing the welcome screen and could not click it.
-///
-/// `app_launch_system_shell` hands the pre-identity shell `world occupant` so a
-/// person can call `create-identity`. That verb is reached by typing a
-/// passphrase and pressing a button — which is an input event — and routing one
-/// used to resolve the user's database first and refuse with `no user loaded on
-/// this daemon`. So the click that would create the user was dropped for want of
-/// the user it was going to create, and the welcome screen was a picture of a
-/// login you could not perform.
-///
-/// The fix is that `user_db` is `Option`: input delivery never reads it, and only
-/// a launch the guest *raises* does. This test pins the property that made the
-/// deadlock possible — input reaching a running instance with no user at all.
-///
-/// **What it does not pin.** The refusal was in `compositor_input`, one layer up,
-/// which resolved the database eagerly and returned before calling this. Under
-/// the old signature this test would not have compiled, which is a kind of red;
-/// but it would still pass if somebody restored that early return, because it
-/// calls `app_input_event` directly. Pinning that layer needs an `AgentContext`,
-/// and saying so is better than implying coverage this does not have.
-#[tokio::test]
-#[serial_test::serial]
-async fn a_fresh_machine_can_be_typed_into() {
-    use kotton_app::daemon::apps::{app_input_event, app_launch_system_shell, system_shell_dir};
-
-    // Both are asked of `bins`, which fails naming everything that is not built and the
-    // commands that build it, rather than returning green with nothing run.
-    let wasm = crate::common::bins::require_shell_wasm();
-    let runner = crate::common::bins::require(crate::common::bins::Bin::Runner).to_path_buf();
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../guest/apps/kotton-shell/manifest.toml");
-
-    let base = tempfile::tempdir().expect("tempdir");
-    let dir = system_shell_dir(base.path());
-    std::fs::create_dir_all(&dir).expect("stage dir");
-    std::fs::copy(wasm, dir.join("app.wasm")).expect("stage wasm");
-    std::fs::copy(&manifest, dir.join("manifest.toml")).expect("stage manifest");
-
-    // SAFETY: `#[serial_test::serial]` means nothing else is running. Restored below.
-    #[allow(unsafe_code)]
-    unsafe {
-        std::env::set_var("KOTTON_RUNNER", &runner)
-    };
-
-    let host = crate::common::NullAppHost::default();
-    let live = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-
-    let resp = app_launch_system_shell(&host, base.path(), std::sync::Arc::clone(&live), None, None, None, None)
-        .await
-        .expect("the staged shell should launch with no identity");
-    let app_id = match resp {
-        kotton_wire::UserResponse::AppLaunched { app_id, .. } => app_id,
-        other => panic!("expected AppLaunched, got {other:?}"),
-    };
-
-    // The surface the person typed on: the one the launch opened, which the
-    // compositor would have hit-tested. It is read back from the host rather
-    // than minted here, because an event for a surface the instance does not
-    // hold is not delivered to it — which is the point of stage 3a and would
-    // make this test pass for the wrong reason.
-    let surface = host.opened.lock().unwrap()[0].0;
-
-    // The whole point: `None` for the user database, because there is no user.
-    let out = app_input_event(
-        &host,
-        None,
-        base.path(),
-        std::sync::Arc::clone(&live),
-        app_id.clone(),
-        surface,
-        kotton_wire::ipc::types::InputEventPayload::Key {
-            key: "Enter".to_string(),
-            pressed: true,
-            shift: false,
-            ctrl: false,
-            alt: false,
-        },
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("input must reach a running instance with no user loaded");
-
-    match out {
-        kotton_wire::UserResponse::AppMessageDelivered { .. } => {}
-        other => panic!("expected the input to be delivered, got {other:?}"),
-    }
-
-    // And the instance survived it, so the next keystroke has somewhere to go.
-    assert!(
-        live.lock().await.contains_key(&app_id),
-        "the shell should still be running after handling input"
-    );
-
-    #[allow(unsafe_code)]
-    unsafe {
-        std::env::set_var("KOTTON_RUNNER", crate::common::mock_runner_bin())
-    };
-}
-
 // ── An app may hold many surfaces (RFC-0087 stage 2) ─────────────────────────
+
+/// The system shell's manifest, as the daemon parses it.
+///
+/// The shell itself is not in this repository, so its manifest is held here as a
+/// fixture (`tests/fixtures/shell-manifest/manifest.toml`). It is the one input these
+/// cases take from the shell, and it is what `app_launch_system_shell` reads: a
+/// manifest the daemon stops accepting fails here.
+fn shell_manifest() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/shell-manifest/manifest.toml")
+}
 
 /// Stage a system shell the mock runner can be launched as, and return its base
 /// directory.
 ///
 /// The wasm is a placeholder: the mock runner never loads a component, so what
 /// is under test here is the **daemon's** half of `create-surface` — minting,
-/// opening, the cap, and which surface each patch reaches. The guest half is
-/// tested where a guest is real (`core/wasm/src/sandbox.rs`, and the SDK's own
-/// render tests); mixing the two would mean a wasm build inside a test that is
-/// about a wire.
+/// opening, the cap, and which surface each patch reaches. The guest half needs a
+/// real component in the real runner, neither of which this repository builds;
+/// mixing the two would mean a wasm build inside a test that is about a wire.
 fn stage_a_shell_for_the_mock() -> tempfile::TempDir {
     use kotton_app::daemon::apps::system_shell_dir;
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../guest/apps/kotton-shell/manifest.toml");
+    let manifest = shell_manifest();
     let base = tempfile::tempdir().expect("tempdir");
     let dir = system_shell_dir(base.path());
     std::fs::create_dir_all(&dir).expect("stage dir");
     std::fs::write(dir.join("app.wasm"), b"not a component").expect("stage wasm");
     std::fs::copy(&manifest, dir.join("manifest.toml")).expect("stage manifest");
     base
+}
+
+/// Install the system shell into `user`'s store by hand, through the person's own
+/// install verb: the fixture manifest (see [`shell_manifest`]) and a placeholder module.
+///
+/// A desktop build of `kuserd` embeds the shell, and `auto_install_bundled_apps` installs
+/// it on every user-database open by calling this same `app_install`. This repository
+/// builds no shell, so these cases make the same record themselves. `app_install` hashes
+/// and stores the bytes without opening them as a component, and the mock runner never
+/// loads them, so the record is the one a bundled install makes. The by-hand step adds
+/// one thing: it sets the `shell` role when the registry has none, which the bundled
+/// path does for the shell.
+async fn install_the_shell_by_hand(client: &mut kotton::KottonClient, user: &str) {
+    use crate::common::InstallApprovingAll as _;
+    let manifest = std::fs::read_to_string(shell_manifest()).expect("read the shell's manifest");
+    let (app_id, _, _) = client
+        .app_install_approving_all(user, manifest, b"not a component".to_vec())
+        .await
+        .expect("the shell installs through the person's own verb");
+    assert_eq!(app_id, "sh.kotton.shell", "the fixture is the system shell's manifest");
+    if client.app_get_role("shell").await.expect("app_get_role").is_none() {
+        client.app_set_role("shell", &app_id).await.expect("app_set_role");
+    }
 }
 
 /// **An instance holds two surfaces, and each patch reaches its own.**
@@ -1091,7 +903,6 @@ async fn a_windows_report_from_the_compositor_repaints_the_designated_app_throug
     assert_eq!(closed["msg"], kotton_wire::runner::WINDOWS_CHANGED_FRAME, "{closed}");
     assert_eq!(closed["windows"].as_array().map(Vec::len), Some(0), "the list as reported: {closed}");
 }
-
 /// **With no designated app running, the nudge goes nowhere** — and in particular it does
 /// not start one, which a notice that means nothing to an instance that has not asked must
 /// not do.
@@ -1142,9 +953,6 @@ async fn the_window_nudge_starts_nothing_when_no_designated_app_is_live() {
 #[serial_test::serial]
 #[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
 async fn the_shell_that_follows_the_ceremony_carries_the_users_data_mount() {
-    // Before anything is set: the shell must be built for this test to have a launch.
-    crate::common::bins::require_shell_wasm();
-
     // SAFETY: `#[serial_test::serial]` means nothing else is running.
     unsafe { std::env::set_var("MOCK_RUNNER_MODE", "report-input") };
     let mut env = crate::common::TestEnv::spawn().await;
@@ -1155,15 +963,8 @@ async fn the_shell_that_follows_the_ceremony_carries_the_users_data_mount() {
         .await
         .expect("create_user");
 
-    // The bundled shell is compiled into `kuserd` only when the guest apps were
-    // built. Without it a new identity receives no apps and there is nothing for
-    // a resident launch to run: that is a failure, not a skip.
-    let installed = env.client.app_list().await.expect("app_list");
-    let bundled = installed.iter().any(|a| a.app_id == "sh.kotton.shell");
-    if !bundled {
-        unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
-    }
-    crate::common::bins::require_apps_bundled(bundled);
+    // The shell, in the person's store, through the verb the bundled path uses.
+    install_the_shell_by_hand(&mut env.client, "owner").await;
 
     let resp = env
         .daemon
@@ -1222,23 +1023,6 @@ async fn the_shell_that_follows_the_ceremony_carries_the_users_data_mount() {
     unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
 }
 
-/// The full launch frame the mock painted back, as JSON.
-///
-/// The init frame is sent once and never mentioned again, so
-/// `MOCK_RUNNER_MODE=report-input` repeating it as the launch's patch is the
-/// only channel there is — the trick
-/// `the_shell_that_follows_the_ceremony_carries_the_users_data_mount` uses for
-/// the mount, kept as a function because a second test now reads two fields out
-/// of the same frame.
-fn launch_report(resp: kotton_wire::UserResponse) -> serde_json::Value {
-    let patches = match resp {
-        kotton_wire::UserResponse::AppLaunched { patches, .. } => patches,
-        other => panic!("expected AppLaunched, got {other:?}"),
-    };
-    serde_json::from_slice(&patches[0][1..])
-        .expect("the mock paints its launch frame as raw JSON (format version 0x00)")
-}
-
 /// **The shell that follows an unlock carries the person's data mount and DID.**
 ///
 /// The owner's report, 2026-09-21: *"when I use the login path, when I use
@@ -1257,8 +1041,8 @@ fn launch_report(resp: kotton_wire::UserResponse) -> serde_json::Value {
 ///
 /// **What this drives, and what it does not.** The unlock is driven through
 /// `DaemonOccupantHost` — the one implementation of `auth.unlock-with-pin`, the
-/// verb the lock screen calls (`guest/apps/kotton-shell/logic/src/lib.rs`,
-/// `handle_lock_input` → `kotton_app::session::unlock_with_pin`) — and then the
+/// verb the lock screen calls (the shell's `handle_lock_input` →
+/// `kotton_app::session::unlock_with_pin`) — and then the
 /// door that consumes its answer. The layer above, `compositor_input`, needs a
 /// `CompositorEvent` on the socketpair `kuid` holds, which this suite cannot
 /// inject; it is the same limit
@@ -1268,9 +1052,6 @@ fn launch_report(resp: kotton_wire::UserResponse) -> serde_json::Value {
 #[serial_test::serial]
 #[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
 async fn the_shell_that_follows_an_unlock_carries_the_users_data_mount_and_did() {
-    // Before anything is set: the shell must be built for this test to have a launch.
-    crate::common::bins::require_shell_wasm();
-
     // SAFETY: `#[serial_test::serial]` means nothing else is running.
     unsafe { std::env::set_var("MOCK_RUNNER_MODE", "report-input") };
     let mut env = crate::common::TestEnv::spawn().await;
@@ -1280,15 +1061,8 @@ async fn the_shell_that_follows_an_unlock_carries_the_users_data_mount_and_did()
         .await
         .expect("create_user");
 
-    // The bundled shell is compiled into `kuserd` only when the guest apps were
-    // built. Without it there is nothing for a resident launch to run: that is a
-    // failure, not a skip.
-    let installed = env.client.app_list().await.expect("app_list");
-    let bundled = installed.iter().any(|a| a.app_id == "sh.kotton.shell");
-    if !bundled {
-        unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
-    }
-    crate::common::bins::require_apps_bundled(bundled);
+    // The shell, in the person's store, through the verb the bundled path uses.
+    install_the_shell_by_hand(&mut env.client, "owner").await;
 
     // ── The unlock, through the host the lock screen calls ───────────────────
     let unlocked_as = {
@@ -1373,362 +1147,6 @@ async fn the_shell_that_follows_an_unlock_carries_the_users_data_mount_and_did()
 }
 
 // ── The name the welcome asks for goes somewhere ─────────────────────────────
-
-/// **An identity made in the window is called by the name the person typed, and
-/// the id the daemon minted beside it is drawn nowhere**
-/// (`TASK-the-name-the-welcome-asks-for-goes-nowhere`, ruled 2026-09-24).
-///
-/// Owner, 2026-09-20: *"when I do create an identity, in `.kotton.dev` it
-/// creates `/users/owner`, despite naming myself Austin."* The welcome asked
-/// for a name and `create-identity` took none; the occupant host minted the
-/// identity as the literal `owner`, and the launch copied that id into
-/// `display_name`, so the desktop called the person `owner`.
-///
-/// This drives the window's own door — `DaemonOccupantHost::create_identity`,
-/// which is what the shell's `create-identity` reaches, with the name beside
-/// the credential — and then reads the name back from each place the daemon
-/// hands it to a document: `read-identity` (Settings' account row), the
-/// `display_name` launch argument (the menubar), and the `names` argument of a
-/// second boot's locked launch (the lock screen's greeting). The three
-/// documents themselves are held in the shell's own render tests
-/// (`components/lock.rs`, `components/overlays/settings.rs`, `lib.rs`), which
-/// take these arguments and draw a name and never an id.
-///
-/// The id: minted, not `owner`; a value `validate_user_id` accepts, since it
-/// is the directory under `users/`; derived from neither the name nor the DID
-/// (the record's second point — a directory named after the identity would be a
-/// join key between this disk and everywhere the identity appears); and a
-/// rename moves nothing but the name.
-///
-/// `KOTTON_BASE_DIR` is pointed at this base for the reason
-/// `a_second_boot_with_a_registered_identity_opens_the_lock_screen` gives:
-/// `device_users` reads a process-global base
-/// (`TASK-the-device-user-registry-is-read-from-a-process-global-base`, open),
-/// and production has one base per process by construction.
-#[tokio::test]
-#[serial_test::serial]
-#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
-async fn an_identity_made_in_the_window_is_called_by_its_name_and_its_id_is_drawn_nowhere() {
-    use kotton_app::daemon::apps::OccupantHost as _;
-
-    // Before anything is set: this test ends in a launch of the shell, so it must be built.
-    crate::common::bins::require_shell_wasm();
-    let base = tempfile::tempdir().expect("tempdir");
-    stage_a_system_shell(base.path());
-
-    // SAFETY: `#[serial_test::serial]` means nothing else is running. Restored
-    // at the end, and before the assertions so a panic cannot leave them set.
-    let prior_base = std::env::var_os("KOTTON_BASE_DIR");
-    unsafe {
-        std::env::set_var("KOTTON_BASE_DIR", base.path());
-        std::env::set_var("MOCK_RUNNER_MODE", "report-input");
-    }
-    let restore = || unsafe {
-        std::env::remove_var("MOCK_RUNNER_MODE");
-        match &prior_base {
-            Some(v) => std::env::set_var("KOTTON_BASE_DIR", v),
-            None => std::env::remove_var("KOTTON_BASE_DIR"),
-        }
-    };
-
-    let secrets: std::sync::Arc<dyn kotton_sys::secret::SecretsStore + Send + Sync> =
-        std::sync::Arc::new(kotton_secret::MemorySecrets::new());
-
-    // ── First boot: the person types their name and a credential ─────────────
-    let (daemon, _endpoint) = boot_a_daemon_at(base.path(), std::sync::Arc::clone(&secrets)).await;
-    let host = daemon.occupant_host();
-    let did = host
-        .create_identity(crate::common::TEST_PASSPHRASE, "  Austin ")
-        .await
-        .expect("the window's door mints the identity");
-    assert!(did.starts_with("did:"), "creation answers with the DID: {did}");
-
-    // What creation left in the registry: one entry, under a minted id, with
-    // the typed name — trimmed — beside it.
-    let registered = kuserd::device_users::load(base.path()).expect("read the registry");
-    let (id, record) = match registered.iter().collect::<Vec<_>>()[..] {
-        [(id, record)] => (id.clone(), record.clone()),
-        ref many => {
-            restore();
-            panic!("one identity was made, the registry holds {}: {many:?}", many.len())
-        }
-    };
-    assert_ne!(id, "owner", "the literal is retired for a new device");
-    kuserd::device_users::validate_user_id(&id).expect("the minted id is one the registry accepts");
-    assert!(
-        !id.to_lowercase().contains("austin"),
-        "the id must not be derived from the name: {id}"
-    );
-    assert!(
-        !did.contains(&id) && !id.contains(did.rsplit(':').next().unwrap_or(&did)),
-        "the id must not be derived from the DID: {id} / {did}"
-    );
-    assert_eq!(record.display_name.as_deref(), Some("Austin"));
-    assert!(
-        base.path().join("users").join(&id).is_dir(),
-        "the id is the directory under users/"
-    );
-    // And the registry's name is a copy: the name the welcome took is kept
-    // first as a sealed record in the person's own store, which is what their
-    // other devices receive (`TASK-a-persons-name-travels-with-their-identity`).
-    let store = daemon.users().get(&id).expect("the new identity is resident");
-    assert_eq!(
-        kuserd::own_name::read(&store).await.expect("the name record reads"),
-        Some(kuserd::own_name::NameRecord { name: Some("Austin".to_owned()) }),
-        "the welcome's name is kept with the identity"
-    );
-
-    // Settings' read: the name, and the id carried for the unlock — not drawn,
-    // which `Identity` in the shell holds by having no field for it.
-    let identity = host.read_identity().await.expect("read-identity");
-    assert_eq!(identity.display_name.as_deref(), Some("Austin"));
-    assert_eq!(identity.user_id, id);
-
-    // A rename is a display change only: the record's name moves, and the id,
-    // the directory and the DID do not. Creation opened a session, so the
-    // person it names is the one asking.
-    host.set_display_name(" Austin Herman ")
-        .await
-        .expect("the person who just enrolled may say what they are called");
-    let after = kuserd::device_users::load(base.path()).expect("read the registry");
-    assert_eq!(after.keys().collect::<Vec<_>>(), vec![&id], "a rename moves no id");
-    assert_eq!(after[&id].display_name.as_deref(), Some("Austin Herman"));
-    assert_eq!(
-        kuserd::own_name::read(&store).await.expect("the name record reads"),
-        Some(kuserd::own_name::NameRecord { name: Some("Austin Herman".to_owned()) }),
-        "Settings edits the record, and the registry follows it"
-    );
-    assert_eq!(after[&id].did, record.did, "a rename touches no DID");
-    assert!(base.path().join("users").join(&id).is_dir(), "a rename moves no directory");
-    assert_eq!(
-        host.read_identity().await.expect("read-identity").display_name.as_deref(),
-        Some("Austin Herman")
-    );
-
-    // ── The resident launch that follows the ceremony ────────────────────────
-    //
-    // Only when kuserd bundles the shell: without it a new identity receives no
-    // apps and there is nothing for a resident launch to run. That fails the test,
-    // for a test that stops half-way reports the half it ran as the whole.
-    let bundled = !kuserd::bundled::bundled_apps().is_empty();
-    if !bundled {
-        restore();
-    }
-    crate::common::bins::require_apps_bundled(bundled);
-    let resp = daemon
-        .end_the_occupant_world("sh.kotton.shell", &id)
-        .await
-        .expect("the occupant world must end in a resident launch");
-    let report = launch_report(resp);
-    let args: Vec<(String, String)> = report["launch_args"]
-        .as_array()
-        .expect("launch args")
-        .iter()
-        .map(|pair| (pair[0].as_str().unwrap().to_owned(), pair[1].as_str().unwrap().to_owned()))
-        .collect();
-    let arg = |key: &str| args.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
-    assert_eq!(arg("mode").as_deref(), Some("authenticated"), "{report}");
-    assert_eq!(
-        arg("display_name").as_deref(),
-        Some("Austin Herman"),
-        "the menubar is handed the name the person typed: {report}"
-    );
-    assert!(arg("did").is_some_and(|d| d.starts_with("did:")), "{report}");
-    for (k, v) in &args {
-        assert!(
-            !v.contains(&id),
-            "the minted id reached a launch argument a document could draw: {k}={v}"
-        );
-    }
-    // And the mount is the id, which is what the id is for.
-    let mount = report["user_vfs_path"].as_str().expect("the resident launch carries the mount");
-    assert!(mount.contains(&id), "{mount}");
-
-    // ── Second boot: the lock screen is told the name, and unlocks the id ────
-    let (again, _endpoint) = boot_a_daemon_at(base.path(), secrets).await;
-    let resp = again
-        .launch_designated_shell("boot", None)
-        .await
-        .expect("a boot with an identity on the device must launch something");
-    let (mode, users, names) = screen_of(resp);
-    restore();
-
-    assert_eq!(mode.as_deref(), Some("locked"));
-    assert_eq!(users.as_deref(), Some(id.as_str()), "the id, for `unlock-with-pin`");
-    assert_eq!(
-        names.as_deref(),
-        Some("Austin Herman"),
-        "the name, for *Welcome back* — never the id"
-    );
-}
-
-/// **A device enrolled before the ruling keeps its `owner` id, opens as it
-/// did, and stops drawing it**
-/// (`TASK-the-name-the-welcome-asks-for-goes-nowhere`: *"An existing device keeps
-/// its `owner` id, because renaming a directory under `users/` is a migration
-/// with nothing to gain, and it stops drawing it"*).
-///
-/// The existing device is made the way every device before 2026-09-24 was: an
-/// identity registered under the id `owner` with no display name, through the
-/// door that still writes exactly that record — `CreateUser`, which the CLI
-/// calls — so what the second boot reads is what such a device actually holds,
-/// down to the file having no `display_name` key at all.
-///
-/// Then the migration: the second boot opens the lock screen for `owner` with an
-/// empty name slot; the rename is refused until the person unlocks; once they
-/// have, Settings sets the name; the resident launch that follows carries the
-/// typed name and the mount `users/owner/data`; and the registry key, the
-/// directory and the DID are what they were.
-#[tokio::test]
-#[serial_test::serial]
-#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
-async fn a_device_enrolled_as_owner_keeps_its_id_and_stops_drawing_it() {
-    use kotton_app::daemon::apps::OccupantHost as _;
-
-    // Before anything is set: this test ends in a launch of the shell, so it must be built.
-    crate::common::bins::require_shell_wasm();
-    let base = tempfile::tempdir().expect("tempdir");
-    stage_a_system_shell(base.path());
-
-    // SAFETY: `#[serial_test::serial]` means nothing else is running. Restored
-    // at the end, and before the assertions so a panic cannot leave them set.
-    let prior_base = std::env::var_os("KOTTON_BASE_DIR");
-    unsafe {
-        std::env::set_var("KOTTON_BASE_DIR", base.path());
-        std::env::set_var("MOCK_RUNNER_MODE", "report-input");
-    }
-    let restore = || unsafe {
-        std::env::remove_var("MOCK_RUNNER_MODE");
-        match &prior_base {
-            Some(v) => std::env::set_var("KOTTON_BASE_DIR", v),
-            None => std::env::remove_var("KOTTON_BASE_DIR"),
-        }
-    };
-
-    let secrets: std::sync::Arc<dyn kotton_sys::secret::SecretsStore + Send + Sync> =
-        std::sync::Arc::new(kotton_secret::MemorySecrets::new());
-
-    // ── The device as it was: `owner`, no name ───────────────────────────────
-    let shell_bundled = {
-        let (daemon, endpoint) =
-            boot_a_daemon_at(base.path(), std::sync::Arc::clone(&secrets)).await;
-        let serving = tokio::spawn({
-            let daemon = std::sync::Arc::clone(&daemon);
-            async move { daemon.run().await }
-        });
-        crate::common::wait_for_daemon(&endpoint, "the first boot").await;
-        let mut client = crate::common::connect_when_ready(&endpoint, "the first boot").await;
-        client
-            .create_user("owner", crate::common::TEST_PASSPHRASE)
-            .await
-            .expect("create_user");
-        let installed = client.app_list().await.expect("app_list");
-        serving.abort();
-        installed.iter().any(|a| a.app_id == "sh.kotton.shell")
-    };
-
-    let file = std::fs::read_to_string(base.path().join("device").join("users.json"))
-        .expect("the registry file");
-    assert!(
-        !file.contains("display_name"),
-        "the pre-ruling record has no display_name key at all: {file}"
-    );
-    let registered = kuserd::device_users::load(base.path()).expect("read the registry");
-    assert_eq!(registered.keys().collect::<Vec<_>>(), vec!["owner"]);
-    assert_eq!(registered["owner"].display_name, None);
-    let did_before = registered["owner"].did.clone();
-
-    // ── The second boot: the lock screen, with the name slot empty ───────────
-    let (daemon, _endpoint) = boot_a_daemon_at(base.path(), secrets).await;
-    assert_eq!(daemon.users().any().as_deref(), Some("owner"), "the boot loads the user");
-    let resp = daemon
-        .launch_designated_shell("boot", None)
-        .await
-        .expect("a boot with an identity on the device must launch something");
-    let (mode, users, names) = screen_of(resp);
-    assert_eq!(mode.as_deref(), Some("locked"));
-    assert_eq!(users.as_deref(), Some("owner"), "the id still opens the device");
-    assert_eq!(names.as_deref(), Some(""), "and is not what the screen is told to draw");
-
-    // Settings' read, before anything is unlocked: the id carried, no name.
-    let host = daemon.occupant_host();
-    let identity = host.read_identity().await.expect("read-identity");
-    assert_eq!(identity.user_id, "owner");
-    assert_eq!(identity.display_name, None);
-
-    // A name is changed by the person it names: refused at the lock screen.
-    match host.set_display_name("Austin").await {
-        Err(kotton_wire::runner::RunnerAuthError::Daemon { message }) => {
-            assert!(message.contains("unlock first"), "{message}")
-        }
-        other => {
-            restore();
-            panic!("a rename before unlock must be refused as a daemon error, got {other:?}")
-        }
-    }
-    assert_eq!(
-        kuserd::device_users::load(base.path()).unwrap()["owner"].display_name,
-        None,
-        "a refused rename writes nothing"
-    );
-
-    // The person unlocks, and sets the name the welcome never kept.
-    host.unlock_with_pin("owner", crate::common::TEST_PASSPHRASE)
-        .await
-        .expect("the credential that made this identity opens it");
-    assert_eq!(host.unlocked_as().as_deref(), Some("owner"));
-    host.set_display_name("Austin")
-        .await
-        .expect("an unlocked person may say what they are called");
-    let after = kuserd::device_users::load(base.path()).expect("read the registry");
-    assert_eq!(after.keys().collect::<Vec<_>>(), vec!["owner"], "the id is kept");
-    assert_eq!(after["owner"].display_name.as_deref(), Some("Austin"));
-    assert_eq!(after["owner"].did, did_before, "the DID is untouched");
-    assert!(base.path().join("users").join("owner").is_dir(), "the directory is kept");
-    assert_eq!(
-        host.read_identity().await.expect("read-identity").display_name.as_deref(),
-        Some("Austin")
-    );
-
-    // ── The resident launch: called Austin, mounted at users/owner ───────────
-    if !shell_bundled {
-        restore();
-    }
-    crate::common::bins::require_apps_bundled(shell_bundled);
-    let resp = daemon
-        .end_the_locked_screen("sh.kotton.shell", "owner")
-        .await
-        .expect("an accepted credential must be followed by a resident launch");
-    let report = launch_report(resp);
-    restore();
-    let arg = |key: &str| {
-        report["launch_args"]
-            .as_array()
-            .expect("launch args")
-            .iter()
-            .find(|pair| pair[0] == key)
-            .and_then(|pair| pair[1].as_str())
-            .map(str::to_owned)
-    };
-    assert_eq!(arg("mode").as_deref(), Some("authenticated"), "{report}");
-    assert_eq!(
-        arg("display_name").as_deref(),
-        Some("Austin"),
-        "the desktop calls the person by the name they set, not `owner`: {report}"
-    );
-    let expected = base
-        .path()
-        .join("users")
-        .join("owner")
-        .join("data")
-        .to_string_lossy()
-        .into_owned();
-    assert_eq!(
-        report["user_vfs_path"].as_str(),
-        Some(expected.as_str()),
-        "the mount is still the `owner` directory: {report}"
-    );
-}
 
 /// **The flip is tied to the occupant's instance, not to whichever app took the
 /// event.**
@@ -1834,20 +1252,18 @@ kind    = "long-lived"
 
 // ── The second boot ──────────────────────────────────────────────────────────
 
-/// Stage a system shell under `base`, the way `cargo xtask build-apps` does.
+/// Stage a system shell under `base`, where a desktop install puts it.
 ///
-/// The manifest is the shell's real one — it is checked in, it is what
+/// The manifest is the shell's (see [`shell_manifest`]): it is what
 /// `app_launch_system_shell` parses, and a manifest that stops parsing should
-/// fail here. The `app.wasm` beside it is a placeholder, because these two tests
+/// fail here. The `app.wasm` beside it is a placeholder, because these tests
 /// are about **which launch arguments the host writes** and the mock runner never
-/// opens the module. A test of the *screen* needs the real wasm and the real
-/// runner, and that is `a_fresh_machine_draws_its_welcome_screen` above; a test
-/// that needed `build-apps` to have run would be one that mostly skips.
+/// opens the module. A test of the *screen* needs the real wasm, the real runner
+/// and the window, none of which this repository builds.
 fn stage_a_system_shell(base: &std::path::Path) {
     let dir = kotton_app::daemon::apps::system_shell_dir(base);
     std::fs::create_dir_all(&dir).expect("stage dir");
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../guest/apps/kotton-shell/manifest.toml");
+    let manifest = shell_manifest();
     std::fs::copy(&manifest, dir.join("manifest.toml")).expect("stage manifest");
     std::fs::write(dir.join("app.wasm"), b"").expect("stage a placeholder module");
 }
@@ -1881,13 +1297,26 @@ async fn boot_a_daemon_at(
     (daemon, endpoint)
 }
 
+/// The full launch frame the mock painted back, as JSON.
+///
+/// The init frame is sent once and never mentioned again, so
+/// `MOCK_RUNNER_MODE=report-input` repeating it as the launch's patch is the
+/// only channel there is; [`screen_of`] reads three fields out of it.
+fn launch_report(resp: kotton_wire::UserResponse) -> serde_json::Value {
+    let patches = match resp {
+        kotton_wire::UserResponse::AppLaunched { patches, .. } => patches,
+        other => panic!("expected AppLaunched, got {other:?}"),
+    };
+    serde_json::from_slice(&patches[0][1..])
+        .expect("the mock paints its launch frame as raw JSON (format version 0x00)")
+}
+
 /// The `mode`, `users` and `names` a launch was handed, read back off the
 /// mock's report.
 ///
 /// Sent once in the init frame and never mentioned again, so
 /// `MOCK_RUNNER_MODE=report-input` painting it back is the only channel there is
-/// — the same trick `the_shell_that_follows_the_ceremony_carries_the_users_data_mount`
-/// uses for the data mount.
+/// (see [`launch_report`]).
 fn screen_of(resp: kotton_wire::UserResponse) -> (Option<String>, Option<String>, Option<String>) {
     let report = launch_report(resp);
     let arg = |key: &str| {
@@ -1920,8 +1349,8 @@ fn screen_of(resp: kotton_wire::UserResponse) -> (Option<String>, Option<String>
 /// stops, and a second daemon constructed on the same base is asked what it would
 /// draw. The assertion is the launch argument, because that is the whole of what
 /// the host tells the shell about which screen to open
-/// (`guest/apps/kotton-shell/logic/src/lib.rs`: `Some("locked") => AppMode::Locked`,
-/// and `users` is read beside it).
+/// (the shell, which this repository does not hold, reads `Some("locked")` as its
+/// lock screen and `users` beside it).
 ///
 /// **`KOTTON_BASE_DIR` is set to that same base**, matching what production has
 /// by construction (one base per process) — no longer load-bearing for
@@ -2080,6 +1509,8 @@ async fn a_launch_for_a_person_whose_store_holds_no_keys_opens_the_lock_screen_a
             .create_user("owner", crate::common::TEST_PASSPHRASE)
             .await
             .expect("create_user");
+        // The shell, in the person's store, through the verb the bundled path uses.
+        install_the_shell_by_hand(&mut client, "owner").await;
         serving.abort();
     }
 

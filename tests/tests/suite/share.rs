@@ -259,7 +259,7 @@ async fn an_outbox_of_two_shares_at_the_inline_cap_and_a_message_is_carried_by_h
         client_v,
         "alice",
         "vault",
-        common::khttpd::free_port(),
+        common::free_port(),
         Posture::BlindStorage,
     )
     .await;
@@ -480,7 +480,7 @@ async fn a_share_her_vault_carries_while_her_device_is_off_is_filed_whole() {
         client_v,
         "alice",
         "vault",
-        common::khttpd::free_port(),
+        common::free_port(),
         Posture::BlindStorage,
     )
     .await;

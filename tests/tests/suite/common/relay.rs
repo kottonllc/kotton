@@ -201,7 +201,7 @@ async fn spawn_in(state: Option<tempfile::TempDir>) -> (Relay, String) {
         "{} is missing — run `cargo xtask build-relay` (just test does)",
         bin.display()
     );
-    let port = super::khttpd::free_port();
+    let port = super::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut command = Command::new(&bin);
     if let Some(dir) = &state {

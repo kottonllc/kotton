@@ -3777,9 +3777,10 @@ async fn supervise_kuid(
 /// *which process is this* becomes a thing the caller holds rather than an
 /// ambient fact re-derived at every spawn.
 ///
-/// Public for the same reason: `tests/tests/suite/inference_sidecar.rs` proves
-/// the pipe by running **this** function, not a copy of it. A supervisor
-/// exercised only by a re-implementation of itself proves the re-implementation.
+/// Public so a test can prove the pipe by running **this** function, not a copy
+/// of it: a supervisor exercised only by a re-implementation of itself proves the
+/// re-implementation. No case in this repository's suite does, since it builds no
+/// `kinferd` (kottonllc/kotton#24, #16).
 pub async fn supervise_kinferd(
     kinferd_bin: PathBuf,
     sidecar_states: Arc<RwLock<HashMap<String, SidecarState>>>,
