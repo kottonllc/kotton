@@ -11,7 +11,7 @@
 //! | Platform | Mechanism | Measured |
 //! |---|---|---|
 //! | Linux, x86-64 or aarch64 | Landlock for the filesystem; seccomp-BPF refusing `socket(2)`, the calls that use a socket, and `io_uring` | yes — `core/proc`'s own tests and the integration suite |
-//! | Windows | an AppContainer with no capabilities, an ACE per grant for its SID, and a job object, attached at `CreateProcessW` to a child created suspended — **written and compiled, not reached by [`confine`](crate::sandbox::confine)**, which still returns [`SandboxError::Unsupported`](crate::sandbox::SandboxError::Unsupported): stable Rust gives a `Command` no way to carry the attribute list the container rides on (`windows.rs`, "Why `confine` still refuses") | not yet — its probes are unit tests in `windows.rs`, run by `cargo test -p kotton-proc` on Windows |
+//! | Windows | an AppContainer with no capabilities, an ACE per grant for its SID, and a job object, attached at `CreateProcessW` to a child created suspended — **written and compiled, not reached by [`confine`](crate::sandbox::confine)**, which still returns [`SandboxError::Unsupported`](crate::sandbox::SandboxError::Unsupported): stable Rust gives a `Command` no way to carry the attribute list the container rides on (`windows.rs`, "Why `confine` still refuses") | yes — `core/proc`'s own tests, the probes in `windows.rs`, run on `windows-latest` on every pull request (`.github/workflows/windows.yml`); what is measured is the container spawned by those probes, not one reached through `confine` |
 //! | anything else | [`SandboxError::Unsupported`](crate::sandbox::SandboxError::Unsupported) — the caller decides, and `kinferd`'s refuses | n/a |
 //!
 //! macOS has a mechanism for this (Seatbelt) and no provider here. It is its own

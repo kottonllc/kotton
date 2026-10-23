@@ -159,34 +159,53 @@ impl SecretsProvider {
 ///
 /// So both sides go through [`resolve`]: the deepest ancestor that exists is
 /// canonicalized (which expands short names and adds the verbatim prefix) and the
-/// missing tail is put back on it, and then [`spelling`] drops the prefix and,
-/// on Windows, the case. Each side is spelled by the same two steps.
+/// rest of the path is applied to it by its text, `..` included, and then
+/// [`spelling`] drops the prefix and, on Windows, the case. Each side is spelled
+/// by the same two steps.
 ///
-/// **A base directory that cannot be resolved is throwaway** (fails closed): no
-/// ancestor of it canonicalizes, so not even its volume exists, or it climbs out
-/// of a missing directory with `..`. Nothing installed can live there, so an
-/// in-process store loses nothing, and the keychain is not written for it. The
-/// temp directory not resolving says nothing about the base, so it is then
+/// **A base directory with no ancestor that exists is throwaway** (fails closed):
+/// not even its root or volume is there, so nothing installed can live under it,
+/// an in-process store loses nothing, and the keychain is not written for it. A
+/// path through a missing directory and back out with `..` is not that case:
+/// `/home/u/missing/../.kotton` names `/home/u/.kotton`, and is spelled as such.
+/// The temp directory not resolving says nothing about the base, so it is then
 /// compared as spelled.
 fn is_throwaway_root(base_dir: &std::path::Path) -> bool {
     let canonical =
         |p: &str| std::fs::canonicalize(p).ok().map(|c| c.to_string_lossy().into_owned());
-    let windows = cfg!(windows);
-    let Some(base) = std::path::absolute(base_dir)
-        .ok()
-        .and_then(|b| resolve(&b.to_string_lossy(), windows, &canonical))
-    else {
+    let Ok(base) = std::path::absolute(base_dir) else {
         return true;
     };
-    let temp_dir = std::env::temp_dir().to_string_lossy().into_owned();
-    let temp = resolve(&temp_dir, windows, &canonical).unwrap_or(temp_dir);
+    throwaway_by(
+        &base.to_string_lossy(),
+        &std::env::temp_dir().to_string_lossy(),
+        cfg!(windows),
+        &canonical,
+    )
+}
+
+/// [`is_throwaway_root`]'s rule over an absolute `base` and the `temp` directory's
+/// text, with the filesystem's answer as `canonical`, so a test can hand it a
+/// filesystem in which nothing exists.
+fn throwaway_by(
+    base: &str,
+    temp: &str,
+    windows: bool,
+    canonical: &dyn Fn(&str) -> Option<String>,
+) -> bool {
+    let Some(base) = resolve(base, windows, canonical) else {
+        return true;
+    };
+    let temp = resolve(temp, windows, canonical).unwrap_or_else(|| temp.to_string());
     is_under(&spelling(&base, windows), &spelling(&temp, windows))
 }
 
 /// `path` (absolute) with its deepest ancestor that `canonical` resolves replaced by
-/// what it resolves to, and the components below that ancestor put back unchanged.
-/// `None` when no ancestor resolves, or when a missing component is not a plain name
-/// (`..`, `.`), which only the filesystem could resolve.
+/// what it resolves to, and the components below that ancestor applied to it by
+/// their text: a name is appended, `.` is nothing, and `..` removes the last name.
+/// Lexical is right below that ancestor, because nothing there exists, so nothing
+/// there is a link `..` could leave by another way. `None` only when no ancestor
+/// resolves, its root included.
 ///
 /// Over the path's text, splitting on `/` and, for Windows, on `\` too, rather than
 /// over `Path`: so the Windows walk is the same code on every platform, and is tested
@@ -196,26 +215,41 @@ fn resolve(path: &str, windows: bool, canonical: &dyn Fn(&str) -> Option<String>
     let joint = if windows { '\\' } else { '/' };
     let mut missing: Vec<&str> = Vec::new();
     let mut at = path;
-    loop {
+    let found = loop {
         if let Some(found) = canonical(at) {
-            let mut out = found.trim_end_matches(is_separator).to_string();
-            for name in missing.iter().rev() {
-                out.push(joint);
-                out.push_str(name);
-            }
-            return Some(out);
+            break found;
         }
         let trimmed = at.trim_end_matches(is_separator);
         let cut = trimmed.rfind(is_separator)?;
-        let name = &trimmed[cut + 1..];
-        if name.is_empty() || name == "." || name == ".." {
-            return None;
-        }
-        missing.push(name);
+        missing.push(&trimmed[cut + 1..]);
         // Keep the separator, so the parent of `C:\Users` is the root `C:\` and of
         // `/tmp` is `/`.
         at = &trimmed[..=cut];
+    };
+    let mut out = found.trim_end_matches(is_separator).to_string();
+    for name in missing.iter().rev() {
+        match *name {
+            "" | "." => {}
+            ".." => {
+                // Up one name, never past a root: `/` (here the empty string), a
+                // drive (`C:`), or a verbatim prefix (`\\?\C:`).
+                if let Some(cut) = out.rfind(is_separator) {
+                    let last = &out[cut + 1..];
+                    if !(last.is_empty() || last.ends_with(':') || last == "?") {
+                        out.truncate(cut);
+                    }
+                }
+            }
+            name => {
+                out.push(joint);
+                out.push_str(name);
+            }
+        }
     }
+    if out.is_empty() {
+        out.push(joint);
+    }
+    Some(out)
 }
 
 /// One spelling of a resolved path: no `\\?\` verbatim prefix (`\\?\UNC\` back to
@@ -327,12 +361,52 @@ mod secrets_selection_tests {
         };
         assert_eq!(resolve("/short~1/a/b", false, &renamed).as_deref(), Some("/long/name/a/b"));
         assert_eq!(resolve("/elsewhere/a", false, &renamed).as_deref(), Some("/elsewhere/a"));
-        assert_eq!(resolve("/short~1/missing/../a", false, &renamed), None);
+        // Through a missing directory and back out: the `..` cancels the missing name,
+        // and may climb into the canonical ancestor, never past the root.
+        assert_eq!(resolve("/short~1/missing/../a", false, &renamed).as_deref(), Some("/long/name/a"));
+        assert_eq!(resolve("/short~1/missing/../../x", false, &renamed).as_deref(), Some("/long/x"));
+        assert_eq!(resolve("/missing/../../../x", false, &renamed).as_deref(), Some("/x"));
+        assert_eq!(resolve("/short~1/./a/.", false, &renamed).as_deref(), Some("/long/name/a"));
         // A backslash is a name's character off Windows, not a separator.
         assert_eq!(resolve(r"/short~1/a\b", false, &renamed).as_deref(), Some(r"/long/name/a\b"));
         let nothing = |_: &str| -> Option<String> { None };
         assert_eq!(resolve("/a/b", false, &nothing), None, "nothing resolves, so nothing is claimed");
         assert_eq!(resolve(r"C:\a\b", true, &nothing), None);
+    }
+
+    /// **A real install named through a missing directory and `..` is not
+    /// throwaway.** `std::path::absolute` keeps `..` on Unix, so
+    /// `<existing>/missing/../.kotton` names `<existing>/.kotton`; read as
+    /// unresolvable it would be sent to memory and its secrets lost at exit.
+    #[test]
+    fn a_base_through_a_missing_directory_and_back_names_where_it_lands() {
+        let existing = std::env::current_dir().unwrap();
+        assert!(!is_throwaway_root(&existing), "precondition: the working directory is a real root");
+        let missing = existing.join("kotton-no-such-directory-12345");
+        assert!(!missing.exists(), "precondition: the probe directory must not exist");
+        let base = missing.join("..").join(".kotton");
+        assert!(
+            !is_throwaway_root(&base),
+            "{} names {} and is not throwaway",
+            base.display(),
+            existing.join(".kotton").display()
+        );
+        // And the same walk back out of a missing directory under temp lands under temp.
+        let under_temp = std::env::temp_dir().join("kotton-no-such-dir-12345").join("..").join("x");
+        assert!(is_throwaway_root(&under_temp), "{} is under the temp dir", under_temp.display());
+    }
+
+    /// **Fails closed**: a base none of whose ancestors exists, not even its root,
+    /// is throwaway, through the rule [`is_throwaway_root`] applies.
+    #[test]
+    fn a_base_with_no_ancestor_that_exists_is_throwaway() {
+        let nothing = |_: &str| -> Option<String> { None };
+        assert!(throwaway_by("/a/b", "/tmp", false, &nothing));
+        assert!(throwaway_by(r"Z:\Kotton", r"C:\Temp", true, &nothing));
+        // Where the filesystem answers, the same rule tells a real root from a temp one.
+        let only_roots = |p: &str| -> Option<String> { (p == "/").then(|| "/".to_string()) };
+        assert!(!throwaway_by("/home/u/.kotton", "/tmp", false, &only_roots));
+        assert!(throwaway_by("/tmp/k", "/tmp", false, &only_roots));
     }
 
     /// The boundary is a path separator, so a sibling whose name merely starts

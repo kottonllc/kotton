@@ -11,13 +11,16 @@
 # `windows-latest` for this file alone: one job, with a ceiling on its minutes, every action
 # pinned to a full commit. Windows on arm64 is not built and not promised.
 #
-# What it tests: every library crate's own tests, named below. What it does not, and why each:
+# What it tests: every library crate's own tests, named below; every other workspace member
+# is built and listed here with why its tests are not run. What it does not, and why each:
 #   - kotton-integration-tests (`tests/`): the suite starts kuserd, kvaultd and the relay as
 #     processes; that is the daemon this job does not run.
 #   - kuserd, kdeviced, kvaultd, kquicd, ksyncd: the daemons themselves. They are built here
 #     (`--workspace`); their tests stand a daemon up or install one, with `/bin/sh`,
 #     `setpriv` and `sha256sum`.
 #   - xtask: the gate's own tooling, which runs on Linux; it is built here.
+#   - kotton-mock-runner (`tests/fixtures/mock-runner`): a fixture binary the suite starts,
+#     with no tests of its own; it is built here.
 #
 # `KOTTON_PAIR_LOCAL_ONLY` declares the run same-machine, as `cargo xtask bind-check` does on
 # Linux: every inbound socket binds loopback and no mDNS advertise is made, so no test raises
@@ -29,8 +32,10 @@
 # theirs. Its import libraries are not in `lib\` itself but in a per-CRT directory below it,
 # so a step finds `libcrypto.lib` for the dynamic CRT Rust links (`MD`, not `MDd` or `MT`) and
 # names its directory as `OPENSSL_LIB_DIR`, and puts the DLLs' `bin\` on the path the tests
-# run with; it fails, naming what it found, if there is none. The toolchain is the one `rust-toolchain.toml` names, which the runner's rustup reads
-# on the first `cargo`, as on Linux.
+# run with; it fails, naming what it found, if there is none.
+#
+# The toolchain is the one `rust-toolchain.toml` names, which the runner's rustup reads on the
+# first `cargo`, as on Linux.
 #
 # Every `uses:` is pinned to a full commit SHA with its version in a trailing comment, as in
 # release.yml; do not "update" it back to a tag. Resolved 2026-10-23:
@@ -73,7 +78,8 @@ jobs:
 
       - name: Find the runner's OpenSSL import libraries
         run: |
-          $found = @(Get-ChildItem -Path $env:OPENSSL_DIR -Recurse -Filter libcrypto.lib -ErrorAction SilentlyContinue)
+          $found = @(Get-ChildItem -Path $env:OPENSSL_DIR -Recurse -Filter libcrypto.lib `
+            -ErrorAction SilentlyContinue)
           $found | ForEach-Object { Write-Host $_.FullName }
           $md = @($found | Where-Object { $_.DirectoryName -match '\\MD$' })
           $pick = if ($md.Count -gt 0) { $md[0] } elseif ($found.Count -gt 0) { $found[0] } else { $null }
@@ -90,10 +96,11 @@ jobs:
       - name: The crate tests that need no daemon
         run: >-
           cargo test --locked --no-fail-fast
-          -p kotton-common -p kotton-sys -p kotton-pair -p kotton-proc -p kotton-infer -p kotton-version
-          -p kotton-context -p kotton-wire -p kotton-schemas -p kotton-crypto -p kotton-net
-          -p kotton-fs -p kotton-diag -p kotton-ipc -p kotton-identity -p kotton-peer
-          -p kotton-record -p kotton-sealed -p kotton-store -p kotton-sync -p kotton-org
-          -p kotton-grant -p kotton-msg -p kotton-app -p kotton-outbound -p kotton-surface
-          -p kotton-secret -p kotton-device -p kotton-session -p kotton -p kotton-operator -p kotton-shell
-          -p kotton-cli -p kotton-record-file -p kotton-pty-drive
+          -p kotton-common -p kotton-sys -p kotton-pair -p kotton-proc -p kotton-infer
+          -p kotton-version -p kotton-context -p kotton-wire -p kotton-schemas -p kotton-crypto
+          -p kotton-net -p kotton-fs -p kotton-diag -p kotton-ipc -p kotton-identity
+          -p kotton-peer -p kotton-record -p kotton-sealed -p kotton-store -p kotton-sync
+          -p kotton-org -p kotton-grant -p kotton-msg -p kotton-app -p kotton-outbound
+          -p kotton-surface -p kotton-secret -p kotton-device -p kotton-session -p kotton
+          -p kotton-operator -p kotton-shell -p kotton-cli -p kotton-record-file
+          -p kotton-pty-drive
