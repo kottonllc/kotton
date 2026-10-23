@@ -150,31 +150,95 @@ impl SecretsProvider {
 ///
 /// - `canonicalize` adds Windows' `\\?\` verbatim prefix; `temp_dir()` has no
 ///   such prefix, so a canonical path never `starts_with` a plain one.
-/// - `canonicalize` fails outright on a path that does not exist yet, dropping
-///   silently back to the raw form for one side only.
-/// - Windows paths are case-insensitive, and 8.3 short names (`RUNNER~1`) may
-///   survive on one side.
+/// - `canonicalize` fails outright on a path that does not exist yet. Falling
+///   back to the raw form for that side alone left one side canonical and the
+///   other not: on a Windows runner `temp_dir()` is `C:\Users\RUNNER~1\…`, an
+///   8.3 short name, which canonicalizes to `C:\Users\runneradmin\…` for the temp
+///   side and stays short for a base directory not created yet.
+/// - Windows paths are case-insensitive.
 ///
-/// Each of those turns the check into a no-op rather than an error, which is why
-/// this is defensive out of proportion to its size.
+/// So both sides go through [`resolve`]: the deepest ancestor that exists is
+/// canonicalized (which expands short names and adds the verbatim prefix) and the
+/// missing tail is put back on it, and then [`spelling`] drops the prefix and,
+/// on Windows, the case. Each side is spelled by the same two steps.
+///
+/// **A base directory that cannot be resolved is throwaway** (fails closed): no
+/// ancestor of it canonicalizes, so not even its volume exists, or it climbs out
+/// of a missing directory with `..`. Nothing installed can live there, so an
+/// in-process store loses nothing, and the keychain is not written for it. The
+/// temp directory not resolving says nothing about the base, so it is then
+/// compared as spelled.
 fn is_throwaway_root(base_dir: &std::path::Path) -> bool {
-    fn normalize(p: &std::path::Path) -> String {
-        let resolved = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let s = resolved.to_string_lossy().replace(r"\\?\", "");
-        let s = s.trim_end_matches(['\\', '/']).to_string();
-        if cfg!(windows) {
-            s.to_lowercase()
-        } else {
-            s
-        }
-    }
+    let canonical =
+        |p: &str| std::fs::canonicalize(p).ok().map(|c| c.to_string_lossy().into_owned());
+    let windows = cfg!(windows);
+    let Some(base) = std::path::absolute(base_dir)
+        .ok()
+        .and_then(|b| resolve(&b.to_string_lossy(), windows, &canonical))
+    else {
+        return true;
+    };
+    let temp_dir = std::env::temp_dir().to_string_lossy().into_owned();
+    let temp = resolve(&temp_dir, windows, &canonical).unwrap_or(temp_dir);
+    is_under(&spelling(&base, windows), &spelling(&temp, windows))
+}
 
-    let base = normalize(base_dir);
-    let temp = normalize(&std::env::temp_dir());
-    // Path-separator boundary, so `/tmpfoo` is not read as being under `/tmp`.
+/// `path` (absolute) with its deepest ancestor that `canonical` resolves replaced by
+/// what it resolves to, and the components below that ancestor put back unchanged.
+/// `None` when no ancestor resolves, or when a missing component is not a plain name
+/// (`..`, `.`), which only the filesystem could resolve.
+///
+/// Over the path's text, splitting on `/` and, for Windows, on `\` too, rather than
+/// over `Path`: so the Windows walk is the same code on every platform, and is tested
+/// as such where `C:\` does not exist.
+fn resolve(path: &str, windows: bool, canonical: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let is_separator = |c: char| c == '/' || (windows && c == '\\');
+    let joint = if windows { '\\' } else { '/' };
+    let mut missing: Vec<&str> = Vec::new();
+    let mut at = path;
+    loop {
+        if let Some(found) = canonical(at) {
+            let mut out = found.trim_end_matches(is_separator).to_string();
+            for name in missing.iter().rev() {
+                out.push(joint);
+                out.push_str(name);
+            }
+            return Some(out);
+        }
+        let trimmed = at.trim_end_matches(is_separator);
+        let cut = trimmed.rfind(is_separator)?;
+        let name = &trimmed[cut + 1..];
+        if name.is_empty() || name == "." || name == ".." {
+            return None;
+        }
+        missing.push(name);
+        // Keep the separator, so the parent of `C:\Users` is the root `C:\` and of
+        // `/tmp` is `/`.
+        at = &trimmed[..=cut];
+    }
+}
+
+/// One spelling of a resolved path: no `\\?\` verbatim prefix (`\\?\UNC\` back to
+/// `\\`), no trailing separator, and on Windows one case and one separator.
+fn spelling(path: &str, windows: bool) -> String {
+    let s = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+    };
+    let s = if windows { s.replace('/', r"\").to_lowercase() } else { s };
+    let trimmed = s.trim_end_matches(['\\', '/']);
+    // A root is its separator, not the empty string.
+    if trimmed.is_empty() { s[..1.min(s.len())].to_string() } else { trimmed.to_string() }
+}
+
+/// `base` is `temp` or below it, at a separator boundary, so `/tmpfoo` is not
+/// read as being under `/tmp`.
+fn is_under(base: &str, temp: &str) -> bool {
     base == temp
-        || base.starts_with(&format!("{temp}{}", std::path::MAIN_SEPARATOR))
-        || base.starts_with(&format!("{temp}/"))
+        || base
+            .strip_prefix(temp)
+            .is_some_and(|rest| rest.starts_with(['\\', '/']))
 }
 
 #[cfg(test)]
@@ -218,6 +282,57 @@ mod secrets_selection_tests {
             is_throwaway_root(&missing),
             "a temp path must be recognised before it is created, not only after"
         );
+    }
+
+    /// **The Windows runner's spelling, on any platform.** `temp_dir()` there is an
+    /// 8.3 short name; canonicalizing expands it and adds the verbatim prefix, and
+    /// a base directory not created yet cannot be canonicalized itself. Resolving
+    /// its deepest existing ancestor and spelling both sides alike puts the two in
+    /// one form. The canonicalizer is a table, so this runs where `C:\` is not.
+    #[test]
+    fn a_missing_base_under_a_short_named_temp_is_spelled_as_the_temp_is() {
+        let long = r"\\?\C:\Users\runneradmin\AppData\Local\Temp";
+        let temp = r"C:\Users\RUNNER~1\AppData\Local\Temp";
+        let base = r"C:\Users\RUNNER~1\AppData\Local\Temp\kotton-does-not-exist-yet";
+        // What the filesystem answers on the runner: the temp dir exists, under its
+        // long name; the base below it does not.
+        let as_the_runner_canonicalizes = |p: &str| -> Option<String> {
+            p.trim_end_matches('\\').eq_ignore_ascii_case(temp).then(|| long.to_string())
+        };
+        let resolved_base = resolve(base, true, &as_the_runner_canonicalizes).unwrap();
+        let resolved_temp = resolve(temp, true, &as_the_runner_canonicalizes).unwrap();
+        assert_eq!(resolved_base, format!(r"{long}\kotton-does-not-exist-yet"));
+        let (base_s, temp_s) = (spelling(&resolved_base, true), spelling(&resolved_temp, true));
+        assert_eq!(temp_s, r"c:\users\runneradmin\appdata\local\temp");
+        assert!(is_under(&base_s, &temp_s), "{base_s} is not under {temp_s}");
+        // The defect this replaces: the base left as spelled, the temp canonical.
+        assert!(!is_under(&spelling(base, true), &temp_s));
+        // The verbatim UNC form and a forward slash spell the same as the plain one.
+        assert_eq!(spelling(r"\\?\UNC\host\share\Temp\", true), r"\\host\share\temp");
+        assert_eq!(spelling(r"C:/Users/X/Temp/", true), r"c:\users\x\temp");
+        assert!(!is_under(r"c:\users\x\tempfoo", r"c:\users\x\temp"));
+    }
+
+    /// `resolve` itself, through a canonicalizer that renames one existing
+    /// directory the way a short name or a symlink is renamed: the missing tail is
+    /// kept below the renamed ancestor, and a missing `..` cannot be resolved.
+    #[test]
+    fn resolve_canonicalizes_the_deepest_existing_ancestor_and_keeps_the_tail() {
+        let renamed = |p: &str| -> Option<String> {
+            match p {
+                "/short~1" | "/short~1/" => Some("/long/name".into()),
+                "/" => Some("/".into()),
+                _ => None,
+            }
+        };
+        assert_eq!(resolve("/short~1/a/b", false, &renamed).as_deref(), Some("/long/name/a/b"));
+        assert_eq!(resolve("/elsewhere/a", false, &renamed).as_deref(), Some("/elsewhere/a"));
+        assert_eq!(resolve("/short~1/missing/../a", false, &renamed), None);
+        // A backslash is a name's character off Windows, not a separator.
+        assert_eq!(resolve(r"/short~1/a\b", false, &renamed).as_deref(), Some(r"/long/name/a\b"));
+        let nothing = |_: &str| -> Option<String> { None };
+        assert_eq!(resolve("/a/b", false, &nothing), None, "nothing resolves, so nothing is claimed");
+        assert_eq!(resolve(r"C:\a\b", true, &nothing), None);
     }
 
     /// The boundary is a path separator, so a sibling whose name merely starts
