@@ -983,12 +983,30 @@ mod tests {
     /// which is `PermissionDenied`. Same assertion, one step earlier — and, as
     /// there, the test that fails if the container was silently not attached,
     /// since an unconfined child reads its own image without an entry.
+    /// `icacls` of `path` and of each directory above it, so a failure says which
+    /// entry let a container read what it was granted nothing on: an
+    /// `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) or `ALL RESTRICTED APPLICATION
+    /// PACKAGES` (`S-1-15-2-2`) entry, inherited or not, admits every container.
+    fn acls_up_from(path: &Path) -> String {
+        path.ancestors()
+            .map(|p| match std::process::Command::new("icacls").arg(p).output() {
+                Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+                Err(e) => format!("{}: icacls did not run: {e}\n", p.display()),
+            })
+            .collect()
+    }
+
     #[test]
     fn a_profile_that_grants_nothing_cannot_even_start_the_program() {
         let err = match spawn(&Profile::nothing("no-grants"), "pair") {
             Ok(child) => panic!(
-                "a program with no grant on its own image was created (it exited {:?})",
-                child.wait()
+                "a program with no grant on its own image was created (it exited {:?})\n\
+                 Its container is {}. The other tests of this binary run beside it and grant \
+                 their own containers this same image, so an entry for another SID below is \
+                 theirs. What grants it, read from the image and every directory above it:\n{}",
+                child.wait(),
+                child.sid_string(),
+                acls_up_from(&test_binary())
             ),
             Err(e) => e,
         };
