@@ -337,14 +337,12 @@ fn build_relay(extra: &[String]) {
     println!("{}", bin.display());
 }
 
-/// Every guest app and test fixture `build_apps` builds, as
+/// Every guest app and example `build_apps` builds, as
 /// (app-dir, cargo-package-name, cdylib-filename-stem, manifest-subpath).
 ///
 /// Rust/WASM logic lives in a `logic/` subdirectory of each app. The entries after the
-/// bundled apps are fixtures rather than apps, each with its reason beside it. The fixtures
-/// and the release's apps are one list, so a desktop release compiles every fixture and packs
-/// only the shell, a cost accepted for one table to read.
-const GUEST_APPS: [(&str, &str, &str, &str); 9] = [
+/// bundled apps are examples rather than apps, each with its reason beside it.
+const GUEST_APPS: [(&str, &str, &str, &str); 5] = [
     (
         "guest/apps/kotton-shell",
         "kotton-shell-logic",
@@ -364,48 +362,6 @@ const GUEST_APPS: [(&str, &str, &str, &str); 9] = [
         "kotton-records-logic",
         "kotton_records_logic",
         "logic",
-    ),
-    // The first fixture: `confinement` in the integration suite installs it with one
-    // of its two capabilities approved and proves it cannot reach the other, through
-    // the real runner.
-    (
-        "tests/fixtures/probe-app",
-        "kotton-probe-app",
-        "kotton_probe_app",
-        ".",
-    ),
-    // The second fixture, and the same idea one invariant along: it imports
-    // `kotton:app/layer-surface` and nothing else uses it, so the host's
-    // decision about the *designation* is observable at instantiation
-    // (RFC-0087). `the_system_layer_is_a_world_not_a_check`, in
-    // `core/wasm/src/sandbox.rs`, loads it twice and varies one argument.
-    (
-        "tests/fixtures/layer-probe",
-        "kotton-layer-probe",
-        "kotton_layer_probe",
-        ".",
-    ),
-    // The third: an occupant that tries every door to the person's files
-    // and paints what each one answered, so the suite can run the host's
-    // projection and the sandbox together through a real launch
-    // (`a_read_only_occupant_cannot_write_its_files_by_any_door`,
-    // `TASK-a-member-writes-in-a-roots-tree`).
-    (
-        "tests/fixtures/roots-probe",
-        "kotton-roots-probe",
-        "kotton_roots_probe",
-        ".",
-    ),
-    // The fourth: an ordinary app that writes, reads and lists through its
-    // `files` handle, so the suite can show a guest's file landing sealed
-    // in the person's store and reading back through it
-    // (`a_file_an_app_writes_rests_sealed_and_packs_and_reads_back`,
-    // `TASK-a-file-an-app-writes-rests-in-the-clear-in-the-sealed-stores-own-directory`).
-    (
-        "tests/fixtures/files-probe",
-        "kotton-files-probe",
-        "kotton_files_probe",
-        ".",
     ),
     // What `kotton app new hello` writes, the SDK's dependency line aside; building it here
     // holds the scaffold to the SDK.

@@ -113,7 +113,6 @@ exclude = [
     "guest/apps/kotton-shell",  # WASM component — build via `cargo xtask build-apps`
     "guest/apps/kotton-editor", # WASM component — build via `cargo xtask build-apps`
     "guest/apps/kotton-records", # WASM component — build via `cargo xtask build-apps`
-    "tests/fixtures/probe-app", # WASM component; a fixture asking for two capabilities
     # Confined extensions — WASM components targeting the `fetcher`
     # world rather than `app`, so they bind WIT directly instead of via the SDK.
     "guest/extensions/feed-reader",

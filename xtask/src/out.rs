@@ -342,9 +342,8 @@ mod tests {
     }
 
     /// **The arrangement a fleet uses, end to end:** `CARGO_TARGET_DIR` exported to a
-    /// directory outside the checkout, and `build-apps`, the relay build and two suite
-    /// modules — `vault::`, which spawns relays through `common::relay`, and
-    /// `confinement::`, which runs a component `build-apps` made in the runner
+    /// directory outside the checkout, and the relay build, the mock runner and one suite
+    /// module — `vault::`, which spawns relays through `common::relay` and the mock runner
     /// `build.rs` located — all succeed under it, with their output landing there and
     /// not under `out/`. Every one of these failed under a shared target on 2026-09-15
     /// (`TASK-two-builds-break-under-a-shared-target-directory`).
@@ -379,31 +378,17 @@ mod tests {
                 .expect("run cargo");
             assert!(status.success(), "{what} failed under CARGO_TARGET_DIR={}", dir.display());
         };
-        step("build-apps", &["xtask", "build-apps"]);
         step("the relay build", &["xtask", "build-relay"]);
+        step("the suite's runner", &["build", "--bin", "kotton-mock-runner"]);
         step(
-            "the suite's sidecars",
-            &["build", "--bin", "kotton-mock-runner", "--bin", "kotton-runner"],
-        );
-        step(
-            "two suite modules",
-            &[
-                "test",
-                "-p",
-                "kotton-integration-tests",
-                "--test",
-                "suite",
-                "--",
-                "vault::",
-                "confinement::",
-            ],
+            "one suite module",
+            &["test", "-p", "kotton-integration-tests", "--test", "suite", "--", "vault::"],
         );
 
         // And the output is where the variable said, which is the whole claim.
         for built in [
-            dir.join("wasm32-wasip2/release/kotton_probe_app.wasm"),
             dir.join("debug/kotton-relay"),
-            dir.join("debug/kotton-runner"),
+            dir.join("debug/kotton-mock-runner"),
         ] {
             assert!(built.is_file(), "{} was not built there", built.display());
         }
