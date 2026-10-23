@@ -2447,8 +2447,8 @@ fn bind_check(cargo_args: &[String]) {
 /// The vault is the binary in which the apps, the sandbox, the display, inference
 /// and every plaintext verb do not exist (RFC-0084 V1). This holds the dependency half of
 /// that sentence: `core/kvaultd/Cargo.toml` names none of the crates that carry
-/// them, and — advisory until the `device` edge is cut — its transitive closure
-/// does not either.
+/// them, and its transitive closure, as cargo resolves it for every vault target,
+/// does not either. Both halves refuse.
 fn vault_check() {
     // `kotton-infer`: a vault keeps sealed packs it cannot open, so it has no plaintext for a
     // model to read; the wire names a model by `kotton-schemas`' manifest, not the runtime's.

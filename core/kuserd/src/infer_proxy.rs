@@ -39,8 +39,10 @@
 //! client carry without linking the inference runtime. `kotton-infer` keeps its
 //! own, because `infer-check` holds that crate to serde and thiserror. This
 //! daemon is the one process that links both, so its tests are where the two are
-//! held to one shape: a field or a variant added to either side and not the
-//! other fails them to compile.
+//! held to one shape. They convert each way, each side destructured with no `..`
+//! and each side's enums matched exhaustively where they are the input, so a
+//! field or a variant added to either side and not the other fails them to
+//! compile.
 
 use kotton_infer::{Context, Metering, ModelHandle, ModelManifest, Options};
 use kotton_infer::{InferRequest, InferResponse, MAX_LOAD_CHUNK};
@@ -320,10 +322,12 @@ mod tests {
     /// The backend's manifest for a stored one: the protocol's type, as `kinferd`'s
     /// channel names it.
     ///
-    /// Field for field, with no `..` on either side and an exhaustive match on each
-    /// enum, so the two types cannot drift apart without the tests failing to
-    /// compile. Test-only: no path of the daemon hands a stored model to the
-    /// backend yet, and the one that does starts from this.
+    /// Field for field, with no `..` on either side and an exhaustive match on the
+    /// protocol's enums, so a field on either side, or a variant on the protocol's,
+    /// that the other lacks fails the tests to compile; [`stored_manifest`] is the
+    /// same in the other direction, for a variant on the backend's. Test-only: no
+    /// path of the daemon hands a stored model to the backend yet, and the one
+    /// that does starts from this.
     fn backend_manifest(stored: &kotton_schemas::ModelManifest) -> ModelManifest {
         let kotton_schemas::ModelManifest {
             name,
@@ -358,6 +362,50 @@ mod tests {
             context_window,
             template,
             licence: kotton_infer::Licence { spdx, text_hash },
+            publisher,
+        }
+    }
+
+    /// The stored manifest for a backend's: [`backend_manifest`] in reverse.
+    ///
+    /// Here the backend's enums are the input, matched exhaustively, so a variant
+    /// added to `kotton_infer::ModelKind` or `kotton_infer::ModelFormat` and not to
+    /// the protocol's fails the tests to compile: an enum that appears only as an
+    /// output value holds nothing.
+    fn stored_manifest(backend: &ModelManifest) -> kotton_schemas::ModelManifest {
+        let ModelManifest {
+            name,
+            version,
+            weights,
+            format,
+            kind,
+            parameters,
+            quantisation,
+            size,
+            context_window,
+            template,
+            licence: kotton_infer::Licence { spdx, text_hash },
+            publisher,
+        } = backend.clone();
+        kotton_schemas::ModelManifest {
+            name,
+            version,
+            weights,
+            format: match format {
+                kotton_infer::ModelFormat::Gguf => kotton_schemas::ModelFormat::Gguf,
+                kotton_infer::ModelFormat::Safetensors => kotton_schemas::ModelFormat::Safetensors,
+            },
+            kind: match kind {
+                kotton_infer::ModelKind::Chat => kotton_schemas::ModelKind::Chat,
+                kotton_infer::ModelKind::Embed => kotton_schemas::ModelKind::Embed,
+                kotton_infer::ModelKind::Vision => kotton_schemas::ModelKind::Vision,
+            },
+            parameters,
+            quantisation,
+            size,
+            context_window,
+            template,
+            licence: kotton_schemas::Licence { spdx, text_hash },
             publisher,
         }
     }
@@ -529,8 +577,9 @@ mod tests {
     }
 
     /// The stored manifest and the backend's are one shape: every field crosses
-    /// [`backend_manifest`] unchanged, and the JSON either serialises to is the
-    /// same record body, signed or not, for every kind and format.
+    /// [`backend_manifest`] unchanged and back through [`stored_manifest`], and the
+    /// JSON either serialises to is the same record body, signed or not, for every
+    /// kind and format.
     #[test]
     fn a_stored_manifest_becomes_the_backends_unchanged() {
         use kotton_schemas::{Licence, ModelFormat, ModelKind};
@@ -559,6 +608,7 @@ mod tests {
                 serde_json::to_value(&stored).unwrap(),
                 "{kind:?}/{format:?}"
             );
+            assert_eq!(stored_manifest(&backend), stored, "{kind:?}/{format:?} back");
         }
     }
 }
