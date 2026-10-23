@@ -904,6 +904,7 @@ mod tests {
             ("core/kuserd/src/agent/handlers/device_config.rs", "`construct` hands a daemon `kuserd.sock` under its tempdir base and never serves it: nothing in the file listens, so nothing binds the path"),
             ("core/kuserd/src/agent/message_open_tests.rs", "`alice_unlocked` hands a daemon `kuserd.sock` under its tempdir base and never calls `run`, the one place the daemon listens: nothing binds the path"),
             ("core/kuserd/src/agent/mod.rs", "its `UnixSocket(` are match arms reading an endpoint it was handed; its tempdirs are binary-lookup directories no socket goes in"),
+            ("core/kuserd/src/agent/revoke_device_tests.rs", "`alice_at` hands a daemon `kuserd.sock` under its tempdir base and never calls `run`, the one place the daemon listens: nothing binds the path"),
             ("core/kuserd/src/agent/set_lock_policy_tests.rs", "`alice_booted` hands a daemon `kuserd.sock` under its tempdir base and never calls `run`, the one place the daemon listens: nothing binds the path"),
             ("core/kuserd/src/agent/unlock_tests.rs", "`booted` hands a daemon `kuserd.sock` under its tempdir base and never calls `run`, the one place the daemon listens: nothing binds the path"),
             ("core/kvaultd/src/instance.rs", "its vault tests' door is `control::tests::a_door`, a `tempdir_in(\"/tmp\")` the test owns, or `daemon_socket_path_in`, which asks `socket_path_fits`; its `tempdir()` is a root no socket joins"),
