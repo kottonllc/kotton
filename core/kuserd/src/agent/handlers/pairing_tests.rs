@@ -606,6 +606,10 @@ mod enrollment_tests {
             network_db::insert_paired_node(&db, id, "alice", &did.to_string(), &key, "[]", 0, Some(posture.as_str()))
                 .await
                 .unwrap();
+            // A vault is a drive as enrolling it records one.
+            if posture == Posture::BlindStorage {
+                kotton_peer::daemon::drives::record(&db, "alice", &key).await.unwrap();
+            }
         }
         (runtime, users, db)
     }

@@ -408,6 +408,8 @@ PeerAdd
     peer_did: String
     peer_pubkey_hex: String
     peer_addr: std::net::SocketAddr
+    #[serde(default)]
+    drive: bool
 PurgeFile
     user_id: String
     path: String

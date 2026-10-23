@@ -307,6 +307,39 @@ enum Door {
     /// `kotton id recover` on the device that set recovery up, which still holds the
     /// identity and pairs the vault.
     Held,
+    /// `kotton id recover` on a device that pairs the vault for the name already, added
+    /// by address and key alone (`kotton peer add`) under a claim since removed: a
+    /// row that says nothing of what the node keeps.
+    AddedByHand,
+}
+
+/// **`kotton id recover` makes the vault a drive on a device where it was added by
+/// hand, and only once the phrase proves.** The person claimed the name, added the
+/// line's vault with a plain `kotton peer add` — a row with no posture, and no drive —
+/// and removed the claim, which leaves the row. Words that prove nothing are refused
+/// and leave it so. The words then recover, and the vault, already paired, is
+/// recorded as the person's drive — the record enrolling the vault writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vault_added_by_hand_becomes_a_drive_when_the_words_recover_and_not_before() {
+    recover_from_the_card(None, Door::AddedByHand).await;
+}
+
+/// The drives `daemon` records for `name`: each one's vault key (hex), tenancy, the
+/// node it is reached through, and that node's posture.
+async fn drives_of(daemon: &kuserd::DeviceDaemon, name: &str) -> Vec<(String, String, String, Option<String>)> {
+    daemon
+        .drives(name)
+        .await
+        .expect("read the drive record")
+        .into_iter()
+        .map(|d| (hex::encode(d.vault_key), d.tenancy, d.node.id, d.node.posture))
+        .collect()
+}
+
+/// The one drive a recovery from `line` records for `name`, reached through `label`.
+fn the_lines_drive(line: &str, name: &str, label: &str) -> Vec<(String, String, String, Option<String>)> {
+    let key = kotton_wire::line::InstanceLine::parse(line).expect("the card's line parses").key;
+    vec![(hex::encode(key), name.to_string(), label.to_string(), Some("blind-storage".to_string()))]
 }
 
 /// **A device that already acts as someone else recovers in one command, and the
@@ -442,6 +475,7 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
                     "a refused recovery left the claim's session cached at {}",
                     cached.display()
                 );
+                assert!(drives_of(&fresh.daemon, &name).await.is_empty(), "a refused recovery recorded a drive");
             }
 
             // The recovery: the name unless given, the words, the line, then a
@@ -467,6 +501,56 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
                 String::from_utf8_lossy(&out.stdout).contains(&format!("you are acting as: {name}")),
                 "the recovered identity is not the one this machine acts as.\n{}",
                 said(&out)
+            );
+            // The vault the line names is the person's drive here, as `id recover`
+            // added it.
+            assert_eq!(
+                drives_of(&fresh.daemon, name).await,
+                the_lines_drive(line, name, "vault"),
+                "`kotton id recover` did not record the line's vault as the person's drive"
+            );
+        }
+        Door::AddedByHand => {
+            assert!(someone_else.is_none(), "the by-hand door is driven on a device that held no identity");
+            // The claim, then the line's vault by address and key alone.
+            let login = new_cli.run_on_a_terminal(&["id", "login", &name], &[&phrase]);
+            assert!(login.ok, "`kotton id login` refused the phrase on a fresh device.\n{login}");
+            let parsed = kotton_wire::line::InstanceLine::parse(&line).expect("the card's line parses");
+            let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&parsed.key)
+                .expect("the line's key")
+                .to_string();
+            let key = hex::encode(parsed.key);
+            // Under a label of the person's own, `home`, so the drive below is seen to
+            // be reached through this row and not through one the recovery added.
+            let out = new_cli.run(&["peer", "--user", &name, "add", "home", &did, &key, &parsed.hint]);
+            assert!(out.status.success(), "`kotton peer add` of the line's vault failed.\n{}", said(&out));
+            assert!(drives_of(&fresh.daemon, &name).await.is_empty(), "a plain `peer add` recorded a drive");
+            // The claim goes; the name's node rows stay (`id recover`'s module doc), so
+            // the vault is paired here, by hand, when the recovery begins.
+            let out = new_cli.run(&["id", "rm", &name, "--force"]);
+            assert!(out.status.success(), "`kotton id rm --force` failed.\n{}", said(&out));
+
+            // Words that prove nothing: refused, and the vault is still no drive.
+            let refused = new_cli.run_on_a_terminal(
+                &["id", "recover", &name],
+                &[NOT_THEIRS, &line, NEW_PASSPHRASE, NEW_PASSPHRASE],
+            );
+            assert!(!refused.ok, "words that prove nothing recovered.\n{refused}");
+            assert!(
+                drives_of(&fresh.daemon, &name).await.is_empty(),
+                "a refused recovery made the vault a drive.\n{refused}"
+            );
+
+            // The words: the vault, already paired, becomes the person's drive.
+            let recovered = new_cli.run_on_a_terminal(
+                &["id", "recover", &name],
+                &[&phrase, &line, NEW_PASSPHRASE, NEW_PASSPHRASE],
+            );
+            assert!(recovered.ok, "recovery failed on a device that added its vault by hand.\n{recovered}");
+            assert_eq!(
+                drives_of(&fresh.daemon, &name).await,
+                the_lines_drive(&line, &name, "home"),
+                "`kotton id recover` did not record the vault paired by hand as the person's drive"
             );
         }
         Door::Repl => {
@@ -656,6 +740,8 @@ async fn recover_where_it_is_held(env: &TestEnv, cli: &Cli, name: &str, phrase: 
     );
     assert!(cached.exists(), "a refused recovery took back the session '{name}' had before it.\n{refused}");
     reads_the_note("after the refusal").await;
+    // The vault this device enrolled is its drive, and a refusal leaves it so.
+    assert_eq!(drives_of(&env.daemon, name).await, the_lines_drive(line, name, "vault"), "after the refusal");
 
     // The words.
     let recovered = cli.run_on_a_terminal(&["id", "recover"], &[name, phrase, line, NEW_PASSPHRASE, NEW_PASSPHRASE]);
@@ -681,6 +767,7 @@ async fn recover_where_it_is_held(env: &TestEnv, cli: &Cli, name: &str, phrase: 
         "the recovery paired the vault a second time.\n{}",
         said(&out)
     );
+    assert_eq!(drives_of(&env.daemon, name).await, the_lines_drive(line, name, "vault"), "after the recovery");
     reads_the_note("after the recovery").await;
 }
 
