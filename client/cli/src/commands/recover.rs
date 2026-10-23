@@ -11,16 +11,19 @@
 //!    phrase is proved against the name's log there, and a phrase that does not prove is
 //!    refused with nothing opened or written. On a machine that holds nothing under it,
 //!    the name is claimed locked: a name with no key.
-//! 2. **Add the vault the line names** as the node to dial, and as a drive (`PeerAdd`
-//!    with `drive`), unless a node with its key is paired for the name already at the
-//!    line's address. The line is a vault's, and says so, so the device records the
-//!    vault's tenancy as the person's drive — the same record enrolling the vault
-//!    writes (`kotton_peer::daemon::drives`) — and the row's posture `blind-storage`.
-//!    A node paired for the key already is recorded as a drive too: one an earlier
-//!    `peer add` wrote knows no posture, and nothing else would say it is a vault.
+//! 2. **Add the vault the line names** as the node to dial (`PeerAdd`), unless a node
+//!    with its key is paired for the name already.
 //! 3. **Recover** (`Recover`): fetch the log and the sealed copy from the vault, prove
 //!    the phrase against the log, rotate onto this machine's key, seal under the
 //!    passphrase, and be admitted at the vault.
+//!    Then, the phrase proved, **record the vault as the person's drive** (`PeerAdd`
+//!    with `drive`): the line is a vault's, and says so, so the device records the
+//!    vault's key and the person's tenancy — the record enrolling the vault writes
+//!    (`kotton_peer::daemon::drives`) — and the row's posture `blind-storage`. A node
+//!    paired for the key already is recorded too: one an earlier `peer add` wrote
+//!    knows no posture, and nothing else would say it is a vault. Only after the
+//!    proof, so words that prove nothing make no node a drive and there is no drive
+//!    to take back.
 //! 4. **Make the name the identity this machine acts as.**
 //! 5. **Sync** with each node the name has here, as `kotton sync` does.
 //!
@@ -40,14 +43,14 @@
 //! back; a node this command added for the line's key is, and nothing else was written
 //! but the one thing below.
 //!
-//! **One thing a refusal does not put back: a vault paired here already.** When the
-//! name already pairs a node with the line's key, step 2 writes it again as `peer add`
-//! does, as a drive: the row keeps its relay route, its posture becomes
-//! `blind-storage` with the drive recorded, and its addresses become the line's one
-//! and its pairing time now. A refusal leaves it so, though the old addresses could
-//! be written back. The line is the vault's, at the address the person wrote down for
-//! it, so the node is left a drive at the address the person says the vault is at,
-//! and a refusal of the words says nothing against either.
+//! **One thing a refusal does not put back: a vault paired here at another address.**
+//! When the name already pairs a node with the line's key, at an address other than
+//! the line's, step 2 re-addresses it as `peer add` does: the row keeps its posture
+//! and relay route, and its addresses become the line's one and its pairing time now.
+//! A refusal leaves it so, though the old addresses could be written back. The line
+//! is the address the person wrote down for the vault, so the node is left at the
+//! address the person says the vault is at, and a refusal of the words says nothing
+//! against it. A refusal leaves no drive recorded that was not recorded before.
 //!
 //! The name is asked for rather than read from the vault: the vault keeps a copy under
 //! the name and serves it only to a dial that names it and proves the phrase, so there
@@ -220,27 +223,28 @@ async fn recover_here(client: &mut KottonClient, a: &Answers) -> io::Result<u32>
         .await
         .map_err(|e| refused(e.to_string()))?;
 
-    // 2. The vault the line names, as the node to dial and as the person's drive.
+    // 2. The vault the line names, as the node to dial. Not yet as a drive: that
+    // is said only once the phrase has proved (3b), so words that prove nothing
+    // make nothing a drive.
     let nodes = client.list_nodes(name).await?;
-    let added = match nodes.iter().find(|n| n.public_key == a.vault.key) {
-        // Paired already: at the line's address, or at another, which the line
-        // says it has left. A refusal below leaves it at the line's (the module
-        // doc says why). Either way it is recorded as a drive, which it may not
-        // have been if an earlier `peer add` wrote it.
+    let key_hex = hex::encode(a.vault.key);
+    let (label, added) = match nodes.iter().find(|n| n.public_key == a.vault.key) {
+        Some(n) if n.addresses.first() == Some(&a.vault.addr) => (n.id.clone(), None),
+        // Paired already under another address: the line says where it is now. A
+        // refusal below leaves it there (the module doc says why).
         Some(n) => {
-            let (id, key_hex) = (n.id.clone(), hex::encode(a.vault.key));
-            if let Err(e) = client.peer_add_drive(name, &id, &a.vault.did, &key_hex, a.vault.addr).await {
+            let id = n.id.clone();
+            if let Err(e) = client.peer_add(name, &id, &a.vault.did, &key_hex, a.vault.addr).await {
                 return Err(refused(take_back(client, name, None, !held_before, e.to_string()).await));
             }
-            None
+            (id, None)
         }
         None => {
             let label = label_for(&nodes, &a.vault);
-            let key_hex = hex::encode(a.vault.key);
-            if let Err(e) = client.peer_add_drive(name, &label, &a.vault.did, &key_hex, a.vault.addr).await {
+            if let Err(e) = client.peer_add(name, &label, &a.vault.did, &key_hex, a.vault.addr).await {
                 return Err(refused(take_back(client, name, None, !held_before, e.to_string()).await));
             }
-            Some(label)
+            (label.clone(), Some(label))
         }
     };
 
@@ -248,6 +252,16 @@ async fn recover_here(client: &mut KottonClient, a: &Answers) -> io::Result<u32>
     if let Err(e) = client.recover(name, &a.phrase, &a.passphrase).await {
         return Err(refused(take_back(client, name, added.as_deref(), !held_before, e.to_string()).await));
     }
+
+    // 3b. The phrase proved, so the vault the person's line names is their drive:
+    // recorded as one (`kotton_peer::daemon::drives`), the record enrolling the
+    // vault writes, on the node added or already paired — one an earlier `peer
+    // add` wrote knows no posture, and nothing else would say it is a vault.
+    let undrived = client
+        .peer_add_drive(name, &label, &a.vault.did, &key_hex, a.vault.addr)
+        .await
+        .err()
+        .map(|e| e.to_string());
 
     // 4. The identity this machine acts as.
     kotton::active_identity::set(name)?;
@@ -260,6 +274,13 @@ async fn recover_here(client: &mut KottonClient, a: &Answers) -> io::Result<u32>
             Ok(r) => pulled += r.pulled,
             Err(e) => unsynced.push(format!("{}: {e}", node.id)),
         }
+    }
+    if let Some(why) = undrived {
+        return Err(io::Error::other(format!(
+            "'{name}' is yours on this machine again, but the vault at '{label}' was not recorded as your \
+             drive ({why}), so this machine does not yet treat it as one; do not recover again{}",
+            if unsynced.is_empty() { String::new() } else { format!(", and the sync did not finish ({})", unsynced.join("; ")) }
+        )));
     }
     if !unsynced.is_empty() {
         return Err(io::Error::other(format!(

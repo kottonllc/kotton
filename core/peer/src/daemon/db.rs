@@ -44,23 +44,34 @@ pub async fn insert_paired_node(
     now: i64,
     posture: Option<&str>,
 ) -> io::Result<()> {
+    // One transaction: the row, and the drive it may be reached for
+    // (`super::drives`), are written together or not at all, so no reader sees
+    // a row that says one thing and a record that says another.
+    let mut tx = db.begin().await.map_err(db_err)?;
     // `INSERT OR REPLACE` rewrites the whole row, and callers that only know an
-    // address (`peer_add`) know no posture. A posture already projected for this
-    // device is kept rather than erased: erasing it turned a blind node into a
-    // node of unknown posture, which no delivery would then reach.
-    // The same goes for the relay the peer was last known to reserve at.
-    let existing: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT posture, relay_url FROM paired_nodes WHERE device_did = ? OR id = ? LIMIT 1",
+    // address (`peer_add`) know no posture. A posture already projected for
+    // this node is kept rather than erased: erasing it turned a blind node into
+    // a node of unknown posture, which no delivery would then reach. **Only for
+    // the same key**: a posture is a fact about the node that holds the key, so
+    // a different key under an old label, or under an old DID, takes none from
+    // the row it replaces — a vault's label re-used for another node must not
+    // make that node a vault. The relay the peer was last known to reserve at
+    // is kept as before, from whichever row matched.
+    let existing: Option<(Vec<u8>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT public_key, posture, relay_url FROM paired_nodes WHERE device_did = ? OR id = ? \
+         ORDER BY (public_key = ?) DESC LIMIT 1",
     )
     .bind(device_did)
     .bind(id)
-    .fetch_optional(db.as_ref())
+    .bind(public_key)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
-    let (existing_posture, existing_relay) = existing.unwrap_or((None, None));
+    let (existing_key, existing_posture, existing_relay) = existing.unwrap_or((Vec::new(), None, None));
     let posture: Option<String> = match posture {
         Some(p) => Some(p.to_string()),
-        None => existing_posture,
+        None if existing_key.as_slice() == public_key => existing_posture,
+        None => None,
     };
     sqlx::query(
         "INSERT OR REPLACE INTO paired_nodes \
@@ -75,7 +86,7 @@ pub async fn insert_paired_node(
     .bind(now)
     .bind(posture)
     .bind(existing_relay)
-    .execute(db.as_ref())
+    .execute(&mut *tx)
     .await
     .map_err(db_err)?;
     // A drive is reached through the node that carries the vault's key
@@ -86,17 +97,17 @@ pub async fn insert_paired_node(
         .bind(id)
         .bind(user_id)
         .bind(public_key)
-        .execute(db.as_ref())
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
     sqlx::query("DELETE FROM drives WHERE user_id = ? AND node_id = ? AND vault_key != ?")
-        .bind(id)
         .bind(user_id)
+        .bind(id)
         .bind(public_key)
-        .execute(db.as_ref())
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
-    Ok(())
+    tx.commit().await.map_err(db_err)
 }
 
 /// Refresh a paired node's `addresses` to a single freshly-observed,

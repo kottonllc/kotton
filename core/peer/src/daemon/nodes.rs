@@ -67,6 +67,17 @@ pub fn json_err(e: serde_json::Error) -> io::Error {
 /// the row's posture `blind-storage`, through the one writer enrolment uses
 /// ([`super::drives::record`]). Without it nothing is recorded but the row:
 /// an address and a key say nothing of what a node keeps.
+///
+/// **What bounds `drive`.** `PeerAdd` is a local verb (`ConnTrustOrigin::Local`),
+/// sent on this device's own socket under the person's session, and the same
+/// call without `drive` already gives the key a device's standing here
+/// (`peer_standing` answers `Paired`, which serves the person's files and
+/// sealed objects). Being a drive adds that the device pushes to it what it
+/// pushes to a vault — the phrase-sealed recovery copy, the doors it holds for
+/// the person, introductions of their other devices — each of which a vault
+/// holds without the keys to open, and narrows the node's posture to
+/// `blind-storage`. The CLI says it of one key only: the one the recovery line
+/// names, after the phrase has proved.
 // Allowed: the request's fields plus the two stores it writes, one argument each.
 #[allow(clippy::too_many_arguments)]
 pub async fn peer_add(

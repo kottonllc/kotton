@@ -38,8 +38,13 @@
 //!
 //! All arrive at the same row: the vault key is the key of the node row the
 //! drive is reached through, the tenancy is the person's name, and the row's
-//! posture is set to `blind-storage` in the same transaction, so the row and
-//! the record never disagree about the node.
+//! posture is set to `blind-storage` in the same transaction as the record.
+//! What holds them together after that is what may rewrite the row:
+//! re-adding the same key keeps the posture, a different key under the label
+//! takes neither the posture nor the drive, and removing the row removes the
+//! record — each in one transaction ([`super::db`]). A caller that writes an
+//! explicit posture over a drive's row (no caller does) would make them
+//! disagree, and the record, not the posture, is what readers believe.
 //!
 //! **Who reads it.** [`list`] and [`is_drive`] answer *which nodes are drives*
 //! for every caller — introducing and withdrawing a device at the person's
@@ -50,10 +55,12 @@
 //! the person's own full device, and nothing in the row tells them apart.
 //!
 //! **What goes with the node.** Revoking the node a drive is reached through
-//! removes the record with it ([`super::db::delete_paired_node`]); a node row
-//! rewritten under another label for the same key keeps its drive, re-pointed;
-//! and a label taken by a different key does not inherit the drive the old key
-//! was ([`super::db::insert_paired_node`]).
+//! removes the record with it, in one transaction
+//! ([`super::db::delete_paired_node`]). [`super::db::insert_paired_node`]
+//! writes the row and re-points or drops its drive in one transaction: a node
+//! row rewritten under another label for the same key keeps its drive and its
+//! posture; a label taken by a different key inherits neither the drive nor
+//! the old row's posture.
 //!
 //! **What it composes into.** Nothing beyond what the node row already holds:
 //! the vault's key is on that row, and the tenancy is the person's own name on
@@ -250,8 +257,22 @@ mod tests {
         let drives = list(&db, "alice").await.unwrap();
         assert_eq!(drives.iter().map(|d| d.node.id.as_str()).collect::<Vec<_>>(), ["home-vault"]);
 
+        // The same key re-added by address alone keeps its posture; the row
+        // and the record still agree.
+        pair(&db, "home-vault", key(9), None).await;
+        let row = network_db::get_paired_node_by_id(&db, "alice", "home-vault").await.unwrap().unwrap();
+        assert_eq!(row.posture.as_deref(), Some("blind-storage"), "re-adding the vault's key dropped its posture");
+        assert!(is_drive(&db, "alice", "home-vault").await.unwrap());
+
+        // Another key under the vault's label is not the vault: no drive, and
+        // no posture taken from the row it replaced.
         pair(&db, "home-vault", key(4), None).await;
         assert!(list(&db, "alice").await.unwrap().is_empty(), "another key under the label is not the drive");
+        let row = network_db::get_paired_node_by_id(&db, "alice", "home-vault").await.unwrap().unwrap();
+        assert_eq!(row.public_key, key(4));
+        assert_eq!(row.posture, None, "another key under a vault's label took the vault's posture");
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap();
+        assert_eq!(left, 0, "a drive record outlived the key it named under that label");
 
         pair(&db, "vault", key(9), None).await;
         record(&db, "alice", &key(9)).await.unwrap();
