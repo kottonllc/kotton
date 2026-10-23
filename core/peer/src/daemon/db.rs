@@ -223,33 +223,6 @@ pub(crate) async fn delete_paired_node(
 
 
 
-/// Return `true` if the peer's raw Ed25519 public key is recorded in `paired_nodes` for `user_id`.
-///
-/// Used by `handle_peer_request` to enforce that a peer can only access data
-/// belonging to users on whose behalf it was actually paired.
-///
-/// Keyed on `public_key` (binary) rather than `device_did` because the TLS
-/// handshake presents the device's operational signing key, which is what the
-/// key names; a DID recorded beside it may name another.
-/// `user_id`'s paired nodes whose projected posture is `posture` (kebab-case,
-/// `Posture::as_str`). Rows written before posture was projected are not
-/// matched: a node whose posture is unknown is not assumed blind.
-pub async fn list_paired_nodes_with_posture(
-    db: &Arc<SqlitePool>,
-    user_id: &str,
-    posture: &str,
-) -> io::Result<Vec<PairedNode>> {
-    let all = list_paired_nodes(db, user_id).await?;
-    let rows = sqlx::query("SELECT id FROM paired_nodes WHERE user_id = ? AND posture = ?")
-        .bind(user_id)
-        .bind(posture)
-        .fetch_all(db.as_ref())
-        .await
-        .map_err(db_err)?;
-    let ids: std::collections::HashSet<String> = rows.into_iter().map(|r| r.get::<String, _>("id")).collect();
-    Ok(all.into_iter().filter(|n| ids.contains(&n.id)).collect())
-}
-
 /// The user a paired key belongs to, and its posture as text (`None` for rows
 /// written before posture was projected here). `device_did` is unique, so a key
 /// is paired to at most one user on this node.
@@ -265,6 +238,14 @@ pub async fn paired_node_for_pubkey(
     Ok(row.map(|r| (r.get::<String, _>("user_id"), r.get::<Option<String>, _>("posture"))))
 }
 
+/// Return `true` if the peer's raw Ed25519 public key is recorded in `paired_nodes` for `user_id`.
+///
+/// Used by `handle_peer_request` to enforce that a peer can only access data
+/// belonging to users on whose behalf it was actually paired.
+///
+/// Keyed on `public_key` (binary) rather than `device_did` because the TLS
+/// handshake presents the device's operational signing key, which is what the
+/// key names; a DID recorded beside it may name another.
 pub async fn is_pubkey_paired_to_user(
     db: &Arc<SqlitePool>,
     public_key: &[u8; 32],
