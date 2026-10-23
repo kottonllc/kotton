@@ -31,8 +31,8 @@
 #                                         systemd is not asked to start anything
 #
 # What SHA256SUMS proves is that these files are the ones the archive was packed with. It does
-# not prove who packed it: the checkout's install.sh checks the archive against the release's
-# signed sums before it is unpacked.
+# not prove who packed it: the distribution's install.sh (kottonllc/kotton-dist) checks the
+# archive against the release's signed sums before it is unpacked.
 set -eu
 
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -112,7 +112,7 @@ else
     refuse "neither sha256sum nor shasum is on this machine, so SHA256SUMS cannot be checked"
 fi
 
-# The command a line printed to run again names: the checkout's install.sh when that reached
+# The command a line printed to run again names: the distribution's install.sh when that reached
 # this, else this file, which stays where the person unpacked it. Either way with the
 # instances this install makes, when they are not both.
 again=${KOTTON_INSTALL_COMMAND:-}

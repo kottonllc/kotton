@@ -14,15 +14,30 @@
 //! It reads the commands, not the sentence beside them: whether a page's prose is true stays
 //! a reviewer's job.
 //!
-//! **And the scripts a page runs from a checkout.** The README installs a release with
-//! `git clone … https://github.com/kottonllc/kotton && sh kotton/install.sh`, so every
-//! `sh kotton/<path>` in a fenced block must name a file this tree has: a page that runs a
-//! script the checkout lacks fails at the reader's first line, exactly as a missing command
-//! does. A release tag is a commit on `main`, so a tree this gate passed is the tree the tag
-//! holds.
+//! **And the line that installs.** A person installs from the distribution,
+//! `kottonllc/kotton-dist`, which holds the release tags and the assets a person installs and
+//! fetches this repository's archives by its own lock. So the README's first line is
+//! [`INSTALL`], byte for byte the line the distribution's README carries, and the README is
+//! refused without it as a line of a fenced block: a page that clones this repository to
+//! install gets a tag the distribution does not have, or an installer that is not the one that
+//! runs. `kotton-dist/` is the distribution's tree, which this gate cannot read; the line is
+//! held here, and the distribution holds its own README to it.
+//!
+//! **And the scripts a page runs from a checkout of this tree.** Every `sh kotton/<path>` in a
+//! fenced block, `kotton/` being the directory a clone of this repository makes, must name a
+//! file this tree has: a page that runs a script the checkout lacks fails at the reader's first
+//! line, exactly as a missing command does. This tree holds no installer of its own, so a page
+//! still telling a reader to `sh kotton/install.sh` is refused here.
 
 /// The page every run reads, whatever else it is given.
 const README: &str = "README.md";
+
+/// The line that installs a release, as the distribution's README gives it and the README
+/// here must carry: clone the distribution at a release's tag, and run its `install.sh`.
+/// `kotton mint host` prints its first half and the same script, held to the README by the
+/// shell's own test.
+pub(crate) const INSTALL: &str =
+    "git clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton-dist && sh kotton-dist/install.sh";
 const CLI_REF: &str = "docs/cli/reference.md";
 
 /// Every `kotton …` invocation inside a fenced block, longest-first against the real tree.
@@ -72,7 +87,7 @@ fn unknown_commands(text: &str, known: &[String]) -> Vec<String> {
 /// the `kotton/<path>` the page typed.
 ///
 /// `kotton/` is the directory `git clone https://github.com/kottonllc/kotton` makes, so the
-/// rest is a path in this tree. An archive's directory (`kotton-relay-<rev>-…/install.sh`) is
+/// rest is a path in this tree. `kotton-dist/` is the distribution's, and is not read. An archive's directory (`kotton-relay-<rev>-…/install.sh`) is
 /// not the checkout and is not read.
 fn missing_scripts(text: &str, exists: impl Fn(&str) -> bool) -> Vec<String> {
     let mut out = Vec::new();
@@ -94,6 +109,21 @@ fn missing_scripts(text: &str, exists: impl Fn(&str) -> bool) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether `text` gives [`INSTALL`] as a whole line of a fenced block.
+fn carries_install(text: &str) -> bool {
+    let mut fenced = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced && line.trim() == INSTALL {
+            return true;
+        }
+    }
+    false
 }
 
 /// The command tree, as the generated reference lists it.
@@ -144,6 +174,13 @@ fn findings(
                  no page."
             ));
         }
+        if rel == README && !carries_install(doc) {
+            bad.push(format!(
+                "{rel} does not give `{INSTALL}` as a line of a fenced block. A person \
+                 installs from the distribution, whose README gives that line: a page that \
+                 installs otherwise names a tag or an installer the distribution does not have."
+            ));
+        }
         for script in missing_scripts(doc, &exists) {
             bad.push(format!(
                 "{rel} tells a reader to run `sh {script}`, and a checkout has no such file: \
@@ -171,7 +208,7 @@ pub fn run(args: &[String]) {
     if bad.is_empty() {
         let names: Vec<&str> = pages.iter().map(|(rel, _)| rel.as_str()).collect();
         println!(
-            "claim-check: OK — every `kotton` command {} gives is one the binary has, and every script it runs from a checkout is in this tree.",
+            "claim-check: OK — {README} installs from the distribution, every `kotton` command {} gives is one the binary has, and every script it runs from a checkout of this tree is in it.",
             names.join(", ")
         );
         return;
@@ -204,7 +241,7 @@ mod tests {
         let known: Vec<String> =
             ["kotton", "kotton id create"].iter().map(|s| s.to_string()).collect();
         let pages = vec![
-            ("README.md".to_string(), Some("```sh\nkotton id create alice\nkotton frobnicate\n```\n".to_string())),
+            ("README.md".to_string(), Some(format!("```sh\n{INSTALL}\nkotton id create alice\nkotton frobnicate\n```\n"))),
             ("docs/gone.md".to_string(), None),
         ];
         let bad = findings(&pages, &known, |_| true);
@@ -251,20 +288,51 @@ mod tests {
         assert!(unknown_commands(doc, &known).is_empty());
     }
 
-    /// **A script a page runs from the clone is one the tree has**, and the install the README
-    /// gives, the root `install.sh`, is one of them; an archive's own `install.sh` is not the
-    /// checkout's and is not read.
+    /// **A script a page runs from a clone of this tree is one the tree has**, and this tree
+    /// holds no installer: `sh kotton/install.sh`, the line the README gave before the
+    /// distribution held it, is refused. The distribution's `kotton-dist/install.sh` and an
+    /// archive's own `install.sh` are not this checkout's and are not read.
     #[test]
     fn a_script_run_from_the_checkout_is_one_the_tree_has() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let exists = |p: &str| root.join(p).is_file();
-        let doc = "```sh\ngit clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton && sh kotton/install.sh\n\
-                   KOTTON_OPERATOR_KEY=<key> sh kotton/install.sh --kind relay\n\
-                   sh kotton-relay-<rev>-linux-x86_64/install.sh\n```\n";
-        assert!(missing_scripts(doc, exists).is_empty(), "{:?}", missing_scripts(doc, exists));
+        let doc = format!(
+            "```sh\n{INSTALL}\n\
+             KOTTON_OPERATOR_KEY_RELAY=<relay key> KOTTON_OPERATOR_KEY_VAULT=<vault key> sh kotton-dist/install.sh --kind host\n\
+             sh kotton-relay-<rev>-linux-x86_64/install.sh\n\
+             sh kotton/infra/release/clean-machine.sh\n```\n"
+        );
+        assert!(missing_scripts(&doc, exists).is_empty(), "{:?}", missing_scripts(&doc, exists));
+        let old = "```sh\ngit clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton && sh kotton/install.sh\n```\n";
+        assert_eq!(missing_scripts(old, exists), vec!["kotton/install.sh"]);
         let planted = "```sh\ngit clone https://github.com/kottonllc/kotton && sh kotton/get-kotton.sh\n```\n";
         assert_eq!(missing_scripts(planted, exists), vec!["kotton/get-kotton.sh"]);
         assert!(missing_scripts("Then sh kotton/get-kotton.sh, in prose.\n", exists).is_empty());
+    }
+
+    /// **The README installs from the distribution**: a README without [`INSTALL`] as a line of
+    /// a fenced block is refused, whether it gives this repository's old line, gives
+    /// the distribution's line in prose only, or gives a near miss; and only the README is held
+    /// to it, since another page gated beside it need not install anything.
+    #[test]
+    fn the_readme_installs_from_the_distribution() {
+        let known: Vec<String> = vec!["kotton".to_string()];
+        let readme = |text: String| vec![(README.to_string(), Some(text))];
+        assert!(findings(&readme(format!("```sh\n{INSTALL}\n```\n")), &known, |_| true).is_empty());
+        for wrong in [
+            "```sh\ngit clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton && sh kotton/install.sh\n```\n".to_string(),
+            format!("Run {INSTALL} at a terminal.\n"),
+            format!("```sh\n{}\n```\n", INSTALL.replace("--depth 1 ", "")),
+        ] {
+            let bad = findings(&readme(wrong.clone()), &known, |_| true);
+            assert_eq!(bad.len(), 1, "{wrong}: {bad:?}");
+            assert!(bad[0].starts_with("README.md does not give `git clone"), "{bad:?}");
+        }
+        let other = vec![
+            (README.to_string(), Some(format!("```sh\n{INSTALL}\n```\n"))),
+            ("docs/a.md".to_string(), Some("```sh\nkotton --help\n```\n".to_string())),
+        ];
+        assert!(findings(&other, &known, |_| true).is_empty());
     }
 
     #[test]

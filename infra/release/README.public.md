@@ -7,7 +7,7 @@ of your own, and recovery. Each comment says what happens when you press Enter.
 # Downloads the release archive, checks its signature against the key in the
 # checkout, installs it under ~/.local/opt/kotton and links kotton and
 # kotton-start into ~/.local/bin. No account.
-git clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton && sh kotton/install.sh
+git clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton-dist && sh kotton-dist/install.sh
 
 # Starts the daemon in this terminal.
 # Leave it running (Ctrl-C stops it) and type the rest in another terminal.
@@ -44,7 +44,7 @@ kotton id add-recovery alice
 kotton id recover
 ```
 
-`<tag>` is the release's tag on the [releases page](https://github.com/kottonllc/kotton/releases).
+`<tag>` is the release's tag on the [releases page](https://github.com/kottonllc/kotton-dist/releases).
 Every command takes `--help`.
 
 ## The host's side
@@ -82,11 +82,14 @@ It makes two operator keys in your own store, one for the relay and one for the 
 prints the two lines the host runs, with the public half of each key in the second:
 
 ```text
-git clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton
-KOTTON_OPERATOR_KEY_RELAY=<relay key> KOTTON_OPERATOR_KEY_VAULT=<vault key> sh kotton/install.sh --kind host
+git clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton-dist
+KOTTON_OPERATOR_KEY_RELAY=<relay key> KOTTON_OPERATOR_KEY_VAULT=<vault key> sh kotton-dist/install.sh --kind host
 ```
 
-`<tag>` is the newest release your desktop knows, and the keys are 64 hex characters each. The
+`<tag>` is a release's tag on the distribution's
+[releases page](https://github.com/kottonllc/kotton-dist/releases), as in the first of the nine
+lines: a desktop built here knows this repository's tags, not the distribution's, so it
+prints `<tag>` and says where to find one. The keys are 64 hex characters each. The
 secrets never leave your store. A relay and a vault are two instances under two keys even on
 one machine, so one key never stands for both. With no `--rule` the relay admits *only my
 devices*; `--rule people_i_invite` or `--rule anyone` gives it another first rule.
@@ -102,7 +105,8 @@ one question (below). The first clones the release at its tag; the second checks
 it:
 
 - **What the script checks.** It reads the release from the checkout, then checks the release's
-  `SHA256SUMS.sig` against [`infra/release/allowed_signers`](infra/release/allowed_signers)
+  `SHA256SUMS.sig` against the distribution's
+  [`infra/release/allowed_signers`](https://github.com/kottonllc/kotton-dist/blob/main/infra/release/allowed_signers)
   as the tag holds it, and the host's archive against the signed `SHA256SUMS`, before anything
   is unpacked: **a
   release with no `SHA256SUMS.sig` has not been signed, and nothing from it runs**.
@@ -132,9 +136,9 @@ The line confers nothing: it says where each instance is and which key to expect
 
 **Behind NAT or on a floating IP**, devices dial an address the ssh session did not arrive at.
 Give that one in front of the second line —
-`KOTTON_PUBLIC_ADDR=<ip> KOTTON_OPERATOR_KEY_RELAY=<relay key> KOTTON_OPERATOR_KEY_VAULT=<vault key> sh kotton/install.sh --kind host`
+`KOTTON_PUBLIC_ADDR=<ip> KOTTON_OPERATOR_KEY_RELAY=<relay key> KOTTON_OPERATOR_KEY_VAULT=<vault key> sh kotton-dist/install.sh --kind host`
 — and it asks nothing. With no terminal to ask at, it writes no address, says so, and prints the
-command that writes it, `KOTTON_PUBLIC_ADDR=<ip> sh kotton/install.sh --kind host`, run from
+command that writes it, `KOTTON_PUBLIC_ADDR=<ip> sh kotton-dist/install.sh --kind host`, run from
 the same directory. That fills the empty address in both settings and restarts both, and each
 instance prints its line again at that start, to the journal:
 
@@ -171,17 +175,20 @@ the relay's port is reachable, not merely bound.
 
 ## What this is
 
-This repository is Kotton's release and nothing else: `kuserd`, the daemon that holds your
-identity, your keys and your sealed tree; `kdeviced`, the device daemon that starts one `kuserd`
-for each person on the machine; `kquicd`, which accepts your other devices' connections, and
-`ksyncd`, which tells the daemon when your tree has changed; the `kotton` command line; the vault,
-`kvaultd`, and the relay, `infra/relay`; and `kotton-start` and the `install.sh` the first line
-runs. It builds from this tree alone, with the toolchain `rust-toolchain.toml` names, and
-`install.sh` unpacks nothing until the release's signature checks against
-`infra/release/allowed_signers`. Your things are yours because only you hold the keys they are
-sealed under: you can put them on any host, and grant them to whom you choose.
+This repository is Kotton's system: `kuserd`, the daemon that holds your identity, your keys
+and your sealed tree; `kdeviced`, the device daemon that starts one `kuserd` for each person on
+the machine; `kquicd`, which accepts your other devices' connections, and `ksyncd`, which tells
+the daemon when your tree has changed; the `kotton` command line; the vault, `kvaultd`, and the
+relay, `infra/relay`; and `kotton-start`. It builds from this tree alone, with the toolchain
+`rust-toolchain.toml` names, and each of its `v*` tags attaches the archives built from that
+commit to its own release. A person installs from the distribution,
+[kottonllc/kotton-dist](https://github.com/kottonllc/kotton-dist): its release lock names which
+of those archives go together, its `install.sh` is the one the first line runs, and that script
+unpacks nothing until the release's signature checks against the key the distribution's tag
+holds. Your things are yours because only you hold the keys they are sealed under: you can put
+them on any host, and grant them to whom you choose.
 
 ## Pre-alpha
 
 Kotton is **pre-alpha**. Put nothing in it you cannot afford to lose. A release is a signed tag
-of this repository; until the first one exists, the first line has nothing to download.
+of the distribution; until the first one exists, the first line has nothing to download.

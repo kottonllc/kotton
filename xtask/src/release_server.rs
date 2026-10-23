@@ -3792,8 +3792,9 @@ mod tests {
     /// **The host's archive is named `kotton-host-<rev>-linux-<arch>` and holds both servers'
     /// trees whole** — both binaries, both units, both env files, each tree's own installer and
     /// sums — beside the host's installer and sums over every file. Laid out by the release's
-    /// own code, so the layout the test holds is the one packed, and the root `install.sh`'s
-    /// `--kind host` downloads it by that name (`release::tests`).
+    /// own code, so the layout the test holds is the one packed. The distribution's `install.sh`
+    /// (`kottonllc/kotton-dist`) downloads it by that name with `--kind host`; this repository
+    /// holds no test of that script.
     #[test]
     fn the_host_archive_is_named_for_the_host_and_holds_both_servers_trees_whole() {
         assert_eq!(archive_name(HOST, "8415af154deb", true, TARGET), "kotton-host-8415af154deb-linux-x86_64");
@@ -3838,7 +3839,7 @@ mod tests {
     /// **The host's installer runs each tree's own, with a key each, asks the address once,
     /// and ends on one line naming both** — read back as `kotton enrol` reads it. From an ssh
     /// session with no terminal its line to run again names the host's installer once, or the
-    /// checkout's `install.sh --kind host` when that reached it; given the address, both lines
+    /// distribution's `install.sh --kind host` when that reached it; given the address, both lines
     /// name it; at a terminal the relay's install asks and the vault's does not, and a yes is
     /// written into both. One key for two instances, a key cut short, a key for an instance it
     /// does not make, an unknown kind and a file not the one summed are each refused before
@@ -3889,13 +3890,14 @@ mod tests {
             holds_its_install_but_static(&root, &server, &system);
         }
 
-        // Reached through the checkout's install.sh: its line to run again is that script's.
-        let out = run(&dir.path().join("checkout"), &[keys[0], keys[1], ("KOTTON_INSTALL_COMMAND", "sh kotton/install.sh --kind host")]);
+        // Reached through the distribution's install.sh, run from its checkout as the README
+        // says: its line to run again is that script's.
+        let out = run(&dir.path().join("checkout"), &[keys[0], keys[1], ("KOTTON_INSTALL_COMMAND", "sh kotton-dist/install.sh --kind host")]);
         assert!(out.status.success(), "{}", release::said(&out));
         let said = String::from_utf8_lossy(&out.stdout).to_string();
-        let again = "KOTTON_PUBLIC_ADDR=198.51.100.7 sh kotton/install.sh --kind host";
+        let again = "KOTTON_PUBLIC_ADDR=198.51.100.7 sh kotton-dist/install.sh --kind host";
         assert_eq!(said.lines().filter(|l| l.trim() == again).count(), 1, "{said}");
-        assert!(!said.contains(&tree.display().to_string()), "a path the checkout's script removes: {said}");
+        assert!(!said.contains(&tree.display().to_string()), "a path the distribution's script removes: {said}");
 
         // Given the address: both lines name it, and nothing is asked.
         let given = dir.path().join("given");
@@ -3985,8 +3987,9 @@ mod tests {
         }
     }
 
-    /// **A server's installer reached through the checkout's `install.sh` says to run that
-    /// script again, which stays, and not its own path, which the checkout's script removes.**
+    /// **A server's installer reached through the distribution's `install.sh` says to run that
+    /// script again, which stays in the distribution's checkout, and not its own path, which
+    /// the distribution's script removes.**
     /// Told how it was reached by `KOTTON_INSTALL_COMMAND`; run alone, it names its own path as
     /// it always did.
     #[cfg(unix)]
@@ -3998,7 +4001,7 @@ mod tests {
         lay_out(&workspace(), &RELAY, &bins[0].1, "abc\n", "stand-in notices\n", &tree).unwrap();
         let system = StandInSystem::new(&dir.path().join("system"), 0, None).unwrap();
         for (how, again) in [
-            (Some("sh kotton/install.sh --kind relay"), "KOTTON_PUBLIC_ADDR=198.51.100.7 sh kotton/install.sh --kind relay".to_string()),
+            (Some("sh kotton-dist/install.sh --kind relay"), "KOTTON_PUBLIC_ADDR=198.51.100.7 sh kotton-dist/install.sh --kind relay".to_string()),
             (None, format!("KOTTON_PUBLIC_ADDR=198.51.100.7 sh '{}'", tree.join("install.sh").display())),
         ] {
             let mut c = system.command("/bin/sh");

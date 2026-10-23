@@ -51,7 +51,7 @@
 #
 #   KOTTON_INSTALL_COMMAND    the command that reached this installer, which the line printed
 #                             with no terminal names in place of this file's own path: the
-#                             checkout's install.sh sets it to itself and its --kind, since it
+#                             distribution's install.sh sets it to itself and its --kind, since it
 #                             removes the directory this file is unpacked in when it exits, and
 #                             the host's install.sh to itself, since it installs both instances
 #   KOTTON_ADDR_ASKED         a file the host's install.sh names, into which this writes the
