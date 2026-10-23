@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! What a vault answers on the authenticated peer transport (RFC-0084 V1).
 //!
-//! Thirteen verbs, and nothing else exists here to be reached. Nine are a
+//! Seventeen verbs, and nothing else exists here to be reached. Eleven are a
 //! tenant's: sealed read, write and list; the recovery packet, kept and
-//! returned; where this vault reserves; how much it keeps; and the doors held
-//! for a person and what arrived at them. Four are the landlord's — an invite,
-//! the tenants, one pool's quota, dropping one pool — and are reached by one
+//! returned; where this vault reserves; how much it keeps; the doors held
+//! for a person, what arrived at them, and what the vault carries for them;
+//! and the person's other devices, admitted and withdrawn under their
+//! identity's signature (`TenantDevice`, `crate::devices`). Six are the
+//! landlord's — an invite and its digits, the tenants, one pool's quota,
+//! dropping one pool, and where the vault stands — and are reached by one
 //! connection only, the one whose key is the vault's operator credential
 //! (`crate::operator`). The full daemon admits a blind node to a wider set and
 //! relies on the node's having no key to make the rest fail. This file is the
@@ -16,7 +19,7 @@
 //! the decision.** A standing is what `peer_standing` says the connection is to
 //! the pool it names; the table says what each standing may say:
 //!
-//! | standing | the ten a tenant says | the landlord's six |
+//! | standing | the eleven a tenant says | the landlord's six |
 //! |---|---|---|
 //! | `Paired` — a tenant's device, to its own pool | yes | no |
 //! | `Claim` — a phrase-only device | `RecoveryFetch` of its own identity only | no |
@@ -63,9 +66,9 @@ pub struct PeerContext {
 }
 
 /// The verbs a vault answers, as the sentence a refused caller reads.
-const VERBS: &str = "ReadSealed, WriteSealed, ListSealed, RecoveryFetch, RecoveryStore, NodeRelay, VaultCapacity, HoldDoors, TakeDeliveries, CarryFrame, and to its operator DeviceInvite, InviteDigits, Tenants, SetQuota, DropTenant, StandAt";
+const VERBS: &str = "ReadSealed, WriteSealed, ListSealed, RecoveryFetch, RecoveryStore, NodeRelay, VaultCapacity, HoldDoors, TakeDeliveries, CarryFrame, TenantDevice, and to its operator DeviceInvite, InviteDigits, Tenants, SetQuota, DropTenant, StandAt";
 
-/// The ten verbs a tenant's device says to its own pool.
+/// The eleven verbs a tenant's device says to its own pool.
 pub fn is_tenant_verb(request: &UserRequest) -> bool {
     matches!(
         request,
@@ -79,6 +82,7 @@ pub fn is_tenant_verb(request: &UserRequest) -> bool {
             | UserRequest::HoldDoors { .. }
             | UserRequest::TakeDeliveries { .. }
             | UserRequest::CarryFrame { .. }
+            | UserRequest::TenantDevice { .. }
     )
 }
 
@@ -135,6 +139,7 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: UserReque
         | UserRequest::HoldDoors { user_id, .. }
         | UserRequest::TakeDeliveries { user_id, .. }
         | UserRequest::CarryFrame { user_id, .. }
+        | UserRequest::TenantDevice { user_id, .. }
         | UserRequest::DeviceInvite { user_id, .. }
         | UserRequest::InviteDigits { user_id }
         | UserRequest::SetQuota { user_id, .. }
@@ -345,6 +350,12 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: UserReque
         UserRequest::CarryFrame { user_id, messages, drop } => {
             Ok(crate::carry::carry(&ctx.db, &user_id, messages, drop).await)
         }
+        // Another device of the person's, admitted or withdrawn under their
+        // identity's signature (`devices`). Paired standing was checked above;
+        // the signature is what decides.
+        UserRequest::TenantDevice { user_id, change, signature } => {
+            Ok(crate::devices::change(ctx, &user_id, change, &signature).await)
+        }
         // Every other variant was refused above: the landlord's six went to
         // `control::landlord` and nothing else reaches this far, which
         // `each_standing_reaches_exactly_its_row_of_the_table` holds. Should
@@ -500,6 +511,16 @@ mod tests {
                 user_id: u(),
                 messages: vec![],
                 drop: vec![],
+            },
+            UserRequest::TenantDevice {
+                user_id: u(),
+                change: kotton_wire::ipc::TenantDeviceChange {
+                    act: kotton_wire::ipc::TenantDeviceAct::Admit,
+                    device_did: "did:key:z".into(),
+                    public_key: [0; 32],
+                    said_at: 0,
+                },
+                signature: vec![],
             },
         ]
     }

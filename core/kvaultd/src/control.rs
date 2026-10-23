@@ -346,7 +346,8 @@ fn keeps_someone_as(peer: &PeerContext, user_id: &str) -> io::Result<bool> {
 /// digits, the transfer, `PairingComplete` on their own device — and was
 /// refused only at the vault's save, a different identity under a kept name,
 /// with nothing said to the landlord who minted it. The tenant's own devices
-/// need no invite: the vault admits whoever proves their chain.
+/// need no invite: the device that admitted each introduces it to the vault
+/// under the identity's signature (`crate::devices`).
 ///
 /// **An invite needs a relay to meet at, and a vault that has none says so.**
 /// This is the only place a vault checks: `handle_device_invite` takes the URL

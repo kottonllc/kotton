@@ -30,7 +30,7 @@ const NOTE: &[u8] = b"the whole of what alice owns";
 pub(crate) struct RunningVault {
     _base: tempfile::TempDir,
     base_path: std::path::PathBuf,
-    ipc: crate::common::Door,
+    pub(crate) ipc: crate::common::Door,
     op_port: u16,
     pub(crate) vault: Arc<Vault>,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
@@ -83,12 +83,12 @@ async fn spawn_vault_at(relay_addr: &str, label: &str) -> RunningVault {
 
 pub(crate) struct RunningDevice {
     _base: tempfile::TempDir,
-    ipc: crate::common::Door,
-    secrets: Arc<dyn SecretsStore + Send + Sync>,
+    pub(crate) ipc: crate::common::Door,
+    pub(crate) secrets: Arc<dyn SecretsStore + Send + Sync>,
     _task: tokio::task::JoinHandle<std::io::Result<()>>,
 }
 
-async fn spawn_device(label: &str) -> RunningDevice {
+pub(crate) async fn spawn_device(label: &str) -> RunningDevice {
     let base = tempfile::tempdir().expect("device base");
     let ipc = unique_ipc();
     let secrets: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
@@ -117,8 +117,8 @@ async fn spawn_device(label: &str) -> RunningDevice {
 /// A vault as a device sees it once enrolled: its DID and signing key.
 pub(crate) struct VaultIdentity {
     pub(crate) did: String,
-    pubkey_hex: String,
-    op_addr: SocketAddr,
+    pub(crate) pubkey_hex: String,
+    pub(crate) op_addr: SocketAddr,
 }
 
 /// Enrol `vault` blind for `user` from the device behind `client`, then tell
@@ -134,7 +134,7 @@ pub(crate) async fn enrol_vault(
 }
 
 /// [`enrol_vault`] from a device that announces itself as `device_name`.
-async fn enrol_vault_from(
+pub(crate) async fn enrol_vault_from(
     client: kotton::KottonClient,
     device_name: &str,
     vault: &RunningVault,
@@ -851,7 +851,7 @@ async fn ask_the_vault_as(device: &RunningDevice, vault: &VaultIdentity, request
 
 /// [`ask_the_vault_as`], with a refusal at the handshake or on the stream as
 /// an `Err` rather than a panic — for a device the vault no longer admits.
-async fn try_ask_the_vault_as(
+pub(crate) async fn try_ask_the_vault_as(
     device: &RunningDevice,
     vault: &VaultIdentity,
     request: Vec<u8>,
@@ -3898,7 +3898,7 @@ async fn a_desktop_that_drops_a_pool_keeps_its_standing_across_the_rebuild_the_d
 
 /// What the landlord's door answers for `VaultRequest::Tenants` — what
 /// `kvaultd tenants` prints.
-async fn tenants_at_the_door(ipc: &IpcEndpoint) -> Vec<kotton_wire::ipc::VaultTenant> {
+pub(crate) async fn tenants_at_the_door(ipc: &IpcEndpoint) -> Vec<kotton_wire::ipc::VaultTenant> {
     let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(ipc.clone())
         .await
         .expect("the landlord reaches the door");

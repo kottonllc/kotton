@@ -193,6 +193,26 @@ pub(crate) async fn delete_paired_node(
 
 
 
+/// Delete `user_id`'s row for the device whose operational key is `public_key`.
+/// Returns `true` if a row was removed.
+///
+/// Keyed by the key and the user, never by a name: a vault withdraws a device
+/// a tenant's identity named by its key (`kvaultd::devices`), and a name is the
+/// tenant's to choose and another tenant's to repeat.
+pub async fn delete_paired_key(
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    public_key: &[u8; 32],
+) -> io::Result<bool> {
+    let result = sqlx::query("DELETE FROM paired_nodes WHERE user_id = ? AND public_key = ?")
+        .bind(user_id)
+        .bind(public_key.as_slice())
+        .execute(db.as_ref())
+        .await
+        .map_err(db_err)?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Return `true` if the peer's raw Ed25519 public key is recorded in `paired_nodes` for `user_id`.
 ///
 /// Used by `handle_peer_request` to enforce that a peer can only access data

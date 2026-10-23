@@ -713,3 +713,99 @@ pub struct AppGrantEnvelope {
     /// The grants it carries, rendered.
     pub grants_display: Vec<String>,
 }
+
+// -- A drive accepts the person's other devices ------------------------------
+
+/// What a tenant's change to the devices its drive admits does: admit a key, or
+/// withdraw one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantDeviceAct {
+    /// The drive admits this key for the tenant from now on, as it admits the
+    /// device that enrolled it.
+    Admit,
+    /// The drive admits this key no longer.
+    Withdraw,
+}
+
+/// One device of a person, introduced to or withdrawn from a drive that keeps
+/// for them, as the identity signs it ([`crate::ipc::UserRequest::TenantDevice`]).
+///
+/// A vault holds no data keys, so it cannot read the person's member list to
+/// learn their devices; it admits the device that enrolled it and, before this,
+/// nobody else. The device that admitted a new device of the person's says
+/// this to each drive the person has, signed under the identity, and the drive
+/// checks the signature against the identity's current key in the key log it
+/// keeps: pairing introduces a device's key to the set a drive admits.
+///
+/// `said_at` orders a tenant's changes to one key: a drive refuses a change no
+/// later than the last it took for that key, so an admit replayed after a
+/// withdrawal does not put a revoked device back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantDeviceChange {
+    pub act: TenantDeviceAct,
+    /// The device's `did:key`, which names [`Self::public_key`].
+    pub device_did: String,
+    /// The device's operational key, the one its TLS handshake presents.
+    pub public_key: [u8; 32],
+    /// Unix seconds when the identity said it.
+    pub said_at: u64,
+}
+
+impl TenantDeviceChange {
+    /// The domain the identity's signature is made in, so a signature over these
+    /// bytes is never one over anything else the identity signs.
+    pub const DOMAIN: &'static [u8] = b"kotton/tenant-device/v1\0";
+
+    /// The bytes the identity signs for this change to `user_id`'s devices at a
+    /// drive: the domain, then each field length-prefixed, so no two changes
+    /// share an encoding.
+    pub fn signed_bytes(&self, user_id: &str) -> Vec<u8> {
+        fn field(out: &mut Vec<u8>, bytes: &[u8]) {
+            out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            out.extend_from_slice(bytes);
+        }
+        let mut out = Self::DOMAIN.to_vec();
+        field(&mut out, user_id.as_bytes());
+        field(
+            &mut out,
+            match self.act {
+                TenantDeviceAct::Admit => b"admit",
+                TenantDeviceAct::Withdraw => b"withdraw",
+            },
+        );
+        field(&mut out, self.device_did.as_bytes());
+        field(&mut out, &self.public_key);
+        field(&mut out, &self.said_at.to_be_bytes());
+        out
+    }
+}
+
+#[cfg(test)]
+mod tenant_device_tests {
+    use super::*;
+
+    fn a_change(act: TenantDeviceAct) -> TenantDeviceChange {
+        TenantDeviceChange { act, device_did: "did:key:zB".into(), public_key: [7; 32], said_at: 42 }
+    }
+
+    /// Every field the identity signs changes the bytes, the tenant included,
+    /// so a signature for one change, one key or one person is no other's.
+    #[test]
+    fn every_field_of_a_tenant_device_change_is_signed() {
+        let base = a_change(TenantDeviceAct::Admit);
+        let bytes = base.signed_bytes("alice");
+        assert!(bytes.starts_with(TenantDeviceChange::DOMAIN));
+        assert_ne!(bytes, base.signed_bytes("bob"), "the tenant");
+        assert_ne!(bytes, a_change(TenantDeviceAct::Withdraw).signed_bytes("alice"), "the act");
+        let mut other = base.clone();
+        other.public_key = [8; 32];
+        assert_ne!(bytes, other.signed_bytes("alice"), "the key");
+        let mut other = base.clone();
+        other.device_did = "did:key:zC".into();
+        assert_ne!(bytes, other.signed_bytes("alice"), "the did");
+        let mut other = base.clone();
+        other.said_at = 43;
+        assert_ne!(bytes, other.signed_bytes("alice"), "the time");
+    }
+}
