@@ -1,0 +1,15 @@
+# Files a test compares byte for byte, or reads as bytes, are checked out exactly as they are
+# committed, on every platform. Git for Windows converts text to CRLF on checkout by default,
+# and a fixture that comes back with different line endings fails a test for a reason that
+# is not the code's.
+
+# The record converter's fixtures: imported, exported and compared byte for byte, line
+# endings and missing final newlines included (client/record-file/tests/round_trip.rs).
+client/record-file/tests/fixtures/** -text
+
+# The calendar fixture: read as bytes by the import tests and the ICS reader's.
+tests/fixtures/calendar/** -text
+
+# The pinned wire surfaces: `cargo xtask wire-check` compares them byte for byte with what
+# the enums generate, which is LF.
+core/wire/*-surface.txt text eol=lf
