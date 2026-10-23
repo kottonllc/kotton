@@ -762,6 +762,11 @@ impl TenantDeviceChange {
     /// The bytes the identity signs for this change to `user_id`'s devices at a
     /// drive: the domain, then each field length-prefixed, so no two changes
     /// share an encoding.
+    ///
+    /// **They bind the tenant and not the drive, on purpose.** One signature
+    /// is sent to every drive the person has, as one entry in the identity's
+    /// key log would be read by every drive, so a change any drive holds is
+    /// one the person said to all of them.
     pub fn signed_bytes(&self, user_id: &str) -> Vec<u8> {
         fn field(out: &mut Vec<u8>, bytes: &[u8]) {
             out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());

@@ -152,16 +152,82 @@ async fn apply(
     user_id: &str,
     change: &TenantDeviceChange,
 ) -> io::Result<Result<(), String>> {
-    let mut conn = db.acquire().await.map_err(io::Error::other)?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await.map_err(io::Error::other)?;
-    let outcome = apply_in(&mut conn, user_id, change).await;
-    let end = if matches!(outcome, Ok(Ok(()))) { "COMMIT" } else { "ROLLBACK" };
-    sqlx::query(end).execute(&mut *conn).await.map_err(io::Error::other)?;
+    apply_ending(db, paired_keys, user_id, change, None).await
+}
+
+/// [`apply`], with the statement that ends the transaction given: `None` is
+/// `COMMIT` on a change taken and `ROLLBACK` otherwise. A test gives one that
+/// fails, to hold that a failed end returns no locked connection to the pool.
+async fn apply_ending(
+    db: &Arc<SqlitePool>,
+    paired_keys: &Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+    user_id: &str,
+    change: &TenantDeviceChange,
+    end: Option<&str>,
+) -> io::Result<Result<(), String>> {
+    let mut tx = Immediate::begin(db).await?;
+    let outcome = apply_in(tx.conn(), user_id, change).await;
+    let taken = matches!(outcome, Ok(Ok(())));
+    tx.end(end.unwrap_or(if taken { "COMMIT" } else { "ROLLBACK" })).await?;
     let outcome = outcome?;
     if outcome.is_ok() && change.act == TenantDeviceAct::Admit {
         paired_keys.write().unwrap().insert(change.public_key);
     }
     Ok(outcome)
+}
+
+/// A pooled connection inside a raw `BEGIN IMMEDIATE`, which never goes back
+/// to the pool still inside it.
+///
+/// `BEGIN IMMEDIATE` takes SQLite's write lock at the start, which is the
+/// isolation a read-then-write needs. sqlx's own transactions cannot say
+/// `IMMEDIATE` (0.8.0), and a raw `BEGIN` is invisible to the pool: a
+/// connection dropped mid-transaction — a cancelled request, or an end
+/// statement that failed — would return to the pool holding the lock, and
+/// every write on the vault, for every tenant, would wait out the busy timeout
+/// and fail until that connection was reaped. So a transaction that is not
+/// ended cleanly takes its connection out of the pool (`detach`) and closes
+/// it, which rolls the transaction back in SQLite, and the pool opens a fresh
+/// one.
+struct Immediate {
+    conn: Option<sqlx::pool::PoolConnection<sqlx::Sqlite>>,
+}
+
+impl Immediate {
+    async fn begin(db: &SqlitePool) -> io::Result<Self> {
+        let mut conn = db.acquire().await.map_err(io::Error::other)?;
+        // A failed BEGIN opened nothing; the connection goes back as it came.
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await.map_err(io::Error::other)?;
+        Ok(Self { conn: Some(conn) })
+    }
+
+    fn conn(&mut self) -> &mut sqlx::SqliteConnection {
+        self.conn.as_mut().expect("a transaction holds its connection until it ends")
+    }
+
+    /// End with `statement`. On success the connection goes back to the pool,
+    /// outside any transaction; on failure it is closed and never returns.
+    async fn end(mut self, statement: &str) -> io::Result<()> {
+        let mut conn = self.conn.take().expect("a transaction ends once");
+        match sqlx::query(statement).execute(&mut *conn).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                use sqlx::Connection as _;
+                let _ = conn.detach().close().await;
+                Err(io::Error::other(e))
+            }
+        }
+    }
+}
+
+impl Drop for Immediate {
+    fn drop(&mut self) {
+        // Not ended: dropped on a cancellation or an early return. Closing the
+        // detached connection rolls back whatever it held.
+        if let Some(conn) = self.conn.take() {
+            drop(conn.detach());
+        }
+    }
 }
 
 async fn apply_in(
@@ -184,6 +250,10 @@ async fn apply_in(
             if last.is_some_and(|l| said_at <= l) {
                 return Ok(Err("an admit no later than a change already taken for this key".to_string()));
             }
+            // Not redundant with the handshake deciding the operator first:
+            // that covers the key while it is the operator's. A tenant's row
+            // for it would outlive the credential, and once the landlord
+            // revoked the key it would stand as that tenant's device.
             let operator = sqlx::query("SELECT 1 FROM operator_key WHERE public_key = ? LIMIT 1")
                 .bind(key)
                 .fetch_optional(&mut *conn)
@@ -408,5 +478,97 @@ mod tests {
         let why = accept(base.path(), &db, &keys, "alice", &change, &signed(&identity, &change)).await.unwrap_err();
         assert!(why.contains("the key is this vault's operator credential"), "{why}");
         assert!(!paired(&db, "alice", &operator).await);
+    }
+
+    /// A file-backed pool as the vault's own: WAL, several connections, and
+    /// a short busy timeout so a held write lock shows as a timed-out write.
+    async fn a_file_pool(dir: &std::path::Path) -> (Arc<SqlitePool>, std::time::Duration) {
+        use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+        let busy = std::time::Duration::from_millis(1500);
+        let opts = SqliteConnectOptions::new()
+            .filename(dir.join("agent.db"))
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(busy);
+        let db = Arc::new(SqlitePoolOptions::new().max_connections(4).connect_with(opts).await.unwrap());
+        kotton_device::db::MIGRATOR.run(db.as_ref()).await.expect("migrations");
+        init(&db).await.expect("tenant_device_changes");
+        (db, busy)
+    }
+
+    /// Two writes through the pool, each on its own connection and each
+    /// inside the busy timeout, then read back committed from outside it. A
+    /// connection the pool was handed back inside a transaction fails this:
+    /// either it is one of the two and its write never commits, or it holds
+    /// the lock and the other's write times out.
+    async fn the_pool_writes(dir: &std::path::Path, db: &Arc<SqlitePool>, busy: std::time::Duration, tag: u8) {
+        use sqlx::Connection as _;
+        let mut first = db.acquire().await.unwrap();
+        let mut second = db.acquire().await.unwrap();
+        for (i, conn) in [&mut first, &mut second].into_iter().enumerate() {
+            let write = sqlx::query("INSERT INTO tenant_device_changes (user_id, public_key, said_at) VALUES ('bob', ?, 1)")
+                .bind(vec![tag, i as u8])
+                .execute(&mut **conn);
+            tokio::time::timeout(busy, write)
+                .await
+                .unwrap_or_else(|_| panic!("a write through the pool waited out the busy timeout"))
+                .unwrap_or_else(|e| panic!("a write through the pool failed: {e}"));
+        }
+        drop((first, second));
+        let mut outside = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(dir.join("agent.db")),
+        )
+        .await
+        .unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenant_device_changes WHERE user_id = 'bob' AND hex(public_key) LIKE ?")
+            .bind(format!("{tag:02X}%"))
+            .fetch_one(&mut outside)
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "a write through the pool did not commit");
+    }
+
+    /// **An end statement that fails returns no locked connection to the
+    /// pool.** The change is not taken; an unrelated write through the pool
+    /// then completes inside the busy timeout; and the next change, for
+    /// another key, is taken.
+    #[tokio::test]
+    async fn a_failed_end_leaves_the_pool_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, busy) = a_file_pool(dir.path()).await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        let key = [8u8; 32];
+        let failed = apply_ending(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 1), Some("COMMIT TO NOWHERE")).await;
+        assert!(failed.is_err(), "an end that failed was reported taken: {failed:?}");
+        assert!(!paired(&db, "alice", &key).await, "a change whose end failed was kept");
+
+        the_pool_writes(dir.path(), &db, busy, 1).await;
+        let other = [9u8; 32];
+        tokio::time::timeout(busy, apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, other, 2)))
+            .await
+            .expect("the next change waited out the busy timeout")
+            .unwrap()
+            .unwrap();
+        assert!(paired(&db, "alice", &other).await);
+    }
+
+    /// **A transaction dropped before it ends — a cancelled request — returns
+    /// no locked connection to the pool**, and what it wrote is not kept.
+    #[tokio::test]
+    async fn a_transaction_dropped_unended_leaves_the_pool_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, busy) = a_file_pool(dir.path()).await;
+        let mut tx = Immediate::begin(&db).await.unwrap();
+        sqlx::query("INSERT INTO tenant_device_changes (user_id, public_key, said_at) VALUES ('carol', x'00', 1)")
+            .execute(tx.conn())
+            .await
+            .unwrap();
+        drop(tx);
+        the_pool_writes(dir.path(), &db, busy, 2).await;
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenant_device_changes WHERE user_id = 'carol'")
+            .fetch_one(db.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(kept, 0, "a dropped transaction's write was kept");
     }
 }
