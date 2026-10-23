@@ -3987,6 +3987,8 @@ mod tests {
     }
 
     /// [`holds_its_install`] but the binary's being static, which a stand-in script is not.
+    /// Read only by the unix-only host installer test.
+    #[cfg(unix)]
     fn holds_its_install_but_static(root: &Path, server: &Server, system: &StandInSystem) {
         match holds_its_install(root, server, system) {
             Ok(()) => panic!("a stand-in script passed as static"),

@@ -8,8 +8,8 @@
 //! tests of the library crates it names. Everything that build compiles is held there, by
 //! rustc, and better than a grep can: an alias, a re-export, a macro, the mirror case.
 //!
-//! The job also compiles every test target of the workspace (`cargo test --workspace
-//! --no-run`), the daemons', xtask's and the integration suite's included. So this stays
+//! The job also compiles every target of the workspace (`cargo build --workspace
+//! --all-targets`), the daemons' tests, xtask's and the integration suite's included. So this stays
 //! for two things only:
 //!
 //! - **`infra/`.** The relay is a workspace of its own, released for Linux alone, and is

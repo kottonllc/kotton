@@ -12,7 +12,7 @@
 # pinned to a full commit. Windows on arm64 is not built and not promised.
 #
 # What it holds, by test rather than by crate:
-#   - Every test target in the workspace compiles, under `-D warnings` (`--no-run`): the
+#   - Every target in the workspace compiles, under `-D warnings` (`--all-targets`): the
 #     integration suite's, xtask's and the daemons' included, run or not.
 #   - Every test of the 35 library crates named in their step below runs.
 #   - The daemons' own unit tests run (`--lib --bins` on kuserd, kdeviced, kvaultd, kquicd and
@@ -96,11 +96,15 @@ jobs:
       - name: cargo build --workspace --locked
         run: cargo build --workspace --locked
 
+      # `--all-targets`: every test, bench and example target, the ones no step below runs
+      # included. `--keep-going`: every crate that fails to compile is named, not the first.
       - name: Every test target compiles
-        run: cargo test --workspace --locked --no-run
+        run: cargo build --workspace --all-targets --locked --keep-going
 
-      # `--no-fail-fast`: every test binary runs and every red is named, not the first.
+      # `--no-fail-fast`: every test binary runs and every red is named, not the first. Runs
+      # after a red in the step above too, as the next one does, so one run names every red.
       - name: The crate tests that need no daemon
+        if: ${{ !cancelled() }}
         run: >-
           cargo test --locked --no-fail-fast
           -p kotton-common -p kotton-sys -p kotton-pair -p kotton-proc -p kotton-infer
@@ -112,7 +116,6 @@ jobs:
           -p kotton-operator -p kotton-shell -p kotton-cli -p kotton-record-file
           -p kotton-pty-drive
 
-      # Runs after a red in the step above too, so one run names every red.
       - name: The daemons' own unit tests, in-process
         if: ${{ !cancelled() }}
         run: >-
