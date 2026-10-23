@@ -18,11 +18,15 @@
 //! came of each is returned ([`Told`]). At a ceremony's end a drive that was
 //! not told is logged and the device is refused there; at revoke the person is
 //! told by name which drives still admit the device ([`revoke`]). Nothing
-//! tells a drive again later yet. Which nodes are drives is the posture the
-//! enrolment recorded for them (`blind-storage`).
+//! tells a drive again later yet.
+//!
+//! **Which nodes are drives** is the drive record this device keeps
+//! ([`kotton_peer::daemon::drives`]: the vault's key and the tenancy, and the
+//! node it is reached through), which enrolling a vault and `kotton id recover`
+//! both write — never a paired node row's posture, which a vault added by
+//! address does not carry.
 
 use crate::DeviceRuntime;
-use kotton_schemas::membership::Posture;
 use kotton_wire::ipc::{TenantDeviceAct, TenantDeviceChange, UserRequest, UserResponse};
 use kotton_wire::peer::PairedNode;
 use sqlx::SqlitePool;
@@ -63,11 +67,6 @@ pub async fn withdraw(runtime: &DeviceRuntime, db: &Arc<SqlitePool>, user_id: &s
     tell(runtime, db, user_id, device, TenantDeviceAct::Withdraw).await
 }
 
-/// Whether `node` is one of the person's drives rather than a device of theirs.
-pub fn is_drive(node: &PairedNode) -> bool {
-    node.posture.as_deref() == Some(Posture::BlindStorage.as_str())
-}
-
 /// The identity's signing key, when this device holds it.
 fn identity_key(runtime: &DeviceRuntime, user_id: &str) -> Option<ed25519_dalek::SigningKey> {
     kotton_peer::daemon::nodes::load_signing_key(user_id, runtime.secrets()).ok()
@@ -93,9 +92,10 @@ pub fn signed_change(
     Some((change, signature))
 }
 
-/// `user_id`'s drives other than `device` itself.
+/// The nodes `user_id`'s drives are reached through, other than `device`
+/// itself, as the drive record names them.
 async fn drives_of(db: &Arc<SqlitePool>, user_id: &str, device: &PairedNode) -> std::io::Result<Vec<PairedNode>> {
-    let drives = kotton_peer::daemon::db::list_paired_nodes_with_posture(db, user_id, Posture::BlindStorage.as_str()).await?;
+    let drives = kotton_peer::daemon::drives::nodes(db, user_id).await?;
     Ok(drives.into_iter().filter(|d| d.public_key != device.public_key).collect())
 }
 
@@ -175,7 +175,8 @@ pub async fn revoke(
     // Read before the row goes: the withdrawal names the device's key.
     let node = kotton_peer::daemon::db::get_paired_node_by_id(db, &user_id, &node_id).await?;
     let mut missed: Vec<(String, String)> = Vec::new();
-    if let Some(node) = node.as_ref().filter(|n| !is_drive(n)) {
+    let is_drive = kotton_peer::daemon::drives::is_drive(db, &user_id, &node_id).await?;
+    if let Some(node) = node.as_ref().filter(|_| !is_drive) {
         let drives = drives_of(db, &user_id, node).await?;
         if !drives.is_empty() && identity_key(runtime, &user_id).is_none() {
             let names: Vec<String> = drives.iter().map(|d| d.id.clone()).collect();

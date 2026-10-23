@@ -878,6 +878,12 @@ pub enum UserRequest {
         peer_pubkey_hex: String,
         /// QUIC listener address of the peer.
         peer_addr: std::net::SocketAddr,
+        /// The node is a vault the person keeps a drive on: record the drive
+        /// (`kotton_peer::daemon::drives`), and the row's posture
+        /// `blind-storage`. `kotton id recover` says it of the vault its line
+        /// names; absent, nothing but the row is recorded.
+        #[serde(default)]
+        drive: bool,
     },
 
     /// Return this daemon's stable device DID and ephemeral signing public key.

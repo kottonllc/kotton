@@ -1289,6 +1289,7 @@ pub(super) async fn handle_request(
             peer_did,
             peer_pubkey_hex,
             peer_addr,
+            drive,
         } => {
             kotton_peer::daemon::nodes::peer_add(
                 db,
@@ -1298,6 +1299,7 @@ pub(super) async fn handle_request(
                 peer_did,
                 peer_pubkey_hex,
                 peer_addr,
+                drive,
             )
             .await
         }

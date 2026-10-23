@@ -3,7 +3,9 @@
 //!
 //! Tables: `paired_nodes`, `ephemeral_sessions`, `sync_rules`, `mount_configs`,
 //! created by `migrations/0002_v0_3_network.sql`; and `operator_key`, by
-//! `migrations/0024_operator_key.sql`.
+//! `migrations/0024_operator_key.sql`. The `drives` table beside `paired_nodes`
+//! is [`super::drives`]'s, which says what a drive record is; the two functions
+//! here that write or remove a node row keep its drive with it.
 
 use kotton_wire::did::{Did, DidError};
 use kotton_wire::peer::{EphemeralSession, MountConfig, PairedNode, SyncRule};
@@ -76,6 +78,24 @@ pub async fn insert_paired_node(
     .execute(db.as_ref())
     .await
     .map_err(db_err)?;
+    // A drive is reached through the node that carries the vault's key
+    // (`super::drives`). The same key under another label keeps its drive,
+    // re-pointed at this row; another key under a drive's old label is not
+    // that drive, and the record that named the label goes.
+    sqlx::query("UPDATE drives SET node_id = ? WHERE user_id = ? AND vault_key = ?")
+        .bind(id)
+        .bind(user_id)
+        .bind(public_key)
+        .execute(db.as_ref())
+        .await
+        .map_err(db_err)?;
+    sqlx::query("DELETE FROM drives WHERE user_id = ? AND node_id = ? AND vault_key != ?")
+        .bind(id)
+        .bind(user_id)
+        .bind(public_key)
+        .execute(db.as_ref())
+        .await
+        .map_err(db_err)?;
     Ok(())
 }
 
@@ -176,18 +196,28 @@ pub async fn list_paired_nodes(
     Ok(nodes)
 }
 
-/// Delete a paired node. Returns `true` if a row was removed.
+/// Delete a paired node, and the drives reached through it
+/// ([`super::drives`]): a drive with no node to reach it through is not one
+/// this device has. Returns `true` if a node row was removed.
 pub(crate) async fn delete_paired_node(
     db: &Arc<SqlitePool>,
     user_id: &str,
     node_id: &str,
 ) -> io::Result<bool> {
+    let mut tx = db.begin().await.map_err(db_err)?;
+    sqlx::query("DELETE FROM drives WHERE user_id = ? AND node_id = ?")
+        .bind(user_id)
+        .bind(node_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
     let result = sqlx::query("DELETE FROM paired_nodes WHERE user_id = ? AND id = ?")
         .bind(user_id)
         .bind(node_id)
-        .execute(db.as_ref())
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
     Ok(result.rows_affected() > 0)
 }
 

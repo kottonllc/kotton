@@ -85,6 +85,9 @@ pub(crate) struct RunningDevice {
     _base: tempfile::TempDir,
     pub(crate) ipc: crate::common::Door,
     pub(crate) secrets: Arc<dyn SecretsStore + Send + Sync>,
+    /// The daemon itself, for what no request reads back — the drives it
+    /// records (`DeviceDaemon::drives`).
+    pub(crate) daemon: Arc<DeviceDaemon>,
     _task: tokio::task::JoinHandle<std::io::Result<()>>,
 }
 
@@ -104,12 +107,15 @@ pub(crate) async fn spawn_device(label: &str) -> RunningDevice {
     )
     .await
     .expect("device daemon");
-    let task = tokio::spawn(async move { Arc::new(daemon).run().await });
+    let daemon = Arc::new(daemon);
+    let running = Arc::clone(&daemon);
+    let task = tokio::spawn(async move { running.run().await });
     wait_for_daemon(&ipc, label).await;
     RunningDevice {
         _base: base,
         ipc,
         secrets,
+        daemon,
         _task: task,
     }
 }
@@ -247,8 +253,10 @@ pub(crate) async fn recover_from(
         .login_with_recovery_key(phrase, Some(user.to_string()), None)
         .await
         .expect("the phrase alone claims the identity on a cold device");
+    // As `kotton id recover` does: the vault the person's line names, added as
+    // the node to dial and recorded as their drive.
     client
-        .peer_add(user, label, &vault.did, &vault.pubkey_hex, vault.op_addr)
+        .peer_add_drive(user, label, &vault.did, &vault.pubkey_hex, vault.op_addr)
         .await
         .expect("tell the cold device where its vault is");
     let recovered_did = client
