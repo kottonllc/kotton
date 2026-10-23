@@ -50,6 +50,27 @@
 //!    ([`Confined`]'s `Drop`), in that order, after the job — whose last handle
 //!    closing kills anything still in it.
 //!
+//! # What the kernel checks at creation, and what after
+//!
+//! **At creation, the parent's token.** `CreateProcessW` opens and maps the image
+//! as the caller, so the container's SID needs no entry on the image for the
+//! child to be created, and a profile that grants nothing still starts.
+//! **After, the child's.** Once it runs, every object the child opens is checked
+//! against the container's token: a file whose DACL names neither its SID nor a
+//! package group (`ALL APPLICATION PACKAGES`) is `ERROR_ACCESS_DENIED`, its own
+//! image included.
+//!
+//! This file used to claim the first check was the second's: that `CreateProcessW`
+//! fails with `ERROR_ACCESS_DENIED` for a child with no grant on its image, the
+//! Windows form of Linux's refused `execve`. The first Windows gate ran it and the
+//! child started; the owner's run as a non-elevated user agreed, with the child's
+//! SID on no entry and no package group anywhere on the chain (#65). So the test
+//! that stands for "the container is attached" is what the kernel does enforce:
+//! the running child cannot read its own image or a file beside it, and can read
+//! the one file it is granted
+//! (`a_child_granted_nothing_can_read_neither_its_own_image_nor_a_file_beside_it`).
+//! An unconfined child would read both.
+//!
 //! # Why `confine` still refuses on Windows
 //!
 //! [`confine`] is handed a `tokio::process::Command` and returns before the
@@ -751,6 +772,22 @@ mod tests {
         use std::net::{TcpStream, UdpSocket};
         match op.split_once(':') {
             Some(("read", path)) => std::fs::read(path).map(|_| ()),
+            // `CreateFileW` for reading, then one `ReadFile`. A refusal is exactly
+            // `ERROR_ACCESS_DENIED`; any other failure exits as unclear with its
+            // code, so a missing file or a sharing violation is never read as one.
+            Some(("open-read", path)) => {
+                use std::io::Read;
+                const ERROR_ACCESS_DENIED: i32 = 5;
+                let exactly_denied = |e: io::Error| match e.raw_os_error() {
+                    Some(ERROR_ACCESS_DENIED) => io::Error::from(ErrorKind::PermissionDenied),
+                    code => std::process::exit(
+                        (EXIT_UNCLEAR | (code.unwrap_or(0xffff) as u32 & 0x0fff_ffff)) as i32,
+                    ),
+                };
+                let mut file = std::fs::File::open(path).map_err(exactly_denied)?;
+                let mut byte = [0u8; 1];
+                file.read(&mut byte).map(|_| ()).map_err(exactly_denied)
+            }
             Some(("write", path)) => std::fs::write(path, b"probe"),
             Some(("overwrite", path)) => {
                 use std::io::Write;
@@ -972,17 +1009,8 @@ mod tests {
         assert_eq!(probe(profile(), &format!("read:{}", sideways.display())), EXIT_REFUSED);
     }
 
-    // ── The refusals that happen before a spawn ──────────────────────────────
+    // ── A profile that grants nothing ────────────────────────────────────────
 
-    /// The Windows statement of `tests/sandbox.rs`'s
-    /// `a_profile_that_grants_nothing_cannot_even_start_the_program`. There,
-    /// `execve` is denied inside the forked child and the spawn returns
-    /// `PermissionDenied`. Here there is no child to deny it in: the kernel
-    /// checks the container's token against the image while creating the
-    /// process, and `CreateProcessW` itself fails with `ERROR_ACCESS_DENIED`,
-    /// which is `PermissionDenied`. Same assertion, one step earlier — and, as
-    /// there, the test that fails if the container was silently not attached,
-    /// since an unconfined child reads its own image without an entry.
     /// `icacls` of `path` and of each directory above it, so a failure says which
     /// entry let a container read what it was granted nothing on: an
     /// `ALL APPLICATION PACKAGES` (`S-1-15-2-1`) or `ALL RESTRICTED APPLICATION
@@ -996,22 +1024,42 @@ mod tests {
             .collect()
     }
 
+    /// What the kernel enforces on a child with no grant, once it runs (the module
+    /// doc's "What the kernel checks at creation, and what after", #65): it cannot
+    /// open its own image or a file the test wrote beside nothing it was granted,
+    /// each refused with exactly `ERROR_ACCESS_DENIED`; and the same profile with a
+    /// grant on that file reads it. An unconfined child reads both, so this is also
+    /// the test that fails if the container was silently not attached. It replaces
+    /// a claim the kernel does not make: that `CreateProcessW` refuses such a child.
     #[test]
-    fn a_profile_that_grants_nothing_cannot_even_start_the_program() {
-        let err = match spawn(&Profile::nothing("no-grants"), "pair") {
-            Ok(child) => panic!(
-                "a program with no grant on its own image was created (it exited {:?})\n\
-                 Its container is {}. The other tests of this binary run beside it and grant \
-                 their own containers this same image, so an entry for another SID below is \
-                 theirs. What grants it, read from the image and every directory above it:\n{}",
-                child.wait(),
+    fn a_child_granted_nothing_can_read_neither_its_own_image_nor_a_file_beside_it() {
+        let file = scratch("no-grants").join("file");
+        let image = test_binary();
+        for (what, path) in [("its own image", &image), ("a file the test wrote", &file)] {
+            let child = spawn(&Profile::nothing("no-grants"), &format!("open-read:{}", path.display()))
+                .expect("a child with no grant is created: the image is opened as the parent");
+            let code = child.wait().expect("the child can be waited on");
+            assert!(
+                code == EXIT_REFUSED,
+                "a child granted nothing opened {what} ({}) and was not refused with \
+                 ERROR_ACCESS_DENIED: it exited {code:#x} (0 is a read; {EXIT_UNCLEAR:#x} plus a \
+                 code is another OS error). Its container is {}. The other tests of this binary \
+                 run beside it and grant their own containers the image, so an entry for another \
+                 SID below is theirs. What grants it, from the path up:\n{}",
+                path.display(),
                 child.sid_string(),
-                acls_up_from(&test_binary())
-            ),
-            Err(e) => e,
-        };
-        assert_eq!(err.kind(), ErrorKind::PermissionDenied, "{err}");
+                acls_up_from(path)
+            );
+        }
+        let granted = Profile::nothing("no-grants").reading(&file);
+        assert_eq!(
+            probe(granted, &format!("open-read:{}", file.display())),
+            EXIT_ALLOWED,
+            "the same profile with a grant on the file does not read it"
+        );
     }
+
+    // ── The refusals that happen before a spawn ──────────────────────────────
 
     #[test]
     fn a_grant_on_a_path_that_does_not_exist_is_refused_before_the_spawn() {
