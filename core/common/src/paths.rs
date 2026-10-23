@@ -908,6 +908,7 @@ mod tests {
             ("core/kuserd/src/agent/unlock_tests.rs", "`booted` hands a daemon `kuserd.sock` under its tempdir base and never calls `run`, the one place the daemon listens: nothing binds the path"),
             ("core/kvaultd/src/instance.rs", "its vault tests' door is `control::tests::a_door`, a `tempdir_in(\"/tmp\")` the test owns, or `daemon_socket_path_in`, which asks `socket_path_fits`; its `tempdir()` is a root no socket joins"),
             ("tests/tests/suite/common/mod.rs", "`unique_ipc` is `door_in(temp_dir(), …)`, and `door_in` asks `socket_path_fits`: the rule's home in the suite"),
+            ("tests/tests/suite/kuid_surface.rs", "`boot_a_daemon_at` asks `door_in` for its socket, which asks `socket_path_fits`; its tempdirs are bases"),
             ("tests/tests/suite/two_node_transfer.rs", "the door is `kuserd_door_in` over an env naming the tempdir, which asks `socket_path_fits`"),
             ("xtask/src/release.rs", "the install test's door is `kuserd_door_in`, which asks `socket_path_fits`; the one `.sock\"` join is asserted not to be the door"),
             ("xtask/src/release_server.rs", "the vault's door is `daemon_socket_path_in` over its env file, which asks `socket_path_fits`; the `.sock\"` join is asserted not to be the door"),

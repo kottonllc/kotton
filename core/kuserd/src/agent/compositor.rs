@@ -636,8 +636,10 @@ impl DeviceDaemon {
     /// **`pub` for the same reason [`Self::end_the_occupant_world`] is.** This is
     /// what a boot does, and the only way to ask *which screen does this daemon
     /// open on* is to make it do it and read what the instance was handed —
-    /// nothing else in the process records it. No case in this repository's suite
-    /// calls it from outside the crate today (kottonllc/kotton#24).
+    /// nothing else in the process records it. The suite's
+    /// `a_second_boot_with_a_registered_identity_opens_the_lock_screen` calls it
+    /// with the daemon's own `"boot"` reason and no session, which is exactly the
+    /// call in `run`.
     pub async fn launch_designated_shell(
         self: &Arc<Self>,
         reason: &str,

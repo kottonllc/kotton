@@ -262,6 +262,624 @@ async fn with_nobody_resident_the_shell_is_looked_for_on_disk() {
 
 // ── An app may hold many surfaces (RFC-0087 stage 2) ─────────────────────────
 
+/// The system shell's manifest, as the daemon parses it.
+///
+/// The shell itself is not in this repository, so its manifest is held here as a
+/// fixture (`tests/fixtures/shell-manifest/manifest.toml`). It is the one input these
+/// cases take from the shell, and it is what `app_launch_system_shell` reads: a
+/// manifest the daemon stops accepting fails here.
+fn shell_manifest() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/shell-manifest/manifest.toml")
+}
+
+/// Stage a system shell the mock runner can be launched as, and return its base
+/// directory.
+///
+/// The wasm is a placeholder: the mock runner never loads a component, so what
+/// is under test here is the **daemon's** half of `create-surface` — minting,
+/// opening, the cap, and which surface each patch reaches. The guest half needs a
+/// real component in the real runner, neither of which this repository builds;
+/// mixing the two would mean a wasm build inside a test that is about a wire.
+fn stage_a_shell_for_the_mock() -> tempfile::TempDir {
+    use kotton_app::daemon::apps::system_shell_dir;
+    let manifest = shell_manifest();
+    let base = tempfile::tempdir().expect("tempdir");
+    let dir = system_shell_dir(base.path());
+    std::fs::create_dir_all(&dir).expect("stage dir");
+    std::fs::write(dir.join("app.wasm"), b"not a component").expect("stage wasm");
+    std::fs::copy(&manifest, dir.join("manifest.toml")).expect("stage manifest");
+    base
+}
+
+/// **An instance holds two surfaces, and each patch reaches its own.**
+///
+/// The whole of RFC-0087 stage 2's third clause, end to end on the daemon's
+/// side: the guest asks for a second surface over the runner's host-call wire,
+/// the *daemon* mints the handle and opens it, and the two patches the guest
+/// commits arrive at two different surfaces.
+///
+/// Under stage 1 this could not have been written. `RunnerOutput.patches` was a
+/// bare `Vec<Vec<u8>>` and the daemon routed every one of them to the
+/// instance's single surface through `AppHost::surface_of` — so two patches
+/// would both have landed on the first, and no assertion here could have told
+/// the difference.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn two_surfaces_of_one_instance_each_get_their_own_patch() {
+    use kotton_app::daemon::apps::app_launch_system_shell;
+
+    let base = stage_a_shell_for_the_mock();
+    // SAFETY: serialised by `#[serial]`; cleared before the assertions so a
+    // panic cannot leave the mode set for another test.
+    unsafe { std::env::set_var("MOCK_RUNNER_MODE", "two-surfaces") };
+
+    let host = crate::common::NullAppHost::default();
+    let live = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let resp = app_launch_system_shell(&host, base.path(), live, None, None, None, None).await;
+    unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
+    resp.expect("a guest asking for a second surface must still launch");
+
+    let opened = host.opened.lock().unwrap().clone();
+    assert_eq!(
+        opened.len(),
+        2,
+        "the launch surface and the one the guest asked for, got {opened:?}"
+    );
+    assert_eq!(
+        opened[0].1, opened[1].1,
+        "both surfaces belong to the same app; the host keeps that association \
+         and the compositor is never told it"
+    );
+    assert_ne!(
+        opened[0].0, opened[1].0,
+        "two surfaces are two handles — a second mint, not the same one twice"
+    );
+    // The designated app's launch surface is the screen's base; what it asked
+    // for afterwards is an ordinary window, framed and stacked like anyone
+    // else's.
+    assert_eq!(opened[0].2, kotton_wire::SurfaceRole::Background);
+    assert_eq!(opened[1].2, kotton_wire::SurfaceRole::Window);
+
+    let committed = host.committed.lock().unwrap().clone();
+    assert_eq!(committed.len(), 2, "one patch per surface, got {committed:?}");
+    assert_eq!(
+        committed[0].0, opened[0].0,
+        "the first patch went to the first surface"
+    );
+    assert_eq!(
+        committed[1].0, opened[1].0,
+        "the second patch went to the second surface"
+    );
+    assert_ne!(
+        committed[0].1, committed[1].1,
+        "the two patches differ, so this is two paintings and not one echoed twice"
+    );
+}
+
+/// **A guest cannot ask for surfaces without end.**
+///
+/// `create-surface` is unbounded reach otherwise, and the cap is the answer
+/// RFC-0087 asks for: *"the number is an implementation choice; its absence is
+/// not."* The mock asks 64 times and stops when it is told no; the host must
+/// have opened exactly the cap, counting the launch surface.
+///
+/// A resource bound, not an authority check — which is why the guest is told,
+/// and why the launch succeeds rather than the instance being dropped.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn an_instance_cannot_hold_more_surfaces_than_the_cap() {
+    use kotton_app::daemon::apps::app_launch_system_shell;
+
+    let base = stage_a_shell_for_the_mock();
+    // SAFETY: serialised by `#[serial]`; cleared before the assertions.
+    unsafe { std::env::set_var("MOCK_RUNNER_MODE", "surface-storm") };
+
+    let host = crate::common::NullAppHost::default();
+    let live = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let resp = app_launch_system_shell(&host, base.path(), live, None, None, None, None).await;
+    unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
+    resp.expect("a guest that asks past the cap is answered, not killed");
+
+    let opened = host.opened.lock().unwrap().len();
+    assert_eq!(
+        opened,
+        kotton_wire::MAX_SURFACES_PER_INSTANCE,
+        "the cap counts the launch surface, so a guest asking for 64 more gets \
+         {} in total",
+        kotton_wire::MAX_SURFACES_PER_INSTANCE
+    );
+}
+
+/// **A launch that fails takes every surface it opened back down.**
+///
+/// The instance asks for a second surface during `on-launch` and then fails its
+/// init. Two surfaces are open on the compositor by then — the one the daemon
+/// minted for the launch and the one the guest asked for — and a failed launch
+/// that closed only the first would leave a window on screen for a process that
+/// never ran, with nothing left able to name it.
+///
+/// This is the test the first version of stage 2 did not have. `spawn_and_present`
+/// closed the launch handle and nothing closed the rest, and it read as correct
+/// because `NullAppHost::surface_close` was an empty body: a host that forgets
+/// and a host that cleans up produced identical evidence. The obligation now
+/// rides the error type — `open_long_lived_runner` hands back what it left open
+/// — so there is one place that closes rather than four that each close what
+/// they happen to know about.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn a_launch_that_fails_closes_every_surface_it_opened() {
+    use kotton_app::daemon::apps::app_launch_system_shell;
+
+    let base = stage_a_shell_for_the_mock();
+    // SAFETY: serialised by `#[serial]`; cleared before the assertions so a
+    // panic cannot leave the mode set for another test.
+    unsafe { std::env::set_var("MOCK_RUNNER_MODE", "surface-then-fail") };
+
+    let host = crate::common::NullAppHost::default();
+    let live = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let resp = app_launch_system_shell(&host, base.path(), live.clone(), None, None, None, None).await;
+    unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
+    resp.expect_err("the mock failed its init, so the launch must fail");
+
+    let opened: Vec<_> = host
+        .opened
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(h, ..)| *h)
+        .collect();
+    assert_eq!(
+        opened.len(),
+        2,
+        "the launch surface and the one the guest asked for, got {opened:?}"
+    );
+
+    let closed = host.closed.lock().unwrap().clone();
+    for handle in &opened {
+        assert!(
+            closed.contains(handle),
+            "surface {handle} was opened and never closed; closed = {closed:?}"
+        );
+    }
+
+    // And nothing was left running to own them.
+    assert!(
+        live.lock().await.is_empty(),
+        "a failed launch must not leave an instance in the live map"
+    );
+}
+
+/// **The shape stage 3c gives the desktop**: a strip on each screen edge, a window, and the
+/// window given back.
+///
+/// RFC-0087 stage 3c on the daemon's side, end to end through the real runner wire. Three
+/// things are under test and each one was a gap before this stage:
+///
+/// 1. **A panel names an edge**, and the edge reaches the host. It is an *anchor*, not a
+///    position — the app says which side it belongs to and the host decides the span, the
+///    offset and the band it reserves — and it has to be said at all because a menubar and
+///    a dock are both full-width strips a few tens of pixels tall, so nothing about the two
+///    surfaces distinguishes them.
+/// 2. **`surface.close` does something.** It was a stub that logged and answered `ok`, so an
+///    app that gave a window back was still charged for it against the per-instance cap.
+///    Invisible while every app had one surface it never wanted to be rid of; the first
+///    thing the shell needed the day it grew a window per window.
+/// 3. **Giving the same surface back twice is refused**, because the second close names a
+///    surface the instance does not hold — which is the same audit the designation check is,
+///    at the process boundary the daemon does not take the runner's word across.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn the_desktop_opens_a_strip_on_each_edge_and_can_give_a_window_back() {
+    use kotton_app::daemon::apps::app_launch_system_shell;
+
+    let base = stage_a_shell_for_the_mock();
+    let host = crate::common::NullAppHost::default();
+
+    // SAFETY: serialised by `#[serial]`; cleared before the assertions so a panic cannot
+    // leave the mode set for another test.
+    unsafe { std::env::set_var("MOCK_RUNNER_MODE", "panels") };
+    let live = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let resp = app_launch_system_shell(&host, base.path(), live.clone(), None, None, None, None).await;
+    unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
+    resp.expect("the designated app opening its panels must launch");
+
+    let opened = host.opened.lock().unwrap().clone();
+    let roles: Vec<(kotton_wire::SurfaceRole, Option<kotton_wire::PanelEdge>)> =
+        opened.iter().map(|(_, _, role, edge, _)| (*role, *edge)).collect();
+    assert_eq!(
+        roles,
+        vec![
+            // The launch surface: the screen's base, hanging from no edge.
+            (kotton_wire::SurfaceRole::Background, None),
+            (
+                kotton_wire::SurfaceRole::Panel,
+                Some(kotton_wire::PanelEdge::Top)
+            ),
+            (
+                kotton_wire::SurfaceRole::Panel,
+                Some(kotton_wire::PanelEdge::Bottom)
+            ),
+            // And an ordinary window, which names no edge and could not.
+            (kotton_wire::SurfaceRole::Window, None),
+        ],
+        "the desktop's four surfaces, each opened as what it is: {opened:?}"
+    );
+    assert!(
+        opened.iter().all(|(_, owner, ..)| owner == &opened[0].1),
+        "every one of them belongs to the same instance: {opened:?}"
+    );
+
+    // The window it gave back was closed on the compositor, and nothing else was.
+    let window = opened[3].0;
+    assert_eq!(
+        host.closed.lock().unwrap().clone(),
+        vec![window],
+        "exactly the surface the guest gave back"
+    );
+
+    // And the instance is still alive with its other three. Closing one surface of an app
+    // that holds several must not end the app — which is the defect a desktop would meet
+    // the first time a person closed a window.
+    let live = live.lock().await;
+    let instance = live.values().next().expect("the desktop is still running");
+    assert_eq!(
+        instance.surfaces.len(),
+        3,
+        "the background and both panels, and not the window it gave back"
+    );
+    assert!(!instance.surfaces.contains(&window));
+
+    // What the guest was told, read back out of the patch it painted.
+    let committed = host.committed.lock().unwrap().clone();
+    let patch = &committed.first().expect("the mock painted its report").1;
+    let report: serde_json::Value =
+        serde_json::from_slice(&patch[1..]).expect("the report is json");
+    assert_eq!(report["top"], true, "the top panel was granted: {report}");
+    assert_eq!(report["bottom"], true, "the bottom panel was granted: {report}");
+    assert_eq!(report["closed"], true, "`surface.close` did something: {report}");
+    assert_eq!(
+        report["closed_twice"], false,
+        "closing a surface it no longer holds is refused: {report}"
+    );
+}
+
+/// **The designated app is told about every open window, and can ask for one back.**
+///
+/// RFC-0087 stage 3b's second clause, end to end on the daemon's side: the guest asks over
+/// the runner's host-call wire, the daemon joins the compositor's stack against its own
+/// record of who holds what, and what comes back carries the host's attribution, an id
+/// minted for this instance, and one bit. The ask goes the other way by the same id.
+///
+/// **The trap is what is *not* in the answer**, and this is where that is checkable: the
+/// handle never crosses, so a designated app holds no name for another app's surface — only
+/// a number the daemon can resolve back, for windows it was shown.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn the_designated_app_is_told_the_windows_in_the_hosts_words() {
+    use kotton_app::daemon::apps::app_launch_system_shell;
+
+    let base = stage_a_shell_for_the_mock();
+    let notes = kotton_wire::SurfaceHandle::mint();
+    let messages = kotton_wire::SurfaceHandle::mint();
+
+    let host = crate::common::NullAppHost::default();
+    *host.windows.lock().unwrap() = vec![
+        kotton_wire::HostWindow {
+            handle: notes,
+            name: "Notes".into(),
+            title: Some("Shopping".into()),
+            minimised: false,
+        },
+        kotton_wire::HostWindow {
+            handle: messages,
+            name: "Messages".into(),
+            title: None,
+            minimised: true,
+        },
+    ];
+
+    // SAFETY: serialised by `#[serial]`; cleared before the assertions so a panic cannot
+    // leave the mode set for another test.
+    unsafe { std::env::set_var("MOCK_RUNNER_MODE", "window-list") };
+    let live = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let resp = app_launch_system_shell(&host, base.path(), live, None, None, None, None).await;
+    unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
+    resp.expect("the designated app asking about windows must launch");
+
+    // What the guest was told, read back out of the patch it painted.
+    let committed = host.committed.lock().unwrap().clone();
+    let patch = &committed.first().expect("the mock painted its report").1;
+    let report: serde_json::Value =
+        serde_json::from_slice(&patch[1..]).expect("the report is json");
+    let windows = report["windows"].as_array().expect("a list of windows");
+
+    assert_eq!(windows.len(), 2, "both windows, in stack order: {report}");
+    assert_eq!(windows[0]["id"], 1, "ids count from 1");
+    assert_eq!(windows[0]["name"], "Notes", "the host's attribution");
+    assert_eq!(windows[0]["minimised"], false);
+    assert_eq!(windows[1]["id"], 2);
+    assert_eq!(windows[1]["name"], "Messages");
+    assert_eq!(windows[1]["minimised"], true, "the one bit only the compositor knows");
+
+    // Nothing a handle could be read out of reached the guest.
+    let text = report.to_string();
+    for handle in [notes, messages] {
+        assert!(
+            !text.contains(&handle.to_string()),
+            "the guest was handed a surface handle: {text}"
+        );
+    }
+
+    // And the ask came back the other way, resolved to the right window.
+    assert_eq!(
+        host.restored.lock().unwrap().clone(),
+        vec![notes],
+        "asking for window 1 asks the compositor for the first window in the list"
+    );
+    assert_eq!(
+        report["refused"].as_array().expect("refusals").len(),
+        1,
+        "an id this instance was never given is refused, not resolved: {report}"
+    );
+}
+
+/// **A window that opens or closes reaches the designated app without the person doing
+/// anything else** (`TASK-the-docks-window-list-is-as-stale-as-its-last-repaint`).
+///
+/// The daemon's half, end to end over the real runner wire: the stack moves, the daemon
+/// nudges the live designated instance, and the instance — as the dock does — asks for the
+/// list again and is told the list as it now stands. Twice, once for each direction the
+/// record measured: a window that opened, and a window that closed.
+///
+/// **And the nudge itself carries nothing.** The mock paints the message it was sent, and
+/// it must be the constant frame — no name, no id, no count. The list is what the pull
+/// answered, not what the push said.
+///
+/// What this does not reach is the compositor's report arriving at `kuserd`'s drain: that
+/// is `SurfaceProxy::note_windows`, held by its own test, and the arm that calls this on a
+/// `true` from it. Nor the shell's own repaint, which is the guest's and is held on screen.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn a_window_that_opens_or_closes_reaches_the_designated_app_as_a_nudge_carrying_nothing() {
+    use kotton_app::daemon::apps::{app_launch_system_shell, app_windows_changed};
+
+    let base = stage_a_shell_for_the_mock();
+    let editor = kotton_wire::SurfaceHandle::mint();
+    let files = kotton_wire::SurfaceHandle::mint();
+    let window = |handle, name: &str| kotton_wire::HostWindow {
+        handle,
+        name: name.into(),
+        title: None,
+        minimised: false,
+    };
+
+    let host = crate::common::NullAppHost::default();
+    *host.windows.lock().unwrap() = vec![window(editor, "Editor")];
+
+    // SAFETY: serialised by `#[serial]`; cleared as soon as the launch returns.
+    unsafe { std::env::set_var("MOCK_RUNNER_MODE", "window-nudge") };
+    let live = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let launched =
+        app_launch_system_shell(&host, base.path(), std::sync::Arc::clone(&live), None, None, None, None).await;
+    // The runner read the mode when it was spawned, so it is cleared here — before any
+    // `expect` below can panic and leave it set for the next serial test.
+    unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
+    launched.expect("the designated app must launch");
+
+    // What the guest paints in answer to one nudge, read back out of its patch.
+    async fn nudge_and_read(
+        host: &crate::common::NullAppHost,
+        live: &std::sync::Arc<
+            tokio::sync::Mutex<
+                std::collections::HashMap<String, kotton_app::daemon::apps::LongLivedInstance>,
+            >,
+        >,
+    ) -> serde_json::Value {
+        host.committed.lock().unwrap().clear();
+        app_windows_changed(host, std::sync::Arc::clone(live), None, None, None)
+            .await
+            .expect("the nudge is delivered to a live designated instance");
+        let committed = host.committed.lock().unwrap().clone();
+        let patch = &committed.first().expect("the instance answered the nudge").1;
+        serde_json::from_slice(&patch[1..]).expect("the report is json")
+    }
+    let names = |report: &serde_json::Value| -> Vec<String> {
+        report["windows"]
+            .as_array()
+            .expect("a list of windows")
+            .iter()
+            .map(|w| w["name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+
+    // A window opens — the Files window a dock click made.
+    *host.windows.lock().unwrap() = vec![window(editor, "Editor"), window(files, "Kotton")];
+    let opened = nudge_and_read(&host, &live).await;
+
+    // It closes.
+    *host.windows.lock().unwrap() = vec![window(editor, "Editor")];
+    let closed = nudge_and_read(&host, &live).await;
+
+    assert_eq!(names(&opened), ["Editor", "Kotton"], "the window that opened is listed: {opened}");
+    assert_eq!(names(&closed), ["Editor"], "the window that closed is gone: {closed}");
+
+    for report in [&opened, &closed] {
+        assert_eq!(
+            report["msg"],
+            kotton_wire::runner::WINDOWS_CHANGED_FRAME,
+            "the nudge is the constant frame and nothing else: {report}"
+        );
+        let text = report["msg"].as_str().unwrap_or_default();
+        for said in ["Editor", "Kotton", &editor.to_string(), &files.to_string()] {
+            assert!(!text.contains(said), "the nudge carried `{said}`: {text}");
+        }
+    }
+}
+
+/// **An app that answers the nudge by reaching for a window is repainted and not obeyed.**
+///
+/// The nudge is the host's, not the person's, so a launch or a raise the designated app
+/// asks for while answering it is acting on a gesture nobody made. Its repaint is served —
+/// that is what the nudge is for — and neither of the other two is.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn a_launch_or_raise_asked_for_in_answer_to_the_nudge_is_not_served() {
+    use kotton_app::daemon::apps::{app_launch_system_shell, app_windows_changed};
+
+    let base = stage_a_shell_for_the_mock();
+    let host = crate::common::NullAppHost::default();
+    // SAFETY: serialised by `#[serial]`; cleared as soon as the launch returns.
+    unsafe { std::env::set_var("MOCK_RUNNER_MODE", "window-nudge-reaches") };
+    let live = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let launched =
+        app_launch_system_shell(&host, base.path(), std::sync::Arc::clone(&live), None, None, None, None).await;
+    unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
+    launched.expect("the designated app must launch");
+
+    let opened_before = host.opened.lock().unwrap().len();
+    host.committed.lock().unwrap().clear();
+    host.raised.lock().unwrap().clear();
+    app_windows_changed(&host, std::sync::Arc::clone(&live), None, None, None)
+        .await
+        .expect("the nudge is delivered");
+
+    assert_eq!(host.committed.lock().unwrap().len(), 1, "the repaint is served");
+    assert!(host.raised.lock().unwrap().is_empty(), "a raise nobody asked for was served");
+    assert_eq!(
+        host.opened.lock().unwrap().len(),
+        opened_before,
+        "a launch nobody asked for opened a surface"
+    );
+    assert_eq!(live.lock().await.len(), 1, "a launch nobody asked for started an instance");
+}
+
+/// **The compositor's report reaches the dock through `kuserd`'s own drain** — the arm, not
+/// the function it calls.
+///
+/// A fake desk is attached where `supervise_kuid` would attach `kuid` (the pattern
+/// `vault.rs` uses for a prompt's answer), and `CompositorEvent::WindowsChanged` is written
+/// up it as the compositor writes it. So this is the whole daemon path: the event drain,
+/// `SurfaceProxy::note_windows` deciding the stack moved, the nudge to the live designated
+/// instance, its `list-windows` answered from the report just recorded, and its repaint
+/// arriving back down the same pair as a `SurfaceCommit`. A report that did not move the
+/// stack is sent in between and must produce no repaint.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn a_windows_report_from_the_compositor_repaints_the_designated_app_through_the_drain() {
+    use kotton_wire::{kuid_ipc::CompositorWindow, CompositorEvent, FromCompositor, KuidResponse};
+    use tokio::io::AsyncReadExt as _;
+
+    let env = crate::common::TestEnv::spawn().await;
+    stage_a_system_shell(&env.base_dir);
+    // SAFETY: serialised by `#[serial]`; cleared as soon as the launch returns.
+    unsafe { std::env::set_var("MOCK_RUNNER_MODE", "window-nudge") };
+    let launched = env.daemon.launch_designated_shell("boot", None).await;
+    unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
+    launched.expect("the designated shell must launch");
+
+    // The fake desk: every request is reported to the test and answered `SurfaceOk`. It
+    // reads frames as JSON values, never as `KuidRequest` — a second acceptor of that type
+    // is what `channel-check` forbids.
+    let (kuid_read, daemon_write) = tokio::io::duplex(1 << 20);
+    let (daemon_read, kuid_write) = tokio::io::duplex(1 << 20);
+    let kuid_write = std::sync::Arc::new(tokio::sync::Mutex::new(kuid_write));
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    tokio::spawn({
+        let kuid_write = std::sync::Arc::clone(&kuid_write);
+        async move {
+            let mut kuid_read = kuid_read;
+            loop {
+                let mut len = [0u8; 4];
+                if kuid_read.read_exact(&mut len).await.is_err() {
+                    break;
+                }
+                let mut body = vec![0u8; u32::from_le_bytes(len) as usize];
+                if kuid_read.read_exact(&mut body).await.is_err() {
+                    break;
+                }
+                let reply = FromCompositor::Response(KuidResponse::SurfaceOk);
+                if kotton_ipc::write_frame(&mut *kuid_write.lock().await, &reply).await.is_err() {
+                    break;
+                }
+                let _ = seen_tx.send(serde_json::from_slice(&body).unwrap_or_default());
+            }
+        }
+    });
+    env.daemon.desk().attach(daemon_write, daemon_read).await;
+
+    // The backlog is flushed on attach: the shell's launch surface is opened, which is the
+    // handle this test reports as a window — one the daemon holds an owner for.
+    let deadline = std::time::Duration::from_secs(20);
+    let handle = tokio::time::timeout(deadline, async {
+        loop {
+            let frame = seen.recv().await.expect("the desk is open");
+            if let Some(h) = frame.get("SurfaceOpen").map(|o| o["handle"].clone()) {
+                break serde_json::from_value::<kotton_wire::SurfaceHandle>(h).expect("a handle");
+            }
+        }
+    })
+    .await
+    .expect("the shell's surface was opened on the desk");
+
+    let report = |windows: Vec<CompositorWindow>| {
+        let kuid_write = std::sync::Arc::clone(&kuid_write);
+        async move {
+            let event = FromCompositor::Event(CompositorEvent::WindowsChanged { windows });
+            kotton_ipc::write_frame(&mut *kuid_write.lock().await, &event)
+                .await
+                .expect("write the report");
+        }
+    };
+    // The next repaint the mock paints in answer to a nudge, or `None` if none comes.
+    async fn next_repaint(
+        seen: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+        within: std::time::Duration,
+    ) -> Option<serde_json::Value> {
+        tokio::time::timeout(within, async {
+            loop {
+                let frame = seen.recv().await?;
+                let Some(patch) = frame.get("SurfaceCommit").and_then(|c| c["patch"].as_array()) else {
+                    continue;
+                };
+                let bytes: Vec<u8> = patch.iter().filter_map(|b| b.as_u64()).map(|b| b as u8).collect();
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes.get(1..).unwrap_or_default()) else {
+                    continue;
+                };
+                if v.get("msg").is_some() {
+                    return Some(v);
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+    let open = vec![CompositorWindow { handle, minimised: false }];
+
+    report(open.clone()).await;
+    let opened = next_repaint(&mut seen, deadline).await.expect("a window appeared: the dock repaints");
+    assert_eq!(opened["msg"], kotton_wire::runner::WINDOWS_CHANGED_FRAME, "{opened}");
+    assert_eq!(opened["windows"].as_array().map(Vec::len), Some(1), "the list as reported: {opened}");
+
+    report(open).await;
+    assert!(
+        next_repaint(&mut seen, std::time::Duration::from_secs(2)).await.is_none(),
+        "the same stack again moved nothing, and must not repaint"
+    );
+
+    report(Vec::new()).await;
+    let closed = next_repaint(&mut seen, deadline).await.expect("a window went: the dock repaints");
+    assert_eq!(closed["msg"], kotton_wire::runner::WINDOWS_CHANGED_FRAME, "{closed}");
+    assert_eq!(closed["windows"].as_array().map(Vec::len), Some(0), "the list as reported: {closed}");
+}
 /// **With no designated app running, the nudge goes nowhere** — and in particular it does
 /// not start one, which a notice that means nothing to an instance that has not asked must
 /// not do.
@@ -377,5 +995,265 @@ kind    = "long-lived"
         before + 1,
         "the bystander's own process must have survived the door \
          (before={before}, after={after}); a restart would begin at one"
+    );
+}
+
+// ── The second boot ──────────────────────────────────────────────────────────
+
+/// Stage a system shell under `base`, where a desktop install puts it.
+///
+/// The manifest is the shell's (see [`shell_manifest`]): it is what
+/// `app_launch_system_shell` parses, and a manifest that stops parsing should
+/// fail here. The `app.wasm` beside it is a placeholder, because these tests
+/// are about **which launch arguments the host writes** and the mock runner never
+/// opens the module. A test of the *screen* needs the real wasm, the real runner
+/// and the window, none of which this repository builds.
+fn stage_a_system_shell(base: &std::path::Path) {
+    let dir = kotton_app::daemon::apps::system_shell_dir(base);
+    std::fs::create_dir_all(&dir).expect("stage dir");
+    let manifest = shell_manifest();
+    std::fs::copy(&manifest, dir.join("manifest.toml")).expect("stage manifest");
+    std::fs::write(dir.join("app.wasm"), b"").expect("stage a placeholder module");
+}
+
+/// A daemon constructed on `base`, not yet serving anything.
+///
+/// This is what a boot *is*, up to the point the question is asked: the process
+/// starts, reads its base directory, and decides what to draw. `run` is not
+/// called because nothing here needs the IPC listener — `launch_designated_shell`
+/// is the call `run` spawns, and it is called directly so the answer can be read.
+async fn boot_a_daemon_at(
+    base: &std::path::Path,
+    secrets: std::sync::Arc<dyn kotton_sys::secret::SecretsStore + Send + Sync>,
+) -> (std::sync::Arc<kuserd::DeviceDaemon>, crate::common::Door) {
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    #[cfg(windows)]
+    let endpoint = crate::common::Door::pipe(format!("kotton-boot-{unique}"));
+    #[cfg(unix)]
+    let endpoint = crate::common::door_in(base, &format!("boot-{unique}.sock"));
+
+    let daemon = std::sync::Arc::new(
+        kuserd::DeviceDaemon::new_with_base_and_secrets(
+            base.to_owned(),
+            endpoint.clone(),
+            secrets,
+        )
+        .await
+        .expect("DeviceDaemon::new_with_base_and_secrets")
+        .with_runner(std::path::PathBuf::from(crate::common::mock_runner_bin())),
+    );
+    (daemon, endpoint)
+}
+
+/// The full launch frame the mock painted back, as JSON.
+///
+/// The init frame is sent once and never mentioned again, so
+/// `MOCK_RUNNER_MODE=report-input` repeating it as the launch's patch is the
+/// only channel there is; [`screen_of`] reads three fields out of it.
+fn launch_report(resp: kotton_wire::UserResponse) -> serde_json::Value {
+    let patches = match resp {
+        kotton_wire::UserResponse::AppLaunched { patches, .. } => patches,
+        other => panic!("expected AppLaunched, got {other:?}"),
+    };
+    serde_json::from_slice(&patches[0][1..])
+        .expect("the mock paints its launch frame as raw JSON (format version 0x00)")
+}
+
+/// The `mode`, `users` and `names` a launch was handed, read back off the
+/// mock's report.
+///
+/// Sent once in the init frame and never mentioned again, so
+/// `MOCK_RUNNER_MODE=report-input` painting it back is the only channel there is
+/// (see [`launch_report`]).
+fn screen_of(resp: kotton_wire::UserResponse) -> (Option<String>, Option<String>, Option<String>) {
+    let report = launch_report(resp);
+    let arg = |key: &str| {
+        report["launch_args"]
+            .as_array()
+            .expect("launch args")
+            .iter()
+            .find(|pair| pair[0] == key)
+            .and_then(|pair| pair[1].as_str())
+            .map(str::to_owned)
+    };
+    (arg("mode"), arg("users"), arg("names"))
+}
+
+/// **A device that knows who lives here opens the lock screen, not the welcome.**
+///
+/// The owner reported this on 2026-09-20: an identity made in the window that
+/// morning, `just desktop::run` that evening, and a screen offering to *create a
+/// new identity* — whose one door then refused, because `create_identity` reads
+/// `device/users.json` and `device/users.json` knew.
+///
+/// Two readers, one question. `launch_designated_shell` reached
+/// `app_launch_system_shell` — by the `Locked` arm, because a boot loads the
+/// registered user and a loaded user can be locked (`DEC-0049`) — and that
+/// function wrote `mode=welcome` as a literal. The device registry, which is
+/// what `shell_launch_mode` consults and where the guest's `LockPane` gets the
+/// names it offers, was never asked on that path.
+///
+/// So this drives a real second boot: one daemon makes the identity, that daemon
+/// stops, and a second daemon constructed on the same base is asked what it would
+/// draw. The assertion is the launch argument, because that is the whole of what
+/// the host tells the shell about which screen to open
+/// (the shell, which this repository does not hold, reads `Some("locked")` as its
+/// lock screen and `users` beside it).
+///
+/// **`KOTTON_BASE_DIR` is set to that same base**, matching what production has
+/// by construction (one base per process) — no longer load-bearing for
+/// `device_users` itself, which now reads and writes relative to the daemon's
+/// own `base` (`TASK-the-device-user-registry-is-read-from-a-process-global-base`,
+/// closed), but kept because `DeviceDaemon::new()` and anything this test spawns
+/// as a subprocess still resolve it the old way.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn a_second_boot_with_a_registered_identity_opens_the_lock_screen() {
+    let base = tempfile::tempdir().expect("tempdir");
+    stage_a_system_shell(base.path());
+
+    // SAFETY: `#[serial_test::serial]` means nothing else is running. Restored
+    // at the end, and before the assertions so a panic cannot leave them set.
+    let prior_base = std::env::var_os("KOTTON_BASE_DIR");
+    unsafe {
+        std::env::set_var("KOTTON_BASE_DIR", base.path());
+        std::env::set_var("MOCK_RUNNER_MODE", "report-input");
+    }
+
+    // Shared across both boots, because an OS keychain survives a daemon restart
+    // and a fresh store would model a wiped one — the same reason
+    // `schema_grants::grants_persist_across_restart` shares its secrets.
+    let secrets: std::sync::Arc<dyn kotton_sys::secret::SecretsStore + Send + Sync> =
+        std::sync::Arc::new(kotton_secret::MemorySecrets::new());
+
+    // ── The first boot: the person makes their identity ──────────────────────
+    //
+    // Through the real verb rather than by writing `device/users.json` here, so
+    // that what the second boot reads is what creating an identity actually
+    // leaves behind.
+    {
+        let (daemon, endpoint) =
+            boot_a_daemon_at(base.path(), std::sync::Arc::clone(&secrets)).await;
+        let serving = tokio::spawn({
+            let daemon = std::sync::Arc::clone(&daemon);
+            async move { daemon.run().await }
+        });
+        crate::common::wait_for_daemon(&endpoint, "the first boot").await;
+        let mut client = crate::common::connect_when_ready(&endpoint, "the first boot").await;
+        client
+            .create_user("owner", crate::common::TEST_PASSPHRASE)
+            .await
+            .expect("create_user");
+        serving.abort();
+    }
+
+    let registered = kuserd::device_users::load(base.path()).expect("read the registry");
+    assert!(
+        registered.contains_key("owner"),
+        "the first boot must leave the identity in the device registry, got {:?}",
+        registered.keys().collect::<Vec<_>>()
+    );
+
+    // ── The second boot ──────────────────────────────────────────────────────
+    let (daemon, _endpoint) = boot_a_daemon_at(base.path(), secrets).await;
+
+    // **Which state the boot is in, pinned, because the two arms below differ
+    // and the answer is not the one the record was filed on.** A boot *does*
+    // load every registered user it may serve (`load_users_on_startup`, through
+    // `DeviceDaemon::new_*`), and loading is not unlocking — `DEC-0049`. So the
+    // person is resident and their database will not open, which sends this
+    // launch down `launch_designated_shell`'s `Locked` arm rather than its
+    // pre-identity one. Both arms reach `app_launch_system_shell`, and both used
+    // to be handed `mode=welcome`; if residency ever stops happening at boot the
+    // arm changes under this test and the test should say so rather than keep
+    // passing for a different reason.
+    assert_eq!(
+        daemon.users().any().as_deref(),
+        Some("owner"),
+        "a boot loads the registered user — loaded, and locked, are not exclusive"
+    );
+
+    let resp = daemon
+        .launch_designated_shell("boot", None)
+        .await
+        .expect("a boot with an identity on the device must launch something");
+    let (mode, users, names) = screen_of(resp);
+
+    unsafe {
+        std::env::remove_var("MOCK_RUNNER_MODE");
+        match &prior_base {
+            Some(v) => std::env::set_var("KOTTON_BASE_DIR", v),
+            None => std::env::remove_var("KOTTON_BASE_DIR"),
+        }
+    }
+
+    assert_eq!(
+        mode.as_deref(),
+        Some("locked"),
+        "a device whose registry names somebody opens the lock screen, never the welcome"
+    );
+    assert_eq!(
+        users.as_deref(),
+        Some("owner"),
+        "the lock screen is told whose device this is, or it has nobody to unlock"
+    );
+    // And what to call them: nothing, because nobody has said. The slot is
+    // there and empty — not the id copied across, which is what the screen
+    // would draw (`TASK-the-name-the-welcome-asks-for-goes-nowhere`).
+    assert_eq!(
+        names.as_deref(),
+        Some(""),
+        "an identity with no name gets an empty name slot, never its id"
+    );
+}
+
+/// And the welcome is still what a boot with nobody registered gets.
+///
+/// The other half of the same rule, and the one a fix aimed at the lock screen
+/// could quietly take away: `shell_launch_mode` routes on an *empty* registry,
+/// so a machine nobody has enrolled on must still reach the screen that enrols
+/// them. `users` is absent rather than empty, because the welcome has nobody to
+/// offer and an empty string in that slot is a list of one nameless person.
+#[tokio::test]
+#[serial_test::serial]
+#[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
+async fn a_boot_with_nobody_registered_still_opens_the_welcome() {
+    let base = tempfile::tempdir().expect("tempdir");
+    stage_a_system_shell(base.path());
+
+    // SAFETY: `#[serial_test::serial]` means nothing else is running.
+    let prior_base = std::env::var_os("KOTTON_BASE_DIR");
+    unsafe {
+        std::env::set_var("KOTTON_BASE_DIR", base.path());
+        std::env::set_var("MOCK_RUNNER_MODE", "report-input");
+    }
+
+    let secrets: std::sync::Arc<dyn kotton_sys::secret::SecretsStore + Send + Sync> =
+        std::sync::Arc::new(kotton_secret::MemorySecrets::new());
+    let (daemon, _endpoint) = boot_a_daemon_at(base.path(), secrets).await;
+
+    let resp = daemon
+        .launch_designated_shell("boot", None)
+        .await
+        .expect("a fresh machine must still have something to draw");
+    let (mode, users, _names) = screen_of(resp);
+
+    unsafe {
+        std::env::remove_var("MOCK_RUNNER_MODE");
+        match &prior_base {
+            Some(v) => std::env::set_var("KOTTON_BASE_DIR", v),
+            None => std::env::remove_var("KOTTON_BASE_DIR"),
+        }
+    }
+
+    assert_eq!(
+        mode.as_deref(),
+        Some("welcome"),
+        "a machine nobody lives on opens the screen that enrols somebody"
+    );
+    assert_eq!(
+        users, None,
+        "the welcome screen is handed no user list: there is nobody to list"
     );
 }
