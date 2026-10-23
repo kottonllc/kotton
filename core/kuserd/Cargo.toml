@@ -36,6 +36,7 @@ kotton-secret = { path = "../secret" }
 kotton-diag = { path = "../diag" }
 kotton-session = { path = "../session" }
 kotton-common = { path = "../common" }
+kotton-version = { path = "../version" }
 kotton-crypto = { path = "../crypto" }
 kotton-identity = { path = "../identity" }
 kotton-org = { path = "../org" }

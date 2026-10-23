@@ -11,6 +11,7 @@ kotton-wire = { path = "../wire" }
 kotton-ipc = { path = "../ipc" }
 kotton-crypto = { path = "../crypto" }
 kotton-common = { path = "../common" }
+kotton-version = { path = "../version" }
 kotton-secret = { path = "../secret" }
 hex = "0.4"
 

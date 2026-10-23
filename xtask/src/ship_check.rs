@@ -55,6 +55,8 @@ pub(crate) const SYSTEM_CRATES: &[&str] = &[
     "ksyncd",
     // Mechanism, carrier and primitives the daemons share.
     "kotton-common",
+    // The version every binary reports, derived once from the tags.
+    "kotton-version",
     "kotton-sys",
     "kotton-pair",
     "kotton-proc",

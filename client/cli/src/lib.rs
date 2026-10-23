@@ -28,7 +28,7 @@ pub fn finish(result: std::io::Result<()>) -> std::process::ExitCode {
 /// command tree without duplicating the parser definition.
 #[derive(Parser)]
 #[command(name = "Kotton")]
-#[command(about = "Kotton - Your data sovereignty platform", version)]
+#[command(about = "Kotton - Your data sovereignty platform", version = kotton_version::VERSION)]
 pub struct Cli {
     /// Machine-readable output: print shapes as JSON instead of styled text. Put it
     /// before the verb (`kotton --json issuer list`). Only the shared verbs that

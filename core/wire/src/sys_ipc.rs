@@ -192,7 +192,9 @@ pub struct SysDaemonStatus {
     pub uptime_secs: u64,
     /// Number of active per-user daemon instances.
     pub active_user_count: usize,
-    /// Build-time version string from `CARGO_PKG_VERSION`.
+    /// The version the system daemon reports: `kotton_version::VERSION`, the form
+    /// kotton-protocol's `VERSIONING.md` describes (a tag's version, or one derived from the
+    /// nearest tag, with the commit after `+`).
     pub version: String,
 }
 

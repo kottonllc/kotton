@@ -1,0 +1,26 @@
+[package]
+name = "kotton-version"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The version every binary reports, in the form kotton-protocol's VERSIONING.md describes, derived once from the tags and checked against this workspace's version"
+
+# No dependencies of its own: what it hands a binary is one string, set by its build script.
+# Its version is the workspace's, `[workspace.package] version` in the root Cargo.toml, so that
+# is the one a tag is held to.
+[build-dependencies]
+# Without the workspace's `serde` feature: a build script's semver is the host's, which the
+# workspace already builds with its default features alone, and adding one would re-hash it.
+semver = "1.0"
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+# The oracle for precedence: the tests parse what the derivation gives and the examples
+# VERSIONING.md states, and order them with the crate cargo itself orders versions with.
+semver = { workspace = true }
+# `src/git.rs`'s tests make repositories of their own.
+tempfile = "3.8"
+
+[lints]
+workspace = true

@@ -2910,6 +2910,7 @@ dependencies = [
  "kotton-ipc",
  "kotton-secret",
  "kotton-sys",
+ "kotton-version",
  "kotton-wire",
  "rand 0.8.8",
  "serde_json",
@@ -3014,6 +3015,7 @@ dependencies = [
  "kotton-secret",
  "kotton-shell",
  "kotton-sys",
+ "kotton-version",
  "kotton-wire",
  "rand 0.8.8",
  "rpassword",
@@ -3715,6 +3717,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kotton-version"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "tempfile",
+ "workspace-hack",
+]
+
+[[package]]
 name = "kotton-wire"
 version = "0.1.0"
 dependencies = [
@@ -3836,6 +3847,7 @@ dependencies = [
  "kotton-surface",
  "kotton-sync",
  "kotton-sys",
+ "kotton-version",
  "kotton-wire",
  "notify",
  "quinn",

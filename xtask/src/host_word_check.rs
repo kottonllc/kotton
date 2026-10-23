@@ -95,6 +95,7 @@ pub const RUST_TREES: &[&str] = &[
     "core/surface/src",
     "core/sync/src",
     "core/sys/src",
+    "core/version/src",
     "core/wire/src",
 ];
 

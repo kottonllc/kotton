@@ -21,6 +21,8 @@ members = [
     # `infer`: the Backend trait and the context a host composes. It
     # links almost nothing on purpose — `cargo xtask infer-check` holds the list.
     "core/infer",
+    # `version`: the version every binary reports, derived once from the tags (VERSIONING.md).
+    "core/version",
 
     # carrier — names a principal and holds their keys; holds no behaviour, so acts on nothing
     "core/context",
