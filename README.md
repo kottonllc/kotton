@@ -9,7 +9,7 @@ of your own, and recovery. Each comment says what happens when you press Enter.
 # kotton-start into ~/.local/bin. No account.
 git clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton-dist && sh kotton-dist/install.sh
 
-# Starts the daemon in this terminal, and on a machine with a GPU the window too.
+# Starts the daemon in this terminal.
 # Leave it running (Ctrl-C stops it) and type the rest in another terminal.
 kotton-start
 
