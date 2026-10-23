@@ -7,7 +7,13 @@
 //! so the page and this code cannot drift without a test failing.
 //!
 //! - **On a tag**: the tag's version, the commit after `+`. A tag whose version disagrees with
-//!   the workspace's is refused, with the reason, and the build fails.
+//!   the workspace's is refused, with the reason, and the build fails. A tag agrees when the
+//!   workspace (`[workspace.package] version`) names either the tag's own version or the
+//!   release it is a pre-release of. `0.1.0` agrees with `v0.1.0-dev.1`, `v0.1.0-rc.2` and
+//!   `v0.1.0`. A workspace that names a pre-release itself, such as `0.1.0-dev.1`, agrees
+//!   only with that exact tag. It refuses `v0.1.0`, because a release tagged while the
+//!   manifest still names a snapshot means the manifest was not moved. VERSIONING does not
+//!   say which; this is the stricter reading.
 //! - **Past a release**: the next patch's zeroth snapshot plus the count past it,
 //!   `v0.1.0` and 12 commits is `0.1.1-dev.0.12+<commit>`.
 //! - **Past a snapshot or a candidate**: that tag's word and number plus the count,
@@ -43,8 +49,7 @@ pub fn tag_version(tag: &str) -> Result<Version, String> {
     let bare = tag
         .strip_prefix('v')
         .ok_or_else(|| format!("tag `{tag}` does not start with `v`"))?;
-    let version =
-        Version::parse(bare).map_err(|e| format!("tag `{tag}` is not a version: {e}"))?;
+    let version = Version::parse(bare).map_err(|e| format!("tag `{tag}` is not a version: {e}"))?;
     if !version.build.is_empty() {
         return Err(format!(
             "tag `{tag}` carries build metadata; a tag is `vX.Y.Z`, `vX.Y.Z-dev.N` or `vX.Y.Z-rc.N`"
@@ -86,7 +91,9 @@ pub fn highest(tags: &[String]) -> Result<(String, Version), String> {
 pub fn parse_describe(out: &str) -> Result<(String, u64, String), String> {
     let mut parts = out.trim().rsplitn(3, '-');
     let (Some(g), Some(n), Some(tag)) = (parts.next(), parts.next(), parts.next()) else {
-        return Err(format!("`git describe` said `{out}`, not `<tag>-<count>-g<commit>`"));
+        return Err(format!(
+            "`git describe` said `{out}`, not `<tag>-<count>-g<commit>`"
+        ));
     };
     let commit = g
         .strip_prefix('g')
@@ -199,7 +206,10 @@ mod tests {
         assert_eq!((tag.as_str(), ahead), ("v0.1.0-dev.1", 0));
         let s = tagged(&[&tag], ahead, &commit);
         assert_eq!(says(&s, "0.1.0"), "0.1.0-dev.1+abc1234");
-        assert_eq!(says(&tagged(&["v0.1.0"], 0, "abc1234"), "0.1.0"), "0.1.0+abc1234");
+        assert_eq!(
+            says(&tagged(&["v0.1.0"], 0, "abc1234"), "0.1.0"),
+            "0.1.0+abc1234"
+        );
     }
 
     #[test]
@@ -290,7 +300,11 @@ mod tests {
             assert!(tag_version(bad).is_err(), "{bad}");
         }
         // One bad tag on the commit is named, not stepped over.
-        assert!(reported(&tagged(&["v0.1.0", "v0.1.0-beta"], 0, "abc1234"), &v("0.1.0")).is_err());
+        assert!(reported(
+            &tagged(&["v0.1.0", "v0.1.0-beta"], 0, "abc1234"),
+            &v("0.1.0")
+        )
+        .is_err());
     }
 
     /// The order `VERSIONING.md` states, by the crate cargo orders versions with: every

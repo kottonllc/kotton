@@ -7,9 +7,10 @@
 //! its tests. A tag whose version disagrees with the workspace's fails the build here, with the
 //! reason. When git cannot answer, the build still succeeds, reporting no tag known.
 //!
-//! Re-run when the commit or the tags move: `HEAD`, the branch it names, `packed-refs` and
-//! `refs/tags`. Only paths that exist are named, since cargo re-runs on every build for one
-//! that does not.
+//! It re-runs when the commit or the tags move. The paths it watches, and why each one, are
+//! listed in `src/git.rs`: `HEAD`, `refs/heads` and `refs/tags` as directories, and
+//! `packed-refs`. A tree with no `.git` of its own watches where `.git` would be, so the script
+//! re-runs on every build until a repository appears.
 
 #[path = "src/derive.rs"]
 mod derive;
