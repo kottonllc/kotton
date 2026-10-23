@@ -118,24 +118,19 @@ fn release_rev() -> Option<&'static str> {
     (!RELEASE_REV.is_empty()).then_some(RELEASE_REV)
 }
 
-/// The tag of the release [`RELEASE_REV`] names, which a host's checkout is
-/// cloned at, or empty or absent with it (`client/shell/build.rs`). Read with
-/// `option_env!`, so the crate compiles whatever build-script output a shared
-/// target hands it, one from before this variable included.
-const RELEASE_TAG: Option<&str> = option_env!("KOTTON_RELEASE_TAG");
+/// Where a host clones the release from: the distribution, which holds the
+/// release tags and the assets a person installs, and whose tag holds the key
+/// the release is checked against. It fetches this repository's archives by
+/// its own release lock, so its tags are not this repository's, and a desktop
+/// built here knows none of them: `mint host` prints a visible `<tag>`.
+const REPOSITORY: &str = "https://github.com/kottonllc/kotton-dist";
 
-/// [`RELEASE_TAG`], when there is one: absent and empty alike are no release
-/// known. A build that did not run this crate's build script may read the
-/// variable from the builder's environment instead, and the tag is printed
-/// into a line run as root, so it is held to the build script's rule here
-/// too: letters, digits, `.`, `-`, `+` and `_`.
-fn release_tag() -> Option<&'static str> {
-    RELEASE_TAG.filter(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b)))
-}
+/// The distribution's own release page, where a release's tag is read.
+const RELEASES: &str = "https://github.com/kottonllc/kotton-dist/releases";
 
-/// Where a host clones the release from: the repository whose tag holds the
-/// key the release is checked against.
-const REPOSITORY: &str = "https://github.com/kottonllc/kotton";
+/// The installer a host runs, from the distribution's checkout: the directory
+/// `git clone` of [`REPOSITORY`] makes, then `install.sh`.
+const CHECKOUT_INSTALLER: &str = "kotton-dist/install.sh";
 
 pub struct VaultCommand;
 
@@ -897,7 +892,7 @@ async fn run(parsed: Parsed<'_>, state: &mut ShellState) -> Result<CommandOutput
                     ))
                 }
             };
-            return Ok(CommandOutput::shapes(minted_host(n, &relay, &vault, prints, release_tag())));
+            return Ok(CommandOutput::shapes(minted_host(n, &relay, &vault, prints)));
         }
         Parsed::Mints => {
             let mut client = state.client.lock().await;
@@ -1118,11 +1113,12 @@ fn minted(service: OperatedService, name: Option<&str>, key: &str, prints: Print
 /// `vault`. With [`Prints::Key`], the two keys alone, the relay's first. With
 /// a revision given, the one command that installs one's own build of the
 /// host's archive, unpacked. Otherwise the two lines the host runs, as root:
-/// the clone of the release at its tag — `known`, the newest this desktop
-/// knows, or a visible `<tag>` and one line saying to put the release's
-/// there — and the checkout's `install.sh --kind host` given a key each
-/// ([`host_install`]). Then the `enrol` that takes the line it prints back.
-fn minted_host(name: Option<&str>, relay: &str, vault: &str, prints: Prints<'_>, known: Option<&str>) -> Vec<Out> {
+/// the clone of the distribution at a visible `<tag>`, with one line saying
+/// where a release's tag is read — the distribution's tags are not this
+/// repository's, so a desktop built here knows none ([`REPOSITORY`]) — and the
+/// distribution's `install.sh --kind host` given a key each ([`host_install`]).
+/// Then the `enrol` that takes the line it prints back.
+fn minted_host(name: Option<&str>, relay: &str, vault: &str, prints: Prints<'_>) -> Vec<Out> {
     let said = name.map(|n| format!(" {n}")).unwrap_or_default();
     let mut out = match prints {
         Prints::Key => {
@@ -1138,13 +1134,13 @@ fn minted_host(name: Option<&str>, relay: &str, vault: &str, prints: Prints<'_>,
         ],
         Prints::Command(None) => vec![
             Out::Note("On the host — an always-on machine with a public address — as root, both lines; it prints one line back:".into()),
-            Out::Data(host_clone(known)),
-            Out::Data(host_install(relay, vault, "kotton/install.sh --kind host")),
+            Out::Data(host_clone()),
+            Out::Data(host_install(relay, vault, &format!("{CHECKOUT_INSTALLER} --kind host"))),
         ],
     };
-    if matches!(prints, Prints::Command(None)) && known.is_none() {
+    if matches!(prints, Prints::Command(None)) {
         out.push(Out::Hint(format!(
-            "this desktop knows no release: put the release's tag where <tag> is, or `mint host{said} --rev <rev>` for your own build"
+            "put a release's tag from {RELEASES} where <tag> is, or `mint host{said} --rev <rev>` for your own build"
         )));
     }
     out.push(Out::Record(vec![("then here".into(), ENROL_THE_HOSTS_LINE.to_string())]));
@@ -1171,7 +1167,7 @@ pub struct TypedLines {
     pub enrol_the_hosts_line: String,
     /// `kotton vault invite --me`: the operator keeps their own things at their vault.
     pub vault_invite_me: String,
-    /// The clone of the release a host's install runs from, at a `<tag>`.
+    /// The clone of the distribution a host's install runs from, at a `<tag>`.
     pub host_clone: String,
     /// The host's install, given the relay's key and the vault's.
     pub host_install: String,
@@ -1191,8 +1187,8 @@ pub fn typed_lines(key: &str, relay_key: &str, vault_key: &str) -> TypedLines {
         mint_host: "kotton mint host".to_string(),
         enrol_the_hosts_line: format!("kotton {ENROL_THE_HOSTS_LINE}"),
         vault_invite_me: "kotton vault invite --me".to_string(),
-        host_clone: host_clone(None),
-        host_install: host_install(relay_key, vault_key, "kotton/install.sh --kind host"),
+        host_clone: host_clone(),
+        host_install: host_install(relay_key, vault_key, &format!("{CHECKOUT_INSTALLER} --kind host")),
         create_vault: to_create(OperatedService::Vault, key, None),
         create_relay: to_create(OperatedService::Relay, key, None),
         at_the_vault: at_the_vault(key),
@@ -1200,10 +1196,10 @@ pub fn typed_lines(key: &str, relay_key: &str, vault_key: &str) -> TypedLines {
     }
 }
 
-/// The clone of the release at `tag` — `<tag>` when none is known — that a
-/// host's install runs from.
-fn host_clone(tag: Option<&str>) -> String {
-    format!("git clone --depth 1 --branch {} {REPOSITORY}", tag.unwrap_or("<tag>"))
+/// The clone of the distribution at a release's `<tag>` that a host's install
+/// runs from: the first half of the README's install line.
+fn host_clone() -> String {
+    format!("git clone --depth 1 --branch <tag> {REPOSITORY}")
 }
 
 /// The host's install of `script`, given the relay's key and the vault's, one
@@ -1724,13 +1720,14 @@ mod tests {
             .collect()
     }
 
-    /// **`mint host` prints the two lines a host runs: the clone at the
-    /// release's tag, and the checkout's `install.sh --kind host` given a key
-    /// each** — the relay's and the vault's, never one for both. With a
+    /// **`mint host` prints the two lines a host runs: the clone of the
+    /// distribution at a release's tag, and its `install.sh --kind host` given
+    /// a key each** — the relay's and the vault's, never one for both. The tag
+    /// is a visible `<tag>` with one line saying where a release's is read,
+    /// since the distribution's tags are not this repository's. With a
     /// revision given, the one command for one's own build of the host's
-    /// archive; with no release known, a visible `<tag>` and one line saying
-    /// to put the release's there; with `--key`, the two keys alone, the
-    /// relay's first. Each ends on the `enrol` that takes the line back.
+    /// archive; with `--key`, the two keys alone, the relay's first. Each ends
+    /// on the `enrol` that takes the line back.
     #[test]
     fn mint_host_prints_the_clone_and_the_install_with_a_key_each() {
         const RELAY_KEY: &str = "7f3a0c9e4b1d2f6a8c5e7b9d1f3a5c7e9b2d4f6a8c0e2b4d6f8a1c3e5b7d9f1a";
@@ -1738,18 +1735,30 @@ mod tests {
         let enrol = |out: &[Out]| {
             out.iter().any(|o| matches!(o, Out::Record(rows) if rows.iter().any(|(_, v)| v == "enrol <the line the host printed>")))
         };
-        let out = minted_host(None, RELAY_KEY, VAULT_KEY, Prints::Command(None), Some("v0.1.0"));
+        let out = minted_host(Some("attic"), RELAY_KEY, VAULT_KEY, Prints::Command(None));
         assert_eq!(
             data(&out),
             vec![
-                "git clone --depth 1 --branch v0.1.0 https://github.com/kottonllc/kotton".to_string(),
-                format!("KOTTON_OPERATOR_KEY_RELAY={RELAY_KEY} KOTTON_OPERATOR_KEY_VAULT={VAULT_KEY} sh kotton/install.sh --kind host"),
+                "git clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton-dist".to_string(),
+                format!("KOTTON_OPERATOR_KEY_RELAY={RELAY_KEY} KOTTON_OPERATOR_KEY_VAULT={VAULT_KEY} sh kotton-dist/install.sh --kind host"),
             ]
         );
-        assert!(!out.iter().any(|o| matches!(o, Out::Hint(_))), "a known release needs no hint: {out:?}");
+        let hints: Vec<&String> = out
+            .iter()
+            .filter_map(|o| match o {
+                Out::Hint(h) => Some(h),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hints.len(), 1, "{out:?}");
+        assert!(
+            hints[0].contains("https://github.com/kottonllc/kotton-dist/releases where <tag> is")
+                && hints[0].contains("`mint host attic --rev <rev>`"),
+            "{hints:?}"
+        );
         assert!(enrol(&out), "{out:?}");
 
-        let own = minted_host(Some("attic"), RELAY_KEY, VAULT_KEY, Prints::Command(Some("c0ffee123456-dirty")), Some("v0.1.0"));
+        let own = minted_host(Some("attic"), RELAY_KEY, VAULT_KEY, Prints::Command(Some("c0ffee123456-dirty")));
         assert_eq!(
             data(&own),
             vec![format!(
@@ -1757,20 +1766,46 @@ mod tests {
             )]
         );
         assert!(enrol(&own), "{own:?}");
+        assert!(!own.iter().any(|o| matches!(o, Out::Hint(_))), "one's own build needs no tag: {own:?}");
 
-        let unknown = minted_host(Some("attic"), RELAY_KEY, VAULT_KEY, Prints::Command(None), None);
-        assert_eq!(data(&unknown)[0], "git clone --depth 1 --branch <tag> https://github.com/kottonllc/kotton");
-        let hints: Vec<&String> = unknown
-            .iter()
-            .filter_map(|o| match o {
-                Out::Hint(h) => Some(h),
-                _ => None,
+        assert_eq!(data(&minted_host(None, RELAY_KEY, VAULT_KEY, Prints::Key)), vec![RELAY_KEY, VAULT_KEY]);
+    }
+
+    /// **`mint host` clones what the README's first line clones and runs the
+    /// same installer**: the README's install line, the one the distribution's
+    /// README carries, is `mint host`'s clone line, then ` && sh `, then the
+    /// installer its second line runs; and the README's host section shows
+    /// both lines `mint host` prints, for the placeholders it writes. So the
+    /// line a host runs and the line a desktop ran cannot name two
+    /// repositories, and a README moved to another distribution fails here
+    /// until `mint host` moves with it.
+    #[test]
+    fn mint_host_clones_and_installs_what_the_readme_does() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let readme = std::fs::read_to_string(root.join("README.md")).expect("the repository's README.md");
+        let mut fenced = false;
+        let fenced_lines: Vec<&str> = readme
+            .lines()
+            .filter(|l| {
+                if l.trim_start().starts_with("```") {
+                    fenced = !fenced;
+                    return false;
+                }
+                fenced
             })
+            .map(str::trim)
             .collect();
-        assert_eq!(hints.len(), 1, "{unknown:?}");
-        assert!(hints[0].contains("where <tag> is") && hints[0].contains("`mint host attic --rev <rev>`"), "{hints:?}");
-
-        assert_eq!(data(&minted_host(None, RELAY_KEY, VAULT_KEY, Prints::Key, Some("v0.1.0"))), vec![RELAY_KEY, VAULT_KEY]);
+        let host = minted_host(None, "<relay key>", "<vault key>", Prints::Command(None));
+        let printed = data(&host);
+        let install = format!("{} && sh {CHECKOUT_INSTALLER}", printed[0]);
+        assert_eq!(
+            fenced_lines.iter().find(|l| l.starts_with("git clone ") && l.contains(" && sh ")),
+            Some(&install.as_str()),
+            "the README's install line is not `mint host`'s clone and installer"
+        );
+        for line in &printed[..2] {
+            assert!(fenced_lines.contains(line), "the README's host section does not show `{line}`");
+        }
     }
 
     /// **The lines a guide is held to are the lines the verbs print**: what
@@ -1783,7 +1818,7 @@ mod tests {
     fn the_lines_a_guide_is_held_to_are_the_lines_the_verbs_print() {
         let lines = typed_lines("<key>", "<relay key>", "<vault key>");
 
-        let host = minted_host(None, "<relay key>", "<vault key>", Prints::Command(None), None);
+        let host = minted_host(None, "<relay key>", "<vault key>", Prints::Command(None));
         assert_eq!(data(&host)[..2], [lines.host_clone.as_str(), lines.host_install.as_str()]);
         let enrol = lines.enrol_the_hosts_line.strip_prefix("kotton ").expect("typed after `kotton`");
         assert!(
