@@ -124,7 +124,7 @@ async fn a_key_not_introduced_under_the_identity_is_refused_at_the_drive() {
         act: TenantDeviceAct::Admit,
         device_did: c_did,
         public_key: hex::decode(&c_key_hex).unwrap().try_into().unwrap(),
-        said_at: 1,
+        said_at_ms: 1,
     };
     let not_the_identity = kotton_peer::daemon::nodes::load_device_operational_key(&*a.secrets).expect("A's device key");
     let signature = not_the_identity.sign(&change.signed_bytes(USER)).to_bytes().to_vec();
@@ -137,3 +137,4 @@ async fn a_key_not_introduced_under_the_identity_is_refused_at_the_drive() {
     assert_eq!(devices_at(&vault, USER).await, 1, "nobody was added");
     assert!(!admitted(&capacity_as(&c, &drive).await), "C is still refused");
 }
+

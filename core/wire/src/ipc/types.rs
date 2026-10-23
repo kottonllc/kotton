@@ -738,9 +738,11 @@ pub enum TenantDeviceAct {
 /// checks the signature against the identity's current key in the key log it
 /// keeps: pairing introduces a device's key to the set a drive admits.
 ///
-/// `said_at` orders a tenant's changes to one key: a drive refuses a change no
-/// later than the last it took for that key, so an admit replayed after a
-/// withdrawal does not put a revoked device back.
+/// `said_at_ms` orders a tenant's changes to one key: a drive refuses an admit
+/// no later than the last change it took for that key, so an admit replayed
+/// after a withdrawal does not put a revoked device back; and it takes a
+/// withdrawal whatever its time, so a revoke in the same millisecond as the
+/// admit, or under a clock that stepped back, still takes the device out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantDeviceChange {
     pub act: TenantDeviceAct,
@@ -748,8 +750,8 @@ pub struct TenantDeviceChange {
     pub device_did: String,
     /// The device's operational key, the one its TLS handshake presents.
     pub public_key: [u8; 32],
-    /// Unix seconds when the identity said it.
-    pub said_at: u64,
+    /// Unix milliseconds when the identity said it.
+    pub said_at_ms: u64,
 }
 
 impl TenantDeviceChange {
@@ -776,7 +778,7 @@ impl TenantDeviceChange {
         );
         field(&mut out, self.device_did.as_bytes());
         field(&mut out, &self.public_key);
-        field(&mut out, &self.said_at.to_be_bytes());
+        field(&mut out, &self.said_at_ms.to_be_bytes());
         out
     }
 }
@@ -786,7 +788,7 @@ mod tenant_device_tests {
     use super::*;
 
     fn a_change(act: TenantDeviceAct) -> TenantDeviceChange {
-        TenantDeviceChange { act, device_did: "did:key:zB".into(), public_key: [7; 32], said_at: 42 }
+        TenantDeviceChange { act, device_did: "did:key:zB".into(), public_key: [7; 32], said_at_ms: 42 }
     }
 
     /// Every field the identity signs changes the bytes, the tenant included,
@@ -805,7 +807,7 @@ mod tenant_device_tests {
         other.device_did = "did:key:zC".into();
         assert_ne!(bytes, other.signed_bytes("alice"), "the did");
         let mut other = base.clone();
-        other.said_at = 43;
+        other.said_at_ms = 43;
         assert_ne!(bytes, other.signed_bytes("alice"), "the time");
     }
 }

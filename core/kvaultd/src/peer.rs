@@ -518,7 +518,7 @@ mod tests {
                     act: kotton_wire::ipc::TenantDeviceAct::Admit,
                     device_did: "did:key:z".into(),
                     public_key: [0; 32],
-                    said_at: 0,
+                    said_at_ms: 0,
                 },
                 signature: vec![],
             },
