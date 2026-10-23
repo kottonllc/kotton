@@ -31,6 +31,16 @@
 //! already read under the unlocked context, never a path, a store handle or a key.
 //! `key-reach-check` holds that from `core/context`'s side and
 //! `cargo xtask infer-check` from the sidecar's.
+//!
+//! ## Where a stored manifest becomes the backend's
+//!
+//! A model's manifest is the protocol's: `kotton_schemas::ModelManifest`, the
+//! body of a `sh.kotton.model` record, which the wire, the device daemon and the
+//! client carry without linking the inference runtime. `kotton-infer` keeps its
+//! own, because `infer-check` holds that crate to serde and thiserror. This
+//! daemon is the one process that links both, so its tests are where the two are
+//! held to one shape: a field or a variant added to either side and not the
+//! other fails them to compile.
 
 use kotton_infer::{Context, Metering, ModelHandle, ModelManifest, Options};
 use kotton_infer::{InferRequest, InferResponse, MAX_LOAD_CHUNK};
@@ -307,6 +317,51 @@ mod tests {
     use kotton_infer::{Origin, Passage, Provenance};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// The backend's manifest for a stored one: the protocol's type, as `kinferd`'s
+    /// channel names it.
+    ///
+    /// Field for field, with no `..` on either side and an exhaustive match on each
+    /// enum, so the two types cannot drift apart without the tests failing to
+    /// compile. Test-only: no path of the daemon hands a stored model to the
+    /// backend yet, and the one that does starts from this.
+    fn backend_manifest(stored: &kotton_schemas::ModelManifest) -> ModelManifest {
+        let kotton_schemas::ModelManifest {
+            name,
+            version,
+            weights,
+            format,
+            kind,
+            parameters,
+            quantisation,
+            size,
+            context_window,
+            template,
+            licence: kotton_schemas::Licence { spdx, text_hash },
+            publisher,
+        } = stored.clone();
+        ModelManifest {
+            name,
+            version,
+            weights,
+            format: match format {
+                kotton_schemas::ModelFormat::Gguf => kotton_infer::ModelFormat::Gguf,
+                kotton_schemas::ModelFormat::Safetensors => kotton_infer::ModelFormat::Safetensors,
+            },
+            kind: match kind {
+                kotton_schemas::ModelKind::Chat => kotton_infer::ModelKind::Chat,
+                kotton_schemas::ModelKind::Embed => kotton_infer::ModelKind::Embed,
+                kotton_schemas::ModelKind::Vision => kotton_infer::ModelKind::Vision,
+            },
+            parameters,
+            quantisation,
+            size,
+            context_window,
+            template,
+            licence: kotton_infer::Licence { spdx, text_hash },
+            publisher,
+        }
+    }
+
     fn context() -> Context {
         Context {
             question: "when was the boiler serviced?".to_string(),
@@ -471,5 +526,39 @@ mod tests {
         );
         // Taken, not read: the next child's exit must not inherit it.
         assert!(proxy.take_refusal().is_none(), "a refusal is taken once");
+    }
+
+    /// The stored manifest and the backend's are one shape: every field crosses
+    /// [`backend_manifest`] unchanged, and the JSON either serialises to is the
+    /// same record body, signed or not, for every kind and format.
+    #[test]
+    fn a_stored_manifest_becomes_the_backends_unchanged() {
+        use kotton_schemas::{Licence, ModelFormat, ModelKind};
+        for (format, kind, publisher) in [
+            (ModelFormat::Gguf, ModelKind::Chat, None),
+            (ModelFormat::Safetensors, ModelKind::Embed, Some("sig".to_string())),
+            (ModelFormat::Gguf, ModelKind::Vision, None),
+        ] {
+            let stored = kotton_schemas::ModelManifest {
+                name: "fixture".to_string(),
+                version: "1".to_string(),
+                weights: "ab".repeat(32),
+                format,
+                kind,
+                parameters: 7,
+                quantisation: "Q4_K_M".to_string(),
+                size: 9,
+                context_window: 4096,
+                template: "{question}".to_string(),
+                licence: Licence { spdx: "Apache-2.0".to_string(), text_hash: "cd".repeat(32) },
+                publisher,
+            };
+            let backend = backend_manifest(&stored);
+            assert_eq!(
+                serde_json::to_value(&backend).unwrap(),
+                serde_json::to_value(&stored).unwrap(),
+                "{kind:?}/{format:?}"
+            );
+        }
     }
 }

@@ -50,7 +50,7 @@ pub use kotton_wire::ipc::{
 };
 /// The manifest a model is installed with, carried unchanged from the person's
 /// file to the record in their store (RFC-0085).
-pub use kotton_infer::{Licence, ModelFormat, ModelKind, ModelManifest};
+pub use kotton_schemas::{Licence, ModelFormat, ModelKind, ModelManifest};
 pub use kotton_wire::peer::{
     EphemeralSession, MountConfig, PairedNode, SessionPermissions, SyncRule,
 };

@@ -15,11 +15,6 @@ ts-types = ["dep:ts-rs", "kotton-schemas/ts-types"]
 # (no cycle). GrantEnvelope wraps Vec<CapabilityGrant> defined there.
 kotton-schemas = { path = "../schemas" }
 kotton-pair = { path = "../pair" }
-# The inference channel's frames carry `Context`, `ModelManifest` and `Metering`
-# (RFC-0085). They live beside the trait that consumes them so the two cannot
-# drift, and this edge runs the same direction as `kotton-pair` above — a
-# primitive naming a mechanism, never the reverse.
-kotton-infer = { path = "../infer" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

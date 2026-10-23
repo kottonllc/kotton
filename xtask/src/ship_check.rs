@@ -130,7 +130,7 @@ pub(crate) const NOT_THE_SYSTEMS: &[NotTheSystems] = &[
     NotTheSystems {
         name: "kotton-infer",
         belongs: "the inference runtime is kotton-infer's",
-        cut: "kotton-wire links kotton-infer: the protocol names inference's messages without linking its mechanism",
+        cut: "kuserd alone links kotton-infer, directly, for the inference channel's frames: it leaves when the daemon reaches inference over the protocol, through a sandbox host that spawns it (kottonllc/kotton#16, kottonllc/kotton#27); the wire, the device crate and the client name a model by kotton-schemas' manifest, so no other binary links it, the vault and the relay among them",
     },
     NotTheSystems {
         name: "kotton-grant",
@@ -374,13 +374,16 @@ mod tests {
         let j = judged(
             "0kuserd v0.1.0 (/r/core/kuserd)\n\
              1kotton-wire v0.1.0 (/r/core/wire)\n\
-             2kotton-infer v0.1.0 (/r/core/infer)\n\
-             3serde v1.0.0\n\
+             2kotton-schemas v0.1.0 (/r/core/schemas)\n\
+             1kotton-infer v0.1.0 (/r/core/infer)\n\
+             2serde v1.0.0\n\
              1kotton-app v0.1.0 (/r/core/app)\n\
              2kotton-outbound v0.1.0 (/r/core/outbound)\n",
         );
         assert_eq!(j.refused, Vec::<String>::new());
-        assert_eq!(j.owed["kotton-infer"], ["kotton-wire".to_string()].into());
+        assert_eq!(j.owed["kotton-infer"], ["kuserd".to_string()].into());
+        // The protocol's crates under it are the system's, and no finding.
+        assert!(j.system.contains("kotton-schemas") && !j.owed.contains_key("kotton-wire"));
         assert_eq!(j.owed["kotton-app"], ["kuserd".to_string()].into());
         // Reached through another finding: it goes when that one does.
         assert_eq!(j.owed["kotton-outbound"], ["kotton-app".to_string()].into());

@@ -52,11 +52,11 @@ pub struct DaemonInferHost<'a> {
     proxy: &'a Arc<InferProxy>,
 }
 
-fn kind_to_wire(k: kotton_infer::ModelKind) -> RunnerModelKind {
+fn kind_to_wire(k: kotton_schemas::ModelKind) -> RunnerModelKind {
     match k {
-        kotton_infer::ModelKind::Chat => RunnerModelKind::Chat,
-        kotton_infer::ModelKind::Embed => RunnerModelKind::Embed,
-        kotton_infer::ModelKind::Vision => RunnerModelKind::Vision,
+        kotton_schemas::ModelKind::Chat => RunnerModelKind::Chat,
+        kotton_schemas::ModelKind::Embed => RunnerModelKind::Embed,
+        kotton_schemas::ModelKind::Vision => RunnerModelKind::Vision,
     }
 }
 
@@ -181,7 +181,7 @@ mod tests {
     use kotton_device::config::RuntimeConfig;
     use kotton_device::users::DeviceUsers as _;
     use kotton_device::DeviceRuntime;
-    use kotton_infer::{Licence, ModelFormat, ModelKind, ModelManifest};
+    use kotton_schemas::{Licence, ModelFormat, ModelKind, ModelManifest};
     use std::collections::HashMap;
     use std::sync::Arc;
 

@@ -12,6 +12,7 @@
 //! - [`CapabilityGrant`] — the minimum-surface access grants apps must declare
 //! - [`CapabilitySet`] — a set of grants with `allows(kind, target)` checking
 //! - [`core`] — the five standard schemas compiled into the daemon
+//! - [`ModelManifest`] — a model as content, the body of a `sh.kotton.model` record
 //!
 //! ## Layer rule
 //!
@@ -24,6 +25,7 @@ pub mod core;
 pub mod definition;
 pub mod field;
 pub mod membership;
+pub mod model_manifest;
 pub mod nsid;
 pub mod record_url;
 
@@ -40,5 +42,6 @@ pub use core::CoreSchema;
 pub use definition::SchemaDefinition;
 pub use field::{FieldType, SchemaField};
 pub use membership::{Ceremony, Member, Posture, Role};
+pub use model_manifest::{Licence, ModelFormat, ModelKind, ModelManifest};
 pub use nsid::{Nsid, NsidError};
 pub use record_url::{RecordUrl, RecordUrlError};

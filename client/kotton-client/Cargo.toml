@@ -10,9 +10,6 @@ kotton-ipc = { path = "../../core/ipc" }
 kotton-wire = { path = "../../core/wire" }
 kotton-schemas = { path = "../../core/schemas" }
 kotton-common = { path = "../../core/common" }
-# `model` carries `ModelManifest` unchanged from the person's file to the
-# record in their store (RFC-0085); the client restates none of its fields.
-kotton-infer = { path = "../../core/infer" }
 # The record-file converter: `records_import` and `records_export` map a record file to a
 # row of `sh.kotton.governance.record` and back through it (RFC-0088 rule 2).
 kotton-record-file = { path = "../record-file" }

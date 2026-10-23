@@ -32,10 +32,8 @@ kotton-record = { path = "../record" }
 # an extension trait, and three files had no home at all.
 kotton-store = { path = "../store" }
 kotton-fs = { path = "../fs" }
-# `users::models` installs a model: the manifest is `ModelManifest`, unchanged,
-# and this crate writes it as a record. Domain -> mechanism tier, the legal
-# direction; `infer` names nothing here and must not (RFC-0085 IN1).
-kotton-infer = { path = "../infer" }
+# `users::models` installs a model: the manifest is `kotton_schemas::ModelManifest`,
+# the record body, unchanged. The inference runtime is not linked here to name one.
 kotton-schemas = { path = "../schemas" }
 kotton-ipc = { path = "../ipc" }
 kotton-session = { path = "../session" }

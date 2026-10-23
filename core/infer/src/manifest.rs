@@ -24,6 +24,12 @@
 //!   prose wins and [`crate::Backend::load`] takes bytes. A `SealedObjectRef`
 //!   here would be a name only the store can resolve, in a crate that must not
 //!   link the store — the sketch's type cannot exist at this tier.
+//! - **The manifest a person stores and the wire carries.** That is the
+//!   protocol's, `kotton_schemas::ModelManifest`, the body of a `sh.kotton.model`
+//!   record: the wire, the device daemon and the client name a model by it and
+//!   link no inference. This crate may not link `kotton-schemas` (`infer-check`),
+//!   so this type is the backend's own copy, and the user daemon, the one process
+//!   that links both, holds the two to one shape in its tests.
 
 use serde::{Deserialize, Serialize};
 

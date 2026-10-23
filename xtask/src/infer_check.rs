@@ -4,8 +4,9 @@
 //!
 //! A weights file is untrusted input parsed by a large runtime, and the process that parses it
 //! must not be the process that can open the store. `core/infer` is the crate that runtime is
-//! built on here: the trait, its data types and the frames, linked by `kuserd`, `device`,
-//! `wire` and the client. This holds the part of that which is mechanical: **`core/infer`
+//! built on here: the trait, its data types and the frames, linked by `kuserd` alone (the
+//! wire, the device daemon and the client name a model by `kotton_schemas::ModelManifest`
+//! instead). This holds the part of that which is mechanical: **`core/infer`
 //! links no crate that opens a socket, and names no socket in its own source.**
 //!
 //! ## What this refuses, and what it does not

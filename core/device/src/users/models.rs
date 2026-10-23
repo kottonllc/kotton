@@ -57,7 +57,7 @@
 use std::io;
 use std::sync::{Arc, RwLock};
 
-use kotton_infer::{ModelKind, ModelManifest};
+use kotton_schemas::{ModelKind, ModelManifest};
 use kotton_record::{registry::SchemaRegistry, record_cmds::Record, SqliteRecordStore};
 use kotton_wire::ipc::{InstalledModel, UserResponse, MAX_STREAMED_FILE_BYTES};
 use serde_json::{json, Value};
@@ -559,7 +559,7 @@ fn kind_str(kind: ModelKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kotton_infer::{Licence, ModelFormat};
+    use kotton_schemas::{Licence, ModelFormat};
 
     fn manifest(name: &str, kind: ModelKind, weights: &str) -> ModelManifest {
         ModelManifest {

@@ -34,7 +34,7 @@ use std::path::Path;
 use kotton_wire::ipc::InstalledModel;
 
 use super::{KottonClient, UserRequest, UserResponse};
-use kotton_infer::ModelManifest;
+use kotton_schemas::ModelManifest;
 
 /// The `model` domain, bound to one user.
 pub struct Model<'a> {

@@ -998,7 +998,7 @@ pub enum UserRequest {
         user_id: String,
         /// The manifest as the person obtained it, carried unchanged: it is what
         /// gets stored.
-        manifest: kotton_infer::ModelManifest,
+        manifest: kotton_schemas::ModelManifest,
     },
     /// One chunk of a model's weights, streamed into the daemon's own object
     /// for the hash they declare — the door `ModelAdd` reads from.
