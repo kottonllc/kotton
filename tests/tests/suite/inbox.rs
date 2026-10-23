@@ -33,7 +33,7 @@ use kuserd::DeviceDaemon;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::common::khttpd::free_port;
+use crate::common::free_port;
 use crate::common::{connect_when_ready, enroll_streamed, init_crypto, unique_ipc, wait_for_daemon};
 use crate::vault::{enrol_vault, recover_from, spawn_vault};
 
@@ -231,51 +231,4 @@ async fn a_file_handed_to_a_device_of_yours_lands_in_its_inbox_directly_each_way
         receipt,
         "the receipt did not arrive byte for byte"
     );
-}
-
-/// **A hand-over an app writes is in the person's log within seconds, on a
-/// device whose sync engine runs**
-/// (`TASK-a-hand-over-is-not-in-the-log-until-the-next-packing-pass`).
-///
-/// The whole path the share sheet takes, on a real daemon: a guest writes
-/// `Inbox/<name>` through `files.write` — the verb `DirListing::hand_over_through`
-/// speaks — the real confined runner carries it to the host's
-/// `service_files_call`, and the person's tree writes it and tells the sync
-/// engine a hand-over landed. The readout is the one the sheet's *sent* is drawn
-/// from, `UserStore::file_logged`. Nothing here packs: the daemon's own engine
-/// must, and without the signal its next pass is a tick five minutes off and the
-/// idle floor behind that, so this fails at its deadline.
-///
-/// Thirty seconds rather than five: a pack in an unoptimised build takes several
-/// seconds by itself (4.8 s measured for two small files in `kuserd`'s test
-/// build, 2026-10-08), and that is the pass's cost, not the wait for it.
-///
-/// Uses the files probe (`tests/fixtures/files-probe`): run
-/// `cargo build --bin kotton-runner` and `cargo xtask build-apps` first, as
-/// `guest_files` says.
-#[tokio::test]
-async fn a_hand_over_an_app_writes_is_in_the_log_within_seconds() {
-    use std::time::{Duration, Instant};
-    let (mut env, app_id) = crate::guest_files::a_person_with_the_probe_installed().await;
-
-    let report = crate::guest_files::launch_with(
-        &mut env,
-        &app_id,
-        vec![
-            ("write".to_string(), "Inbox/beach.jpg".to_string()),
-            ("body".to_string(), "a photo of the beach".to_string()),
-        ],
-    )
-    .await;
-    assert_eq!(report["arg_write"], "ok", "the hand-over's write was refused: {report}");
-
-    let store = env.users.get("owner").expect("the person's store is loaded");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while store.file_logged("/Inbox/beach.jpg").await.expect("the log readout").is_none() {
-        assert!(
-            Instant::now() < deadline,
-            "a hand-over was not in the person's log within thirty seconds of its write"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }

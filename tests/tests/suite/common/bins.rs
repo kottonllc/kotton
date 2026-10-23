@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The binaries the suite runs as processes, and the one check of all of them.
 //!
-//! The same check also covers the built inputs that are not binaries, the three guest
-//! apps' `app.wasm` ([`require_shell_wasm`], [`require_apps_bundled`]): a test that drives
-//! the real shell needs it as a test that spawns the runner needs the runner, and it fails
-//! the same way — by name,
-//! beside whatever else is missing, with the command that makes it. **No suite test
-//! returns green on an input that is not there**: a test that cannot run says so and
-//! fails, because a skip prints to a stream nobody reads and reports as a pass.
+//! **No suite test returns green on an input that is not there**: a test that cannot run
+//! says so and fails, by name, beside whatever else is missing, with the command that
+//! makes it, because a skip prints to a stream nobody reads and reports as a pass. Every
+//! input is one this tree builds: no guest app, no wasm component, no binary from a tree
+//! that is not here.
 //!
 //! Each is bin-only, so none can be a dev-dependency of this package, and Cargo has no
 //! way on stable to say "this test needs that binary" (artifact dependencies are
@@ -22,8 +20,7 @@
 //! command that builds them together. A test whose binary is present runs as it would
 //! have: the check widens what a failure says, never what fails.
 //!
-//! `just test_suite <names>` builds every one of them, the apps included, and then runs the
-//! named tests.
+//! `just test_suite <names>` builds every one of them and then runs the named tests.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -34,87 +31,18 @@ use std::sync::OnceLock;
 pub enum Bin {
     /// The CLI, which `cli_identity` and its neighbours run as a person does.
     Kotton,
-    /// The fixture runner most `TestEnv`s launch apps in.
+    /// The fixture runner every `TestEnv` launches apps in.
     MockRunner,
-    /// The real runner, for `confinement` and `runner_confinement`.
-    Runner,
     /// The daemon `two_node_transfer` spawns.
     Kuserd,
-    /// The gateway `gateway_bind` and enrolment start.
-    Khttpd,
-    /// The inference sidecar `inference_sidecar` supervises.
-    Kinferd,
     /// The vault `headless` installs with the self-host adapter.
     Kvaultd,
     /// The relay — its own workspace, built into its own target directory.
     Relay,
 }
 
-/// What the check looks for: a binary the suite runs, or the shell's `app.wasm`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Input {
-    Bin(Bin),
-    /// A guest app's `app.wasm`, which `cargo xtask build-apps` makes. It is a component
-    /// the tests load, not a process they run, and `kuserd` embeds all three when it
-    /// compiles (`core/kuserd/build.rs`).
-    App(App),
-}
-
-/// The bundled guest apps, the three `core/kuserd/build.rs` requires before `kuserd`
-/// embeds any of them. That list is the other half of this one: a fourth there is a
-/// fourth here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum App {
-    Shell,
-    Editor,
-    Records,
-}
-
-/// Every app `kuserd` embeds, in the order a failure lists them.
-const APPS: [App; 3] = [App::Shell, App::Editor, App::Records];
-
-impl App {
-    fn name(self) -> &'static str {
-        match self {
-            App::Shell => "the shell's app.wasm",
-            App::Editor => "the editor's app.wasm",
-            App::Records => "the records app's app.wasm",
-        }
-    }
-
-    /// Where `cargo xtask build-apps` leaves it, under the repository root.
-    fn built_at(self) -> PathBuf {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("tests/ has a parent");
-        let dir = match self {
-            App::Shell => "kotton-shell",
-            App::Editor => "kotton-editor",
-            App::Records => "kotton-records",
-        };
-        root.join("guest/apps").join(dir).join("app.wasm")
-    }
-}
-
-impl Input {
-    /// What a failure calls it.
-    fn name(self) -> &'static str {
-        match self {
-            Input::Bin(b) => b.name(),
-            Input::App(a) => a.name(),
-        }
-    }
-}
-
 /// Every binary the suite runs, in the order a failure lists them.
-pub const ALL: [Bin; 8] = [
-    Bin::Kotton,
-    Bin::MockRunner,
-    Bin::Runner,
-    Bin::Kuserd,
-    Bin::Khttpd,
-    Bin::Kinferd,
-    Bin::Kvaultd,
-    Bin::Relay,
-];
+pub const ALL: [Bin; 5] = [Bin::Kotton, Bin::MockRunner, Bin::Kuserd, Bin::Kvaultd, Bin::Relay];
 
 impl Bin {
     /// Cargo's name for it: what `--bin` takes.
@@ -122,10 +50,7 @@ impl Bin {
         match self {
             Bin::Kotton => "kotton",
             Bin::MockRunner => "kotton-mock-runner",
-            Bin::Runner => "kotton-runner",
             Bin::Kuserd => "kuserd",
-            Bin::Khttpd => "khttpd",
-            Bin::Kinferd => "kinferd",
             Bin::Kvaultd => "kvaultd",
             Bin::Relay => "kotton-relay",
         }
@@ -150,10 +75,7 @@ impl Bin {
         let path = match self {
             Bin::Kotton => PathBuf::from(env!("KOTTON_BIN")),
             Bin::MockRunner => PathBuf::from(env!("MOCK_RUNNER_BIN")),
-            Bin::Runner => PathBuf::from(env!("KOTTON_RUNNER_BIN")),
             Bin::Kuserd => PathBuf::from(env!("KUSERD_BIN")),
-            Bin::Khttpd => PathBuf::from(env!("KHTTPD_BIN")),
-            Bin::Kinferd => PathBuf::from(env!("KINFERD_BIN")),
             Bin::Kvaultd => PathBuf::from(env!("KVAULTD_BIN")),
             Bin::Relay => relay_built_at(),
         };
@@ -180,93 +102,54 @@ fn relay_built_at() -> PathBuf {
     target.join("debug").join(name)
 }
 
-/// One input, as the check found it.
+/// One binary, as the check found it.
 struct Found {
-    input: Input,
+    bin: Bin,
     path: PathBuf,
     named_by: Option<&'static str>,
     present: bool,
 }
 
-/// Every input, looked at once for the process.
+/// Every binary, looked at once for the process.
 fn survey() -> &'static [Found] {
     static SURVEY: OnceLock<Vec<Found>> = OnceLock::new();
     SURVEY.get_or_init(|| {
-        let bins = ALL.iter().map(|&bin| {
-            let (path, named_by) = bin.locate();
-            Found { input: Input::Bin(bin), present: path.exists(), path, named_by }
-        });
-        let apps = APPS.iter().map(|&app| {
-            let path = app.built_at();
-            Found { input: Input::App(app), present: path.exists(), path, named_by: None }
-        });
-        bins.chain(apps).collect()
+        ALL.iter()
+            .map(|&bin| {
+                let (path, named_by) = bin.locate();
+                Found { bin, present: path.exists(), path, named_by }
+            })
+            .collect()
     })
-}
-
-/// The path to `input`, or a failure naming every input the suite needs that is not built,
-/// with the commands that build them together.
-fn require_input(input: Input) -> &'static Path {
-    let all = survey();
-    let found = all.iter().find(|f| f.input == input).expect("every input is surveyed");
-    assert!(found.present, "{}", missing_report(input, all));
-    &found.path
 }
 
 /// The path to `bin`, or a failure naming every binary the suite runs that is not built,
 /// with the commands that build them together.
 pub fn require(bin: Bin) -> &'static Path {
-    require_input(Input::Bin(bin))
-}
-
-/// The path to the shell's `app.wasm`, or the same failure [`require`] gives, which
-/// names it beside anything else that is also missing: the other apps, the binaries.
-pub fn require_shell_wasm() -> &'static Path {
-    require_input(Input::App(App::Shell))
-}
-
-/// The apps are bundled in the `kuserd` this suite links, or a failure that says why not.
-///
-/// `kuserd` embeds the guest apps only if **all three** exist when *it* compiles
-/// (`core/kuserd/build.rs`), so a suite built before `cargo xtask build-apps` ran links a
-/// daemon that installs no shell, however present the files are now. `bundled` is what
-/// the test observed of that daemon. A file that is missing is named first, with any
-/// other input that is, so the cause that can be fixed is the one reported.
-pub fn require_apps_bundled(bundled: bool) {
     let all = survey();
-    if let Some(app) = APPS.iter().find(|&&a| !all.iter().any(|f| f.input == Input::App(a) && f.present)) {
-        require_input(Input::App(*app));
-    }
-    assert!(
-        bundled,
-        "the guest apps are built, but the kuserd this suite links was compiled before they \
-         were, so a new identity receives no shell and this test has nothing to launch.\n\
-         kuserd embeds the apps only when all three exist as it compiles (core/kuserd/build.rs):\n  \
-         cargo test -p kotton-integration-tests --test suite    (rebuilds kuserd, which watches the files)"
-    );
+    let found = all.iter().find(|f| f.bin == bin).expect("every binary is surveyed");
+    assert!(found.present, "{}", missing_report(bin, all));
+    &found.path
 }
 
-/// What a test whose input is missing says: all of them, and how to build them.
-fn missing_report(needed: Input, all: &[Found]) -> String {
+/// What a test whose binary is missing says: all of them, and how to build them.
+fn missing_report(needed: Bin, all: &[Found]) -> String {
     let missing: Vec<&Found> = all.iter().filter(|f| !f.present).collect();
-    let width = missing.iter().map(|f| f.input.name().len()).max().unwrap_or(0);
-    let binaries = all.iter().filter(|f| matches!(f.input, Input::Bin(_))).count();
-    let apps_total = all.len() - binaries;
+    let width = missing.iter().map(|f| f.bin.name().len()).max().unwrap_or(0);
     let mut s = format!(
         "{} is not built, so this test cannot use it.\n\
-         The suite needs {} built inputs, {binaries} binaries it runs as processes and the \
-         {apps_total} guest apps' app.wasm, and {} of them {} not built:\n",
+         The suite runs {} binaries as processes, and {} of them {} not built:\n",
         needed.name(),
         all.len(),
         missing.len(),
         if missing.len() == 1 { "is" } else { "are" },
     );
     for f in &missing {
-        let _ = write!(s, "  {:width$}  {}", f.input.name(), f.path.display());
+        let _ = write!(s, "  {:width$}  {}", f.bin.name(), f.path.display());
         if let Some(var) = f.named_by {
             let _ = write!(s, "  (named by {var})");
         }
-        if f.input == needed {
+        if f.bin == needed {
             s.push_str("  <- this test");
         }
         s.push('\n');
@@ -274,19 +157,11 @@ fn missing_report(needed: Input, all: &[Found]) -> String {
 
     let workspace: Vec<&str> = missing
         .iter()
-        .filter_map(|f| match f.input {
-            Input::Bin(b) if b != Bin::Relay && f.named_by.is_none() => Some(b.name()),
-            _ => None,
-        })
+        .filter(|f| f.bin != Bin::Relay && f.named_by.is_none())
+        .map(|f| f.bin.name())
         .collect();
-    let relay =
-        missing.iter().any(|f| f.input == Input::Bin(Bin::Relay) && f.named_by.is_none());
-    let apps = missing.iter().any(|f| matches!(f.input, Input::App(_)));
+    let relay = missing.iter().any(|f| f.bin == Bin::Relay && f.named_by.is_none());
     s.push_str("Build them together:\n");
-    if apps {
-        // First: `kuserd` embeds the component when it compiles, so it is built after.
-        s.push_str("  cargo xtask build-apps    (before the cargo build below: kuserd embeds the apps)\n");
-    }
     if !workspace.is_empty() {
         let bins: Vec<String> = workspace.iter().map(|b| format!("--bin {b}")).collect();
         let _ = writeln!(s, "  cargo build {}", bins.join(" "));
@@ -312,40 +187,24 @@ mod tests {
 
     fn found(bin: Bin, present: bool, named_by: Option<&'static str>) -> Found {
         Found {
-            input: Input::Bin(bin),
+            bin,
             path: PathBuf::from(format!("/t/debug/{}", bin.name())),
             named_by,
             present,
         }
     }
 
-    /// The three apps' components, present or not, beside the binaries.
-    fn apps(shell: bool, editor: bool, records: bool) -> Vec<Found> {
-        [(App::Shell, shell, "kotton-shell"), (App::Editor, editor, "kotton-editor"), (App::Records, records, "kotton-records")]
-            .into_iter()
-            .map(|(app, present, dir)| Found {
-                input: Input::App(app),
-                path: PathBuf::from(format!("/t/guest/apps/{dir}/app.wasm")),
-                named_by: None,
-                present,
-            })
-            .collect()
-    }
-
     /// A narrow run meets every missing binary in its first failure, and one line builds
     /// the workspace's together.
     #[test]
     fn a_missing_binary_names_every_missing_one_and_the_line_that_builds_them() {
-        let mut all: Vec<Found> = ALL
+        let all: Vec<Found> = ALL
             .iter()
             .map(|&b| found(b, !matches!(b, Bin::MockRunner | Bin::Kvaultd | Bin::Kuserd), None))
             .collect();
-        all.extend(apps(true, true, true));
-        let report = missing_report(Input::Bin(Bin::Kvaultd), &all);
+        let report = missing_report(Bin::Kvaultd, &all);
         assert!(report.starts_with("kvaultd is not built"), "{report}");
-        assert!(report.contains("11 built inputs, 8 binaries it runs as processes and the 3 guest apps"), "{report}");
-        assert!(report.contains("and 3 of them are not built"), "{report}");
-        assert!(!report.contains("build-apps"), "the apps are built:\n{report}");
+        assert!(report.contains("The suite runs 5 binaries as processes, and 3 of them are not built"), "{report}");
         for name in ["kotton-mock-runner", "kuserd", "kvaultd"] {
             assert!(report.contains(&format!("/t/debug/{name}")), "{name} unlisted:\n{report}");
         }
@@ -362,7 +221,7 @@ mod tests {
     /// something `cargo build` makes, so neither goes on the workspace's line.
     #[test]
     fn the_relay_and_a_named_binary_say_their_own_fix() {
-        let mut all: Vec<Found> = ALL
+        let all: Vec<Found> = ALL
             .iter()
             .map(|&b| match b {
                 Bin::Relay => found(b, false, None),
@@ -370,31 +229,10 @@ mod tests {
                 _ => found(b, true, None),
             })
             .collect();
-        all.extend(apps(true, true, true));
-        let report = missing_report(Input::Bin(Bin::Relay), &all);
+        let report = missing_report(Bin::Relay, &all);
         assert!(!report.contains("cargo build --bin"), "{report}");
         assert!(report.contains("cargo xtask build-relay"), "{report}");
         assert!(report.contains("(named by KOTTON_VAULT_BIN)"), "{report}");
         assert!(report.contains("KOTTON_VAULT_BIN names a file that is not there"), "{report}");
-    }
-
-    /// A test that needs the shell and finds it missing is told so by name, beside the
-    /// runner and the editor it also lacks, with the command that builds them before the
-    /// one that builds the daemon that embeds them. The records app is built and unlisted.
-    #[test]
-    fn a_missing_app_is_named_beside_a_missing_binary_and_built_first() {
-        let mut all: Vec<Found> =
-            ALL.iter().map(|&b| found(b, b != Bin::Runner, None)).collect();
-        all.extend(apps(false, false, true));
-        let report = missing_report(Input::App(App::Shell), &all);
-        assert!(report.starts_with("the shell's app.wasm is not built"), "{report}");
-        assert!(report.contains("and 3 of them are not built"), "{report}");
-        assert!(report.contains("/t/guest/apps/kotton-shell/app.wasm  <- this test\n"), "{report}");
-        assert!(report.contains("/t/guest/apps/kotton-editor/app.wasm\n"), "{report}");
-        assert!(!report.contains("kotton-records"), "the records app is built:\n{report}");
-        assert!(report.contains("/t/debug/kotton-runner\n"), "{report}");
-        let apps = report.find("cargo xtask build-apps").expect(&report);
-        let bins = report.find("cargo build --bin kotton-runner").expect(&report);
-        assert!(apps < bins, "the daemon embeds the apps, so they are built first:\n{report}");
     }
 }

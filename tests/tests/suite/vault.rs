@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::khttpd::free_port;
+use crate::common::free_port;
 use crate::common::{connect_when_ready, enroll_streamed, enroll_streamed_as, init_crypto, unique_ipc, wait_for_daemon};
 use kotton_sys::ipc::IpcEndpoint;
 

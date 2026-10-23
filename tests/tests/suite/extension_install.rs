@@ -4,11 +4,6 @@
 //! The acceptance path for program authoring: a package goes in through the
 //! real IPC verbs, the daemon verifies it, and it lands with the capabilities
 //! its *class* implies rather than the ones it asked for.
-//!
-//! One test installs the **real `guest/extensions/feed-reader` component** when it has
-//! been built, which is the end-to-end proof — a component compiled
-//! independently for `wasm32-wasip2`, installed through the same path a stranger
-//! would use.
 
 use crate::common::cli::{said, Cli};
 use crate::common::TestEnv;
@@ -155,56 +150,6 @@ async fn removing_an_extension_takes_it_out_of_the_listing() {
             .is_err(),
         "removing an absent extension should report it"
     );
-}
-
-/// **The acceptance test.** Installs the real `guest/extensions/feed-reader`
-/// component — compiled independently for `wasm32-wasip2`, against the public
-/// WIT — through the same path a stranger would use.
-///
-/// Skips (rather than fails) when the artifact has not been built, so the suite
-/// does not require a wasm toolchain on every machine. Build it with:
-/// `cd guest/extensions/feed-reader && cargo build --target wasm32-wasip2 --release`
-#[tokio::test]
-async fn the_real_feed_reader_installs_through_the_real_path() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace root")
-        .join("extensions")
-        .join("feed-reader");
-    let wasm = root
-        .join("target")
-        .join("wasm32-wasip2")
-        .join("release")
-        .join("kotton_feed_reader.wasm");
-
-    let Ok(wasm_bytes) = std::fs::read(&wasm) else {
-        eprintln!("skipping: {} not built", wasm.display());
-        return;
-    };
-    let manifest_toml = std::fs::read_to_string(root.join("manifest.toml"))
-        .expect("the example ships a manifest");
-
-    let mut env = TestEnv::spawn_authed().await;
-    let outcome = env
-        .client
-        .extension_install(USER, manifest_toml, wasm_bytes.clone())
-        .await
-        .expect("the shipped example must install through the real path");
-
-    assert_eq!(outcome.extension_id, "sh.kotton.feed-reader");
-    assert_eq!(outcome.class, "fetcher");
-    assert_eq!(
-        outcome.content_hash,
-        hex::encode(blake3::hash(&wasm_bytes).as_bytes()),
-        "the daemon must hash the bytes it received, not trust a claim"
-    );
-
-    let listed = env.client.extension_list(USER).await.expect("extension_list");
-    let found = listed
-        .iter()
-        .find(|e| e.extension_id == "sh.kotton.feed-reader")
-        .expect("the example appears in the listing");
-    assert_eq!(found.endpoints, vec!["*.substack.com", "hnrss.org"]);
 }
 
 /// **`kotton extension install` installs for the person it names, from the terminal.** A fresh

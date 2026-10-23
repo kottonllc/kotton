@@ -42,7 +42,7 @@ use kotton_wire::ipc::{OperatedService, UserResponse, VaultRequest};
 use kotton_wire::line::InstanceLine;
 use tokio::sync::Mutex;
 
-use crate::common::khttpd::free_port;
+use crate::common::free_port;
 use crate::common::relay::relay_bin;
 
 const USER: &str = "lee";

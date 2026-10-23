@@ -636,10 +636,8 @@ impl DeviceDaemon {
     /// **`pub` for the same reason [`Self::end_the_occupant_world`] is.** This is
     /// what a boot does, and the only way to ask *which screen does this daemon
     /// open on* is to make it do it and read what the instance was handed —
-    /// nothing else in the process records it. The suite's
-    /// `a_second_boot_with_a_registered_identity_opens_the_lock_screen` calls it
-    /// with the daemon's own `"boot"` reason and no session, which is exactly the
-    /// call in `run`.
+    /// nothing else in the process records it. No case in this repository's suite
+    /// calls it from outside the crate today (kottonllc/kotton#24).
     pub async fn launch_designated_shell(
         self: &Arc<Self>,
         reason: &str,
@@ -925,9 +923,8 @@ mod tests {
         );
     }
 
-    /// Nothing live under that id: not a refusal. The ceremony door is driven
-    /// in exactly this state by
-    /// `kuid_surface::the_shell_that_follows_the_ceremony_carries_the_users_data_mount`.
+    /// Nothing live under that id: not a refusal. The ceremony door meets
+    /// exactly this state when the occupant's instance has already ended.
     #[test]
     fn no_live_instance_is_not_a_refusal() {
         assert_eq!(a_screen_to_replace(None), Ok(()));

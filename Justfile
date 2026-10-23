@@ -177,9 +177,7 @@ test:
     # CLI works, not run by the gate that exists to run it. `kvaultd` is here for
     # `suite/headless.rs`, which installs it with the self-host adapter and starts it as
     # its unit does.
-    cargo build --bin kotton --bin kotton-mock-runner --bin kuserd --bin khttpd --bin kotton-runner --bin kinferd --bin kvaultd
-    # `confinement` runs real components in the real runner; this builds them.
-    cargo xtask build-apps
+    cargo build --bin kotton --bin kotton-mock-runner --bin kuserd --bin kvaultd
     # The relay is its own workspace; the relay tests spawn this binary, from `out/relay`.
     cargo xtask build-relay
     cargo xtask bind-check
@@ -206,14 +204,13 @@ test:
 # The relay is built by `cargo xtask build-relay`, the one command for it, into the directory
 # the suite's `relay_bin` reads back.
 #
-# The guest apps' `app.wasm` are the inputs that are not binaries, and `kuserd` embeds all
-# three as it compiles, so `cargo xtask build-apps` runs first. A test that needs an input that is not
-# built fails naming it; none returns green without running.
+# Every input a suite case needs is one of these five binaries, built from this tree: no guest
+# app and no wasm toolchain. A test whose binary is not built fails naming it; none returns
+# green without running.
 #
 # Build every input the integration suite needs, then run the suite tests named, exactly.
 test_suite +tests:
-    cargo xtask build-apps
-    cargo build --bin kotton --bin kotton-mock-runner --bin kuserd --bin khttpd --bin kotton-runner --bin kinferd --bin kvaultd
+    cargo build --bin kotton --bin kotton-mock-runner --bin kuserd --bin kvaultd
     cargo xtask build-relay
     cargo xtask bind-check -- -p kotton-integration-tests --test suite -- --exact {{tests}}
 

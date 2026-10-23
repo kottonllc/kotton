@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use kotton_wire::ipc::OperatedService;
 use kotton_wire::line::InstanceLine;
 
-use crate::common::khttpd::free_port;
+use crate::common::free_port;
 use crate::common::relay::{create_at, relay_bin};
 
 /// ed25519's base point: a key whose secret half nobody here holds.

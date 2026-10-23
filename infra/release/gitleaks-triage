@@ -19,7 +19,4 @@ core/wire/src/did/document.rs:generic-api-key:94  the did:key example the W3C di
 core/wire/src/did/document.rs:generic-api-key:98  the did:key example the W3C did:key spec gives: a public key
 core/wire/src/ipc/response.rs:generic-api-key:1441  a 20-hex test token, asserted never to be printed
 infra/vault/vault.env:generic-api-key:46  an empty setting in a template; it carries no value
-tests/tests/suite/guest_files.rs:generic-api-key:274  a placeholder DID a test names, not a key
-tests/tests/suite/guest_files.rs:generic-api-key:286  a placeholder DID a test names, not a key
-tests/tests/suite/guest_files.rs:generic-api-key:338  a placeholder DID a test names, not a key
 tests/tests/suite/restarted_daemon.rs:generic-api-key:214  a placeholder DID a test names, not a key
