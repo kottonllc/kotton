@@ -1035,14 +1035,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kotton-infer"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "kotton-pair"
 version = "0.1.0"
 dependencies = [
@@ -1108,7 +1100,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "hex",
- "kotton-infer",
  "kotton-pair",
  "kotton-schemas",
  "serde",

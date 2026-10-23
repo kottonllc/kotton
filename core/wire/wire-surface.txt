@@ -268,7 +268,7 @@ MintPrincipalSession
     evidence: PrincipalEvidence
 ModelAdd
     user_id: String
-    manifest: kotton_infer::ModelManifest
+    manifest: kotton_schemas::ModelManifest
 ModelList
     user_id: String
 ModelRemove

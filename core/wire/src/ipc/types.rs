@@ -272,7 +272,7 @@ pub const MAX_STREAMED_FILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// they installed it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledModel {
-    pub manifest: kotton_infer::ModelManifest,
+    pub manifest: kotton_schemas::ModelManifest,
     /// One per kind answers, and the person chooses which (`DEC-0073`).
     pub active: bool,
     /// RFC-3339, as the record carries it.
