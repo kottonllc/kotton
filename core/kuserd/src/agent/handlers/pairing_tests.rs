@@ -664,6 +664,8 @@ mod enrollment_tests {
             UserResponse::Error { message } => {
                 assert!(message.contains("revoked on this device"), "{message}");
                 assert!(message.contains("still admits it: vault ("), "the drive is named: {message}");
+                assert!(message.contains("will not reach it"), "the retry is not invited: {message}");
+                assert!(message.contains("nothing retries the withdrawal yet"), "{message}");
             }
             other => panic!("a revoke no drive took answered {other:?}"),
         }

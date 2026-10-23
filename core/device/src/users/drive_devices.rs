@@ -161,8 +161,10 @@ async fn tell(
 /// answer says which device can do it. When some drive does not take the
 /// withdrawal, the device is still revoked here — the revocation takes effect
 /// wherever it can — and the answer is an error naming each drive that still
-/// admits it and why. Telling those drives again is a later queue's; the person
-/// is told now.
+/// admits it and why, and that running revoke again will not reach them — the
+/// row is gone here, so a second run finds no such device — and that nothing
+/// retries yet. Telling those drives again is a later queue's; the person is
+/// told now.
 pub async fn revoke(
     runtime: &DeviceRuntime,
     member_store: &dyn kotton_peer::membership::MemberStore,
@@ -196,12 +198,15 @@ pub async fn revoke(
     let still: Vec<String> = missed.iter().map(|(d, why)| format!("{d} ({why})")).collect();
     Ok(UserResponse::Error {
         message: format!(
-            "'{node_id}' is revoked on this device, but {} still admit{} it: {}. Nothing tells {} \
-             again yet, so until one is told that device can still reach the sealed copy kept there.",
+            "'{node_id}' is revoked on this device, but {} still admit{} it: {}. Running `device \
+             revoke` again will not reach {}: the device is no longer listed here, and nothing \
+             retries the withdrawal yet. Until {} told, that device can still reach the sealed \
+             copy kept there.",
             if missed.len() == 1 { "a drive" } else { "these drives" },
             if missed.len() == 1 { "s" } else { "" },
             still.join("; "),
             if missed.len() == 1 { "it" } else { "them" },
+            if missed.len() == 1 { "it is" } else { "they are" },
         ),
     })
 }
