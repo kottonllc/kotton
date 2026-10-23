@@ -11,6 +11,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: every commit is signed off by its author, and no agent made one
         run: |
           set -eu
