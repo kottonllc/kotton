@@ -39,7 +39,9 @@
 //! (RFC 0002, Consequences; #57). A vault enrolled while this desktop operates
 //! no relay stands nowhere, so that keep cannot meet; the relay's `enrol`
 //! later stands it there, and then keeps the person's things at it, as the
-//! vault's own enrol would have, unless it keeps them already (#102).
+//! vault's own enrol would have (#102). A vault that keeps them already says
+//! so in its own answer to the invite, and that is said as the keep done, not
+//! failed (#108).
 //!
 //! From then on the vault's four acts — invite someone with the space set
 //! aside for them, list who keeps there, change one person's space, drop one
@@ -666,9 +668,6 @@ async fn enrol(text: &str, state: &mut ShellState) -> Result<CommandOutput> {
             client.operator_held(&state.user_id, OperatedService::Vault).await.is_ok_and(|held| held.len() == 1)
         };
         for vault in &stood {
-            if keeps_already(state, vault).await {
-                continue;
-            }
             all_kept &= keep_at(state, &mut out, vault, only, &relays).await;
         }
     }
@@ -715,28 +714,6 @@ fn stood_by_relays(came: &[kotton_wire::ipc::LineEnrolled]) -> Vec<String> {
         }
     }
     stood
-}
-
-/// Whether the vault `vault` already keeps this person's things: its people
-/// list them, with a device of theirs paired there or bytes held for them. Such
-/// a vault is not invited again. A list that cannot be read is answered `false`:
-/// the keep is tried, and the vault's own refusal, if any, is what is said.
-async fn keeps_already(state: &ShellState, vault: &str) -> bool {
-    let people = {
-        let mut client = state.client.lock().await;
-        client.as_operator(&state.user_id, vault, OperatorVerb::Pools).await
-    };
-    match people {
-        Ok(UserResponse::VaultTenants { tenants }) => keeps_here(&tenants, &state.user_id),
-        _ => false,
-    }
-}
-
-/// Whether `tenants` — a vault's people — keep `user`'s things: listed, with a
-/// device paired there or bytes held. A name the landlord only set a number
-/// for keeps nothing yet, and is invited.
-fn keeps_here(tenants: &[kotton_wire::ipc::VaultTenant], user: &str) -> bool {
-    tenants.iter().any(|t| t.user_id == user && (t.devices > 0 || t.held > 0))
 }
 
 /// What one line came to, in the three readouts it is read by — what it
@@ -802,8 +779,11 @@ fn readout(c: &kotton_wire::ipc::LineEnrolled) -> Vec<(String, String)> {
 /// has not done what enrol does, though its credential is kept. Nothing in a
 /// keep aborts the enrol: its readouts are said whatever the keep came to. A
 /// relay's enrol that stands such a vault takes the keep up there, by this
-/// same act, unless the vault keeps the person's things already
-/// ([`stood_by_relays`], [`keeps_already`]; #102).
+/// same act ([`stood_by_relays`]; #102). A vault that keeps this person's
+/// things already answers the invite so, in its own typed word
+/// ([`kotton::InvitedMe::KeptAlready`]), and mints nothing: that is the keep
+/// done, said ([`kept_already`]) and `true` (#108). Whom a vault keeps for is
+/// the vault's to say, so nothing here reads its people to guess it.
 async fn keep_at(state: &mut ShellState, out: &mut Vec<Out>, vault: &str, only: bool, relays: &[[u8; 32]]) -> bool {
     let to = if only { To::Only(vault) } else { To::Named(vault) };
     let not_kept = |why: String| Out::Fail {
@@ -816,7 +796,11 @@ async fn keep_at(state: &mut ShellState, out: &mut Vec<Out>, vault: &str, only: 
         client.vault_invite_me_stream(&user_id, vault, INVITE_ME_TTL_SECS).await
     };
     let mut rx = match invited {
-        Ok(rx) => rx,
+        Ok(kotton::InvitedMe::Admitting(rx)) => rx,
+        Ok(kotton::InvitedMe::KeptAlready) => {
+            out.push(kept_already(vault));
+            return true;
+        }
         Err(e) => {
             out.push(not_kept(e.to_string()));
             return false;
@@ -847,6 +831,12 @@ async fn keep_at(state: &mut ShellState, out: &mut Vec<Out>, vault: &str, only: 
         out.push(stood_at(client.relay_stand(&user_id, &line).await, &line));
     }
     kept
+}
+
+/// What a keep at the vault `vault` says when the vault keeps this person's
+/// things already: the act's done state, said, never a failure (#108).
+fn kept_already(vault: &str) -> Out {
+    Out::Note(format!("your things are kept at the vault '{vault}' already — it keeps for you, so nothing was invited"))
 }
 
 /// What standing this device at the relay `line` came to: stood there, held
@@ -946,12 +936,18 @@ async fn run(parsed: Parsed<'_>, state: &mut ShellState) -> Result<CommandOutput
             // Minted over the operator channel for the user this shell acts
             // as — what `whoami` prints — and admitted here, held to the vault
             // key the credential pins. No words, no digits.
-            let mut rx = {
+            let invited = {
                 let mut client = state.client.lock().await;
                 client
                     .vault_invite_me_stream(&user_id, to.name(), INVITE_ME_TTL_SECS)
                     .await
                     .map_err(|e| anyhow::anyhow!("vault invite --me: {e}"))?
+            };
+            // A vault that keeps this person's things already has done what
+            // `--me` asks: said, not failed (#108).
+            let mut rx = match invited {
+                kotton::InvitedMe::Admitting(rx) => rx,
+                kotton::InvitedMe::KeptAlready => return Ok(CommandOutput::shapes(vec![kept_already(to.name())])),
             };
             let client = state.client.lock().await;
             return super::device::run_ceremony(&client, &user_id, &mut rx, super::device::Role::OwnVault, None)
@@ -1026,6 +1022,11 @@ async fn run(parsed: Parsed<'_>, state: &mut ShellState) -> Result<CommandOutput
             action: "told where to stand".into(),
             subject: name.to_string(),
         }]),
+        // An invite for someone new, under a name the vault keeps: refused.
+        // Only `--me` reads it as done (#108).
+        UserResponse::VaultKeepsAlready { user_id } => {
+            CommandOutput::fail(format!("{word}: {}", kotton_wire::ipc::vault_keeps_already_said(&user_id)), None)
+        }
         UserResponse::Error { message } => CommandOutput::fail(format!("{word}: {message}"), None),
         other => CommandOutput::fail(format!("{word}: an answer this does not read: {other:?}"), None),
     })
@@ -1997,21 +1998,6 @@ mod tests {
             "{rows:?}"
         );
         assert!(!readout(&relay(&[])).iter().any(|(k, _)| k == "told to stand here"));
-    }
-
-    /// **A vault that keeps this person's things already is not invited
-    /// again** (#102): listed among its people with a device paired there or
-    /// bytes held. A name the landlord only set a number for keeps nothing
-    /// yet, and another person's pool is not this person's.
-    #[test]
-    fn a_vault_keeps_a_persons_things_when_a_device_or_bytes_of_theirs_are_there() {
-        use kotton_wire::ipc::VaultTenant;
-        let t = |user: &str, held, devices| VaultTenant { user_id: user.into(), held, quota: None, devices };
-        assert!(keeps_here(&[t("lee", 0, 1)], "lee"));
-        assert!(keeps_here(&[t("sam", 0, 1), t("lee", 4096, 0)], "lee"));
-        assert!(!keeps_here(&[t("lee", 0, 0)], "lee"), "a number set for lee keeps nothing yet");
-        assert!(!keeps_here(&[t("sam", 4096, 2)], "lee"), "sam's pool is not lee's");
-        assert!(!keeps_here(&[], "lee"));
     }
 
     /// **`mint <kind> <name>` takes `--rev <rev>` for one's own build and

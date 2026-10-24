@@ -456,6 +456,10 @@ async fn invite(user: &str, ttl_seconds: u64, quota: Option<u64>) -> io::Result<
                 eprintln!("pairing failed: {reason}");
                 std::process::exit(1);
             }
+            UserResponse::VaultKeepsAlready { user_id } => {
+                eprintln!("{}", kotton_wire::ipc::vault_keeps_already_said(&user_id));
+                std::process::exit(1);
+            }
             UserResponse::Error { message } => {
                 eprintln!("{message}");
                 std::process::exit(1);

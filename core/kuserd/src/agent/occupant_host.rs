@@ -643,11 +643,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
             quota: Some(space_bytes),
             ttl_seconds: LANDLORD_INVITE_TTL_SECS,
         };
-        match super::operator::speak(self.runtime, self.users, self.record_stores, &user_id, &vault, verb).await {
-            UserResponse::PairAdvertising { code, .. } => Ok(code.expose().to_string()),
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("landlord.invite: an answer this does not read: {other:?}")),
-        }
+        invite_answered(super::operator::speak(self.runtime, self.users, self.record_stores, &user_id, &vault, verb).await)
     }
 
     /// Drop one person's pool — `vault drop <v> <name>`, once the person has
@@ -1907,6 +1903,44 @@ mod message_tests {
             sealed_from_record(&serde_json::json!({ "id": "m1" })).is_none(),
             "no from_did, no body, no nonce — there is nothing here to open"
         );
+    }
+}
+
+/// What the guest is told of the vault's answer to `landlord_invite`: the
+/// invite's text, or the refusal in the vault's own words. A name the vault
+/// keeps is refused here, as everywhere but `vault invite --me` (#108): a
+/// guest's invite admits someone new.
+fn invite_answered(answer: UserResponse) -> Result<String, String> {
+    match answer {
+        UserResponse::PairAdvertising { code, .. } => Ok(code.expose().to_string()),
+        UserResponse::VaultKeepsAlready { user_id } => Err(kotton_wire::ipc::vault_keeps_already_said(&user_id)),
+        UserResponse::Error { message } => Err(message),
+        other => Err(format!("landlord.invite: an answer this does not read: {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod a_guests_invite {
+    use super::*;
+
+    /// **A name the vault keeps is refused to the guest in the vault's
+    /// sentence** (#108): the vault answers `VaultKeepsAlready`, and the guest's
+    /// `vault invite <v> <name> --space` is told the vault already keeps for
+    /// that name — never a debug print of the variant. `landlord_invite` hands
+    /// the vault's answer to [`invite_answered`] and nothing else; the method
+    /// itself needs a kept credential and a live vault to reach this.
+    #[test]
+    fn a_name_the_vault_keeps_is_refused_to_the_guest_in_the_vaults_sentence() {
+        let said = invite_answered(UserResponse::VaultKeepsAlready { user_id: "sam".into() })
+            .expect_err("an invite for a kept name was answered as minted");
+        assert!(said.starts_with("this vault already keeps for 'sam'"), "{said}");
+        assert!(!said.contains("VaultKeepsAlready") && !said.contains("does not read"), "{said}");
+        let minted = UserResponse::PairAdvertising {
+            code: kotton_wire::ipc::SecretText::new("kotton-invite:vault:the-words"),
+            expires_at: 1,
+        };
+        assert_eq!(invite_answered(minted).as_deref(), Ok("kotton-invite:vault:the-words"));
+        assert_eq!(invite_answered(UserResponse::Error { message: "no relay".into() }), Err("no relay".to_string()));
     }
 }
 
