@@ -5420,6 +5420,128 @@ async fn enrol_at_the_repl_asks_which_between_two_vault_keys_and_nothing_else() 
     assert!(matches!(named.exit_code, kotton_shell::ExitCode::Success), "{:?}", named.out);
 }
 
+/// A relay and a vault each minted at `repl` with no name and created for its
+/// key, neither enrolled yet: the relay, its address, its key, the vault, and
+/// the two lines `enrol` takes. With `stood`, the vault stands at the relay in
+/// process already, outside anything this desktop told it
+/// (`common::relay::stand_at`).
+async fn a_relay_and_a_vault_not_enrolled(
+    desk: &mut crate::common::TestEnv,
+    repl: &mut kotton_shell::ShellState,
+    stood: bool,
+) -> (crate::common::relay::Relay, RunningVault, String, String) {
+    for kind in ["relay", "vault"] {
+        let minted = at_the_repl(repl, &format!("mint {kind}"), &[]).await;
+        assert!(matches!(minted.exit_code, kotton_shell::ExitCode::Success), "mint {kind}: {:?}", minted.out);
+    }
+    let keys = within("mint", desk.client.operator_mints("lee")).await.expect("the keys waiting");
+    let key_of = |name: &str| keys.iter().find(|m| m.name == name).map(|m| m.key.clone()).expect("minted");
+    let (relay, relay_addr) = within("the relay", crate::common::relay::spawn_with_operator(&key_of("relay"))).await;
+    let relay_id = within("the relay's key", crate::common::relay::key_of(&relay_addr)).await;
+    let vault = within("the vault", spawn_vault("vault")).await;
+    if stood {
+        crate::common::relay::stand_at(&vault.vault, &relay_addr).await;
+    }
+    admit_public_at_the_door(&vault, &key_of("vault")).await;
+    let mut door = within("the vault's door", connect_when_ready(&vault.ipc, "door")).await;
+    let (_, vault_key_hex) = within("the vault's identity", door.get_node_identity()).await.expect("who the vault is");
+    let (relay_text, vault_text) = (relay_line(&format!("http://{relay_addr}"), &relay_id), vault_line(&vault, &vault_key_hex));
+    (relay, vault, relay_text, vault_text)
+}
+
+/// **A relay's `enrol` keeps the person's things at the vault that could not
+/// keep yet** (#102). A vault enrolled while this desktop operates no relay
+/// stands nowhere, so its keep has nowhere to meet: said not kept, exit 1,
+/// no tenant written. The relay's line, enrolled after, tells the vault to
+/// stand there — its readout names it — and then runs the keep the vault's
+/// own enrol runs, `vault invite --me`, unasked (an answer given is left
+/// unread), with this device standing at that relay. The vault then holds
+/// `lee` as a tenant, is `lee`'s one drive, and the enrol exits 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_relays_enrol_keeps_your_things_at_the_vault_that_could_not_keep_yet() {
+    init_crypto();
+    let _base = OwnBaseDir::take();
+    let mut desk = within("the operator's desktop", crate::common::relay::env_without()).await;
+    within("the operator's identity", desk.client.create_user("lee", crate::common::TEST_PASSPHRASE))
+        .await
+        .expect("create_user");
+    let mut repl = a_repl(&mut desk, "lee").await;
+    let (_relay, vault, relay_text, vault_text) = a_relay_and_a_vault_not_enrolled(&mut desk, &mut repl, false).await;
+
+    // The vault first, with no relay held: kept, and its keep cannot meet.
+    let first = at_the_repl(&mut repl, &format!("enrol {vault_text}"), &[]).await;
+    assert!(matches!(first.exit_code, kotton_shell::ExitCode::Code(1)), "{:?}: {:?}", first.exit_code, first.out);
+    assert!(said_as(&first, "enrolled")[0].contains("you operate the vault"), "{:?}", first.out);
+    assert!(not_kept(&first).contains("stands at no relay"), "{:?}", first.out);
+    assert!(tenants_at_the_door(&vault.ipc).await.is_empty(), "a vault at no relay wrote a tenant");
+
+    // Then the relay's line: the vault stands there, and the keep is taken up, asking nothing.
+    let then = at_the_repl(&mut repl, &format!("enrol {relay_text}"), &["y"]).await;
+    assert!(
+        matches!(then.exit_code, kotton_shell::ExitCode::Success),
+        "the relay's enrol that kept at the vault exited {:?}: {:?}",
+        then.exit_code,
+        then.out
+    );
+    assert_eq!(repl.asking, kotton_shell::Asking::Given(["y".to_string()].into()), "the enrol asked something: {:?}", then.out);
+    assert!(said_as(&then, "enrolled")[0].contains("you operate the relay"), "{:?}", then.out);
+    assert_eq!(said_as(&then, "told to stand here"), vec!["the vault 'vault'".to_string()], "{:?}", then.out);
+    assert!(
+        !then.out.iter().any(|o| matches!(o, kotton_shell::out::Out::Fail { .. })),
+        "the relay's enrol said something failed: {:?}",
+        then.out
+    );
+    assert!(
+        then.out.iter().any(
+            |o| matches!(o, kotton_shell::out::Out::Confirm { action, .. } if action.starts_with("this device stands at your relay too"))
+        ),
+        "the keep did not stand this device at the relay: {:?}",
+        then.out
+    );
+    let tenants = tenants_at_the_door(&vault.ipc).await;
+    assert!(tenants.iter().any(|t| t.user_id == "lee" && t.devices == 1), "the vault does not hold lee as a tenant: {tenants:?}");
+    let (_, drives) = within("a sync asked for", desk.client.sync_drives("lee")).await.expect("the sync asked for");
+    assert_eq!(drives, 1, "the vault is not lee's one drive");
+}
+
+/// **A vault that keeps the person's things already is not invited again by a
+/// relay's `enrol`** (#102). The vault stands at the relay in process, outside
+/// anything this desktop told it, so its own enrol's keep meets: `lee` is its
+/// tenant, and this desktop's record still says the vault was told nothing.
+/// The relay's enrol then tells it to stand there — its readout names it —
+/// and finds `lee` already among its people: no invite, no ceremony, one
+/// device of `lee`'s paired there, and the enrol exits 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_relays_enrol_does_not_invite_again_a_vault_that_keeps_your_things() {
+    init_crypto();
+    let _base = OwnBaseDir::take();
+    let mut desk = within("the operator's desktop", crate::common::relay::env_without()).await;
+    within("the operator's identity", desk.client.create_user("lee", crate::common::TEST_PASSPHRASE))
+        .await
+        .expect("create_user");
+    let mut repl = a_repl(&mut desk, "lee").await;
+    let (_relay, vault, relay_text, vault_text) = a_relay_and_a_vault_not_enrolled(&mut desk, &mut repl, true).await;
+
+    let first = at_the_repl(&mut repl, &format!("enrol {vault_text}"), &[]).await;
+    assert!(matches!(first.exit_code, kotton_shell::ExitCode::Success), "{:?}: {:?}", first.exit_code, first.out);
+    let kept = tenants_at_the_door(&vault.ipc).await;
+    assert!(kept.iter().any(|t| t.user_id == "lee" && t.devices == 1), "the vault's own enrol did not keep: {kept:?}");
+
+    let then = at_the_repl(&mut repl, &format!("enrol {relay_text}"), &[]).await;
+    assert!(matches!(then.exit_code, kotton_shell::ExitCode::Success), "{:?}: {:?}", then.exit_code, then.out);
+    assert_eq!(said_as(&then, "told to stand here"), vec!["the vault 'vault'".to_string()], "{:?}", then.out);
+    assert!(
+        !then.out.iter().any(|o| matches!(o, kotton_shell::out::Out::Fail { .. } | kotton_shell::out::Out::Confirm { .. })),
+        "the relay's enrol invited a vault that keeps lee's things already: {:?}",
+        then.out
+    );
+    assert_eq!(tenants_at_the_door(&vault.ipc).await, kept, "the vault's people changed");
+    let nodes = within("the desktop's nodes", desk.client.list_nodes("lee")).await.expect("nodes");
+    assert_eq!(nodes.len(), 1, "the vault was paired again: {nodes:?}");
+}
+
 /// What an `enrol` said of a vault that does not keep this person's things,
 /// panicking when it said nothing of the kind.
 fn not_kept(out: &kotton_shell::CommandOutput) -> String {

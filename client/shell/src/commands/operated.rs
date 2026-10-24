@@ -36,7 +36,10 @@
 //! more: it runs `vault invite --me` for that vault, and the vault is recorded
 //! as this person's drive, as the admit of a vault records one. Nothing is
 //! synced then: `sync` syncs this device's drives when the person asks
-//! (RFC 0002, Consequences; #57).
+//! (RFC 0002, Consequences; #57). A vault enrolled while this desktop operates
+//! no relay stands nowhere, so that keep cannot meet; the relay's `enrol`
+//! later stands it there, and then keeps the person's things at it, as the
+//! vault's own enrol would have, unless it keeps them already (#102).
 //!
 //! From then on the vault's four acts — invite someone with the space set
 //! aside for them, list who keeps there, change one person's space, drop one
@@ -538,13 +541,14 @@ impl Command for MintCommand {
 
 /// `enrol <line> [<line>…]` — complete the keys minted here from the lines
 /// their instances printed when they were created, each on its own; a vault's
-/// then keeps this person's things, asking nothing (#57).
+/// then keeps this person's things, asking nothing (#57), and a relay's keeps
+/// them at each vault it stood that could not keep them yet (#102).
 pub struct EnrolCommand;
 
 #[async_trait::async_trait]
 impl Command for EnrolCommand {
     fn help_text(&self) -> &'static str {
-        "enrol <line> [<line>…] — paste the line each relay or vault of your own printed when it was created, space-separated or one per row, in any order, or the one line a host printed, which names both: each completes the key minted for it, and says what it names, whether it is reached from here and whether its key matched; a vault's then keeps your things, sealed, as one of your drives — `sync` syncs them there when you ask — and this device stands at the relay the same enrol kept. mint and enrol make one; relay and vault operate one"
+        "enrol <line> [<line>…] — paste the line each relay or vault of your own printed when it was created, space-separated or one per row, in any order, or the one line a host printed, which names both: each completes the key minted for it, and says what it names, whether it is reached from here and whether its key matched; a vault's then keeps your things, sealed, as one of your drives — `sync` syncs them there when you ask — and this device stands at the relay the same enrol kept; a relay's keeps them at each vault it stands that does not keep them yet. mint and enrol make one; relay and vault operate one"
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
@@ -587,7 +591,8 @@ fn parse_enrol(text: &str) -> Option<(Vec<String>, Vec<kotton_wire::ipc::LineEnr
 }
 
 /// `enrol`: send the lines, ask which where several keys of a kind wait, say
-/// what each came to, then keep this person's things at each vault kept. Every decision is the
+/// what each came to, then keep this person's things at each vault kept, and
+/// at each vault a relay kept stood that does not keep them yet. Every decision is the
 /// daemon's (`operator::enrol_lines`); this asks the person what only they
 /// can answer, and sends their answer back as the line's `mint`.
 async fn enrol(text: &str, state: &mut ShellState) -> Result<CommandOutput> {
@@ -652,6 +657,21 @@ async fn enrol(text: &str, state: &mut ShellState) -> Result<CommandOutput> {
             all_kept &= keep_at(state, &mut out, name, *only, &relays).await;
         }
     }
+    // A relay's enrol takes up the keep at each vault it stood that could
+    // not keep yet, as that vault's own enrol would have (#102).
+    let stood = stood_by_relays(&came);
+    if !stood.is_empty() {
+        let only = {
+            let mut client = state.client.lock().await;
+            client.operator_held(&state.user_id, OperatedService::Vault).await.is_ok_and(|held| held.len() == 1)
+        };
+        for vault in &stood {
+            if keeps_already(state, vault).await {
+                continue;
+            }
+            all_kept &= keep_at(state, &mut out, vault, only, &relays).await;
+        }
+    }
     let mut answer = CommandOutput::shapes(out);
     if !all_kept {
         answer.exit_code = crate::ExitCode::Code(1);
@@ -669,6 +689,54 @@ fn relays_kept(came: &[kotton_wire::ipc::LineEnrolled]) -> Vec<[u8; 32]> {
         .filter(|l| l.kind == OperatedService::Relay)
         .map(|l| l.key)
         .collect()
+}
+
+/// The vaults the relays this `enrol` kept told to stand there, each once and
+/// in the order told — less any whose own line this `enrol` kept, whose keep
+/// its own completion runs. A relay's completion names them
+/// (`LineCame::Kept::stood`); a vault told nothing before stood nowhere, so its
+/// keep could not meet, and this is where it is taken up (#102).
+fn stood_by_relays(came: &[kotton_wire::ipc::LineEnrolled]) -> Vec<String> {
+    use kotton_wire::ipc::LineCame;
+    let kept_as_vaults: Vec<&str> = came
+        .iter()
+        .filter_map(|c| match (c.kind, &c.came_to) {
+            (Some(OperatedService::Vault), LineCame::Kept { name, .. }) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut stood: Vec<String> = Vec::new();
+    for c in came {
+        let (Some(OperatedService::Relay), LineCame::Kept { stood: told, .. }) = (c.kind, &c.came_to) else { continue };
+        for vault in told {
+            if !kept_as_vaults.contains(&vault.as_str()) && !stood.contains(vault) {
+                stood.push(vault.clone());
+            }
+        }
+    }
+    stood
+}
+
+/// Whether the vault `vault` already keeps this person's things: its people
+/// list them, with a device of theirs paired there or bytes held for them. Such
+/// a vault is not invited again. A list that cannot be read is answered `false`:
+/// the keep is tried, and the vault's own refusal, if any, is what is said.
+async fn keeps_already(state: &ShellState, vault: &str) -> bool {
+    let people = {
+        let mut client = state.client.lock().await;
+        client.as_operator(&state.user_id, vault, OperatorVerb::Pools).await
+    };
+    match people {
+        Ok(UserResponse::VaultTenants { tenants }) => keeps_here(&tenants, &state.user_id),
+        _ => false,
+    }
+}
+
+/// Whether `tenants` — a vault's people — keep `user`'s things: listed, with a
+/// device paired there or bytes held. A name the landlord only set a number
+/// for keeps nothing yet, and is invited.
+fn keeps_here(tenants: &[kotton_wire::ipc::VaultTenant], user: &str) -> bool {
+    tenants.iter().any(|t| t.user_id == user && (t.devices > 0 || t.held > 0))
 }
 
 /// What one line came to, in the three readouts it is read by — what it
@@ -696,11 +764,15 @@ fn readout(c: &kotton_wire::ipc::LineEnrolled) -> Vec<(String, String)> {
         ("its key".to_string(), yes_no(c.matched, "matched", "did not match", unmatched)),
     ];
     match &c.came_to {
-        LineCame::Kept { name, unstood, .. } => {
+        LineCame::Kept { name, unstood, stood, .. } => {
             let word = c.kind.map_or("instance", OperatedService::word);
             let named = if name == word { String::new() } else { format!(" '{name}'") };
             rows.push(("enrolled".into(), format!("you operate the {word}{named}; its credential is sealed in your store")));
             rows.extend(self::unstood(&kotton::KeptCredential { name: name.clone(), unstood: unstood.clone() }));
+            if !stood.is_empty() {
+                let vaults: Vec<String> = stood.iter().map(|v| format!("the vault '{v}'")).collect();
+                rows.push(("told to stand here".into(), vaults.join(", ")));
+            }
         }
         LineCame::Which { names } => rows.push((
             "not enrolled".into(),
@@ -729,7 +801,9 @@ fn readout(c: &kotton_wire::ipc::LineEnrolled) -> Vec<(String, String)> {
 /// a vault is where things are kept, and a vault's enrol that keeps nothing
 /// has not done what enrol does, though its credential is kept. Nothing in a
 /// keep aborts the enrol: its readouts are said whatever the keep came to. A
-/// relay's enrol that stands such a vault does not yet take the keep up (#102).
+/// relay's enrol that stands such a vault takes the keep up there, by this
+/// same act, unless the vault keeps the person's things already
+/// ([`stood_by_relays`], [`keeps_already`]; #102).
 async fn keep_at(state: &mut ShellState, out: &mut Vec<Out>, vault: &str, only: bool, relays: &[[u8; 32]]) -> bool {
     let to = if only { To::Only(vault) } else { To::Named(vault) };
     let not_kept = |why: String| Out::Fail {
@@ -1852,14 +1926,14 @@ mod tests {
             matched: Some(true),
             came_to,
         };
-        let kept = || LineCame::Kept { name: "relay".into(), only: true, unstood: None };
+        let kept = || LineCame::Kept { name: "relay".into(), only: true, unstood: None, stood: Vec::new() };
         let mine = line(OperatedService::Relay, 5, "http://203.0.113.9:7700");
         let refused = line(OperatedService::Relay, 6, "http://203.0.113.10:7700");
         let vault = line(OperatedService::Vault, 7, "203.0.113.9:7710");
         let relays = relays_kept(&[
             came(mine.clone(), OperatedService::Relay, kept()),
             came(refused.clone(), OperatedService::Relay, LineCame::Refused { why: "another key".into() }),
-            came(vault.clone(), OperatedService::Vault, LineCame::Kept { name: "vault".into(), only: true, unstood: None }),
+            came(vault.clone(), OperatedService::Vault, LineCame::Kept { name: "vault".into(), only: true, unstood: None, stood: Vec::new() }),
         ]);
         assert_eq!(relays, vec![[5; 32]]);
         assert!(super::super::device::relay_offer_taken(&mine, &relays));
@@ -1881,6 +1955,63 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// **A relay's enrol takes up the keep at each vault it stood, once, and
+    /// not at one whose own line this enrol kept** (#102). The relay's
+    /// completion names the vaults it told to stand there; a vault named by two
+    /// relays is kept at once, a vault whose line is in the same enrol is kept
+    /// by its own completion, and a refused relay names none. Its readout says
+    /// which vaults it stood.
+    #[test]
+    fn a_relays_enrol_keeps_at_each_vault_it_stood_once() {
+        use kotton_wire::ipc::{LineCame, LineEnrolled};
+        let came = |kind, came_to| LineEnrolled {
+            line: String::new(),
+            kind: Some(kind),
+            hint: String::new(),
+            dialled: true,
+            reached: Some(true),
+            matched: Some(true),
+            came_to,
+        };
+        let relay = |stood: &[&str]| {
+            came(
+                OperatedService::Relay,
+                LineCame::Kept { name: "relay".into(), only: true, unstood: None, stood: stood.iter().map(|s| s.to_string()).collect() },
+            )
+        };
+        let vault = |name: &str| came(OperatedService::Vault, LineCame::Kept { name: name.into(), only: false, unstood: None, stood: Vec::new() });
+        assert_eq!(stood_by_relays(&[relay(&["attic", "home"])]), vec!["attic".to_string(), "home".into()]);
+        assert_eq!(stood_by_relays(&[relay(&["attic"]), relay(&["attic", "home"])]), vec!["attic".to_string(), "home".into()], "once each");
+        assert_eq!(stood_by_relays(&[vault("attic"), relay(&["attic", "home"])]), vec!["home".to_string()], "attic's own line keeps it");
+        assert!(stood_by_relays(&[relay(&[]), vault("attic")]).is_empty(), "a relay that stood none takes up nothing");
+        assert!(
+            stood_by_relays(&[came(OperatedService::Relay, LineCame::Refused { why: "another key".into() })]).is_empty(),
+            "a refused relay stood nothing"
+        );
+
+        let rows = readout(&relay(&["attic", "home"]));
+        assert!(
+            rows.contains(&("told to stand here".to_string(), "the vault 'attic', the vault 'home'".to_string())),
+            "{rows:?}"
+        );
+        assert!(!readout(&relay(&[])).iter().any(|(k, _)| k == "told to stand here"));
+    }
+
+    /// **A vault that keeps this person's things already is not invited
+    /// again** (#102): listed among its people with a device paired there or
+    /// bytes held. A name the landlord only set a number for keeps nothing
+    /// yet, and another person's pool is not this person's.
+    #[test]
+    fn a_vault_keeps_a_persons_things_when_a_device_or_bytes_of_theirs_are_there() {
+        use kotton_wire::ipc::VaultTenant;
+        let t = |user: &str, held, devices| VaultTenant { user_id: user.into(), held, quota: None, devices };
+        assert!(keeps_here(&[t("lee", 0, 1)], "lee"));
+        assert!(keeps_here(&[t("sam", 0, 1), t("lee", 4096, 0)], "lee"));
+        assert!(!keeps_here(&[t("lee", 0, 0)], "lee"), "a number set for lee keeps nothing yet");
+        assert!(!keeps_here(&[t("sam", 4096, 2)], "lee"), "sam's pool is not lee's");
+        assert!(!keeps_here(&[], "lee"));
     }
 
     /// **`mint <kind> <name>` takes `--rev <rev>` for one's own build and
@@ -2156,12 +2287,12 @@ mod tests {
             came_to,
         };
         let field = |rows: &[(String, String)], k: &str| rows.iter().find(|(f, _)| f == k).map(|(_, v)| v.clone()).unwrap();
-        let kept = readout(&line(true, Some(true), Some(true), LineCame::Kept { name: "vault".into(), only: true, unstood: None }));
+        let kept = readout(&line(true, Some(true), Some(true), LineCame::Kept { name: "vault".into(), only: true, unstood: None, stood: Vec::new() }));
         assert_eq!(field(&kept, "names"), "a vault at 203.0.113.9:7710, key 7c1e4a9f…");
         assert_eq!(field(&kept, "reached from here"), "yes");
         assert_eq!(field(&kept, "its key"), "matched");
         assert_eq!(field(&kept, "enrolled"), "you operate the vault; its credential is sealed in your store", "the kind's word is no name");
-        let named = readout(&line(true, Some(true), Some(true), LineCame::Kept { name: "attic".into(), only: false, unstood: None }));
+        let named = readout(&line(true, Some(true), Some(true), LineCame::Kept { name: "attic".into(), only: false, unstood: None, stood: Vec::new() }));
         assert!(field(&named, "enrolled").contains("the vault 'attic'"), "{named:?}");
         let stand_in = readout(&line(true, Some(true), Some(false), LineCame::Refused { why: "another key".into() }));
         assert_eq!((field(&stand_in, "reached from here"), field(&stand_in, "its key")), ("yes".into(), "did not match".into()));
