@@ -1359,9 +1359,12 @@ pub fn vault_keeps_already_said(user_id: &str) -> String {
 /// adds is never misread as leave to go on: it is said here by its name
 /// until it is given a sentence, and then said in it by every reader at once.
 /// The readers that say through this: `kvaultd invite` and `kvaultd join` at
-/// the vault's door, a guest's `landlord.*` verbs (`kuserd`'s
-/// `occupant_host::answered!`), and the shell's operating verbs
-/// (`vault …`, `relay …`).
+/// the vault's door; six of a guest's landlord verbs, through `kuserd`'s
+/// `occupant_host::answered!` — `landlord.invite`, `landlord.people`,
+/// `landlord.drop-pool`, `landlord.rule`, `landlord.set-rule` and
+/// `landlord.move-vault` (not `landlord.enrol`, which reads through
+/// `door::enrolled`, #139; `landlord.resolve` reads no answer); and the shell's
+/// verbs said to an operated vault or relay (`operated::spoken`).
 pub fn answer_said(answer: &UserResponse) -> String {
     match answer {
         UserResponse::Error { message } => message.clone(),
