@@ -840,6 +840,9 @@ pub enum UserRequest {
     /// Revoke a paired node, removing it from the allowlist.
     NodeRevoke {
         user_id: String,
+        /// The node's DID, or the label it is shown under while one of the
+        /// person's nodes carries it: a label keys no row, so one that two
+        /// carry is refused and the DID names the one meant.
         node_id: String,
     },
 

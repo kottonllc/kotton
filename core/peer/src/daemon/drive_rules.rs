@@ -91,7 +91,10 @@ async fn drive_named(db: &Arc<SqlitePool>, user_id: &str, name: &str) -> io::Res
     if let Some(d) = drives.iter().find(|d| d.node.id == name || hex::encode(d.vault_key) == name) {
         return Ok(Ok(d.clone()));
     }
-    let paired = super::db::get_paired_node_by_id(db, user_id, name).await?.is_some();
+    let paired = super::db::list_paired_nodes(db, user_id)
+        .await?
+        .iter()
+        .any(|n| n.id == name || n.device_did.to_string() == name);
     Ok(Err(if paired {
         format!(
             "'{name}' is not one of your drives: a sync rule names a drive, and a device is not one — \
@@ -297,7 +300,8 @@ mod tests {
         let key = paired(&db, "vault", 9, Posture::BlindStorage).await;
         super::super::drives::record(&db, "alice", &key).await.unwrap();
         configure(&db, &udb, "alice".into(), "vault".into(), None, true).await.unwrap();
-        super::super::db::delete_paired_node(&db, "alice", "vault").await.unwrap();
+        let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key).unwrap().to_string();
+        assert!(super::super::db::delete_paired_node(&db, "alice", &did).await.unwrap());
 
         let UserResponse::SyncRuleList { rules: listed } = list(&db, &udb, "alice".into()).await.unwrap() else { panic!() };
         assert_eq!(listed[0].drive, "");

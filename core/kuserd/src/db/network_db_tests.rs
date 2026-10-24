@@ -66,7 +66,7 @@ mod tests {
         assert_eq!(read("desktop", &nodes).as_deref(), Some("full"));
         assert_eq!(read("old", &nodes), None);
         for id in ["cosigner", "vault", "desktop", "old"] {
-            let one = get_paired_node_by_id(&db, "alice", id).await.unwrap().unwrap();
+            let one = paired_node_named(&db, "alice", id).await.unwrap().unwrap();
             assert_eq!(one.posture, read(id, &nodes), "{id} by its label");
         }
     }
@@ -85,7 +85,7 @@ mod tests {
         insert_paired_node(&db, "newer", "alice", &did, &pk, "[]", 0, Some("steward")).await.unwrap();
         let node = list_paired_nodes(&db, "alice").await.unwrap().pop().unwrap();
         assert!(!offers_from(node.posture), "an unrecognised posture was read as full");
-        let one = get_paired_node_by_id(&db, "alice", "newer").await.unwrap().unwrap();
+        let one = paired_node_named(&db, "alice", "newer").await.unwrap().unwrap();
         assert!(!offers_from(one.posture), "an unrecognised posture was read as full, by its label");
     }
 

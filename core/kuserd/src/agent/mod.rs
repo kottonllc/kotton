@@ -2596,9 +2596,12 @@ async fn handle_peer_request(
             // asker is told that key beside the address.
             let relay_key = nat.relay_key;
             let own_device = match peer_pubkey_bytes {
-                Some(pk) => match kotton_peer::daemon::db::paired_node_for_pubkey(db, &pk).await {
-                    Ok(Some((_, None))) => true,
-                    Ok(Some((_, Some(p)))) => p == kotton_schemas::membership::Posture::Full.as_str(),
+                // This person's row for the key, not any person's: rows are
+                // each person's (`kotton_peer::daemon::db`), and another's
+                // row for the same key says nothing of what it is to this one.
+                Some(pk) => match kotton_peer::daemon::db::paired_posture_for_user(db, &pk, &user_id).await {
+                    Ok(Some(None)) => true,
+                    Ok(Some(Some(p))) => p == kotton_schemas::membership::Posture::Full.as_str(),
                     _ => false,
                 },
                 None => false,

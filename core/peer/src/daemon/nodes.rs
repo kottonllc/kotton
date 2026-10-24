@@ -89,9 +89,9 @@ pub async fn peer_add(
     pubkey.copy_from_slice(&pubkey_bytes);
 
     let now = now_secs();
-    // The label IS the paired_nodes primary key — it must be stable and
-    // human-readable so that mount configs (which FK-reference it) and CLI
-    // commands that take a node label all resolve to the same row.
+    // The label is what the person reads and names the node by; the row is
+    // keyed by the person and the DID (`super::db`), so a label another row of
+    // theirs already carries is shown on both, and replaces neither.
     let id = label.clone();
     let addresses_json = serde_json::to_string(&[peer_addr]).map_err(json_err)?;
 
@@ -116,7 +116,7 @@ pub async fn peer_add(
 
     // The row as it now stands: a posture an earlier pairing projected is kept
     // (`insert_paired_node`).
-    let node = super::db::get_paired_node_by_id(db, &user_id, &id).await?.unwrap_or(PairedNode {
+    let node = super::db::get_paired_node(db, &user_id, &peer_did).await?.unwrap_or(PairedNode {
         id,
         device_did: device_did_parsed,
         public_key: pubkey,
@@ -136,25 +136,33 @@ pub async fn peer_add(
 ///
 /// Unlike [`node_revoke`] it touches no membership record: a node added by
 /// address was never a member, and the person's set may not be open here.
+/// The node is named by its DID, the row's key: the label it was added under
+/// may be another row's too.
 pub async fn take_back_added(
     db: &Arc<SqlitePool>,
     paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
     user_id: &str,
-    node_id: &str,
+    device_did: &str,
 ) -> io::Result<()> {
-    let Some(node) = network_db::get_paired_node_by_id(db, user_id, node_id).await? else {
+    let Some(node) = network_db::get_paired_node(db, user_id, device_did).await? else {
         return Ok(());
     };
-    network_db::delete_paired_node(db, user_id, node_id).await?;
-    let still_paired: Option<i64> = sqlx::query_scalar("SELECT 1 FROM paired_nodes WHERE public_key = ? LIMIT 1")
-        .bind(node.public_key.as_slice())
-        .fetch_optional(db.as_ref())
-        .await
-        .map_err(|e| io::Error::other(e.to_string()))?;
-    if still_paired.is_none() {
+    network_db::delete_paired_node(db, user_id, device_did).await?;
+    if !still_paired(db, &node.public_key).await? {
         paired_keys.write().unwrap().remove(&node.public_key);
     }
     Ok(())
+}
+
+/// Whether any row on this machine, any person's, still pairs `key`: the live
+/// allowlist is the machine's, so a key leaves it with its last row.
+async fn still_paired(db: &Arc<SqlitePool>, key: &[u8; 32]) -> io::Result<bool> {
+    let row: Option<i64> = sqlx::query_scalar("SELECT 1 FROM paired_nodes WHERE public_key = ? LIMIT 1")
+        .bind(key.as_slice())
+        .fetch_optional(db.as_ref())
+        .await
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(row.is_some())
 }
 ///
 /// Constructs a `GuestAccessToken` with:
@@ -370,8 +378,10 @@ pub async fn node_revoke(
     paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
 ) -> io::Result<UserResponse> {
     // Fetch the node *before* deleting so we have its DID (to drop the membership
-    // record) and public key (to drop the live TLS allowlist entry).
-    let node = match network_db::get_paired_node_by_id(db, &user_id, &node_id).await? {
+    // record and to name the row) and public key (to drop the live TLS
+    // allowlist entry). `node_id` is what the person typed: the node's DID, or
+    // a label one row of theirs carries (`network_db::paired_node_named`).
+    let node = match network_db::paired_node_named(db, &user_id, &node_id).await? {
         Some(n) => n,
         None => {
             return Ok(UserResponse::Error {
@@ -394,8 +404,12 @@ pub async fn node_revoke(
         }
     }
 
-    network_db::delete_paired_node(db, &user_id, &node_id).await?;
-    paired_keys.write().unwrap().remove(&node.public_key);
+    network_db::delete_paired_node(db, &user_id, &node.device_did.to_string()).await?;
+    // The key leaves the live allowlist unless a row still pairs it: another
+    // person's here, who may pair the same node (two tenants of one vault).
+    if !still_paired(db, &node.public_key).await? {
+        paired_keys.write().unwrap().remove(&node.public_key);
+    }
     Ok(UserResponse::NodeRevoked)
 }
 
@@ -1020,7 +1034,7 @@ pub async fn project_membership_into_allowlist(
             added += 1;
         }
         // Ensure a paired_nodes cache row exists without clobbering learned
-        // addresses (keyed by the unique DID; address-less until reachability
+        // addresses (keyed by the person and the DID; address-less until reachability
         // fills it). Skip members already cached.
         //
         // **Own devices only.** `paired_nodes` is what `peer_standing` reads to

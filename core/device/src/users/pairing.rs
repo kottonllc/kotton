@@ -37,11 +37,15 @@
 //!   join on the joiner with the reason, before the joiner writes anything:
 //!   one that does not hold together ([`check_handed_drives`]), and one whose
 //!   rows would be written over a row this device holds — its key paired here
-//!   as something other than a vault, or its label held here by another key
-//!   ([`check_handed_rows`]). The issuer's word replaces none of this
-//!   device's rows under another key, and writes no posture over any. A
-//!   write that fails after that point also fails the join there, which the
-//!   person runs again.
+//!   as something other than a vault, or its DID paired here beside another
+//!   key ([`check_handed_rows`]). A row is the person's and the node's DID's,
+//!   and its label keys nothing (`kotton_peer::daemon::db`), so a drive's
+//!   label that this device already shows on another row, the issuer's
+//!   included, or that another person here uses, is no reason to refuse: the
+//!   drive's row sits beside the other. The issuer's word replaces none of this
+//!   device's rows under another key, reaches no other person's row, and
+//!   writes no posture over any. A write that fails after that point also
+//!   fails the join there, which the person runs again.
 //!
 //!   **A late refusal is one-sided.** The issuer sends the payload and gets no
 //!   acknowledgement after it: once its frames are sent its side returns, it
@@ -1481,14 +1485,16 @@ pub async fn drives_to_hand(db: &Arc<SqlitePool>, user_id: &str) -> Vec<kotton_w
 
 /// Whether this device can record every drive `issuer` handed it at the join,
 /// as the name `user_id` it joins under: each drive's tenancy is that name, its
-/// node's key is the vault's key and its DID names that key, its node is
-/// neither the issuer's row (by label) nor the issuer's key, and the handout
-/// holds together: one that names one label for two keys does not. An honest
-/// issuer cannot send that, since its own rows are keyed by label and by DID
-/// (`id PRIMARY KEY`, `device_did UNIQUE`); the clause holds the bytes on the
-/// wire to the same shape, so the join's second write never takes its first.
-/// `Err` says which drive and why.
-/// The rows this device already holds are [`check_handed_rows`]'s.
+/// node's key is the vault's key and its DID names that key, and its node is
+/// not the issuer's — neither the issuer's key nor the issuer's DID, which is
+/// the key of the row the join writes for the issuer, so a drive under it
+/// would be written over that row. `Err` says which drive and why. The rows
+/// this device already holds are [`check_handed_rows`]'s.
+///
+/// What the drive's node is *called* is not checked: a label keys no row
+/// (`kotton_peer::daemon::db`), so a drive shown under the issuer's name, or
+/// two drives under one label, are each written to their own row and replace
+/// nothing.
 ///
 /// Checked before the join writes anything, so a handout this device cannot
 /// keep refuses the ceremony cleanly: a device that joins with a drive it
@@ -1508,10 +1514,8 @@ pub fn check_handed_drives(
             Some("the node it is reached through is not the vault's key".to_string())
         } else if named != Some(node.public_key) {
             Some("its node's DID does not name its key".to_string())
-        } else if node.id == issuer.id || node.public_key == issuer.public_key {
+        } else if node.device_did == issuer.device_did || node.public_key == issuer.public_key {
             Some(format!("its node is the device this one joins ('{}')", issuer.id))
-        } else if drives.iter().any(|d| d.node.id == node.id && d.node.public_key != node.public_key) {
-            Some("the handout names another drive's node by the same label".to_string())
         } else {
             None
         };
@@ -1523,23 +1527,24 @@ pub fn check_handed_drives(
 }
 
 /// Whether this device can record every drive handed at the join without
-/// writing over a row it holds. The join's write (`insert_paired_node`) takes
-/// the row its label or DID names, so each row either names is checked here,
-/// as that write matches them: the only one it may take is this person's own
-/// row for the vault's key, and only while that row names no posture or
+/// writing over a row it holds. A row is keyed by the person and the node's
+/// DID (`kotton_peer::daemon::db`), so the join's write (`insert_paired_node`)
+/// can take only this person's row under the drive's DID, and `drives::record`
+/// reads this person's row under the vault's key; those are the rows read
+/// here, and no other person's, which no write of this person's reaches. The
+/// one the join may take is a row for the vault's key under no posture or
 /// `blind-storage`. `Ok(Err)` says which drive and why.
 ///
 /// - **The vault's key, paired here as something else** — one of the person's
 ///   devices, a cosigner — is not made a vault on the issuer's word: the row
 ///   keeps its posture, and the join is refused. `drives::record` refuses the
 ///   same row; checking here refuses before anything is written.
-/// - **The drive's label, held here by another key**, is not replaced: that
-///   row, and the drive it may be, stay as they are, and the join is refused.
-/// - **A row of another person's on this device** that the label or the DID
-///   names is not replaced either. That one is a refusal only because rows
-///   are keyed by label and DID across every person here (kotton #99); keyed
-///   per person, the write cannot reach it and this clause has nothing to
-///   find.
+/// - **The drive's DID, paired here beside another key**, is not rewritten to
+///   the vault's key: that row, and the drive it may be, stay as they are, and
+///   the join is refused.
+///
+/// A label is not read: one the person's rows already carry is shown on the
+/// drive's row too, and keys neither.
 ///
 /// Read before the join writes anything, beside [`check_handed_drives`].
 pub async fn check_handed_rows(
@@ -1549,16 +1554,18 @@ pub async fn check_handed_rows(
 ) -> io::Result<Result<(), String>> {
     for drive in drives {
         let node = &drive.node;
-        let rows: Vec<(String, String, Vec<u8>, Option<String>)> = sqlx::query_as(
-            "SELECT id, user_id, public_key, posture FROM paired_nodes WHERE device_did = ? OR id = ? ORDER BY id",
+        let rows: Vec<(String, Vec<u8>, Option<String>)> = sqlx::query_as(
+            "SELECT id, public_key, posture FROM paired_nodes \
+             WHERE user_id = ? AND (device_did = ? OR public_key = ?) ORDER BY device_did",
         )
+        .bind(user_id)
         .bind(node.device_did.to_string())
-        .bind(&node.id)
+        .bind(drive.vault_key.as_slice())
         .fetch_all(db.as_ref())
         .await
         .map_err(|e| io::Error::other(e.to_string()))?;
-        for (id, owner, key, posture) in rows {
-            let why = if owner == user_id && key.as_slice() == drive.vault_key.as_slice() {
+        for (id, key, posture) in rows {
+            let why = if key.as_slice() == drive.vault_key.as_slice() {
                 match posture.filter(|p| p != Posture::BlindStorage.as_str()) {
                     Some(other) => format!(
                         "this device pairs '{id}' under the vault's key as {other}, not as a vault, and \
@@ -1566,10 +1573,8 @@ pub async fn check_handed_rows(
                     ),
                     None => continue,
                 }
-            } else if owner == user_id {
-                format!("this device already pairs another key as '{id}', and keeps it as that")
             } else {
-                "this device keeps that node's label or key for another name here".to_string()
+                format!("this device pairs the vault's DID as '{id}' under another key, and keeps it as that")
             };
             return Ok(Err(format!("the drive at '{}' cannot be recorded here: {why}", node.id)));
         }
@@ -1673,16 +1678,26 @@ mod handed_drive_tests {
         let why = check_handed_drives("alice", &issuer, &[misnamed]).unwrap_err();
         assert!(why.contains("DID does not name its key"), "{why}");
 
-        let why = check_handed_drives("alice", &issuer, &[a_drive("laptop", 2, "alice")]).unwrap_err();
-        assert!(why.contains("the device this one joins"), "{why}");
+        // The issuer's name on a drive is a label, and keys no row: taken.
+        assert!(check_handed_drives("alice", &issuer, &[a_drive("laptop", 2, "alice")]).is_ok());
         let mut issuers_key = a_drive("vault", 1, "alice");
         issuers_key.node.id = "vault".into();
         let why = check_handed_drives("alice", &issuer, &[issuers_key]).unwrap_err();
         assert!(why.contains("the device this one joins"), "{why}");
 
-        let why = check_handed_drives("alice", &issuer, &[a_drive("vault", 2, "alice"), a_drive("vault", 3, "alice")])
-            .unwrap_err();
-        assert!(why.contains("same label"), "{why}");
+        // Two drives under one label are two rows: taken, as an issuer that
+        // enrolled two vaults under the default `vault` holds them.
+        assert!(check_handed_drives("alice", &issuer, &[a_drive("vault", 2, "alice"), a_drive("vault", 3, "alice")])
+            .is_ok());
+
+        // The issuer's DID is the key of the row written for it: a drive under
+        // it would be written over that row. Its DID here names another key
+        // than the one it presents, as a device's identity DID beside its
+        // operational key does.
+        let mut issuer_by_identity = a_node("laptop", 1);
+        issuer_by_identity.device_did = a_node("identity", 8).device_did;
+        let why = check_handed_drives("alice", &issuer_by_identity, &[a_drive("vault", 8, "alice")]).unwrap_err();
+        assert!(why.contains("the device this one joins"), "{why}");
     }
 
     /// A machine database at the current schema, on disk so every connection
@@ -1770,49 +1785,84 @@ mod handed_drive_tests {
         assert!(why.contains("'laptop'") && why.contains("as full, not as a vault"), "{why}");
         assert!(why.contains("This device was not joined"), "{why}");
 
-        let laptop = network_db::get_paired_node_by_id(&db, "alice", "laptop").await.unwrap().unwrap();
+        let laptop = network_db::paired_node_named(&db, "alice", "laptop").await.unwrap().unwrap();
         assert_eq!(laptop.posture.as_deref(), Some("full"), "the join relabelled the device");
-        assert!(network_db::get_paired_node_by_id(&db, "alice", "vault").await.unwrap().is_none());
-        assert!(network_db::get_paired_node_by_id(&db, "alice", "issuer").await.unwrap().is_none(), "a refused join wrote");
+        assert!(network_db::paired_node_named(&db, "alice", "vault").await.unwrap().is_none());
+        assert!(network_db::paired_node_named(&db, "alice", "issuer").await.unwrap().is_none(), "a refused join wrote");
         assert_eq!(drive_records(&db).await, 0, "the device was recorded as a drive");
     }
 
     /// **The issuer's word does not replace a row the joiner holds under
     /// another key, nor drop its drive.** The joiner's own `vault`, another
     /// key and recorded as its drive: a join handing a drive labelled `vault`
-    /// is refused, and that row and its drive are as they were.
+    /// writes the handed drive's row beside it (a label keys no row), and that
+    /// row and its drive are as they were.
     #[tokio::test]
     async fn a_joiner_holding_another_key_under_the_handed_label_keeps_that_rows_drive() {
         let (_dir, db) = machine_db().await;
         pair(&db, "alice", "vault", 3, None).await;
         kotton_peer::daemon::drives::record(&db, "alice", &a_node("vault", 3).public_key).await.unwrap();
 
-        let why = refusal(join_handing(&db, vec![a_drive("vault", 2, "alice")]).await);
-        assert!(why.contains("already pairs another key as 'vault'"), "{why}");
-        assert!(why.contains("This device was not joined"), "{why}");
+        let answer = join_handing(&db, vec![a_drive("vault", 2, "alice")]).await;
+        assert!(!matches!(answer, UserResponse::PairFailed { .. }), "the join was refused: {answer:?}");
 
-        assert!(network_db::get_paired_node_by_id(&db, "alice", "issuer").await.unwrap().is_none(), "a refused join wrote");
-        let row = network_db::get_paired_node_by_id(&db, "alice", "vault").await.unwrap().unwrap();
-        assert_eq!(row.public_key, a_node("vault", 3).public_key, "the join replaced the row");
-        let drives = kotton_peer::daemon::drives::list(&db, "alice").await.unwrap();
-        assert_eq!(drives.len(), 1, "{drives:?}");
-        assert_eq!(drives[0].vault_key, a_node("vault", 3).public_key, "the join dropped the joiner's drive");
+        let mut drives: Vec<_> = kotton_peer::daemon::drives::list(&db, "alice")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.node.id, d.vault_key))
+            .collect();
+        drives.sort();
+        let mut want = vec![("vault".to_string(), a_node("vault", 3).public_key), ("vault".to_string(), a_node("vault", 2).public_key)];
+        want.sort();
+        assert_eq!(drives, want, "the join replaced the joiner's vault or dropped its drive");
     }
 
-    /// **A row of another person's on this device is not replaced** under the
-    /// label or the key a handed drive names. Rows are keyed by label and DID
-    /// across everyone here (kotton #99), so the join's write would take it;
-    /// the join is refused instead.
+    /// **A drive shown under the issuer's own name is recorded beside the
+    /// issuer** (kotton #99). The person's device is named `laptop` and so is
+    /// one of their drives: the join writes both rows, under their own DIDs,
+    /// and is not refused for the name.
+    #[tokio::test]
+    async fn a_drive_under_the_issuers_name_is_recorded_beside_the_issuer() {
+        let (_dir, db) = machine_db().await;
+        let answer = join_handing(&db, vec![a_drive("issuer", 2, "alice")]).await;
+        assert!(!matches!(answer, UserResponse::PairFailed { .. }), "the join was refused: {answer:?}");
+        let rows = network_db::list_paired_nodes(&db, "alice").await.unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows.iter().all(|n| n.id == "issuer"), "{rows:?}");
+        let drives = kotton_peer::daemon::drives::list(&db, "alice").await.unwrap();
+        assert_eq!(drives.len(), 1, "{drives:?}");
+        assert_eq!(drives[0].node.public_key, a_node("issuer", 2).public_key, "the drive names the issuer");
+    }
+
+    /// **Two people's rows under one label are both kept** (kotton #99). Bob
+    /// pairs a vault as `vault` and another under the key alice's drive is
+    /// handed under; alice's join writes her own rows beside them, under her
+    /// name, and bob's rows and drives are as they were.
     #[tokio::test]
     async fn a_row_of_another_person_here_under_the_handed_label_or_key_is_kept() {
         let (_dir, db) = machine_db().await;
-        pair(&db, "bob", "vault", 3, Some("blind-storage")).await;
-        pair(&db, "bob", "bobs-vault", 2, Some("blind-storage")).await;
-        for handed in [a_drive("vault", 4, "alice"), a_drive("shared", 2, "alice")] {
-            let why = check_handed_rows(&db, "alice", &[handed]).await.unwrap().unwrap_err();
-            assert!(why.contains("for another name here"), "{why}");
-        }
-        assert_eq!(network_db::list_paired_nodes(&db, "bob").await.unwrap().len(), 2);
+        pair(&db, "bob", "vault", 3, None).await;
+        kotton_peer::daemon::drives::record(&db, "bob", &a_node("vault", 3).public_key).await.unwrap();
+        pair(&db, "bob", "household", 2, Some("blind-storage")).await;
+        let handed = [a_drive("vault", 4, "alice"), a_drive("shared", 2, "alice")];
+        assert_eq!(check_handed_rows(&db, "alice", &handed).await.unwrap(), Ok(()));
+
+        let answer = join_handing(&db, handed.to_vec()).await;
+        assert!(!matches!(answer, UserResponse::PairFailed { .. }), "the join was refused: {answer:?}");
+
+        let bobs = network_db::list_paired_nodes(&db, "bob").await.unwrap();
+        assert_eq!(bobs.len(), 2, "{bobs:?}");
+        let vault = network_db::paired_node_named(&db, "bob", "vault").await.unwrap().unwrap();
+        assert_eq!(vault.public_key, a_node("vault", 3).public_key, "alice's join took bob's row");
+        let bobs_drives = kotton_peer::daemon::drives::list(&db, "bob").await.unwrap();
+        assert_eq!(bobs_drives.len(), 1, "{bobs_drives:?}");
+        assert_eq!(bobs_drives[0].node.public_key, a_node("vault", 3).public_key, "bob's drive names a node not his");
+
+        let alices = kotton_peer::daemon::drives::list(&db, "alice").await.unwrap();
+        let mut named: Vec<_> = alices.iter().map(|d| d.node.id.as_str()).collect();
+        named.sort();
+        assert_eq!(named, ["shared", "vault"], "{alices:?}");
     }
 
     /// **What the join may write over, it records through the one writer.** A

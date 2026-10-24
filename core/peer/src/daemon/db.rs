@@ -7,6 +7,15 @@
 //! is [`super::drives`]'s, which says what a drive record is; the two functions
 //! here that write or remove a node row keep its drive with it. A device's
 //! sync rules, which name drives, are [`super::drive_rules`]'s.
+//!
+//! **A `paired_nodes` row is one person's**, keyed by that person and the
+//! node's DID (`migrations/0027_paired_nodes_per_person.sql`). Its `id` is the
+//! label the person sees it under and keys nothing: a label may come from
+//! elsewhere (the name a device announced at a join, a drive's label handed at
+//! one), so a write under it reaches no other row, and two of one person's
+//! rows may carry it. What names a row is [`get_paired_node`]; a verb a person
+//! names a node in resolves the name through [`paired_node_named`], which
+//! refuses a label two rows carry rather than pick one.
 
 use kotton_wire::did::{Did, DidError};
 use kotton_wire::peer::{EphemeralSession, MountConfig, PairedNode};
@@ -34,6 +43,12 @@ fn did_err(e: DidError) -> io::Error {
 // ---------------------------------------------------------------------------
 
 // Eight columns, eight arguments: a row, not a design.
+/// Write `user_id`'s row for the node `device_did`, or rewrite the row they
+/// already hold for it. A row is keyed by the person and the node's DID
+/// (`migrations/0027_paired_nodes_per_person.sql`), and `id` is the label it is
+/// shown under, which keys nothing: so this write reaches no other person's
+/// row, and no row of this person's under another DID, whatever label it
+/// carries.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_paired_node(
     db: &Arc<SqlitePool>,
@@ -53,18 +68,16 @@ pub async fn insert_paired_node(
     // address (`peer_add`) know no posture. A posture already projected for
     // this node is kept rather than erased: erasing it turned a blind node into
     // a node of unknown posture, which no delivery would then reach. **Only for
-    // the same key**: a posture is a fact about the node that holds the key, so
-    // a different key under an old label, or under an old DID, takes none from
-    // the row it replaces — a vault's label re-used for another node must not
-    // make that node a vault. The relay the peer was last known to reserve at
-    // is kept as before, from whichever row matched.
+    // the same key**: a posture is a fact about the node that holds the key, and
+    // a DID may be recorded beside a key it does not name (the operational key a
+    // device presents, beside its identity's DID), so the row this person held
+    // for the DID under another key gives the new key none. The relay the peer
+    // was last known to reserve at is kept.
     let existing: Option<(Vec<u8>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT public_key, posture, relay_url FROM paired_nodes WHERE device_did = ? OR id = ? \
-         ORDER BY (public_key = ?) DESC LIMIT 1",
+        "SELECT public_key, posture, relay_url FROM paired_nodes WHERE user_id = ? AND device_did = ?",
     )
+    .bind(user_id)
     .bind(device_did)
-    .bind(id)
-    .bind(public_key)
     .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -91,9 +104,7 @@ pub async fn insert_paired_node(
     .await
     .map_err(db_err)?;
     // A drive is reached through the node that carries the vault's key
-    // (`super::drives`). The same key under another label keeps its drive,
-    // re-pointed at this row; another key under a drive's old label is not
-    // that drive, and the record that named the label goes.
+    // (`super::drives`), and its record shows the label that node is under.
     sqlx::query("UPDATE drives SET node_id = ? WHERE user_id = ? AND vault_key = ?")
         .bind(id)
         .bind(user_id)
@@ -101,14 +112,35 @@ pub async fn insert_paired_node(
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
-    sqlx::query("DELETE FROM drives WHERE user_id = ? AND node_id = ? AND vault_key != ?")
-        .bind(user_id)
-        .bind(id)
-        .bind(public_key)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+    // The key this DID's row carried before, when it was another: a drive under
+    // that key that no row of this person's still carries has no node left to
+    // reach it through.
+    if !existing_key.is_empty() && existing_key.as_slice() != public_key {
+        drop_unreachable_drive(&mut tx, user_id, &existing_key).await?;
+    }
     tx.commit().await.map_err(db_err)
+}
+
+/// Remove `user_id`'s drive record for `vault_key` when no row of theirs
+/// carries that key any more: a drive with no node to reach it through is not
+/// one this device has.
+async fn drop_unreachable_drive(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    user_id: &str,
+    vault_key: &[u8],
+) -> io::Result<()> {
+    sqlx::query(
+        "DELETE FROM drives WHERE user_id = ? AND vault_key = ? \
+         AND NOT EXISTS (SELECT 1 FROM paired_nodes WHERE user_id = ? AND public_key = ?)",
+    )
+    .bind(user_id)
+    .bind(vault_key)
+    .bind(user_id)
+    .bind(vault_key)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
 }
 
 /// Refresh a paired node's `addresses` to a single freshly-observed,
@@ -168,86 +200,182 @@ fn row_posture(row: &sqlx::sqlite::SqliteRow) -> Option<String> {
     Some(text)
 }
 
+/// One `paired_nodes` row, as the wire carries it.
+fn node_of(row: &sqlx::sqlite::SqliteRow) -> io::Result<PairedNode> {
+    let device_did = Did::parse(&row.get::<String, _>("device_did")).map_err(did_err)?;
+    let public_key: [u8; 32] = row
+        .get::<Vec<u8>, _>("public_key")
+        .try_into()
+        .map_err(|_| io::Error::other("corrupt public_key length in paired_nodes"))?;
+    let addresses: Vec<SocketAddr> =
+        serde_json::from_str(&row.get::<String, _>("addresses")).map_err(json_err)?;
+    Ok(PairedNode {
+        id: row.get("id"),
+        device_did,
+        public_key,
+        paired_at: row.get("paired_at"),
+        addresses,
+        relay_url: row.get::<Option<String>, _>("relay_url").filter(|u| !u.is_empty()),
+        posture: row_posture(row),
+    })
+}
+
+const NODE_COLUMNS: &str = "id, device_did, public_key, paired_at, addresses, relay_url, posture";
+
 pub async fn list_paired_nodes(
     db: &Arc<SqlitePool>,
     user_id: &str,
 ) -> io::Result<Vec<PairedNode>> {
-    let rows = sqlx::query(
-        "SELECT id, device_did, public_key, paired_at, addresses, relay_url, posture \
-         FROM paired_nodes WHERE user_id = ? ORDER BY paired_at DESC",
-    )
+    let rows = sqlx::query(&format!(
+        "SELECT {NODE_COLUMNS} FROM paired_nodes WHERE user_id = ? ORDER BY paired_at DESC, device_did"
+    ))
     .bind(user_id)
     .fetch_all(db.as_ref())
     .await
     .map_err(db_err)?;
-
-    let mut nodes = Vec::with_capacity(rows.len());
-    for row in rows {
-        let id: String = row.get("id");
-        let device_did_str: String = row.get("device_did");
-        let pk_bytes: Vec<u8> = row.get("public_key");
-        let paired_at: i64 = row.get("paired_at");
-        let addresses_json: String = row.get("addresses");
-
-        let device_did = Did::parse(&device_did_str).map_err(did_err)?;
-        let public_key: [u8; 32] = pk_bytes
-            .try_into()
-            .map_err(|_| io::Error::other("corrupt public_key length in paired_nodes"))?;
-        let addresses: Vec<SocketAddr> = serde_json::from_str(&addresses_json).map_err(json_err)?;
-
-        nodes.push(PairedNode {
-            id,
-            device_did,
-            public_key,
-            paired_at,
-            addresses,
-            relay_url: row.get::<Option<String>, _>("relay_url").filter(|u| !u.is_empty()),
-            posture: row_posture(&row),
-        });
-    }
-    Ok(nodes)
+    rows.iter().map(node_of).collect()
 }
 
-/// Delete a paired node, and the drives reached through it
-/// ([`super::drives`]): a drive with no node to reach it through is not one
-/// this device has. Returns `true` if a node row was removed.
+/// `user_id`'s row for the node `device_did`: the one row the key names.
+pub async fn get_paired_node(
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    device_did: &str,
+) -> io::Result<Option<PairedNode>> {
+    let row = sqlx::query(&format!(
+        "SELECT {NODE_COLUMNS} FROM paired_nodes WHERE user_id = ? AND device_did = ?"
+    ))
+    .bind(user_id)
+    .bind(device_did)
+    .fetch_optional(db.as_ref())
+    .await
+    .map_err(db_err)?;
+    row.as_ref().map(node_of).transpose()
+}
+
+/// `user_id`'s row carrying `public_key`, the node a drive under that key is
+/// reached through ([`super::drives`]); the first by DID when two carry it.
+pub async fn paired_node_for_key(
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    public_key: &[u8; 32],
+) -> io::Result<Option<PairedNode>> {
+    let row = sqlx::query(&format!(
+        "SELECT {NODE_COLUMNS} FROM paired_nodes WHERE user_id = ? AND public_key = ? \
+         ORDER BY device_did LIMIT 1"
+    ))
+    .bind(user_id)
+    .bind(public_key.as_slice())
+    .fetch_optional(db.as_ref())
+    .await
+    .map_err(db_err)?;
+    row.as_ref().map(node_of).transpose()
+}
+
+/// The node `name` names among `user_id`'s rows, for a verb a person names a
+/// node in: its DID, or the label it is shown under when one row carries it.
+/// A label is a name, not a key (`migrations/0027_paired_nodes_per_person.sql`),
+/// so two of the person's rows may carry one; such a label is refused with the
+/// DIDs that tell them apart, never resolved to whichever row came first.
+/// `Ok(None)` when it names none.
+pub async fn paired_node_named(
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    name: &str,
+) -> io::Result<Option<PairedNode>> {
+    if let Some(node) = get_paired_node(db, user_id, name).await? {
+        return Ok(Some(node));
+    }
+    let rows = sqlx::query(&format!(
+        "SELECT {NODE_COLUMNS} FROM paired_nodes WHERE user_id = ? AND id = ? ORDER BY device_did"
+    ))
+    .bind(user_id)
+    .bind(name)
+    .fetch_all(db.as_ref())
+    .await
+    .map_err(db_err)?;
+    let mut nodes = rows.iter().map(node_of).collect::<io::Result<Vec<_>>>()?;
+    match nodes.len() {
+        0 | 1 => Ok(nodes.pop()),
+        n => Err(io::Error::other(format!(
+            "'{name}' is the label of {n} of your nodes ({}); name the one you mean by its DID",
+            nodes.iter().map(|n| n.device_did.to_string()).collect::<Vec<_>>().join(", ")
+        ))),
+    }
+}
+
+/// Delete `user_id`'s row for the node `device_did`, and a drive reached
+/// through it ([`super::drives`]) that no other row of theirs still carries
+/// the key of: a drive with no node to reach it through is not one this device
+/// has. Returns `true` if a node row was removed.
 pub(crate) async fn delete_paired_node(
     db: &Arc<SqlitePool>,
     user_id: &str,
-    node_id: &str,
+    device_did: &str,
 ) -> io::Result<bool> {
     let mut tx = db.begin().await.map_err(db_err)?;
-    sqlx::query("DELETE FROM drives WHERE user_id = ? AND node_id = ?")
+    let key: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT public_key FROM paired_nodes WHERE user_id = ? AND device_did = ?")
+            .bind(user_id)
+            .bind(device_did)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let Some(key) = key else {
+        return Ok(false);
+    };
+    sqlx::query("DELETE FROM paired_nodes WHERE user_id = ? AND device_did = ?")
         .bind(user_id)
-        .bind(node_id)
+        .bind(device_did)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
-    let result = sqlx::query("DELETE FROM paired_nodes WHERE user_id = ? AND id = ?")
-        .bind(user_id)
-        .bind(node_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+    drop_unreachable_drive(&mut tx, user_id, &key).await?;
     tx.commit().await.map_err(db_err)?;
-    Ok(result.rows_affected() > 0)
+    Ok(true)
 }
 
-
-
-/// The user a paired key belongs to, and its posture as text (`None` for rows
-/// written before posture was projected here). `device_did` is unique, so a key
-/// is paired to at most one user on this node.
+/// A user a paired key belongs to, and its posture as text (`None` for rows
+/// written before posture was projected here), for a caller that knows the key
+/// and no person. Rows are each person's (`migrations/0027_paired_nodes_per_person.sql`),
+/// so two people here may pair one key (two tenants of one vault on a shared
+/// device): this answers one of them, a `gateway` row first, so that a key any
+/// person here pairs as a gateway is held to a gateway's one verb whichever
+/// other row it also has. A caller that knows the person asks
+/// [`paired_posture_for_user`].
 pub async fn paired_node_for_pubkey(
     db: &Arc<SqlitePool>,
     public_key: &[u8; 32],
 ) -> io::Result<Option<(String, Option<String>)>> {
-    let row = sqlx::query("SELECT user_id, posture FROM paired_nodes WHERE public_key = ? LIMIT 1")
+    let row = sqlx::query(
+        "SELECT user_id, posture FROM paired_nodes WHERE public_key = ? \
+         ORDER BY (posture = 'gateway') DESC, user_id, device_did LIMIT 1",
+    )
         .bind(public_key.as_slice())
         .fetch_optional(db.as_ref())
         .await
         .map_err(db_err)?;
     Ok(row.map(|r| (r.get::<String, _>("user_id"), r.get::<Option<String>, _>("posture"))))
+}
+
+/// The posture `user_id` pairs `public_key` under: `None` when they pair it
+/// nowhere, `Some(None)` for a row naming no posture. When they pair it under
+/// two DIDs, a `gateway` row answers first, as in [`paired_node_for_pubkey`].
+pub async fn paired_posture_for_user(
+    db: &Arc<SqlitePool>,
+    public_key: &[u8; 32],
+    user_id: &str,
+) -> io::Result<Option<Option<String>>> {
+    let row = sqlx::query(
+        "SELECT posture FROM paired_nodes WHERE public_key = ? AND user_id = ? \
+         ORDER BY (posture = 'gateway') DESC, device_did LIMIT 1",
+    )
+    .bind(public_key.as_slice())
+    .bind(user_id)
+    .fetch_optional(db.as_ref())
+    .await
+    .map_err(db_err)?;
+    Ok(row.map(|r| r.get::<Option<String>, _>("posture")))
 }
 
 /// Return `true` if the peer's raw Ed25519 public key is recorded in `paired_nodes` for `user_id`.
@@ -584,49 +712,6 @@ pub async fn list_revoked_session_ids(
         .await
         .map_err(db_err)?;
     Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
-}
-
-/// Get a single paired node by its label (`id`) for a given user.
-pub async fn get_paired_node_by_id(
-    db: &Arc<SqlitePool>,
-    user_id: &str,
-    node_id: &str,
-) -> io::Result<Option<PairedNode>> {
-    let row_opt = sqlx::query(
-        "SELECT id, device_did, public_key, paired_at, addresses, relay_url, posture \
-         FROM paired_nodes WHERE user_id = ? AND id = ? LIMIT 1",
-    )
-    .bind(user_id)
-    .bind(node_id)
-    .fetch_optional(db.as_ref())
-    .await
-    .map_err(db_err)?;
-
-    let Some(row) = row_opt else {
-        return Ok(None);
-    };
-
-    let id: String = row.get("id");
-    let device_did_str: String = row.get("device_did");
-    let pk_bytes: Vec<u8> = row.get("public_key");
-    let paired_at: i64 = row.get("paired_at");
-    let addresses_json: String = row.get("addresses");
-
-    let device_did = Did::parse(&device_did_str).map_err(did_err)?;
-    let public_key: [u8; 32] = pk_bytes
-        .try_into()
-        .map_err(|_| io::Error::other("corrupt public_key length in paired_nodes"))?;
-    let addresses: Vec<SocketAddr> = serde_json::from_str(&addresses_json).map_err(json_err)?;
-
-    Ok(Some(PairedNode {
-        id,
-        device_did,
-        public_key,
-        paired_at,
-        addresses,
-        relay_url: row.get::<Option<String>, _>("relay_url").filter(|u| !u.is_empty()),
-        posture: row_posture(&row),
-    }))
 }
 
 // ---------------------------------------------------------------------------
