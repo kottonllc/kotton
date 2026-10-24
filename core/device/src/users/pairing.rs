@@ -11,6 +11,14 @@
 //! which moved, is real: **joining an existing identity issues a session;
 //! enrolling does not.**
 //!
+//! **Each entry point returns the ceremony's stream, and the type says so**
+//! (`io::Result<mpsc::Receiver<UserResponse>>`, #120). Every client of these
+//! verbs reads the answer with `send_streaming`, which ends only when the door
+//! closes the connection, and the door closes it after a stream and not after
+//! one frame. So a refusal before the ceremony starts is an `Err` (one error
+//! frame, then the door closes), or a frame on the stream before it ends; it
+//! cannot be a single frame left open, because there is no type to say one in.
+//!
 //! The tests stay for a blunter reason: they build a runtime to make a user
 //! resident, and a crate that names the runtime crate cannot live in `peer` —
 //! that is the cycle this whole move exists to escape. They exercise `peer`'s
@@ -81,7 +89,6 @@ use kotton_wire::ipc::UserResponse;
 use kotton_peer::daemon::db as network_db;
 use ed25519_dalek::SigningKey;
 use hex;
-use kotton_ipc::HandlerOutput;
 use kotton_peer::pairing::{
     encode_connection_code, open_pair_listener, parse_connection_code,
     run_enroll_issuer_committed, run_enroll_join_committed, Invite,
@@ -331,7 +338,7 @@ pub async fn handle_device_add(
     ttl_seconds: u64,
     port: u16,
     posture: Posture,
-) -> io::Result<HandlerOutput<UserResponse>> {
+) -> io::Result<mpsc::Receiver<UserResponse>> {
     let secrets = runtime.secrets();
     // This device announces its OWN name to the joiner; `--as`
     // overrides the persisted device name for this ceremony only.
@@ -485,7 +492,7 @@ pub async fn handle_device_add(
         };
         let _ = tx.send(frame).await;
     });
-    Ok(HandlerOutput::Stream(rx))
+    Ok(rx)
 }
 
 /// The issuer half of the six-digit ceremony with the transport reversed, for a
@@ -505,7 +512,7 @@ pub async fn handle_gateway_enroll(
     user_id: String,
     code: String,
     ttl_seconds: u64,
-) -> io::Result<HandlerOutput<UserResponse>> {
+) -> io::Result<mpsc::Receiver<UserResponse>> {
     use kotton_peer::pairing::{parse_connection_code, run_enroll_issuer_dialing};
 
     let (sid, addr) = parse_connection_code(code.trim())
@@ -597,7 +604,7 @@ pub async fn handle_gateway_enroll(
         };
         let _ = tx.send(frame).await;
     });
-    Ok(HandlerOutput::Stream(rx))
+    Ok(rx)
 }
 
 /// Joiner side of the streamed `device join` ceremony. Dials the issuer
@@ -633,7 +640,7 @@ pub async fn handle_device_join(
     code: String,
     as_name: Option<String>,
     policy: JoinPolicy,
-) -> io::Result<HandlerOutput<UserResponse>> {
+) -> io::Result<mpsc::Receiver<UserResponse>> {
     let node_key = load_device_operational_key(runtime.secrets())?;
     let warm_key = SigningKey::generate(&mut rand::rngs::OsRng);
     // This device announces its OWN name to the issuer; `--as` overrides the
@@ -782,7 +789,7 @@ pub async fn handle_device_join(
         };
         let _ = tx.send(frame).await;
     });
-    Ok(HandlerOutput::Stream(rx))
+    Ok(rx)
 }
 
 
@@ -991,7 +998,7 @@ pub async fn handle_device_admit(
     ttl_seconds: u64,
     posture: Posture,
     pinned: Option<PinnedVault>,
-) -> io::Result<HandlerOutput<UserResponse>> {
+) -> io::Result<mpsc::Receiver<UserResponse>> {
     use kotton_peer::pairing::{run_enroll_issuer_dialing, run_enroll_issuer_relayed};
 
     admits_by_code(posture)?;
@@ -1172,7 +1179,7 @@ pub async fn handle_device_admit(
         };
         let _ = tx.send(frame).await;
     });
-    Ok(HandlerOutput::Stream(rx))
+    Ok(rx)
 }
 
 /// The one posture an admit by code takes, refused before anything else runs.
@@ -1352,7 +1359,7 @@ pub async fn handle_device_invite(
     ttl_seconds: u64,
     as_name: Option<String>,
     policy: JoinPolicy,
-) -> io::Result<HandlerOutput<UserResponse>> {
+) -> io::Result<mpsc::Receiver<UserResponse>> {
     use kotton_peer::pairing::run_enroll_join_relayed;
 
     let node_key = load_device_operational_key(runtime.secrets())?;
@@ -1460,7 +1467,7 @@ pub async fn handle_device_invite(
         };
         let _ = tx.send(frame).await;
     });
-    Ok(HandlerOutput::Stream(rx))
+    Ok(rx)
 }
 
 

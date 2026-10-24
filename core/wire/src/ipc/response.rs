@@ -582,9 +582,12 @@ pub enum UserResponse {
     /// not refused: `vault invite --me` asks the vault to keep this person's
     /// things, and a vault that keeps them already has (#108). Every other
     /// reader of an invite's answer says it as a refusal, in
-    /// [`vault_keeps_already_said`]: `kvaultd invite` at the vault's own door,
-    /// and on the operator's desktop `vault invite <v> <name>` and a guest's
-    /// `landlord.invite`.
+    /// [`vault_keeps_already_said`]: `kvaultd invite` at the vault's own door
+    /// and a guest's `landlord.invite` through [`answer_said`], as they say
+    /// any answer but the invite, and on the operator's desktop
+    /// `vault invite <v> <name>`. No reader names it to decide what to send
+    /// next: the operator's desktop sends a number after an invite only on
+    /// the invite itself (`kuserd::agent::operator::in_order`, #114).
     VaultKeepsAlready {
         user_id: String,
     },
@@ -1351,6 +1354,43 @@ pub fn vault_keeps_already_said(user_id: &str) -> String {
     )
 }
 
+/// What a reader of the vault's answer to an invite says of an answer it does
+/// not act on: anything but the invite (`PairAdvertising`) and the ceremony's
+/// own frames. The vault's own words where the answer carries them — an
+/// `Error`'s message, [`vault_keeps_already_said`] — and otherwise the
+/// answer's name, never its fields.
+///
+/// **This says; it does not decide** (#114). Each reader acts only on the
+/// answer it asked for and stops on anything else, so an answer a release
+/// adds is never misread as leave to go on: it is said here by its name
+/// until it is given a sentence, and then said in it by every reader at once.
+/// `kvaultd invite` at the vault's door and a guest's `landlord.invite` say
+/// through this.
+pub fn answer_said(answer: &UserResponse) -> String {
+    match answer {
+        UserResponse::Error { message } => message.clone(),
+        UserResponse::VaultKeepsAlready { user_id } => vault_keeps_already_said(user_id),
+        unsaid => format!(
+            "the vault answered `{}`, which this release has no sentence for; nothing more was asked of it",
+            unsaid.name()
+        ),
+    }
+}
+
+impl UserResponse {
+    /// The variant's name and nothing of its fields: the leading word of its
+    /// derived `Debug`, which is the variant's identifier. Nothing past that
+    /// word is kept, and a secret field prints redacted in `Debug` anyway.
+    fn name(&self) -> String {
+        let printed = format!("{self:?}");
+        printed
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+}
+
 /// A handler's error, as the frame a door answers it with
 /// (`kotton_ipc::ChannelAcceptor` requires this of every `Resp` it serves).
 /// The text is the error's own; the door closes the connection after it.
@@ -1369,6 +1409,35 @@ pub enum VfsChangeKind {
     Created,
     Modified,
     Deleted,
+}
+
+#[cfg(test)]
+mod answer_said_tests {
+    use super::{answer_said, vault_keeps_already_said, UserResponse};
+    use crate::ipc::SecretText;
+
+    /// **An answer a reader does not act on is said in the vault's words where
+    /// it carries them, and otherwise by its name alone** (#114): never a
+    /// debug print of its fields, which for an answer a release adds may hold
+    /// what is not to be printed.
+    #[test]
+    fn an_answer_is_said_in_the_vaults_words_or_by_its_name_alone() {
+        assert_eq!(answer_said(&UserResponse::Error { message: "no relay".into() }), "no relay");
+        assert_eq!(
+            answer_said(&UserResponse::VaultKeepsAlready { user_id: "sam".into() }),
+            vault_keeps_already_said("sam")
+        );
+        let full = answer_said(&UserResponse::VaultFull { held: 17, quota: 9 });
+        assert!(full.starts_with("the vault answered `VaultFull`,"), "{full}");
+        assert!(!full.contains("17") && !full.contains('{'), "fields were printed: {full}");
+        let unit = answer_said(&UserResponse::NoActiveSession);
+        assert!(unit.starts_with("the vault answered `NoActiveSession`,"), "{unit}");
+        let secret = answer_said(&UserResponse::PairAdvertising {
+            code: SecretText::new("kotton-invite:vault:the-words"),
+            expires_at: 1,
+        });
+        assert!(secret.starts_with("the vault answered `PairAdvertising`,") && !secret.contains("the-words"), "{secret}");
+    }
 }
 
 #[cfg(test)]

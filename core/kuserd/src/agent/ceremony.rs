@@ -38,7 +38,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use kotton_device::DeviceRuntime;
-use kotton_ipc::provider::acceptor::HandlerOutput;
 use kotton_wire::runner::{HostFrame, RunnerContact, RunnerPairingState, PAIRING_FRAME_KIND};
 use kotton_wire::UserResponse;
 use sqlx::SqlitePool;
@@ -251,17 +250,12 @@ impl Ceremonies {
         };
 
         let mut rx = match out {
-            Ok(HandlerOutput::Stream(rx)) => rx,
+            Ok(rx) => rx,
             // A ceremony that refuses before it starts still owes the screen a
             // sentence — an unopenable ceremony that says nothing looks to a
-            // person exactly like one that is still thinking.
-            Ok(HandlerOutput::Single(resp)) => {
-                if let Some(state) = as_state(resp) {
-                    self.push(&user_id, state).await;
-                }
-                self.running.lock().await.remove(&user_id);
-                return;
-            }
+            // person exactly like one that is still thinking. A refusal is an
+            // `Err` or a frame on the stream: the handler's type is the
+            // stream, so there is no one-frame answer to read here (#120).
             Err(e) => {
                 self.push(
                     &user_id,

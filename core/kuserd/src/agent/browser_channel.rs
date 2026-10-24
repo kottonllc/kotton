@@ -831,10 +831,7 @@ async fn dispatch_inner(
             _ => unreachable!("the match above admits exactly these two"),
         };
         return match started {
-            Ok(kotton_ipc::HandlerOutput::Stream(rx)) => Inner::Stream(id, rx),
-            Ok(kotton_ipc::HandlerOutput::Single(resp)) => {
-                Inner::Frame(frame_json(ChannelFrame::once(id, resp)))
-            }
+            Ok(rx) => Inner::Stream(id, rx),
             Err(e) => Inner::Frame(err_frame(id, &e.to_string())),
         };
     }

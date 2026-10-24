@@ -417,13 +417,35 @@ async fn invite(user: &str, ttl_seconds: u64, quota: Option<u64>) -> io::Result<
     let client = IpcClient::<UserRequest, UserResponse>::connect(ep.clone())
         .await
         .map_err(|_| unanswered(&ep))?;
-    let mut rx = client
+    let rx = client
         .send_streaming(&UserRequest::DeviceInvite {
             user_id: user.to_string(),
             ttl_seconds,
             as_name: None,
         })
         .await?;
+    admitted(user, quota, &ep, rx).await
+}
+
+/// Read an invite's ceremony from the door at `ep` until it ends: act on the
+/// invite and the ceremony's own frames, and on nothing else.
+///
+/// **What it does not act on, it says when the door ends the stream** (#112,
+/// #114). There is no list of refusals here: an answer that is not the
+/// ceremony's — `Error`, `VaultKeepsAlready`, or one a later release adds —
+/// is held, and when the door closes the stream after it
+/// (`kvaultd::control::mint_invite` answers every refusal as a stream that
+/// ends), said in [`kotton_wire::ipc::answer_said`], exit 1. Which frame is
+/// the last is the door's to say by ending the stream, not this reader's to
+/// guess by name: a frame a later vault adds mid-ceremony would otherwise end
+/// a ceremony that was going well.
+async fn admitted(
+    user: &str,
+    quota: Option<u64>,
+    ep: &IpcEndpoint,
+    mut rx: tokio::sync::mpsc::Receiver<UserResponse>,
+) -> io::Result<()> {
+    let mut unread = None;
     while let Some(frame) = rx.recv().await {
         match frame {
             UserResponse::PairAdvertising { code, expires_at } => {
@@ -452,22 +474,14 @@ async fn invite(user: &str, ttl_seconds: u64, quota: Option<u64>) -> io::Result<
                 eprintln!("this vault now keeps for {user}: paired with {} ({}).", node.id, node.device_did);
                 return Ok(());
             }
-            UserResponse::PairFailed { reason } => {
-                eprintln!("pairing failed: {reason}");
-                std::process::exit(1);
-            }
-            UserResponse::VaultKeepsAlready { user_id } => {
-                eprintln!("{}", kotton_wire::ipc::vault_keeps_already_said(&user_id));
-                std::process::exit(1);
-            }
-            UserResponse::Error { message } => {
-                eprintln!("{message}");
-                std::process::exit(1);
-            }
-            _ => {}
+            UserResponse::PairFailed { reason } => return Err(io::Error::other(format!("pairing failed: {reason}"))),
+            not_the_ceremonys => unread = Some(not_the_ceremonys),
         }
     }
-    Err(io::Error::other("the vault closed the ceremony without a result"))
+    Err(io::Error::other(match unread {
+        Some(answer) => kotton_wire::ipc::answer_said(&answer),
+        None => "the vault closed the ceremony without a result".to_string(),
+    }))
 }
 
 /// Set the pool's own quota at the door. The verb is the door's alone
@@ -754,6 +768,37 @@ async fn operator_revoke(key: Revoke<'_>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **`kvaultd invite` ends on an answer it does not read, says it, and
+    /// sends nothing after it** (#112, #114). The door answers the invite with
+    /// a typed refusal this reader names nowhere (`VaultFull`, standing in for
+    /// one a later release adds) and ends the stream, as `mint_invite` ends
+    /// every refusal. The verb returns — it does not wait — with the answer
+    /// said in `answer_said` and no field of it printed. Nothing answers at the
+    /// door named here, so a number set or a confirm sent after it would have
+    /// failed in other words than these.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_invite_answered_with_what_the_verb_does_not_read_ends_saying_it() {
+        let dir = tempfile::tempdir_in("/tmp").expect("a directory under /tmp");
+        let nobody = IpcEndpoint::UnixSocket(dir.path().join("nobody.sock"));
+        let unnamed = UserResponse::VaultFull { held: 3, quota: 2 };
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(unnamed.clone()).await.expect("queued");
+        drop(tx);
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), admitted("sam", Some(25), &nobody, rx))
+            .await
+            .expect("the verb waited on after the door ended the stream")
+            .expect_err("an answer other than the ceremony's was taken as one");
+        assert_eq!(ended.to_string(), kotton_wire::ipc::answer_said(&unnamed));
+        assert!(ended.to_string().starts_with("the vault answered `VaultFull`"), "{ended}");
+
+        // A stream that ends with nothing in it says so.
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(tx);
+        let ended = admitted("sam", None, &nobody, rx).await.expect_err("nothing was admitted");
+        assert_eq!(ended.to_string(), "the vault closed the ceremony without a result");
+    }
 
     #[test]
     fn only_an_installed_binary_has_an_env_file_beside_it() {

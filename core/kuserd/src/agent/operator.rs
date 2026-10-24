@@ -2323,12 +2323,18 @@ async fn say(
 }
 
 /// Send `requests` one after another, each only once the one before it was
-/// answered and not refused. The answer is the first request's — the verb's
-/// own, the invite's text for an invite — unless one is refused, and then it
-/// is that refusal, and nothing after it is sent. A refusal is an `Error`, or
-/// the vault's typed answer that it keeps the invite's name already
-/// (`VaultKeepsAlready`, #108): either way nothing was minted, so no number
-/// follows it.
+/// answered with what it asked for ([`as_asked`]). The answer is the first
+/// request's — the verb's own, the invite's text for an invite — unless one
+/// is answered otherwise, and then it is that answer, handed back unread, and
+/// nothing after it is sent.
+///
+/// **The number follows the invite itself, not the absence of a refusal**
+/// (#114). Read the other way, by a list of refusals (`Error`, then
+/// `VaultKeepsAlready`), any refusal a release added and the list missed let
+/// `SetQuota` follow it and reset a kept tenant's number, which is what
+/// [`requests_for`]'s order exists to prevent. Read this way there is no list
+/// to miss: an answer this desktop does not know is not the invite, so
+/// nothing follows it, and its reader says it.
 async fn in_order<F, Fut>(requests: Vec<UserRequest>, mut send: F) -> anyhow::Result<UserResponse>
 where
     F: FnMut(UserRequest) -> Fut,
@@ -2336,13 +2342,25 @@ where
 {
     let mut answer = None;
     for request in requests {
-        let said = send(request).await?;
-        if matches!(said, UserResponse::Error { .. } | UserResponse::VaultKeepsAlready { .. }) {
+        let said = send(request.clone()).await?;
+        if !as_asked(&request, &said) {
             return Ok(said);
         }
         answer.get_or_insert(said);
     }
     Ok(answer.unwrap_or_else(|| refused("no request was sent")))
+}
+
+/// Whether `said` is what `request` asked the vault for, so the requests after
+/// it in [`requests_for`] may follow: an invite's answer is the invite, a
+/// number's is the pool's readout. Every other answer is not, and nor is any
+/// answer to a request no other follows — [`in_order`] hands it back as it is.
+fn as_asked(request: &UserRequest, said: &UserResponse) -> bool {
+    matches!(
+        (request, said),
+        (UserRequest::DeviceInvite { .. }, UserResponse::PairAdvertising { .. })
+            | (UserRequest::SetQuota { .. }, UserResponse::VaultCapacityResult { .. })
+    )
 }
 
 #[cfg(test)]
@@ -3474,6 +3492,25 @@ mod tests {
         let number_refused = UserResponse::Error { message: "the number does not fit".into() };
         let (_, answer) = an_invite_answered(minted, number_refused).await;
         assert!(matches!(answer, UserResponse::Error { .. }), "a refused number is not hidden behind the invite");
+    }
+
+    /// **An invite answered with anything but the invite sends no number, and
+    /// hands that answer back** (#114). The vault here answers with a typed
+    /// refusal no reader of an invite names (`VaultFull`, standing in for one
+    /// a later release adds): nothing follows it, and it is the answer the
+    /// verb's reader says — in `answer_said`, by its name, where a refusal list
+    /// would have let the number through.
+    #[tokio::test]
+    async fn an_invite_answered_with_a_refusal_nobody_names_sends_no_number() {
+        let unnamed = UserResponse::VaultFull { held: 3, quota: 2 };
+        let readout = UserResponse::VaultCapacityResult { held: 0, quota: Some(25) };
+        let (sent, answer) = an_invite_answered(unnamed, readout).await;
+        assert_eq!(sent, ["DeviceInvite"], "an invite answered otherwise sent the number after it");
+        assert!(matches!(answer, UserResponse::VaultFull { held: 3, quota: 2 }), "{answer:?}");
+        assert!(
+            kotton_wire::ipc::answer_said(&answer).starts_with("the vault answered `VaultFull`"),
+            "the answer handed back is not said"
+        );
     }
 
     /// **A credential that names the relay's key refuses another key at the

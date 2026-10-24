@@ -14,7 +14,7 @@ use hex;
 use kotton_app::daemon::db::app_registry_db;
 use kotton_device::users::DeviceUsers as _;
 use kotton_device::DeviceRuntime;
-use kotton_ipc::{Caller, HandlerOutput};
+use kotton_ipc::Caller;
 use kotton_peer::membership::Membership as _;
 use kotton_session::lock_policy;
 use kotton_session::service::tokens as sessions;
@@ -34,7 +34,7 @@ pub(super) async fn handle_subscribe(
     runtime: &Arc<DeviceRuntime>,
     category: Option<String>,
     level: Option<String>,
-) -> io::Result<HandlerOutput<UserResponse>> {
+) -> tokio::sync::mpsc::Receiver<UserResponse> {
     use kotton_diag::service::{EventCategory, EventLevel};
     use kotton_wire::ipc::EventEntry;
     use std::time::UNIX_EPOCH;
@@ -112,7 +112,7 @@ pub(super) async fn handle_subscribe(
         }
     });
 
-    Ok(HandlerOutput::Stream(rx))
+    rx
 }
 
 /// Handle a [`UserRequest::VfsWatch`] streaming subscription.
@@ -156,7 +156,7 @@ pub(super) async fn handle_vfs_watch(
     paths: Vec<String>,
     mut broadcast_rx: tokio::sync::broadcast::Receiver<kotton_sync::engine::VfsChangeFrame>,
     mut fs_watch: tokio::sync::watch::Receiver<kotton_sync::engine::FsWatchState>,
-) -> io::Result<HandlerOutput<UserResponse>> {
+) -> tokio::sync::mpsc::Receiver<UserResponse> {
     use kotton_sync::engine::wait_until_watching;
     use tokio::sync::broadcast::error::RecvError;
     use tokio::sync::mpsc;
@@ -220,7 +220,7 @@ pub(super) async fn handle_vfs_watch(
         }
     });
 
-    Ok(HandlerOutput::Stream(rx))
+    rx
 }
 
 /// Resolve the per-user agent database for a verb.
@@ -426,8 +426,8 @@ fn session_refusal(session_user: Option<&str>, request: &UserRequest) -> Option<
 /// Both guards, for the streaming path — the one caller that is not
 /// [`handle_request`].
 ///
-/// Nine verbs return `HandlerOutput::Stream` and are intercepted in the
-/// acceptor closure before `handle_request` runs, so they never met its floor.
+/// The verbs whose clients read a stream are answered in `super::streamed`,
+/// before `handle_request` runs, so they never met its floor.
 /// Each carried instead a hand-written approximation, and they were not the
 /// same rule: most compared the session's user to the request's, which is a
 /// session check with no origin in it. A gateway is handed a session by
@@ -3238,7 +3238,6 @@ pub(super) async fn handle_request(
 #[cfg(test)]
 mod vfs_watch_opening_frame_tests {
     use super::handle_vfs_watch;
-    use kotton_ipc::HandlerOutput;
     use kotton_sync::engine::FsWatchState;
     use kotton_wire::UserResponse;
     use std::sync::Arc;
@@ -3260,13 +3259,7 @@ mod vfs_watch_opening_frame_tests {
             "too many open files (os error 24)",
         )));
 
-        let out = handle_vfs_watch(dir.path(), "alice".to_string(), vec![], change_rx, state_rx)
-            .await
-            .expect("the handler builds its stream");
-
-        let HandlerOutput::Stream(mut rx) = out else {
-            panic!("VfsWatch is a streaming handler");
-        };
+        let mut rx = handle_vfs_watch(dir.path(), "alice".to_string(), vec![], change_rx, state_rx).await;
 
         let first = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
             .await
@@ -3294,13 +3287,7 @@ mod vfs_watch_opening_frame_tests {
         let (_change_tx, change_rx) = tokio::sync::broadcast::channel(16);
         let (_state_tx, state_rx) = tokio::sync::watch::channel(FsWatchState::Watching);
 
-        let out = handle_vfs_watch(dir.path(), "alice".to_string(), vec![], change_rx, state_rx)
-            .await
-            .expect("the handler builds its stream");
-
-        let HandlerOutput::Stream(mut rx) = out else {
-            panic!("VfsWatch is a streaming handler");
-        };
+        let mut rx = handle_vfs_watch(dir.path(), "alice".to_string(), vec![], change_rx, state_rx).await;
 
         let first = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
             .await

@@ -2042,6 +2042,9 @@ async fn a_desktop_holding_the_operator_credential_invites_and_sets_a_quota_and_
         Some(UserResponse::VaultKeepsAlready { user_id }) => assert_eq!(user_id, "alice"),
         other => panic!("the terminal's door minted an invite naming a pool it keeps: {other:?}"),
     }
+    // And the door ends the stream after it, so a reader that does not name
+    // the refusal is not left waiting on it (#112).
+    assert!(within("the door's end of the stream", frames.recv()).await.is_none(), "the door's stream went on after its refusal");
     let alice_row = tenants_at_the_door(&vault.ipc)
         .await
         .into_iter()

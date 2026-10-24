@@ -906,6 +906,7 @@ mod tests {
             ("core/kuserd/src/agent/mod.rs", "its `UnixSocket(` are match arms reading an endpoint it was handed; its tempdirs are binary-lookup directories no socket goes in"),
             ("core/kuserd/src/agent/revoke_device_tests.rs", "`alice_at` hands a daemon `kuserd.sock` under its tempdir base and never calls `run`, the one place the daemon listens: nothing binds the path"),
             ("core/kuserd/src/agent/set_lock_policy_tests.rs", "`alice_booted` hands a daemon `kuserd.sock` under its tempdir base and never calls `run`, the one place the daemon listens: nothing binds the path"),
+            ("core/kuserd/src/agent/streamed.rs", "its socket tests bind in a `tempfile::tempdir_in(\"/tmp\")` they own on Unix; the `tempdir()` is Windows-only, a daemon base whose door is a named pipe, so no socket joins it"),
             ("core/kuserd/src/agent/unlock_tests.rs", "`booted` hands a daemon `kuserd.sock` under its tempdir base and never calls `run`, the one place the daemon listens: nothing binds the path"),
             ("core/kvaultd/src/instance.rs", "its vault tests' door is `control::tests::a_door`, a `tempdir_in(\"/tmp\")` the test owns, or `daemon_socket_path_in`, which asks `socket_path_fits`; its `tempdir()` is a root no socket joins"),
             ("tests/tests/suite/common/mod.rs", "`unique_ipc` is `door_in(temp_dir(), …)`, and `door_in` asks `socket_path_fits`: the rule's home in the suite"),
