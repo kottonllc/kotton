@@ -193,6 +193,12 @@ pub enum LineCame {
         /// kept all the same; `None` when it was told, and for a relay.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unstood: Option<Unstood>,
+        /// For a relay, the vaults this desktop operates that its enrol told
+        /// to stand there, by name — each told nothing before — for `enrol` to
+        /// keep this person's things at the ones that do not keep them yet
+        /// (#102). Empty for a vault, and for a relay that told none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stood: Vec<String>,
     },
     /// Several keys of the line's kind wait here, and nothing tells which one
     /// its instance was created for: nothing was dialled, and these are the

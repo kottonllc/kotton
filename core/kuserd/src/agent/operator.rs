@@ -1165,14 +1165,34 @@ async fn enrol_one(
         return readout(true, not.reached, not.matched_not.then_some(false), LineCame::Refused { why: not.why });
     }
     let service = credential.service();
+    let untold = if service == OperatedService::Relay { untold_vaults(store) } else { Vec::new() };
     match keep(runtime, users, record_stores, store, credential, Some(&name)).await {
         UserResponse::OperatorEnrolled { name, unstood, .. } => {
             let only = held(store).map(|k| k.iter().filter(|c| c.service() == service).count() == 1).unwrap_or(false);
-            readout(true, Some(true), Some(true), LineCame::Kept { name, only, unstood })
+            let stood = now_told(store, untold);
+            readout(true, Some(true), Some(true), LineCame::Kept { name, only, unstood, stood })
         }
         UserResponse::Error { message } => readout(true, Some(true), Some(true), LineCame::Refused { why: message }),
         other => readout(true, Some(true), Some(true), LineCame::Refused { why: format!("kept, and answered {other:?}") }),
     }
+}
+
+/// The vaults this desktop operates and has told nothing yet, by name and
+/// key: the ones a relay's enrol tells to stand there ([`tell_the_untold`]).
+fn untold_vaults(store: &UserStore) -> Vec<(String, [u8; 32])> {
+    held(store)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|c| vault_key(c).map(|v| (c.name.clone(), v)))
+        .filter(|(_, v)| stands_of(store, v).is_none())
+        .collect()
+}
+
+/// Which of `untold` this desktop's record now says it told where to stand:
+/// the vaults a relay's enrol stood, read from the record the telling wrote
+/// ([`tell`]), so a vault that did not take the set is not among them.
+fn now_told(store: &UserStore, untold: Vec<(String, [u8; 32])>) -> Vec<String> {
+    untold.into_iter().filter(|(_, v)| stands_of(store, v).is_some()).map(|(name, _)| name).collect()
 }
 
 /// Why an instance was not held to its line, with what is known of the two
