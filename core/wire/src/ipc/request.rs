@@ -641,6 +641,20 @@ pub enum UserRequest {
     TenantDrives {
         user_id: String,
     },
+    /// Replace the sealed name a made drive is kept under at this vault —
+    /// what `drive move` does once the vault it moves to holds every object:
+    /// the tree is made under a name sealed *unfinished*, which every device
+    /// reads as a move in progress and not as the drive, and is named finished
+    /// only after the copy is verified. Refused for a drive the tenant does
+    /// not have here; the tenancy's own tree is no [`crate::ipc::MadeDrive`].
+    ///
+    /// Peer-only, from a paired device of the person's. A vault verb.
+    TenantDriveName {
+        user_id: String,
+        drive: crate::ipc::MadeDrive,
+        #[serde(with = "crate::base64_bytes")]
+        sealed_name: Vec<u8>,
+    },
     /// Retire a made drive at this vault: its tree, every sealed object in
     /// it, and its sealed name, as `drive move` does at the vault it moved
     /// from once the vault it moved to holds every object. A made drive only:
@@ -2643,6 +2657,7 @@ impl UserRequest {
             Self::TenantDevice { user_id, .. } => Some(user_id),
             Self::TenantDriveMake { user_id, .. } => Some(user_id),
             Self::TenantDrives { user_id } => Some(user_id),
+            Self::TenantDriveName { user_id, .. } => Some(user_id),
             Self::TenantDriveRetire { user_id, .. } => Some(user_id),
             Self::DriveCreate { user_id, .. } => Some(user_id),
             Self::DriveList { user_id } => Some(user_id),
@@ -2873,6 +2888,7 @@ impl UserRequest {
             Self::TenantDevice { .. } => "TenantDevice",
             Self::TenantDriveMake { .. } => "TenantDriveMake",
             Self::TenantDrives { .. } => "TenantDrives",
+            Self::TenantDriveName { .. } => "TenantDriveName",
             Self::TenantDriveRetire { .. } => "TenantDriveRetire",
             Self::DriveCreate { .. } => "DriveCreate",
             Self::DriveList { .. } => "DriveList",
@@ -3392,7 +3408,10 @@ impl UserRequest {
             Self::TenantDevice { .. } => Local,
             // A person's drives at a vault, made, listed and retired: served
             // only over a peer connection, to a vault, from a device it admits.
-            Self::TenantDriveMake { .. } | Self::TenantDrives { .. } | Self::TenantDriveRetire { .. } => Local,
+            Self::TenantDriveMake { .. }
+            | Self::TenantDrives { .. }
+            | Self::TenantDriveName { .. }
+            | Self::TenantDriveRetire { .. } => Local,
             // The drive's verbs (RFC 0003): `create` and `move` mint and
             // retire sealed trees at the person's vaults, and every one of the
             // four dials them under this device's key; said at the machine.

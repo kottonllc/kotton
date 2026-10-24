@@ -821,7 +821,10 @@ drive on each vault is `personal`, the tree this device syncs with.
 
 A move copies every sealed object to the other vault under the same key, and
 retires the drive where it was only once the other vault holds all of it.
-Your other devices follow it at their next sync. `personal` does not move.
+Your other devices follow it at their next sync. A move that fails leaves the
+drive where it was; a copy the other vault would not take back is listed as an
+unfinished move, and moving the drive there again clears it. `personal` does
+not move.
 
 FLAGS:
   --on <vault>   the vault to make the drive on: its label, DID or key

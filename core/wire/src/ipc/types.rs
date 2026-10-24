@@ -921,6 +921,11 @@ pub struct DriveDescriptor {
     /// device keeps as a record in the drive; until then no device records one,
     /// and this is empty.
     pub pinned_whole: Vec<String>,
+    /// A tree a `drive move` made and did not finish: the vault holds part of
+    /// the drive's objects under a name sealed unfinished, and the drive itself
+    /// is still where it was. Not a drive; `drive list` shows it so the person
+    /// can see it, and the next move of that drive to that vault retires it.
+    pub unfinished: bool,
 }
 
 #[cfg(test)]
@@ -955,6 +960,7 @@ mod made_drive_tests {
             vault_key: "00".repeat(32),
             size: Some(9),
             pinned_whole: vec![],
+            unfinished: false,
         };
         let back: DriveDescriptor = serde_json::from_str(&serde_json::to_string(&described).unwrap()).unwrap();
         assert_eq!(back, described);

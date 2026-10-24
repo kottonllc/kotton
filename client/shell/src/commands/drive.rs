@@ -28,6 +28,15 @@ fn size_said(size: Option<u64>) -> String {
     size.map_or_else(|| "?".to_string(), |b| format!("{b} bytes"))
 }
 
+/// A drive's name as the person reads it, a move's unfinished tree marked.
+fn name_said(d: &DriveDescriptor) -> String {
+    if d.unfinished {
+        format!("{} (unfinished move: not the drive)", d.name)
+    } else {
+        d.name.clone()
+    }
+}
+
 fn table(drives: &[DriveDescriptor]) -> Out {
     Out::Table {
         columns: vec!["drive".into(), "vault".into(), "size".into(), "kept whole on".into()],
@@ -35,7 +44,7 @@ fn table(drives: &[DriveDescriptor]) -> Out {
             .iter()
             .map(|d| {
                 vec![
-                    d.name.clone(),
+                    name_said(d),
                     d.vault.clone(),
                     size_said(d.size),
                     if d.pinned_whole.is_empty() { "-".to_string() } else { d.pinned_whole.join(", ") },
@@ -88,7 +97,7 @@ impl Command for DriveCommand {
                         .iter()
                         .map(|d| {
                             Out::Record(vec![
-                                ("drive".into(), d.name.clone()),
+                                ("drive".into(), name_said(d)),
                                 ("vault".into(), d.vault.clone()),
                                 ("vault key".into(), d.vault_key.clone()),
                                 ("size".into(), size_said(d.size)),
@@ -145,7 +154,10 @@ drive on each vault is `personal`, the tree this device syncs with.
 
 A move copies every sealed object to the other vault under the same key, and
 retires the drive where it was only once the other vault holds all of it.
-Your other devices follow it at their next sync. `personal` does not move.
+Your other devices follow it at their next sync. A move that fails leaves the
+drive where it was; a copy the other vault would not take back is listed as an
+unfinished move, and moving the drive there again clears it. `personal` does
+not move.
 
 FLAGS:
   --on <vault>   the vault to make the drive on: its label, DID or key

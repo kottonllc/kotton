@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! What a vault answers on the authenticated peer transport (RFC-0084 V1).
 //!
-//! Twenty verbs, and nothing else exists here to be reached. Fourteen are a
+//! Twenty-one verbs, and nothing else exists here to be reached. Fifteen are a
 //! tenant's: sealed read, write and list; the recovery packet, kept and
 //! returned; where this vault reserves; how much it keeps; the doors held
 //! for a person, what arrived at them, and what the vault carries for them;
 //! the person's other devices, admitted and withdrawn under their
 //! identity's signature (`TenantDevice`, `crate::devices`); and the person's
-//! drives here, made, listed and retired (`TenantDriveMake`, `TenantDrives`,
-//! `TenantDriveRetire`, `crate::drives`). Six are the
+//! drives here, made, listed, named and retired (`TenantDriveMake`,
+//! `TenantDrives`, `TenantDriveName`, `TenantDriveRetire`, `crate::drives`).
+//! Six are the
 //! landlord's — an invite and its digits, the tenants, one pool's quota,
 //! dropping one pool, and where the vault stands — and are reached by one
 //! connection only, the one whose key is the vault's operator credential
@@ -21,7 +22,7 @@
 //! the decision.** A standing is what `peer_standing` says the connection is to
 //! the pool it names; the table says what each standing may say:
 //!
-//! | standing | the fourteen a tenant says | the landlord's six |
+//! | standing | the fifteen a tenant says | the landlord's six |
 //! |---|---|---|
 //! | `Paired` — a tenant's device, to its own pool | yes | no |
 //! | `Claim` — a phrase-only device | `RecoveryFetch` of its own identity only | no |
@@ -68,9 +69,9 @@ pub struct PeerContext {
 }
 
 /// The verbs a vault answers, as the sentence a refused caller reads.
-const VERBS: &str = "ReadSealed, WriteSealed, ListSealed, RecoveryFetch, RecoveryStore, NodeRelay, VaultCapacity, HoldDoors, TakeDeliveries, CarryFrame, TenantDevice, TenantDriveMake, TenantDrives, TenantDriveRetire, and to its operator DeviceInvite, InviteDigits, Tenants, SetQuota, DropTenant, StandAt";
+const VERBS: &str = "ReadSealed, WriteSealed, ListSealed, RecoveryFetch, RecoveryStore, NodeRelay, VaultCapacity, HoldDoors, TakeDeliveries, CarryFrame, TenantDevice, TenantDriveMake, TenantDrives, TenantDriveName, TenantDriveRetire, and to its operator DeviceInvite, InviteDigits, Tenants, SetQuota, DropTenant, StandAt";
 
-/// The fourteen verbs a tenant's device says to its own pool.
+/// The fifteen verbs a tenant's device says to its own pool.
 pub fn is_tenant_verb(request: &UserRequest) -> bool {
     matches!(
         request,
@@ -87,6 +88,7 @@ pub fn is_tenant_verb(request: &UserRequest) -> bool {
             | UserRequest::TenantDevice { .. }
             | UserRequest::TenantDriveMake { .. }
             | UserRequest::TenantDrives { .. }
+            | UserRequest::TenantDriveName { .. }
             | UserRequest::TenantDriveRetire { .. }
     )
 }
@@ -147,6 +149,7 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: UserReque
         | UserRequest::TenantDevice { user_id, .. }
         | UserRequest::TenantDriveMake { user_id, .. }
         | UserRequest::TenantDrives { user_id }
+        | UserRequest::TenantDriveName { user_id, .. }
         | UserRequest::TenantDriveRetire { user_id, .. }
         | UserRequest::DeviceInvite { user_id, .. }
         | UserRequest::InviteDigits { user_id }
@@ -373,6 +376,9 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: UserReque
             crate::drives::make(ctx, &user_id, drive, sealed_name).await
         }
         UserRequest::TenantDrives { user_id } => crate::drives::list(ctx, &user_id).await,
+        UserRequest::TenantDriveName { user_id, drive, sealed_name } => {
+            crate::drives::name(ctx, &user_id, drive, sealed_name).await
+        }
         UserRequest::TenantDriveRetire { user_id, drive } => crate::drives::retire(ctx, &user_id, drive).await,
         // Every other variant was refused above: the landlord's six went to
         // `control::landlord` and nothing else reaches this far, which
@@ -496,7 +502,7 @@ pub async fn capacity(ctx: &PeerContext, user_id: &str) -> UserResponse {
 mod tests {
     use super::*;
 
-    /// One of each verb a tenant's device says to its pool — the fourteen.
+    /// One of each verb a tenant's device says to its pool — the fifteen.
     fn tenant_verbs() -> Vec<UserRequest> {
         let u = || "alice".to_string();
         vec![
@@ -559,6 +565,11 @@ mod tests {
                 sealed_name: vec![],
             },
             UserRequest::TenantDrives { user_id: u() },
+            UserRequest::TenantDriveName {
+                user_id: u(),
+                drive: kotton_wire::ipc::MadeDrive([1; 16]),
+                sealed_name: vec![],
+            },
             UserRequest::TenantDriveRetire {
                 user_id: u(),
                 drive: kotton_wire::ipc::MadeDrive([1; 16]),

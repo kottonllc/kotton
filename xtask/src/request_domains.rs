@@ -123,6 +123,7 @@ const DOMAINS: &[(&str, &[&str])] = &[
             // is `kotton_peer::daemon::drives`.
             "TenantDriveMake",
             "TenantDrives",
+            "TenantDriveName",
             "TenantDriveRetire",
             "DriveCreate",
             "DriveList",

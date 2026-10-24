@@ -276,12 +276,16 @@ mod tests {
         let other = open(&dirs[1], UserKeys::new(Some([8; 32])));
         let keyless = open(&dirs[2], UserKeys::keyless());
 
-        let sealed = mine.seal_drive_name("drive-aa", "photos").unwrap();
+        let sealed = mine.seal_drive_name("drive-aa", "photos", true).unwrap();
         assert!(!sealed.windows(6).any(|w| w == b"photos"), "the name is sealed");
-        assert_eq!(mine.open_drive_name("drive-aa", &sealed).unwrap(), "photos");
+        assert_eq!(mine.open_drive_name("drive-aa", &sealed).unwrap(), ("photos".to_string(), true));
         assert!(mine.open_drive_name("drive-bb", &sealed).is_err(), "it opened for another tree");
         assert!(other.open_drive_name("drive-aa", &sealed).is_err(), "it opened under another key");
-        assert!(keyless.seal_drive_name("drive-aa", "photos").is_err(), "a keyless node named a drive");
+        assert!(keyless.seal_drive_name("drive-aa", "photos", true).is_err(), "a keyless node named a drive");
+        // A move's unfinished tree reads as unfinished, and never as the drive.
+        let unfinished = mine.seal_drive_name("drive-aa", "photos", false).unwrap();
+        assert_eq!(mine.open_drive_name("drive-aa", &unfinished).unwrap(), ("photos".to_string(), false));
+        assert!(mine.open_drive_name("drive-bb", &unfinished).is_err(), "an unfinished name opened for another tree");
         assert!(keyless.open_drive_name("drive-aa", &sealed).is_err(), "a keyless node read a drive's name");
     }
 

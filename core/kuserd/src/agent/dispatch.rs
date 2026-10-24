@@ -3119,6 +3119,7 @@ pub(super) async fn handle_request(
         }),
         UserRequest::TenantDriveMake { .. }
         | UserRequest::TenantDrives { .. }
+        | UserRequest::TenantDriveName { .. }
         | UserRequest::TenantDriveRetire { .. } => Ok(UserResponse::Error {
             message: format!("{request_name} is a vault's verb, served only over a peer connection"),
         }),

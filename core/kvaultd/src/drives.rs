@@ -27,8 +27,9 @@
 //! minted by the person's device fresh for each vault it is kept on, so a
 //! drive moved here from elsewhere carries no id the other landlord holds.
 //!
-//! **Who reaches it: a tenant's device, to its own pool**, through the three
-//! tenant verbs (`TenantDriveMake`, `TenantDrives`, `TenantDriveRetire`) that
+//! **Who reaches it: a tenant's device, to its own pool**, through the four
+//! tenant verbs (`TenantDriveMake`, `TenantDrives`, `TenantDriveName`,
+//! `TenantDriveRetire`) that
 //! `crate::peer::reaches` gives `Paired` standing and nothing else. A made
 //! drive is named on the wire by a `MadeDrive`, sixteen bytes, so the tree a
 //! verb names is always `drive-` and hex: one path component, never `local`,
@@ -43,10 +44,14 @@
 //!
 //! **What is not here.** A drive is moved by a device of the person's, which
 //! reads its sealed tree from one vault and writes it to another
-//! (`kotton_device::users::drives`); a vault never dials another. A retire
-//! does not wait out a write in flight to the same drive: the device that
-//! retires a drive is the one that moved it, and no device writes into a made
-//! drive yet (what a device keeps of one is pins', kotton #55).
+//! (`kotton_device::users::drive_verbs`); a vault never dials another. The
+//! tree it writes to is made under a name sealed *unfinished* and named
+//! finished (`TenantDriveName`) only once the copy is verified, so a listing
+//! taken mid-move never shows a second drive of the same name. A retire does
+//! not wait out a write in flight to the same drive: the device that retires a
+//! drive is the one that moved it, and no device writes into a made drive yet
+//! (what a device keeps of one is pins', kotton #55, where the lock this will
+//! need is recorded).
 
 use crate::peer::PeerContext;
 use kotton_common::crypto::kdf_labels;
@@ -156,6 +161,30 @@ pub async fn list(ctx: &PeerContext, user_id: &str) -> io::Result<UserResponse> 
         drives.push(TenantDrive { tree, sealed_name, held });
     }
     Ok(UserResponse::TenantDrivesResult { drives })
+}
+
+/// `TenantDriveName`: replace the sealed name a made drive is kept under —
+/// how a move names its tree finished once the copy is verified.
+pub async fn name(ctx: &PeerContext, user_id: &str, drive: MadeDrive, sealed_name: Vec<u8>) -> io::Result<UserResponse> {
+    if sealed_name.len() > MAX_SEALED_NAME {
+        return Ok(refused(format!(
+            "a drive's sealed name is at most {MAX_SEALED_NAME} bytes; this one is {}",
+            sealed_name.len()
+        )));
+    }
+    let tree = drive.tree();
+    let named = sqlx::query("UPDATE tenant_drives SET sealed_name = ? WHERE user_id = ? AND tree = ?")
+        .bind(&sealed_name)
+        .bind(user_id)
+        .bind(&tree)
+        .execute(ctx.db.as_ref())
+        .await
+        .map_err(io::Error::other)?
+        .rows_affected();
+    if named == 0 {
+        return Ok(refused(format!("this vault keeps no drive for '{user_id}' under {tree}")));
+    }
+    Ok(UserResponse::Ok)
 }
 
 /// `TenantDriveRetire`: every sealed object in the made drive's tree, then the
@@ -315,6 +344,16 @@ mod tests {
             Some(listed(&ctx, "alice").await.iter().map(|d| d.held).sum::<u64>()),
             "the meter counts what is left, over every drive"
         );
+        assert!(matches!(name(&ctx, "alice", photos, b"named again".to_vec()).await.unwrap(), UserResponse::Ok));
+        assert_eq!(listed(&ctx, "alice").await[1].sealed_name, b"named again");
+        match name(&ctx, "alice", work, b"x".to_vec()).await.unwrap() {
+            UserResponse::Error { message } => assert!(message.contains("keeps no drive"), "{message}"),
+            other => panic!("a retired drive was named: {other:?}"),
+        }
+        match name(&ctx, "bob", photos, b"x".to_vec()).await.unwrap() {
+            UserResponse::Error { message } => assert!(message.contains("keeps no drive"), "{message}"),
+            other => panic!("bob named alice's drive: {other:?}"),
+        }
         match retire(&ctx, "alice", work).await.unwrap() {
             UserResponse::Error { message } => assert!(message.contains("keeps no drive"), "{message}"),
             other => panic!("a retired drive was retired again: {other:?}"),
