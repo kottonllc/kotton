@@ -212,13 +212,37 @@ fn as_uid(bin: &Path, uid: Option<u32>) -> Command {
 /// A verb as a person at the host's shell types it: `PATH` and their login's
 /// `XDG_RUNTIME_DIR`, `/run/user/<uid>`, and whatever `extra` names.
 fn typed(bin: &Path, uid: Option<u32>, extra: &[(&str, &str)], args: &[&str]) -> Output {
+    let mut c = typed_as(bin, uid, extra, args);
+    forked(|| c.output()).unwrap()
+}
+
+/// [`typed`], with no extra environment, for a verb that must end by itself:
+/// one still running after `within` is killed and the test fails saying so,
+/// rather than waiting on it (#112).
+fn typed_within(within: Duration, bin: &Path, args: &[&str]) -> Output {
+    let mut c = typed_as(bin, None, &[], args);
+    c.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = forked(|| c.spawn()).unwrap();
+    let deadline = Instant::now() + within;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!("`kvaultd {}` had not exited after {within:?}: {}", args.join(" "), said(&out));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child.wait_with_output().unwrap()
+}
+
+fn typed_as(bin: &Path, uid: Option<u32>, extra: &[(&str, &str)], args: &[&str]) -> Command {
     let mut c = as_uid(bin, uid);
     c.env("XDG_RUNTIME_DIR", format!("/run/user/{}", uid.unwrap_or(0)));
     for (k, v) in extra {
         c.env(k, v);
     }
     c.args(args);
-    forked(|| c.output()).unwrap()
+    c
 }
 
 fn said(out: &Output) -> String {
@@ -299,7 +323,9 @@ fn a_verb_typed_bare_reaches_the_installed_vault_and_is_refused_in_one_sentence_
     // that tells it, and no file
     // (TASK-kvaultd-invite-at-a-vault-with-no-relay-says-only-that-the-ceremony-closed,
     // TASK-the-desktop-tells-the-vault-which-relays-to-stand-at).
-    let out = typed(&b.bin(), None, &[], &["invite", "sam", "--ttl", "5"]);
+    // Each refusal of an invite ends the door's stream after it, so the verb
+    // ends by itself — whatever it names (#112).
+    let out = typed_within(Duration::from_secs(60), &b.bin(), &["invite", "sam", "--ttl", "5"]);
     refused_in_one_sentence(&out, "this vault stands at no relay");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("`enrol <the vault's line>`"), "{}", said(&out));
@@ -308,7 +334,9 @@ fn a_verb_typed_bare_reaches_the_installed_vault_and_is_refused_in_one_sentence_
     // A name the vault keeps is refused before the relay is looked for: the
     // vault's typed answer (`VaultKeepsAlready`, #108), said in one sentence,
     // exit 1. `sam` is written into the registry the vault reads at each invite
-    // (`keeps_someone_as`), as a join's save writes it.
+    // (`keeps_someone_as`), as a join's save writes it. The verb reads neither
+    // this answer nor the one above by name (#114): it says what is not the
+    // ceremony once the door ends the stream, and here it must end.
     let system = b.root.join("var/lib/kotton-vault/system");
     let mut registry = kotton_device::registry::load_users(&system).unwrap();
     registry.users.push(
@@ -321,7 +349,7 @@ fn a_verb_typed_bare_reaches_the_installed_vault_and_is_refused_in_one_sentence_
         .unwrap(),
     );
     kotton_device::registry::save_users(&system, &registry).unwrap();
-    let out = typed(&b.bin(), None, &[], &["invite", "sam", "--ttl", "5"]);
+    let out = typed_within(Duration::from_secs(60), &b.bin(), &["invite", "sam", "--ttl", "5"]);
     refused_in_one_sentence(&out, "this vault already keeps for 'sam' — an invite admits someone new");
     assert!(!String::from_utf8_lossy(&out.stdout).contains("invite="), "{}", said(&out));
 

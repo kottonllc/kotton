@@ -154,6 +154,33 @@ pub enum HandlerOutput<Resp> {
     Stream(mpsc::Receiver<Resp>),
 }
 
+impl<Resp> HandlerOutput<Resp> {
+    /// This answer as a stream that ends: a `Stream` as it is, and a `Single`
+    /// as its one frame and then the end.
+    ///
+    /// **A request its client reads as a stream is answered as one, whatever
+    /// it says.** [`crate::IpcClient::send_streaming`] reads frames until the
+    /// door closes the connection, and the door closes it only after a
+    /// `Stream`: after a `Single` it waits for the next request on the same
+    /// connection, which a streaming client never sends. So a `Single`
+    /// answering a streaming request leaves both sides waiting, and the client
+    /// can end only by guessing which frames are last (#112). A handler for
+    /// such a request answers through this, and its client's `recv` returns
+    /// `None` after the one frame.
+    pub fn into_stream(self) -> mpsc::Receiver<Resp> {
+        match self {
+            Self::Stream(rx) => rx,
+            Self::Single(frame) => {
+                let (tx, rx) = mpsc::channel(1);
+                // One frame into an empty channel of one: it is taken, and the
+                // sender dropped here is the stream's end.
+                let _ = tx.try_send(frame);
+                rx
+            }
+        }
+    }
+}
+
 impl<Req, Resp> ChannelAcceptor<Req, Resp>
 where
     Req: for<'de> Deserialize<'de>,
@@ -467,6 +494,42 @@ mod tests {
         );
         let after = tokio::time::timeout(within, rx.recv()).await.expect("the stream ends");
         assert_eq!(after, None);
+        serving.abort();
+    }
+
+    /// **A one-frame answer to a streaming request ends the stream after its
+    /// frame** (#112). A `Single` leaves the connection open for a next
+    /// request, so a client reading a stream waits on it with the answer in
+    /// hand and nothing to end it but a guess at which frames are last;
+    /// answered through [`HandlerOutput::into_stream`], its `recv` returns
+    /// the frame and then `None`.
+    #[tokio::test]
+    async fn a_one_frame_answer_to_a_stream_ends_the_stream_after_its_frame() {
+        let (_dir, endpoint) = a_socket();
+        let server = ChannelAcceptor::<Req, Resp>::listen(endpoint.clone()).await.expect("bind");
+        let serving = tokio::spawn(async move {
+            server
+                .accept_with_session_streaming::<_, _, ()>(|req, _caller, _session| async move {
+                    Ok(match req {
+                        // The cause: one frame, and the door waits on.
+                        Req::Fail => HandlerOutput::Single(Resp::Pong),
+                        Req::Ping => HandlerOutput::Stream(HandlerOutput::Single(Resp::Pong).into_stream()),
+                    })
+                })
+                .await
+        });
+        let within = Duration::from_secs(5);
+
+        let mut rx = a_client(&endpoint).await.send_streaming(&Req::Ping).await.expect("sent");
+        assert_eq!(tokio::time::timeout(within, rx.recv()).await.expect("bounded"), Some(Resp::Pong));
+        let after = tokio::time::timeout(within, rx.recv()).await;
+        assert_eq!(after, Ok(None), "the stream did not end after its one frame");
+
+        // As a `Single`, the frame arrives and the stream never ends.
+        let mut rx = a_client(&endpoint).await.send_streaming(&Req::Fail).await.expect("sent");
+        assert_eq!(tokio::time::timeout(within, rx.recv()).await.expect("bounded"), Some(Resp::Pong));
+        let after = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
+        assert!(after.is_err(), "a `Single` ended the stream after all: {after:?}");
         serving.abort();
     }
 }
