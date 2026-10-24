@@ -1784,7 +1784,9 @@ mod handed_drive_tests {
 
         let why = refusal(join_handing(&db, vec![a_drive("vault", 2, "alice")]).await);
         assert!(why.contains("already pairs another key as 'vault'"), "{why}");
+        assert!(why.contains("This device was not joined"), "{why}");
 
+        assert!(network_db::get_paired_node_by_id(&db, "alice", "issuer").await.unwrap().is_none(), "a refused join wrote");
         let row = network_db::get_paired_node_by_id(&db, "alice", "vault").await.unwrap().unwrap();
         assert_eq!(row.public_key, a_node("vault", 3).public_key, "the join replaced the row");
         let drives = kotton_peer::daemon::drives::list(&db, "alice").await.unwrap();
