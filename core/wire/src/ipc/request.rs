@@ -882,8 +882,9 @@ pub enum UserRequest {
     ///
     /// **It records a row and never a drive.** An address and a key say nothing
     /// of what a node keeps, so no caller's word makes a node a drive here: a
-    /// drive is recorded by enrolment, by `Recover` after the proof, and by the
-    /// membership projection, each of which names a vault. The `drive` flag it
+    /// drive is recorded by enrolment, by `Recover` after the proof, by the
+    /// membership projection, and by the join (the drives the admitting device
+    /// hands over), each of which names a vault. The `drive` flag it
     /// carried until #80 is off the wire: a request that still sends it does not
     /// decode ([`peer_add_fields`]), rather than being read as a plain add.
     #[serde(deserialize_with = "peer_add_fields")]

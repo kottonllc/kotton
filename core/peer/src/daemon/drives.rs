@@ -54,10 +54,15 @@
 //! posture is `blind-storage`, set in the same transaction as the record on a
 //! row that named none. [`record`] never relabels a row: a node paired under
 //! another posture (one of the person's own devices, a cosigner) is refused,
-//! not made a vault, and no caller hands it one — enrolment and the projection
-//! record only `BlindStorage` members, the join writes each handed drive's row
-//! as `blind-storage` before it records it, and `Recover` refuses a line whose
-//! key is paired under another posture before it writes anything.
+//! not made a vault. Enrolment and the projection record only `BlindStorage`
+//! members, and `Recover` refuses a line whose key is paired under another
+//! posture before it writes anything. **The join is the exception, and it is
+//! the join's own write, not `record`'s:** `record_handed_drives` writes each
+//! handed drive's row with posture `blind-storage` (`insert_paired_node`),
+//! over whatever posture the row for that node (its label or DID) held, and
+//! only then calls `record`, which sees a `blind-storage` row. So a row the
+//! joiner already held under another posture is relabelled by the join, on
+//! the issuer's word inside the ceremony.
 //! What holds them together after that is what may rewrite the row:
 //! re-adding the same key keeps the posture, a different key under the label
 //! takes neither the posture nor the drive, and removing the row removes the

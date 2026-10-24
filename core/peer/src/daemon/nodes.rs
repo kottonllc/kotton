@@ -65,7 +65,8 @@ pub fn json_err(e: serde_json::Error) -> io::Error {
 /// **It records a row, never a drive.** An address and a key say nothing of
 /// what a node keeps, so a node added here is no drive until something that
 /// names a vault records it ([`super::drives`]): enrolment, the daemon's
-/// `Recover` after the proof, or the membership projection. The `drive` flag
+/// `Recover` after the proof, the membership projection, or the join
+/// (`record_handed_drives` in `kotton_device::users::pairing`). The `drive` flag
 /// that let a local session record any key as a drive went with #80.
 pub async fn peer_add(
     db: &Arc<SqlitePool>,

@@ -573,8 +573,9 @@ impl KottonClient {
     /// `peer_pubkey_hex` must be 64 lowercase hex characters (32-byte Ed25519 key).
     ///
     /// It records a row and never a drive: a vault is recorded as the person's
-    /// drive by enrolling it, by [`Self::recover`] with its line, or by the
-    /// membership set (`kotton_peer::daemon::drives`).
+    /// drive by enrolling it, by [`Self::recover`] with its line, by the
+    /// membership set, or at a join, from the drives the admitting device
+    /// hands over (`kotton_peer::daemon::drives`).
     pub async fn peer_add(
         &mut self,
         user_id: &str,

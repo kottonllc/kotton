@@ -39,7 +39,8 @@
 //! - **Before anything is written**, the words are read as a phrase, the passphrase is
 //!   held to the bar, and the line is read as a vault's. A line whose key this device
 //!   pairs for the person under a posture other than `blind-storage` (one of their own
-//!   devices, a cosigner) is refused here: a drive is a vault, and nothing is relabelled.
+//!   devices, a cosigner) is refused here: a drive is a vault, and this recovery
+//!   relabels no row.
 //! - **The node to dial.** Unless the person pairs a node under the line's key already,
 //!   the vault is added under `vault` (or `vault-` and eight hex of its key, when that
 //!   label is taken) at the line's address. One paired under the key at another address
@@ -59,8 +60,9 @@
 //!   never as a refusal: the identity is already rotated, and recovering again would
 //!   rotate it again.
 //!
-//! This is one of the three places a device records a drive, each naming a vault:
-//! enrolment, this, and the membership projection (`kotton_peer::daemon::drives`).
+//! This is one of the four places a device records a drive, each naming a vault:
+//! enrolment, this, the membership projection, and the join
+//! (`kotton_device::users::pairing::record_handed_drives`; `kotton_peer::daemon::drives`).
 //! Until #80 a door added the vault itself and then said "this is a drive" with
 //! `PeerAdd { drive: true }`, a flag any local session could set on any key; the
 //! REPL's door never said it (#76). Both are gone: the drive is recorded where the
