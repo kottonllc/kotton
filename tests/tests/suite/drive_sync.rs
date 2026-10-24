@@ -73,8 +73,7 @@ async fn a_device_its_admitter_introduces_reaches_the_persons_drive_until_revoke
     assert_eq!(devices_at(&vault, USER).await, 2, "the drive pairs both of alice's devices");
     assert!(admitted(&capacity_as(&b, &drive).await), "B reaches the drive under its own key");
 
-    // B is told where the drive is, as a drive, and pulls what A kept there.
-    tell_of(&b.daemon, USER, &drive).await;
+    // B learned the drive at the join, and pulls what A kept there.
     for client in [&mut client_a, &mut client_b] {
         let _ = client
             .remote_add(
@@ -214,6 +213,36 @@ async fn enrolment_and_recovery_record_the_same_drive() {
     assert_eq!(recovered, enrolled, "recovery recorded a drive other than the one enrolment recorded");
 }
 
+/// **A device that joins learns its person's drives at the join.** A enrols
+/// a drive, then admits B. With nothing more — no `peer add`, and no sync pass
+/// before — B records the drive A records (the vault's key, the person's
+/// tenancy, the node it is reached through, `blind-storage`), the drive admits
+/// B, and B's first `sync` takes what A wrote from it. The join carried the
+/// drive both ways: to B, and B to the drive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_that_joins_learns_the_persons_drives_at_the_join() {
+    init_crypto();
+    let vault = spawn_vault("vault").await;
+    let (a, mut client_a, b, mut client_b, drive) = two_devices_and_a_drive(&vault).await;
+
+    let enrolled = said_of(&a.daemon.drives(USER).await.expect("A's drives"));
+    let joined = said_of(&b.daemon.drives(USER).await.expect("B's drives"));
+    assert_eq!(
+        joined,
+        [(drive.pubkey_hex.clone(), USER.to_string(), "vault".to_string(), Some("blind-storage".to_string()))],
+        "the joined device does not record the drive"
+    );
+    assert_eq!(joined, enrolled, "the joined device records another drive than the admitting one");
+    assert!(admitted(&capacity_as(&b, &drive).await), "the drive does not admit the joined device");
+
+    client_a.write_file(USER, "from-a.txt", b"written on A").await.expect("write on A");
+    let pushed = synced(&mut client_a, "A").await;
+    assert!(pushed.files >= 1, "A sent nothing to the drive: {pushed:?}");
+    let first = synced(&mut client_b, "B").await;
+    assert!(first.files >= 1, "B's first sync took nothing from the drive: {first:?}");
+    assert_eq!(client_b.read_file(USER, "from-a.txt").await.expect("read on B"), b"written on A");
+}
+
 /// **A device learns a drive enrolled after it joined from the drive it
 /// already syncs.** A enrols a first vault and admits B, which is introduced
 /// to it; then A enrols a second vault, which is in the person's membership
@@ -228,7 +257,7 @@ async fn a_drive_enrolled_after_a_device_joined_reaches_that_device_by_way_of_a_
     init_crypto();
     let vault = spawn_vault("vault").await;
     let second = spawn_vault("second vault").await;
-    let (a, client_a, drive) = a_person_with_a_drive(&vault).await;
+    let (a, client_a, _drive) = a_person_with_a_drive(&vault).await;
 
     let b = spawn_device("device B").await;
     let client_b = connect_when_ready(&b.ipc, "client B").await;
@@ -240,7 +269,8 @@ async fn a_drive_enrolled_after_a_device_joined_reaches_that_device_by_way_of_a_
     client_a.write_file(USER, "from-a.txt", b"written on A").await.expect("write on A");
     synced(&mut client_a, "A").await;
 
-    tell_of(&b.daemon, USER, &drive).await;
+    // B learned the first drive at the join; the second, enrolled after,
+    // it learns from the first.
     let outcome = synced(&mut client_b, "B").await;
     assert!(outcome.files >= 1, "B pulled nothing from the drive: {outcome:?}");
 
@@ -263,9 +293,10 @@ async fn synced(client: &mut kotton::KottonClient, who: &str) -> kotton_wire::ip
     client.sync_await(USER, job, 120).await.unwrap_or_else(|e| panic!("{who}'s sync pass: {e}"))
 }
 
-/// Two of alice's devices, A and B, and one drive both reach: A enrolled it,
-/// admitted B — which introduced B to it — and B was told of it as a drive.
-/// Neither device listens for the other: no peer listener runs on either.
+/// Two of alice's devices, A and B, and one drive both reach: A enrolled it and
+/// admitted B, and the join carried the drive both ways — B to the drive, the
+/// drive to B. Neither device listens for the other: no peer listener runs on
+/// either.
 async fn two_devices_and_a_drive(
     vault: &RunningVault,
 ) -> (RunningDevice, kotton::KottonClient, RunningDevice, kotton::KottonClient, VaultIdentity) {
@@ -274,7 +305,6 @@ async fn two_devices_and_a_drive(
     let client_b = connect_when_ready(&b.ipc, "client B").await;
     let (client_a, client_b, _node_b) =
         enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
-    tell_of(&b.daemon, USER, &drive).await;
     (a, client_a, b, client_b, drive)
 }
 
@@ -350,41 +380,17 @@ async fn a_device_is_refused_as_a_sync_target() {
 /// first one's things uses, now that devices reach each other's writes only by
 /// way of a drive: a vault, enrolled as the person's drive by `client` — the
 /// device holding the identity, which announces itself as `device_name` —
-/// *before* the second device joins, so the join introduces that device to it.
+/// *before* the second device joins, so the join carries the drive both ways:
+/// the drive learns the joining device, and the joining device learns the drive.
 pub(crate) struct ADrive {
     pub(crate) _vault: RunningVault,
-    pub(crate) drive: VaultIdentity,
 }
 
 /// Enrol a fresh vault as `user`'s drive, labelled `vault`, from `client`.
 pub(crate) async fn a_drive_for(client: kotton::KottonClient, device_name: &str, user: &str) -> (kotton::KottonClient, ADrive) {
     let vault = spawn_vault("vault").await;
-    let (client, drive) = enrol_vault_from(client, device_name, &vault, user, "vault").await;
-    (client, ADrive { _vault: vault, drive })
-}
-
-/// Tell a joined device where its person's drive is, as a drive, labelled
-/// `vault`, through the daemon it runs (`daemon`).
-///
-/// **A stand-in for the join, until #84.** No request tells a device a drive on
-/// the caller's word: `PeerAdd { drive: true }` went with #80, and a drive is
-/// recorded by enrolment, by `Recover` after the proof, and by the membership
-/// projection. A device that joined has no first drive to sync the projection
-/// from until the join hands it the admitting device's drives (#84), so the
-/// cases that sync a joined device write the record through the daemon the test
-/// holds (`DeviceDaemon::record_drive_until_the_join_hands_it_on`), and move to
-/// the join when it does.
-pub(crate) async fn tell_of_the_drive(daemon: &kuserd::DeviceDaemon, user: &str, drive: &ADrive) {
-    tell_of(daemon, user, &drive.drive).await;
-}
-
-/// [`tell_of_the_drive`], for the vault `drive` names.
-async fn tell_of(daemon: &kuserd::DeviceDaemon, user: &str, drive: &VaultIdentity) {
-    let key: [u8; 32] = hex::decode(&drive.pubkey_hex).expect("hex").try_into().expect("32 bytes");
-    daemon
-        .record_drive_until_the_join_hands_it_on(user, "vault", key, drive.op_addr)
-        .await
-        .expect("tell the joined device where the drive is");
+    let (client, _) = enrol_vault_from(client, device_name, &vault, user, "vault").await;
+    (client, ADrive { _vault: vault })
 }
 
 /// **A drive serving another key domain's packs**: what the key-domain gate is

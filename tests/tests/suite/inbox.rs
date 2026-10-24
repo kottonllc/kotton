@@ -165,7 +165,7 @@ async fn a_file_handed_to_a_joined_device_lands_in_its_inbox_by_way_of_the_drive
         .create_user("alice", crate::common::TEST_PASSPHRASE)
         .await
         .expect("create_user");
-    let (pc_client, drive) = crate::drive_sync::a_drive_for(pc_client, "device-e", "alice").await;
+    let (pc_client, _drive) = crate::drive_sync::a_drive_for(pc_client, "device-e", "alice").await;
     let phone_client = connect_when_ready(&phone_device.ipc, "the phone's client").await;
     let (mut pc_client, mut phone, phone_node) =
         enroll_streamed(pc_client, phone_client, "alice", "the phone", free_port(), Posture::Full).await;
@@ -179,8 +179,7 @@ async fn a_file_handed_to_a_joined_device_lands_in_its_inbox_by_way_of_the_drive
     assert!(!row.is_this_device);
     assert_eq!(row.name.as_deref(), Some("the phone"), "the roster's name for the phone");
 
-    // The phone is told where the drive is; it is never told where the computer is.
-    crate::drive_sync::tell_of_the_drive(&phone_device.daemon, "alice", &drive).await;
+    // The phone learned the drive at the join; it is never told where the computer is.
 
     let photo = a_photo(3, 40_000);
     pc_client

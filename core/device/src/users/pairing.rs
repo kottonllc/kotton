@@ -18,14 +18,40 @@
 //!
 //! Both follow `peer` once `agent::sessions` moves to `core/session`.
 //!
-//! **A ceremony that admits a full device introduces it to the person's
-//! drives.** A drive holds no data keys and cannot read the member list, so it
-//! admits the device that enrolled it and nobody else until told. When the
-//! issuer's ceremony completes for a `Full` device, the issuer — which holds
-//! the identity — tells each drive the person has enrolled, under the
-//! identity's signature, before it answers `PairingComplete`
-//! ([`crate::users::drive_devices`]); `device revoke` withdraws the device the
-//! same way. A joined device holds a key share and introduces nobody.
+//! **A ceremony that admits a full device carries the drives both ways: the
+//! drives learn the device, and the device learns the drives.** A device
+//! syncs with its person's drives and never with another device, so a device
+//! that joins has nothing to sync until it knows a drive, and a drive admits
+//! nobody it was not told of.
+//!
+//! - *The device learns the drives.* The issuer hands the joiner the drives it
+//!   records — each vault's key, the person's tenancy, the node it is reached
+//!   through with its addresses and relay — inside the enrollment payload, over
+//!   the ceremony's own encrypted, SAS-confirmed channel
+//!   (`PairingPayload::FrostShare::drives`, [`drives_to_hand`]). The joiner
+//!   records each as enrolment records a drive — a `blind-storage` node row,
+//!   then `drives::record` — before it answers `PairingComplete`
+//!   ([`record_handed_drives`]), so its first `sync` has drives to reach. A
+//!   handout it cannot keep refuses the join on the joiner with the reason,
+//!   before the joiner writes anything ([`check_handed_drives`]); a write that
+//!   fails after that point also fails the join there, which the person runs
+//!   again.
+//!
+//!   **A late refusal is one-sided.** The issuer sends the payload and gets no
+//!   acknowledgement after it: once its frames are sent its side returns, it
+//!   records the joiner as a device, introduces it at every drive, and reports
+//!   `PairingComplete`. So when the joiner refuses the handout or fails to
+//!   record it, the joiner keeps nothing (or, on a failed write, what it wrote
+//!   before the failure), while the issuer keeps the device admitted — in its
+//!   node table and at every drive — until the person runs `device revoke`
+//!   there. The refusal says so to the person. Closing the gap — an
+//!   acknowledgement before the issuer commits, or a withdrawal on refusal —
+//!   is kotton #98.
+//! - *The drives learn the device.* When the issuer's ceremony completes, the
+//!   issuer — which holds the identity — tells each drive about the joiner,
+//!   under the identity's signature, before it answers `PairingComplete`
+//!   ([`crate::users::drive_devices`]); `device revoke` withdraws the device
+//!   the same way. A joined device holds a key share and introduces nobody.
 use kotton_session::service::tokens as sessions;
 use kotton_peer::daemon::nodes::{
     PendingConfirms,
@@ -89,6 +115,21 @@ pub async fn finalize_joined_node(
         Some(inception) => inception.aid.to_string(),
         None => joined.root_did.to_string(),
     };
+    // The drives the issuer handed over, checked before anything is written:
+    // a device that joins with a drive it cannot record has nothing to sync and
+    // no way back, so such a join is refused here with the reason. The issuer
+    // has already committed its side and does not hear of it (kotton #98), so
+    // the refusal tells the person what is left there.
+    if let Err(why) = check_handed_drives(user_id, &joined.peer, &joined.drives) {
+        tracing::warn!(user_id, %why, "refused a join whose drives cannot be recorded");
+        return Ok(UserResponse::PairFailed {
+            reason: format!(
+                "This device was not joined: {why}. Nothing was kept here, but the device that \
+                 admitted you will still list this device until you run `device revoke` there; \
+                 then join again from the device that holds your identity."
+            ),
+        });
+    }
     // Provision BEFORE writing anything: this validates that `user_id` is either
     // free or already this same identity (a name colliding with a *different*
     // local identity is rejected), and creates the user directory. Doing it first
@@ -197,6 +238,20 @@ pub async fn finalize_joined_node(
     }
     paired_keys.write().unwrap().insert(node.public_key);
 
+    // The person's drives, as the admitting device handed them: recorded here
+    // as enrolment records a drive (`record_handed_drives`), so this device's
+    // first `sync` has drives to reach, before it answers `PairingComplete`.
+    if let Err(e) = record_handed_drives(db, paired_keys, user_id, &joined.drives).await {
+        return Ok(UserResponse::PairFailed {
+            reason: format!(
+                "Joined, but recording your drives failed ({e}), so this device has nothing to \
+                 sync yet. The device that admitted you lists this device and has introduced it \
+                 to your drives; join again from the device that holds your identity — a second \
+                 join keeps what this one did — or run `device revoke` there to withdraw it."
+            ),
+        });
+    }
+
     // Completing the join cryptographically authenticates this device (it proved
     // its operational key + ran the committed handshake). It holds no mnemonic to
     // log in with afterward, so issue a session now.
@@ -292,6 +347,9 @@ pub async fn handle_device_add(
         None
     };
     let warm_key_expires_at = now_secs() + WARM_KEY_TTL_SECONDS;
+    // The person's drives, handed to a `Full` joiner with its payload so its
+    // first `sync` has drives to reach (`drives_to_hand`).
+    let handed_drives = drives_to_hand(&db, &user_id).await;
 
     // Fresh offer id + bootstrap listener (its cert presents the operational key).
     let mut sid = [0u8; 16];
@@ -356,6 +414,7 @@ pub async fn handle_device_add(
             warm_key_expires_at,
             issuer_kel,
             issuer_recovery_bundle,
+            handed_drives,
             &confirmer,
         )
         .await;
@@ -472,6 +531,7 @@ pub async fn handle_gateway_enroll(
             Posture::Gateway,
             Vec::new(),
             None,
+            Vec::new(),
             Some(handout),
             &confirmer,
         )
@@ -957,6 +1017,7 @@ pub async fn handle_device_admit(
     // device that has one keeps it; the vault reserves at its own and the
     // pair resolves the difference.
     let own_relay_url = runtime.reachability().nat().relay_url;
+    let handed_drives = drives_to_hand(&db, &user_id).await;
     let relay_offer = invite
         .as_ref()
         .filter(|_| own_relay_url.is_empty())
@@ -1007,6 +1068,7 @@ pub async fn handle_device_admit(
                     posture,
                     issuer_kel,
                     issuer_recovery_bundle,
+                    handed_drives,
                     confirmer,
                     Some(inv.vault_key),
                 )
@@ -1023,6 +1085,7 @@ pub async fn handle_device_admit(
                     posture,
                     issuer_kel,
                     issuer_recovery_bundle,
+                    handed_drives,
                     None,
                     confirmer,
                 )
@@ -1383,6 +1446,154 @@ pub async fn handle_device_invite(
     Ok(HandlerOutput::Stream(rx))
 }
 
+
+/// The person's drives this device records, as the handout a joiner is given
+/// at the join (`PairingPayload::FrostShare::drives`). Whether a join is handed
+/// them is the ceremony's to decide (`kotton_peer::pairing::issuer_over`
+/// hands them to a `Full` joiner only); this says what they are. A record that
+/// does not read is a join that hands no drive, and is logged, never a failed
+/// join.
+pub async fn drives_to_hand(db: &Arc<SqlitePool>, user_id: &str) -> Vec<kotton_wire::peer::DriveHandout> {
+    match kotton_peer::daemon::drives::list(db, user_id).await {
+        Ok(drives) => drives
+            .into_iter()
+            .map(|d| kotton_wire::peer::DriveHandout { vault_key: d.vault_key, tenancy: d.tenancy, node: d.node })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(user_id, error = %e, "the drive record does not read; the join hands no drive");
+            Vec::new()
+        }
+    }
+}
+
+/// Whether this device can record every drive `issuer` handed it at the join,
+/// as the name `user_id` it joins under: each drive's tenancy is that name, its
+/// node's key is the vault's key and its DID names that key, and its node is
+/// neither the issuer's row (by label) nor the issuer's key. `Err` says which
+/// drive and why.
+///
+/// Checked before the join writes anything, so a handout this device cannot
+/// keep refuses the ceremony cleanly: a device that joins with a drive it
+/// cannot reach has nothing to sync and no way back — the projection runs only
+/// in a pass on a drive it already reaches.
+pub fn check_handed_drives(
+    user_id: &str,
+    issuer: &kotton_wire::peer::PairedNode,
+    drives: &[kotton_wire::peer::DriveHandout],
+) -> Result<(), String> {
+    for drive in drives {
+        let node = &drive.node;
+        let named = kotton_crypto::DidKeyMethod::to_public_key(&node.device_did).map(|k| k.to_bytes()).ok();
+        let why = if drive.tenancy != user_id {
+            Some(format!("it is kept under '{}', and this device joins as '{user_id}'", drive.tenancy))
+        } else if node.public_key != drive.vault_key {
+            Some("the node it is reached through is not the vault's key".to_string())
+        } else if named != Some(node.public_key) {
+            Some("its node's DID does not name its key".to_string())
+        } else if node.id == issuer.id || node.public_key == issuer.public_key {
+            Some(format!("its node is the device this one joins ('{}')", issuer.id))
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            return Err(format!("the drive at '{}' cannot be recorded here: {why}", node.id));
+        }
+    }
+    Ok(())
+}
+
+/// Record the drives an admitting device handed this one at the join, the way
+/// enrolment records a drive: the node it is reached through, as a
+/// `blind-storage` row with its addresses and relay, admitted at the
+/// handshake, then the drive itself through `drives::record`. The caller has
+/// checked them ([`check_handed_drives`]); a write that fails is the join's
+/// error, so the person is told and joins again — a re-join is idempotent —
+/// rather than ending with a device that has nothing to sync.
+pub async fn record_handed_drives(
+    db: &Arc<SqlitePool>,
+    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    user_id: &str,
+    drives: &[kotton_wire::peer::DriveHandout],
+) -> io::Result<()> {
+    for drive in drives {
+        let node = &drive.node;
+        let did = node.device_did.to_string();
+        let addresses = serde_json::to_string(&node.addresses).map_err(json_err)?;
+        network_db::insert_paired_node(
+            db,
+            &node.id,
+            user_id,
+            &did,
+            &node.public_key,
+            &addresses,
+            now_secs(),
+            Some(Posture::BlindStorage.as_str()),
+        )
+        .await?;
+        if let Some(relay) = node.relay_url.as_deref() {
+            network_db::update_paired_node_relay(db, user_id, &did, Some(relay)).await?;
+        }
+        kotton_peer::daemon::drives::record(db, user_id, &drive.vault_key).await?;
+        paired_keys.write().unwrap().insert(node.public_key);
+        tracing::info!(user_id, drive = %node.id, "recorded a drive handed at the join");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod handed_drive_tests {
+    use super::check_handed_drives;
+    use kotton_wire::peer::{DriveHandout, PairedNode};
+
+    fn a_node(id: &str, seed: u8) -> PairedNode {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key();
+        PairedNode {
+            id: id.into(),
+            device_did: kotton_crypto::DidKeyMethod::from_public_key(&key),
+            public_key: key.to_bytes(),
+            paired_at: 0,
+            addresses: vec![],
+            relay_url: None,
+            posture: Some("blind-storage".into()),
+        }
+    }
+
+    fn a_drive(id: &str, seed: u8, tenancy: &str) -> DriveHandout {
+        let node = a_node(id, seed);
+        DriveHandout { vault_key: node.public_key, tenancy: tenancy.into(), node }
+    }
+
+    /// **A handout the joiner cannot keep refuses the join**, by name and with
+    /// the reason: another tenancy, a node that is not the vault's key, a DID
+    /// that names another key, and a node that is the issuer's own row. A
+    /// drive it can keep, and no drive at all, are taken.
+    #[test]
+    fn a_handout_the_joiner_cannot_keep_is_refused_with_the_reason() {
+        let issuer = a_node("laptop", 1);
+        assert!(check_handed_drives("alice", &issuer, &[]).is_ok());
+        assert!(check_handed_drives("alice", &issuer, &[a_drive("vault", 2, "alice")]).is_ok());
+
+        let why = check_handed_drives("alice", &issuer, &[a_drive("vault", 2, "bob")]).unwrap_err();
+        assert!(why.contains("'vault'") && why.contains("kept under 'bob'"), "{why}");
+
+        let mut not_the_vault = a_drive("vault", 2, "alice");
+        not_the_vault.vault_key = [9; 32];
+        let why = check_handed_drives("alice", &issuer, &[not_the_vault]).unwrap_err();
+        assert!(why.contains("not the vault's key"), "{why}");
+
+        let mut misnamed = a_drive("vault", 2, "alice");
+        misnamed.node.device_did = a_node("other", 3).device_did;
+        let why = check_handed_drives("alice", &issuer, &[misnamed]).unwrap_err();
+        assert!(why.contains("DID does not name its key"), "{why}");
+
+        let why = check_handed_drives("alice", &issuer, &[a_drive("laptop", 2, "alice")]).unwrap_err();
+        assert!(why.contains("the device this one joins"), "{why}");
+        let mut issuers_key = a_drive("vault", 1, "alice");
+        issuers_key.node.id = "vault".into();
+        let why = check_handed_drives("alice", &issuer, &[issuers_key]).unwrap_err();
+        assert!(why.contains("the device this one joins"), "{why}");
+    }
+}
 
 #[cfg(test)]
 mod admit_tests {

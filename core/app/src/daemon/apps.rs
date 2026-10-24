@@ -7806,6 +7806,9 @@ mod one_shell_tests {
         Closed(SurfaceHandle),
     }
 
+    // Read only by the unix-only test of a second launch, which stands a shell in for the
+    // first instance.
+    #[cfg(unix)]
     impl LaunchHost {
         fn surface_calls(&self) -> Vec<SurfaceCall> {
             self.surfaces.lock().unwrap().clone()

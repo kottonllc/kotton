@@ -18,13 +18,17 @@
 //! device's direction for it, never a node. So what the engine can reach is
 //! exactly what the drive record holds, and the record is as good as its
 //! writers: enrolment, the daemon's `Recover` after the proof (it takes the
-//! vault's line), and the membership projection, each of which names a vault
-//! (`kotton_peer::daemon::drives`; the join hands its drives on after #84).
-//! No caller's word makes a node a drive: the `PeerAdd { drive: true }` that
-//! recorded any key it was given went with #80, and the record refuses a node
-//! paired under another posture. So no device of the person's is a target, and
-//! every peer a pass reaches holds no data keys: a pass toward one sends packs
-//! and nothing loose ([`ensure_packed_for_peer`]).
+//! vault's line), and the membership projection, each of which names a vault;
+//! and the join, which records the drives the admitting device handed over,
+//! resting on that device's word inside the SAS-confirmed, identity-attested
+//! ceremony — the device that holds the identity, which could put a member in
+//! the sealed set or introduce the joiner anywhere already
+//! (`kotton_peer::daemon::drives`). No other caller's word makes a node a
+//! drive: the `PeerAdd { drive: true }` that recorded any key it was given went
+//! with #80, and the record refuses a node paired under another posture. So no
+//! device of the person's is a target, and every peer a pass reaches holds no
+//! data keys: a pass toward one sends packs and nothing loose
+//! ([`ensure_packed_for_peer`]).
 //!
 //! **What left, with the mesh.** Rules that named a paired node (any node,
 //! another of the person's devices among them) and a path nothing read; the

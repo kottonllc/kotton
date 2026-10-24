@@ -190,7 +190,7 @@ async fn a_second_device_admitted_to_an_identity_is_handed_the_name_it_already_h
     // N joins the identity. The ceremony carries no name.
     // E keeps the person's things on a drive, enrolled before N joins so the
     // join introduces N to it.
-    let (client_e, drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
+    let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
     let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) =
         enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
@@ -211,7 +211,6 @@ async fn a_second_device_admitted_to_an_identity_is_handed_the_name_it_already_h
         .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
         .await
         .expect("E pushes to the drive");
-    crate::drive_sync::tell_of_the_drive(&daemon_n, "alice", &drive).await;
     client_n
         .sync_mount("alice", "local", "vault", Some(SyncDirection::Pull))
         .await

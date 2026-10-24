@@ -638,6 +638,10 @@ pub struct JoinedNode {
     pub recovery_bundle: Option<String>,
     /// Present when the joiner was admitted as a gateway.
     pub gateway: Option<kotton_wire::peer::GatewayHandout>,
+    /// The person's drives, handed by the admitting device for a `Full` join
+    /// (`PairingPayload::FrostShare::drives`); empty on every other posture.
+    /// The joiner records each before it answers `PairingComplete`.
+    pub drives: Vec<kotton_wire::peer::DriveHandout>,
 }
 
 /// Issuer (E) side of FROST node enrollment. Waits for the new device N to
@@ -712,6 +716,7 @@ pub async fn run_enroll_issuer_committed(
     warm_key_expires_at: i64,
     issuer_kel: Vec<kotton_wire::kel::KelEvent>,
     issuer_recovery_bundle: Option<String>,
+    drives: Vec<kotton_wire::peer::DriveHandout>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
 ) -> Result<EnrolledNode> {
     let timeout = tokio::time::Duration::from_secs(ttl_seconds);
@@ -740,6 +745,7 @@ pub async fn run_enroll_issuer_committed(
         warm_key_expires_at,
         issuer_kel,
         issuer_recovery_bundle,
+        drives,
         None,
         confirmer,
         async {
@@ -767,6 +773,7 @@ pub async fn run_enroll_issuer_dialing(
     posture: kotton_schemas::membership::Posture,
     issuer_kel: Vec<kotton_wire::kel::KelEvent>,
     issuer_recovery_bundle: Option<String>,
+    drives: Vec<kotton_wire::peer::DriveHandout>,
     gateway: Option<kotton_wire::peer::GatewayHandout>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
 ) -> Result<EnrolledNode> {
@@ -799,6 +806,7 @@ pub async fn run_enroll_issuer_dialing(
         0,
         issuer_kel,
         issuer_recovery_bundle,
+        drives,
         gateway,
         confirmer,
         async {
@@ -1199,6 +1207,7 @@ pub async fn run_enroll_issuer_relayed(
     posture: kotton_schemas::membership::Posture,
     issuer_kel: Vec<kotton_wire::kel::KelEvent>,
     issuer_recovery_bundle: Option<String>,
+    drives: Vec<kotton_wire::peer::DriveHandout>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
     pinned: Option<[u8; 32]>,
 ) -> Result<EnrolledNode> {
@@ -1261,6 +1270,7 @@ pub async fn run_enroll_issuer_relayed(
         0,
         issuer_kel,
         issuer_recovery_bundle,
+        drives,
         None,
         confirmer,
         std::future::ready(()),
@@ -1449,6 +1459,7 @@ async fn issuer_over<W, R>(
     warm_key_expires_at: i64,
     issuer_kel: Vec<kotton_wire::kel::KelEvent>,
     issuer_recovery_bundle: Option<String>,
+    drives: Vec<kotton_wire::peer::DriveHandout>,
     gateway: Option<kotton_wire::peer::GatewayHandout>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
     linger: impl std::future::Future<Output = ()>,
@@ -1559,8 +1570,17 @@ where
                 warm_key_expires_at,
                 issuer_kel,
             )?;
+            // A `Full` device keeps the person's things, and so is handed the
+            // drives they live on (`PairingPayload::FrostShare::drives`); a
+            // `Cosigner` keeps nothing and is handed none.
+            let mut payload = issued.payload;
+            if matches!(posture, Posture::Full) {
+                if let PairingPayload::FrostShare { drives: handed, .. } = &mut payload {
+                    *handed = drives;
+                }
+            }
             (
-                issued.payload,
+                payload,
                 Some((issued.issuer_share, issued.root_did)),
                 Some(issued.pubkey_package),
             )
@@ -1912,6 +1932,7 @@ where
             data_keys,
             pubkey_package,
             kel,
+            drives,
         } => {
             kotton_org::enrollment::verify_received_frost_share(
                 &warm_key_delegation,
@@ -1947,6 +1968,7 @@ where
                 kel,
                 recovery_bundle: None,
                 gateway: None,
+                drives,
             })
         }
         PairingPayload::Gateway(handout) => Ok(JoinedNode {
@@ -1959,6 +1981,7 @@ where
             kel: Vec::new(),
             recovery_bundle: None,
             gateway: Some(handout),
+            drives: Vec::new(),
         }),
         PairingPayload::BlindRelay {
             kel,
@@ -1993,6 +2016,7 @@ where
                 kel,
                 recovery_bundle,
                 gateway: None,
+                drives: Vec::new(),
             })
         }
         other => Err(anyhow!("unexpected enrollment payload, got {other:?}")),
@@ -2236,6 +2260,7 @@ mod tests {
                 9_999_999_999,
                 vec![],
                 None,
+                Vec::new(),
                 &AutoConfirm,
             )
             .await
@@ -2311,6 +2336,7 @@ mod tests {
                 9_999_999_999,
                 vec![],
                 None,
+                Vec::new(),
                 &AutoConfirm,
             )
             .await
@@ -2352,6 +2378,7 @@ mod tests {
                 9_999_999_999,
                 vec![],
                 None,
+                Vec::new(),
                 &AutoConfirm,
             )
             .await
@@ -2414,6 +2441,7 @@ mod tests {
                 9_999_999_999,
                 vec![],
                 None,
+                Vec::new(),
                 &AutoConfirm, // issuer would confirm; the joiner rejects
             )
             .await
@@ -2646,6 +2674,7 @@ mod relayed_tests {
                 0,
                 Vec::new(),
                 Some("sealed-recovery-copy".into()),
+                Vec::new(),
                 None,
                 &yes_i,
                 std::future::ready(()),

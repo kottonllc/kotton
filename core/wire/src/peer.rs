@@ -209,6 +209,25 @@ pub struct GatewayHandout {
     pub node_label: String,
 }
 
+/// One of the person's drives, handed by the device admitting another to the
+/// device it admits (`PairingPayload::FrostShare::drives`): the vault's key
+/// and the person's tenancy on it — what names a drive — and the node it is
+/// reached through, with that node's addresses and the relay it reserves at.
+///
+/// It says nothing the joined device could not be told by its person, and it
+/// travels inside the ceremony's encrypted, SAS-confirmed channel from the
+/// device holding the identity. It is recorded only on the person's own
+/// device, and never sent on from there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveHandout {
+    /// The vault's key: the key the drive is dialled under.
+    pub vault_key: [u8; 32],
+    /// The person's tenancy on that vault.
+    pub tenancy: String,
+    /// The node the drive is reached through, as the admitting device records it.
+    pub node: PairedNode,
+}
+
 /// Payload sealed inside the RFC-0004 ECDH envelope during the pairing ceremony.
 ///
 /// The initiator seals one of these variants into the ChaCha20-Poly1305 envelope
@@ -271,6 +290,15 @@ pub enum PairingPayload {
         /// the enrollment by checking `resolve_current_key(kel)` equals the root
         /// group key it received. Empty only from a pre-KEL issuer (none exist).
         kel: Vec<KelEvent>,
+        /// The person's **drives**, as the admitting device records them: where
+        /// a joined device syncs, since a device syncs with its person's drives
+        /// and never with another device. Handed over with the payload so the
+        /// joiner's first `sync` has drives to reach; the admitting device tells
+        /// each of them about the joiner at the same ceremony's end, so the join
+        /// carries both directions. Empty from an issuer with no drive, from one
+        /// from before this field, and for a `Cosigner`, which keeps nothing.
+        #[serde(default)]
+        drives: Vec<DriveHandout>,
     },
     /// A gateway (RFC-0078): receives no key material and no chain — only what it
     /// needs to reach the node it will relay for. Everything else a gateway is,
@@ -577,6 +605,7 @@ mod tests {
             }),
             pubkey_package: "pubkeypkg".to_string(),
             kel: vec![],
+            drives: vec![],
         };
         let back: PairingPayload =
             serde_json::from_str(&serde_json::to_string(&payload).unwrap()).unwrap();
@@ -599,6 +628,53 @@ mod tests {
             }
             other => panic!("expected FrostShare, got {other:?}"),
         }
+    }
+
+    /// **The drives ride the payload, and a payload from before them reads as
+    /// none.** A `FrostShare` carries the person's drives to the joiner; an
+    /// issuer from before the field sends none, and its payload still decodes.
+    #[test]
+    fn a_frost_share_carries_the_drives_and_one_from_before_carries_none() {
+        let vault_key = [5u8; 32];
+        let drive = DriveHandout {
+            vault_key,
+            tenancy: "alice".to_string(),
+            node: PairedNode {
+                id: "vault".to_string(),
+                device_did: make_did(),
+                public_key: vault_key,
+                paired_at: 0,
+                addresses: vec!["127.0.0.1:7000".parse().unwrap()],
+                relay_url: Some("https://relay.example".to_string()),
+                posture: Some("blind-storage".to_string()),
+            },
+        };
+        let payload = PairingPayload::FrostShare {
+            share: FrostSharePayload("deadbeef".to_string()),
+            warm_key_delegation: WarmKeyDelegation {
+                warm_did: make_did(),
+                warm_pubkey: [9u8; 32],
+                expires_at: 1_800_000_000,
+                root_did: make_did(),
+                quorum_signature: "c2ln".to_string(),
+            },
+            quorum_certificate: "cert".to_string(),
+            data_keys: None,
+            pubkey_package: "pubkeypkg".to_string(),
+            kel: vec![],
+            drives: vec![drive],
+        };
+        let mut json = serde_json::to_value(&payload).unwrap();
+        let back: PairingPayload = serde_json::from_value(json.clone()).unwrap();
+        let PairingPayload::FrostShare { drives, .. } = back else { panic!("not a FrostShare") };
+        assert_eq!(drives.len(), 1);
+        assert_eq!((drives[0].vault_key, drives[0].tenancy.as_str(), drives[0].node.id.as_str()), (vault_key, "alice", "vault"));
+        assert_eq!(drives[0].node.relay_url.as_deref(), Some("https://relay.example"), "the relay route rides along");
+
+        json["FrostShare"].as_object_mut().unwrap().remove("drives");
+        let before: PairingPayload = serde_json::from_value(json).expect("a payload from before the drives decodes");
+        let PairingPayload::FrostShare { drives, .. } = before else { panic!("not a FrostShare") };
+        assert!(drives.is_empty());
     }
 
     #[test]
@@ -629,6 +705,7 @@ mod tests {
             }),
             pubkey_package: "pubkeypkg".to_string(),
             kel: vec![],
+            drives: vec![],
         };
         let d = format!("{frost:?}");
         assert!(!d.contains("deadbeefsecret"), "FROST share leaked: {d}");

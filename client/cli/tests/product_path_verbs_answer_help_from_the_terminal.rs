@@ -44,8 +44,10 @@ fn each_product_path_verb_answers_help_with_the_shell_verbs_own() {
             stdout.contains(help),
             "`kotton {verb} --help` does not say the shell's `{verb}` help.\nwant: {help}\ngot: {stdout}"
         );
+        // clap names the program as it was started, so on Windows the line reads `kotton.exe`.
+        let program = format!("kotton{}", std::env::consts::EXE_SUFFIX);
         assert!(
-            stdout.contains(&format!("Usage: kotton {verb} [OPTIONS] [ARGS]...")),
+            stdout.contains(&format!("Usage: {program} {verb} [OPTIONS] [ARGS]...")),
             "`kotton {verb} --help` is not the terminal verb's: {stdout}"
         );
         assert!(stdout.contains("--user <USER>"), "`kotton {verb} --help` names no --user: {stdout}");

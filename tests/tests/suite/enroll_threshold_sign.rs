@@ -557,11 +557,7 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
     .expect("daemon N");
 
     let _task_e = tokio::spawn(async move { std::sync::Arc::new(daemon_e).run().await });
-    let daemon_n = std::sync::Arc::new(daemon_n);
-    let _task_n = tokio::spawn({
-        let d = std::sync::Arc::clone(&daemon_n);
-        async move { d.run().await }
-    });
+    let _task_n = tokio::spawn(async move { std::sync::Arc::new(daemon_n).run().await });
     wait_for_daemon(&ipc_e, "daemon E").await;
     wait_for_daemon(&ipc_n, "daemon N").await;
 
@@ -573,7 +569,7 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
     let (did_n_dev, pubkey_n_hex) = client_n.get_node_identity().await.expect("N node identity");
     // E keeps the person's things on a drive, enrolled before N joins so the
     // join introduces N to it: N receives E's writes by way of the drive.
-    let (client_e, drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
+    let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
 
     let bootstrap_port = free_port();
     let (mut client_e, mut client_n, node_n) =
@@ -603,9 +599,8 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
         "the DID is the operational key's, not a label"
     );
 
-    // N is told where the drive is, as a drive. It is never given E's address:
-    // a device does not sync from another device.
-    crate::drive_sync::tell_of_the_drive(&daemon_n, "alice", &drive).await;
+    // N learned the drive at the join. It is never given E's address: a
+    // device does not sync from another device.
 
     // E writes a top-level file and a nested one. The nested path is the pull
     // regression: `SealedListEntry` carries no `is_dir`, so unless the drive
@@ -710,11 +705,7 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
     .expect("daemon N");
 
     let _task_e = tokio::spawn(async move { std::sync::Arc::new(daemon_e).run().await });
-    let daemon_n = std::sync::Arc::new(daemon_n);
-    let _task_n = tokio::spawn({
-        let d = std::sync::Arc::clone(&daemon_n);
-        async move { d.run().await }
-    });
+    let _task_n = tokio::spawn(async move { std::sync::Arc::new(daemon_n).run().await });
     wait_for_daemon(&ipc_e, "daemon E").await;
     wait_for_daemon(&ipc_n, "daemon N").await;
 
@@ -722,14 +713,13 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
     let client_n = connect_when_ready(&ipc_n, "client_n").await;
 
     client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
-    let (client_e, drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
+    let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
 
     let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) =
         enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
-    // N is told where the drive is, as a drive; neither device is given the
-    // other's address. A record reaches N by way of the drive.
-    crate::drive_sync::tell_of_the_drive(&daemon_n, "alice", &drive).await;
+    // N learned the drive at the join; neither device is given the other's
+    // address. A record reaches N by way of the drive.
 
     // The schema must be registered on both — E to insert, N to build the table
     // from its own registry when it applies the segment.

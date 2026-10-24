@@ -327,11 +327,7 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
     .expect("daemon N");
 
     let _task_e = tokio::spawn(async move { Arc::new(daemon_e).run().await });
-    let daemon_n = Arc::new(daemon_n);
-    let _task_n = tokio::spawn({
-        let d = Arc::clone(&daemon_n);
-        async move { d.run().await }
-    });
+    let _task_n = tokio::spawn(async move { Arc::new(daemon_n).run().await });
     wait_for_daemon(&ipc_e, "daemon E").await;
     wait_for_daemon(&ipc_n, "daemon N").await;
 
@@ -344,7 +340,7 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
         .expect("create_user E");
     // E keeps the person's things on a drive, enrolled before N joins so the
     // join introduces N to it: N receives E's records by way of the drive.
-    let (client_e, drive) = crate::drive_sync::a_drive_for(client_e, "device-e", USER).await;
+    let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", USER).await;
 
     let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) = enroll_streamed(
@@ -356,8 +352,7 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
         Posture::Full,
     )
     .await;
-    // N is told where the drive is; neither device is given the other's address.
-    crate::drive_sync::tell_of_the_drive(&daemon_n, USER, &drive).await;
+    // N learned the drive at the join; neither device is given the other's address.
 
     // The import happens on E, where the person's export is.
     let (_nsid, imported, _skipped) = client_e

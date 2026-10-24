@@ -104,10 +104,8 @@ impl Cli {
     pub fn for_env(env: &super::TestEnv) -> Self {
         #[cfg(windows)]
         {
-            let pipe = match &env.endpoint {
-                kotton_sys::ipc::IpcEndpoint::NamedPipe(p) => p.clone(),
-                other => panic!("not a named pipe: {other:?}"),
-            };
+            // On Windows a pipe is the only endpoint there is.
+            let kotton_sys::ipc::IpcEndpoint::NamedPipe(pipe) = env.endpoint.clone();
             Self { base: env.base_dir.clone(), pipe }
         }
         #[cfg(unix)]
