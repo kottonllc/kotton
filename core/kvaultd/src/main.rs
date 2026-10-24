@@ -457,10 +457,7 @@ async fn invite(user: &str, ttl_seconds: u64, quota: Option<u64>) -> io::Result<
                 std::process::exit(1);
             }
             UserResponse::VaultKeepsAlready { user_id } => {
-                eprintln!(
-                    "this vault already keeps for '{user_id}' — an invite admits someone new, so it takes a \
-                     name nobody holds here; their own devices need none"
-                );
+                eprintln!("{}", kotton_wire::ipc::vault_keeps_already_said(&user_id));
                 std::process::exit(1);
             }
             UserResponse::Error { message } => {

@@ -570,8 +570,11 @@ pub enum UserResponse {
     /// here, and the tenant's own devices need none (`kvaultd::control::mint_invite`).
     /// Typed rather than an `Error` string because one caller reads it as done,
     /// not refused: `vault invite --me` asks the vault to keep this person's
-    /// things, and a vault that keeps them already has (#108). Any other
-    /// invite, at either door, reads it as the refusal it is.
+    /// things, and a vault that keeps them already has (#108). Every other
+    /// reader of an invite's answer says it as a refusal, in
+    /// [`vault_keeps_already_said`]: `kvaultd invite` at the vault's own door,
+    /// and on the operator's desktop `vault invite <v> <name>` and a guest's
+    /// `landlord.invite`.
     VaultKeepsAlready {
         user_id: String,
     },
@@ -1330,6 +1333,16 @@ pub enum UserResponse {
 
 /// A handler's error, as the frame a door answers it with
 /// (`kotton_ipc::ChannelAcceptor` requires this of every `Resp` it serves).
+/// The vault's refusal of an invite naming `user_id`, a pool it keeps
+/// ([`UserResponse::VaultKeepsAlready`]), in the one sentence every reader
+/// that refuses on it says.
+pub fn vault_keeps_already_said(user_id: &str) -> String {
+    format!(
+        "this vault already keeps for '{user_id}' — an invite admits someone new, so it takes a name nobody holds \
+         here; their own devices need none"
+    )
+}
+
 /// The text is the error's own; the door closes the connection after it.
 impl From<std::io::Error> for UserResponse {
     fn from(e: std::io::Error) -> Self {

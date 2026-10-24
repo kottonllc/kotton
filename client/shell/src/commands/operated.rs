@@ -1024,13 +1024,9 @@ async fn run(parsed: Parsed<'_>, state: &mut ShellState) -> Result<CommandOutput
         }]),
         // An invite for someone new, under a name the vault keeps: refused.
         // Only `--me` reads it as done (#108).
-        UserResponse::VaultKeepsAlready { user_id } => CommandOutput::fail(
-            format!(
-                "{word}: this vault already keeps for '{user_id}' — an invite admits someone new, so it takes a name \
-                 nobody holds here; their own devices need none"
-            ),
-            None,
-        ),
+        UserResponse::VaultKeepsAlready { user_id } => {
+            CommandOutput::fail(format!("{word}: {}", kotton_wire::ipc::vault_keeps_already_said(&user_id)), None)
+        }
         UserResponse::Error { message } => CommandOutput::fail(format!("{word}: {message}"), None),
         other => CommandOutput::fail(format!("{word}: an answer this does not read: {other:?}"), None),
     })
