@@ -236,7 +236,8 @@ async fn a_device_that_joins_learns_the_persons_drives_at_the_join() {
     assert!(admitted(&capacity_as(&b, &drive).await), "the drive does not admit the joined device");
 
     client_a.write_file(USER, "from-a.txt", b"written on A").await.expect("write on A");
-    synced(&mut client_a, "A").await;
+    let pushed = synced(&mut client_a, "A").await;
+    assert!(pushed.files >= 1, "A sent nothing to the drive: {pushed:?}");
     let first = synced(&mut client_b, "B").await;
     assert!(first.files >= 1, "B's first sync took nothing from the drive: {first:?}");
     assert_eq!(client_b.read_file(USER, "from-a.txt").await.expect("read on B"), b"written on A");

@@ -40,7 +40,9 @@
 //!   each drive the admitting device handed the joiner in the ceremony
 //!   (`PairingPayload::FrostShare::drives`). It rests on the issuer's word
 //!   inside the SAS-confirmed, identity-attested ceremony, from the device that
-//!   holds the identity; a handout the joiner cannot record refuses the join.
+//!   holds the identity; a handout the joiner cannot record refuses the join on
+//!   the joiner only — the issuer has already committed and still lists the
+//!   device until `device revoke` (kotton #98).
 //!   A device that joins after a vault was enrolled learns the drive this way.
 //!
 //! All arrive at the same row: the vault key is the key of the node row the

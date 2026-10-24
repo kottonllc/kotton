@@ -32,9 +32,21 @@
 //!   records each as enrolment records a drive — a `blind-storage` node row,
 //!   then `drives::record` — before it answers `PairingComplete`
 //!   ([`record_handed_drives`]), so its first `sync` has drives to reach. A
-//!   handout it cannot record refuses the join with the reason, before anything
-//!   is written ([`check_handed_drives`]); a write that fails fails the join,
-//!   which the person runs again.
+//!   handout it cannot keep refuses the join on the joiner with the reason,
+//!   before the joiner writes anything ([`check_handed_drives`]); a write that
+//!   fails after that point also fails the join there, which the person runs
+//!   again.
+//!
+//!   **A late refusal is one-sided.** The issuer sends the payload and gets no
+//!   acknowledgement after it: once its frames are sent its side returns, it
+//!   records the joiner as a device, introduces it at every drive, and reports
+//!   `PairingComplete`. So when the joiner refuses the handout or fails to
+//!   record it, the joiner keeps nothing (or, on a failed write, what it wrote
+//!   before the failure), while the issuer keeps the device admitted — in its
+//!   node table and at every drive — until the person runs `device revoke`
+//!   there. The refusal says so to the person. Closing the gap — an
+//!   acknowledgement before the issuer commits, or a withdrawal on refusal —
+//!   is kotton #98.
 //! - *The drives learn the device.* When the issuer's ceremony completes, the
 //!   issuer — which holds the identity — tells each drive about the joiner,
 //!   under the identity's signature, before it answers `PairingComplete`
@@ -105,13 +117,16 @@ pub async fn finalize_joined_node(
     };
     // The drives the issuer handed over, checked before anything is written:
     // a device that joins with a drive it cannot record has nothing to sync and
-    // no way back, so such a join is refused, whole, with the reason.
+    // no way back, so such a join is refused here with the reason. The issuer
+    // has already committed its side and does not hear of it (kotton #98), so
+    // the refusal tells the person what is left there.
     if let Err(why) = check_handed_drives(user_id, &joined.peer, &joined.drives) {
         tracing::warn!(user_id, %why, "refused a join whose drives cannot be recorded");
         return Ok(UserResponse::PairFailed {
             reason: format!(
-                "This device was not joined: {why}. Nothing was kept here; join again from the \
-                 device that holds your identity."
+                "This device was not joined: {why}. Nothing was kept here, but the device that \
+                 admitted you will still list this device until you run `device revoke` there; \
+                 then join again from the device that holds your identity."
             ),
         });
     }
@@ -230,8 +245,9 @@ pub async fn finalize_joined_node(
         return Ok(UserResponse::PairFailed {
             reason: format!(
                 "Joined, but recording your drives failed ({e}), so this device has nothing to \
-                 sync yet. Join again from the device that holds your identity; a second join \
-                 keeps what this one did."
+                 sync yet. The device that admitted you lists this device and has introduced it \
+                 to your drives; join again from the device that holds your identity — a second \
+                 join keeps what this one did — or run `device revoke` there to withdraw it."
             ),
         });
     }
