@@ -16,6 +16,15 @@
 //! rows may carry it. What names a row is [`get_paired_node`]; a verb a person
 //! names a node in resolves the name through [`paired_node_named`], which
 //! refuses a label two rows carry rather than pick one.
+//!
+//! **A transaction here that reads and then writes begins as the writer**
+//! (`kotton_record::immediate::Immediate`), here and in [`super::drives`]. The
+//! machine database is shared: the device's event log commits into it from
+//! its own task while a request runs, and a deferred transaction whose read
+//! snapshot such a commit overtakes fails its first write at once with
+//! "database is locked", which no busy timeout waits out. That is how a
+//! revoke failed on Windows, where the event log's commit landed between
+//! `delete_paired_node`'s read and its delete.
 
 use kotton_wire::did::{Did, DidError};
 use kotton_wire::peer::{EphemeralSession, MountConfig, PairedNode};
@@ -63,7 +72,7 @@ pub async fn insert_paired_node(
     // One transaction: the row, and the drive it may be reached for
     // (`super::drives`), are written together or not at all, so no reader sees
     // a row that says one thing and a record that says another.
-    let mut tx = db.begin().await.map_err(db_err)?;
+    let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
     // `INSERT OR REPLACE` rewrites the whole row, and callers that only know an
     // address (`peer_add`) know no posture. A posture already projected for
     // this node is kept rather than erased: erasing it turned a blind node into
@@ -78,7 +87,7 @@ pub async fn insert_paired_node(
     )
     .bind(user_id)
     .bind(device_did)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await
     .map_err(db_err)?;
     let (existing_key, existing_posture, existing_relay) = existing.unwrap_or((Vec::new(), None, None));
@@ -100,7 +109,7 @@ pub async fn insert_paired_node(
     .bind(now)
     .bind(posture)
     .bind(existing_relay)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await
     .map_err(db_err)?;
     // A drive is reached through the node that carries the vault's key
@@ -109,23 +118,23 @@ pub async fn insert_paired_node(
         .bind(id)
         .bind(user_id)
         .bind(public_key)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .map_err(db_err)?;
     // The key this DID's row carried before, when it was another: a drive under
     // that key that no row of this person's still carries has no node left to
     // reach it through.
     if !existing_key.is_empty() && existing_key.as_slice() != public_key {
-        drop_unreachable_drive(&mut tx, user_id, &existing_key).await?;
+        drop_unreachable_drive(tx.conn(), user_id, &existing_key).await?;
     }
-    tx.commit().await.map_err(db_err)
+    tx.commit().await
 }
 
 /// Remove `user_id`'s drive record for `vault_key` when no row of theirs
 /// carries that key any more: a drive with no node to reach it through is not
 /// one this device has.
 async fn drop_unreachable_drive(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    conn: &mut sqlx::SqliteConnection,
     user_id: &str,
     vault_key: &[u8],
 ) -> io::Result<()> {
@@ -137,7 +146,7 @@ async fn drop_unreachable_drive(
     .bind(vault_key)
     .bind(user_id)
     .bind(vault_key)
-    .execute(&mut **tx)
+    .execute(conn)
     .await
     .map_err(db_err)?;
     Ok(())
@@ -313,25 +322,26 @@ pub(crate) async fn delete_paired_node(
     user_id: &str,
     device_did: &str,
 ) -> io::Result<bool> {
-    let mut tx = db.begin().await.map_err(db_err)?;
+    let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
     let key: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT public_key FROM paired_nodes WHERE user_id = ? AND device_did = ?")
             .bind(user_id)
             .bind(device_did)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(tx.conn())
             .await
             .map_err(db_err)?;
     let Some(key) = key else {
+        tx.end("ROLLBACK").await?;
         return Ok(false);
     };
     sqlx::query("DELETE FROM paired_nodes WHERE user_id = ? AND device_did = ?")
         .bind(user_id)
         .bind(device_did)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .map_err(db_err)?;
-    drop_unreachable_drive(&mut tx, user_id, &key).await?;
-    tx.commit().await.map_err(db_err)?;
+    drop_unreachable_drive(tx.conn(), user_id, &key).await?;
+    tx.commit().await?;
     Ok(true)
 }
 

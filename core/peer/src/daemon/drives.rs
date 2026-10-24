@@ -175,14 +175,14 @@ impl Drive {
 /// `blind-storage`: a drive is a tenancy on a vault, and a row that says the
 /// node is something else is not relabelled here (module doc).
 pub async fn record(db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32]) -> io::Result<()> {
-    let mut tx = db.begin().await.map_err(db_err)?;
+    let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
     let node: Option<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT id, device_did, posture FROM paired_nodes WHERE user_id = ? AND public_key = ? \
          ORDER BY device_did LIMIT 1",
     )
     .bind(user_id)
     .bind(vault_key.as_slice())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await
     .map_err(db_err)?;
     let Some((node_id, device_did, posture)) = node else {
@@ -202,7 +202,7 @@ pub async fn record(db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32]) -
         .bind(Posture::BlindStorage.as_str())
         .bind(user_id)
         .bind(&device_did)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .map_err(db_err)?;
     sqlx::query(
@@ -217,10 +217,10 @@ pub async fn record(db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32]) -
     .bind(FIRST_DRIVE_NAME)
     .bind(&node_id)
     .bind(kotton_common::time::now_secs())
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await
     .map_err(db_err)?;
-    tx.commit().await.map_err(db_err)
+    tx.commit().await
 }
 
 /// Take what the vault `vault_key` lists of `user_id`'s drives — each made
@@ -246,7 +246,7 @@ pub async fn reconcile(
     listed: &[(String, String)],
 ) -> io::Result<bool> {
     let tenancy = tenancy_of(user_id);
-    let mut tx = db.begin().await.map_err(db_err)?;
+    let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
     let first: Option<String> = sqlx::query_scalar(
         "SELECT node_id FROM drives WHERE user_id = ? AND vault_key = ? AND tenancy = ? AND tree = ?",
     )
@@ -254,7 +254,7 @@ pub async fn reconcile(
     .bind(vault_key.as_slice())
     .bind(tenancy)
     .bind(FIRST_DRIVE_TREE)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await
     .map_err(db_err)?;
     let Some(node_id) = first else {
@@ -270,7 +270,7 @@ pub async fn reconcile(
     .bind(vault_key.as_slice())
     .bind(tenancy)
     .bind(FIRST_DRIVE_TREE)
-    .fetch_all(&mut *tx)
+    .fetch_all(tx.conn())
     .await
     .map_err(db_err)?;
     let made: Vec<&(String, String)> = listed.iter().filter(|(tree, _)| tree != FIRST_DRIVE_TREE).collect();
@@ -281,7 +281,7 @@ pub async fn reconcile(
             .bind(vault_key.as_slice())
             .bind(tenancy)
             .bind(tree)
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await
             .map_err(db_err)?;
         changed = true;
@@ -302,12 +302,12 @@ pub async fn reconcile(
         .bind(name)
         .bind(&node_id)
         .bind(kotton_common::time::now_secs())
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .map_err(db_err)?;
         changed = true;
     }
-    tx.commit().await.map_err(db_err)?;
+    tx.commit().await?;
     Ok(changed)
 }
 
@@ -584,5 +584,62 @@ mod tests {
         assert!(network_db::delete_paired_node(&db, "alice", &did(&key(9))).await.unwrap());
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap();
         assert_eq!(left, 0, "revoking the vault left a drive recorded at it");
+    }
+
+    /// **The drive record's read-then-write transactions survive another
+    /// writer on the same file.** The machine database is shared: the
+    /// device's event log commits `events` rows into it from its own task
+    /// while a request runs, as a revoke's dial does. A transaction that reads
+    /// and then writes must begin as a writer; one that begins deferred takes
+    /// a read snapshot, and a commit on another connection before its first
+    /// write makes that write fail at once with SQLITE_BUSY ("database is
+    /// locked") — the busy timeout does not wait out a stale snapshot. This
+    /// pairs, records and revokes a vault over and over against a writer that
+    /// never stops, through the pool the daemon opens (WAL, five connections,
+    /// a busy timeout), and every call must succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_record_is_written_beside_another_writer_on_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = kotton_record::open_sqlite(&dir.path().join("agent.db")).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        let db = Arc::new(pool);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (db, stop) = (Arc::clone(&db), Arc::clone(&stop));
+            tokio::spawn(async move {
+                let mut n = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    n += 1;
+                    sqlx::query(
+                        "INSERT INTO events (id, category, level, message, timestamp) VALUES (?, 'transport', 'info', 'dial', 0)",
+                    )
+                    .bind(format!("e{n}"))
+                    .execute(db.as_ref())
+                    .await
+                    .expect("the other writer's insert");
+                    tokio::task::yield_now().await;
+                }
+                n
+            })
+        };
+        for round in 0..150u8 {
+            let k = key(round.wrapping_add(10));
+            let d = did(&k);
+            network_db::insert_paired_node(&db, "vault", "alice", &d, &k, "[]", 0, None)
+                .await
+                .unwrap_or_else(|e| panic!("round {round}: pairing: {e}"));
+            record(&db, "alice", &k).await.unwrap_or_else(|e| panic!("round {round}: recording: {e}"));
+            reconcile(&db, "alice", &k, &[("drive-01".into(), "photos".into())])
+                .await
+                .unwrap_or_else(|e| panic!("round {round}: following: {e}"));
+            assert!(
+                network_db::delete_paired_node(&db, "alice", &d).await.unwrap_or_else(|e| panic!("round {round}: revoking: {e}")),
+                "round {round}: the row was not there to revoke"
+            );
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(writer.await.unwrap() > 0, "the other writer never wrote");
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap();
+        assert_eq!(left, 0);
     }
 }
