@@ -1632,13 +1632,14 @@ impl DeviceDaemon {
                         return Ok(HandlerOutput::Single(refusal));
                     }
                     // One relayed frame of a browser's sealed channel.
-                    if let UserRequest::BrowserFrame { bytes, channel } = request {
+                    if let UserRequest::BrowserFrame { bytes, channel, user_id } = request {
                         let resp = browser_channel::handle_frame(
                             &ctx,
                             caller,
                             &conn_session,
                             &pending_confirms,
                             &browser_desks,
+                            user_id,
                             channel,
                             bytes,
                         )
@@ -1938,25 +1939,88 @@ impl DeviceDaemon {
 
 // â”€â”€ Peer request handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// handshake already verified the peer's Ed25519 identity key.  Only storage
-/// operations are permitted; any other request type returns an error.
+/// Who a peer's request is for, and what the peer is to that person — read
+/// from **that person's** row for the key the handshake proved
+/// ([`peer_ask`]).
+#[derive(Debug, PartialEq, Eq)]
+enum PeerAsk {
+    /// The person's row pairs the key as their gateway (`Posture::Gateway`):
+    /// for them it speaks a gateway's one verb, `BrowserFrame`, and may ask
+    /// `NodeRelay`, and the frames it carries are their browser's.
+    Gateway(String),
+    /// Anything else the key is to the person — their device, a vault, a
+    /// stranger — which `peer_standing` classifies next.
+    Person(String),
+}
+
+/// The person a peer's request names, and whether the key that sent it is
+/// that person's gateway: the peer path's one decision about a gateway, made
+/// for a person and never across persons.
 ///
-/// `peer_did` is the connecting device's `did:key:â€¦` string, extracted from its
-/// TLS certificate.  Before serving any request we verify that `peer_did` is
-/// either permanently paired with the `user_id` named in the request, or holds
-/// an active (non-revoked, non-expired) `EphemeralSession` scoped to that user.
-/// For ephemeral sessions, path-level grant enforcement is also applied.
-/// The person a peer's key is paired to as a gateway, when any person here
-/// pairs it as one: such a key speaks a gateway's one verb, whatever other
-/// row it has. The frame names no person until after this, so the answer is
-/// read across every person's rows, a `gateway` row first
-/// (`kotton_peer::daemon::db::paired_node_for_pubkey`): with one key held by
-/// two people, the narrower verb wins.
-async fn gateway_user_for(db: &Arc<SqlitePool>, pk: &[u8; 32]) -> std::io::Result<Option<String>> {
-    Ok(match kotton_peer::daemon::db::paired_node_for_pubkey(db, pk).await? {
-        Some((user, Some(posture))) if posture == kotton_schemas::membership::Posture::Gateway.as_str() => Some(user),
-        _ => None,
-    })
+/// The handshake proves a key and nothing else, and rows are each person's
+/// (`kotton_peer::daemon::db`), so one key may be one person's gateway and
+/// another's device, or two people's gateway. Every verb a peer may ask names
+/// its person — `BrowserFrame` too, in its `user_id` — and that person's
+/// posture for the key decides what the key is *to them*
+/// (`paired_posture_for_user`). The name selects among the reach the key's own
+/// rows grant and adds none: a frame naming a person who does not pair the
+/// key as their gateway is refused, and another verb naming a person whose
+/// row says gateway is held to the gateway's verbs.
+///
+/// A `BrowserFrame` naming no one is refused, never resolved to the one person
+/// who pairs the key as a gateway: that fallback is the person-less read
+/// kotton #119 removes, narrowed to the unambiguous case. So a relayed gateway
+/// that does not yet send `user_id` is refused on every frame, naming the
+/// field, until it does (kotton-ahead#339); the local path never comes here.
+///
+/// `Err` is the refusal to send back.
+async fn peer_ask(
+    db: &Arc<SqlitePool>,
+    pk: Option<&[u8; 32]>,
+    request: &UserRequest,
+) -> Result<PeerAsk, String> {
+    let user_id = match request {
+        UserRequest::ReadFile { user_id, .. }
+        | UserRequest::WriteFile { user_id, .. }
+        | UserRequest::ListFiles { user_id, .. }
+        | UserRequest::DeleteFile { user_id, .. }
+        | UserRequest::SyncAvailable { user_id, .. }
+        | UserRequest::RecordSyncAvailable { user_id, .. }
+        | UserRequest::FrostSignRound { user_id, .. }
+        | UserRequest::ApplyRecordChangeset { user_id, .. }
+        | UserRequest::ReadSealed { user_id, .. }
+        | UserRequest::ListSealed { user_id, .. }
+        | UserRequest::WriteSealed { user_id, .. }
+        | UserRequest::RecoveryFetch { user_id }
+        | UserRequest::RecoveryStore { user_id, .. }
+        | UserRequest::NodeRelay { user_id }
+        | UserRequest::Introduce { user_id, .. }
+        | UserRequest::BrowserFrame { user_id: Some(user_id), .. } => user_id.clone(),
+        UserRequest::BrowserFrame { user_id: None, .. } => {
+            return Err("a gateway's BrowserFrame over a peer connection names the person it is for \
+                        (`user_id`); this one names no one"
+                .to_string())
+        }
+        _ => return Err("request type not permitted over a peer connection".to_string()),
+    };
+    let gateway = match pk {
+        Some(pk) => kotton_peer::daemon::db::paired_posture_for_user(db, pk, &user_id)
+            .await
+            .map_err(|e| format!("authorization check failed: {e}"))?
+            .flatten()
+            .is_some_and(|p| p == kotton_schemas::membership::Posture::Gateway.as_str()),
+        None => false,
+    };
+    if gateway {
+        return Ok(PeerAsk::Gateway(user_id));
+    }
+    if matches!(request, UserRequest::BrowserFrame { .. }) {
+        return Err(format!(
+            "BrowserFrame over a peer connection is the verb of a gateway '{user_id}' pairs, \
+             and '{user_id}' does not pair this key as one"
+        ));
+    }
+    Ok(PeerAsk::Person(user_id))
 }
 
 /// Whether the peer asking `NodeRelay` for `user_id` is one of that person's
@@ -1973,6 +2037,15 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
     }
 }
 
+/// Serve one request from a peer device, whose Ed25519 key the TLS
+/// handshake already verified.  Only storage
+/// operations are permitted; any other request type returns an error.
+///
+/// `peer_did` is the connecting device's `did:key:â€¦` string, extracted from its
+/// TLS certificate.  Before serving any request we verify that `peer_did` is
+/// either permanently paired with the `user_id` named in the request, or holds
+/// an active (non-revoked, non-expired) `EphemeralSession` scoped to that user.
+/// For ephemeral sessions, path-level grant enforcement is also applied.
 #[allow(clippy::too_many_arguments)]
 async fn handle_peer_request(
     runtime: &Arc<DeviceRuntime>,
@@ -1998,79 +2071,45 @@ async fn handle_peer_request(
         .and_then(|d| DidKeyMethod::to_public_key(&d).ok())
         .map(|vk| vk.to_bytes());
 
-    // A gateway device is paired so the relay carries it and the
-    // handshake admits it; its *posture* is what keeps pairing from being reach.
-    // It speaks one verb of the user's, for the one user it was admitted for,
-    // and the frames it carries are dispatched as the browser behind it — so
-    // this is decided before any arm below can treat it as a device. The one
-    // other thing it may ask is where this node reserves: its
-    // forwarding address, nothing of the user's.
-    if let Some(pk) = peer_pubkey_bytes {
-        match gateway_user_for(db, &pk).await {
-            Ok(Some(gateway_user)) => {
-                return match request {
-                    UserRequest::BrowserFrame { bytes, channel } => {
-                        browser_channel::handle_gateway_frame(
-                            ctx,
-                            peer_did,
-                            &gateway_user,
-                            channel,
-                            bytes,
-                        )
-                        .await
-                    }
-                    UserRequest::NodeRelay { .. } => UserResponse::NodeRelayResult {
-                        relay_url: Some(runtime.reachability().nat().relay_url)
-                            .filter(|u| !u.is_empty()),
-                        relay_key: runtime.reachability().nat().relay_key,
-                        // A gateway is not one of the person's devices, and is
-                        // handed no relay's key.
-                        admission: None,
-                    },
-                    other => UserResponse::Error {
-                        message: format!(
-                            "a gateway speaks one verb, BrowserFrame, and may ask NodeRelay; {} is refused",
-                            other.variant_name()
-                        ),
-                    },
-                };
-            }
-            Ok(_) => {}
-            Err(e) => {
-                return UserResponse::Error {
-                    message: format!("authorization check failed: {e}"),
+    // A gateway device is paired so the relay carries it and the handshake
+    // admits it; its *posture* is what keeps pairing from being reach. It
+    // speaks one verb of a person's, for the person whose row pairs it as
+    // their gateway, and the frames it carries are dispatched as that
+    // person's browser — so this is decided, for the person the request
+    // names, before any arm below can treat it as a device. The one other
+    // thing it may ask is where this node reserves: its forwarding address,
+    // nothing of the person's.
+    let user_id = match peer_ask(db, peer_pubkey_bytes.as_ref(), &request).await {
+        Ok(PeerAsk::Person(user_id)) => user_id,
+        Ok(PeerAsk::Gateway(gateway_user)) => {
+            return match request {
+                UserRequest::BrowserFrame { bytes, channel, .. } => {
+                    browser_channel::handle_gateway_frame(
+                        ctx,
+                        peer_did,
+                        &gateway_user,
+                        channel,
+                        bytes,
+                    )
+                    .await
                 }
-            }
-        }
-    }
-    if matches!(request, UserRequest::BrowserFrame { .. }) {
-        return UserResponse::Error {
-            message: "BrowserFrame over a peer connection is a gateway device's verb".to_string(),
-        };
-    }
-
-    // Extract the user_id from the request so we can authorise before dispatch.
-    let user_id = match &request {
-        UserRequest::ReadFile { user_id, .. }
-        | UserRequest::WriteFile { user_id, .. }
-        | UserRequest::ListFiles { user_id, .. }
-        | UserRequest::DeleteFile { user_id, .. }
-        | UserRequest::SyncAvailable { user_id, .. }
-        | UserRequest::RecordSyncAvailable { user_id, .. }
-        | UserRequest::FrostSignRound { user_id, .. }
-        | UserRequest::ApplyRecordChangeset { user_id, .. }
-        | UserRequest::ReadSealed { user_id, .. }
-        | UserRequest::ListSealed { user_id, .. }
-        | UserRequest::WriteSealed { user_id, .. }
-        | UserRequest::RecoveryFetch { user_id }
-        | UserRequest::RecoveryStore { user_id, .. }
-        | UserRequest::NodeRelay { user_id }
-        | UserRequest::Introduce { user_id, .. } => user_id.clone(),
-        _ => {
-            return UserResponse::Error {
-                message: "request type not permitted over a peer connection".to_string(),
+                UserRequest::NodeRelay { .. } => UserResponse::NodeRelayResult {
+                    relay_url: Some(runtime.reachability().nat().relay_url)
+                        .filter(|u| !u.is_empty()),
+                    relay_key: runtime.reachability().nat().relay_key,
+                    // A gateway is not one of the person's devices, and is
+                    // handed no relay's key.
+                    admission: None,
+                },
+                other => UserResponse::Error {
+                    message: format!(
+                        "a gateway speaks one verb, BrowserFrame, and may ask NodeRelay; {} is refused",
+                        other.variant_name()
+                    ),
+                },
             };
         }
+        Err(message) => return UserResponse::Error { message },
     };
 
     // Who is this peer to this user? Paired, admitted on proof (and written

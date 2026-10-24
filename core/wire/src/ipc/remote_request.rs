@@ -76,6 +76,8 @@ pub enum RemoteRequest {
         #[serde(with = "crate::base64_bytes")]
         bytes: Vec<u8>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         channel: Option<String>,
     },
     BrowserOutbound {
@@ -558,7 +560,7 @@ impl From<RemoteRequest> for UserRequest {
             RemoteRequest::AppVerify { app_id } => UserRequest::AppVerify { app_id },
             RemoteRequest::ApplyRecordChangeset { user_id, nsid, rows } => UserRequest::ApplyRecordChangeset { user_id, nsid, rows },
             RemoteRequest::Authenticate { token, scope } => UserRequest::Authenticate { token, scope },
-            RemoteRequest::BrowserFrame { bytes, channel } => UserRequest::BrowserFrame { bytes, channel },
+            RemoteRequest::BrowserFrame { bytes, user_id, channel } => UserRequest::BrowserFrame { bytes, user_id, channel },
             RemoteRequest::BrowserOutbound { channel } => UserRequest::BrowserOutbound { channel },
             RemoteRequest::CallerInfo => UserRequest::CallerInfo,
             RemoteRequest::ConfigStatus => UserRequest::ConfigStatus,

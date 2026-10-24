@@ -69,9 +69,11 @@ pub enum Posture {
     BlindStorage,
     /// The browser-facing gateway (RFC-0078 GW3): a device that relays sealed
     /// browser frames to this node and holds nothing — no share, no key, no
-    /// data. It may speak exactly one verb, `BrowserFrame`, and the peer path
-    /// refuses it every other one. Paired so the relay carries it and the node
-    /// admits it; postured so pairing gives it no reach.
+    /// data. For the person who pairs it as one, it may speak exactly one verb,
+    /// `BrowserFrame`, naming that person, and the peer path refuses it every
+    /// other one; a posture is a person's row, so what the same key is to
+    /// another person is read from theirs. Paired so the relay carries it and
+    /// the node admits it; postured so pairing gives it no reach.
     Gateway,
 }
 

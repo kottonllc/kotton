@@ -201,7 +201,8 @@ pub use kotton_pair::wire::{
 /// is reachable. The node's own key it learns from the handshake it just ran.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayHandout {
-    /// The user the gateway serves.
+    /// The user the gateway serves, and so the person each `BrowserFrame` it
+    /// carries for them over the peer path names (`UserRequest::BrowserFrame`).
     pub user_id: String,
     /// The relay the node holds reservations at, which the gateway dials.
     pub relay_url: String,

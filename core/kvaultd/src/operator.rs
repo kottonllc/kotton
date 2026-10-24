@@ -99,14 +99,61 @@ pub async fn revoke_all_but(ctx: &PeerContext, keep: &str) -> io::Result<usize> 
 /// Take `keys` out of the handshake's allowlist — each one that is not also a
 /// tenant's paired device, whose own row still admits it.
 async fn unadmit(ctx: &PeerContext, keys: &[[u8; 32]]) {
+    unadmit_from(&ctx.db, &ctx.runtime.paired_keys(), keys).await;
+}
+
+/// [`unadmit`] against the database and allowlist it is handed. A key stays
+/// while **any** person here pairs it (`paired_users_for_pubkey`): the
+/// allowlist is the machine's, and one tenant's row admits the key whatever
+/// the operator credential under the same key was. An unreadable database
+/// reads as no row, as it always has, and the key leaves.
+async fn unadmit_from(
+    db: &std::sync::Arc<sqlx::SqlitePool>,
+    paired_keys: &std::sync::RwLock<std::collections::HashSet<[u8; 32]>>,
+    keys: &[[u8; 32]],
+) {
     for key in keys {
-        let paired = kotton_peer::daemon::db::paired_node_for_pubkey(&ctx.db, key)
+        let paired = kotton_peer::daemon::db::paired_users_for_pubkey(db, key)
             .await
-            .ok()
-            .flatten()
-            .is_some();
+            .is_ok_and(|pools| !pools.is_empty());
         if !paired {
-            ctx.runtime.paired_keys().write().unwrap().remove(key);
+            paired_keys.write().unwrap().remove(key);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unadmit_from;
+    use std::collections::HashSet;
+    use std::sync::{Arc, RwLock};
+
+    /// **A revoked operator key leaves the allowlist unless some person here
+    /// still pairs it**, and it stays whichever person that is: sam's row
+    /// keeps his key in when pat's row under the same key goes, and the key
+    /// leaves with its last row. A key no one pairs leaves at once.
+    #[tokio::test]
+    async fn an_unadmitted_key_stays_while_any_person_pairs_it() {
+        let db = Arc::new(sqlx::SqlitePool::connect("sqlite::memory:").await.expect("db"));
+        kotton_device::db::MIGRATOR.run(db.as_ref()).await.expect("migrations");
+        let (shared, alone) = ([7u8; 32], [9u8; 32]);
+        for user in ["pat", "sam"] {
+            kotton_peer::daemon::db::insert_paired_node(&db, "laptop", user, "did:key:zShared", &shared, "[]", 0, Some("full"))
+                .await
+                .expect("paired");
+        }
+        let allow = RwLock::new(HashSet::from([shared, alone]));
+
+        unadmit_from(&db, &allow, &[shared, alone]).await;
+        assert!(allow.read().unwrap().contains(&shared), "a key two people pair left the allowlist");
+        assert!(!allow.read().unwrap().contains(&alone), "a key no one pairs stayed");
+
+        sqlx::query("DELETE FROM paired_nodes WHERE user_id = 'pat'").execute(db.as_ref()).await.unwrap();
+        unadmit_from(&db, &allow, &[shared]).await;
+        assert!(allow.read().unwrap().contains(&shared), "sam's row no longer admitted his key once pat's went");
+
+        sqlx::query("DELETE FROM paired_nodes WHERE user_id = 'sam'").execute(db.as_ref()).await.unwrap();
+        unadmit_from(&db, &allow, &[shared]).await;
+        assert!(!allow.read().unwrap().contains(&shared), "a key stayed after its last row went");
     }
 }

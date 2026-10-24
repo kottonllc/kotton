@@ -30,7 +30,7 @@ pub(crate) const USER: &str = "browsertest";
 /// Relay one frame the way khttpd does: `BrowserFrame` in, `BrowserFrame` out.
 pub(crate) async fn relay(gw: &mut IpcClient<UserRequest, UserResponse>, frame: Vec<u8>) -> Vec<u8> {
     match gw
-        .send(&UserRequest::BrowserFrame { bytes: frame, channel: None })
+        .send(&UserRequest::BrowserFrame { bytes: frame, channel: None, user_id: None })
         .await
         .expect("relay BrowserFrame")
     {
@@ -277,6 +277,55 @@ async fn an_unknown_browser_is_refused_when_no_one_is_at_the_node() {
     );
 }
 
+/// **On the local path the bootstrap token names the person, and a frame that
+/// names another is refused** (kotton #119). The gateway's token is for
+/// `USER`; a first frame naming someone else is answered with the refusal
+/// frame, which the browser's own joiner reads as a refusal, and the channel
+/// takes no step. The same frame naming `USER` is carried as any other.
+#[tokio::test]
+async fn a_local_frame_naming_another_person_than_the_gateways_token_is_refused() {
+    let mut env = TestEnv::spawn().await;
+    env.client.create_user(USER, TEST_PASSPHRASE).await.expect("create_user");
+    let mut gw = gateway(&env).await;
+
+    let (mut j, hello) = Joiner::start(SigningKey::generate(&mut OsRng), "test phone", None);
+    let reply = match gw
+        .send(&UserRequest::BrowserFrame {
+            bytes: hello,
+            channel: None,
+            user_id: Some("someone-else".to_string()),
+        })
+        .await
+        .expect("relay a frame naming another person")
+    {
+        UserResponse::BrowserFrame { bytes } => bytes,
+        other => panic!("the refusal is a frame the browser reads: {other:?}"),
+    };
+    let err = j.receive(&reply).expect_err("a frame for another person than the token's was carried");
+    assert!(
+        err.to_string().contains("another person than the frame names"),
+        "the refusal must say why: {err}"
+    );
+
+    let (mut j, hello) = Joiner::start(SigningKey::generate(&mut OsRng), "test phone", None);
+    let reply = match gw
+        .send(&UserRequest::BrowserFrame {
+            bytes: hello,
+            channel: None,
+            user_id: Some(USER.to_string()),
+        })
+        .await
+        .expect("relay a frame naming the token's person")
+    {
+        UserResponse::BrowserFrame { bytes } => bytes,
+        other => panic!("the node did not answer the frame: {other:?}"),
+    };
+    assert!(
+        matches!(j.receive(&reply).expect("the token's own person is carried"), JoinerStep::Send(_)),
+        "a frame naming the token's person did not reach the ceremony"
+    );
+}
+
 // ── the channel's other direction (DEC-0059) ─────────────────────────────────
 
 /// A gateway holding both halves of a channel, the way `khttpd` does: one
@@ -300,6 +349,7 @@ impl Duplex {
             .send(&UserRequest::BrowserFrame {
                 bytes: frame,
                 channel: Some(self.channel.clone()),
+                user_id: None,
             })
             .await
             .expect("relay a browser frame")
@@ -331,6 +381,7 @@ impl Duplex {
             .send(&UserRequest::BrowserFrame {
                 bytes: sealed,
                 channel: Some(self.channel.clone()),
+                user_id: None,
             })
             .await
             .expect("relay a call")
