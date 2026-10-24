@@ -38,9 +38,10 @@
 //!   one that does not hold together ([`check_handed_drives`]), and one whose
 //!   rows would be written over a row this device holds — its key paired here
 //!   as something other than a vault, or its label held here by another key
-//!   ([`check_handed_rows`]). The issuer's word makes no node of this device's
-//!   a drive and replaces none of its rows. A write that fails after that
-//!   point also fails the join there, which the person runs again.
+//!   ([`check_handed_rows`]). The issuer's word replaces none of this
+//!   device's rows under another key, and writes no posture over any. A
+//!   write that fails after that point also fails the join there, which the
+//!   person runs again.
 //!
 //!   **A late refusal is one-sided.** The issuer sends the payload and gets no
 //!   acknowledgement after it: once its frames are sent its side returns, it
@@ -250,8 +251,9 @@ pub async fn finalize_joined_node(
     paired_keys.write().unwrap().insert(node.public_key);
 
     // The person's drives, as the admitting device handed them: recorded here
-    // as enrolment records a drive (`record_handed_drives`), so this device's
-    // first `sync` has drives to reach, before it answers `PairingComplete`.
+    // through the one writer of the record (`record_handed_drives`), so this
+    // device's first `sync` has drives to reach, before it answers
+    // `PairingComplete`.
     if let Err(e) = record_handed_drives(db, paired_keys, user_id, &joined.drives).await {
         return Ok(UserResponse::PairFailed {
             reason: format!(
@@ -1480,9 +1482,12 @@ pub async fn drives_to_hand(db: &Arc<SqlitePool>, user_id: &str) -> Vec<kotton_w
 /// Whether this device can record every drive `issuer` handed it at the join,
 /// as the name `user_id` it joins under: each drive's tenancy is that name, its
 /// node's key is the vault's key and its DID names that key, its node is
-/// neither the issuer's row (by label) nor the issuer's key, and no other
-/// drive in the handout is reached through another key under its label (the
-/// second would be written over the first). `Err` says which drive and why.
+/// neither the issuer's row (by label) nor the issuer's key, and the handout
+/// holds together: one that names one label for two keys does not. An honest
+/// issuer cannot send that, since its own rows are keyed by label and by DID
+/// (`id PRIMARY KEY`, `device_did UNIQUE`); the clause holds the bytes on the
+/// wire to the same shape, so the join's second write never takes its first.
+/// `Err` says which drive and why.
 /// The rows this device already holds are [`check_handed_rows`]'s.
 ///
 /// Checked before the join writes anything, so a handout this device cannot
