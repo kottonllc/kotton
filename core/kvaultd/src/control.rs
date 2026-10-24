@@ -348,6 +348,11 @@ fn keeps_someone_as(peer: &PeerContext, user_id: &str) -> io::Result<bool> {
 /// with nothing said to the landlord who minted it. The tenant's own devices
 /// need no invite: the device that admitted each introduces it to the vault
 /// under the identity's signature (`crate::devices`).
+/// The refusal is typed, `UserResponse::VaultKeepsAlready`, not a message:
+/// `vault invite --me` on the operator's desktop reads it as its done state, a
+/// vault that keeps the person's things already (#108). Only this registry
+/// says whom the vault keeps for; a guess from its people list disagrees with
+/// it once a tenant has withdrawn every device.
 ///
 /// **An invite needs a relay to meet at, and a vault that has none says so.**
 /// This is the only place a vault checks: `handle_device_invite` takes the URL
@@ -366,12 +371,7 @@ pub async fn mint_invite(
 ) -> io::Result<HandlerOutput<UserResponse>> {
     let peer = &ctx.peer;
     if keeps_someone_as(peer, &user_id)? {
-        return Ok(HandlerOutput::Single(UserResponse::Error {
-            message: format!(
-                "this vault already keeps for '{user_id}' — an invite admits someone new, so it \
-                 takes a name nobody holds here; their own devices need none"
-            ),
-        }));
+        return Ok(HandlerOutput::Single(UserResponse::VaultKeepsAlready { user_id }));
     }
     let relay_url = peer.runtime.reachability().nat().relay_url;
     if relay_url.is_empty() {
@@ -567,9 +567,7 @@ pub(crate) mod tests {
         };
 
         match landlord(ctx, &[1u8; 32], invite("alice")).await {
-            UserResponse::Error { message } => {
-                assert!(message.contains("already keeps for 'alice'"), "{message}")
-            }
+            UserResponse::VaultKeepsAlready { user_id } => assert_eq!(user_id, "alice"),
             other => panic!("the operator's key minted an invite naming a kept pool: {other:?}"),
         }
         match dispatch(
@@ -582,9 +580,7 @@ pub(crate) mod tests {
         )
         .await
         {
-            Ok(HandlerOutput::Single(UserResponse::Error { message })) => {
-                assert!(message.contains("already keeps for 'alice'"), "{message}")
-            }
+            Ok(HandlerOutput::Single(UserResponse::VaultKeepsAlready { user_id })) => assert_eq!(user_id, "alice"),
             Ok(HandlerOutput::Single(other)) => panic!("the door answered {other:?}"),
             Ok(HandlerOutput::Stream(_)) => panic!("the terminal's door minted an invite naming a kept pool"),
             Err(e) => panic!("the door failed rather than refusing: {e}"),
@@ -592,7 +588,6 @@ pub(crate) mod tests {
 
         match landlord(ctx, &[1u8; 32], invite("bob")).await {
             UserResponse::Error { message } => {
-                assert!(!message.contains("already keeps"), "a new name was refused as kept: {message}");
                 // With no relay, the operator's key is told why in the door's words.
                 if ctx.peer.runtime.reachability().nat().relay_url.is_empty() {
                     assert_eq!(message, NO_RELAY);

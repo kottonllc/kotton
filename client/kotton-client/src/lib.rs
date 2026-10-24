@@ -40,7 +40,7 @@ pub use records::{records_export, records_import, ImportReport, OrgRoot, OrgRoot
 pub use surface::Surface;
 pub use store::Store;
 pub use sync::Sync;
-pub use net::{ForgottenCredential, KeptCredential, LocalDoor, Net, NetworkStatusSummary};
+pub use net::{ForgottenCredential, InvitedMe, KeptCredential, LocalDoor, Net, NetworkStatusSummary};
 pub use org::Org;
 pub use frost_orgs::{org_grant_issue_full, OrgGrantIssueResult};
 pub use kotton_wire::ipc::{

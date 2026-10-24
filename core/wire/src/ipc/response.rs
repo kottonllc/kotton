@@ -565,6 +565,16 @@ pub enum UserResponse {
         held: u64,
         quota: u64,
     },
+    /// An invite refused because this vault already keeps a pool named
+    /// `user_id`: an invite admits someone new, under a name nobody holds
+    /// here, and the tenant's own devices need none (`kvaultd::control::mint_invite`).
+    /// Typed rather than an `Error` string because one caller reads it as done,
+    /// not refused: `vault invite --me` asks the vault to keep this person's
+    /// things, and a vault that keeps them already has (#108). Any other
+    /// invite, at either door, reads it as the refusal it is.
+    VaultKeepsAlready {
+        user_id: String,
+    },
     /// Answer to the door's `VaultRequest::Tenants`: every tenant the vault
     /// keeps anything for, by name, with bytes held, quota and a device count.
     VaultTenants {
