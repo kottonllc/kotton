@@ -3096,7 +3096,6 @@ dependencies = [
  "kotton-diag",
  "kotton-fs",
  "kotton-identity",
- "kotton-ipc",
  "kotton-net",
  "kotton-peer",
  "kotton-record",
