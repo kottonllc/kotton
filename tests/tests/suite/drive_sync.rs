@@ -477,3 +477,163 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
         }
     }
 }
+
+/// The sealed objects a vault keeps for `USER` in `tree`, by key, with their bytes.
+async fn sealed_in(vault: &RunningVault, tree: &str) -> Vec<(String, Vec<u8>)> {
+    use kotton_device::users::residency::Residency as _;
+    let pool = vault.vault.pools().get(USER).expect("the vault keeps a pool for the person");
+    let mut out = Vec::new();
+    for (key, _, _) in pool.list_sealed(tree, "").await.expect("the tree lists") {
+        let blob = pool.read_sealed(tree, &key).await.expect("the object reads");
+        out.push((key, blob));
+    }
+    out.sort();
+    out
+}
+
+/// The drives a vault keeps for `USER`, by tree.
+fn trees_at(vault: &RunningVault) -> Vec<String> {
+    use kotton_device::users::residency::Residency as _;
+    let pool = vault.vault.pools().get(USER).expect("the vault keeps a pool for the person");
+    let mut trees: Vec<String> = pool.shelf_mounts().into_iter().map(|(tree, _)| tree).collect();
+    trees.sort();
+    trees
+}
+
+/// Where the device records the drive `name`: each vault's key and the tree.
+async fn where_recorded(device: &RunningDevice, name: &str) -> Vec<(String, String)> {
+    device
+        .daemon
+        .drives(USER)
+        .await
+        .expect("the drive record")
+        .into_iter()
+        .filter(|d| d.name == name)
+        .map(|d| (hex::encode(d.vault_key), d.tree))
+        .collect()
+}
+
+/// **Several drives for one person on one vault, and a drive moved between
+/// two vaults, with every device following it** (kotton #56).
+///
+/// One fixture: alice's devices A and B, and two vaults she enrolled from A
+/// before B joined, so B reaches both. Each vault keeps her first drive,
+/// `personal`, the tree her devices sync. A makes a second drive, `photos`, on
+/// the first vault, and objects sealed under her key are kept in it: the vault
+/// then keeps two sealed trees for her, each with its own contents. B follows
+/// the new drive at its next sync without being told, and lists it. A moves
+/// `photos` to the second vault: the very sealed bytes are there under a tree
+/// of their own, nothing of the drive is left at the first, and B's next sync
+/// follows it there. `personal`, kept at both, does not move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_device() {
+    use kotton_wire::ipc::FIRST_DRIVE_TREE;
+    init_crypto();
+    let first = spawn_vault("vault").await;
+    let second = spawn_vault("second vault").await;
+    let a = spawn_device("device A").await;
+    let mut client_a = connect_when_ready(&a.ipc, "client A").await;
+    client_a.create_user(USER, crate::common::TEST_PASSPHRASE).await.expect("create_user on A");
+    let (client_a, first_id) = enrol_vault_from(client_a, "device-a", &first, USER, "vault").await;
+    let (client_a, second_id) = enrol_vault_from(client_a, "device-a", &second, USER, "vault-2").await;
+    let b = spawn_device("device B").await;
+    let client_b = connect_when_ready(&b.ipc, "client B").await;
+    let (mut client_a, mut client_b, _node_b) =
+        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
+
+    // The first drive at each vault: what A's tree syncs with.
+    client_a.write_file(USER, "from-a.txt", b"written on A").await.expect("write on A");
+    synced(&mut client_a, "A").await;
+    let domain = first
+        .vault
+        .runtime()
+        .secrets()
+        .get_secret(&kotton_common::crypto::kdf_labels::sealed_mount_domain(USER, FIRST_DRIVE_TREE))
+        .expect("the vault's secrets read")
+        .expect("the first drive pinned the person's key domain at its first write");
+
+    // A second drive on the first vault.
+    let made = client_a.drive_create(USER, "photos", Some("vault")).await.expect("drive create");
+    assert_eq!(made.len(), 1, "{made:?}");
+    assert_eq!((made[0].name.as_str(), made[0].vault_key.as_str()), ("photos", first_id.pubkey_hex.as_str()));
+    let at_first = where_recorded(&a, "photos").await;
+    assert_eq!(at_first.len(), 1, "{at_first:?}");
+    let tree = at_first[0].1.clone();
+    assert_ne!(tree, FIRST_DRIVE_TREE);
+    let refused = client_a.drive_create(USER, "photos", Some("vault-2")).await.expect_err("a second drive called photos");
+    assert!(refused.to_string().contains("already"), "{refused}");
+
+    // Kept in it: two objects sealed under alice's key, as a device writes them.
+    let objects: Vec<(String, Vec<u8>)> = vec![("p/one".into(), vec![1; 300]), ("p/two".into(), vec![2; 500])];
+    for (key, body) in &objects {
+        let request = serde_json::to_vec(&UserRequest::WriteSealed {
+            user_id: USER.into(),
+            mount: tree.clone(),
+            path: key.clone(),
+            blob: body.clone(),
+            domain_id: domain.clone(),
+            offset: 0,
+            total_size: body.len() as u64,
+            content_hash: blake3::hash(body).to_hex().to_string(),
+        })
+        .unwrap();
+        let answer = try_ask_the_vault_as(&a, &first_id, request).await.expect("A reaches the vault");
+        assert!(matches!(answer, UserResponse::Ok), "{answer:?}");
+    }
+
+    // Two drives on one vault, each a tree of its own.
+    assert_eq!(trees_at(&first), {
+        let mut t = vec![FIRST_DRIVE_TREE.to_string(), tree.clone()];
+        t.sort();
+        t
+    });
+    assert_eq!(sealed_in(&first, &tree).await, objects, "the second drive holds what was kept in it");
+    let first_drive = sealed_in(&first, FIRST_DRIVE_TREE).await;
+    assert!(!first_drive.is_empty(), "the first drive holds A's sync");
+    assert!(
+        first_drive.iter().all(|(key, _)| !objects.iter().any(|(k, _)| k == key)),
+        "an object of the second drive is in the first"
+    );
+
+    // B follows the new drive at its next sync, told by nobody.
+    assert!(where_recorded(&b, "photos").await.is_empty(), "B knew of photos before any pass");
+    synced(&mut client_b, "B").await;
+    assert_eq!(where_recorded(&b, "photos").await, at_first, "B's sync did not follow the new drive");
+    let listed = client_b.drive_list(USER).await.expect("drive list on B");
+    let mut said: Vec<(String, String)> = listed.iter().map(|d| (d.name.clone(), d.vault_key.clone())).collect();
+    said.sort();
+    let mut want = vec![
+        ("personal".to_string(), first_id.pubkey_hex.clone()),
+        ("personal".to_string(), second_id.pubkey_hex.clone()),
+        ("photos".to_string(), first_id.pubkey_hex.clone()),
+    ];
+    want.sort();
+    assert_eq!(said, want, "B's drive list");
+    let photos = listed.iter().find(|d| d.name == "photos").unwrap();
+    assert!(photos.size.unwrap_or(0) >= 800, "the drive's size is what it holds: {photos:?}");
+    assert!(photos.pinned_whole.is_empty(), "no device pins a drive yet: {photos:?}");
+
+    // The move: the sealed bytes to the second vault, under the same key.
+    let first_drive = sealed_in(&first, FIRST_DRIVE_TREE).await;
+    let moved = client_a.drive_move(USER, "photos", "vault-2", None).await.expect("drive move");
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(moved[0].vault_key, second_id.pubkey_hex);
+    let now = where_recorded(&a, "photos").await;
+    assert_eq!(now.len(), 1, "{now:?}");
+    assert_eq!(now[0].0, second_id.pubkey_hex);
+    let new_tree = now[0].1.clone();
+    assert_ne!(new_tree, tree, "the second vault holds the drive under the id the first held");
+    assert_eq!(sealed_in(&second, &new_tree).await, objects, "the second vault holds the very sealed bytes");
+    assert_eq!(trees_at(&first), [FIRST_DRIVE_TREE.to_string()], "the first vault still keeps the moved drive");
+    assert!(sealed_in(&first, FIRST_DRIVE_TREE).await == first_drive, "the move touched the first drive at the vault it left");
+
+    // B follows it there at its next sync.
+    synced(&mut client_b, "B").await;
+    assert_eq!(where_recorded(&b, "photos").await, now, "B's sync did not follow the moved drive");
+    let shown = client_b.drive_show(USER, "photos").await.expect("drive show on B");
+    assert_eq!(shown.iter().map(|d| d.vault_key.as_str()).collect::<Vec<_>>(), [second_id.pubkey_hex.as_str()]);
+
+    // The first drive is kept at both vaults and does not move.
+    let refused = client_b.drive_move(USER, "personal", "vault-2", None).await.expect_err("personal moved");
+    assert!(refused.to_string().contains("tenancy's own tree"), "{refused}");
+}

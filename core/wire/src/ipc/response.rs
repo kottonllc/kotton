@@ -558,6 +558,16 @@ pub enum UserResponse {
         held: u64,
         quota: Option<u64>,
     },
+    /// Answer to [`crate::UserRequest::TenantDrives`]: every drive the vault
+    /// keeps for the tenant, the tenancy's own tree first.
+    TenantDrivesResult {
+        drives: Vec<crate::ipc::TenantDrive>,
+    },
+    /// Answer to the drive's verbs (`DriveCreate`, `DriveList`, `DriveShow`,
+    /// `DriveMove`): the drives the verb is about, each as its descriptor.
+    Drives {
+        drives: Vec<crate::ipc::DriveDescriptor>,
+    },
     /// A sealed write refused because it would exceed the quota (RFC-0084 V3).
     /// Typed rather than an `Error` string so a device can show the person the
     /// two numbers instead of a failure.

@@ -11,6 +11,7 @@
 /// references to the runtime crate on 2026-08-20, when the caller took over
 /// resolving the record store and schema registry; what kept it in the daemon
 /// after that was only that nobody had moved it.
+pub mod immediate;
 pub mod open;
 pub mod daemon;
 pub mod provider;

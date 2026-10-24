@@ -40,6 +40,7 @@
 //! device against the identity's key log itself, and this verb becomes that
 //! log's publication rather than the vault's own list.
 
+use kotton_record::immediate::Immediate;
 use crate::peer::PeerContext;
 use ed25519_dalek::{Signature, VerifyingKey};
 use kotton_crypto::did::DidKeyMethod;
@@ -174,60 +175,6 @@ async fn apply_ending(
         paired_keys.write().unwrap().insert(change.public_key);
     }
     Ok(outcome)
-}
-
-/// A pooled connection inside a raw `BEGIN IMMEDIATE`, which never goes back
-/// to the pool still inside it.
-///
-/// `BEGIN IMMEDIATE` takes SQLite's write lock at the start, which is the
-/// isolation a read-then-write needs. sqlx's own transactions cannot say
-/// `IMMEDIATE` (0.8.0), and a raw `BEGIN` is invisible to the pool: a
-/// connection dropped mid-transaction — a cancelled request, or an end
-/// statement that failed — would return to the pool holding the lock, and
-/// every write on the vault, for every tenant, would wait out the busy timeout
-/// and fail until that connection was reaped. So a transaction that is not
-/// ended cleanly takes its connection out of the pool (`detach`) and closes
-/// it, which rolls the transaction back in SQLite, and the pool opens a fresh
-/// one.
-struct Immediate {
-    conn: Option<sqlx::pool::PoolConnection<sqlx::Sqlite>>,
-}
-
-impl Immediate {
-    async fn begin(db: &SqlitePool) -> io::Result<Self> {
-        let mut conn = db.acquire().await.map_err(io::Error::other)?;
-        // A failed BEGIN opened nothing; the connection goes back as it came.
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await.map_err(io::Error::other)?;
-        Ok(Self { conn: Some(conn) })
-    }
-
-    fn conn(&mut self) -> &mut sqlx::SqliteConnection {
-        self.conn.as_mut().expect("a transaction holds its connection until it ends")
-    }
-
-    /// End with `statement`. On success the connection goes back to the pool,
-    /// outside any transaction; on failure it is closed and never returns.
-    async fn end(mut self, statement: &str) -> io::Result<()> {
-        let mut conn = self.conn.take().expect("a transaction ends once");
-        match sqlx::query(statement).execute(&mut *conn).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                use sqlx::Connection as _;
-                let _ = conn.detach().close().await;
-                Err(io::Error::other(e))
-            }
-        }
-    }
-}
-
-impl Drop for Immediate {
-    fn drop(&mut self) {
-        // Not ended: dropped on a cancellation or an early return. Closing the
-        // detached connection rolls back whatever it held.
-        if let Some(conn) = self.conn.take() {
-            drop(conn.detach());
-        }
-    }
 }
 
 async fn apply_in(
