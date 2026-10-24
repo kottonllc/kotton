@@ -361,6 +361,9 @@ mod tests {
 
     /// A directory for the daemon's state and, on Unix, its sockets: under
     /// `/tmp` there, so a socket path stays within the platform's length limit.
+    /// On Windows the door is a named pipe and nothing joins this directory, which
+    /// is the reason this file is on kotton-common's socket allow list
+    /// (`paths::tests::a_socket_joined_onto_the_temp_dir_asks_whether_it_fits`).
     fn a_dir() -> tempfile::TempDir {
         #[cfg(unix)]
         let dir = tempfile::tempdir_in("/tmp");
