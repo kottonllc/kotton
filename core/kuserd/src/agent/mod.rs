@@ -61,6 +61,7 @@ mod read_mark_host;
 mod record_access;
 mod sealed_read;
 mod sidecar_token;
+mod streamed;
 mod vault_doors;
 pub use protocol::{UserRequest, UserResponse};
 pub use vault_doors::doors_for;
@@ -1564,8 +1565,6 @@ impl DeviceDaemon {
         let ctx = this.agent_context();
         // Still bound separately: these are used by the connection closure
         // itself rather than by request handling.
-        let runtime = Arc::clone(&this.runtime);
-        let users = this.users.clone();
         let sessions = Arc::clone(&this.sessions);
         let sidecar_states = Arc::clone(&this.sidecar_states);
         let pending_confirms = Arc::clone(&this.pending_confirms);
@@ -1602,8 +1601,6 @@ impl DeviceDaemon {
                 let ctx = ctx.clone();
                 let surface_proxy_for_kuid = Arc::clone(&surface_proxy_for_kuid);
                 let quitting_for_kuid = quitting_for_kuid.clone();
-                let runtime = Arc::clone(&runtime);
-                let users = users.clone();
                 let sessions = Arc::clone(&sessions);
                 let sidecar_states = Arc::clone(&sidecar_states);
                 let pending_confirms = Arc::clone(&pending_confirms);
@@ -1611,250 +1608,28 @@ impl DeviceDaemon {
                 let vfs_watch_tx = vfs_watch_tx.clone();
                 let fs_watch_state = fs_watch_state.clone();
                 async move {
-                    // The floor, before any arm below runs.
-                    //
-                    // Every verb in this block returns `HandlerOutput::Stream`,
-                    // so it is intercepted here and never reaches
-                    // `handle_request` — and therefore never reached the
-                    // trust-origin floor that lives inside it. Each arm carried
-                    // its own session check instead, which is a different rule:
-                    // a gateway holds a `MintPrincipalSession`-minted session on
-                    // this socket, and that session satisfied them, so a
-                    // `Remote` origin could reach `Local`-tier `DeviceAdd`.
-                    //
-                    // One call to the same two functions `handle_request` reads.
-                    // The arms below no longer check either rule, because the
-                    // rule is here — the thing that made nine copies necessary
-                    // was that this call was missing.
+                    // A verb its client reads as a stream is answered as one,
+                    // refusal included: `streamed::answer`'s type is the stream,
+                    // so no answer to it can be one frame left open (#120).
+                    if let Some(stream) = streamed::answer(
+                        &ctx,
+                        &request,
+                        &conn_session,
+                        streamed::VfsWatchSource {
+                            changes: &vfs_watch_tx,
+                            watcher: &fs_watch_state,
+                        },
+                    )
+                    .await
+                    {
+                        return stream.map(HandlerOutput::Stream);
+                    }
+                    // The same gate for a verb answered in one frame, before
+                    // anything below runs; `handle_request` reads it again.
                     if let Some(refusal) =
                         dispatch::stream_entry_refusal(&sessions, &conn_session, &request)
                     {
                         return Ok(HandlerOutput::Single(refusal));
-                    }
-                    // SubscribeEvents is handled here so it can return a
-                    // HandlerOutput::Stream without changing handle_request's
-                    // return type.
-                    if let UserRequest::SubscribeEvents { category, level } = &request {
-                        return dispatch::handle_subscribe(
-                            &runtime,
-                            category.clone(),
-                            level.clone(),
-                        )
-                        .await;
-                    }
-                    // VfsWatch is handled here for the same reason.
-                    if let UserRequest::VfsWatch { user_id, paths } = &request {
-                        let rx = vfs_watch_tx.subscribe();
-                        return dispatch::handle_vfs_watch(
-                            &ctx.base,
-                            user_id.clone(),
-                            paths.clone(),
-                            rx,
-                            fs_watch_state,
-                        )
-                        .await;
-                    }
-                    // The streamed ceremony verbs return HandlerOutput::Stream,
-                    // so they are dispatched here like SubscribeEvents/VfsWatch.
-                    // The gate above has already applied the floor and the session
-                    // guard, `DeviceJoin` and `DeviceInvite` included — both are
-                    // session-less bootstrap, which `requires_session` now says.
-                    if let UserRequest::GatewayEnroll {
-                        user_id,
-                        code,
-                        ttl_seconds,
-                    } = &request
-                    {
-                        return kotton_device::users::pairing::handle_gateway_enroll(
-                            Arc::clone(&runtime),
-                            Arc::new(users.clone())
-                                as Arc<dyn kotton_device::users::residency::Residency>,
-                            Arc::clone(&ctx.db),
-                            Arc::clone(&ctx.device_db),
-                            Arc::clone(&ctx.paired_keys),
-                            Arc::clone(&pending_confirms),
-                            user_id.clone(),
-                            code.expose().to_owned(),
-                            *ttl_seconds,
-                        )
-                        .await;
-                    }
-                    if let UserRequest::DeviceAdd {
-                        user_id,
-                        as_name,
-                        ttl_seconds,
-                        port,
-                        posture,
-                    } = &request
-                    {
-                        return kotton_device::users::pairing::handle_device_add(
-                            Arc::clone(&runtime),
-                            Arc::new(users.clone())
-                                as Arc<dyn kotton_device::users::residency::Residency>,
-                            Arc::clone(&ctx.db),
-                            Arc::clone(&ctx.device_db),
-                            Arc::clone(&ctx.paired_keys),
-                            Arc::clone(&pending_confirms),
-                            user_id.clone(),
-                            as_name.clone(),
-                            *ttl_seconds,
-                            *port,
-                            *posture,
-                        )
-                        .await;
-                    }
-                    // A contact ceremony: two people, a spoken code, this node's relay. Both
-                    // streamed like DeviceAdd, and both need the session of the
-                    // user pairing — a contact is admitted on their word.
-                    if let UserRequest::ContactPairStart {
-                        user_id,
-                        as_name,
-                        ttl_seconds,
-                    } = &request
-                    {
-                        return kotton_device::users::contacts::handle_contact_pair_start(
-                            Arc::clone(&runtime),
-                            Arc::new(users.clone())
-                                as Arc<dyn kotton_device::users::residency::Residency>,
-                            Arc::clone(&pending_confirms),
-                            user_id.clone(),
-                            as_name.clone(),
-                            *ttl_seconds,
-                        )
-                        .await;
-                    }
-                    if let UserRequest::ContactPairJoin {
-                        user_id,
-                        code,
-                        as_name,
-                    } = &request
-                    {
-                        return kotton_device::users::contacts::handle_contact_pair_join(
-                            Arc::clone(&runtime),
-                            Arc::new(users.clone())
-                                as Arc<dyn kotton_device::users::residency::Residency>,
-                            Arc::clone(&pending_confirms),
-                            user_id.clone(),
-                            code.expose().to_owned(),
-                            as_name.clone(),
-                        )
-                        .await;
-                    }
-                    // The transport-reversed pair, both streamed.
-                    if let UserRequest::DeviceAdmit {
-                        user_id,
-                        code,
-                        ttl_seconds,
-                        posture,
-                        operator_of,
-                    } = &request
-                    {
-                        // An admit held to a vault this person operates:
-                        // the key is the credential's, read here
-                        // and nowhere else.
-                        let pinned = match operator_of {
-                            None => None,
-                            Some(vault) => match operator::pinned_vault(&users, user_id, vault) {
-                                Ok(p) => Some(p),
-                                Err(message) => {
-                                    return Ok(HandlerOutput::Single(UserResponse::Error { message }));
-                                }
-                            },
-                        };
-                        return kotton_device::users::pairing::handle_device_admit(
-                            Arc::clone(&runtime),
-                            Arc::new(users.clone())
-                                as Arc<dyn kotton_device::users::residency::Residency>,
-                            Arc::clone(&ctx.db),
-                            Arc::clone(&ctx.device_db),
-                            Arc::clone(&ctx.paired_keys),
-                            Arc::clone(&pending_confirms),
-                            user_id.clone(),
-                            code.expose().to_owned(),
-                            *ttl_seconds,
-                            *posture,
-                            pinned,
-                        )
-                        .await;
-                    }
-                    if let UserRequest::DeviceInvite {
-                        user_id,
-                        ttl_seconds,
-                        as_name,
-                    } = &request
-                    {
-                        // An invite meets at this device's relay, and where a
-                        // device sets one is its own verb, so this is where
-                        // its absence is refused; the ceremony is handed the
-                        // URL checked here and reads none of its own.
-                        let relay_url = runtime.reachability().nat().relay_url;
-                        if relay_url.is_empty() {
-                            return Ok(HandlerOutput::Single(UserResponse::Error {
-                                message: NO_RELAY_FOR_AN_INVITE.to_string(),
-                            }));
-                        }
-                        // The relay's invited key, carried only when this
-                        // person holds it as that relay's operator: another
-                        // person's keys on this machine are never handed on.
-                        let offered = kotton_peer::relay_keys::relay_id(
-                            runtime.reachability().nat().relay_key.as_deref(),
-                        )
-                        .and_then(|r| runtime.reachability().relay_keys().offer_for(user_id, &r));
-                        return kotton_device::users::pairing::handle_device_invite(
-                            Arc::clone(&runtime),
-                            relay_url,
-                            offered,
-                            Arc::new(users.clone())
-                                as Arc<dyn kotton_device::users::residency::Residency>,
-                            Arc::clone(&ctx.db),
-                            Arc::clone(&ctx.device_db),
-                            Arc::clone(&sessions),
-                            Arc::clone(&ctx.paired_keys),
-                            Arc::clone(&pending_confirms),
-                            user_id.clone(),
-                            *ttl_seconds,
-                            as_name.clone(),
-                            kotton_device::users::pairing::JoinPolicy::Any,
-                        )
-                        .await;
-                    }
-                    if let UserRequest::DeviceJoin {
-                        user_id,
-                        code,
-                        as_name,
-                    } = &request
-                    {
-                        return kotton_device::users::pairing::handle_device_join(
-                            Arc::clone(&runtime),
-                            Arc::new(users.clone())
-                                as Arc<dyn kotton_device::users::residency::Residency>,
-                            Arc::clone(&ctx.db),
-                            Arc::clone(&ctx.device_db),
-                            Arc::clone(&sessions),
-                            Arc::clone(&ctx.paired_keys),
-                            Arc::clone(&pending_confirms),
-                            user_id.clone(),
-                            code.expose().to_owned(),
-                            as_name.clone(),
-                            kotton_device::users::pairing::JoinPolicy::Any,
-                        )
-                        .await;
-                    }
-                    // The operator opens a desk and waits for a browser
-                    // to pair. `Local`-tier, so the gate above is what makes this
-                    // connection the human at the screen: a browser with an unknown
-                    // key is admitted only while a desk is open, and only a `Local`
-                    // origin can open one.
-                    if let UserRequest::WebShellPair { user_id, .. } = &request {
-                        let (tx, rx) = tokio::sync::mpsc::channel::<UserResponse>(16);
-                        browser_desks
-                            .lock()
-                            .await
-                            .insert(user_id.clone(), tx.clone());
-                        // Announce the desk is registered before any browser could
-                        // reach it, so a caller need not race the insertion.
-                        let _ = tx.send(UserResponse::WebShellPairReady).await;
-                        return Ok(HandlerOutput::Stream(rx));
                     }
                     // One relayed frame of a browser's sealed channel.
                     if let UserRequest::BrowserFrame { bytes, channel } = request {
@@ -1869,49 +1644,6 @@ impl DeviceDaemon {
                         )
                         .await;
                         return Ok(HandlerOutput::Single(resp));
-                    }
-                    // The channel's other direction. This connection
-                    // becomes the side that carries frames no call is waiting
-                    // on, and holds it for as long as `khttpd` holds the
-                    // browser's socket. When it ends, so does the channel.
-                    if let UserRequest::BrowserOutbound { channel } = &request {
-                        let user_id = {
-                            let g = conn_session.lock().unwrap();
-                            g.as_ref()
-                                .and_then(|s| sessions::live_user(&sessions, &s.token))
-                        };
-                        let Some(user_id) = user_id else {
-                            return Ok(HandlerOutput::Single(UserResponse::NoActiveSession));
-                        };
-                        let key = browser_channel::local_key(&user_id, Some(channel));
-                        let (tx, rx) = tokio::sync::mpsc::channel::<UserResponse>(256);
-                        // Say so on the stream itself, first, before anything
-                        // else can be on it. The gateway opens this connection
-                        // and the one carrying calls independently, so without
-                        // a mark it cannot know the node has attached this side
-                        // — and a frame arriving before it attached would be
-                        // answered inline, to a gateway no longer reading
-                        // replies. `khttpd` waits for this.
-                        let _ = tx.send(UserResponse::Ok).await;
-                        browser_channel::attach_outbound(&ctx, key.clone(), tx).await;
-                        // Watch the stream rather than the socket: the receiver
-                        // is dropped when the caller goes away, which closes the
-                        // sender, which is the signal the browser is gone.
-                        let ctx_for_close = ctx.clone();
-                        let rx = {
-                            let (out_tx, out_rx) = tokio::sync::mpsc::channel::<UserResponse>(256);
-                            tokio::spawn(async move {
-                                let mut rx = rx;
-                                while let Some(frame) = rx.recv().await {
-                                    if out_tx.send(frame).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                browser_channel::close_channel(&ctx_for_close, &key).await;
-                            });
-                            out_rx
-                        };
-                        return Ok(HandlerOutput::Stream(rx));
                     }
                     // Ensure kuid is running before any app install or launch.
                     // kuid is normally started at daemon boot when apps are already
