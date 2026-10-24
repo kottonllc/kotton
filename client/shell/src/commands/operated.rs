@@ -642,14 +642,14 @@ async fn enrol(text: &str, state: &mut ShellState) -> Result<CommandOutput> {
         }
         answered = true;
     }
-    let all_kept = not_lines.is_empty() && came.iter().all(|c| matches!(c.came_to, LineCame::Kept { .. }));
+    let mut all_kept = not_lines.is_empty() && came.iter().all(|c| matches!(c.came_to, LineCame::Kept { .. }));
     for c in not_lines.iter().chain(came.iter()) {
         out.push(Out::Record(readout(c)));
     }
     let relays = relays_kept(&came);
     for c in &came {
         if let (Some(OperatedService::Vault), LineCame::Kept { name, only, .. }) = (c.kind, &c.came_to) {
-            keep_at(state, &mut out, name, *only, &relays).await?;
+            all_kept &= keep_at(state, &mut out, name, *only, &relays).await?;
         }
     }
     let mut answer = CommandOutput::shapes(out);
@@ -722,11 +722,14 @@ fn readout(c: &kotton_wire::ipc::LineEnrolled) -> Vec<(String, String)> {
 /// now; `sync` syncs this device's drives when the person asks. When the
 /// ceremony offers this device a relay among `relays` — the ones this `enrol`
 /// kept — this device stands there, held to its key, rather than being told
-/// the `relay set` that would. A vault that cannot keep them yet — one that
-/// stands at no relay, so its invite has nowhere to meet — is said as a
-/// failure naming why and the `vault invite --me` that takes it up later; the
-/// enrol's exit stays what its lines came to, since the credential is kept.
-async fn keep_at(state: &mut ShellState, out: &mut Vec<Out>, vault: &str, only: bool, relays: &[[u8; 32]]) -> Result<()> {
+/// the `relay set` that would. `false` when the vault does not keep them —
+/// one that stands at no relay, so its invite has nowhere to meet, or an
+/// invite or ceremony that failed — said as a failure naming why and the
+/// `vault invite [<v>] --me` that takes it up. The enrol then exits non-zero:
+/// a vault is where things are kept, and a vault's enrol that keeps nothing
+/// has not done what enrol does, though its credential is kept. A relay's
+/// enrol that stands such a vault does not yet take the keep up (#102).
+async fn keep_at(state: &mut ShellState, out: &mut Vec<Out>, vault: &str, only: bool, relays: &[[u8; 32]]) -> Result<bool> {
     let to = if only { To::Only(vault) } else { To::Named(vault) };
     let not_kept = |why: String| Out::Fail {
         what: format!("your things are not kept at the vault: {why}"),
@@ -741,22 +744,25 @@ async fn keep_at(state: &mut ShellState, out: &mut Vec<Out>, vault: &str, only: 
         Ok(rx) => rx,
         Err(e) => {
             out.push(not_kept(e.to_string()));
-            return Ok(());
+            return Ok(false);
         }
     };
-    let (said, _, stand) = {
+    let (said, node, stand) = {
         let client = state.client.lock().await;
         super::device::run_ceremony_to(&client, &user_id, &mut rx, super::device::Role::OwnVault, None, relays).await?
     };
     out.extend(said.out);
-    if let Some(why) = said.stderr {
-        out.push(not_kept(why));
+    let kept = node.is_some();
+    match said.stderr {
+        Some(why) => out.push(not_kept(why)),
+        None if !kept => out.push(not_kept("the admit ended before it completed".into())),
+        None => {}
     }
     if let Some(line) = stand {
         let mut client = state.client.lock().await;
         out.push(stood_at(client.relay_stand(&user_id, &line).await, &line));
     }
-    Ok(())
+    Ok(kept)
 }
 
 /// What standing this device at the relay `line` came to: stood there, held

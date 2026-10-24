@@ -30,9 +30,10 @@ kotton mint host
 # the vault, sealed so it cannot read them.
 kotton enrol <the line the host printed>
 
-# Prints a code and waits. On the other device, after installing: kotton id join alice <code>
-# That device shows six digits; type them here. It joins knowing your vault, and
-# your things arrive there on demand, when you run kotton sync on it.
+# After the host, since a device learns your vault as it joins. Prints a code and
+# waits. On the other device, after installing: kotton id join alice <code>
+# That device shows six digits; type them here. Your things arrive there on
+# demand, when you run kotton sync on it.
 kotton device add
 
 # Prints twenty-four words and one line, once. Write both on paper.

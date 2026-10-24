@@ -5299,7 +5299,8 @@ fn said_as(out: &kotton_shell::CommandOutput, field: &str) -> Vec<String> {
 /// given beyond *which* is left unread. The enrol goes on to keep `lee`'s
 /// things there unasked, and the vault, standing at no relay here, cannot meet
 /// the invite: that is said with why and the `vault invite --me` that takes it
-/// up, and nothing is written — no tenant, no node. (Keeping at a vault that
+/// up, the enrol exits 1 — a vault is where things are kept, and this one
+/// keeps nothing yet — and nothing is written: no tenant, no node. (Keeping at a vault that
 /// stands at a relay is `headless::a_headless_desktop_operates_…`.) Then
 /// `enrol <home's line>` asks nothing at all — one key waits — with nobody to
 /// answer, and says the same of home, naming it, since there are two. With two
@@ -5352,7 +5353,12 @@ async fn enrol_at_the_repl_asks_which_between_two_vault_keys_and_nothing_else() 
 
     // Answered right: kept under the mint's name, said by its readouts, and nothing else asked.
     let kept = at_the_repl(&mut repl, &format!("enrol {attic}"), &["attic", "n"]).await;
-    assert!(matches!(kept.exit_code, kotton_shell::ExitCode::Success), "{:?}", kept.out);
+    assert!(
+        matches!(kept.exit_code, kotton_shell::ExitCode::Code(1)),
+        "a vault's enrol that keeps nothing exited {:?}: {:?}",
+        kept.exit_code,
+        kept.out
+    );
     assert_eq!(
         repl.asking,
         kotton_shell::Asking::Given(["n".to_string()].into()),
@@ -5374,7 +5380,12 @@ async fn enrol_at_the_repl_asks_which_between_two_vault_keys_and_nothing_else() 
 
     // One key waits: nothing is asked, with nobody to answer, and the keep at home is said the same, by name.
     let one = at_the_repl(&mut repl, &format!("enrol {home}"), &[]).await;
-    assert!(matches!(one.exit_code, kotton_shell::ExitCode::Success), "{:?}", one.out);
+    assert!(
+        matches!(one.exit_code, kotton_shell::ExitCode::Code(1)),
+        "a vault's enrol that keeps nothing exited {:?}: {:?}",
+        one.exit_code,
+        one.out
+    );
     assert!(said_as(&one, "enrolled")[0].contains("you operate the vault 'home'"), "{:?}", one.out);
     assert!(not_kept(&one).contains("stands at no relay"), "{:?}", one.out);
     assert!(
