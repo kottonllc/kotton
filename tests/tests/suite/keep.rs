@@ -48,7 +48,7 @@ async fn a_folder_kept_on_one_device_is_read_on_another() {
     alice_e.authenticate(&token).await.expect("present E's session");
     // E keeps the person's things on a drive, enrolled before N joins so the
     // join introduces N to it: N reads what E keeps by way of the drive.
-    let (alice_e, drive) = crate::drive_sync::a_drive_for(alice_e, "device-e", USER).await;
+    let (alice_e, _drive) = crate::drive_sync::a_drive_for(alice_e, "device-e", USER).await;
     let fresh_n = connect_when_ready(&n.endpoint, "N").await;
     let (mut alice_e, mut alice_n, _) =
         enroll_streamed(alice_e, fresh_n, USER, "device-n", free_port(), Posture::Full).await;
@@ -97,7 +97,6 @@ async fn a_folder_kept_on_one_device_is_read_on_another() {
         .sync_mount(USER, "local", "vault", Some(SyncDirection::Push))
         .await
         .expect("E pushes to the drive");
-    crate::drive_sync::tell_of_the_drive(&mut alice_n, USER, &drive).await;
     let pulled = alice_n
         .sync_mount(USER, "local", "vault", Some(SyncDirection::Pull))
         .await

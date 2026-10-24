@@ -142,6 +142,9 @@ pub fn build_frost_enrollment(
         data_keys,
         pubkey_package: pubkey_package.clone(),
         kel: issuer_kel,
+        // The person's drives are the ceremony's to add (`kotton_peer::pairing`),
+        // which knows what the admitting device records; a share knows none.
+        drives: Vec::new(),
     };
 
     Ok(IssuedEnrollment {

@@ -34,7 +34,16 @@
 //!   [`super::nodes::project_membership_into_allowlist`], for an own-device
 //!   member admitted under `Posture::BlindStorage`: what the enrolling device
 //!   wrote into the person's sealed set, read on every device it reaches. A
-//!   device that joined after the vault was enrolled learns the drive this way.
+//!   device learns this way of a vault enrolled *after* it joined, in a pass
+//!   on a drive it already reaches;
+//! - **the join** — `kotton_device::users::pairing::record_handed_drives`, for
+//!   each drive the admitting device handed the joiner in the ceremony
+//!   (`PairingPayload::FrostShare::drives`). It rests on the issuer's word
+//!   inside the SAS-confirmed, identity-attested ceremony, from the device that
+//!   holds the identity; a handout the joiner cannot record refuses the join on
+//!   the joiner only — the issuer has already committed and still lists the
+//!   device until `device revoke` (kotton #98).
+//!   A device that joins after a vault was enrolled learns the drive this way.
 //!
 //! All arrive at the same row: the vault key is the key of the node row the
 //! drive is reached through, the tenancy is the person's name, and the row's
@@ -48,7 +57,9 @@
 //!
 //! **Who reads it.** [`list`] and [`is_drive`] answer *which nodes are drives*
 //! for every caller — introducing and withdrawing a device at the person's
-//! drives (`kotton_device::users::drive_devices`), handing a vault the doors it
+//! drives (`kotton_device::users::drive_devices`), handing the drives to a
+//! device that joins (`kotton_device::users::pairing::drives_to_hand`), the
+//! sync engine's targets (`kotton_sync::engine`), handing a vault the doors it
 //! holds (`kuserd::agent::vault_doors`), and delivering the phrase-sealed
 //! recovery copy (`kuserd`'s `deliver_recovery_copy`). None of them reads a
 //! row's posture for it: a row with no posture is a vault added by address or
@@ -64,8 +75,10 @@
 //!
 //! **What it composes into.** Nothing beyond what the node row already holds:
 //! the vault's key is on that row, and the tenancy is the person's own name on
-//! their own device. The record is the device's, it is never sent, and the
-//! vault learns nothing from it.
+//! their own device. The record is the device's. It is sent once, to one
+//! place: to another of the person's own devices as it joins, inside the
+//! ceremony's encrypted channel, so that device can reach the drive. It
+//! never goes to the vault, which learns nothing from it, nor anywhere else.
 
 use kotton_schemas::membership::Posture;
 use kotton_wire::peer::PairedNode;

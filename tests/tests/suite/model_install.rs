@@ -452,7 +452,7 @@ async fn an_installed_model_reaches_a_second_paired_device() {
         .expect("create_user E");
     // E keeps the person's things on a drive, enrolled before N joins so the
     // join introduces N to it: N receives E's model by way of the drive.
-    let (client_e, drive) = crate::drive_sync::a_drive_for(client_e, "device-e", USER).await;
+    let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", USER).await;
 
     let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) = enroll_streamed(
@@ -464,8 +464,6 @@ async fn an_installed_model_reaches_a_second_paired_device() {
         Posture::Full,
     )
     .await;
-
-    crate::drive_sync::tell_of_the_drive(&mut client_n, USER, &drive).await;
 
     // The model, installed on E.
     let body = weights(0x71);

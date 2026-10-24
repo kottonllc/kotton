@@ -30,7 +30,7 @@ pub use ipc::remote_request::RemoteRequest;
 pub use ipc::request::{ConnTrustOrigin, REMOTE_ELIGIBLE};
 pub use peer::{
     EphemeralSession, FrostSharePayload, GuestAccess, GuestAccessToken, MountConfig, PairedNode,
-    PairingPayload, SessionPermissions, SyncRule, WarmKeyDelegation,
+    DriveHandout, PairingPayload, SessionPermissions, SyncRule, WarmKeyDelegation,
 };
 pub use remote::{RemoteBackend, RemoteConfig, SyncResult};
 pub use rendezvous::{
