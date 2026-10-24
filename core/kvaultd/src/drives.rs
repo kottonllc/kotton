@@ -48,10 +48,15 @@
 //! tree it writes to is made under a name sealed *unfinished* and named
 //! finished (`TenantDriveName`) only once the copy is verified, so a listing
 //! taken mid-move never shows a second drive of the same name. A retire does
-//! not wait out a write in flight to the same drive: the device that retires a
-//! drive is the one that moved it, and no device writes into a made drive yet
-//! (what a device keeps of one is pins', kotton #55, where the lock this will
-//! need is recorded).
+//! refuses a write in flight to the same drive ([`Trees`]): each sealed write
+//! into a made drive holds the drive for reading for the whole request, and a
+//! retire holds it for writing, drops any part of a write still being
+//! reassembled, and takes the tree away; a write that comes after finds no
+//! tree and is refused by name. So a write is either in the drive before its
+//! retire begins — and was carried by the move that retires it, or it was not
+//! a move's — or refused, never landed in a directory being removed. What no
+//! vault-side lock holds is two devices acting on one drive at two vaults; that
+//! is `kotton_device::users::drive_verbs`' module doc's lease.
 
 use crate::peer::PeerContext;
 use kotton_common::crypto::kdf_labels;
@@ -84,6 +89,42 @@ pub async fn init(db: &SqlitePool) -> io::Result<()> {
 
 fn refused(message: impl Into<String>) -> UserResponse {
     UserResponse::Error { message: message.into() }
+}
+
+/// One lock per made drive a tenant keeps at this vault ([`PeerContext::trees`]).
+#[derive(Default)]
+pub struct Trees(std::sync::Mutex<std::collections::HashMap<(String, String), TreeLock>>);
+
+/// The lock one made drive is held under ([`Trees`]).
+type TreeLock = std::sync::Arc<tokio::sync::RwLock<()>>;
+
+impl Trees {
+    fn of(&self, user_id: &str, tree: &str) -> TreeLock {
+        let mut held = self.0.lock().unwrap();
+        held.entry((user_id.to_string(), tree.to_string())).or_default().clone()
+    }
+}
+
+/// Hold `user_id`'s drive `mount` for a sealed write into it, or refuse the
+/// write when it is a made drive this vault no longer keeps — retired, or
+/// never made. The tenancy's own tree is never retired, and takes no hold.
+pub async fn write_into(
+    ctx: &PeerContext,
+    user_id: &str,
+    mount: &str,
+) -> Result<Option<tokio::sync::OwnedRwLockReadGuard<()>>, String> {
+    if MadeDrive::from_tree(mount).is_none() {
+        return Ok(None);
+    }
+    let held = ctx.trees.of(user_id, mount).read_owned().await;
+    let kept = ctx.pools.get(user_id).is_some_and(|pool| pool.get_remote(mount).is_some());
+    if !kept {
+        return Err(format!(
+            "this vault keeps no drive for '{user_id}' under {mount}: it was retired, or never made here, so the write \
+             was refused"
+        ));
+    }
+    Ok(Some(held))
 }
 
 /// `TenantDriveMake`: a sealed tree of its own for `user_id`, under `drive`,
@@ -198,6 +239,12 @@ pub async fn retire(ctx: &PeerContext, user_id: &str, drive: MadeDrive) -> io::R
         return Ok(refused(format!("this vault keeps no pool for '{user_id}'")));
     };
     let tree = drive.tree();
+    // Every write into the drive in flight finishes first, and none starts
+    // until the tree is gone ([`Trees`]); a write still being reassembled is
+    // dropped, so its next part finds no tree and is refused.
+    let _retiring = ctx.trees.of(user_id, &tree).write_owned().await;
+    let reassembling = format!("sealed:{tree}");
+    ctx.reassembly.lock().await.retain(|(user, slot, _, _), _| !(user == user_id && *slot == reassembling));
     let Some(path) = pool.shelf_mounts().into_iter().find(|(m, _)| *m == tree).map(|(_, p)| p) else {
         // Already as asked: the tree is gone. A retire answers what the vault
         // keeps afterwards, not whether this ask was the one that removed it,
@@ -272,6 +319,7 @@ mod tests {
             reassembly: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             tenancy: tokio::sync::RwLock::new(()),
             drops: tokio::sync::Mutex::new(()),
+            trees: Default::default(),
         }
     }
 
@@ -385,6 +433,64 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reloaded.read_sealed(&photos.tree(), "x/photo").await.unwrap(), b"a photo");
+    }
+
+    /// **A retire with a write in flight refuses the write** (kotton #55's
+    /// last comment). A write into a made drive holds it; a retire asked
+    /// meanwhile waits for that request to end, drops the part of the object
+    /// still being reassembled, and takes the tree; the write's last part then
+    /// finds no tree and is refused by name — nothing lands in the retired
+    /// drive's directory. The first drive takes no hold and is never refused
+    /// so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retire_with_a_write_in_flight_refuses_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(a_vault(dir.path()).await);
+        let photos = MadeDrive([4; 16]);
+        assert!(matches!(make(&ctx, "alice", photos, b"sealed".to_vec()).await.unwrap(), UserResponse::Ok));
+        let body = vec![9u8; 64];
+        let hash = blake3::hash(&body).to_hex().to_string();
+        let part = |offset: usize| {
+            let (ctx, hash, body) = (Arc::clone(&ctx), hash.clone(), body.clone());
+            async move {
+                let host = VaultHost { runtime: &ctx.runtime, pools: &ctx.pools };
+                kotton_device::users::files::write_sealed(
+                    &host,
+                    "alice".into(),
+                    photos.tree(),
+                    "x/photo".into(),
+                    body[offset..offset + 32].to_vec(),
+                    "domain".into(),
+                    offset as u64,
+                    body.len() as u64,
+                    hash,
+                    Some(&ctx.reassembly),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // The first part, under the hold a write takes.
+        let held = write_into(&ctx, "alice", &photos.tree()).await.expect("a kept drive takes the write");
+        assert!(matches!(part(0).await, UserResponse::Ok), "the first part is taken");
+        let retiring = tokio::spawn({
+            let ctx = Arc::clone(&ctx);
+            async move { retire(&ctx, "alice", photos).await.unwrap() }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!retiring.is_finished(), "the retire did not wait for the write in flight");
+        drop(held);
+        assert!(matches!(retiring.await.unwrap(), UserResponse::Ok));
+
+        // The last part comes after the retire: refused, by name.
+        match write_into(&ctx, "alice", &photos.tree()).await {
+            Err(message) => assert!(message.contains("keeps no drive") && message.contains("refused"), "{message}"),
+            other => panic!("a write into a retired drive was let in: {:?}", other.map(|_| ())),
+        }
+        assert!(ctx.reassembly.lock().await.is_empty(), "the retired drive's part was kept");
+        assert!(!dir.path().join("vault/users/alice/drives").join(photos.tree()).exists(), "the retired tree is on the disk");
+        assert!(write_into(&ctx, "alice", FIRST_DRIVE_TREE).await.unwrap().is_none(), "the first drive took a hold");
     }
 
     /// A sealed name past the bound is refused, and no tree is made for it.

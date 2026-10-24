@@ -66,6 +66,11 @@ pub struct PeerContext {
     /// One landlord's drop at a time, held for the whole of it — the shelf
     /// walk included, which `tenancy` is not.
     pub drops: tokio::sync::Mutex<()>,
+    /// One lock per made drive a tenant keeps here: held for reading by every
+    /// sealed write into the drive's tree, for the whole of the request, and
+    /// for writing by its retire (`crate::drives::retire`), so a write either
+    /// lands before the retire begins or finds the tree gone and is refused.
+    pub trees: crate::drives::Trees,
 }
 
 /// The verbs a vault answers, as the sentence a refused caller reads.
@@ -268,6 +273,14 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: UserReque
             total_size,
             content_hash,
         } => {
+            // A write into a made drive holds the drive here for the whole of
+            // the request, and a drive being retired, or retired, takes none:
+            // it is refused by name rather than landing in a tree on its way
+            // out (`crate::drives::retire`).
+            let _tree = match crate::drives::write_into(ctx, &user_id, &mount).await {
+                Ok(held) => held,
+                Err(message) => return UserResponse::Error { message },
+            };
             // The meter's one decision, made before any byte is buffered: does
             // the whole object fit? Checked on the first chunk, so a large
             // object is refused once rather than after occupying a buffer.

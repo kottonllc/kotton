@@ -229,6 +229,7 @@ impl Vault {
             reassembly: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             tenancy: tokio::sync::RwLock::new(()),
             drops: tokio::sync::Mutex::new(()),
+            trees: Default::default(),
         });
         let device_db = Arc::new(device_db);
         let control = Arc::new(control::ControlContext {
