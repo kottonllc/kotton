@@ -84,25 +84,63 @@ pub fn rule_for<'a>(rules: &'a [DriveRule], drive: &super::drives::Drive) -> Opt
     rules.iter().find(|r| r.vault_key == drive.vault_key && r.tenancy == drive.tenancy)
 }
 
-/// The drive `name` names: the label of the node it is reached through, or the
-/// vault's key in hex. `Err` says why there is none.
-async fn drive_named(db: &Arc<SqlitePool>, user_id: &str, name: &str) -> io::Result<Result<super::drives::Drive, String>> {
+/// Why a name names no one drive.
+enum Unnamed {
+    /// A label two of the person's drives are shown under: refused, with the
+    /// DIDs that tell them apart, never read as whichever was recorded first.
+    Ambiguous(String),
+    /// A name no drive carries.
+    None(String),
+}
+
+impl Unnamed {
+    fn said(self) -> String {
+        match self {
+            Unnamed::Ambiguous(s) | Unnamed::None(s) => s,
+        }
+    }
+}
+
+/// The drive `name` names: the label of the node it is reached through while
+/// one drive carries it, that node's DID, or the vault's key in hex. A label
+/// keys no row (`super::db`), so two drives may be shown under one; such a
+/// label names neither, as `super::db::paired_node_named` refuses it among
+/// nodes. `Err` says why there is no one drive.
+async fn drive_named(db: &Arc<SqlitePool>, user_id: &str, name: &str) -> io::Result<Result<super::drives::Drive, Unnamed>> {
     let drives = super::drives::list(db, user_id).await?;
-    if let Some(d) = drives.iter().find(|d| d.node.id == name || hex::encode(d.vault_key) == name) {
-        return Ok(Ok(d.clone()));
+    let mut found: Vec<&super::drives::Drive> = Vec::new();
+    for d in drives
+        .iter()
+        .filter(|d| d.node.id == name || d.node.device_did.to_string() == name || hex::encode(d.vault_key) == name)
+    {
+        if !found.iter().any(|f| f.vault_key == d.vault_key && f.tenancy == d.tenancy) {
+            found.push(d);
+        }
+    }
+    match found.as_slice() {
+        [one] => return Ok(Ok((*one).clone())),
+        [] => {}
+        many => {
+            let dids: Vec<String> = many.iter().map(|d| d.node.device_did.to_string()).collect();
+            return Ok(Err(Unnamed::Ambiguous(format!(
+                "'{name}' is the label of {} of your drives ({}); name the one you mean by its DID",
+                many.len(),
+                dids.join(", ")
+            ))));
+        }
     }
     let paired = super::db::list_paired_nodes(db, user_id)
         .await?
         .iter()
         .any(|n| n.id == name || n.device_did.to_string() == name);
-    Ok(Err(if paired {
+    Ok(Err(Unnamed::None(if paired {
         format!(
             "'{name}' is not one of your drives: a sync rule names a drive, and a device is not one — \
              devices sync to their drives, never to each other"
         )
     } else {
         format!("'{name}' names none of your drives")
-    }))
+    })))
 }
 
 fn rule_said(rule: &DriveRule, drive: &str) -> SyncRule {
@@ -129,7 +167,7 @@ pub async fn configure(
 ) -> io::Result<UserResponse> {
     let found = match drive_named(db, &user_id, &drive).await? {
         Ok(d) => d,
-        Err(message) => return Ok(UserResponse::Error { message }),
+        Err(unnamed) => return Ok(UserResponse::Error { message: unnamed.said() }),
     };
     let rule = DriveRule {
         vault_key: found.vault_key,
@@ -181,7 +219,8 @@ pub async fn list(db: &Arc<SqlitePool>, user_db: &Arc<SqlitePool>, user_id: Stri
 pub async fn remove(db: &Arc<SqlitePool>, user_db: &Arc<SqlitePool>, user_id: String, drive: String) -> io::Result<UserResponse> {
     let keyed: Option<(Vec<u8>, Option<String>)> = match drive_named(db, &user_id, &drive).await? {
         Ok(d) => Some((d.vault_key.to_vec(), Some(d.tenancy))),
-        Err(_) => hex::decode(&drive).ok().filter(|k| k.len() == 32).map(|k| (k, None)),
+        Err(Unnamed::Ambiguous(message)) => return Ok(UserResponse::Error { message }),
+        Err(Unnamed::None(_)) => hex::decode(&drive).ok().filter(|k| k.len() == 32).map(|k| (k, None)),
     };
     let removed = match keyed {
         Some((key, Some(tenancy))) => sqlx::query("DELETE FROM drive_rules WHERE user_id = ? AND vault_key = ? AND tenancy = ?")
@@ -306,5 +345,34 @@ mod tests {
         let UserResponse::SyncRuleList { rules: listed } = list(&db, &udb, "alice".into()).await.unwrap() else { panic!() };
         assert_eq!(listed[0].drive, "");
         assert!(matches!(remove(&db, &udb, "alice".into(), hex::encode(key)).await.unwrap(), UserResponse::SyncRuleRemoved));
+    }
+
+    /// **A label two drives are shown under names neither** (kotton #99). A
+    /// label keys no row, so the person may keep two vaults under `vault`: a
+    /// rule set or removed by that label is refused with both DIDs, nothing is
+    /// kept, and each drive is still named by its DID.
+    #[tokio::test]
+    async fn a_label_two_drives_carry_is_refused_with_both_dids() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, udb) = (machine_db(dir.path()).await, user_db(dir.path()).await);
+        let first = paired(&db, "vault", 9, Posture::BlindStorage).await;
+        let second = paired(&db, "vault", 8, Posture::BlindStorage).await;
+        for key in [first, second] {
+            super::super::drives::record(&db, "alice", &key).await.unwrap();
+        }
+        let did = |k: &[u8; 32]| kotton_crypto::DidKeyMethod::from_public_key_bytes(k).unwrap().to_string();
+
+        for said in [
+            configure(&db, &udb, "alice".into(), "vault".into(), None, true).await.unwrap(),
+            remove(&db, &udb, "alice".into(), "vault".into()).await.unwrap(),
+        ] {
+            let UserResponse::Error { message } = said else { panic!("an ambiguous label was taken: {said:?}") };
+            assert!(message.contains(&did(&first)) && message.contains(&did(&second)), "{message}");
+        }
+        assert!(rules(&udb, "alice").await.unwrap().is_empty(), "a rule was kept under an ambiguous label");
+
+        let set = configure(&db, &udb, "alice".into(), did(&second), None, true).await.unwrap();
+        let UserResponse::SyncConfigured { rule } = set else { panic!("{set:?}") };
+        assert_eq!(rule.vault_key, hex::encode(second));
     }
 }

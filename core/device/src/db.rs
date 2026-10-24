@@ -264,8 +264,9 @@ mod tests {
 
     /// **A machine database from before #99 keeps every row when its
     /// `paired_nodes` is re-keyed by person and DID**
-    /// (`migrations/0027_paired_nodes_per_person.sql`), the legacy
-    /// `sync_rules` and `mount_configs` beside it keep theirs, and the
+    /// (`migrations/0027_paired_nodes_per_person.sql`): every column of the
+    /// `paired_nodes`, `drives`, legacy `sync_rules` and legacy `mount_configs`
+    /// row reads back as written before the migration, and the
     /// reference those two held to `paired_nodes(id)` is gone with the key it
     /// named: with foreign keys enforced, as every pool here opens, a row can
     /// still be written and removed in each, and two people's rows under one
@@ -302,10 +303,27 @@ mod tests {
             row,
             ("bob".into(), "did:key:zBob".into(), "vault".into(), vec![7], 5, Some("blind-storage".into()), Some("https://relay".into()))
         );
-        for table in ["drives", "sync_rules", "mount_configs"] {
-            let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}")).fetch_one(&pool).await.unwrap();
-            assert_eq!(n, 1, "{table} lost its row");
-        }
+        let drives: Vec<(String, Vec<u8>, String, String, i64)> =
+            sqlx::query_as("SELECT user_id, vault_key, tenancy, node_id, recorded_at FROM drives")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(drives, [("bob".into(), vec![7], "bob".into(), "vault".into(), 5)]);
+        let rules: Vec<(i64, String, String, String, i64, i64)> =
+            sqlx::query_as("SELECT id, user_id, node_id, path, watch, configured_at FROM sync_rules")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rules, [(1, "bob".into(), "vault".into(), "/notes".into(), 1, 5)]);
+        // id, user_id, node_id, remote_path, local_path, cache_budget_bytes, pins, mounted_at
+        type Mount = (i64, String, String, String, String, Option<i64>, String, i64);
+        let mounts: Vec<Mount> = sqlx::query_as(
+            "SELECT id, user_id, node_id, remote_path, local_path, cache_budget_bytes, pins, mounted_at FROM mount_configs",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mounts, [(1, "bob".into(), "vault".into(), "/".into(), "/v".into(), None, "[]".into(), 5)]);
 
         // Another person's row under the same label sits beside bob's.
         sqlx::query(

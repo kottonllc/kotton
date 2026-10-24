@@ -339,7 +339,8 @@ mod tests {
         assert_eq!(other.posture, None, "another key under a vault's label took the vault's posture");
         assert!(!is_drive(&db, "alice", &other).await.unwrap());
         let named = network_db::paired_node_named(&db, "alice", "home-vault").await.unwrap_err();
-        assert!(named.to_string().contains("name the one you mean by its DID"), "{named}");
+        let named = named.to_string();
+        assert!(named.contains(&did(&key(9))) && named.contains(&did(&key(4))), "the refusal names both DIDs: {named}");
 
         assert!(network_db::delete_paired_node(&db, "alice", &did(&key(9))).await.unwrap());
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap();

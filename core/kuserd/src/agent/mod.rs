@@ -2214,6 +2214,33 @@ impl DeviceDaemon {
 /// either permanently paired with the `user_id` named in the request, or holds
 /// an active (non-revoked, non-expired) `EphemeralSession` scoped to that user.
 /// For ephemeral sessions, path-level grant enforcement is also applied.
+/// The person a peer's key is paired to as a gateway, when any person here
+/// pairs it as one: such a key speaks a gateway's one verb, whatever other
+/// row it has. The frame names no person until after this, so the answer is
+/// read across every person's rows, a `gateway` row first
+/// (`kotton_peer::daemon::db::paired_node_for_pubkey`): with one key held by
+/// two people, the narrower verb wins.
+async fn gateway_user_for(db: &Arc<SqlitePool>, pk: &[u8; 32]) -> std::io::Result<Option<String>> {
+    Ok(match kotton_peer::daemon::db::paired_node_for_pubkey(db, pk).await? {
+        Some((user, Some(posture))) if posture == kotton_schemas::membership::Posture::Gateway.as_str() => Some(user),
+        _ => None,
+    })
+}
+
+/// Whether the peer asking `NodeRelay` for `user_id` is one of that person's
+/// own devices that holds their keys (`Posture::Full`, or a row from before
+/// postures), and so is handed what this node presents at its relay. Read
+/// from **this person's** row for the key, not any person's: rows are each
+/// person's (`kotton_peer::daemon::db`), and another person's row for the same
+/// key says nothing of what it is to this one. Unreadable reads as no.
+async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) -> bool {
+    match kotton_peer::daemon::db::paired_posture_for_user(db, pk, user_id).await {
+        Ok(Some(None)) => true,
+        Ok(Some(Some(p))) => p == kotton_schemas::membership::Posture::Full.as_str(),
+        _ => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_peer_request(
     runtime: &Arc<DeviceRuntime>,
@@ -2247,10 +2274,8 @@ async fn handle_peer_request(
     // other thing it may ask is where this node reserves: its
     // forwarding address, nothing of the user's.
     if let Some(pk) = peer_pubkey_bytes {
-        match kotton_peer::daemon::db::paired_node_for_pubkey(db, &pk).await {
-            Ok(Some((gateway_user, Some(posture))))
-                if posture == kotton_schemas::membership::Posture::Gateway.as_str() =>
-            {
+        match gateway_user_for(db, &pk).await {
+            Ok(Some(gateway_user)) => {
                 return match request {
                     UserRequest::BrowserFrame { bytes, channel } => {
                         browser_channel::handle_gateway_frame(
@@ -2596,14 +2621,7 @@ async fn handle_peer_request(
             // asker is told that key beside the address.
             let relay_key = nat.relay_key;
             let own_device = match peer_pubkey_bytes {
-                // This person's row for the key, not any person's: rows are
-                // each person's (`kotton_peer::daemon::db`), and another's
-                // row for the same key says nothing of what it is to this one.
-                Some(pk) => match kotton_peer::daemon::db::paired_posture_for_user(db, &pk, &user_id).await {
-                    Ok(Some(None)) => true,
-                    Ok(Some(Some(p))) => p == kotton_schemas::membership::Posture::Full.as_str(),
-                    _ => false,
-                },
+                Some(pk) => asks_as_own_device(db, &pk, &user_id).await,
                 None => false,
             };
             let admission = own_device
@@ -4024,6 +4042,9 @@ mod message_open_tests;
 
 #[cfg(test)]
 mod revoke_device_tests;
+
+#[cfg(test)]
+mod peer_key_tests;
 
 #[cfg(test)]
 mod co_member_tests;

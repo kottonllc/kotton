@@ -1535,4 +1535,36 @@ mod allowlist_rebuild {
             "the rebuilt allowlist admitted the all-zero key"
         );
     }
+
+    /// **A key revoked for one person stays in the live allowlist while
+    /// another person's row still pairs it, and leaves with the last row**
+    /// (kotton #99). Rows are each person's, so two tenants of one vault on a
+    /// shared device each pair its key; `node_revoke` for one of them must
+    /// not shut the other's door at the handshake.
+    #[tokio::test]
+    async fn a_revoked_key_leaves_the_allowlist_with_its_last_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        let db = Arc::new(pool);
+
+        let key = SigningKey::from_bytes(&[12u8; 32]).verifying_key().to_bytes();
+        let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key).unwrap().to_string();
+        for user in ["alice", "bob"] {
+            network_db::insert_paired_node(&db, "household", user, &did, &key, "[]", 0, None).await.unwrap();
+        }
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([key])));
+
+        let said = node_revoke(&NoMembers, &db, "alice".into(), "household".into(), &paired_keys).await.unwrap();
+        assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
+        assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty());
+        assert!(paired_keys.read().unwrap().contains(&key), "alice's revoke shut bob's door at the handshake");
+
+        let said = node_revoke(&NoMembers, &db, "bob".into(), did.clone(), &paired_keys).await.unwrap();
+        assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
+        assert!(!paired_keys.read().unwrap().contains(&key), "a key no row pairs is still admitted");
+    }
 }
