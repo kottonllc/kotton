@@ -437,6 +437,18 @@ async fn invite_confirmed_on_sight(
 /// kept for the desktop of the operator key that minted it (`minted_by`) to
 /// read while the ceremony waits, and
 /// confirmed on sight; forgotten when it ends, however it ends.
+///
+/// **The ceremony ends when the door's stream ends, never at a frame named
+/// here** (#140). The one frame this reads is `PairShowCode`; it decides
+/// nothing about which frame is last, so it keeps no list of results and no
+/// arm for the frames it passes by. Which frame is last is the door's to say
+/// by ending the stream (#112, #122), as `kvaultd invite`'s `admitted` and
+/// `kvaultd join`'s `joined` read it. The invite ceremony's stream does end
+/// after its result: `kotton_device::users::pairing::handle_device_invite`'s
+/// spawned task owns its only sender and the one clone inside its
+/// `StreamingConfirmer` (which `run_enroll_join_relayed` borrows as a
+/// `&dyn SasConfirmer`), and the result is that task's last send. A refusal
+/// at the door ends its stream after its one frame (`mint_invite`).
 async fn confirmed_on_sight(
     mut rx: tokio::sync::mpsc::Receiver<UserResponse>,
     pending: PendingConfirms,
@@ -446,15 +458,11 @@ async fn confirmed_on_sight(
 ) {
     let mut showing: Vec<String> = Vec::new();
     while let Some(frame) = rx.recv().await {
-        match frame {
-            UserResponse::PairShowCode { token, sas, .. } => {
-                let token = token.expose().to_owned();
-                shown.show(&token, &minted_by, &pool, sas);
-                showing.push(token.clone());
-                let _ = kotton_peer::daemon::nodes::confirm_code(&pending, token, true).await;
-            }
-            UserResponse::PairingComplete { .. } | UserResponse::PairFailed { .. } => break,
-            _ => {}
+        if let UserResponse::PairShowCode { token, sas, .. } = frame {
+            let token = token.expose().to_owned();
+            shown.show(&token, &minted_by, &pool, sas);
+            showing.push(token.clone());
+            let _ = kotton_peer::daemon::nodes::confirm_code(&pending, token, true).await;
         }
     }
     for token in showing {
@@ -490,8 +498,76 @@ pub(crate) mod tests {
         assert_eq!(shown.for_pool(&A, "sam"), vec![47_291]);
         assert!(shown.for_pool(&A, "alice").is_empty(), "kept under the invite's pool alone");
         tx.send(UserResponse::PairFailed { reason: "the digits did not match".into() }).await.unwrap();
+        // The ceremony's task sends its result and ends, and its sender with it.
+        drop(tx);
         ceremony.await.expect("the watch ends with the ceremony");
         assert!(shown.for_pool(&A, "sam").is_empty(), "the digits outlived their ceremony");
+    }
+
+    /// The digits of a ceremony the watch is fed, kept under `A` for `sam`
+    /// once its one `PairShowCode` is read.
+    async fn shown_once_read(shown: &Shown, tx: &tokio::sync::mpsc::Sender<UserResponse>) {
+        tx.send(UserResponse::PairShowCode { token: kotton_wire::ipc::SecretText::new("t"), sas: 47_291, peer_label: None }).await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while shown.for_pool(&[0xA; 32], "sam").is_empty() {
+            assert!(std::time::Instant::now() < deadline, "the digits were never kept");
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// **An operator's invite forgets its digits when its ceremony's stream
+    /// ends on a frame the watch does not name** (#140). The watch reads
+    /// `PairShowCode` and nothing else; the last frame here is `VaultFull`,
+    /// standing for one a later release adds (as #122's and #141's tests use
+    /// it), after the confirmation's `PairAwaitingPeer` and `PairTransferring`.
+    /// No result is sent: the stream's end is the ceremony's end.
+    #[tokio::test]
+    async fn an_operators_invite_forgets_its_digits_when_its_stream_ends_on_a_frame_it_does_not_name() {
+        const A: [u8; 32] = [0xA; 32];
+        let shown = Shown::default();
+        let pending: PendingConfirms = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let ceremony = tokio::spawn(confirmed_on_sight(rx, pending, shown.clone(), A, "sam".into()));
+        shown_once_read(&shown, &tx).await;
+        for frame in [
+            UserResponse::PairAwaitingPeer,
+            UserResponse::PairTransferring,
+            UserResponse::VaultFull { held: 1, quota: 1 },
+        ] {
+            tx.send(frame).await.unwrap();
+        }
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), ceremony)
+            .await
+            .expect("the watch did not end with its stream")
+            .expect("the watch ends with the ceremony");
+        assert!(shown.for_pool(&A, "sam").is_empty(), "the digits outlived their ceremony's stream");
+    }
+
+    /// **The watch ends where the door ends the stream, not at a frame it
+    /// names** (#140). A result followed by nothing, the stream still open, is
+    /// not yet the end: the door has not said it. The digits are forgotten
+    /// when the stream ends.
+    #[tokio::test]
+    async fn an_operators_invite_ends_where_its_stream_ends_and_not_at_a_result() {
+        const A: [u8; 32] = [0xA; 32];
+        let shown = Shown::default();
+        let pending: PendingConfirms = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let mut ceremony = tokio::spawn(confirmed_on_sight(rx, pending, shown.clone(), A, "sam".into()));
+        shown_once_read(&shown, &tx).await;
+        tx.send(UserResponse::PairFailed { reason: "the digits did not match".into() }).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut ceremony).await.is_err(),
+            "the watch ended at a frame it named, before the door ended the stream"
+        );
+        assert_eq!(shown.for_pool(&A, "sam"), vec![47_291], "the stream has not ended");
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), ceremony)
+            .await
+            .expect("the watch did not end with its stream")
+            .expect("the watch ends with the ceremony");
+        assert!(shown.for_pool(&A, "sam").is_empty(), "the digits outlived their ceremony's stream");
     }
 
     /// **One operator key reads none of another's digits.** A vault admits a

@@ -359,6 +359,15 @@ mod tests {
         }
     }
 
+    /// What the door says to [`a_gateway`] for `request`: the gate's refusal,
+    /// or, for `BrowserOutbound`, which the gate passes, the verb's own.
+    fn refusal_to_a_gateway(request: &UserRequest) -> UserResponse {
+        match request {
+            UserRequest::BrowserOutbound { .. } => UserResponse::NoActiveSession,
+            _ => UserResponse::NotAllowed,
+        }
+    }
+
     /// A directory for the daemon's state and, on Unix, its sockets: under
     /// `/tmp` there, so a socket path stays within the platform's length limit.
     /// On Windows the door is a named pipe and nothing joins this directory, which
@@ -466,13 +475,55 @@ mod tests {
 
         for request in every_streamed_verb() {
             let said = format!("{:?}", read_to_the_end(&endpoint, &request).await);
-            let refusal = match request {
-                UserRequest::BrowserOutbound { .. } => UserResponse::NoActiveSession,
-                _ => UserResponse::NotAllowed,
-            };
+            let refusal = refusal_to_a_gateway(&request);
             assert_eq!(said, format!("{:?}", vec![refusal]), "{}", request.variant_name());
         }
         door.abort();
+    }
+
+    /// **A refused streamed verb leaves nothing behind (#130).**
+    ///
+    /// [`opening`] builds every verb's future before the gate reads the
+    /// request, and [`answer`] drops it unpolled on a refusal; that is what
+    /// makes a refused verb do nothing. The compiler does not hold it: an arm
+    /// whose argument expressions did the verb's work would build, and its
+    /// stream would still end after the refusal, so the test above would stay
+    /// green. This holds it. Each verb is refused for a mint-only gateway, as
+    /// above, and the two tables a verb that ran would have written are empty
+    /// after it: the open web-shell desks, and the ceremonies waiting on a
+    /// confirmation.
+    #[tokio::test]
+    async fn a_refused_streamed_verb_leaves_no_desk_and_no_pending_ceremony() {
+        let dir = a_dir();
+        let daemon = a_daemon(dir.path()).await;
+        let ctx = daemon.agent_context();
+        let conn_session: ConnSession = Arc::new(Mutex::new(Some(a_gateway())));
+        let (changes, _) = broadcast::channel(16);
+        let (_watching, watcher) = watch::channel(kotton_sync::engine::FsWatchState::Watching);
+
+        for request in every_streamed_verb() {
+            let verb = request.variant_name();
+            let vfs = VfsWatchSource { changes: &changes, watcher: &watcher };
+            let mut stream = answer(&ctx, &request, &conn_session, vfs)
+                .await
+                .unwrap_or_else(|| panic!("{verb}: not answered as a stream"))
+                .unwrap_or_else(|e| panic!("{verb}: {e}"));
+            let mut frames = vec![];
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), stream.recv()).await {
+                    Ok(Some(frame)) => frames.push(frame),
+                    Ok(None) => break,
+                    Err(_) => panic!("{verb}: the stream had not ended 5 s after {frames:?}"),
+                }
+            }
+            let refusal = refusal_to_a_gateway(&request);
+            assert_eq!(format!("{frames:?}"), format!("{:?}", vec![refusal]), "{verb}");
+            assert!(ctx.browser_desks.lock().await.is_empty(), "{verb}: refused, and a desk is open");
+            assert!(
+                ctx.pending_confirms.lock().await.is_empty(),
+                "{verb}: refused, and a ceremony is waiting on a confirmation"
+            );
+        }
     }
 
     /// **A verb's own refusal ends its stream as the gate's does.** An invite
