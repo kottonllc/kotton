@@ -359,13 +359,35 @@ mod tests {
         }
     }
 
+    /// A directory for the daemon's state and, on Unix, its sockets: under
+    /// `/tmp` there, so a socket path stays within the platform's length limit.
+    fn a_dir() -> tempfile::TempDir {
+        #[cfg(unix)]
+        let dir = tempfile::tempdir_in("/tmp");
+        #[cfg(windows)]
+        let dir = tempfile::tempdir();
+        dir.expect("a temporary directory")
+    }
+
+    /// A door's endpoint as each platform makes one, as kuserd's other socket
+    /// tests do: a socket named `name` in `dir` on Unix, a uniquely named pipe
+    /// on Windows.
+    #[cfg_attr(windows, allow(unused_variables))]
+    fn an_endpoint(dir: &std::path::Path, name: &str) -> IpcEndpoint {
+        #[cfg(unix)]
+        let endpoint = IpcEndpoint::UnixSocket(dir.join(name));
+        #[cfg(windows)]
+        let endpoint = IpcEndpoint::NamedPipe(format!("kotton-test-{}", uuid::Uuid::new_v4().simple()));
+        endpoint
+    }
+
     /// A booted daemon's context, with nobody resident and no relay.
     async fn a_daemon(base: &std::path::Path) -> super::super::DeviceDaemon {
         let keychain: Arc<dyn kotton_sys::secret::SecretsStore + Send + Sync> =
             Arc::new(kotton_secret::MemorySecrets::new());
         super::super::DeviceDaemon::new_with_base_secrets_and_relay(
             base.to_path_buf(),
-            IpcEndpoint::UnixSocket(base.join("kuserd.sock")),
+            an_endpoint(base, "kuserd.sock"),
             keychain,
             kotton_device::config::db::RelayChoice::None,
         )
@@ -434,9 +456,9 @@ mod tests {
     /// client had the refusal and no end.
     #[tokio::test]
     async fn a_refused_streaming_request_is_its_refusal_and_then_the_end() {
-        let dir = tempfile::tempdir_in("/tmp").expect("a directory under /tmp for the socket");
+        let dir = a_dir();
         let daemon = a_daemon(dir.path()).await;
-        let endpoint = IpcEndpoint::UnixSocket(dir.path().join("door.sock"));
+        let endpoint = an_endpoint(dir.path(), "door.sock");
         let door = tokio::spawn(a_door(daemon.agent_context(), endpoint.clone(), || Some(a_gateway())));
 
         for request in every_streamed_verb() {
@@ -455,9 +477,9 @@ mod tests {
     /// bootstrap) and is refused by the verb before any ceremony starts.
     #[tokio::test]
     async fn an_invite_refused_for_want_of_a_relay_is_its_refusal_and_then_the_end() {
-        let dir = tempfile::tempdir_in("/tmp").expect("a directory under /tmp for the socket");
+        let dir = a_dir();
         let daemon = a_daemon(dir.path()).await;
-        let endpoint = IpcEndpoint::UnixSocket(dir.path().join("door.sock"));
+        let endpoint = an_endpoint(dir.path(), "door.sock");
         let door = tokio::spawn(a_door(daemon.agent_context(), endpoint.clone(), || None));
 
         let request = UserRequest::DeviceInvite { user_id: "alice".into(), ttl_seconds: 60, as_name: None };
