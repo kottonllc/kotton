@@ -61,13 +61,14 @@ impl Command for PeerCommand {
                     .list_nodes(&user_id)
                     .await
                     .map_err(|e| anyhow::anyhow!("peer show: {e}"))?;
-                match nodes.iter().find(|n| &n.id == remote) {
-                    Some(n) => Ok(CommandOutput::shapes(vec![show_record(n)])),
-                    None => Ok(CommandOutput::fail(
+                let shown = shown_by(&nodes, remote);
+                if shown.is_empty() {
+                    return Ok(CommandOutput::fail(
                         format!("no paired peer '{remote}'"),
                         Some("peer list".into()),
-                    )),
+                    ));
                 }
+                Ok(CommandOutput::shapes(shown.into_iter().map(show_record).collect()))
             }
 
             Some("add") => {
@@ -277,6 +278,14 @@ fn list_table(nodes: &[PairedNode]) -> Out {
 /// `peer list` is a table, and the renderer shrinks a table's widest column to fit
 /// the terminal — so the DID, the widest thing in it, is the one cell cut with `…`.
 /// That is the right rule for a table and the wrong place to read a DID from.
+/// Every node `name` names: its DID, or the label it is shown under. A label
+/// keys no row, so two of the person's nodes may carry one, and `peer show`
+/// shows each of them, never only the first; each record says its DID, which
+/// names it to `peer revoke` and `sync`.
+fn shown_by<'a>(nodes: &'a [PairedNode], name: &str) -> Vec<&'a PairedNode> {
+    nodes.iter().filter(|n| n.id == name || n.device_did.to_string() == name).collect()
+}
+
 /// A `Record` is not fitted, so every value here is printed whole, including the
 /// public key the table never showed; `peer add` needs all four, and the last row is
 /// that command.
@@ -476,5 +485,18 @@ mod peer_list_tests {
         let got = format_paired_at(ahead);
         assert!(got.contains("in the future"), "got: {got}");
         assert!(got.contains("clock"), "the reader is told what to check: {got}");
+    }
+
+    /// **`peer show` shows every node a label names** (kotton #99): two rows
+    /// under `vault` are both shown, and a DID shows the one it names.
+    #[test]
+    fn peer_show_shows_every_node_a_label_names() {
+        const OTHER: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+        let nodes = [node("vault", DID), node("vault", OTHER), node("laptop", "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH")];
+        let shown: Vec<String> = shown_by(&nodes, "vault").iter().map(|n| n.device_did.to_string()).collect();
+        assert_eq!(shown, [DID, OTHER]);
+        let by_did: Vec<&str> = shown_by(&nodes, OTHER).iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(by_did, ["vault"]);
+        assert!(shown_by(&nodes, "nowhere").is_empty());
     }
 }

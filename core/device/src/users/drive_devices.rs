@@ -173,9 +173,15 @@ pub async fn revoke(
     node_id: String,
 ) -> std::io::Result<UserResponse> {
     // Read before the row goes: the withdrawal names the device's key.
-    let node = kotton_peer::daemon::db::get_paired_node_by_id(db, &user_id, &node_id).await?;
+    // `node_id` is what the person named: the node's DID, or a label one row
+    // of theirs carries. A label two rows carry is refused here, before the
+    // drives are asked anything, rather than read as whichever row came first.
+    let node = kotton_peer::daemon::db::paired_node_named(db, &user_id, &node_id).await?;
     let mut missed: Vec<(String, String)> = Vec::new();
-    let is_drive = kotton_peer::daemon::drives::is_drive(db, &user_id, &node_id).await?;
+    let is_drive = match node.as_ref() {
+        Some(node) => kotton_peer::daemon::drives::is_drive(db, &user_id, node).await?,
+        None => false,
+    };
     if let Some(node) = node.as_ref().filter(|_| !is_drive) {
         let drives = drives_of(db, &user_id, node).await?;
         if !drives.is_empty() && identity_key(runtime, &user_id).is_none() {
@@ -192,7 +198,10 @@ pub async fn revoke(
         }
         missed = withdraw(runtime, db, &user_id, node).await.missed;
     }
-    let revoked = kotton_peer::daemon::nodes::node_revoke(member_store, db, user_id, node_id.clone(), &runtime.paired_keys()).await?;
+    // The row is named by its DID from here, so the revoke takes the row the
+    // drives were just told of.
+    let named = node.as_ref().map_or_else(|| node_id.clone(), |n| n.device_did.to_string());
+    let revoked = kotton_peer::daemon::nodes::node_revoke(member_store, db, user_id, named, &runtime.paired_keys()).await?;
     if !matches!(revoked, UserResponse::NodeRevoked) || missed.is_empty() {
         return Ok(revoked);
     }

@@ -27,7 +27,9 @@
 //! drive: the `PeerAdd { drive: true }` that recorded any key it was given went
 //! with #80, and the record refuses a node paired under another posture,
 //! whichever writer hands it the row: the join writes no posture over a row
-//! this device holds and replaces none under another key (#105). So no
+//! this device holds and replaces none under another key (#105), and a row is
+//! the person's and the node's DID's, so no writer's label reaches another row,
+//! another person's included (#99). So no
 //! device of the person's is a target, and every peer a pass reaches holds no
 //! data keys: a pass toward one sends packs and nothing loose
 //! ([`ensure_packed_for_peer`]).
@@ -917,7 +919,11 @@ async fn sync_drive_with_outcome(
     };
 
     // 2. A transient (non-persisted) remote for the pass.
-    let remote_name = format!("__sync_bg__{node_id}");
+    // Named for the vault's key, not the node's label: a label keys no row
+    // (`kotton_peer::daemon::db`), so two of the person's drives may be shown
+    // under one, and two passes must not share a remote.
+    let remote_name: String =
+        std::iter::once("__sync_bg__".to_string()).chain(target.drive.vault_key.iter().map(|b| format!("{b:02x}"))).collect();
     let storage = Arc::new(client) as Arc<dyn kotton_sys::store::SyncableStore>;
     let config = RemoteConfig {
         // The vault's DID, not the node's name: the remote's configuration is

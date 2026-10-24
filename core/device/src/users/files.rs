@@ -1138,8 +1138,22 @@ pub async fn sync_mount(
     // Only a drive. A paired node that is not one — another of the person's
     // devices — is not a sync target, so it opens no remote here, and
     // `remote_add_kotton` refuses it by name.
+    //
+    // The name is looked for among the drives first, by label or DID: a label
+    // keys no row, so a device and a drive may both carry it, and `sync` names
+    // the drive. A name no drive carries is resolved among every row
+    // (`paired_node_named`), so a device is refused by name below.
     if !store.list_remotes().contains(&remote) {
-        if let Some(node) = network_db::get_paired_node_by_id(db, &user_id, &remote).await? {
+        let drive = kotton_peer::daemon::drives::nodes(db, &user_id)
+            .await?
+            .into_iter()
+            .filter(|n| n.id == remote || n.device_did.to_string() == remote)
+            .collect::<Vec<_>>();
+        let node = match <[_; 1]>::try_from(drive) {
+            Ok([node]) => Some(node),
+            Err(_) => network_db::paired_node_named(db, &user_id, &remote).await?,
+        };
+        if let Some(node) = node {
             let did = node.device_did.to_string();
             if let UserResponse::Error { message } =
                 remote_add_kotton(db, host, user_id.clone(), remote.clone(), did, remote.clone()).await?

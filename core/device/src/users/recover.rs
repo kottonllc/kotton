@@ -148,7 +148,7 @@ pub async fn recover(
                 return Err(refused);
             };
             return Err(
-                match kotton_peer::daemon::nodes::take_back_added(db, &runtime.paired_keys(), user_id, added).await {
+                match kotton_peer::daemon::nodes::take_back_added(db, &runtime.paired_keys(), user_id, &vault.did).await {
                     Ok(()) => refused,
                     Err(e) => anyhow!(
                         "{refused:#}; and the node '{added}' this recovery added for the line is still paired \
@@ -190,6 +190,9 @@ fn what_was_asked(runtime: &DeviceRuntime, user_id: &str, recovery_key: &str, pa
 /// recovery added it (and so takes it back on a refusal).
 struct VaultNode {
     label: String,
+    /// The row's key with the person's: its DID, which names it when it is
+    /// taken back, whatever other row carries its label.
+    did: String,
     added: bool,
 }
 
@@ -215,28 +218,32 @@ async fn point_at_the_vault(
             ));
         }
         if n.addresses.first() == Some(&addr) {
-            return Ok(VaultNode { label: n.id.clone(), added: false });
+            return Ok(VaultNode { label: n.id.clone(), did: n.device_did.to_string(), added: false });
         }
     }
-    let (label, added) = match paired {
-        Some(n) => (n.id.clone(), false),
-        None => (label_for(&nodes, &key), true),
+    // A row already pairing the key is re-addressed under its own DID, the
+    // row's key; a new one is the line key's DID.
+    let (label, did, added) = match paired {
+        Some(n) => (n.id.clone(), n.device_did.to_string(), false),
+        None => {
+            let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key)
+                .map_err(|e| anyhow!("the line's key is not a vault's key: {e}; nothing was changed"))?
+                .to_string();
+            (label_for(&nodes, &key), did, true)
+        }
     };
-    let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key)
-        .map_err(|e| anyhow!("the line's key is not a vault's key: {e}; nothing was changed"))?
-        .to_string();
     match kotton_peer::daemon::nodes::peer_add(
         db,
         &runtime.paired_keys(),
         user_id.to_string(),
         label.clone(),
-        did,
+        did.clone(),
         hex::encode(key),
         addr,
     )
     .await?
     {
-        UserResponse::NodePaired { .. } => Ok(VaultNode { label, added }),
+        UserResponse::NodePaired { .. } => Ok(VaultNode { label, did, added }),
         UserResponse::Error { message } => Err(anyhow!("{message}; nothing was changed")),
         other => Err(anyhow!("unexpected reply {other:?}")),
     }
@@ -244,6 +251,9 @@ async fn point_at_the_vault(
 
 /// The label a vault the line names is added under: `vault`, or, when the person
 /// pairs a node under that label already, `vault-` and the first eight hex of its key.
+/// Not to keep a row from being replaced — a label keys no row, so the vault
+/// added under `vault` would sit beside the other — but so the person can
+/// still name each of them by label.
 fn label_for(taken: &[PairedNode], key: &[u8; 32]) -> String {
     if taken.iter().any(|n| n.id == "vault") {
         format!("vault-{}", &hex::encode(key)[..8])

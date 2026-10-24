@@ -388,7 +388,7 @@ mod enrollment_tests {
             "key projected into the live allowlist"
         );
         assert!(
-            network_db::get_paired_node_by_id(&db, "alice", &did.to_string())
+            network_db::paired_node_named(&db, "alice", &did.to_string())
                 .await
                 .unwrap()
                 .is_some(),
@@ -578,7 +578,7 @@ mod enrollment_tests {
             .unwrap()
             .is_empty());
         assert!(!paired_keys.read().unwrap().contains(&pubkey));
-        assert!(network_db::get_paired_node_by_id(&db, "alice", "vps")
+        assert!(network_db::paired_node_named(&db, "alice", "vps")
             .await
             .unwrap()
             .is_none());
@@ -642,7 +642,7 @@ mod enrollment_tests {
             other => panic!("a revoke that withdrew from no drive answered {other:?}"),
         }
         assert!(
-            network_db::get_paired_node_by_id(&db, "alice", "laptop").await.unwrap().is_some(),
+            network_db::paired_node_named(&db, "alice", "laptop").await.unwrap().is_some(),
             "a refused revoke revoked"
         );
     }
@@ -674,7 +674,7 @@ mod enrollment_tests {
             other => panic!("a revoke no drive took answered {other:?}"),
         }
         assert!(
-            network_db::get_paired_node_by_id(&db, "alice", "laptop").await.unwrap().is_none(),
+            network_db::paired_node_named(&db, "alice", "laptop").await.unwrap().is_none(),
             "the device is still revoked here"
         );
     }
