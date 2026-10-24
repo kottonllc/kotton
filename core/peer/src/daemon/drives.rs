@@ -55,15 +55,12 @@
 //! row that named none. [`record`] never relabels a row: a node paired under
 //! another posture (one of the person's own devices, a cosigner) is refused,
 //! not made a vault. Enrolment and the projection record only `BlindStorage`
-//! members, and `Recover` refuses a line whose key is paired under another
-//! posture before it writes anything. **The join is the exception, and it is
-//! the join's own write, not `record`'s:** `record_handed_drives` writes each
-//! handed drive's row with posture `blind-storage` (`insert_paired_node`),
-//! over whatever posture the row for that node (its label or DID) held, and
-//! only then calls `record`, which sees a `blind-storage` row. So a row the
-//! joiner already held under another posture is relabelled by the join, on
-//! the issuer's word inside the ceremony, until #105 has the join hand
-//! `record` the row it finds.
+//! members, and `Recover` and the join refuse, before they write anything, a
+//! vault whose key is paired under another posture; the join also refuses a
+//! handed drive whose label this device holds under another key
+//! (`check_handed_rows` in `kotton_device::users::pairing`). The join writes
+//! the row it records with no posture of its own, so `record` is handed the
+//! row as the device held it. No writer of the record relabels a row.
 //! What holds them together after that is what may rewrite the row:
 //! re-adding the same key keeps the posture, a different key under the label
 //! takes neither the posture nor the drive, and removing the row removes the
