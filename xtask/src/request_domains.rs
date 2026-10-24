@@ -118,6 +118,16 @@ const DOMAINS: &[(&str, &[&str])] = &[
             // A person's other devices, introduced to and withdrawn from the
             // drives that keep for them, under the identity's signature.
             "TenantDevice",
+            // A person's drives at a vault — made, listed, retired — and the
+            // drive's verbs over them (RFC 0003); the drive record they write
+            // is `kotton_peer::daemon::drives`.
+            "TenantDriveMake",
+            "TenantDrives",
+            "TenantDriveRetire",
+            "DriveCreate",
+            "DriveList",
+            "DriveShow",
+            "DriveMove",
             "PeerAdd",
             "GetNodeIdentity",
             "TrustAdd",

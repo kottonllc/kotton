@@ -176,6 +176,31 @@ impl UserStore {
         self.ctx.sealing_keys()
     }
 
+    /// Seal a drive's name under this person's key, bound to the `tree` a
+    /// vault keeps the drive under, for the vault to keep and hand back to
+    /// every device of theirs (`kotton_wire::ipc::TenantDrive`). The vault
+    /// cannot open it; a sealed name moved to another tree does not open there,
+    /// so a vault cannot pass one drive's name off as another's.
+    ///
+    /// Refused on a store with no keys: a node that holds none names nothing.
+    pub fn seal_drive_name(&self, tree: &str, name: &str) -> Result<Vec<u8>> {
+        let keys = self
+            .sealing_keys()
+            .ok_or_else(|| anyhow::anyhow!("this node holds no keys for {}, so it cannot name a drive", self.user_id()))?;
+        crate::provider::seal_envelope(keys.cek, &drive_name_aad(tree), name.as_bytes())
+            .map_err(|e| anyhow::anyhow!("sealing a drive's name: {e}"))
+    }
+
+    /// Open a drive's name [`Self::seal_drive_name`] sealed for `tree`.
+    pub fn open_drive_name(&self, tree: &str, sealed: &[u8]) -> Result<String> {
+        let keys = self
+            .sealing_keys()
+            .ok_or_else(|| anyhow::anyhow!("this node holds no keys for {}, so it cannot read a drive's name", self.user_id()))?;
+        let name = crate::provider::open_envelope(keys.cek, &drive_name_aad(tree), sealed)
+            .map_err(|e| anyhow::anyhow!("the name sealed for drive tree '{tree}' does not open under this person's key: {e}"))?;
+        String::from_utf8(name).map_err(|_| anyhow::anyhow!("the name sealed for drive tree '{tree}' is not text"))
+    }
+
     /// This user's DID.
     pub fn did(&self) -> &str {
         self.ctx.did()
@@ -403,6 +428,13 @@ impl UserStore {
             .ok()
             .map(|b| b.to_vec())
     }
+}
+
+/// What a drive's sealed name is bound to: its own domain, then the tree.
+fn drive_name_aad(tree: &str) -> Vec<u8> {
+    let mut aad = b"kotton/drive-name/v1\0".to_vec();
+    aad.extend_from_slice(tree.as_bytes());
+    aad
 }
 
 /// Where one path in the person's tree lands, as [`UserStore::person_door`]

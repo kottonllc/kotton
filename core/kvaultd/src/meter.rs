@@ -7,9 +7,9 @@
 //! what is measured here. There is no meter for files and none for records,
 //! because the vault cannot tell them apart.
 //!
-//! `held` is a cached count: measured by walking the pool's shelf when the
-//! pool is loaded, raised by each completed sealed write, and re-measured
-//! before any refusal — so a write is never refused on a stale number, and the
+//! `held` is a cached count: measured by walking the pool's shelves — one per
+//! drive the tenant keeps here (`crate::drives`) — when the pool is loaded,
+//! raised by each completed sealed write, and re-measured before any refusal — so a write is never refused on a stale number, and the
 //! walk is paid only at the boundary rather than on every write. It is not
 //! stored anywhere: the shelf *is* the record of what is held.
 //!
@@ -203,6 +203,17 @@ impl Meter {
         total
     }
 
+    /// Sum of object sizes on every shelf of a pool — its first drive's and
+    /// each made beside it (`crate::drives`): what the tenant is charged for is
+    /// everything the vault keeps for them, whichever drive holds it.
+    pub async fn measure_all(shelves: &[&dyn SyncableStore]) -> u64 {
+        let mut total = 0u64;
+        for shelf in shelves {
+            total = total.saturating_add(Self::measure(*shelf).await);
+        }
+        total
+    }
+
     /// Record a freshly measured count for a pool.
     pub fn set(&self, user_id: &str, held: u64) {
         self.held.write().unwrap().insert(user_id.to_string(), held);
@@ -224,13 +235,13 @@ impl Meter {
     /// May a write of `incoming` bytes land in this pool, under this pool's
     /// own number? A write that brings the pool to exactly its quota lands;
     /// one byte past it is refused — `held + incoming <= quota`, the rule the
-    /// single quota had. The shelf is walked only when the cached count says
-    /// no, so the answer at the boundary is exact and the walk is not paid on
-    /// every write.
+    /// single quota had. The pool's shelves — every drive it keeps — are
+    /// walked only when the cached count says no, so the answer at the
+    /// boundary is exact and the walk is not paid on every write.
     pub async fn admits(
         &self,
         user_id: &str,
-        shelf: &dyn SyncableStore,
+        shelves: &[&dyn SyncableStore],
         incoming: u64,
     ) -> Result<(), Full> {
         let Some(quota) = self.quota(user_id) else {
@@ -240,7 +251,7 @@ impl Meter {
         if cached.saturating_add(incoming) <= quota {
             return Ok(());
         }
-        let measured = Self::measure(shelf).await;
+        let measured = Self::measure_all(shelves).await;
         self.set(user_id, measured);
         if measured.saturating_add(incoming) <= quota {
             Ok(())
@@ -260,17 +271,33 @@ mod tests {
     use kotton_store::MemoryObjectStorage;
     use kotton_sys::store::ObjectStorage as _;
 
+    /// **A tenant's quota holds over every drive they keep here**: bytes in
+    /// a made drive count against the pool as bytes in its first drive do,
+    /// so a second drive is not a way past the number.
+    #[tokio::test]
+    async fn a_pools_quota_holds_over_every_drive_it_keeps() {
+        let first = MemoryObjectStorage::new();
+        let made = MemoryObjectStorage::new();
+        first.put(Path::new("x/a"), &[0u8; 60]).await.unwrap();
+        made.put(Path::new("x/b"), &[0u8; 40]).await.unwrap();
+        let m = Meter::new(Some(100));
+        m.set("a", 101);
+        assert_eq!(Meter::measure_all(&[&first, &made]).await, 100);
+        assert_eq!(m.admits("a", &[&first, &made], 0).await, Ok(()), "exactly at the quota, across both");
+        assert_eq!(m.admits("a", &[&first, &made], 1).await, Err(Full { held: 100, quota: 100 }));
+    }
+
     #[tokio::test]
     async fn a_pool_fills_to_its_quota_and_no_further() {
         let shelf = MemoryObjectStorage::new();
         let m = Meter::new(Some(100));
-        assert_eq!(m.admits("a", &shelf, 60).await, Ok(()));
+        assert_eq!(m.admits("a", &[&shelf], 60).await, Ok(()));
         m.add("a", 60);
-        assert_eq!(m.admits("a", &shelf, 40).await, Ok(()));
+        assert_eq!(m.admits("a", &[&shelf], 40).await, Ok(()));
         m.add("a", 40);
         // The cache says full; the walk says the shelf is empty, so the
         // refusal is re-measured and the write lands. The number is honest.
-        assert_eq!(m.admits("a", &shelf, 1).await, Ok(()));
+        assert_eq!(m.admits("a", &[&shelf], 1).await, Ok(()));
         assert_eq!(m.held("a"), Some(0), "the re-measure corrected the cache");
         // Now the bytes are really there, counted as a completed write counts
         // them: the cache says full, the walk agrees, and the refusal carries
@@ -278,7 +305,7 @@ mod tests {
         shelf.put(Path::new("packs/pack"), &[0u8; 100]).await.unwrap();
         m.add("a", 100);
         assert_eq!(
-            m.admits("a", &shelf, 1).await,
+            m.admits("a", &[&shelf], 1).await,
             Err(Full {
                 held: 100,
                 quota: 100
@@ -307,9 +334,9 @@ mod tests {
 
         small.put(Path::new("packs/a"), &[0u8; 60]).await.unwrap();
         m.add("small", 60);
-        assert_eq!(m.admits("small", &small, 40).await, Ok(()), "exactly at the quota lands");
+        assert_eq!(m.admits("small", &[&small], 40).await, Ok(()), "exactly at the quota lands");
         assert_eq!(
-            m.admits("small", &small, 41).await,
+            m.admits("small", &[&small], 41).await,
             Err(Full { held: 60, quota: 100 }),
             "one byte past it is refused, and the refusal names the pool's own number"
         );
@@ -318,9 +345,9 @@ mod tests {
         // could not, up to its own number and no further.
         small.put(Path::new("packs/b"), &[0u8; 40]).await.unwrap();
         m.add("small", 40);
-        assert_eq!(m.admits("small", &small, 1).await, Err(Full { held: 100, quota: 100 }));
-        assert_eq!(m.admits("large", &large, 1000).await, Ok(()));
-        assert_eq!(m.admits("large", &large, 1001).await, Err(Full { held: 0, quota: 1000 }));
+        assert_eq!(m.admits("small", &[&small], 1).await, Err(Full { held: 100, quota: 100 }));
+        assert_eq!(m.admits("large", &[&large], 1000).await, Ok(()));
+        assert_eq!(m.admits("large", &[&large], 1001).await, Err(Full { held: 0, quota: 1000 }));
     }
 
     #[tokio::test]
@@ -334,14 +361,14 @@ mod tests {
         let m = Meter::new(Some(50));
         m.set_pool_quota(&db, "own", 500).await.unwrap();
         assert_eq!(m.quota("other"), Some(50));
-        assert_eq!(m.admits("other", &shelf, 51).await, Err(Full { held: 0, quota: 50 }));
+        assert_eq!(m.admits("other", &[&shelf], 51).await, Err(Full { held: 0, quota: 50 }));
         // Moving the default moves every pool without a number, and none with one.
         m.set_default_quota(Some(80));
         assert_eq!(m.quota("other"), Some(80));
         assert_eq!(m.quota("own"), Some(500));
         m.set_default_quota(None);
         assert_eq!(m.quota("other"), None);
-        assert_eq!(m.admits("other", &shelf, u64::MAX).await, Ok(()));
+        assert_eq!(m.admits("other", &[&shelf], u64::MAX).await, Ok(()));
     }
 
     /// Lowered below what the pool holds: nothing is removed, and the next
@@ -359,7 +386,7 @@ mod tests {
         shelf.put(Path::new("packs/a"), &[0u8; 300]).await.unwrap();
         m.add("a", 300);
         m.set_pool_quota(&db, "a", 100).await.unwrap();
-        assert_eq!(m.admits("a", &shelf, 1).await, Err(Full { held: 300, quota: 100 }));
+        assert_eq!(m.admits("a", &[&shelf], 1).await, Err(Full { held: 300, quota: 100 }));
         assert_eq!(Meter::measure(&shelf).await, 300, "the shelf still holds every byte");
         assert_eq!(m.held("a"), Some(300));
     }
@@ -406,6 +433,6 @@ mod tests {
     async fn no_quota_admits_everything() {
         let shelf = MemoryObjectStorage::new();
         let m = Meter::new(None);
-        assert_eq!(m.admits("a", &shelf, u64::MAX).await, Ok(()));
+        assert_eq!(m.admits("a", &[&shelf], u64::MAX).await, Ok(()));
     }
 }

@@ -818,3 +818,145 @@ mod tenant_device_tests {
         assert_ne!(bytes, other.signed_bytes("alice"), "the time");
     }
 }
+
+// -- Several drives for one person on one vault -------------------------------
+//
+// RFC 0002 (kotton-protocol): a drive is a tenancy on a vault, and a person may
+// have several, on one vault or many. kotton-protocol #20 asks for the drive's
+// verbs and its descriptor as request types; kotton-protocol has no type crates
+// yet, so they live here, together — `MadeDrive`, `TenantDrive` and
+// `DriveDescriptor` below, and the `Drive*` and `TenantDrive*` variants of
+// `UserRequest` — and move as one when those crates exist.
+
+/// The name a device gives the tenancy's own tree on a vault: the pool a vault
+/// kept for each tenant before a person could have several drives on one, which
+/// is that person's first drive there. A vault holds no key, so it cannot keep a
+/// sealed name for a tree it made before names existed; every device reads this
+/// one for it, so they all agree without having been told.
+pub const FIRST_DRIVE_NAME: &str = "personal";
+
+/// The mount a vault keeps the tenancy's own tree under — the first drive.
+pub const FIRST_DRIVE_TREE: &str = "local";
+
+/// A drive made on a vault after the first, by the id the device that made it
+/// minted: sixteen random bytes, fresh for each vault it is kept on, so the id
+/// one landlord holds is not the id another holds for the same drive after a
+/// move.
+///
+/// **The type is what keeps the tree's name a tree's name.** The vault keeps the
+/// drive under [`Self::tree`], `drive-` and thirty-two hex digits: one path
+/// component, never `local` (the tenancy's own tree, which no verb over made
+/// drives can name, so none can retire it), never a parent or a sibling's. No
+/// check of a caller's string is needed for that, because no caller sends a
+/// string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MadeDrive(pub [u8; 16]);
+
+impl MadeDrive {
+    /// The prefix every made drive's tree carries.
+    pub const TREE_PREFIX: &'static str = "drive-";
+
+    /// The mount the vault keeps this drive's sealed tree under, and the one the
+    /// sealed verbs (`ReadSealed`, `WriteSealed`, `ListSealed`) name to reach it.
+    pub fn tree(&self) -> String {
+        let mut out = String::with_capacity(Self::TREE_PREFIX.len() + 32);
+        out.push_str(Self::TREE_PREFIX);
+        for b in self.0 {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out
+    }
+
+    /// The made drive a tree's name is, or `None` for one that is not —
+    /// [`FIRST_DRIVE_TREE`] among them.
+    pub fn from_tree(tree: &str) -> Option<Self> {
+        let hex = tree.strip_prefix(Self::TREE_PREFIX)?;
+        if hex.len() != 32 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return None;
+        }
+        let mut id = [0u8; 16];
+        for (i, byte) in id.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+        }
+        Some(Self(id))
+    }
+}
+
+/// One of a tenant's drives, as the vault that keeps it lists it
+/// ([`crate::ipc::UserRequest::TenantDrives`]): the tree it is kept under, the
+/// name a device of the person's sealed for it, and the bytes it holds.
+///
+/// What the vault can say and nothing more: it cannot open `sealed_name`, so it
+/// learns how many drives a tenant has and how large each is, and never what any
+/// is called.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantDrive {
+    /// The tree: [`FIRST_DRIVE_TREE`] for the tenancy's own, or a
+    /// [`MadeDrive::tree`].
+    pub tree: String,
+    /// The drive's name, sealed under the person's key by the device that made
+    /// it, bound to `tree`; empty for the first drive, which no device sealed a
+    /// name for ([`FIRST_DRIVE_NAME`]).
+    #[serde(with = "crate::base64_bytes")]
+    pub sealed_name: Vec<u8>,
+    /// Sealed bytes the vault holds in this tree.
+    pub held: u64,
+}
+
+/// A drive, as a person's device describes it (kotton-protocol #20): its name,
+/// the vault it lives on, its size, and which of the person's devices keep it
+/// whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriveDescriptor {
+    /// The person's name for it.
+    pub name: String,
+    /// The vault it lives on, as the person's paired node for it is labelled.
+    pub vault: String,
+    /// The vault's key, hex: what tells two vaults shown under one label apart.
+    pub vault_key: String,
+    /// Sealed bytes the vault holds for it, as the vault last said; `None` when
+    /// the vault did not answer this time.
+    pub size: Option<u64>,
+    /// The devices that keep it whole, by name. Pins (kotton #55) write what a
+    /// device keeps as a record in the drive; until then no device records one,
+    /// and this is empty.
+    pub pinned_whole: Vec<String>,
+}
+
+#[cfg(test)]
+mod made_drive_tests {
+    use super::*;
+
+    /// A made drive's tree is one name a vault can keep it under, and reads
+    /// back as the same drive; the tenancy's own tree, and anything a caller
+    /// might spell, is no made drive.
+    #[test]
+    fn a_made_drives_tree_reads_back_and_nothing_else_is_one() {
+        let id = MadeDrive([0xab; 16]);
+        let tree = id.tree();
+        assert_eq!(tree, format!("drive-{}", "ab".repeat(16)));
+        assert_eq!(MadeDrive::from_tree(&tree), Some(id));
+        for not in [FIRST_DRIVE_TREE, "drive-", "drive-AB", "drive-../x", &format!("drive-{}", "AB".repeat(16)), &format!("{tree}0")] {
+            assert_eq!(MadeDrive::from_tree(not), None, "{not}");
+        }
+    }
+
+    /// The descriptor and a vault's listing as they cross: the sealed name as
+    /// base64, a made drive's id as its bytes.
+    #[test]
+    fn a_tenant_drive_and_a_descriptor_round_trip() {
+        let listed = TenantDrive { tree: MadeDrive([1; 16]).tree(), sealed_name: vec![1, 2, 3], held: 9 };
+        let json = serde_json::to_value(&listed).unwrap();
+        assert_eq!(json["sealed_name"], "AQID");
+        assert_eq!(serde_json::from_value::<TenantDrive>(json).unwrap(), listed);
+        let described = DriveDescriptor {
+            name: "photos".into(),
+            vault: "home".into(),
+            vault_key: "00".repeat(32),
+            size: Some(9),
+            pinned_whole: vec![],
+        };
+        let back: DriveDescriptor = serde_json::from_str(&serde_json::to_string(&described).unwrap()).unwrap();
+        assert_eq!(back, described);
+    }
+}

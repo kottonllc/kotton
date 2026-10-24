@@ -209,6 +209,44 @@ impl UserStore {
                 format,
             )
     }
+
+    /// Keep one more sealed tree on this node's own shelves, as the mount
+    /// `name`, resting at `path` — a drive a vault makes for a tenant beside
+    /// the tenancy's own tree (`kvaultd::drives`).
+    ///
+    /// Built as every shelf mount of this store is built at load
+    /// ([`crate::runtime::instantiate_remotes`]): the shelf `shelves` opens
+    /// for it, under this store's own keys — none on a vault, so the tree
+    /// takes sealed bytes and refuses content — and recorded in `config.toml`
+    /// as a `Local` mount, so a reload instantiates it again and a tenant's
+    /// drop finds it among [`super::UserStore::shelf_mounts`] and clears it.
+    /// Refused for a name a mount already carries, `local` among them.
+    pub fn add_shelf_tree(
+        &self,
+        name: &str,
+        path: std::path::PathBuf,
+        shelves: &dyn kotton_sys::store::Shelves,
+    ) -> Result<()> {
+        kotton_common::fs::create_dir_all_owner_only(&path)
+            .with_context(|| format!("creating the directory for mount '{name}' at {path:?}"))?;
+        let keys = self.ctx.sealing_keys();
+        let store = crate::stack::build_sealed_store(
+            crate::stack::ArcStore(shelves.open(self.user_id(), name, &path)),
+            keys.map(|k| *k.cek),
+            keys.map(|k| *k.path_key),
+            self.ctx.log_identity(),
+            KeyFormat::Blinded,
+        );
+        self.add_remote(
+            name.to_string(),
+            store,
+            RemoteConfig {
+                backend: RemoteBackend::Local { path },
+                cache_dir: None,
+                key_format: KeyFormat::Blinded,
+            },
+        )
+    }
 }
 
 
@@ -224,6 +262,58 @@ impl UserStore {
 mod tests {
     use super::*;
     use crate::runtime::UserKeys;
+
+    /// **A drive's name opens only under the person's key, and only for the
+    /// tree it was sealed for**; a node with no keys names nothing.
+    #[test]
+    fn a_drive_name_opens_for_its_own_tree_under_its_own_key() {
+        let shelves = crate::LocalShelves(kotton_fs::OsFilesystem);
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let open = |dir: &tempfile::TempDir, keys| {
+            UserStore::create("alice", "did:key:zAlice", dir.path().to_path_buf(), keys, &shelves).unwrap()
+        };
+        let mine = open(&dirs[0], UserKeys::new(Some([7; 32])));
+        let other = open(&dirs[1], UserKeys::new(Some([8; 32])));
+        let keyless = open(&dirs[2], UserKeys::keyless());
+
+        let sealed = mine.seal_drive_name("drive-aa", "photos").unwrap();
+        assert!(!sealed.windows(6).any(|w| w == b"photos"), "the name is sealed");
+        assert_eq!(mine.open_drive_name("drive-aa", &sealed).unwrap(), "photos");
+        assert!(mine.open_drive_name("drive-bb", &sealed).is_err(), "it opened for another tree");
+        assert!(other.open_drive_name("drive-aa", &sealed).is_err(), "it opened under another key");
+        assert!(keyless.seal_drive_name("drive-aa", "photos").is_err(), "a keyless node named a drive");
+        assert!(keyless.open_drive_name("drive-aa", &sealed).is_err(), "a keyless node read a drive's name");
+    }
+
+    /// **A tree added beside `local` is a mount of its own, kept across a
+    /// reload**: what is written to one is not in the other, and the store
+    /// reopened from its configuration has both.
+    #[tokio::test]
+    async fn a_shelf_tree_is_its_own_mount_and_survives_a_reload() {
+        let temp = tempfile::tempdir().unwrap();
+        let shelves = crate::LocalShelves(kotton_fs::OsFilesystem);
+        let store = UserStore::create("alice", "did:key:zAlice", temp.path().to_path_buf(), UserKeys::keyless(), &shelves).unwrap();
+        store.save_config().unwrap();
+        store.add_shelf_tree("drive-aa", temp.path().join("drives").join("drive-aa"), &shelves).unwrap();
+        assert!(store.add_shelf_tree("local", temp.path().join("x"), &shelves).is_err(), "local was replaced");
+
+        store.write_sealed("drive-aa", "x/one", b"sealed one").await.unwrap();
+        store.write_sealed("local", "x/two", b"sealed two").await.unwrap();
+        let keys = |mount: &'static str| {
+            let store = &store;
+            async move { store.list_sealed(mount, "").await.unwrap().into_iter().map(|(k, _, _)| k).collect::<Vec<_>>() }
+        };
+        assert_eq!(keys("drive-aa").await, ["x/one"]);
+        assert_eq!(keys("local").await, ["x/two"]);
+
+        let again = UserStore::load("alice", "did:key:zAlice", temp.path().to_path_buf(), UserKeys::keyless(), &shelves)
+            .await
+            .unwrap();
+        assert_eq!(again.read_sealed("drive-aa", "x/one").await.unwrap(), b"sealed one");
+        let mut mounts: Vec<String> = again.shelf_mounts().into_iter().map(|(name, _)| name).collect();
+        mounts.sort();
+        assert_eq!(mounts, ["drive-aa", "local"]);
+    }
 
     #[test]
     fn test_cannot_add_remote_named_local() {

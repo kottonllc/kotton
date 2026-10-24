@@ -47,6 +47,7 @@ This document contains the help content for the `Kotton` command-line program.
 * [`Kotton records export`↴](#Kotton-records-export)
 * [`Kotton import`↴](#Kotton-import)
 * [`Kotton sync`↴](#Kotton-sync)
+* [`Kotton drive`↴](#Kotton-drive)
 * [`Kotton issuer`↴](#Kotton-issuer)
 * [`Kotton cp`↴](#Kotton-cp)
 * [`Kotton keep`↴](#Kotton-keep)
@@ -126,6 +127,7 @@ Kotton - Your data sovereignty platform
 * `records` — The project's records in a root its org owns — init, invite, import, export
 * `import` — Bring your history with you — read an export (.ics) into your own records
 * `sync` — Sync this device's drives (now, add, list, remove) — shares the REPL's `sync` verb
+* `drive` — Your drives — create, list, show, move — shares the REPL's `drive` verb
 * `issuer` — Trusted-issuer registry (add, remove, list) — shares the REPL's `issuer` verb
 * `cp` — Copy files into and out of your tree — shares the REPL's `cp` verb. `host:` names this computer's own files, a relative one from the directory the command is run in
 * `keep` — Keep a folder of yours in your tree, and copy only what changed when run again — shares the REPL's `keep` verb. The folder is on this computer, a relative one from the directory the command is run in; with no arguments it lists what is kept
@@ -791,6 +793,52 @@ NOTES:
 ###### **Arguments:**
 
 * `<ARGS>` — Arguments: (none) = all devices | `now …` | `add <node> <path>` | `list` | `remove …` | `--push|--pull <remote>`
+
+###### **Options:**
+
+* `--user <USER>` — Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
+
+
+
+## `Kotton drive`
+
+Your drives — create, list, show, move — shares the REPL's `drive` verb
+
+**Usage:** `Kotton drive [OPTIONS] [ARGS]...`
+
+```text
+drive — your drives: where your things live
+
+USAGE:
+  drive create <name> [--on <vault>]   make a drive on one of your vaults
+  drive list                           every drive: where each lives, its size, which devices keep it whole
+  drive show <name>                    one drive, on each vault it is kept on
+  drive move <name> --to <vault>       carry a drive, sealed, to another of your vaults
+
+A drive is a sealed tree a vault keeps for you; a vault keeps as many as you
+make. Its name is sealed under your key: the vault cannot read it. Your first
+drive on each vault is `personal`, the tree this device syncs with.
+
+A move copies every sealed object to the other vault under the same key, and
+retires the drive where it was only once the other vault holds all of it.
+Your other devices follow it at their next sync. `personal` does not move.
+
+FLAGS:
+  --on <vault>   the vault to make the drive on: its label, DID or key
+                 (needed when you keep drives on more than one)
+  --to <vault>   the vault to move the drive to: its label, DID or key
+
+EXAMPLES:
+  drive create photos                  # on your one vault
+  drive create work --on office-vault  # on the vault labelled office-vault
+  drive list
+  drive show photos
+  drive move photos --to office-vault
+```
+
+###### **Arguments:**
+
+* `<ARGS>` — Arguments: `create <name> [--on <vault>]` | `list` | `show <name>` | `move <name> --to <vault>`
 
 ###### **Options:**
 

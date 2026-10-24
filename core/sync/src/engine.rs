@@ -924,7 +924,8 @@ async fn sync_drive_with_outcome(
     // under one, and two passes must not share a remote.
     let remote_name: String =
         std::iter::once("__sync_bg__".to_string()).chain(target.drive.vault_key.iter().map(|b| format!("{b:02x}"))).collect();
-    let storage = Arc::new(client) as Arc<dyn kotton_sys::store::SyncableStore>;
+    let client = Arc::new(client);
+    let storage = Arc::clone(&client) as Arc<dyn kotton_sys::store::SyncableStore>;
     let config = RemoteConfig {
         // The vault's DID, not the node's name: the remote's configuration is
         // where every push through it learns who is on the other end
@@ -958,6 +959,18 @@ async fn sync_drive_with_outcome(
         "sync_engine: drive pass complete",
     );
     let bytes: u64 = r.transfers.iter().map(|(_, _, b)| *b).sum();
+
+    // What the vault keeps of the person's drives beside this one: a drive
+    // another device made there, or moved there or away, is followed here at
+    // this pass (`kotton_device::users::drive_verbs::follow`). Best-effort: a
+    // vault that does not list leaves the record as it was.
+    if let Some(store) = resources.user_store(user_id) {
+        if let Err(e) =
+            kotton_device::users::drive_verbs::follow(&store, db, user_id, &target.drive.vault_key, &client).await
+        {
+            tracing::debug!(user_id, drive = %node_id, error = %e, "sync_engine: the vault's drives were not followed");
+        }
+    }
 
     // The pass may have pulled new membership records; reproject them into the
     // live allowlist and the drive record, so a device or a drive admitted on
@@ -1825,6 +1838,8 @@ mod drive_target_tests {
         Drive {
             vault_key: [seed; 32],
             tenancy: "alice".into(),
+            tree: kotton_wire::ipc::FIRST_DRIVE_TREE.into(),
+            name: kotton_wire::ipc::FIRST_DRIVE_NAME.into(),
             node: PairedNode {
                 id: label.into(),
                 device_did: kotton_wire::did::Did::parse("did:key:z6MkqQEvkQX8axm6AzW37ZT5bSEJwFnRS7PgYhbrvzKVc4B2").unwrap(),

@@ -1464,8 +1464,11 @@ pub async fn handle_device_invite(
 }
 
 
-/// The person's drives this device records, as the handout a joiner is given
-/// at the join (`PairingPayload::FrostShare::drives`). Whether a join is handed
+/// The person's drives this device records — the first drive on each vault,
+/// one per vault ([`kotton_peer::daemon::drives::list`]) — as the handout a
+/// joiner is given at the join (`PairingPayload::FrostShare::drives`). The
+/// drives made beside them the joiner learns from the vaults themselves at its
+/// first pass (`drive_verbs::follow`), so the payload is unchanged. Whether a join is handed
 /// them is the ceremony's to decide (`kotton_peer::pairing::issuer_over`
 /// hands them to a `Full` joiner only); this says what they are. A record that
 /// does not read is a join that hands no drive, and is logged, never a failed

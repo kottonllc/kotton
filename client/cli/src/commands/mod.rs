@@ -145,6 +145,16 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },
+    /// Your drives — create, list, show, move — shares the REPL's `drive` verb
+    #[command(after_help = shell_help(&kotton_shell::commands::DriveCommand))]
+    Drive {
+        /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
+        #[arg(long)]
+        user: Option<String>,
+        /// Arguments: `create <name> [--on <vault>]` | `list` | `show <name>` | `move <name> --to <vault>`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
+        args: Vec<String>,
+    },
     /// Trusted-issuer registry (add, remove, list) — shares the REPL's `issuer` verb
     #[command(after_help = shell_help(&kotton_shell::commands::IssuerCommand))]
     Issuer {

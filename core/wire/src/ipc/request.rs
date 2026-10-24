@@ -618,6 +618,71 @@ pub enum UserRequest {
         change: crate::ipc::TenantDeviceChange,
         signature: Vec<u8>,
     },
+    /// Make a drive at this vault for `user_id`: a sealed tree of its own,
+    /// kept under [`crate::ipc::MadeDrive::tree`], beside the tenancy's own
+    /// tree and every drive made before it. `sealed_name` is the drive's name,
+    /// sealed under the person's key by the device that made it and bound to
+    /// the tree; the vault keeps it, cannot open it, and hands it back in
+    /// `TenantDrives`. Answered `Ok`, or refused when the tenant already has a
+    /// drive under that id.
+    ///
+    /// Peer-only, from a paired device of the person's. A vault verb.
+    TenantDriveMake {
+        user_id: String,
+        drive: crate::ipc::MadeDrive,
+        #[serde(with = "crate::base64_bytes")]
+        sealed_name: Vec<u8>,
+    },
+    /// Every drive this vault keeps for `user_id` — the tenancy's own tree and
+    /// each made one — with its sealed name and the bytes it holds. Answered
+    /// with `TenantDrivesResult`.
+    ///
+    /// Peer-only, from a paired device of the person's. A vault verb.
+    TenantDrives {
+        user_id: String,
+    },
+    /// Retire a made drive at this vault: its tree, every sealed object in
+    /// it, and its sealed name, as `drive move` does at the vault it moved
+    /// from once the vault it moved to holds every object. A made drive only:
+    /// the tenancy's own tree is no [`crate::ipc::MadeDrive`], so it cannot be
+    /// named here.
+    ///
+    /// Peer-only, from a paired device of the person's. A vault verb.
+    TenantDriveRetire {
+        user_id: String,
+        drive: crate::ipc::MadeDrive,
+    },
+    /// `drive create <name> [--on <vault>]`: make a drive called `name` on one
+    /// of the person's vaults — `on`, a vault's label, DID or key, or the one
+    /// vault they keep drives on when they keep drives on one. Answered with
+    /// `Drives`, the drive made.
+    DriveCreate {
+        user_id: String,
+        name: String,
+        #[serde(default)]
+        on: Option<String>,
+    },
+    /// `drive list`: every drive the person has — where each lives, its size,
+    /// which devices keep it whole — asked of each vault they keep drives on.
+    /// Answered with `Drives`.
+    DriveList {
+        user_id: String,
+    },
+    /// `drive show <name>`: the drives called `name`, one per vault it is kept
+    /// on. Answered with `Drives`.
+    DriveShow {
+        user_id: String,
+        name: String,
+    },
+    /// `drive move <name> --to <vault>`: carry the drive's sealed tree, under
+    /// the same key, to another vault the person keeps drives on, and retire
+    /// it where it was; every device of theirs follows the drive there.
+    /// Answered with `Drives`, the drive where it now lives.
+    DriveMove {
+        user_id: String,
+        name: String,
+        to: String,
+    },
     /// List a mount in **storage-key space** — the keys `ReadSealed`/`WriteSealed`
     /// address, not the caller's logical paths (RFC-0044).
     ///
@@ -2576,6 +2641,13 @@ impl UserRequest {
             Self::HoldDoors { user_id, .. } => Some(user_id),
             Self::CarryFrame { user_id, .. } => Some(user_id),
             Self::TenantDevice { user_id, .. } => Some(user_id),
+            Self::TenantDriveMake { user_id, .. } => Some(user_id),
+            Self::TenantDrives { user_id } => Some(user_id),
+            Self::TenantDriveRetire { user_id, .. } => Some(user_id),
+            Self::DriveCreate { user_id, .. } => Some(user_id),
+            Self::DriveList { user_id } => Some(user_id),
+            Self::DriveShow { user_id, .. } => Some(user_id),
+            Self::DriveMove { user_id, .. } => Some(user_id),
             Self::TakeDeliveries { user_id, .. } => Some(user_id),
             Self::NodeList { user_id } => Some(user_id),
             Self::NodeRelay { user_id } => Some(user_id),
@@ -2799,6 +2871,13 @@ impl UserRequest {
             Self::HoldDoors { .. } => "HoldDoors",
             Self::CarryFrame { .. } => "CarryFrame",
             Self::TenantDevice { .. } => "TenantDevice",
+            Self::TenantDriveMake { .. } => "TenantDriveMake",
+            Self::TenantDrives { .. } => "TenantDrives",
+            Self::TenantDriveRetire { .. } => "TenantDriveRetire",
+            Self::DriveCreate { .. } => "DriveCreate",
+            Self::DriveList { .. } => "DriveList",
+            Self::DriveShow { .. } => "DriveShow",
+            Self::DriveMove { .. } => "DriveMove",
             Self::TakeDeliveries { .. } => "TakeDeliveries",
             Self::ListUsers => "ListUsers",
             Self::Authenticate { .. } => "Authenticate",
@@ -3311,6 +3390,13 @@ impl UserRequest {
             // A person's other devices, introduced to their drive: served only
             // over a peer connection, to a vault, from a device it admits.
             Self::TenantDevice { .. } => Local,
+            // A person's drives at a vault, made, listed and retired: served
+            // only over a peer connection, to a vault, from a device it admits.
+            Self::TenantDriveMake { .. } | Self::TenantDrives { .. } | Self::TenantDriveRetire { .. } => Local,
+            // The drive's verbs (RFC 0003): `create` and `move` mint and
+            // retire sealed trees at the person's vaults, and every one of the
+            // four dials them under this device's key; said at the machine.
+            Self::DriveCreate { .. } | Self::DriveList { .. } | Self::DriveShow { .. } | Self::DriveMove { .. } => Local,
             // An introduction opens a listener on the network this machine is on.
             // It is served only over a peer connection to one of the person's own
             // devices; no session, and no peer's `Remote` origin, reaches it.

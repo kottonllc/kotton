@@ -1335,6 +1335,33 @@ pub(super) async fn handle_request(
             let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
             kotton_peer::daemon::drive_rules::remove(db, &user_db, user_id, drive).await
         }
+        // The drive's verbs: this device asks the person's vaults,
+        // under its own key, and keeps the drive record
+        // (`kotton_device::users::drive_verbs`).
+        UserRequest::DriveCreate { user_id, name, on } => {
+            let Some(store) = users.get(&user_id) else {
+                return Ok(UserResponse::Error { message: format!("user runtime '{user_id}' is not loaded") });
+            };
+            kotton_device::users::drive_verbs::create(runtime, &store, db, &user_id, &name, on.as_deref()).await
+        }
+        UserRequest::DriveList { user_id } => {
+            let Some(store) = users.get(&user_id) else {
+                return Ok(UserResponse::Error { message: format!("user runtime '{user_id}' is not loaded") });
+            };
+            kotton_device::users::drive_verbs::list(runtime, &store, db, &user_id).await
+        }
+        UserRequest::DriveShow { user_id, name } => {
+            let Some(store) = users.get(&user_id) else {
+                return Ok(UserResponse::Error { message: format!("user runtime '{user_id}' is not loaded") });
+            };
+            kotton_device::users::drive_verbs::show(runtime, &store, db, &user_id, &name).await
+        }
+        UserRequest::DriveMove { user_id, name, to } => {
+            let Some(store) = users.get(&user_id) else {
+                return Ok(UserResponse::Error { message: format!("user runtime '{user_id}' is not loaded") });
+            };
+            kotton_device::users::drive_verbs::move_to(runtime, &store, db, &user_id, &name, &to).await
+        }
         UserRequest::SyncDrives { user_id } => {
             let (job_id, targets) = sync_engine.enqueue(&user_id).await;
             Ok(UserResponse::SyncStarted { job_id, targets })
@@ -3089,6 +3116,11 @@ pub(super) async fn handle_request(
         UserRequest::TenantDevice { .. } => Ok(UserResponse::Error {
             message: "TenantDevice is a vault's verb, served only over a peer connection"
                 .to_string(),
+        }),
+        UserRequest::TenantDriveMake { .. }
+        | UserRequest::TenantDrives { .. }
+        | UserRequest::TenantDriveRetire { .. } => Ok(UserResponse::Error {
+            message: format!("{request_name} is a vault's verb, served only over a peer connection"),
         }),
         // The browsers a person admitted, and the revoke that un-admits one
         // (Article IV). Both `Local`; the revoke ends the browser's

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! What a vault answers on the authenticated peer transport (RFC-0084 V1).
 //!
-//! Seventeen verbs, and nothing else exists here to be reached. Eleven are a
+//! Twenty verbs, and nothing else exists here to be reached. Fourteen are a
 //! tenant's: sealed read, write and list; the recovery packet, kept and
 //! returned; where this vault reserves; how much it keeps; the doors held
 //! for a person, what arrived at them, and what the vault carries for them;
-//! and the person's other devices, admitted and withdrawn under their
-//! identity's signature (`TenantDevice`, `crate::devices`). Six are the
+//! the person's other devices, admitted and withdrawn under their
+//! identity's signature (`TenantDevice`, `crate::devices`); and the person's
+//! drives here, made, listed and retired (`TenantDriveMake`, `TenantDrives`,
+//! `TenantDriveRetire`, `crate::drives`). Six are the
 //! landlord's — an invite and its digits, the tenants, one pool's quota,
 //! dropping one pool, and where the vault stands — and are reached by one
 //! connection only, the one whose key is the vault's operator credential
@@ -19,7 +21,7 @@
 //! the decision.** A standing is what `peer_standing` says the connection is to
 //! the pool it names; the table says what each standing may say:
 //!
-//! | standing | the eleven a tenant says | the landlord's six |
+//! | standing | the fourteen a tenant says | the landlord's six |
 //! |---|---|---|
 //! | `Paired` — a tenant's device, to its own pool | yes | no |
 //! | `Claim` — a phrase-only device | `RecoveryFetch` of its own identity only | no |
@@ -66,9 +68,9 @@ pub struct PeerContext {
 }
 
 /// The verbs a vault answers, as the sentence a refused caller reads.
-const VERBS: &str = "ReadSealed, WriteSealed, ListSealed, RecoveryFetch, RecoveryStore, NodeRelay, VaultCapacity, HoldDoors, TakeDeliveries, CarryFrame, TenantDevice, and to its operator DeviceInvite, InviteDigits, Tenants, SetQuota, DropTenant, StandAt";
+const VERBS: &str = "ReadSealed, WriteSealed, ListSealed, RecoveryFetch, RecoveryStore, NodeRelay, VaultCapacity, HoldDoors, TakeDeliveries, CarryFrame, TenantDevice, TenantDriveMake, TenantDrives, TenantDriveRetire, and to its operator DeviceInvite, InviteDigits, Tenants, SetQuota, DropTenant, StandAt";
 
-/// The eleven verbs a tenant's device says to its own pool.
+/// The fourteen verbs a tenant's device says to its own pool.
 pub fn is_tenant_verb(request: &UserRequest) -> bool {
     matches!(
         request,
@@ -83,6 +85,9 @@ pub fn is_tenant_verb(request: &UserRequest) -> bool {
             | UserRequest::TakeDeliveries { .. }
             | UserRequest::CarryFrame { .. }
             | UserRequest::TenantDevice { .. }
+            | UserRequest::TenantDriveMake { .. }
+            | UserRequest::TenantDrives { .. }
+            | UserRequest::TenantDriveRetire { .. }
     )
 }
 
@@ -140,6 +145,9 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: UserReque
         | UserRequest::TakeDeliveries { user_id, .. }
         | UserRequest::CarryFrame { user_id, .. }
         | UserRequest::TenantDevice { user_id, .. }
+        | UserRequest::TenantDriveMake { user_id, .. }
+        | UserRequest::TenantDrives { user_id }
+        | UserRequest::TenantDriveRetire { user_id, .. }
         | UserRequest::DeviceInvite { user_id, .. }
         | UserRequest::InviteDigits { user_id }
         | UserRequest::SetQuota { user_id, .. }
@@ -261,8 +269,10 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: UserReque
             // the whole object fit? Checked on the first chunk, so a large
             // object is refused once rather than after occupying a buffer.
             if offset == 0 {
-                if let Some(shelf) = ctx.pools.get(&user_id).and_then(|s| pool_shelf(&s)) {
-                    if let Err(full) = ctx.meter.admits(&user_id, shelf.as_ref(), total_size).await {
+                if let Some(store) = ctx.pools.get(&user_id) {
+                    let shelves = pool_shelves(&store);
+                    let shelves: Vec<&dyn SyncableStore> = shelves.iter().map(|s| s.as_ref()).collect();
+                    if let Err(full) = ctx.meter.admits(&user_id, &shelves, total_size).await {
                         return UserResponse::VaultFull {
                             held: full.held,
                             quota: full.quota,
@@ -356,6 +366,14 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: UserReque
         UserRequest::TenantDevice { user_id, change, signature } => {
             Ok(crate::devices::change(ctx, &user_id, change, &signature).await)
         }
+        // The person's drives here (`crate::drives`): made, listed and retired
+        // by a device of theirs. Paired standing was checked above; a made
+        // drive is named by its id, so the tenancy's own tree is beyond reach.
+        UserRequest::TenantDriveMake { user_id, drive, sealed_name } => {
+            crate::drives::make(ctx, &user_id, drive, sealed_name).await
+        }
+        UserRequest::TenantDrives { user_id } => crate::drives::list(ctx, &user_id).await,
+        UserRequest::TenantDriveRetire { user_id, drive } => crate::drives::retire(ctx, &user_id, drive).await,
         // Every other variant was refused above: the landlord's six went to
         // `control::landlord` and nothing else reaches this far, which
         // `each_standing_reaches_exactly_its_row_of_the_table` holds. Should
@@ -435,10 +453,23 @@ fn refusal(
     UserResponse::Error { message }
 }
 
-/// The shelf a pool rests on: its "local" mount, which on a vault is the
-/// sealed-only stack straight over the shelf, so the listing is the shelf's.
-pub fn pool_shelf(store: &kotton_store::runtime::user::UserStore) -> Option<Arc<dyn SyncableStore>> {
-    store.get_remote("local")
+/// The shelves a pool rests on: one per drive the tenant keeps here — the
+/// tenancy's own tree, `local`, and each made beside it (`crate::drives`) —
+/// each the sealed-only stack straight over its shelf on a vault, so a
+/// listing is the shelf's. What the meter measures, so every drive is charged.
+pub fn pool_shelves(store: &kotton_store::runtime::user::UserStore) -> Vec<Arc<dyn SyncableStore>> {
+    store
+        .shelf_mounts()
+        .into_iter()
+        .filter_map(|(mount, _)| store.get_remote(&mount))
+        .collect()
+}
+
+/// What a pool holds over every drive it keeps, walked now.
+pub async fn measure_pool(store: &kotton_store::runtime::user::UserStore) -> u64 {
+    let shelves = pool_shelves(store);
+    let shelves: Vec<&dyn SyncableStore> = shelves.iter().map(|s| s.as_ref()).collect();
+    Meter::measure_all(&shelves).await
 }
 
 /// The meter's readout for a pool: measured now if never measured, and the
@@ -447,8 +478,8 @@ pub async fn capacity(ctx: &PeerContext, user_id: &str) -> UserResponse {
     let held = match ctx.meter.held(user_id) {
         Some(h) => h,
         None => {
-            let measured = match ctx.pools.get(user_id).and_then(|s| pool_shelf(&s)) {
-                Some(shelf) => Meter::measure(shelf.as_ref()).await,
+            let measured = match ctx.pools.get(user_id) {
+                Some(store) => measure_pool(&store).await,
                 None => 0,
             };
             ctx.meter.set(user_id, measured);
@@ -465,7 +496,7 @@ pub async fn capacity(ctx: &PeerContext, user_id: &str) -> UserResponse {
 mod tests {
     use super::*;
 
-    /// One of each verb a tenant's device says to its pool — the ten.
+    /// One of each verb a tenant's device says to its pool — the fourteen.
     fn tenant_verbs() -> Vec<UserRequest> {
         let u = || "alice".to_string();
         vec![
@@ -521,6 +552,16 @@ mod tests {
                     said_at_ms: 0,
                 },
                 signature: vec![],
+            },
+            UserRequest::TenantDriveMake {
+                user_id: u(),
+                drive: kotton_wire::ipc::MadeDrive([1; 16]),
+                sealed_name: vec![],
+            },
+            UserRequest::TenantDrives { user_id: u() },
+            UserRequest::TenantDriveRetire {
+                user_id: u(),
+                drive: kotton_wire::ipc::MadeDrive([1; 16]),
             },
         ]
     }

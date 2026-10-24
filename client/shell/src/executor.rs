@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[cfg(feature = "cli")]
 use crate::commands::{
     AppCommand, CpCommand, DeviceCommand, DoorCommand, DoctorCommand, IdCommand, IssuerCommand, KeepCommand, LogsCommand,
-    EnrolCommand, MintCommand, PeerCommand, RelayCommand, SessionCommand, SyncCommand, TedCommand, VaultCommand,
+    DriveCommand, EnrolCommand, MintCommand, PeerCommand, RelayCommand, SessionCommand, SyncCommand, TedCommand, VaultCommand,
 };
 use crate::commands::{
     CatCommand, CdCommand, ClearCommand, CommandOutput, CommandRegistry, DaemonCommand,
@@ -112,6 +112,7 @@ impl ShellExecutor {
             registry.register("vault", VaultCommand);
             registry.register("session", SessionCommand);
             registry.register("sync", SyncCommand);
+            registry.register("drive", DriveCommand);
             registry.register("id", IdCommand);
         }
 
