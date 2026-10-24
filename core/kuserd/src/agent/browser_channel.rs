@@ -367,8 +367,10 @@ pub(super) async fn revoke(
 
 /// Drive one relayed frame. Returns the frame to relay back to the browser.
 ///
-/// `user_id` is the user `khttpd` authenticated for (its bootstrap token names
-/// exactly one). `ttl_secs` bounds how long an unknown browser waits for a human.
+/// The person is the user `khttpd` authenticated for (its bootstrap token names
+/// exactly one); `named` is the person the frame itself names, which on this
+/// path is absent or that same person. `ttl_secs` bounds how long an unknown
+/// browser waits for a human.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_frame(
     ctx: &AgentContext,
@@ -376,6 +378,7 @@ pub(super) async fn handle_frame(
     conn_session: &std::sync::Arc<std::sync::Mutex<Option<ConnSessionData>>>,
     pending_confirms: &PendingConfirms,
     desks: &BrowserDesks,
+    named: Option<String>,
     channel_id: Option<String>,
     frame: Vec<u8>,
 ) -> UserResponse {
@@ -390,6 +393,11 @@ pub(super) async fn handle_frame(
             None => return sealed_or_plain_refuse("this gateway connection is not authenticated"),
         }
     };
+    // The token is what names the person here. A frame that names one too
+    // names the same one, or it is not this connection's to carry.
+    if named.as_deref().is_some_and(|n| n != user_id) {
+        return sealed_or_plain_refuse("this gateway connection serves another person than the frame names");
+    }
     // A gateway that named its channel is telling us which one; one that did
     // not gets a name of its own, minted once and kept for this connection.
     // Without that, two browsers on two connections would share the key
@@ -502,12 +510,27 @@ async fn serve_frame(
     }
 }
 
-/// One frame from a browser behind a gateway device, on the peer path.
+/// The registry name of a channel a gateway device carries for `user_id`.
 ///
-/// The gateway was admitted by the handshake against its paired key and its
-/// posture was checked by the caller; what is left is the same ceremony the
-/// local path runs, on state keyed by the gateway and its channel name rather
-/// than by an IPC connection. The caller is anonymous to the OS: nothing about
+/// The person is part of the name because one gateway key may be paired by two
+/// people here: a channel is admitted for one person (its ceremony runs against
+/// their browsers and their desk), and a frame for another person under the
+/// same channel name is a different channel, never a turn of this one. A DID
+/// and a user id carry no `#` (`validate_user_id`), so the first two separate
+/// the parts whatever the gateway names its channel.
+pub(super) fn gateway_key(peer_did: &str, user_id: &str, channel_id: Option<&str>) -> String {
+    format!("{peer_did}#{user_id}#{}", channel_id.unwrap_or("-"))
+}
+
+/// One frame from a browser behind a gateway device, on the peer path, for
+/// `user_id`.
+///
+/// The gateway was admitted by the handshake against its paired key, and the
+/// caller read `user_id`'s own row for that key as `Posture::Gateway` — the
+/// person the frame names, not any person who pairs the key. What is left is
+/// the same ceremony the local path runs, on state keyed by the gateway, the
+/// person and the channel's name ([`gateway_key`]) rather than by an IPC
+/// connection, so a channel is one person's from its first frame. The caller is anonymous to the OS: nothing about
 /// a relayed frame names a process, and the dispatch decides by the channel's
 /// own session, never by the transport it arrived on.
 pub(super) async fn handle_gateway_frame(
@@ -517,7 +540,7 @@ pub(super) async fn handle_gateway_frame(
     channel_id: Option<String>,
     frame: Vec<u8>,
 ) -> UserResponse {
-    let key = format!("{peer_did}#{}", channel_id.as_deref().unwrap_or("-"));
+    let key = gateway_key(peer_did, user_id, channel_id.as_deref());
     // The caller is anonymous to the OS: nothing about a relayed frame names a
     // process, and the dispatch decides by the channel's own session, never by
     // the transport it arrived on.

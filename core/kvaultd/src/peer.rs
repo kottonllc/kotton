@@ -415,8 +415,13 @@ async fn held_by(
     let (PeerStanding::Stranger, Some(key), Some(_)) = (standing, peer_pubkey, pool) else {
         return None;
     };
-    match kotton_peer::daemon::db::paired_node_for_pubkey(db, &key).await {
-        Ok(found) => found.map(|(user_id, _)| user_id),
+    // Every pool the key is paired to, not the first by name: a vault keeps a
+    // key to one tenant (`crate::devices`), so this is one pool or none, and a
+    // key two pools pair is not a state this sentence names — it reads as
+    // none, today's sentence, rather than picking one of them.
+    match kotton_peer::daemon::db::paired_users_for_pubkey(db, &key).await {
+        Ok(mut pools) if pools.len() == 1 => pools.pop(),
+        Ok(_) => None,
         Err(e) => {
             tracing::warn!(error = %e, "could not read which pool a refused key is paired to");
             None
@@ -692,5 +697,12 @@ mod tests {
         assert_eq!(held_by(&db, &PeerStanding::Paired, Some(sams), Some("alice")).await, None);
         assert_eq!(held_by(&db, &PeerStanding::Stranger, Some(sams), None).await, None);
         assert_eq!(held_by(&db, &PeerStanding::Stranger, None, Some("alice")).await, None);
+
+        // A key two pools pair — a state `crate::devices` does not make on a
+        // vault — names neither, rather than the first by name.
+        kotton_peer::daemon::db::insert_paired_node(&db, "sams-laptop", "pat", "did:key:zSam", &sams, "[]", 0, Some("full"))
+            .await
+            .expect("a second pool's row for sam's key");
+        assert_eq!(held_by(&db, &PeerStanding::Stranger, Some(sams), Some("alice")).await, None);
     }
 }

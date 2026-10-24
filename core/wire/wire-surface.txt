@@ -68,6 +68,8 @@ BrowserFrame
     #[serde(with = "crate::base64_bytes")]
     bytes: Vec<u8>
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_id: Option<String>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     channel: Option<String>
 BrowserOutbound
     channel: String

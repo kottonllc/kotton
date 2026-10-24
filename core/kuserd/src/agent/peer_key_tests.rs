@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! What a peer's key is to the peer path when rows are each person's
 //! (kotton #99): one key may be paired by two people, so the two decisions
-//! `handle_peer_request` reads from a key are held here — the gateway's
-//! confinement, read before the frame names a person, and `NodeRelay`'s
-//! own-device check, read for the person it names.
+//! `handle_peer_request` reads from a key are held here, each for the person
+//! the request names and never across persons (kotton #119) — the gateway's
+//! confinement and the person its frames reach ([`peer_ask`]), and
+//! `NodeRelay`'s own-device check.
 
-use super::{asks_as_own_device, gateway_user_for};
+use super::browser_channel::gateway_key;
+use super::{asks_as_own_device, peer_ask, PeerAsk};
+use kotton_wire::UserRequest;
 use kotton_peer::daemon::db as network_db;
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -22,26 +25,76 @@ fn key_and_did(seed: u8) -> ([u8; 32], String) {
     (key, did)
 }
 
-/// **A key any person here pairs as a gateway is held to the gateway's verb,
-/// whatever other row it has.** Alice pairs the key as a full device and bob
-/// as his gateway: the person-less read finds bob's gateway row, so the key
-/// speaks one verb for bob, never a full device's reach. The narrower verb
-/// wins. Alone, alice's full row confines nothing.
+fn frame_for(user: Option<&str>) -> UserRequest {
+    UserRequest::BrowserFrame {
+        bytes: vec![1, 2, 3],
+        channel: Some("tab".to_string()),
+        user_id: user.map(str::to_string),
+    }
+}
+
+/// A verb that is not a gateway's: a recovery fetch for `user`.
+fn other_for(user: &str) -> UserRequest {
+    UserRequest::RecoveryFetch { user_id: user.to_string() }
+}
+
+/// **One key, paired as a gateway by two people: each frame reaches the
+/// person it names, not the first by name** (kotton #119). Alice and bob both
+/// enrol the same gateway. Bob sorts after alice and is paired first, so
+/// neither the name order nor the insertion order can be what answers. A
+/// frame for bob is bob's browser's, a frame for alice is alice's, and their
+/// channels under one channel name are two channels. A frame naming carol,
+/// who pairs the key nowhere, or naming no one, reaches no one.
 #[tokio::test]
-async fn a_key_one_person_pairs_as_a_gateway_is_held_to_the_gateway_verb() {
+async fn one_gateway_two_people_each_frame_reaches_the_person_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = machine_db(dir.path()).await;
+    let (key, did) = key_and_did(25);
+    network_db::insert_paired_node(&db, "front-door", "bob", &did, &key, "[]", 0, Some("gateway")).await.unwrap();
+    network_db::insert_paired_node(&db, "front-door", "alice", &did, &key, "[]", 0, Some("gateway")).await.unwrap();
+
+    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("bob"))).await, Ok(PeerAsk::Gateway("bob".into())));
+    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("alice"))).await, Ok(PeerAsk::Gateway("alice".into())));
+    assert_ne!(
+        gateway_key(&did, "alice", Some("tab")),
+        gateway_key(&did, "bob", Some("tab")),
+        "two people's browsers behind one gateway shared a channel"
+    );
+
+    assert!(peer_ask(&db, Some(&key), &frame_for(Some("carol"))).await.is_err(), "a frame reached a person who pairs no gateway here");
+    assert!(peer_ask(&db, Some(&key), &frame_for(None)).await.is_err(), "a frame naming no one was taken for someone");
+
+    // Bob revokes his gateway: his frames stop, alice's still reach her.
+    sqlx::query("DELETE FROM paired_nodes WHERE user_id = 'bob'").execute(db.as_ref()).await.unwrap();
+    assert!(peer_ask(&db, Some(&key), &frame_for(Some("bob"))).await.is_err());
+    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("alice"))).await, Ok(PeerAsk::Gateway("alice".into())));
+}
+
+/// **A key is held to the gateway's verbs for the person who pairs it as
+/// one, and only for them.** Alice pairs the key as her full device and bob
+/// as his gateway. Asked for bob, the key is his gateway whatever it asks:
+/// his browser's frames reach him, and any other verb for him is held to the
+/// gateway's verbs. Asked for alice, it is not a gateway: a verb for her goes
+/// on to her own standing, and a frame naming her is refused, since she
+/// enrolled no gateway. A key paired nowhere carries no frame for anyone.
+#[tokio::test]
+async fn a_key_is_held_to_the_gateway_verb_for_the_person_who_pairs_it_as_one() {
     let dir = tempfile::tempdir().unwrap();
     let db = machine_db(dir.path()).await;
     let (key, did) = key_and_did(21);
     network_db::insert_paired_node(&db, "laptop", "alice", &did, &key, "[]", 0, Some("full")).await.unwrap();
-    assert_eq!(gateway_user_for(&db, &key).await.unwrap(), None, "a full device was confined as a gateway");
-
-    // Inserted after alice's, and sorting after her by user, so the answer
-    // is the gateway ordering's and not the insertion's or the name's.
     network_db::insert_paired_node(&db, "front-door", "bob", &did, &key, "[]", 0, Some("gateway")).await.unwrap();
-    assert_eq!(gateway_user_for(&db, &key).await.unwrap().as_deref(), Some("bob"));
+
+    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("bob"))).await, Ok(PeerAsk::Gateway("bob".into())));
+    assert_eq!(peer_ask(&db, Some(&key), &other_for("bob")).await, Ok(PeerAsk::Gateway("bob".into())));
+    assert_eq!(peer_ask(&db, Some(&key), &other_for("alice")).await, Ok(PeerAsk::Person("alice".into())));
+    assert!(peer_ask(&db, Some(&key), &frame_for(Some("alice"))).await.is_err(), "alice's full device carried a frame as her gateway");
 
     let (unpaired, _) = key_and_did(22);
-    assert_eq!(gateway_user_for(&db, &unpaired).await.unwrap(), None);
+    assert!(peer_ask(&db, Some(&unpaired), &frame_for(Some("bob"))).await.is_err());
+    assert_eq!(peer_ask(&db, Some(&unpaired), &other_for("bob")).await, Ok(PeerAsk::Person("bob".into())));
+    // A peer whose DID names no key is no one's gateway.
+    assert!(peer_ask(&db, None, &frame_for(Some("bob"))).await.is_err());
 }
 
 /// **`NodeRelay` hands this node's relay admission to the asking person's own

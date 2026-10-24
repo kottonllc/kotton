@@ -345,32 +345,32 @@ pub(crate) async fn delete_paired_node(
     Ok(true)
 }
 
-/// A user a paired key belongs to, and its posture as text (`None` for rows
-/// written before posture was projected here), for a caller that knows the key
-/// and no person. Rows are each person's (`migrations/0027_paired_nodes_per_person.sql`),
-/// so two people here may pair one key (two tenants of one vault on a shared
-/// device): this answers one of them, a `gateway` row first, so that a key any
-/// person here pairs as a gateway is held to a gateway's one verb whichever
-/// other row it also has. A caller that knows the person asks
-/// [`paired_posture_for_user`].
-pub async fn paired_node_for_pubkey(
+/// Every person here who pairs `public_key`, by name, in name order. Rows are
+/// each person's (`migrations/0027_paired_nodes_per_person.sql`), so two
+/// people here may pair one key (two tenants of one vault on a shared device,
+/// or one gateway two people enrolled), and a reader that knows the key and no
+/// person is handed all of them rather than one. What a key *is* to a person —
+/// its posture, and so what it may ask for them — is read for the person a
+/// request names, by [`paired_posture_for_user`]; nothing here decides it.
+pub async fn paired_users_for_pubkey(
     db: &Arc<SqlitePool>,
     public_key: &[u8; 32],
-) -> io::Result<Option<(String, Option<String>)>> {
-    let row = sqlx::query(
-        "SELECT user_id, posture FROM paired_nodes WHERE public_key = ? \
-         ORDER BY (posture = 'gateway') DESC, user_id, device_did LIMIT 1",
-    )
+) -> io::Result<Vec<String>> {
+    sqlx::query_scalar("SELECT DISTINCT user_id FROM paired_nodes WHERE public_key = ? ORDER BY user_id")
         .bind(public_key.as_slice())
-        .fetch_optional(db.as_ref())
+        .fetch_all(db.as_ref())
         .await
-        .map_err(db_err)?;
-    Ok(row.map(|r| (r.get::<String, _>("user_id"), r.get::<Option<String>, _>("posture"))))
+        .map_err(db_err)
 }
 
 /// The posture `user_id` pairs `public_key` under: `None` when they pair it
-/// nowhere, `Some(None)` for a row naming no posture. When they pair it under
-/// two DIDs, a `gateway` row answers first, as in [`paired_node_for_pubkey`].
+/// nowhere, `Some(None)` for a row naming no posture. This is the read that
+/// decides what a key may ask *for this person* — the peer path's gateway
+/// confinement and `NodeRelay`'s own-device check both read it, for the person
+/// the request names; another person's row for the same key says nothing of
+/// what it is to this one. When this person pairs the key under two DIDs, a
+/// `gateway` row answers first: within one person's rows, the narrower verb
+/// wins.
 pub async fn paired_posture_for_user(
     db: &Arc<SqlitePool>,
     public_key: &[u8; 32],
