@@ -190,13 +190,26 @@ pub async fn name(ctx: &PeerContext, user_id: &str, drive: MadeDrive, sealed_nam
 /// `TenantDriveRetire`: every sealed object in the made drive's tree, then the
 /// tree, its pinned key domain and its sealed name — and the pool's count
 /// measured again, so the quota sees the bytes go.
+///
+/// Idempotent: a drive this vault no longer keeps is answered `Ok`, as one it
+/// has just retired is, so a retry after a lost answer is read truly.
 pub async fn retire(ctx: &PeerContext, user_id: &str, drive: MadeDrive) -> io::Result<UserResponse> {
     let Some(pool) = ctx.pools.get(user_id) else {
         return Ok(refused(format!("this vault keeps no pool for '{user_id}'")));
     };
     let tree = drive.tree();
     let Some(path) = pool.shelf_mounts().into_iter().find(|(m, _)| *m == tree).map(|(_, p)| p) else {
-        return Ok(refused(format!("this vault keeps no drive for '{user_id}' under {tree}")));
+        // Already as asked: the tree is gone. A retire answers what the vault
+        // keeps afterwards, not whether this ask was the one that removed it,
+        // so a device whose first ask acted and whose answer was lost reads
+        // the second ask truly. A stray name row is taken with it.
+        sqlx::query("DELETE FROM tenant_drives WHERE user_id = ? AND tree = ?")
+            .bind(user_id)
+            .bind(&tree)
+            .execute(ctx.db.as_ref())
+            .await
+            .map_err(io::Error::other)?;
+        return Ok(UserResponse::Ok);
     };
     let shelf = ctx.runtime.shelves().open(user_id, &tree, &path);
     let objects = crate::tenancy::clear_shelf(shelf.as_ref()).await?;
@@ -354,10 +367,13 @@ mod tests {
             UserResponse::Error { message } => assert!(message.contains("keeps no drive"), "{message}"),
             other => panic!("bob named alice's drive: {other:?}"),
         }
-        match retire(&ctx, "alice", work).await.unwrap() {
-            UserResponse::Error { message } => assert!(message.contains("keeps no drive"), "{message}"),
-            other => panic!("a retired drive was retired again: {other:?}"),
-        }
+        // Idempotent: asked again — an answer lost, a retry — it is `Ok`, and
+        // nothing else changes.
+        assert!(
+            matches!(retire(&ctx, "alice", work).await.unwrap(), UserResponse::Ok),
+            "a retire asked again for a drive already gone is not Ok"
+        );
+        assert_eq!(keys(&ctx, "alice", &photos.tree()).await, ["x/photo"]);
 
         let reloaded = UserStore::load(
             "alice",

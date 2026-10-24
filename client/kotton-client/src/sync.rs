@@ -253,8 +253,15 @@ impl KottonClient {
         self.drives(UserRequest::DriveShow { user_id: user_id.into(), name: name.into() }).await
     }
 
-    /// `drive move <name> --to <vault>`: the drive where it now lives.
-    pub async fn drive_move(&mut self, user_id: &str, name: &str, to: &str) -> io::Result<Vec<kotton_wire::ipc::DriveDescriptor>> {
-        self.drives(UserRequest::DriveMove { user_id: user_id.into(), name: name.into(), to: to.into() }).await
+    /// `drive move <name> --to <vault> [--from <vault>]`: the drive where it now lives.
+    pub async fn drive_move(
+        &mut self,
+        user_id: &str,
+        name: &str,
+        to: &str,
+        from: Option<&str>,
+    ) -> io::Result<Vec<kotton_wire::ipc::DriveDescriptor>> {
+        self.drives(UserRequest::DriveMove { user_id: user_id.into(), name: name.into(), to: to.into(), from: from.map(Into::into) })
+            .await
     }
 }

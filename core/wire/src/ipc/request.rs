@@ -659,7 +659,8 @@ pub enum UserRequest {
     /// it, and its sealed name, as `drive move` does at the vault it moved
     /// from once the vault it moved to holds every object. A made drive only:
     /// the tenancy's own tree is no [`crate::ipc::MadeDrive`], so it cannot be
-    /// named here.
+    /// named here. Idempotent: a made drive the vault no longer keeps is
+    /// answered `Ok`.
     ///
     /// Peer-only, from a paired device of the person's. A vault verb.
     TenantDriveRetire {
@@ -688,14 +689,19 @@ pub enum UserRequest {
         user_id: String,
         name: String,
     },
-    /// `drive move <name> --to <vault>`: carry the drive's sealed tree, under
-    /// the same key, to another vault the person keeps drives on, and retire
-    /// it where it was; every device of theirs follows the drive there.
-    /// Answered with `Drives`, the drive where it now lives.
+    /// `drive move <name> --to <vault> [--from <vault>]`: carry the drive's
+    /// sealed tree, under the same key, to another vault the person keeps
+    /// drives on, and retire it where it was; every device of theirs follows
+    /// the drive there. A move left half-done — named at `to`, not yet retired
+    /// where it was — is finished by moving it there again. `from` names the
+    /// copy meant where two drives no move made share the name. Answered with
+    /// `Drives`, the drive where it now lives.
     DriveMove {
         user_id: String,
         name: String,
         to: String,
+        #[serde(default)]
+        from: Option<String>,
     },
     /// List a mount in **storage-key space** — the keys `ReadSealed`/`WriteSealed`
     /// address, not the caller's logical paths (RFC-0044).

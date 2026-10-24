@@ -14,14 +14,14 @@ use crate::state::ShellState;
 ///   drive create <name> [--on <vault>]
 ///   drive list
 ///   drive show <name>
-///   drive move <name> --to <vault>
+///   drive move <name> --to <vault> [--from <vault>]
 /// ```
 ///
 /// The daemon asks the vaults (`kotton_device::users::drive_verbs`); this says
 /// what they answered.
 pub struct DriveCommand;
 
-const USAGE: &str = "usage: drive create <name> [--on <vault>] | drive list | drive show <name> | drive move <name> --to <vault>";
+const USAGE: &str = "usage: drive create <name> [--on <vault>] | drive list | drive show <name> | drive move <name> --to <vault> [--from <vault>]";
 
 /// A size as a person reads it; `?` when the vault did not answer.
 fn size_said(size: Option<u64>) -> String {
@@ -110,8 +110,14 @@ impl Command for DriveCommand {
                         .collect(),
                 ))
             }
-            [sub, name, flag, to] if sub == "move" && flag == "--to" => {
-                let drives = client.drive_move(&user_id, name, to).await.map_err(|e| said("move", e))?;
+            [sub, name, rest @ ..] if sub == "move" => {
+                let (to, from) = match rest {
+                    [t, to] if t == "--to" => (to, None),
+                    [t, to, f, from] if t == "--to" && f == "--from" => (to, Some(from.as_str())),
+                    [f, from, t, to] if t == "--to" && f == "--from" => (to, Some(from.as_str())),
+                    _ => return Ok(CommandOutput::fail("drive move: needs --to <vault>", Some(USAGE.into()))),
+                };
+                let drives = client.drive_move(&user_id, name, to, from).await.map_err(|e| said("move", e))?;
                 let vault = drives.first().map(|d| d.vault.clone()).unwrap_or_else(|| to.clone());
                 Ok(CommandOutput::shapes(vec![Out::Confirm {
                     action: format!("drive moved to '{vault}'; your other devices follow it there at their next sync"),
@@ -131,7 +137,7 @@ impl Command for DriveCommand {
     }
 
     fn flags(&self) -> Vec<&'static str> {
-        vec!["--on", "--to"]
+        vec!["--on", "--to", "--from"]
     }
 
     fn help_text(&self) -> &'static str {
@@ -146,7 +152,8 @@ USAGE:
   drive create <name> [--on <vault>]   make a drive on one of your vaults
   drive list                           every drive: where each lives, its size, which devices keep it whole
   drive show <name>                    one drive, on each vault it is kept on
-  drive move <name> --to <vault>       carry a drive, sealed, to another of your vaults
+  drive move <name> --to <vault> [--from <vault>]
+                                       carry a drive, sealed, to another of your vaults
 
 A drive is a sealed tree a vault keeps for you; a vault keeps as many as you
 make. Its name is sealed under your key: the vault cannot read it. Your first
@@ -156,13 +163,15 @@ A move copies every sealed object to the other vault under the same key, and
 retires the drive where it was only once the other vault holds all of it.
 Your other devices follow it at their next sync. A move that fails leaves the
 drive where it was; a copy the other vault would not take back is listed as an
-unfinished move, and moving the drive there again clears it. `personal` does
-not move.
+unfinished move, and moving the drive there again clears it. A move cut off
+after the other vault has the drive is finished by running it again. `personal`
+does not move.
 
 FLAGS:
   --on <vault>   the vault to make the drive on: its label, DID or key
                  (needed when you keep drives on more than one)
   --to <vault>   the vault to move the drive to: its label, DID or key
+  --from <vault> the copy to move, where two drives of yours share a name
 
 EXAMPLES:
   drive create photos                  # on your one vault

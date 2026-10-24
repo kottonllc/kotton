@@ -176,7 +176,8 @@ impl UserStore {
         self.ctx.sealing_keys()
     }
 
-    /// Seal a drive's name under this person's key, bound to the `tree` a
+    /// Seal what names a drive — the bytes a device's drive verbs make of its
+    /// name and where it came from — under this person's key, bound to the `tree` a
     /// vault keeps the drive under, for the vault to keep and hand back to
     /// every device of theirs (`kotton_wire::ipc::TenantDrive`). The vault
     /// cannot open it; a sealed name moved to another tree does not open there,
@@ -189,17 +190,17 @@ impl UserStore {
     /// (`kotton_device::users::drive_verbs`).
     ///
     /// Refused on a store with no keys: a node that holds none names nothing.
-    pub fn seal_drive_name(&self, tree: &str, name: &str, finished: bool) -> Result<Vec<u8>> {
+    pub fn seal_drive_name(&self, tree: &str, name: &[u8], finished: bool) -> Result<Vec<u8>> {
         let keys = self
             .sealing_keys()
             .ok_or_else(|| anyhow::anyhow!("this node holds no keys for {}, so it cannot name a drive", self.user_id()))?;
-        crate::provider::seal_envelope(keys.cek, &drive_name_aad(tree, finished), name.as_bytes())
+        crate::provider::seal_envelope(keys.cek, &drive_name_aad(tree, finished), name)
             .map_err(|e| anyhow::anyhow!("sealing a drive's name: {e}"))
     }
 
     /// Open a drive's name [`Self::seal_drive_name`] sealed for `tree`, and
     /// whether it was sealed finished.
-    pub fn open_drive_name(&self, tree: &str, sealed: &[u8]) -> Result<(String, bool)> {
+    pub fn open_drive_name(&self, tree: &str, sealed: &[u8]) -> Result<(Vec<u8>, bool)> {
         let keys = self
             .sealing_keys()
             .ok_or_else(|| anyhow::anyhow!("this node holds no keys for {}, so it cannot read a drive's name", self.user_id()))?;
@@ -212,7 +213,6 @@ impl UserStore {
                 false,
             ),
         };
-        let name = String::from_utf8(name).map_err(|_| anyhow::anyhow!("the name sealed for drive tree '{tree}' is not text"))?;
         Ok((name, finished))
     }
 

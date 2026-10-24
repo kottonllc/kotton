@@ -1356,11 +1356,11 @@ pub(super) async fn handle_request(
             };
             kotton_device::users::drive_verbs::show(runtime, &store, db, &user_id, &name).await
         }
-        UserRequest::DriveMove { user_id, name, to } => {
+        UserRequest::DriveMove { user_id, name, to, from } => {
             let Some(store) = users.get(&user_id) else {
                 return Ok(UserResponse::Error { message: format!("user runtime '{user_id}' is not loaded") });
             };
-            kotton_device::users::drive_verbs::move_to(runtime, &store, db, &user_id, &name, &to).await
+            kotton_device::users::drive_verbs::move_to(runtime, &store, db, &user_id, &name, &to, from.as_deref()).await
         }
         UserRequest::SyncDrives { user_id } => {
             let (job_id, targets) = sync_engine.enqueue(&user_id).await;

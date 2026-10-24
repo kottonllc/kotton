@@ -813,7 +813,8 @@ USAGE:
   drive create <name> [--on <vault>]   make a drive on one of your vaults
   drive list                           every drive: where each lives, its size, which devices keep it whole
   drive show <name>                    one drive, on each vault it is kept on
-  drive move <name> --to <vault>       carry a drive, sealed, to another of your vaults
+  drive move <name> --to <vault> [--from <vault>]
+                                       carry a drive, sealed, to another of your vaults
 
 A drive is a sealed tree a vault keeps for you; a vault keeps as many as you
 make. Its name is sealed under your key: the vault cannot read it. Your first
@@ -823,13 +824,15 @@ A move copies every sealed object to the other vault under the same key, and
 retires the drive where it was only once the other vault holds all of it.
 Your other devices follow it at their next sync. A move that fails leaves the
 drive where it was; a copy the other vault would not take back is listed as an
-unfinished move, and moving the drive there again clears it. `personal` does
-not move.
+unfinished move, and moving the drive there again clears it. A move cut off
+after the other vault has the drive is finished by running it again. `personal`
+does not move.
 
 FLAGS:
   --on <vault>   the vault to make the drive on: its label, DID or key
                  (needed when you keep drives on more than one)
   --to <vault>   the vault to move the drive to: its label, DID or key
+  --from <vault> the copy to move, where two drives of yours share a name
 
 EXAMPLES:
   drive create photos                  # on your one vault

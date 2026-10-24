@@ -615,7 +615,7 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
 
     // The move: the sealed bytes to the second vault, under the same key.
     let first_drive = sealed_in(&first, FIRST_DRIVE_TREE).await;
-    let moved = client_a.drive_move(USER, "photos", "vault-2").await.expect("drive move");
+    let moved = client_a.drive_move(USER, "photos", "vault-2", None).await.expect("drive move");
     assert_eq!(moved.len(), 1, "{moved:?}");
     assert_eq!(moved[0].vault_key, second_id.pubkey_hex);
     let now = where_recorded(&a, "photos").await;
@@ -634,6 +634,6 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
     assert_eq!(shown.iter().map(|d| d.vault_key.as_str()).collect::<Vec<_>>(), [second_id.pubkey_hex.as_str()]);
 
     // The first drive is kept at both vaults and does not move.
-    let refused = client_b.drive_move(USER, "personal", "vault-2").await.expect_err("personal moved");
+    let refused = client_b.drive_move(USER, "personal", "vault-2", None).await.expect_err("personal moved");
     assert!(refused.to_string().contains("tenancy's own tree"), "{refused}");
 }
