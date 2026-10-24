@@ -221,28 +221,21 @@ pub(crate) async fn add_recovery_phrase(
     }
 }
 
-/// Hand the copy just sealed to every paired node that holds nothing
-/// (`Posture::BlindStorage`), so a node enrolled before the phrase existed can
-/// serve a recovery. Best effort, node by node: one that is asleep
+/// Hand the copy just sealed to every node a drive of the person's is reached
+/// through (`kotton_peer::daemon::drives`) — a vault, which holds nothing it can
+/// open — so a vault enrolled before the phrase existed can serve a recovery. Best effort, node by node: one that is asleep
 /// is logged and skipped, and the caller is told which ones have it.
 async fn deliver_recovery_copy(
     runtime: &DeviceRuntime,
     db: &std::sync::Arc<sqlx::SqlitePool>,
     user_id: &str,
 ) -> Vec<kotton_wire::peer::PairedNode> {
-    use kotton_schemas::membership::Posture;
     let Ok(Some(bundle)) =
         kotton_identity::provisioning::read_recovery_bundle_raw(runtime.base_dir(), user_id)
     else {
         return Vec::new();
     };
-    let nodes = match kotton_peer::daemon::db::list_paired_nodes_with_posture(
-        db,
-        user_id,
-        Posture::BlindStorage.as_str(),
-    )
-    .await
-    {
+    let nodes = match kotton_peer::daemon::drives::nodes(db, user_id).await {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!(error = %e, "recovery copy: could not list blind nodes");

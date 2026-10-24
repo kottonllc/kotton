@@ -408,6 +408,8 @@ PeerAdd
     peer_did: String
     peer_pubkey_hex: String
     peer_addr: std::net::SocketAddr
+    #[serde(default)]
+    drive: bool
 PurgeFile
     user_id: String
     path: String
@@ -581,9 +583,11 @@ SyncAwait
     timeout_secs: u64
 SyncConfigure
     user_id: String
-    node_id: String
-    path: String
+    drive: String
+    direction: Option<super::SyncDirection>
     watch: bool
+SyncDrives
+    user_id: String
 SyncMount
     user_id: String
     mount: String
@@ -593,13 +597,9 @@ SyncRuleList
     user_id: String
 SyncRuleRemove
     user_id: String
-    node_id: String
-    path: String
+    drive: String
 SyncStatus
     user_id: String
-SyncTrigger
-    user_id: String
-    node_id: Option<String>
 TakeDeliveries
     user_id: String
     ack: Vec<String>

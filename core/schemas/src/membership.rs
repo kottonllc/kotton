@@ -59,8 +59,9 @@ pub enum Posture {
     /// Named `BlindStorage` and not `BlindReplica`, which it was until 2026-08-28.
     /// "Replica" claims a mirror of the device, and that is wrong twice over: it is
     /// not the product model — a person chooses what to keep off-device, the way
-    /// every consumer cloud works — and it is not even true today, since a blind
-    /// node receives files but not records (the stated gap at `run_record_sync`).
+    /// every consumer cloud works — and a drive is where a person's things live,
+    /// which each device syncs with, not a copy of any one device. It holds files
+    /// and records alike as sealed packs it cannot open.
     ///
     /// *Replica* is worth keeping for what it should mean: a second copy of a blind
     /// storage in another geography, for the operator's own continuity. That is

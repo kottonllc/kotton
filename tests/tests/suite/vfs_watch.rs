@@ -145,20 +145,19 @@ async fn vfs_watch_delivers_change_events() {
     );
 }
 
-/// SyncTrigger returns a job_id (verifies the handler is wired up
-/// and the sync engine signal path doesn't panic).
+/// `SyncDrives` returns a job id and the number of drives it syncs: none,
+/// for a person with no drive yet (verifies the handler is wired up and the
+/// sync engine signal path doesn't panic).
 #[tokio::test]
 async fn sync_now_returns_result() {
     let mut env = TestEnv::spawn().await;
 
     env.client.create_user(USER, crate::common::TEST_PASSPHRASE).await.expect("create_user");
 
-    // sync_trigger enqueues a job; with no paired nodes the engine resolves
-    // immediately but the trigger itself must not fail.
-    let result = env.client.sync_trigger(USER, None).await;
+    let result = env.client.sync_drives(USER).await;
     assert!(
-        result.is_ok(),
-        "sync_trigger should succeed (even with no paired nodes): {result:?}"
+        matches!(result, Ok((_, 0))),
+        "a sync with no drive should succeed and sync none: {result:?}"
     );
 }
 

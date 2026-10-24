@@ -155,7 +155,7 @@ build-all:
 #
 # `kotton_peer::scope` owns the switch and lists what honors it. It used to live in
 # the pairing module and cover only the pairing listener, which is why the QUIC peer
-# listener — bound by peer_sync, relay_peer_sync and every enroll_threshold_sign
+# listener — bound by peer_sync, introduction and every enroll_threshold_sign
 # case — kept raising the dialog anyway.
 #
 # `scope` is domain-tier, so primitive-tier code cannot consult it. mDNS lives in
@@ -448,5 +448,5 @@ dev_services_logs:
 e2e_relay:
     cargo xtask build-relay
     cargo test -p kotton-integration-tests -- --nocapture \
-      relay_circuit relay_peer_sync relay_presence rendezvous_handles \
+      relay_circuit introduction relay_presence rendezvous_handles \
       enroll_then_threshold_sign_over_relay

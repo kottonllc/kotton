@@ -29,8 +29,10 @@ pub struct SyncOutcome {
     pub files: u32,
     /// Total bytes transferred (pushed + pulled).
     pub bytes: u64,
-    /// Number of record NSIDs synced.
-    pub records: u32,
+    // No record count: records ride the packs as sealed segments, so what a
+    // pass moves is files and bytes. The field it had counted the record
+    // changesets a pass pushed in the clear to another device, which no pass
+    // does now; a count that is always zero would say nothing true.
     /// Number of LWW conflicts resolved (always 0 in the current engine).
     pub conflicts_resolved: u32,
     /// Wall-clock duration of the sync pass in milliseconds.

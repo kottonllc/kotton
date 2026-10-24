@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Handing a person's doors to their vault, and taking what it held.
 //!
-//! For each resident user with a vault among their paired nodes: derive the
+//! For each resident user with a drive recorded on this device
+//! (`kotton_peer::daemon::drives`), at the vault it is reached through: derive the
 //! pair handle for every contact and every epoch of the window ahead, hand
 //! them over with `HoldDoors`, then `TakeDeliveries` — open each, prove who
 //! wrote it against the contact's identity key, file it, and acknowledge. Runs
@@ -33,7 +34,7 @@ use kotton_msg::daemon::delivery;
 use kotton_peer::daemon::nodes::load_signing_key;
 use kotton_peer::membership::Membership as _;
 use kotton_peer::rendezvous;
-use kotton_schemas::membership::{Posture, Role};
+use kotton_schemas::membership::Role;
 use kotton_wire::ipc::{CarriedMessage, Carrying, HeldDoor, UserRequest, UserResponse};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
@@ -126,13 +127,9 @@ pub async fn sync_once(
     record_stores: &RecordStores,
 ) {
     for (user_id, store) in users.all() {
-        let vaults = match kotton_peer::daemon::db::list_paired_nodes_with_posture(
-            db,
-            &user_id,
-            Posture::BlindStorage.as_str(),
-        )
-        .await
-        {
+        // The nodes the person's drives are reached through, as the drive
+        // record names them (`kotton_peer::daemon::drives`).
+        let vaults = match kotton_peer::daemon::drives::nodes(db, &user_id).await {
             Ok(v) if !v.is_empty() => v,
             // Nothing rented. The ordinary case, and the only one of the four
             // exits below that is not a fault.

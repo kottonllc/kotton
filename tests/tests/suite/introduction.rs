@@ -2,19 +2,19 @@
 //! A relay introduces your devices, end to end
 //! (`TASK-a-relay-introduces-your-devices`).
 //!
-//! The setup is `relay_peer_sync`'s: two daemons on one relay, B joined to A's
+//! Two daemons on one relay, B joined to A's
 //! identity, and B given a dead direct address for A so its dial falls through to
 //! the relayed circuit. What this adds is the step after: over that circuit B asks
 //! A for an introduction, A opens a listener that hears B's address and token and
-//! nothing else, and the pull goes direct. The listener is gone when the session is.
+//! nothing else, and what B asks of A — a co-signature, since devices sync by way
+//! of a drive and never from each other — goes direct. The listener is gone when
+//! the session is.
 //!
 //! Under `KOTTON_PAIR_LOCAL_ONLY` (which `bind-check`, and so `just test`, sets)
 //! both ends bind loopback; without it they bind the machine's own address on its
 //! network, which in a container is still this machine.
 
-use kotton::SyncDirection;
 use kotton_schemas::membership::Posture;
-use kotton_wire::remote::RemoteBackend;
 use std::time::Duration;
 
 use crate::common::{connect_when_ready, enroll_streamed, unique_ipc, wait_for_daemon};
@@ -24,9 +24,9 @@ fn free_port() -> u16 {
     s.local_addr().expect("local_addr").port()
 }
 
-/// B reaches A only through the relay; the relay introduces them; the pull lands
-/// over the introduced connection; and A's introduced listener is closed once the
-/// session ends.
+/// B reaches A only through the relay; the relay introduces them; B's request of
+/// A — a co-signature — lands over the introduced connection; and A's introduced
+/// listener is closed once the session ends.
 #[tokio::test]
 async fn a_relay_introduces_two_devices_and_they_go_direct() {
     use kotton_secret::MemorySecrets;
@@ -121,48 +121,26 @@ async fn a_relay_introduces_two_devices_and_they_go_direct() {
         .expect("inject a dead address for A into B");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    for i in 1u8..=3 {
-        client_a
-            .write_file("alice", &format!("intro{i}.bin"), &[i; 64])
-            .await
-            .expect("write_file A");
-    }
-    client_b
-        .remote_add(
-            "alice",
-            "peer-a",
-            RemoteBackend::Kotton {
-                peer_did: a_op_did.clone(),
-                label: "device-a".to_string(),
-            },
-            None,
-        )
-        .await
-        .expect("remote_add Kotton on B");
-
+    // B speaks to A as one of the person's own devices does: a threshold
+    // signature B coordinates, which A co-signs over the peer channel. Devices
+    // do not sync from each other — what they replicate goes by way of a drive —
+    // so a co-signature, and not a pull, is what B asks of A here.
     let before = runtime_a.introduced_requests();
-    let result = client_b
-        .sync_mount("alice", "local", "peer-a", Some(SyncDirection::Pull))
+    let signature = client_b
+        .threshold_sign("alice", b"introduced, then direct")
         .await
-        .expect("sync_mount Pull after an introduction");
-    assert!(result.pulled >= 3, "pulled {}", result.pulled);
-    for i in 1u8..=3 {
-        let data = client_b
-            .read_file("alice", &format!("intro{i}.bin"))
-            .await
-            .expect("read_file B");
-        assert_eq!(data, vec![i; 64], "intro{i}.bin content mismatch on B");
-    }
+        .expect("B and A co-sign after an introduction");
+    assert_eq!(signature.len(), 64, "an Ed25519 signature");
 
-    // The pull went over a session A's introduced listener accepted: the relay
+    // The rounds went over a session A's introduced listener accepted: the relay
     // carried the introduction and the pair went direct. Counted in requests rather
     // than sessions because B's first dial to A — and so the introduction — can come
-    // before the pull, which then reuses the connection; what matters is that the
-    // pull's own requests were served there.
+    // before the rounds, which then reuse the connection; what matters is that the
+    // rounds' own requests were served there.
     assert!(runtime_a.introduced_sessions() >= 1, "no introduced session was opened on A");
     assert!(
-        runtime_a.introduced_requests() >= before + 3,
-        "the pull's requests were not served over an introduced session ({} before, {} after)",
+        runtime_a.introduced_requests() > before,
+        "the co-signing rounds were not served over an introduced session ({} before, {} after)",
         before,
         runtime_a.introduced_requests()
     );

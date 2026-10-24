@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! DB access for network/pairing tables.
 //!
-//! Tables: `paired_nodes`, `ephemeral_sessions`, `sync_rules`, `mount_configs`,
+//! Tables: `paired_nodes`, `ephemeral_sessions`, `mount_configs`,
 //! created by `migrations/0002_v0_3_network.sql`; and `operator_key`, by
-//! `migrations/0024_operator_key.sql`.
+//! `migrations/0024_operator_key.sql`. The `drives` table beside `paired_nodes`
+//! is [`super::drives`]'s, which says what a drive record is; the two functions
+//! here that write or remove a node row keep its drive with it. A device's
+//! sync rules, which name drives, are [`super::drive_rules`]'s.
 
 use kotton_wire::did::{Did, DidError};
-use kotton_wire::peer::{EphemeralSession, MountConfig, PairedNode, SyncRule};
+use kotton_wire::peer::{EphemeralSession, MountConfig, PairedNode};
 use kotton_wire::GrantEnvelope;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashSet;
@@ -42,23 +45,34 @@ pub async fn insert_paired_node(
     now: i64,
     posture: Option<&str>,
 ) -> io::Result<()> {
+    // One transaction: the row, and the drive it may be reached for
+    // (`super::drives`), are written together or not at all, so no reader sees
+    // a row that says one thing and a record that says another.
+    let mut tx = db.begin().await.map_err(db_err)?;
     // `INSERT OR REPLACE` rewrites the whole row, and callers that only know an
-    // address (`peer_add`) know no posture. A posture already projected for this
-    // device is kept rather than erased: erasing it turned a blind node into a
-    // node of unknown posture, which no delivery would then reach.
-    // The same goes for the relay the peer was last known to reserve at.
-    let existing: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT posture, relay_url FROM paired_nodes WHERE device_did = ? OR id = ? LIMIT 1",
+    // address (`peer_add`) know no posture. A posture already projected for
+    // this node is kept rather than erased: erasing it turned a blind node into
+    // a node of unknown posture, which no delivery would then reach. **Only for
+    // the same key**: a posture is a fact about the node that holds the key, so
+    // a different key under an old label, or under an old DID, takes none from
+    // the row it replaces — a vault's label re-used for another node must not
+    // make that node a vault. The relay the peer was last known to reserve at
+    // is kept as before, from whichever row matched.
+    let existing: Option<(Vec<u8>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT public_key, posture, relay_url FROM paired_nodes WHERE device_did = ? OR id = ? \
+         ORDER BY (public_key = ?) DESC LIMIT 1",
     )
     .bind(device_did)
     .bind(id)
-    .fetch_optional(db.as_ref())
+    .bind(public_key)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
-    let (existing_posture, existing_relay) = existing.unwrap_or((None, None));
+    let (existing_key, existing_posture, existing_relay) = existing.unwrap_or((Vec::new(), None, None));
     let posture: Option<String> = match posture {
         Some(p) => Some(p.to_string()),
-        None => existing_posture,
+        None if existing_key.as_slice() == public_key => existing_posture,
+        None => None,
     };
     sqlx::query(
         "INSERT OR REPLACE INTO paired_nodes \
@@ -73,10 +87,28 @@ pub async fn insert_paired_node(
     .bind(now)
     .bind(posture)
     .bind(existing_relay)
-    .execute(db.as_ref())
+    .execute(&mut *tx)
     .await
     .map_err(db_err)?;
-    Ok(())
+    // A drive is reached through the node that carries the vault's key
+    // (`super::drives`). The same key under another label keeps its drive,
+    // re-pointed at this row; another key under a drive's old label is not
+    // that drive, and the record that named the label goes.
+    sqlx::query("UPDATE drives SET node_id = ? WHERE user_id = ? AND vault_key = ?")
+        .bind(id)
+        .bind(user_id)
+        .bind(public_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    sqlx::query("DELETE FROM drives WHERE user_id = ? AND node_id = ? AND vault_key != ?")
+        .bind(user_id)
+        .bind(id)
+        .bind(public_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)
 }
 
 /// Refresh a paired node's `addresses` to a single freshly-observed,
@@ -176,49 +208,32 @@ pub async fn list_paired_nodes(
     Ok(nodes)
 }
 
-/// Delete a paired node. Returns `true` if a row was removed.
+/// Delete a paired node, and the drives reached through it
+/// ([`super::drives`]): a drive with no node to reach it through is not one
+/// this device has. Returns `true` if a node row was removed.
 pub(crate) async fn delete_paired_node(
     db: &Arc<SqlitePool>,
     user_id: &str,
     node_id: &str,
 ) -> io::Result<bool> {
+    let mut tx = db.begin().await.map_err(db_err)?;
+    sqlx::query("DELETE FROM drives WHERE user_id = ? AND node_id = ?")
+        .bind(user_id)
+        .bind(node_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
     let result = sqlx::query("DELETE FROM paired_nodes WHERE user_id = ? AND id = ?")
         .bind(user_id)
         .bind(node_id)
-        .execute(db.as_ref())
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
     Ok(result.rows_affected() > 0)
 }
 
 
-
-/// Return `true` if the peer's raw Ed25519 public key is recorded in `paired_nodes` for `user_id`.
-///
-/// Used by `handle_peer_request` to enforce that a peer can only access data
-/// belonging to users on whose behalf it was actually paired.
-///
-/// Keyed on `public_key` (binary) rather than `device_did` because the TLS
-/// handshake presents the device's operational signing key, which is what the
-/// key names; a DID recorded beside it may name another.
-/// `user_id`'s paired nodes whose projected posture is `posture` (kebab-case,
-/// `Posture::as_str`). Rows written before posture was projected are not
-/// matched: a node whose posture is unknown is not assumed blind.
-pub async fn list_paired_nodes_with_posture(
-    db: &Arc<SqlitePool>,
-    user_id: &str,
-    posture: &str,
-) -> io::Result<Vec<PairedNode>> {
-    let all = list_paired_nodes(db, user_id).await?;
-    let rows = sqlx::query("SELECT id FROM paired_nodes WHERE user_id = ? AND posture = ?")
-        .bind(user_id)
-        .bind(posture)
-        .fetch_all(db.as_ref())
-        .await
-        .map_err(db_err)?;
-    let ids: std::collections::HashSet<String> = rows.into_iter().map(|r| r.get::<String, _>("id")).collect();
-    Ok(all.into_iter().filter(|n| ids.contains(&n.id)).collect())
-}
 
 /// The user a paired key belongs to, and its posture as text (`None` for rows
 /// written before posture was projected here). `device_did` is unique, so a key
@@ -235,6 +250,14 @@ pub async fn paired_node_for_pubkey(
     Ok(row.map(|r| (r.get::<String, _>("user_id"), r.get::<Option<String>, _>("posture"))))
 }
 
+/// Return `true` if the peer's raw Ed25519 public key is recorded in `paired_nodes` for `user_id`.
+///
+/// Used by `handle_peer_request` to enforce that a peer can only access data
+/// belonging to users on whose behalf it was actually paired.
+///
+/// Keyed on `public_key` (binary) rather than `device_did` because the TLS
+/// handshake presents the device's operational signing key, which is what the
+/// key names; a DID recorded beside it may name another.
 pub async fn is_pubkey_paired_to_user(
     db: &Arc<SqlitePool>,
     public_key: &[u8; 32],
@@ -563,65 +586,6 @@ pub async fn list_revoked_session_ids(
     Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
 }
 
-// ---------------------------------------------------------------------------
-// sync_rules
-// ---------------------------------------------------------------------------
-
-pub(crate) async fn upsert_sync_rule(
-    db: &Arc<SqlitePool>,
-    user_id: &str,
-    node_id: &str,
-    path: &str,
-    watch: bool,
-    now: i64,
-) -> io::Result<SyncRule> {
-    sqlx::query(
-        "INSERT INTO sync_rules (user_id, node_id, path, watch, configured_at) \
-         VALUES (?, ?, ?, ?, ?) \
-         ON CONFLICT(user_id, node_id, path) DO UPDATE SET \
-           watch=excluded.watch, configured_at=excluded.configured_at",
-    )
-    .bind(user_id)
-    .bind(node_id)
-    .bind(path)
-    .bind(watch as i32)
-    .bind(now)
-    .execute(db.as_ref())
-    .await
-    .map_err(db_err)?;
-
-    Ok(SyncRule {
-        node_id: node_id.to_owned(),
-        path: path.to_owned(),
-        watch,
-        configured_at: now,
-    })
-}
-
-pub async fn list_sync_rules(
-    db: &Arc<SqlitePool>,
-    user_id: &str,
-) -> io::Result<Vec<SyncRule>> {
-    let rows = sqlx::query(
-        "SELECT node_id, path, watch, configured_at \
-         FROM sync_rules WHERE user_id = ? ORDER BY configured_at DESC",
-    )
-    .bind(user_id)
-    .fetch_all(db.as_ref())
-    .await
-    .map_err(db_err)?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| SyncRule {
-            node_id: row.get("node_id"),
-            path: row.get("path"),
-            watch: row.get::<i64, _>("watch") != 0,
-            configured_at: row.get("configured_at"),
-        })
-        .collect())
-}
-
 /// Get a single paired node by its label (`id`) for a given user.
 pub async fn get_paired_node_by_id(
     db: &Arc<SqlitePool>,
@@ -663,24 +627,6 @@ pub async fn get_paired_node_by_id(
         relay_url: row.get::<Option<String>, _>("relay_url").filter(|u| !u.is_empty()),
         posture: row_posture(&row),
     }))
-}
-
-/// Delete a sync rule. Returns `true` if a row was removed.
-pub(crate) async fn delete_sync_rule(
-    db: &Arc<SqlitePool>,
-    user_id: &str,
-    node_id: &str,
-    path: &str,
-) -> io::Result<bool> {
-    let result =
-        sqlx::query("DELETE FROM sync_rules WHERE user_id = ? AND node_id = ? AND path = ?")
-            .bind(user_id)
-            .bind(node_id)
-            .bind(path)
-            .execute(db.as_ref())
-            .await
-            .map_err(db_err)?;
-    Ok(result.rows_affected() > 0)
 }
 
 // ---------------------------------------------------------------------------

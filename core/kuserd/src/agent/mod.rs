@@ -2105,6 +2105,14 @@ impl DeviceDaemon {
         Ok(())
     }
 
+    /// The drives this device records for `user_id`
+    /// ([`kotton_peer::daemon::drives`]): what "a drive" resolves against
+    /// here. For a caller that holds the daemon — an integration test that
+    /// asks what enrolment or recovery recorded.
+    pub async fn drives(&self, user_id: &str) -> io::Result<Vec<kotton_peer::daemon::drives::Drive>> {
+        kotton_peer::daemon::drives::list(&self.db, user_id).await
+    }
+
     /// Build the peer-request handler closure.
     ///
     /// The closure captures `Arc<DeviceRuntime>` and deserializes / dispatches

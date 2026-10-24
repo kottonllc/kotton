@@ -1289,6 +1289,7 @@ pub(super) async fn handle_request(
             peer_did,
             peer_pubkey_hex,
             peer_addr,
+            drive,
         } => {
             kotton_peer::daemon::nodes::peer_add(
                 db,
@@ -1298,6 +1299,7 @@ pub(super) async fn handle_request(
                 peer_did,
                 peer_pubkey_hex,
                 peer_addr,
+                drive,
             )
             .await
         }
@@ -1313,30 +1315,28 @@ pub(super) async fn handle_request(
                 signing_pubkey_hex,
             })
         }
+        // A device's sync rules, each for one of its person's drives
+        // (`drive_rules`): the drive record is the machine database's, the
+        // rule the person's own.
         UserRequest::SyncConfigure {
             user_id,
-            node_id,
-            path,
+            drive,
+            direction,
             watch,
         } => {
             let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
-            kotton_peer::daemon::nodes::sync_configure(&user_db, user_id, node_id, path, watch)
-                .await
+            kotton_peer::daemon::drive_rules::configure(db, &user_db, user_id, drive, direction, watch).await
         }
         UserRequest::SyncRuleList { user_id } => {
             let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
-            kotton_peer::daemon::nodes::sync_rule_list(&user_db, user_id).await
+            kotton_peer::daemon::drive_rules::list(db, &user_db, user_id).await
         }
-        UserRequest::SyncRuleRemove {
-            user_id,
-            node_id,
-            path,
-        } => {
+        UserRequest::SyncRuleRemove { user_id, drive } => {
             let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
-            kotton_peer::daemon::nodes::sync_rule_remove(&user_db, user_id, node_id, path).await
+            kotton_peer::daemon::drive_rules::remove(db, &user_db, user_id, drive).await
         }
-        UserRequest::SyncTrigger { user_id, node_id } => {
-            let (job_id, targets) = sync_engine.enqueue(&user_id, node_id.as_deref()).await;
+        UserRequest::SyncDrives { user_id } => {
+            let (job_id, targets) = sync_engine.enqueue(&user_id).await;
             Ok(UserResponse::SyncStarted { job_id, targets })
         }
         UserRequest::SyncAwait {

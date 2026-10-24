@@ -878,6 +878,12 @@ pub enum UserRequest {
         peer_pubkey_hex: String,
         /// QUIC listener address of the peer.
         peer_addr: std::net::SocketAddr,
+        /// The node is a vault the person keeps a drive on: record the drive
+        /// (`kotton_peer::daemon::drives`), and the row's posture
+        /// `blind-storage`. `kotton id recover` says it of the vault its line
+        /// names; absent, nothing but the row is recorded.
+        #[serde(default)]
+        drive: bool,
     },
 
     /// Return this daemon's stable device DID and ephemeral signing public key.
@@ -887,41 +893,55 @@ pub enum UserRequest {
     /// `PeerAdd` to allow mTLS connections from this node.  Not in
     /// `Remote`-eligible (public identity, not private key material).
     GetNodeIdentity,
-    /// Add or update a background sync rule between a local path and a node.
+    /// Add or update this device's sync rule for one of its person's drives.
+    ///
+    /// `drive` names the drive by the node it is reached through, as this
+    /// device lists its drives; the rule is kept under the drive itself (the
+    /// vault's key and the tenancy), so it follows the drive and not a label.
+    /// A rule names a drive and nothing else: a device is not a sync target,
+    /// and a node that is not one of the person's drives is refused.
+    ///
+    /// `direction` is this device's own choice for that drive (`None` both
+    /// ways); `watch` puts the drive in the background pass.
+    ///
+    /// Until the replication model changed, this named a paired node and a
+    /// path; that shape is not decoded any more, so a client that still sends
+    /// it is refused rather than read as something else.
     SyncConfigure {
         user_id: String,
-        node_id: String,
-        path: String,
-        /// Enable filesystem-watch based continuous sync.
+        drive: String,
+        direction: Option<super::SyncDirection>,
+        /// Sync this drive in the background pass as well as on request.
         watch: bool,
     },
-    /// List all sync rules for a user.
+    /// List this device's sync rules.
     SyncRuleList {
         user_id: String,
     },
-    /// Remove a sync rule.
+    /// Remove this device's sync rule for a drive.
     SyncRuleRemove {
         user_id: String,
-        node_id: String,
-        path: String,
+        drive: String,
     },
-    /// Enqueue a sync pass for all matching rules (or a single node).
+    /// Sync this device's drives now: every drive the person has recorded
+    /// here, each in the direction its rule chooses (both ways when it has
+    /// none). Returns at once with `SyncStarted { job_id }`; `SyncAwait` waits
+    /// for the pass.
     ///
-    /// Returns immediately with a `SyncStarted { job_id }`. Pass `job_id` to
-    /// `SyncAwait` to block until the pass completes (RFC-0019).
-    ///
-    /// `node_id = None` enqueues all configured sync rules for the user.
-    SyncTrigger {
+    /// **Named for what it now means.** It was `SyncTrigger`, and could name a
+    /// single paired node — another of the person's devices among them. A
+    /// device is not a sync target, so the request that could name one is not
+    /// on the wire any more: a client that sends it is refused as a verb this
+    /// daemon does not know, never read as "sync everything".
+    SyncDrives {
         user_id: String,
-        /// Restrict to a single paired node. `None` = all nodes.
-        node_id: Option<String>,
     },
     /// Block until a previously enqueued sync job completes or times out.
     ///
     /// Returns `SyncOutcomeMsg`, `SyncFailed`, or `SyncTimeout`.
     SyncAwait {
         user_id: String,
-        /// Job id returned by `SyncTrigger`.
+        /// Job id returned by `SyncDrives`.
         job_id: String,
         /// Maximum seconds to wait before returning `SyncTimeout`.
         timeout_secs: u64,
@@ -2552,7 +2572,7 @@ impl UserRequest {
             Self::SyncConfigure { user_id, .. } => Some(user_id),
             Self::SyncRuleList { user_id } => Some(user_id),
             Self::SyncRuleRemove { user_id, .. } => Some(user_id),
-            Self::SyncTrigger { user_id, .. } => Some(user_id),
+            Self::SyncDrives { user_id } => Some(user_id),
             Self::SyncAwait { user_id, .. } => Some(user_id),
             Self::MountPath { user_id, .. } => Some(user_id),
             Self::MountList { user_id } => Some(user_id),
@@ -2807,7 +2827,7 @@ impl UserRequest {
             Self::SyncConfigure { .. } => "SyncConfigure",
             Self::SyncRuleList { .. } => "SyncRuleList",
             Self::SyncRuleRemove { .. } => "SyncRuleRemove",
-            Self::SyncTrigger { .. } => "SyncTrigger",
+            Self::SyncDrives { .. } => "SyncDrives",
             Self::SyncAwait { .. } => "SyncAwait",
             Self::MountPath { .. } => "MountPath",
             Self::MountList { .. } => "MountList",
@@ -3062,11 +3082,11 @@ pub const REMOTE_ELIGIBLE: &[&str] = &[
     "SyncAvailable",
     "SyncAwait",
     "SyncConfigure",
+    "SyncDrives",
     "SyncMount",
     "SyncRuleList",
     "SyncRuleRemove",
     "SyncStatus",
-    "SyncTrigger",
     "TrustAdd",
     "TrustList",
     "TrustRemove",
@@ -3609,7 +3629,7 @@ impl UserRequest {
             | Self::SyncConfigure { .. }
             | Self::SyncRuleList { .. }
             | Self::SyncRuleRemove { .. }
-            | Self::SyncTrigger { .. }
+            | Self::SyncDrives { .. }
             | Self::SyncAwait { .. }
             | Self::MountPath { .. }
             | Self::MountList { .. }
@@ -4095,6 +4115,27 @@ mod trust_origin_tests {
         assert_eq!(tags, ["CarryFrame"], "{bytes}");
         let old = serde_json::json!({ "CarryMessages": { "user_id": "alice", "messages": [] } });
         assert!(serde_json::from_value::<UserRequest>(old).is_err(), "the old verb still decodes");
+    }
+
+    /// **A request that names a device as a sync target does not decode.**
+    /// The sync engine replicates a device to its person's drives and to
+    /// nothing else, so the three shapes that could name another device —
+    /// the trigger restricted to one node, and a rule kept or removed by node
+    /// and path — are off the wire: a client that still sends one is refused,
+    /// never read as "sync every drive" or as a rule for something else.
+    #[test]
+    fn a_request_naming_a_device_as_a_sync_target_is_not_on_the_wire() {
+        for old in [
+            serde_json::json!({ "SyncTrigger": { "user_id": "alice", "node_id": "phone" } }),
+            serde_json::json!({ "SyncTrigger": { "user_id": "alice", "node_id": null } }),
+            serde_json::json!({ "SyncConfigure": { "user_id": "alice", "node_id": "phone", "path": "/", "watch": true } }),
+            serde_json::json!({ "SyncRuleRemove": { "user_id": "alice", "node_id": "phone", "path": "/" } }),
+        ] {
+            assert!(serde_json::from_value::<UserRequest>(old.clone()).is_err(), "{old} still decodes");
+        }
+        let now = UserRequest::SyncDrives { user_id: "alice".into() };
+        let bytes = serde_json::to_value(&now).unwrap();
+        assert_eq!(bytes, serde_json::json!({ "SyncDrives": { "user_id": "alice" } }));
     }
 }
 

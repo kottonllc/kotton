@@ -150,7 +150,7 @@ const DOMAINS: &[(&str, &[&str])] = &[
             "SyncConfigure",
             "SyncRuleList",
             "SyncRuleRemove",
-            "SyncTrigger",
+            "SyncDrives",
             "SyncAwait",
             "SyncStatus",
             "SyncAvailable",
