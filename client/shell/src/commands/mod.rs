@@ -206,6 +206,10 @@ mod doctor;
 #[cfg(feature = "cli")]
 mod drive;
 #[cfg(feature = "cli")]
+mod pin;
+#[cfg(feature = "cli")]
+mod status;
+#[cfg(feature = "cli")]
 mod id;
 #[cfg(feature = "cli")]
 mod issuer;
@@ -272,6 +276,10 @@ pub(crate) use device::join_identity;
 pub use doctor::DoctorCommand;
 #[cfg(feature = "cli")]
 pub use drive::DriveCommand;
+#[cfg(feature = "cli")]
+pub use pin::PinCommand;
+#[cfg(feature = "cli")]
+pub use status::StatusCommand;
 #[cfg(feature = "cli")]
 pub use id::{id_answer, recovery_card, IdAnswer, IdCommand};
 #[cfg(feature = "cli")]

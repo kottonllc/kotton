@@ -265,3 +265,40 @@ impl KottonClient {
             .await
     }
 }
+
+/// What this device keeps (RFC 0003, "What this device holds"; kotton #55),
+/// and `status`.
+impl KottonClient {
+    /// `pin <scope> whole|on-demand|default`: this device's settings after.
+    pub async fn pin_set(
+        &mut self,
+        user_id: &str,
+        scope: kotton_wire::ipc::PinScope,
+        value: Option<kotton_wire::ipc::PinValue>,
+    ) -> io::Result<kotton_wire::ipc::PinReadout> {
+        match self.client.send(&UserRequest::PinSet { user_id: user_id.into(), scope, value }).await? {
+            UserResponse::Pins { pins } => Ok(pins),
+            UserResponse::Error { message } => Err(io::Error::other(message)),
+            got => Err(crate::protocol::unexpected(got)),
+        }
+    }
+
+    /// `pin list`: this device's default, its exceptions, and the notices.
+    pub async fn pin_list(&mut self, user_id: &str) -> io::Result<kotton_wire::ipc::PinReadout> {
+        match self.client.send(&UserRequest::PinList { user_id: user_id.into() }).await? {
+            UserResponse::Pins { pins } => Ok(pins),
+            UserResponse::Error { message } => Err(io::Error::other(message)),
+            got => Err(crate::protocol::unexpected(got)),
+        }
+    }
+
+    /// `status`: when this device last synced, what it keeps of each drive,
+    /// and the notices.
+    pub async fn status(&mut self, user_id: &str) -> io::Result<kotton_wire::ipc::DeviceStatus> {
+        match self.client.send(&UserRequest::Status { user_id: user_id.into() }).await? {
+            UserResponse::Status { status } => Ok(status),
+            UserResponse::Error { message } => Err(io::Error::other(message)),
+            got => Err(crate::protocol::unexpected(got)),
+        }
+    }
+}

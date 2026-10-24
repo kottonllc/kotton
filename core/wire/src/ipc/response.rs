@@ -568,6 +568,15 @@ pub enum UserResponse {
     Drives {
         drives: Vec<crate::ipc::DriveDescriptor>,
     },
+    /// Answer to `PinSet` and `PinList`: what this device keeps, and the
+    /// notices.
+    Pins {
+        pins: crate::ipc::PinReadout,
+    },
+    /// Answer to `Status`.
+    Status {
+        status: crate::ipc::DeviceStatus,
+    },
     /// A sealed write refused because it would exceed the quota (RFC-0084 V3).
     /// Typed rather than an `Error` string so a device can show the person the
     /// two numbers instead of a failure.

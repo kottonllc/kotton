@@ -79,27 +79,37 @@
 //! lost by it, because the retire comes only after the other vault holds and
 //! names every object, and the record is rebuilt from the vaults' listings.
 //!
-//! **What a move does not hold yet: the drive's lock.** No device writes into
-//! a made drive today, so nothing races the copy. Once a device keeps one
-//! (pins, kotton #55), a move must hold the drive's mount lock, and refuse
-//! while another device's pass holds it, and two devices moving or making the
-//! same drive at once need the same; that requirement is recorded on #55,
-//! beside the same one for `kvaultd::drives`' retire.
+//! **What a move holds: the drive, on this device.** A move takes the drive's
+//! lock on this device ([`drive_lock`], a [`DeviceRuntime::lock_mount`] keyed by
+//! the drive's name) for the whole of it, so two moves of one drive on one
+//! device are one after the other, and the second reads where the first left
+//! it. A vault refuses a write into a tree it is retiring
+//! (`kvaultd::drives::retire`). What no device-local lock can hold is another
+//! device: two devices moving one drive at once, two making one name at once,
+//! or a pass another device runs into a made drive while this one moves it.
+//! Today no device writes into a made drive — a device keeps no tree of one
+//! until drive paths (kotton #58) and the first drive among others (#124) —
+//! so the last cannot happen yet, and the first two are resolved afterwards by
+//! the next move as above. Making them exclusive needs a lease or a sequence
+//! the vault keeps, which is a design of its own and is filed as one.
 //!
 //! **What does not move yet: the first drive.** The tenancy's own tree is what
 //! this device's own tree syncs with, at every vault the person keeps drives
 //! on (`kotton_sync::engine`); it is kept at each and lives at none alone, so
 //! `move` refuses it and says so. A device keeping a made drive's files — and
-//! so the first drive becoming one drive among others — is pins' (kotton #55)
-//! and the drive paths' (kotton #58).
+//! so the first drive becoming one drive among others — is the drive paths'
+//! (kotton #58) and #124's; what a device keeps of a drive is its pin settings
+//! (`crate::users::pins`), which reach the first drive's tree today.
 
 use crate::users::DeviceUsers as _;
+use crate::users::pins;
 use crate::DeviceRuntime;
+use kotton_record::SqliteRecordStore;
 use kotton_peer::daemon::drives::{self as record, Drive};
 use kotton_peer::KottonPeerObjectStorage;
 use kotton_store::runtime::user::UserStore;
 use kotton_sys::store::SealedObjectAccess as _;
-use kotton_wire::ipc::{DriveDescriptor, MadeDrive, TenantDrive, UserRequest, UserResponse, FIRST_DRIVE_TREE};
+use kotton_wire::ipc::{DriveDescriptor, MadeDrive, PinScope, PinValue, TenantDrive, UserRequest, UserResponse, FIRST_DRIVE_TREE};
 use kotton_wire::peer::PairedNode;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -290,17 +300,32 @@ async fn follow_every_vault(runtime: &DeviceRuntime, store: &UserStore, db: &Arc
     Ok(seen)
 }
 
-fn describe(drive: &Drive, sizes: &HashMap<([u8; 32], String), u64>) -> DriveDescriptor {
+fn describe(drive: &Drive, sizes: &HashMap<([u8; 32], String), u64>, pins: &pins::Read) -> DriveDescriptor {
     DriveDescriptor {
         name: drive.name.clone(),
         vault: drive.node.id.clone(),
         vault_key: hex::encode(drive.vault_key),
         size: sizes.get(&(drive.vault_key, drive.tree.clone())).copied(),
-        // What each device keeps is pins' (kotton #55), a record in the drive
-        // that nothing writes yet.
-        pinned_whole: Vec::new(),
+        // What each device of the person's keeps, as this device reads their
+        // pin settings (`crate::users::pins`).
+        pinned_whole: pins.whole_on(&drive.name),
         unfinished: false,
     }
+}
+
+/// What a drive's descriptors need of the pin settings, read once per verb.
+async fn pins_now(runtime: &DeviceRuntime, records: &SqliteRecordStore, store: &UserStore) -> io::Result<pins::Read> {
+    pins::Read::now(&runtime.schema_registry, records, store, &runtime.operational_did()).await
+}
+
+/// The name of the lock a drive is held under on this device while a verb
+/// changes where it is (`drive move`): [`DeviceRuntime::lock_mount`]'s, keyed
+/// by the person's name for the drive, which a move does not change — its tree
+/// does, at every vault it is carried to. Anything on this device that writes
+/// into a made drive takes it too (kotton #55's last comment; a device keeps
+/// no tree of a made drive yet, kotton #58 and #124).
+pub fn drive_lock(name: &str) -> String {
+    format!("drive:{name}")
 }
 
 /// The unfinished trees `seen` holds, as descriptors, each under the label of
@@ -388,6 +413,7 @@ fn name_is_free(seen: &Seen, name: &str) -> Result<(), String> {
 pub async fn create(
     runtime: &DeviceRuntime,
     store: &UserStore,
+    records: &SqliteRecordStore,
     db: &Arc<SqlitePool>,
     user_id: &str,
     name: &str,
@@ -423,29 +449,57 @@ pub async fn create(
         .into_iter()
         .find(|d| d.vault_key == vault.vault_key && d.tree == tree)
         .ok_or_else(|| io::Error::other("the vault made the drive but did not list it"))?;
+    // Whatever its default, the device that creates a drive keeps it whole
+    // until told otherwise, so something holds the whole from the first day
+    // (the protocol's storage model) — written as this device's setting, which every device of the
+    // person's reads.
+    let me = runtime.operational_did();
+    let whole = pins::write(&runtime.schema_registry, records, &me, &PinScope::Drive { drive: name.clone() }, Some(PinValue::Whole)).await;
+    if let Err(e) = whole {
+        return refused(format!(
+            "drive create: '{name}' was made on '{}', but this device could not write that it keeps it whole ({e}); \
+             `pin {name} whole` writes it",
+            vault.node.id
+        ));
+    }
     tracing::info!(user_id, vault = %vault.node.id, "made a drive");
-    Ok(UserResponse::Drives { drives: vec![describe(&made, &sizes)] })
+    Ok(UserResponse::Drives { drives: vec![describe(&made, &sizes, &pins_now(runtime, records, store).await?)] })
 }
 
 /// `drive list`: every drive, after asking each vault what it keeps, and
 /// every unfinished move's tree, marked so.
-pub async fn list(runtime: &DeviceRuntime, store: &UserStore, db: &Arc<SqlitePool>, user_id: &str) -> io::Result<UserResponse> {
+pub async fn list(
+    runtime: &DeviceRuntime,
+    store: &UserStore,
+    records: &SqliteRecordStore,
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+) -> io::Result<UserResponse> {
     let seen = follow_every_vault(runtime, store, db, user_id).await?;
     let sizes = seen.sizes();
-    let mut drives: Vec<DriveDescriptor> = record::all(db, user_id).await?.iter().map(|d| describe(d, &sizes)).collect();
+    let pins = pins_now(runtime, records, store).await?;
+    let mut drives: Vec<DriveDescriptor> = record::all(db, user_id).await?.iter().map(|d| describe(d, &sizes, &pins)).collect();
     drives.extend(unfinished_described(db, user_id, &seen).await?);
     Ok(UserResponse::Drives { drives })
 }
 
 /// `drive show <name>`: the drives called `name`, one per vault it is kept on.
-pub async fn show(runtime: &DeviceRuntime, store: &UserStore, db: &Arc<SqlitePool>, user_id: &str, name: &str) -> io::Result<UserResponse> {
+pub async fn show(
+    runtime: &DeviceRuntime,
+    store: &UserStore,
+    records: &SqliteRecordStore,
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    name: &str,
+) -> io::Result<UserResponse> {
     let seen = follow_every_vault(runtime, store, db, user_id).await?;
     let sizes = seen.sizes();
+    let pins = pins_now(runtime, records, store).await?;
     let mut drives: Vec<DriveDescriptor> = record::all(db, user_id)
         .await?
         .iter()
         .filter(|d| d.name == name)
-        .map(|d| describe(d, &sizes))
+        .map(|d| describe(d, &sizes, &pins))
         .collect();
     drives.extend(unfinished_described(db, user_id, &seen).await?.into_iter().filter(|d| d.name == name));
     if drives.is_empty() {
@@ -623,15 +677,23 @@ pub fn plan_move(copies: &[Copy], name: &str, dest: &[u8; 32], from: Option<&[u8
 }
 
 /// `drive move <name> --to <vault> [--from <vault>]` (module doc).
+#[allow(clippy::too_many_arguments)]
 pub async fn move_to(
     runtime: &DeviceRuntime,
     store: &UserStore,
+    records: &SqliteRecordStore,
     db: &Arc<SqlitePool>,
     user_id: &str,
     name: &str,
     to: &str,
     from: Option<&str>,
 ) -> io::Result<UserResponse> {
+    // The drive is held on this device for the whole move ([`drive_lock`]):
+    // a second move of it here waits, and then reads where the first left it.
+    // Another device's move, or a pass another device runs into the drive,
+    // this lock does not see; that needs a lease the vault keeps (module doc).
+    let _held = runtime.lock_mount(user_id, &drive_lock(name)).await;
+    let pins = pins_now(runtime, records, store).await?;
     let dest = match vault_named(db, user_id, Some(to), "--to").await? {
         Ok(v) => v,
         Err(e) => return refused(format!("drive move: {e}")),
@@ -684,7 +746,7 @@ pub async fn move_to(
             let moved = record::all(db, user_id).await?.into_iter().find(|d| d.vault_key == keep.vault_key && d.tree == keep.tree);
             let moved = moved.ok_or_else(|| io::Error::other("the drive's copy at the vault was not recorded"))?;
             tracing::info!(user_id, to = %dest.node.id, "finished an interrupted drive move");
-            return Ok(UserResponse::Drives { drives: vec![describe(&moved, &sizes)] });
+            return Ok(UserResponse::Drives { drives: vec![describe(&moved, &sizes, &pins)] });
         }
         Plan::Carry { source, retire_after } => (source, retire_after),
     };
@@ -762,7 +824,7 @@ pub async fn move_to(
         .find(|d| d.vault_key == dest.vault_key && d.tree == to_tree)
         .ok_or_else(|| io::Error::other("the drive was moved but the vault it moved to did not list it"))?;
     tracing::info!(user_id, from = %src, to = %dst, "moved a drive");
-    Ok(UserResponse::Drives { drives: vec![describe(&moved, &sizes)] })
+    Ok(UserResponse::Drives { drives: vec![describe(&moved, &sizes, &pins)] })
 }
 
 /// Retire each of `copies` at its vault. `None` when every one went; else the
@@ -1155,5 +1217,41 @@ mod tests {
                 (tree(3), "work".into(), true, here(tree(3))),
             ]
         );
+    }
+
+    /// **A move holds the drive on this device for the whole of it**
+    /// ([`drive_lock`]): while anything else on this device holds `photos` —
+    /// another move of it — a move of `photos` waits, and runs once it is let
+    /// go. (Here it then refuses: the person keeps drives on no vault; what
+    /// is held is the wait.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_move_holds_the_drive_on_this_device_for_the_whole_of_it() {
+        use crate::users::DeviceUsers as _;
+        let temp = tempfile::TempDir::new().unwrap();
+        let secrets = Arc::new(kotton_secret::MemorySecrets::new());
+        let rt = Arc::new(
+            DeviceRuntime::new_with_secrets(temp.path().to_path_buf(), crate::config::RuntimeConfig::default(), secrets)
+                .await
+                .unwrap(),
+        );
+        let (_, store) = rt.create_user("alice", "canyon-orbit-velvet-fish-hospital").await.unwrap();
+        let records = Arc::new(kotton_record::open::user_record_store(rt.base_dir(), "alice", rt.secrets()).unwrap());
+        let db = Arc::new(kotton_record::open_sqlite(&temp.path().join("machine.db")).await.unwrap());
+        crate::db::MIGRATOR.run(db.as_ref()).await.unwrap();
+
+        let held = rt.lock_mount("alice", &drive_lock("photos")).await;
+        let moving = tokio::spawn({
+            let (rt, store, records, db) = (Arc::clone(&rt), Arc::clone(&store), Arc::clone(&records), Arc::clone(&db));
+            async move { move_to(&rt, &store, &records, &db, "alice", "photos", "elsewhere", None).await.unwrap() }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!moving.is_finished(), "a move ran while the drive was held on this device");
+        let other = rt.try_lock_mount("alice", &drive_lock("work"));
+        assert!(other.is_some(), "holding one drive held another");
+        drop(held);
+        match moving.await.unwrap() {
+            UserResponse::Error { message } => assert!(message.contains("drive move"), "{message}"),
+            other => panic!("{other:?}"),
+        }
     }
 }

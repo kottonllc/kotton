@@ -48,6 +48,8 @@ This document contains the help content for the `Kotton` command-line program.
 * [`Kotton import`↴](#Kotton-import)
 * [`Kotton sync`↴](#Kotton-sync)
 * [`Kotton drive`↴](#Kotton-drive)
+* [`Kotton pin`↴](#Kotton-pin)
+* [`Kotton status`↴](#Kotton-status)
 * [`Kotton issuer`↴](#Kotton-issuer)
 * [`Kotton cp`↴](#Kotton-cp)
 * [`Kotton keep`↴](#Kotton-keep)
@@ -128,6 +130,8 @@ Kotton - Your data sovereignty platform
 * `import` — Bring your history with you — read an export (.ics) into your own records
 * `sync` — Sync this device's drives (now, add, list, remove) — shares the REPL's `sync` verb
 * `drive` — Your drives — create, list, show, move — shares the REPL's `drive` verb
+* `pin` — What this device keeps of your drives — default, a drive or folder, list — shares the REPL's `pin` verb
+* `status` — When this device last synced, what it keeps of each drive, and the notices — shares the REPL's `status` verb
 * `issuer` — Trusted-issuer registry (add, remove, list) — shares the REPL's `issuer` verb
 * `cp` — Copy files into and out of your tree — shares the REPL's `cp` verb. `host:` names this computer's own files, a relative one from the directory the command is run in
 * `keep` — Keep a folder of yours in your tree, and copy only what changed when run again — shares the REPL's `keep` verb. The folder is on this computer, a relative one from the directory the command is run in; with no arguments it lists what is kept
@@ -849,6 +853,75 @@ EXAMPLES:
 ###### **Options:**
 
 * `--user <USER>` — Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
+
+
+
+## `Kotton pin`
+
+What this device keeps of your drives — default, a drive or folder, list — shares the REPL's `pin` verb
+
+**Usage:** `Kotton pin [OPTIONS] [ARGS]...`
+
+```text
+pin — what this device keeps of your drives
+
+USAGE:
+  pin default whole|on-demand                       this device's default, for every drive it has not been told about
+  pin <drive>[:/<folder>] whole|on-demand|default   set a drive or a folder the other way on this device
+  pin list                                          this device's default and exceptions, and the notices
+
+Every device of yours sees every drive. Whole keeps every file's content on
+this device; on demand keeps the index — every name, and where its content is
+— and fetches a file's content when it is opened. The nearest setting wins: a
+folder's over its drive's over this device's default, and `default` follows
+the one above. Your first device starts at whole; a device paired later at on
+demand. The device that creates a drive keeps it whole.
+
+`pin <drive> whole` collects: this device fetches what it lacks of the drive
+now. Each setting is a record in your drive, sealed like everything else, so
+your other devices read it and the vault cannot.
+
+You are told when no device of yours keeps a drive whole, and when this device
+runs short of room for what it keeps whole, with the setting that keeps less.
+
+EXAMPLES:
+  pin default on-demand
+  pin personal:/photos whole
+  pin personal:/photos default
+  pin personal whole            # collect all my things
+  pin list
+```
+
+###### **Arguments:**
+
+* `<ARGS>` — Arguments: `default whole|on-demand` | `<drive>[:/<folder>] whole|on-demand|default` | `list`
+
+###### **Options:**
+
+* `--user <USER>` — Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
+
+
+
+## `Kotton status`
+
+When this device last synced, what it keeps of each drive, and the notices — shares the REPL's `status` verb
+
+**Usage:** `Kotton status [OPTIONS]`
+
+```text
+status — when this device last synced, what it keeps of each drive, and the notices: a drive no device of yours keeps whole, and this device short of room
+
+USAGE:
+  status
+```
+
+###### **Arguments:**
+
+* `<ARGS>`
+
+###### **Options:**
+
+* `--user <USER>` — Identity to act as (defaults to the active identity / KOTTON_USER)
 
 
 

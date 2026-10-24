@@ -30,7 +30,9 @@
 //! within one person's record on one vault and joins nothing across vaults or
 //! persons; the person's name for a drive keys nothing at all. The first drive
 //! is what this device's own tree syncs with, at each vault; a made drive has
-//! no tree on a device yet (what a device keeps is pins', kotton #55), so
+//! no tree on a device yet (drive paths, kotton #58, and the first drive among
+//! others, #124; what a device keeps of the first is its pins,
+//! `kotton_device::users::pins`), so
 //! [`list`] — what every reader below that asks *which nodes are drives* reads
 //! — is the first drive on each vault, and [`all`] is every drive.
 //!

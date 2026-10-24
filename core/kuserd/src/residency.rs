@@ -45,6 +45,11 @@ use std::sync::{Arc, RwLock};
 #[derive(Clone, Default)]
 pub struct UserRegistry {
     runtimes: Arc<RwLock<HashMap<String, Arc<UserStore>>>>,
+    /// Where every resident store fetches a pack it does not keep when it is
+    /// read (`kotton_store::fetch`, kotton #55): lent once, by the daemon,
+    /// after its sync engine is made, and to each store as it becomes
+    /// resident — here, the one door every store comes in by.
+    packs: Arc<std::sync::OnceLock<Arc<dyn kotton_store::fetch::PackSource>>>,
 }
 
 impl UserRegistry {
@@ -59,7 +64,21 @@ impl UserRegistry {
     /// belongs to whoever owns the event bus, and threading one in here would
     /// give the registry a dependency it does not otherwise need.
     pub fn insert(&self, user_id: String, runtime: Arc<UserStore>) {
+        if let Some(source) = self.packs.get() {
+            runtime.lend_pack_source(Arc::clone(source));
+        }
         self.runtimes.write().unwrap().insert(user_id, runtime);
+    }
+
+    /// Lend `source` to every store resident now and every one made resident
+    /// after ([`Self::packs`]'s doc). Once: a second call is ignored.
+    pub fn lend_packs(&self, source: Arc<dyn kotton_store::fetch::PackSource>) {
+        if self.packs.set(Arc::clone(&source)).is_err() {
+            return;
+        }
+        for store in self.runtimes.read().unwrap().values() {
+            store.lend_pack_source(Arc::clone(&source));
+        }
     }
 
     /// This user's runtime, if they are loaded.
@@ -224,6 +243,10 @@ pub struct DaemonUserResources {
     record_stores: RecordStores,
     user_dbs: crate::db::user_db::UserDbMap,
     runtime: Arc<kotton_device::DeviceRuntime>,
+    /// The machine's database, which a pass reads the budget and keeps what
+    /// it found of the room in (`kotton_device::users::pins`); `None` in a
+    /// harness that has none.
+    machine_db: Option<Arc<sqlx::SqlitePool>>,
 }
 
 impl DaemonUserResources {
@@ -233,12 +256,14 @@ impl DaemonUserResources {
         record_stores: RecordStores,
         user_dbs: crate::db::user_db::UserDbMap,
         runtime: Arc<kotton_device::DeviceRuntime>,
+        machine_db: Option<Arc<sqlx::SqlitePool>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             users,
             record_stores,
             user_dbs,
             runtime,
+            machine_db,
         })
     }
 }
@@ -281,6 +306,10 @@ impl kotton_sync::UserResources for DaemonUserResources {
 
     /// The name another of the person's devices set arrives as a sealed record
     /// in a pass; this device's copy of it is brought up to that record here.
+    fn machine_db(&self) -> Option<Arc<sqlx::SqlitePool>> {
+        self.machine_db.clone()
+    }
+
     async fn pass_landed(&self, user_id: &str) {
         let Some(store) = self.users.get(user_id) else {
             return;

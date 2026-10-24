@@ -66,6 +66,7 @@ mod reassembly_tests {
             RecordStores::new(),
             Arc::new(std::sync::RwLock::new(HashMap::new())),
             Arc::clone(rt),
+            None,
         )
     }
 
@@ -686,6 +687,7 @@ mod pin_tests {
             RecordStores::new(),
             Arc::new(std::sync::RwLock::new(HashMap::new())),
             Arc::clone(rt),
+            None,
         );
         let blob = format!("sealed under {domain}").into_bytes();
         let hash = blake3::hash(&blob).to_hex().to_string();

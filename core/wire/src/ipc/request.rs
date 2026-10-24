@@ -723,6 +723,33 @@ pub enum UserRequest {
         #[serde(default)]
         from: Option<String>,
     },
+    /// `pin default|<drive>[:/<folder>] whole|on-demand|default`: what this
+    /// device keeps — its default for every drive it has not been told about,
+    /// or a drive or a folder set the other way (kotton #55). `value` `None`
+    /// is `default`: the drive or folder follows the setting above it, and the
+    /// device's own default has nothing above it, so it is refused there. The
+    /// setting is a record in the person's drive (`PinSetting`), which every
+    /// device of theirs reads. `pin <drive> whole` is "collect all my things":
+    /// the daemon starts a pass, which fetches what this device lacks of it.
+    /// Answered with `Pins`, this device's settings and the notices after.
+    PinSet {
+        user_id: String,
+        scope: crate::ipc::PinScope,
+        #[serde(default)]
+        value: Option<crate::ipc::PinValue>,
+    },
+    /// `pin list`: this device's default and its exceptions, and the notices
+    /// — a drive no device keeps whole, and a pass short of room. Answered
+    /// with `Pins`.
+    PinList {
+        user_id: String,
+    },
+    /// `status`: when this device last synced, what it keeps of each drive,
+    /// and the notices. Read on this device, asking no vault. Answered with
+    /// `Status`.
+    Status {
+        user_id: String,
+    },
     /// List a mount in **storage-key space** — the keys `ReadSealed`/`WriteSealed`
     /// address, not the caller's logical paths (RFC-0044).
     ///
@@ -2689,6 +2716,9 @@ impl UserRequest {
             Self::DriveList { user_id } => Some(user_id),
             Self::DriveShow { user_id, .. } => Some(user_id),
             Self::DriveMove { user_id, .. } => Some(user_id),
+            Self::PinSet { user_id, .. } => Some(user_id),
+            Self::PinList { user_id } => Some(user_id),
+            Self::Status { user_id } => Some(user_id),
             Self::TakeDeliveries { user_id, .. } => Some(user_id),
             Self::NodeList { user_id } => Some(user_id),
             Self::NodeRelay { user_id } => Some(user_id),
@@ -2920,6 +2950,9 @@ impl UserRequest {
             Self::DriveList { .. } => "DriveList",
             Self::DriveShow { .. } => "DriveShow",
             Self::DriveMove { .. } => "DriveMove",
+            Self::PinSet { .. } => "PinSet",
+            Self::PinList { .. } => "PinList",
+            Self::Status { .. } => "Status",
             Self::TakeDeliveries { .. } => "TakeDeliveries",
             Self::ListUsers => "ListUsers",
             Self::Authenticate { .. } => "Authenticate",
@@ -3442,6 +3475,10 @@ impl UserRequest {
             // retire sealed trees at the person's vaults, and every one of the
             // four dials them under this device's key; said at the machine.
             Self::DriveCreate { .. } | Self::DriveList { .. } | Self::DriveShow { .. } | Self::DriveMove { .. } => Local,
+            // What this device keeps (RFC 0003, "What this device holds"), and
+            // its status: said at the machine, of this device; `pin` writes a
+            // record in the person's drive and may start a pass.
+            Self::PinSet { .. } | Self::PinList { .. } | Self::Status { .. } => Local,
             // An introduction opens a listener on the network this machine is on.
             // It is served only over a peer connection to one of the person's own
             // devices; no session, and no peer's `Remote` origin, reaches it.

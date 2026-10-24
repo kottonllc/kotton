@@ -44,6 +44,22 @@
 //! the clear to a node holding the data keys. A drive answers none of those;
 //! records reach it as sealed segments in the packs, as before.
 //!
+//! **What a pass keeps** (kotton #55). A device keeps what its person chose:
+//! its pin settings, records in their drive (`kotton_device::users::pins`),
+//! resolved for this device in [`sync_mount_with_records`] — the one function
+//! both entry points pass through — and held at the store's transfer loop
+//! (`kotton_store::runtime::user::sync::Keep`). A pass always takes the index
+//! (superblocks and index packs: the history log, the manifests, the record
+//! segments) and takes a content pack only for what this device keeps whole,
+//! within the budget its mount for the drive records; the rest is fetched when
+//! it is read ([`DrivePacks`], lent to every resident store). A pass short of
+//! room says so in `status` and names the setting that keeps less. Pins are
+//! over the tree a device keeps of the person's first drive, `local`; a made
+//! drive has no tree on a device yet (kotton #58, #124). Until #91 closes, the
+//! sidecar's change-triggered pass is the asked-for one, so it syncs every
+//! drive both ways — and now keeps only what the pins keep, so a device paired
+//! later no longer pulls a drive whole on its first change.
+//!
 //! ## Two execution paths
 //!
 //! 1. **Background loop** — started by [`SyncEngine::spawn_background`].
@@ -66,6 +82,8 @@
 
 use kotton_peer::daemon::drive_rules::DriveRule;
 use kotton_peer::daemon::drives::Drive;
+use kotton_device::users::pins;
+use kotton_wire::ipc::FIRST_DRIVE_NAME;
 use kotton_wire::ipc::{SyncDirection, SyncOutcome, VfsChangeKind};
 use kotton_wire::remote::{RemoteBackend, RemoteConfig};
 use kotton_store::runtime::user::sync::Outbound;
@@ -297,6 +315,12 @@ impl SyncEngine {
     /// marked by [`Self::hand_over_landed`] and not yet taken by a pack.
     pub fn hand_over_waiting(&self, user_id: &str) -> bool {
         self.hand_overs.lock().unwrap().contains(user_id)
+    }
+
+    /// Where the person's stores fetch a pack they do not keep when it is
+    /// read ([`DrivePacks`]): lent to each user store the host makes resident.
+    pub fn pack_source(&self) -> Arc<dyn kotton_store::fetch::PackSource> {
+        Arc::new(DrivePacks { db: Arc::clone(&self.db), resources: Arc::clone(&self.resources) })
     }
 
     /// The one thing the host's file verbs may tell this engine: that a
@@ -1051,6 +1075,12 @@ pub async fn sync_mount_with_records(
     // Who is on the other end is the remote's own configuration, so this asks
     // it rather than being told by each caller. Before any write, so a refusal
     // leaves the mount as it found it.
+    // What this device keeps of the drive (kotton #55): its pin settings,
+    // resolved here for both entry points, as the lock above is taken here.
+    // This device states its default first if it never has, so the setting
+    // rides this pass's log to every other device ([`pins::state_default`]).
+    let keep = keep_for(runtime, resources, &store, user_rt.as_ref(), user_id, mount, remote).await;
+
     let outbound = match user_rt.peer_of(remote) {
         Some(peer_did) => {
             let pushes = !matches!(direction, Some(kotton_wire::ipc::SyncDirection::Pull));
@@ -1068,7 +1098,15 @@ pub async fn sync_mount_with_records(
         tracing::warn!(error = %e, user_id, "sync: log_records before sync failed");
     }
 
-    let result = user_rt.sync_mount(mount, remote, direction, outbound).await?;
+    let (result, kept) = user_rt.sync_mount_keeping(mount, remote, direction, outbound, keep.as_ref()).await?;
+    if let (Some(report), Some(db)) = (kept, resources.machine_db()) {
+        if !report.short.is_empty() {
+            tracing::warn!(user_id, held = report.held, budget = ?report.budget, wanted = report.wanted, "sync: short of room for what this device keeps whole");
+        }
+        if let Err(e) = pins::note_room(&db, user_id, FIRST_DRIVE_NAME, &report).await {
+            tracing::warn!(user_id, error = %e, "sync: what this pass found of the room was not kept");
+        }
+    }
 
     match kotton_record::replication::apply_record_segments(
         &runtime.schema_registry,
@@ -1091,6 +1129,94 @@ pub async fn sync_mount_with_records(
     resources.pass_landed(user_id).await;
 
     Ok(result)
+}
+
+/// What a pass keeps of the drive `remote` reaches, for `mount` (kotton #55):
+/// `None` — every byte, as before pins — for any mount but `local`, the tree a
+/// device keeps of the person's first drive and the one pins are over today,
+/// and for a pass whose settings cannot be read. Else the settings resolved
+/// for this device, within the budget its mount for that drive records.
+async fn keep_for(
+    runtime: &DeviceRuntime,
+    resources: &dyn crate::SyncHost,
+    records: &kotton_record::SqliteRecordStore,
+    user_rt: &kotton_store::runtime::user::UserStore,
+    user_id: &str,
+    mount: &str,
+    remote: &str,
+) -> Option<kotton_store::runtime::user::sync::Keep> {
+    if mount != "local" {
+        return None;
+    }
+    let me = runtime.operational_did();
+    if let Err(e) = pins::state_default(&runtime.schema_registry, records, &me).await {
+        tracing::warn!(user_id, error = %e, "sync: this device's default was not written down");
+    }
+    let all = match pins::settings(&runtime.schema_registry, records).await {
+        Ok(all) => all,
+        Err(e) => {
+            tracing::warn!(user_id, error = %e, "sync: the pin settings do not read; this pass keeps everything");
+            return None;
+        }
+    };
+    let budget = match (resources.machine_db(), user_rt.peer_of(remote)) {
+        (Some(db), Some(peer_did)) => {
+            let node = kotton_peer::daemon::drives::list(&db, user_id)
+                .await
+                .ok()
+                .and_then(|drives| drives.into_iter().find(|d| d.node.device_did.to_string() == peer_did))
+                .map(|d| d.node.id);
+            // The budget is the person's mount for that drive, in their own
+            // database, as `peer mount add … --budget` writes it.
+            match (node, resources.agent_db(user_id).await) {
+                (Some(node), Some(user_db)) => pins::budget(&user_db, user_id, &node).await.unwrap_or_else(|e| {
+                    tracing::warn!(user_id, error = %e, "sync: the budget does not read; this pass keeps with no bound");
+                    None
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    Some(pins::keep(all, &me, budget))
+}
+
+/// Where a pack this device does not keep is fetched from when something reads
+/// it (`kotton_store::fetch`): the person's first drive on each vault they keep
+/// drives on, in the order recorded, the first that holds it.
+pub struct DrivePacks {
+    db: Arc<SqlitePool>,
+    resources: Arc<dyn crate::SyncHost>,
+}
+
+/// How long one drive is given to hand over one pack.
+const FETCH_WITHIN: Duration = Duration::from_secs(30);
+
+#[async_trait::async_trait]
+impl kotton_store::fetch::PackSource for DrivePacks {
+    async fn fetch(&self, user_id: &str, key: &str) -> anyhow::Result<Option<kotton_store::fetch::Bytes>> {
+        use kotton_sys::store::SealedObjectAccess as _;
+        let mut last: Option<anyhow::Error> = None;
+        for drive in kotton_peer::daemon::drives::list(&self.db, user_id).await? {
+            let store = self.resources.user_store(user_id);
+            let reached = tokio::time::timeout(FETCH_WITHIN, async {
+                let client = self.resources.open_peer_client(drive.node.clone(), user_id, store.as_deref()).await?;
+                Ok::<_, anyhow::Error>(client.get_sealed(std::path::Path::new(key)).await)
+            })
+            .await;
+            match reached {
+                Ok(Ok(Ok(blob))) => return Ok(Some(blob)),
+                Ok(Ok(Err(kotton_sys::store::ObjectStorageError::NotFound(_)))) => {}
+                Ok(Ok(Err(e))) => last = Some(e.into()),
+                Ok(Err(e)) => last = Some(e),
+                Err(_) => last = Some(anyhow::anyhow!("the drive at '{}' did not answer in time", drive.node.id)),
+            }
+        }
+        match last {
+            Some(e) => Err(e),
+            None => Ok(None),
+        }
+    }
 }
 
 /// What a pass may send toward `peer_did`, a drive, packing `mount` first

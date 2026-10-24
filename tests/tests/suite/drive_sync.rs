@@ -611,7 +611,13 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
     assert_eq!(said, want, "B's drive list");
     let photos = listed.iter().find(|d| d.name == "photos").unwrap();
     assert!(photos.size.unwrap_or(0) >= 800, "the drive's size is what it holds: {photos:?}");
-    assert!(photos.pinned_whole.is_empty(), "no device pins a drive yet: {photos:?}");
+    // A, which made it, keeps it whole (kotton #55), and B reads that from the
+    // drive once a pass of A's has carried the setting there.
+    assert_eq!(made[0].pinned_whole, ["this device"], "the device that made the drive does not keep it whole");
+    synced(&mut client_a, "A").await;
+    synced(&mut client_b, "B").await;
+    let read = client_b.drive_show(USER, "photos").await.expect("drive show on B");
+    assert_eq!(read[0].pinned_whole, ["device-a"], "B does not read that A keeps photos whole: {read:?}");
 
     // The move: the sealed bytes to the second vault, under the same key.
     let first_drive = sealed_in(&first, FIRST_DRIVE_TREE).await;

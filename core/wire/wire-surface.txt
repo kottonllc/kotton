@@ -2,7 +2,7 @@
 # Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
 # Variants sorted by name; fields in declaration order, which is the order
 # serde writes them. See xtask/src/wire_check.rs for why this file exists.
-# variants: 200
+# variants: 203
 AddRecoveryPhrase
     user_id: String
 AppGetBundlePath
@@ -426,6 +426,13 @@ PeerAdd
     peer_did: String
     peer_pubkey_hex: String
     peer_addr: std::net::SocketAddr
+PinList
+    user_id: String
+PinSet
+    user_id: String
+    scope: crate::ipc::PinScope
+    #[serde(default)]
+    value: Option<crate::ipc::PinValue>
 PurgeFile
     user_id: String
     path: String
@@ -585,6 +592,8 @@ SetQuota
     quota: u64
 StandAt
     relays: Vec<crate::rendezvous::Stand>
+Status
+    user_id: String
 StorageReload
     user_id: String
 SubscribeEvents
