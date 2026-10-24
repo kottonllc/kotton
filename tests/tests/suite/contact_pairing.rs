@@ -1340,7 +1340,6 @@ pub(crate) async fn holding_a_vault(env: &mut TestEnv, user: &str, relay_url: &s
         client_v,
         user,
         "vault",
-        common::free_port(),
         Posture::BlindStorage,
     )
     .await;

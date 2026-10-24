@@ -29,7 +29,6 @@ use kotton_sys::secret::SecretsStore;
 use kuserd::DeviceDaemon;
 use std::sync::Arc;
 
-use crate::common::free_port;
 use crate::common::{connect_when_ready, enroll_streamed, init_crypto, unique_ipc, wait_for_daemon};
 use crate::vault::{enrol_vault, recover_from, spawn_vault};
 
@@ -168,7 +167,7 @@ async fn a_file_handed_to_a_joined_device_lands_in_its_inbox_by_way_of_the_drive
     let (pc_client, _drive) = crate::drive_sync::a_drive_for(pc_client, "device-e", "alice").await;
     let phone_client = connect_when_ready(&phone_device.ipc, "the phone's client").await;
     let (mut pc_client, mut phone, phone_node) =
-        enroll_streamed(pc_client, phone_client, "alice", "the phone", free_port(), Posture::Full).await;
+        enroll_streamed(pc_client, phone_client, "alice", "the phone", Posture::Full).await;
 
     let roster = pc.daemon.occupant_host().list_devices().await.expect("the roster");
     let row = roster

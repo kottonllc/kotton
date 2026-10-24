@@ -275,11 +275,6 @@ async fn a_hostile_duration_answers_instead_of_dropping_the_connection() {
     assert_eq!(records[0]["title"], "Ordinary");
 }
 
-fn free_port() -> u16 {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind :0 for port probe");
-    s.local_addr().expect("local_addr").port()
-}
-
 /// **The other half of the record's `Done when`, and the gap in it.**
 ///
 /// An imported event reaches a second paired device the way every other record
@@ -342,13 +337,11 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
     // join introduces N to it: N receives E's records by way of the drive.
     let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", USER).await;
 
-    let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) = enroll_streamed(
         client_e,
         client_n,
         USER,
         "device-n",
-        bootstrap_port,
         Posture::Full,
     )
     .await;

@@ -32,11 +32,6 @@ fn init_crypto() {
     });
 }
 
-fn free_port() -> u16 {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind :0 for port probe");
-    s.local_addr().expect("local_addr").port()
-}
-
 /// Outcome collected from one side's ceremony stream.
 struct Outcome {
     /// The SAS shown to this side's human (they must match across both sides).
@@ -134,14 +129,16 @@ async fn device_add_join_streams_a_confirmed_six_digit_ceremony() {
     let (did_e, _fp) = client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
 
     // ── Run the streamed ceremony: E adds, N joins, both confirm the SAS. ──────
-    let bootstrap_port = free_port();
     let (code_tx, code_rx) = oneshot::channel::<String>();
 
     // Each device announces its OWN name; the peer adopts it (RFC-0040 §1). E is
     // the existing device, N is the new one.
+    // Port 0: E's daemon binds what the OS gives it and says it in the code. A
+    // port picked here and bound there is a race with every other test binding
+    // one meanwhile (#110).
     let issuer = tokio::spawn(async move {
         let rx = client_e
-            .device_add_stream("alice", Some("device-e"), 30, bootstrap_port, Posture::Full)
+            .device_add_stream("alice", Some("device-e"), 30, 0, Posture::Full)
             .await
             .expect("device_add_stream");
         drive(client_e, "alice".to_string(), rx, Some(code_tx)).await
