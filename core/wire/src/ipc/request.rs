@@ -885,9 +885,8 @@ pub enum UserRequest {
     /// drive is recorded by enrolment, by `Recover` after the proof, by the
     /// membership projection, and by the join (the drives the admitting device
     /// hands over), each of which names a vault. The `drive` flag it
-    /// carried until #80 is off the wire: a request that still sends it does not
-    /// decode ([`peer_add_fields`]), rather than being read as a plain add.
-    #[serde(deserialize_with = "peer_add_fields")]
+    /// carried until #80 is off the wire: a request that still sends it is
+    /// read as the plain add it now is, which records a row and no drive.
     PeerAdd {
         user_id: String,
         /// Human label for this node, e.g. `"node-b"`.
@@ -2526,31 +2525,6 @@ pub enum UserRequest {
     },
 }
 
-
-/// `PeerAdd`'s fields, and nothing else: the one variant read through a shape
-/// that refuses a field it does not name, because the field it lost — `drive`,
-/// which made any key a drive on the caller's word — must not decode as a
-/// plain add (#80). Every other variant keeps serde's default and ignores an
-/// unknown field.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PeerAddFields {
-    user_id: String,
-    label: String,
-    peer_did: String,
-    peer_pubkey_hex: String,
-    peer_addr: std::net::SocketAddr,
-}
-
-/// Read `PeerAdd` through [`PeerAddFields`].
-fn peer_add_fields<'de, D>(d: D) -> Result<(String, String, String, String, std::net::SocketAddr), D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let f = PeerAddFields::deserialize(d)?;
-    Ok((f.user_id, f.label, f.peer_did, f.peer_pubkey_hex, f.peer_addr))
-}
-
 impl UserRequest {
     /// Returns the `user_id` for requests that operate on behalf of a specific
     /// user, or `None` for device-level and public operations.
@@ -4177,27 +4151,19 @@ mod trust_origin_tests {
         assert_eq!(bytes, serde_json::json!({ "SyncDrives": { "user_id": "alice" } }));
     }
 
-    /// **No request makes a node a drive on the caller's word** (#80). A
-    /// `PeerAdd` that still carries `drive`, true or false, does not decode: it
-    /// is refused, never read as a plain add. A `Recover` without the vault's
-    /// line does not decode either, since the line is what the drive is
-    /// recorded from. The shapes that are on the wire round-trip.
+    /// **No request makes a node a drive on the caller's word** (#80). `PeerAdd`
+    /// has no `drive` field (the wire surface records its fields), and its shape
+    /// round-trips. A `Recover` without the vault's line does not decode, since
+    /// the line is what the drive is recorded from.
     #[test]
     fn a_request_naming_a_drive_on_the_callers_word_is_not_on_the_wire() {
-        let add = serde_json::json!({
+        let now = serde_json::json!({ "PeerAdd": {
             "user_id": "alice",
             "label": "vault",
             "peer_did": "did:key:z6Mk",
             "peer_pubkey_hex": "00",
             "peer_addr": "127.0.0.1:7710",
-        });
-        for drive in [true, false] {
-            let mut old = add.clone();
-            old["drive"] = serde_json::json!(drive);
-            let old = serde_json::json!({ "PeerAdd": old });
-            assert!(serde_json::from_value::<UserRequest>(old.clone()).is_err(), "{old} still decodes");
-        }
-        let now = serde_json::json!({ "PeerAdd": add });
+        } });
         let read: UserRequest = serde_json::from_value(now.clone()).expect("a plain PeerAdd decodes");
         assert_eq!(serde_json::to_value(&read).unwrap(), now);
 

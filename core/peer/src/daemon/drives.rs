@@ -62,7 +62,8 @@
 //! over whatever posture the row for that node (its label or DID) held, and
 //! only then calls `record`, which sees a `blind-storage` row. So a row the
 //! joiner already held under another posture is relabelled by the join, on
-//! the issuer's word inside the ceremony.
+//! the issuer's word inside the ceremony, until #105 has the join hand
+//! `record` the row it finds.
 //! What holds them together after that is what may rewrite the row:
 //! re-adding the same key keeps the posture, a different key under the label
 //! takes neither the posture nor the drive, and removing the row removes the
