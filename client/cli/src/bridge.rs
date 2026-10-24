@@ -228,7 +228,7 @@ mod tests {
                 );
             }
         }
-        for verb in ["app", "peer", "device", "sync", "issuer", "cp", "cat", "keep", "mint", "enrol", "relay", "vault"] {
+        for verb in ["app", "peer", "device", "sync", "drive", "issuer", "cp", "cat", "keep", "mint", "enrol", "relay", "vault"] {
             assert!(
                 walked.iter().any(|w| w == verb),
                 "the walk did not reach `kotton {verb}`: {walked:?}"
@@ -257,6 +257,7 @@ mod tests {
                 &["relay", "--rule", "anyone", "--rev", "r"],
             ),
             (&["vault", "invite", "--me"], &["invite", "--me"]),
+            (&["drive", "move", "photos", "--to", "office"], &["move", "photos", "--to", "office"]),
             (&["cp", "host:photo.jpg", "/photos/"], &["host:photo.jpg", "/photos/"]),
             (&["keep", "../Photos", "as", "/photos"], &["../Photos", "as", "/photos"]),
         ] {
@@ -306,7 +307,7 @@ mod tests {
             );
             seen.push(name.to_string());
         }
-        for verb in ["mint", "enrol", "cp", "cat", "keep", "relay", "vault", "sync"] {
+        for verb in ["mint", "enrol", "cp", "cat", "keep", "relay", "vault", "sync", "drive"] {
             assert!(seen.iter().any(|s| s == verb), "`kotton {verb}` is not a pass-through: {seen:?}");
         }
     }

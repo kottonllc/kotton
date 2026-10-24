@@ -347,4 +347,62 @@ mod tests {
         .await
         .unwrap();
     }
+
+    /// **The drive a person had on a vault becomes their first drive there,
+    /// named, in place** (`migrations/0028_drives_per_tree.sql`): each row
+    /// from before carries over as the tenancy's own tree, `local`, named
+    /// `personal`, every other column as written; and after it, one person
+    /// keeps two drives on one vault key — the tree is the key's last part —
+    /// while the same tree twice is one row.
+    #[tokio::test]
+    async fn the_drive_a_person_had_becomes_their_first_drive_and_a_vault_keeps_several() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = kotton_record::open_sqlite(&dir.path().join("agent.db")).await.unwrap();
+        let (before, per_tree): (Vec<_>, Vec<_>) = MIGRATOR.iter().partition(|m| m.version < 28);
+        for m in before {
+            sqlx::raw_sql(&m.sql[..]).execute(&pool).await.unwrap();
+        }
+        sqlx::raw_sql(
+            "INSERT INTO drives (user_id, vault_key, tenancy, node_id, recorded_at) VALUES ('bob', x'07', 'bob', 'vault', 5); \
+             INSERT INTO drives (user_id, vault_key, tenancy, node_id, recorded_at) VALUES ('alice', x'07', 'alice', 'home', 6);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for m in per_tree {
+            sqlx::raw_sql(&m.sql[..]).execute(&pool).await.unwrap();
+        }
+
+        type Row = (String, Vec<u8>, String, String, String, String, i64);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT user_id, vault_key, tenancy, tree, name, node_id, recorded_at FROM drives ORDER BY user_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("alice".into(), vec![7], "alice".into(), "local".into(), "personal".into(), "home".into(), 6),
+                ("bob".into(), vec![7], "bob".into(), "local".into(), "personal".into(), "vault".into(), 5),
+            ]
+        );
+
+        sqlx::query(
+            "INSERT INTO drives (user_id, vault_key, tenancy, tree, name, node_id, recorded_at) \
+             VALUES ('bob', x'07', 'bob', 'drive-00', 'photos', 'vault', 7)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let twice = sqlx::query(
+            "INSERT INTO drives (user_id, vault_key, tenancy, tree, name, node_id, recorded_at) \
+             VALUES ('bob', x'07', 'bob', 'drive-00', 'other', 'vault', 8)",
+        )
+        .execute(&pool)
+        .await;
+        assert!(twice.is_err(), "one tree on one vault was recorded twice");
+        let bobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives WHERE user_id = 'bob'").fetch_one(&pool).await.unwrap();
+        assert_eq!(bobs, 2, "bob keeps two drives on one vault");
+    }
 }

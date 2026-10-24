@@ -7,11 +7,11 @@
 //!
 //! | Where | What |
 //! |---|---|
-//! | the shelf, through `Shelves::open(user_id, mount, path)` | the sealed pool: `users/<id>/data/` on the disk, `<prefix>/<id>/<mount>/` in a bucket |
+//! | the shelf, through `Shelves::open(user_id, mount, path)` | the sealed pool, one tree per drive (`crate::drives`): `users/<id>/data/` and `users/<id>/drives/<tree>/` on the disk, `<prefix>/<id>/<mount>/` in a bucket |
 //! | `users/<id>/` | the identity chain (`identity/kel.json`), the sealed recovery copy (`recovery.json`), the pool's configuration |
 //! | `system/users.json`, `system/device_routing.json` | the tenant's registry entry and their routes |
 //! | the secrets store | the per-user labels, and each mount's pinned key domain |
-//! | `system/agent.db` | every row of every table with a `user_id` column: `paired_nodes` (the pairing), `pool_quotas`, `held_doors`, `held_deliveries`, `carried_messages`, and the device tables a vault leaves empty |
+//! | `system/agent.db` | every row of every table with a `user_id` column: `paired_nodes` (the pairing), `pool_quotas`, `held_doors`, `held_deliveries`, `carried_messages`, `tenant_drives` (each made drive's sealed name), and the device tables a vault leaves empty |
 //! | this process | the resident pool, its meter, sessions, reassembly buffers, the chain's tip and recovery authorities at the handshake, the paired-key allowlist and the relay reservations it drives, the held doors' reservations |
 //!
 //! **The drop finds all of it by the user id and by nothing else.** In
@@ -329,9 +329,10 @@ mod tests {
         crate::meter::init(&db).await.unwrap();
         crate::doors::init(&db).await.unwrap();
         crate::carry::init(&db).await.unwrap();
+        crate::drives::init(&db).await.unwrap();
 
         let tables = tenant_tables(&db).await.unwrap();
-        for t in ["paired_nodes", "pool_quotas", "held_doors", "held_deliveries", "carried_messages"] {
+        for t in ["paired_nodes", "pool_quotas", "held_doors", "held_deliveries", "carried_messages", "tenant_drives"] {
             assert!(tables.iter().any(|x| x == t), "{t} is swept: {tables:?}");
         }
 
@@ -379,6 +380,11 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
+            sqlx::query("INSERT INTO tenant_drives (user_id, tree, sealed_name, made_at) VALUES (?, 'drive-00', x'01', 0)")
+                .bind(user)
+                .execute(&db)
+                .await
+                .unwrap();
         }
 
         // The vault's operator credential is nobody's tenancy: its table has no
@@ -395,7 +401,7 @@ mod tests {
             vec![[9u8; 32]],
             "a drop leaves the operator credential enrolled"
         );
-        for t in ["paired_nodes", "pool_quotas", "held_doors", "held_deliveries", "carried_messages"] {
+        for t in ["paired_nodes", "pool_quotas", "held_doors", "held_deliveries", "carried_messages", "tenant_drives"] {
             assert_eq!(
                 removed.iter().find(|(x, _)| x == t).map(|(_, n)| *n),
                 Some(1),
@@ -417,7 +423,7 @@ mod tests {
             };
             assert_eq!(count("alice").await, 0, "nothing of alice's is left in {table}");
         }
-        for t in ["paired_nodes", "pool_quotas", "held_doors", "held_deliveries", "carried_messages"] {
+        for t in ["paired_nodes", "pool_quotas", "held_doors", "held_deliveries", "carried_messages", "tenant_drives"] {
             let n: i64 = sqlx::query(&format!("SELECT COUNT(*) AS n FROM {t} WHERE user_id = 'bob'"))
                 .fetch_one(&db)
                 .await

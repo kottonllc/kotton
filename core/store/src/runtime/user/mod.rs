@@ -176,6 +176,46 @@ impl UserStore {
         self.ctx.sealing_keys()
     }
 
+    /// Seal what names a drive — the bytes a device's drive verbs make of its
+    /// name and where it came from — under this person's key, bound to the `tree` a
+    /// vault keeps the drive under, for the vault to keep and hand back to
+    /// every device of theirs (`kotton_wire::ipc::TenantDrive`). The vault
+    /// cannot open it; a sealed name moved to another tree does not open there,
+    /// so a vault cannot pass one drive's name off as another's.
+    ///
+    /// `finished` is false for the tree a `drive move` is still filling: its
+    /// name is sealed in a domain of its own, so every device that opens it
+    /// reads an unfinished move and not a second drive of that name, and only
+    /// the device that verified the copy seals it finished
+    /// (`kotton_device::users::drive_verbs`).
+    ///
+    /// Refused on a store with no keys: a node that holds none names nothing.
+    pub fn seal_drive_name(&self, tree: &str, name: &[u8], finished: bool) -> Result<Vec<u8>> {
+        let keys = self
+            .sealing_keys()
+            .ok_or_else(|| anyhow::anyhow!("this node holds no keys for {}, so it cannot name a drive", self.user_id()))?;
+        crate::provider::seal_envelope(keys.cek, &drive_name_aad(tree, finished), name)
+            .map_err(|e| anyhow::anyhow!("sealing a drive's name: {e}"))
+    }
+
+    /// Open a drive's name [`Self::seal_drive_name`] sealed for `tree`, and
+    /// whether it was sealed finished.
+    pub fn open_drive_name(&self, tree: &str, sealed: &[u8]) -> Result<(Vec<u8>, bool)> {
+        let keys = self
+            .sealing_keys()
+            .ok_or_else(|| anyhow::anyhow!("this node holds no keys for {}, so it cannot read a drive's name", self.user_id()))?;
+        let (name, finished) = match crate::provider::open_envelope(keys.cek, &drive_name_aad(tree, true), sealed) {
+            Ok(name) => (name, true),
+            Err(_) => (
+                crate::provider::open_envelope(keys.cek, &drive_name_aad(tree, false), sealed).map_err(|e| {
+                    anyhow::anyhow!("the name sealed for drive tree '{tree}' does not open under this person's key: {e}")
+                })?,
+                false,
+            ),
+        };
+        Ok((name, finished))
+    }
+
     /// This user's DID.
     pub fn did(&self) -> &str {
         self.ctx.did()
@@ -403,6 +443,14 @@ impl UserStore {
             .ok()
             .map(|b| b.to_vec())
     }
+}
+
+/// What a drive's sealed name is bound to: its own domain — one for a
+/// finished drive, another for a move's unfinished tree — then the tree.
+fn drive_name_aad(tree: &str, finished: bool) -> Vec<u8> {
+    let mut aad = if finished { b"kotton/drive-name/v1\0".to_vec() } else { b"kotton/drive-name-unfinished/v1\0".to_vec() };
+    aad.extend_from_slice(tree.as_bytes());
+    aad
 }
 
 /// Where one path in the person's tree lands, as [`UserStore::person_door`]
