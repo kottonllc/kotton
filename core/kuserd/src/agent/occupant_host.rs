@@ -607,21 +607,10 @@ impl OccupantHost for DaemonOccupantHost<'_> {
     /// is refused in words by `operator::speak` before anything is dialled.
     async fn landlord_people(&self, vault: String) -> Result<Vec<RunnerTenant>, String> {
         let user_id = self.user()?;
-        match super::operator::speak(self.runtime, self.users, self.record_stores, &user_id, &vault, OperatorVerb::Pools)
-            .await
-        {
-            UserResponse::VaultTenants { tenants } => Ok(tenants
-                .into_iter()
-                .map(|t| RunnerTenant {
-                    name: t.user_id,
-                    held_bytes: t.held,
-                    space_bytes: t.quota,
-                    devices: t.devices,
-                })
-                .collect()),
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("landlord.people: an answer this does not read: {other:?}")),
-        }
+        tenants_answered(
+            super::operator::speak(self.runtime, self.users, self.record_stores, &user_id, &vault, OperatorVerb::Pools)
+                .await,
+        )
     }
 
     /// Mint `name`'s invite, then set their space aside —
@@ -659,20 +648,17 @@ impl OccupantHost for DaemonOccupantHost<'_> {
             Ok(self.landlord_people(vault.clone()).await?.iter().any(|t| t.name == name))
         };
         dropped_once_typed_back(self.desk, &vault, &name, kept, || async {
-            match super::operator::speak(
-                self.runtime,
-                self.users,
-                self.record_stores,
-                &user_id,
-                &vault,
-                OperatorVerb::Drop { pool: name.clone() },
+            dropped_answered(
+                super::operator::speak(
+                    self.runtime,
+                    self.users,
+                    self.record_stores,
+                    &user_id,
+                    &vault,
+                    OperatorVerb::Drop { pool: name.clone() },
+                )
+                .await,
             )
-            .await
-            {
-                UserResponse::TenantDropped { .. } => Ok(()),
-                UserResponse::Error { message } => Err(message),
-                other => Err(format!("landlord.drop-pool: an answer this does not read: {other:?}")),
-            }
         })
         .await
     }
@@ -681,11 +667,10 @@ impl OccupantHost for DaemonOccupantHost<'_> {
     /// under the credential this person keeps for it.
     async fn landlord_rule(&self, relay: String) -> Result<kotton_wire::rendezvous::AdmissionRule, String> {
         let user_id = self.user()?;
-        match super::operator::speak(self.runtime, self.users, self.record_stores, &user_id, &relay, OperatorVerb::ReadRule).await {
-            UserResponse::RelayRule { rule } => Ok(rule),
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("landlord.rule: an answer this does not read: {other:?}")),
-        }
+        rule_answered(
+            super::operator::speak(self.runtime, self.users, self.record_stores, &user_id, &relay, OperatorVerb::ReadRule)
+                .await,
+        )
     }
 
     /// Set who may use the relay — `OperatorVerb::SetRule`. The keys it
@@ -697,13 +682,10 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         rule: kotton_wire::rendezvous::AdmissionRule,
     ) -> Result<kotton_wire::rendezvous::AdmissionRule, String> {
         let user_id = self.user()?;
-        match super::operator::speak(self.runtime, self.users, self.record_stores, &user_id, &relay, OperatorVerb::SetRule { rule })
-            .await
-        {
-            UserResponse::RelayRule { rule } => Ok(rule),
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("landlord.set-rule: an answer this does not read: {other:?}")),
-        }
+        rule_answered(
+            super::operator::speak(self.runtime, self.users, self.record_stores, &user_id, &relay, OperatorVerb::SetRule { rule })
+                .await,
+        )
     }
 
     /// Settings' one door: what a pasted code names, before anything is
@@ -732,13 +714,10 @@ impl OccupantHost for DaemonOccupantHost<'_> {
     /// vault stands — `vault move <v> <r>` (`OperatorVerb::Move`).
     async fn landlord_move_vault(&self, vault: String, relay: String) -> Result<(), String> {
         let user_id = self.user()?;
-        match super::operator::speak(self.runtime, self.users, self.record_stores, &user_id, &vault, OperatorVerb::Move { relay })
-            .await
-        {
-            UserResponse::Ok => Ok(()),
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("landlord.move-vault: an answer this does not read: {other:?}")),
-        }
+        moved_answered(
+            super::operator::speak(self.runtime, self.users, self.record_stores, &user_id, &vault, OperatorVerb::Move { relay })
+                .await,
+        )
     }
 
     /// *This device › Operators*: whether the person at this desk operates this
@@ -1906,20 +1885,65 @@ mod message_tests {
     }
 }
 
-/// What the guest is told of the vault's answer to `landlord_invite`: the
-/// invite's text, and any other answer as a refusal, said in
-/// [`kotton_wire::ipc::answer_said`]. A name the vault keeps is refused here,
-/// as everywhere but `vault invite --me` (#108): a guest's invite admits
-/// someone new.
+/// The answer a landlord reader asked for, read; any other, refused in
+/// [`kotton_wire::ipc::answer_said`]'s words — the vault's own where the
+/// answer carries them (`Error`, `VaultKeepsAlready`), and otherwise its name,
+/// never its fields.
 ///
-/// **The invite is read; nothing else is.** There is no list of refusals here
-/// to miss one a release adds (#114): anything but the invite is not one, and
-/// is said in the vault's words where it carries them, by its name where not.
+/// **One expectation per reader, and no list** (#114, #121). Each reader
+/// names the one answer its verb asks the vault for, and nothing else: there
+/// is no arm for `Error`, no arm for any refusal, and no catch-all of its own.
+/// An answer a release adds is not the one asked for, so it is refused and
+/// said, never misread and never printed. The five other landlord readers
+/// had one shape — the answer asked for, then `Error`, then a debug print of
+/// anything else — and the invite's had the form this is (#122): written once
+/// here, rather than five times more, so each reader below states only what it
+/// asked for. It is a macro because what a reader asked for is a pattern,
+/// which a function cannot take.
+macro_rules! answered {
+    ($answer:expr, $asked:pat => $read:expr) => {
+        match $answer {
+            $asked => Ok($read),
+            unread => Err(kotton_wire::ipc::answer_said(&unread)),
+        }
+    };
+}
+
+/// `landlord.invite`: the invite's text. A name the vault keeps is refused
+/// here, as everywhere but `vault invite --me` (#108): a guest's invite
+/// admits someone new.
 fn invite_answered(answer: UserResponse) -> Result<String, String> {
-    match answer {
-        UserResponse::PairAdvertising { code, .. } => Ok(code.expose().to_string()),
-        refused => Err(kotton_wire::ipc::answer_said(&refused)),
-    }
+    answered!(answer, UserResponse::PairAdvertising { code, .. } => code.expose().to_string())
+}
+
+/// `landlord.people` (and the drop's check of who is kept): who the vault
+/// keeps for.
+fn tenants_answered(answer: UserResponse) -> Result<Vec<RunnerTenant>, String> {
+    answered!(answer, UserResponse::VaultTenants { tenants } => tenants
+        .into_iter()
+        .map(|t| RunnerTenant {
+            name: t.user_id,
+            held_bytes: t.held,
+            space_bytes: t.quota,
+            devices: t.devices,
+        })
+        .collect())
+}
+
+/// `landlord.drop-pool`: the pool dropped.
+fn dropped_answered(answer: UserResponse) -> Result<(), String> {
+    answered!(answer, UserResponse::TenantDropped { .. } => ())
+}
+
+/// `landlord.rule` and `landlord.set-rule`: the rule the relay holds — read,
+/// or as it holds it once set. Both verbs ask the relay for the same answer.
+fn rule_answered(answer: UserResponse) -> Result<kotton_wire::rendezvous::AdmissionRule, String> {
+    answered!(answer, UserResponse::RelayRule { rule } => rule)
+}
+
+/// `landlord.move-vault`: the vault took the relay it was told of.
+fn moved_answered(answer: UserResponse) -> Result<(), String> {
+    answered!(answer, UserResponse::Ok => ())
 }
 
 #[cfg(test)]
@@ -1958,8 +1982,89 @@ mod a_guests_invite {
         let unnamed = UserResponse::VaultFull { held: 3, quota: 2 };
         let said = invite_answered(unnamed.clone()).expect_err("an answer other than the invite was taken as one");
         assert_eq!(said, kotton_wire::ipc::answer_said(&unnamed));
-        assert!(said.starts_with("the vault answered `VaultFull`"), "{said}");
+        assert!(said.starts_with("the answer was `VaultFull`"), "{said}");
         assert!(!said.contains('{') && !said.contains("does not read"), "{said}");
+    }
+}
+
+#[cfg(test)]
+mod a_landlords_answer {
+    use super::*;
+    use kotton_wire::rendezvous::AdmissionRule;
+
+    /// A typed refusal no landlord reader names, standing in for one a later
+    /// release adds — as `a_refusal_nobody_names_is_refused_to_the_guest_and_said`.
+    fn unnamed() -> UserResponse {
+        UserResponse::VaultFull { held: 3, quota: 2 }
+    }
+
+    /// What every reader says of [`unnamed`]: `answer_said`'s words, with no
+    /// field of the answer and no debug print.
+    fn said_by_name<T: std::fmt::Debug>(read: Result<T, String>) {
+        let said = read.expect_err("an answer other than the one asked for was taken as it");
+        assert_eq!(said, kotton_wire::ipc::answer_said(&unnamed()));
+        assert!(said.starts_with("the answer was `VaultFull`"), "{said}");
+        assert!(!said.contains('{') && !said.contains("does not read"), "{said}");
+    }
+
+    /// The vault's own words, where its refusal is an `Error`.
+    fn refused() -> UserResponse {
+        UserResponse::Error { message: "no operator credential is kept for 'home'".into() }
+    }
+
+    /// **`landlord.people` reads the tenants and says any other answer**
+    /// (#121): `VaultTenants` is the list, an `Error` its message, and an
+    /// answer it does not name is said by its name.
+    #[test]
+    fn landlord_people_reads_the_tenants_and_says_any_other_answer() {
+        let tenant = kotton_wire::ipc::VaultTenant { user_id: "sam".into(), held: 7, quota: Some(9), devices: 1 };
+        let people = tenants_answered(UserResponse::VaultTenants { tenants: vec![tenant] }).expect("the tenants");
+        assert_eq!(people.len(), 1);
+        assert_eq!((people[0].name.as_str(), people[0].held_bytes, people[0].space_bytes), ("sam", 7, Some(9)));
+        assert_eq!(tenants_answered(refused()).err().as_deref(), Some("no operator credential is kept for 'home'"));
+        said_by_name(tenants_answered(unnamed()));
+    }
+
+    /// **`landlord.drop-pool` reads the drop and says any other answer**
+    /// (#121). A pool's readout (`VaultCapacityResult`) is not a drop either:
+    /// an answer meant for another verb is said, never taken as done.
+    #[test]
+    fn landlord_drop_reads_the_drop_and_says_any_other_answer() {
+        let tenant = kotton_wire::ipc::VaultTenant { user_id: "sam".into(), held: 7, quota: None, devices: 1 };
+        assert_eq!(dropped_answered(UserResponse::TenantDropped { tenant }), Ok(()));
+        assert_eq!(dropped_answered(refused()).err().as_deref(), Some("no operator credential is kept for 'home'"));
+        said_by_name(dropped_answered(unnamed()));
+        let readout = dropped_answered(UserResponse::VaultCapacityResult { held: 7, quota: None });
+        assert!(readout.is_err_and(|s| s.starts_with("the answer was `VaultCapacityResult`")));
+    }
+
+    /// **`landlord.rule` reads the relay's rule and says any other answer**
+    /// (#121).
+    #[test]
+    fn landlord_rule_reads_the_rule_and_says_any_other_answer() {
+        assert_eq!(rule_answered(UserResponse::RelayRule { rule: AdmissionRule::Anyone }), Ok(AdmissionRule::Anyone));
+        assert_eq!(rule_answered(refused()).err().as_deref(), Some("no operator credential is kept for 'home'"));
+        said_by_name(rule_answered(unnamed()));
+    }
+
+    /// **`landlord.set-rule` is answered with the rule the relay then holds,
+    /// and says any other answer** (#121): a bare `Ok` is not the rule held,
+    /// so it is said, not taken as set.
+    #[test]
+    fn landlord_set_rule_reads_the_rule_held_and_says_any_other_answer() {
+        let held = rule_answered(UserResponse::RelayRule { rule: AdmissionRule::PeopleIInvite });
+        assert_eq!(held, Ok(AdmissionRule::PeopleIInvite));
+        said_by_name(rule_answered(unnamed()));
+        assert!(rule_answered(UserResponse::Ok).is_err_and(|s| s.starts_with("the answer was `Ok`")));
+    }
+
+    /// **`landlord.move-vault` reads the vault taking the relay and says any
+    /// other answer** (#121).
+    #[test]
+    fn landlord_move_vault_reads_the_move_and_says_any_other_answer() {
+        assert_eq!(moved_answered(UserResponse::Ok), Ok(()));
+        assert_eq!(moved_answered(refused()).err().as_deref(), Some("no operator credential is kept for 'home'"));
+        said_by_name(moved_answered(unnamed()));
     }
 }
 

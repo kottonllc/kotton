@@ -6,7 +6,9 @@
 //! signature (`devices`) — holds the
 //! sealed recovery copy a phrase-only device needs, and reserves at the person's
 //! relay so they are reachable when nothing of theirs is awake. It is paid by
-//! the byte and it has one meter. Many people's pools live in one process.
+//! the byte and it has one meter. Many people's pools live in one process, and
+//! each pool holds that person's drives here: the tenancy's own tree, and each
+//! drive made beside it (`drives`).
 //!
 //! What is *not* here is the point: no apps, no sandbox, no display, no
 //! plaintext verb. The full daemon enrolled blind is correct because a node
@@ -17,6 +19,7 @@ pub mod carry;
 pub mod control;
 pub mod devices;
 pub mod doors;
+pub mod drives;
 pub mod host;
 pub mod instance;
 pub mod meter;
@@ -203,9 +206,7 @@ impl Vault {
         meter::init(&db).await?;
         meter.load(&db).await?;
         for (id, store) in pools.all() {
-            if let Some(shelf) = peer::pool_shelf(&store) {
-                meter.set(&id, Meter::measure(shelf.as_ref()).await);
-            }
+            meter.set(&id, peer::measure_pool(&store).await);
         }
 
         let runtime = Arc::new(runtime);
@@ -219,6 +220,7 @@ impl Vault {
         doors::refresh(&runtime, &db).await;
         carry::init(&db).await?;
         devices::init(&db).await?;
+        drives::init(&db).await?;
         let peer = Arc::new(PeerContext {
             runtime: Arc::clone(&runtime),
             pools,

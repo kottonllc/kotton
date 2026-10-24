@@ -112,6 +112,16 @@ impl KottonPeerObjectStorage {
         self
     }
 
+    /// Address another store on the peer with the **sealed** verbs — a drive a
+    /// vault keeps beside the tenancy's own tree, by the tree it is kept under
+    /// (`kotton_wire::ipc::MadeDrive::tree`). The VFS verbs are unchanged:
+    /// they name no store.
+    #[must_use]
+    pub fn with_remote_mount(mut self, remote_mount: impl Into<String>) -> Self {
+        self.remote_mount = remote_mount.into();
+        self
+    }
+
     /// Record the peer's directly-dialable address observed on this connection.
     ///
     /// The dialer passes `Some(addr)` only for direct / hole-punched paths, where

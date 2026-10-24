@@ -27,6 +27,7 @@ kotton-ipc = { path = "../ipc" }
 kotton-net = { path = "../net" }
 kotton-peer = { path = "../peer" }
 kotton-device = { path = "../device" }
+kotton-record = { path = "../record" }
 kotton-store = { path = "../store" }
 kotton-fs = { path = "../fs" }
 kotton-identity = { path = "../identity" }

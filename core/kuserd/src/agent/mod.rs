@@ -1838,12 +1838,13 @@ impl DeviceDaemon {
         Ok(())
     }
 
-    /// The drives this device records for `user_id`
-    /// ([`kotton_peer::daemon::drives`]): what "a drive" resolves against
-    /// here. For a caller that holds the daemon — an integration test that
-    /// asks what enrolment or recovery recorded.
+    /// Every drive this device records for `user_id`
+    /// ([`kotton_peer::daemon::drives::all`]): each vault's first drive and
+    /// each made beside it. For a caller that holds the daemon — an
+    /// integration test that asks what enrolment, recovery, or following a
+    /// vault's listing recorded.
     pub async fn drives(&self, user_id: &str) -> io::Result<Vec<kotton_peer::daemon::drives::Drive>> {
-        kotton_peer::daemon::drives::list(&self.db, user_id).await
+        kotton_peer::daemon::drives::all(&self.db, user_id).await
     }
 
     /// Build the peer-request handler closure.

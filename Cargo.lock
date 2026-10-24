@@ -3890,6 +3890,7 @@ dependencies = [
  "kotton-ipc",
  "kotton-net",
  "kotton-peer",
+ "kotton-record",
  "kotton-schemas",
  "kotton-secret",
  "kotton-session",

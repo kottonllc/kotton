@@ -5,23 +5,39 @@
 //!
 //! The protocol names the thing: *a drive is a tenancy on a vault*, and *a
 //! device names a drive by the vault's key and the tenancy, wherever the vault
-//! runs*. So the record is those two — the vault's key and
-//! the tenancy — and, beside them, the paired node the drive is reached
-//! through, which is where the dialer finds the vault's addresses and relay.
-//! It lives in the `drives` table (`core/device/migrations/0026_drives.sql`),
-//! beside `paired_nodes`, one row per person, vault key and tenancy.
+//! runs*; and *a person may have several drives, on one vault or many*. So the
+//! record is the vault's key, the tenancy, and the tree the vault keeps the
+//! drive under, with the person's name for it — and, beside them, the paired
+//! node the drive is reached through, which is where the dialer finds the
+//! vault's addresses and relay. It lives in the `drives` table
+//! (`core/device/migrations/0026_drives.sql`, re-keyed by
+//! `0028_drives_per_tree.sql`), beside `paired_nodes`, one row per person,
+//! vault key, tenancy and tree.
 //!
 //! **The tenancy, today.** A vault keeps one pool per tenant, and the pool is
 //! named by the name the person's device syncs as: every request a device sends
 //! a vault names its `user_id`, and the admit checks the vault keeps for this
 //! device under that name before it reports success (`refused_as` in
 //! `kotton_device::users::pairing`). So a person has one tenancy on a vault,
-//! their own name here, and the record names that one. The key already admits
-//! several, for when a vault keeps more than one drive for a person.
+//! their own name here.
 //!
-//! **Who writes it: [`record`], and nothing else.** It is called from every
-//! place a device learns that a node is a vault keeping the person's things,
-//! and each of them names a vault; no caller's word makes a node a drive:
+//! **The trees, and the first drive.** In the pool a vault keeps several
+//! drives (`kvaultd::drives`): the tenancy's own tree, `local` — the pool it
+//! kept before, the person's *first drive* there, named `personal` on every
+//! device because no device sealed it a name — and each drive made beside it,
+//! `drive-<hex>`, whose name a device sealed and the vault keeps. A tree's
+//! name is the vault's word for it, minted fresh for each vault, so it is a key
+//! within one person's record on one vault and joins nothing across vaults or
+//! persons; the person's name for a drive keys nothing at all. The first drive
+//! is what this device's own tree syncs with, at each vault; a made drive has
+//! no tree on a device yet (what a device keeps is pins', kotton #55), so
+//! [`list`] — what every reader below that asks *which nodes are drives* reads
+//! — is the first drive on each vault, and [`all`] is every drive.
+//!
+//! **Who writes a first drive: [`record`], and nothing else.** It is called
+//! from every place a device learns that a node is a vault keeping the
+//! person's things, and each of them names a vault; no caller's word makes a
+//! node a drive:
 //!
 //! - **enrolment** — [`super::nodes::finalize_enrolled_node`], for a node
 //!   admitted under `Posture::BlindStorage` (`device add --blind`, `device
@@ -49,7 +65,16 @@
 //!   device until `device revoke` (kotton #98).
 //!   A device that joins after a vault was enrolled learns the drive this way.
 //!
-//! All arrive at the same row: the vault key is the key of the node row the
+//! **Who writes a made drive: [`reconcile`], and nothing else**, from a
+//! vault's own listing of the person's drives there, each name opened under
+//! the person's key (`kotton_device::users::drive_verbs::follow`): after
+//! `drive create` and `drive move`, at `drive list` and `show`, and after every
+//! sync pass with the vault. It refines a vault already recorded as a drive,
+//! and is refused for any other, so a listing makes no node a drive; and it
+//! takes the listing whole, so a drive moved away is forgotten here at this
+//! device's next pass — which is how every device follows a drive.
+//!
+//! All first drives arrive at the same row: the vault key is the key of the node row the
 //! drive is reached through, the tenancy is the person's name, and the row's
 //! posture is `blind-storage`, set in the same transaction as the record on a
 //! row that named none. [`record`] never relabels a row: a node paired under
@@ -95,10 +120,14 @@
 //! the vault's key is on that row, and the tenancy is the person's own name on
 //! their own device. The record is the device's. It is sent once, to one
 //! place: to another of the person's own devices as it joins, inside the
-//! ceremony's encrypted channel, so that device can reach the drive. It
-//! never goes to the vault, which learns nothing from it, nor anywhere else.
+//! ceremony's encrypted channel, so that device can reach the drive — the
+//! first drive on each vault; the joiner learns the made ones from the vaults
+//! at its first pass. It never goes to the vault, which learns nothing from
+//! it, nor anywhere else. The vault holds what is its own: the trees, their
+//! sizes, and each made drive's name sealed so it cannot read it.
 
 use kotton_schemas::membership::Posture;
+use kotton_wire::ipc::{FIRST_DRIVE_NAME, FIRST_DRIVE_TREE};
 use kotton_wire::peer::PairedNode;
 use sqlx::{Row, SqlitePool};
 use std::io;
@@ -116,12 +145,27 @@ pub struct Drive {
     /// The tenancy on that vault: the name the vault keeps the person's pool
     /// under, which is the person's own name on this device today.
     pub tenancy: String,
+    /// The tree the vault keeps the drive under: [`FIRST_DRIVE_TREE`] for the
+    /// tenancy's own, or a made drive's (`kotton_wire::ipc::MadeDrive::tree`).
+    pub tree: String,
+    /// The person's name for it: [`FIRST_DRIVE_NAME`] for the tenancy's own
+    /// tree, the name opened from what the vault keeps sealed otherwise.
+    pub name: String,
     /// The paired node the drive is reached through.
     pub node: PairedNode,
 }
 
+impl Drive {
+    /// Whether this is the tenancy's own tree on its vault — the drive this
+    /// device's own tree syncs with (module doc).
+    pub fn is_first(&self) -> bool {
+        self.tree == FIRST_DRIVE_TREE
+    }
+}
+
 /// Record that the node `user_id` pairs under `vault_key` is a vault, and the
-/// person's tenancy on it a drive. The one writer of the record (module doc).
+/// person's tenancy on it a drive — the tenancy's own tree, their first drive
+/// there. The one writer of a vault's first drive (module doc).
 ///
 /// Idempotent: recording a drive again re-points it at the node now holding
 /// the key and leaves it otherwise as it was. Refused when `user_id` pairs no
@@ -131,14 +175,14 @@ pub struct Drive {
 /// `blind-storage`: a drive is a tenancy on a vault, and a row that says the
 /// node is something else is not relabelled here (module doc).
 pub async fn record(db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32]) -> io::Result<()> {
-    let mut tx = db.begin().await.map_err(db_err)?;
+    let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
     let node: Option<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT id, device_did, posture FROM paired_nodes WHERE user_id = ? AND public_key = ? \
          ORDER BY device_did LIMIT 1",
     )
     .bind(user_id)
     .bind(vault_key.as_slice())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await
     .map_err(db_err)?;
     let Some((node_id, device_did, posture)) = node else {
@@ -158,22 +202,113 @@ pub async fn record(db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32]) -
         .bind(Posture::BlindStorage.as_str())
         .bind(user_id)
         .bind(&device_did)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .map_err(db_err)?;
     sqlx::query(
-        "INSERT INTO drives (user_id, vault_key, tenancy, node_id, recorded_at) VALUES (?, ?, ?, ?, ?) \
-         ON CONFLICT (user_id, vault_key, tenancy) DO UPDATE SET node_id = excluded.node_id",
+        "INSERT INTO drives (user_id, vault_key, tenancy, tree, name, node_id, recorded_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (user_id, vault_key, tenancy, tree) DO UPDATE SET node_id = excluded.node_id",
     )
     .bind(user_id)
     .bind(vault_key.as_slice())
     .bind(tenancy_of(user_id))
+    .bind(FIRST_DRIVE_TREE)
+    .bind(FIRST_DRIVE_NAME)
     .bind(&node_id)
     .bind(kotton_common::time::now_secs())
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await
     .map_err(db_err)?;
-    tx.commit().await.map_err(db_err)
+    tx.commit().await
+}
+
+/// Take what the vault `vault_key` lists of `user_id`'s drives — each made
+/// drive's tree and the name a device of theirs opened for it — as what this
+/// device records of the drives made there: every listed tree recorded under
+/// its name, and every made drive recorded at that vault and not listed
+/// forgotten. The one writer of made drives (module doc). Returns whether the
+/// record changed.
+///
+/// `listed` is the vault's whole listing, never part of one: a tree left out
+/// is a tree the vault no longer keeps — retired by a `drive move` from it, on
+/// this device or another — and this is how every device follows a drive away
+/// from it. The tenancy's own tree is [`record`]'s, and is neither written nor
+/// forgotten here, whatever the listing says of it.
+///
+/// Refused when `user_id` records no first drive at `vault_key`: a vault's
+/// listing names trees on a vault already one of the person's, and makes no
+/// node a drive.
+pub async fn reconcile(
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    vault_key: &[u8; 32],
+    listed: &[(String, String)],
+) -> io::Result<bool> {
+    let tenancy = tenancy_of(user_id);
+    let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
+    let first: Option<String> = sqlx::query_scalar(
+        "SELECT node_id FROM drives WHERE user_id = ? AND vault_key = ? AND tenancy = ? AND tree = ?",
+    )
+    .bind(user_id)
+    .bind(vault_key.as_slice())
+    .bind(tenancy)
+    .bind(FIRST_DRIVE_TREE)
+    .fetch_optional(tx.conn())
+    .await
+    .map_err(db_err)?;
+    let Some(node_id) = first else {
+        return Err(io::Error::other(format!(
+            "'{user_id}' keeps no drive at the vault {}, so what it lists is not recorded",
+            hex::encode(vault_key)
+        )));
+    };
+    let recorded: Vec<(String, String)> = sqlx::query_as(
+        "SELECT tree, name FROM drives WHERE user_id = ? AND vault_key = ? AND tenancy = ? AND tree != ?",
+    )
+    .bind(user_id)
+    .bind(vault_key.as_slice())
+    .bind(tenancy)
+    .bind(FIRST_DRIVE_TREE)
+    .fetch_all(tx.conn())
+    .await
+    .map_err(db_err)?;
+    let made: Vec<&(String, String)> = listed.iter().filter(|(tree, _)| tree != FIRST_DRIVE_TREE).collect();
+    let mut changed = false;
+    for (tree, _) in recorded.iter().filter(|(tree, _)| !made.iter().any(|(t, _)| t == tree)) {
+        sqlx::query("DELETE FROM drives WHERE user_id = ? AND vault_key = ? AND tenancy = ? AND tree = ?")
+            .bind(user_id)
+            .bind(vault_key.as_slice())
+            .bind(tenancy)
+            .bind(tree)
+            .execute(tx.conn())
+            .await
+            .map_err(db_err)?;
+        changed = true;
+    }
+    for (tree, name) in made {
+        if recorded.iter().any(|(t, n)| t == tree && n == name) {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO drives (user_id, vault_key, tenancy, tree, name, node_id, recorded_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (user_id, vault_key, tenancy, tree) DO UPDATE SET name = excluded.name",
+        )
+        .bind(user_id)
+        .bind(vault_key.as_slice())
+        .bind(tenancy)
+        .bind(tree)
+        .bind(name)
+        .bind(&node_id)
+        .bind(kotton_common::time::now_secs())
+        .execute(tx.conn())
+        .await
+        .map_err(db_err)?;
+        changed = true;
+    }
+    tx.commit().await?;
+    Ok(changed)
 }
 
 /// The tenancy a person has on a vault they keep a drive on: their name here,
@@ -183,15 +318,33 @@ fn tenancy_of(user_id: &str) -> &str {
 }
 
 /// Every drive `user_id` has, each with the node it is reached through, in the
-/// order they were recorded. The node is the person's row carrying the vault's
-/// key, found by that key: the record's `node_id` is the label that row is
-/// shown under, and a label keys no row. A record no row of theirs carries the
-/// key of is not a drive this device can reach, and is not listed.
+/// order they were recorded — the first drive on each vault and every drive
+/// made beside it. The node is the person's row carrying the vault's key,
+/// found by that key: the record's `node_id` is the label that row is shown
+/// under, and a label keys no row. A record no row of theirs carries the key
+/// of is not a drive this device can reach, and is not listed.
+pub async fn all(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<Drive>> {
+    read(db, user_id, false).await
+}
+
+/// The first drive on each vault `user_id` keeps drives on — the tenancy's
+/// own tree, one per vault and tenancy, the drive this device's own tree syncs
+/// with — each with the node it is reached through, in the order recorded.
+/// What every reader that asks *which nodes are drives* reads (module doc);
+/// [`all`] is every drive.
 pub async fn list(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<Drive>> {
+    read(db, user_id, true).await
+}
+
+async fn read(db: &Arc<SqlitePool>, user_id: &str, first_only: bool) -> io::Result<Vec<Drive>> {
     let rows = sqlx::query(
-        "SELECT vault_key, tenancy FROM drives WHERE user_id = ? ORDER BY recorded_at, node_id, tenancy",
+        "SELECT vault_key, tenancy, tree, name FROM drives WHERE user_id = ? AND (? = 0 OR tree = ?) \
+         ORDER BY recorded_at, node_id, tenancy, tree != ?, tree",
     )
     .bind(user_id)
+    .bind(first_only as i64)
+    .bind(FIRST_DRIVE_TREE)
+    .bind(FIRST_DRIVE_TREE)
     .fetch_all(db.as_ref())
     .await
     .map_err(db_err)?;
@@ -204,7 +357,13 @@ pub async fn list(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<Drive>>
         let Some(node) = super::db::paired_node_for_key(db, user_id, &vault_key).await? else {
             continue;
         };
-        drives.push(Drive { vault_key, tenancy: row.get("tenancy"), node });
+        drives.push(Drive {
+            vault_key,
+            tenancy: row.get("tenancy"),
+            tree: row.get("tree"),
+            name: row.get("name"),
+            node,
+        });
     }
     Ok(drives)
 }
@@ -272,6 +431,7 @@ mod tests {
         assert_eq!(drives.len(), 1, "{drives:?}");
         assert_eq!(drives[0].vault_key, key(9));
         assert_eq!(drives[0].tenancy, "alice");
+        assert_eq!((drives[0].tree.as_str(), drives[0].name.as_str()), ("local", "personal"), "the first drive is the tenancy's own tree");
         assert_eq!(drives[0].node.id, "vault");
         assert_eq!(drives[0].node.posture.as_deref(), Some("blind-storage"));
         let row = |id: &'static str| {
@@ -376,5 +536,110 @@ mod tests {
         assert_eq!(network_db::list_paired_nodes(&db, "bob").await.unwrap().len(), 2);
         assert!(network_db::delete_paired_node(&db, "bob", &did(&key(9))).await.unwrap());
         assert_eq!(list(&db, "alice").await.unwrap().len(), 1, "bob's revoke took alice's drive");
+    }
+
+    /// **A vault keeps several drives for one person, and the record follows
+    /// what the vault lists.** Two drives made at one vault are recorded
+    /// beside its first, each under its own tree and name; `list` still names
+    /// the vault once, by its first drive. A listing that leaves one out — a
+    /// drive moved away — forgets that one and no other; the first drive is
+    /// the vault's own and no listing removes it; and a vault the person keeps
+    /// no drive at records nothing it lists.
+    #[tokio::test]
+    async fn the_drives_made_at_a_vault_follow_what_it_lists() {
+        let (_dir, db) = machine_db().await;
+        pair(&db, "vault", key(9), None).await;
+        record(&db, "alice", &key(9)).await.unwrap();
+        let made = |tree: &str, name: &str| (tree.to_string(), name.to_string());
+
+        let changed = reconcile(&db, "alice", &key(9), &[made("local", "ignored"), made("drive-01", "photos"), made("drive-02", "work")])
+            .await
+            .unwrap();
+        assert!(changed);
+        let said = |drives: Vec<Drive>| -> Vec<(String, String)> { drives.into_iter().map(|d| (d.tree, d.name)).collect() };
+        assert_eq!(
+            said(all(&db, "alice").await.unwrap()),
+            [made("local", "personal"), made("drive-01", "photos"), made("drive-02", "work")]
+        );
+        assert_eq!(said(list(&db, "alice").await.unwrap()), [made("local", "personal")], "the vault is listed once, by its first drive");
+        assert_eq!(nodes(&db, "alice").await.unwrap().len(), 1);
+        assert!(!reconcile(&db, "alice", &key(9), &[made("drive-01", "photos"), made("drive-02", "work")]).await.unwrap(), "the same listing changed the record");
+
+        // "work" moved away: the vault lists it no longer.
+        assert!(reconcile(&db, "alice", &key(9), &[made("drive-01", "photos")]).await.unwrap());
+        assert_eq!(said(all(&db, "alice").await.unwrap()), [made("local", "personal"), made("drive-01", "photos")]);
+        // A listing with nothing in it leaves the first drive.
+        reconcile(&db, "alice", &key(9), &[]).await.unwrap();
+        assert_eq!(said(all(&db, "alice").await.unwrap()), [made("local", "personal")]);
+
+        // A vault that is not one of the person's drives records nothing.
+        pair(&db, "elsewhere", key(4), None).await;
+        let refused = reconcile(&db, "alice", &key(4), &[made("drive-03", "x")]).await.unwrap_err();
+        assert!(refused.to_string().contains("keeps no drive"), "{refused}");
+        assert_eq!(all(&db, "alice").await.unwrap().len(), 1);
+        assert!(all(&db, "bob").await.unwrap().is_empty(), "alice's drives are nobody else's");
+
+        // Revoking the vault's node takes every drive kept there.
+        reconcile(&db, "alice", &key(9), &[made("drive-01", "photos")]).await.unwrap();
+        assert!(network_db::delete_paired_node(&db, "alice", &did(&key(9))).await.unwrap());
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap();
+        assert_eq!(left, 0, "revoking the vault left a drive recorded at it");
+    }
+
+    /// **The drive record's read-then-write transactions survive another
+    /// writer on the same file.** The machine database is shared: the
+    /// device's event log commits `events` rows into it from its own task
+    /// while a request runs, as a revoke's dial does. A transaction that reads
+    /// and then writes must begin as a writer; one that begins deferred takes
+    /// a read snapshot, and a commit on another connection before its first
+    /// write makes that write fail at once with SQLITE_BUSY ("database is
+    /// locked") — the busy timeout does not wait out a stale snapshot. This
+    /// pairs, records and revokes a vault over and over against a writer that
+    /// never stops, through the pool the daemon opens (WAL, five connections,
+    /// a busy timeout), and every call must succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_record_is_written_beside_another_writer_on_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = kotton_record::open_sqlite(&dir.path().join("agent.db")).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        let db = Arc::new(pool);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (db, stop) = (Arc::clone(&db), Arc::clone(&stop));
+            tokio::spawn(async move {
+                let mut n = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    n += 1;
+                    sqlx::query(
+                        "INSERT INTO events (id, category, level, message, timestamp) VALUES (?, 'transport', 'info', 'dial', 0)",
+                    )
+                    .bind(format!("e{n}"))
+                    .execute(db.as_ref())
+                    .await
+                    .expect("the other writer's insert");
+                    tokio::task::yield_now().await;
+                }
+                n
+            })
+        };
+        for round in 0..150u8 {
+            let k = key(round.wrapping_add(10));
+            let d = did(&k);
+            network_db::insert_paired_node(&db, "vault", "alice", &d, &k, "[]", 0, None)
+                .await
+                .unwrap_or_else(|e| panic!("round {round}: pairing: {e}"));
+            record(&db, "alice", &k).await.unwrap_or_else(|e| panic!("round {round}: recording: {e}"));
+            reconcile(&db, "alice", &k, &[("drive-01".into(), "photos".into())])
+                .await
+                .unwrap_or_else(|e| panic!("round {round}: following: {e}"));
+            assert!(
+                network_db::delete_paired_node(&db, "alice", &d).await.unwrap_or_else(|e| panic!("round {round}: revoking: {e}")),
+                "round {round}: the row was not there to revoke"
+            );
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(writer.await.unwrap() > 0, "the other writer never wrote");
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap();
+        assert_eq!(left, 0);
     }
 }

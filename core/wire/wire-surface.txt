@@ -2,7 +2,7 @@
 # Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
 # Variants sorted by name; fields in declaration order, which is the order
 # serde writes them. See xtask/src/wire_check.rs for why this file exists.
-# variants: 192
+# variants: 200
 AddRecoveryPhrase
     user_id: String
 AppGetBundlePath
@@ -130,6 +130,22 @@ DeviceJoin
 DeviceName
     #[serde(default)]
     new_name: Option<String>
+DriveCreate
+    user_id: String
+    name: String
+    #[serde(default)]
+    on: Option<String>
+DriveList
+    user_id: String
+DriveMove
+    user_id: String
+    name: String
+    to: String
+    #[serde(default)]
+    from: Option<String>
+DriveShow
+    user_id: String
+    name: String
 DropTenant
     user_id: String
 ExtensionInstall
@@ -608,6 +624,21 @@ TenantDevice
     user_id: String
     change: crate::ipc::TenantDeviceChange
     signature: Vec<u8>
+TenantDriveMake
+    user_id: String
+    drive: crate::ipc::MadeDrive
+    #[serde(with = "crate::base64_bytes")]
+    sealed_name: Vec<u8>
+TenantDriveName
+    user_id: String
+    drive: crate::ipc::MadeDrive
+    #[serde(with = "crate::base64_bytes")]
+    sealed_name: Vec<u8>
+TenantDriveRetire
+    user_id: String
+    drive: crate::ipc::MadeDrive
+TenantDrives
+    user_id: String
 Tenants
 ThresholdSign
     user_id: String
