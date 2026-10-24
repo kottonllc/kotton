@@ -416,6 +416,11 @@ pub async fn sync_once(
 /// room before a share's bytes do, within what one pass hands
 /// ([`within_room`]); once the vault is full from earlier passes, a message
 /// waits with the ranges until signatures free room.
+///
+/// **Within each of the two, oldest first** ([`handed_order`]): by when the
+/// person queued it (`queued_at`), the id breaking a tie. The outbox's listing has
+/// no order of its own (it differs between platforms), so without this a consumer
+/// that reads the frames in order would read them in an order nobody chose.
 pub async fn carried_for(
     store: &kotton_store::runtime::user::UserStore,
     own_identity: &ed25519_dalek::SigningKey,
@@ -424,7 +429,7 @@ pub async fn carried_for(
     use crate::agent::outbox_shelf::Outbox as _;
     let mut out = Vec::new();
     let mut entries = store.outbox_entries().await?;
-    entries.sort_by_key(|e| e.part_of.is_some());
+    handed_order(&mut entries);
     // A window is the pair's, not the message's: derived once per contact, so
     // a share of sixty-four ranges costs one week of doors here, not 65.
     let mut windows: std::collections::HashMap<String, Vec<HeldDoor>> = std::collections::HashMap::new();
@@ -449,6 +454,15 @@ pub async fn carried_for(
         });
     }
     Ok(out)
+}
+
+/// The order [`carried_for`] hands the outbox in: every message before any range,
+/// and within each, the oldest queued first, the id breaking a tie, so the order is
+/// one the sender chose and the same on every platform.
+fn handed_order(entries: &mut [kotton_msg::daemon::outbox::OutboxEntry]) {
+    entries.sort_by(|a, b| {
+        (a.part_of.is_some(), a.queued_at, &a.id).cmp(&(b.part_of.is_some(), b.queued_at, &b.id))
+    });
 }
 
 /// What a pass names for the vault to drop — what it carries that the outbox
@@ -592,6 +606,43 @@ fn window(own_identity: &ed25519_dalek::SigningKey, contacts: &[[u8; 32]]) -> Ve
 
 #[cfg(test)]
 mod tests {
+    /// [`handed_order`] by itself: messages before ranges, and within each the
+    /// oldest queued first, whatever order the ids or the listing would give.
+    #[test]
+    fn the_outbox_is_handed_messages_first_and_each_oldest_first() {
+        use kotton_msg::daemon::outbox::OutboxEntry;
+        let entry = |id: &str, queued_at: u64, part_of: Option<&str>| OutboxEntry {
+            id: id.into(),
+            to_did: "did:kel:bob".into(),
+            record_id: "1".into(),
+            sealed: kotton_wire::ipc::SealedDm {
+                ephemeral_pub: id.into(),
+                nonce: String::new(),
+                body: String::new(),
+            },
+            queued_at,
+            attempts: 0,
+            next_at: 0,
+            carried: false,
+            part_of: part_of.map(Into::into),
+            channel_did: None,
+        };
+        let mut entries = vec![
+            entry("a-range-early", 1, Some("m")),
+            entry("z-message-old", 1, None),
+            entry("b-range-late", 3, Some("m")),
+            entry("a-message-new", 5, None),
+            entry("c-range-tie", 3, Some("m")),
+            entry("y-message-tie", 5, None),
+        ];
+        super::handed_order(&mut entries);
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["z-message-old", "a-message-new", "y-message-tie", "a-range-early", "b-range-late", "c-range-tie"]
+        );
+    }
+
     use super::*;
     use ed25519_dalek::SigningKey;
     use kotton_msg::envelope::{self, DmInner};
@@ -782,14 +833,11 @@ mod tests {
         let ids: Vec<String> = handed.iter().map(|m| m.sealed.ephemeral_pub.clone()).collect();
         let ranges: Vec<String> = ranges.iter().map(|r| r.ephemeral_pub.clone()).collect();
         assert_eq!(ids.len(), 5, "the vault is handed every range, the share and the message: {ids:?}");
-        assert_eq!(ids[..2], [text.ephemeral_pub.clone(), manifest.ephemeral_pub.clone()], "every message first");
-        // In any order among themselves: once the manifest waits, a range is
-        // kept wherever it falls in its stream.
-        let mut after: Vec<String> = ids[2..].to_vec();
-        let mut expected = ranges.clone();
-        after.sort();
-        expected.sort();
-        assert_eq!(after, expected, "then the ranges");
+        // Every message first, oldest queued first: both were queued at the same
+        // second, so the id decides, `y` (the text) before `z` (the manifest).
+        assert_eq!(ids[..2], [text.ephemeral_pub.clone(), manifest.ephemeral_pub.clone()], "every message first, in order");
+        // Then the ranges, in the same order: kept as `a0`, `a1`, … at one second.
+        assert_eq!(ids[2..], ranges[..], "then the ranges, in order");
         let week = window(&alice, &[bob_pub]);
         assert!(handed.iter().all(|m| m.doors == week), "each with the pair's week of doors");
 

@@ -159,12 +159,15 @@ pub fn create_dir_all_owner_only(path: &Path) -> std::io::Result<bool> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         create_dir_all_owner_only(parent)?;
     }
-    let mut made = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let made = {
         use std::os::unix::fs::DirBuilderExt as _;
-        made.mode(0o700);
-    }
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let made = std::fs::DirBuilder::new();
     match made.create(path) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),

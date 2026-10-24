@@ -670,6 +670,13 @@ pub async fn attempt(
 
 /// Try every entry in `user_id`'s outbox that is due at `now`. Returns how many
 /// were tried.
+///
+/// Every message before any range; within each group the order is the outbox
+/// listing's, which is undefined and differs between platforms. That is enough
+/// here, because each entry is tried on its own and none depends on another's
+/// having gone first but a range on its manifest, which the grouping already
+/// orders. `carried_for` (kuserd's `vault_doors`) orders within each group too, by
+/// `handed_order`, because the vault it hands to takes the first that fits its room.
 pub async fn retry_due(host: &dyn MessageHost, user_id: &str, now: u64, retry: Retry) -> usize {
     let entries = match host.outbox_entries(user_id).await {
         Ok(e) => e,

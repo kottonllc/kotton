@@ -3,8 +3,9 @@
 # `just lint` is the fast gate a change must pass, and this is the same command a contributor
 # runs on their own machine (CONTRIBUTING.md). It does not run `just test`, it builds nothing
 # for release, and it holds no write token. `cargo xtask actions-check`, in `just lint`,
-# admits `pull_request` as a trigger for this file by name and for no other, so the gate cannot
-# quietly grow into a CI that runs on every push.
+# admits `pull_request` as a trigger for this file, signoff.yml and windows.yml by name and for
+# no other, so the gate cannot quietly grow into a CI that runs on every push. The Windows
+# build is windows.yml's, not this file's.
 #
 # The toolchain is the one `rust-toolchain.toml` names — one version, with clippy and rustfmt —
 # which the runner's rustup reads and installs on the first `cargo` it runs, exactly as a

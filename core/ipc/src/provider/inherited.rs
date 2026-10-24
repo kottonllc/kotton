@@ -327,12 +327,16 @@ mod tests {
         Fail,
     }
 
+    // The served tests below are unix-only (they hand over a socket pair), and so is
+    // what only they use.
+    #[cfg(unix)]
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     enum Resp {
         Pong { n: u32 },
         Error { message: String },
     }
 
+    #[cfg(unix)]
     impl From<io::Error> for Resp {
         fn from(e: io::Error) -> Self {
             Resp::Error {
@@ -342,6 +346,7 @@ mod tests {
     }
 
     /// The handler every served test uses: `Ping` answers, `Fail` errs.
+    #[cfg(unix)]
     async fn ping(req: Req) -> io::Result<Resp> {
         match req {
             Req::Ping { n } => Ok(Resp::Pong { n: n + 1 }),
@@ -349,6 +354,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     async fn send_frame<W: AsyncWrite + Unpin>(w: &mut W, req: &Req) {
         let json = serde_json::to_vec(req).expect("encode");
         let mut msg = (json.len() as u32).to_le_bytes().to_vec();
@@ -364,8 +370,10 @@ mod tests {
     /// them **hang** rather than fail. A hanging test burns its harness timeout
     /// and gets reported as an infrastructure problem instead of the assertion
     /// it actually is.
+    #[cfg(unix)]
     const PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
 
+    #[cfg(unix)]
     async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Resp {
         let mut len = [0u8; 4];
         tokio::time::timeout(PATIENCE, r.read_exact(&mut len))

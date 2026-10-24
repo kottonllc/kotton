@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `actions-check`: GitHub Actions runs a release on a tag, `just lint` on a pull request, and
-//! nothing else.
+//! `actions-check`: GitHub Actions runs a release on a tag, `just lint` and the Windows build on
+//! a pull request, and nothing else.
 //!
 //! ## Why this exists
 //!
@@ -30,7 +30,10 @@
 //!   pull request, and nothing else. Any other file with `pull_request` is refused, and so is
 //!   [`LINT`] with any trigger beside it or any filter on it. [`SIGNOFF`] is the second file
 //!   admitted on `pull_request`, by name, on the same terms: the sign-off check every
-//!   repository is born with, and it may do less than [`LINT`] (below);
+//!   repository is born with, and it may do less than [`LINT`] (below). [`WINDOWS`] is the
+//!   third, on the same terms: the workspace built and its daemon-free crate tests run on
+//!   Windows, which the protocol asks of every device platform on every pull
+//!   request;
 //! - **`jobs`**: a non-empty mapping; each job a mapping whose keys are among [`JOB_KEYS`],
 //!   with `runs-on` **exactly one of [`RUNNERS`]** — the standard GitHub-hosted Linux labels,
 //!   so no list, no label group, no self-hosted runner and no larger runner
@@ -40,7 +43,14 @@
 //!   `continue-on-error` are not among them either, nor are `name`, `if`, `concurrency`,
 //!   `outputs` and `defaults`: the list is what the release workflow uses. **No job-level
 //!   `uses:`**, since a reusable workflow brings its own runners and triggers from a file this
-//!   does not read, and no `<<` merge key, which would bring keys this never saw.
+//!   does not read, and no `<<` merge key, which would bring keys this never saw. The one
+//!   runner that is not Linux is [`WINDOWS_RUNNER`], in [`WINDOWS`] and in no other file.
+//!
+//! [`WINDOWS`] is held to a shape of its own ([`windows_shape`]), because a Windows minute is
+//! the dearer one and the file is the one place it is admitted: **exactly one job**, on
+//! [`WINDOWS_RUNNER`] and no other label, with a `timeout-minutes` of at most
+//! [`WINDOWS_MAX_MINUTES`], and **every step's `uses:` pinned** to a full commit
+//! (`owner/repo@<40 hex>`), so a moved tag cannot run someone else's code in it.
 //!
 //! What the steps do is not this check's business: it holds *when* a workflow runs and *on
 //! what*, which is what spends the budget. [`SIGNOFF`] is the one exception, because it runs
@@ -83,6 +93,20 @@ const LINT: &str = "lint.yml";
 /// brings is signed off by its author and none is made as an agent. Every repository takes it
 /// at its first commit; its steps are held to [`signoff_shape`].
 const SIGNOFF: &str = "signoff.yml";
+
+/// The third workflow admitted on `pull_request`, by file name: the workspace built and the
+/// daemon-free crate tests run on Windows. The one file a runner that is not Linux is admitted
+/// in; its shape is held by [`windows_shape`].
+const WINDOWS: &str = "windows.yml";
+
+/// The runner [`WINDOWS`]'s one job runs on, and the only label it may name: the standard
+/// GitHub-hosted Windows x86_64 runner. No larger runner, and no arm64 one (not built, not
+/// promised).
+const WINDOWS_RUNNER: &str = "windows-latest";
+
+/// The ceiling on [`WINDOWS`]'s `timeout-minutes`: a hung step stops there, not at the
+/// platform's six hours.
+const WINDOWS_MAX_MINUTES: i64 = 120;
 
 /// The one action [`SIGNOFF`] may use, pinned to a full commit.
 const CHECKOUT: &str = "actions/checkout@";
@@ -184,17 +208,85 @@ pub(crate) fn refusals(file: &str, text: &str) -> Vec<String> {
     }
     match top.get(&Yaml::String("on".into())) {
         None => out.push("no `on:` — a workflow here runs on a pushed tag, and says so".into()),
-        Some(on) if file == LINT || file == SIGNOFF => pull_request_trigger(&mut out, file, on),
+        Some(on) if file == LINT || file == SIGNOFF || file == WINDOWS => {
+            pull_request_trigger(&mut out, file, on)
+        }
         Some(on) => triggers(&mut out, on),
     }
     match top.get(&Yaml::String("jobs".into())) {
         None => out.push("no `jobs:`".into()),
-        Some(jobs) => check_jobs(&mut out, jobs),
+        Some(jobs) => check_jobs(&mut out, file, jobs),
     }
     if file == SIGNOFF {
         signoff_shape(&mut out, top, text);
     }
+    if file == WINDOWS {
+        windows_shape(&mut out, top);
+    }
     out
+}
+
+/// A `uses:` pinned to a full commit: `owner/repo@` (or `owner/repo/path@`) and forty hex
+/// digits, nothing after. Not a local action (`./…`, whatever the checkout holds) and not a
+/// `docker://` image, which names no commit.
+fn pinned(uses: &str) -> bool {
+    uses.split_once('@').is_some_and(|(action, sha)| {
+        action.contains('/')
+            && !action.starts_with("./")
+            && !action.contains(':')
+            && sha.len() == 40
+            && sha.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
+/// What [`WINDOWS`] may be: one job on [`WINDOWS_RUNNER`], bounded in minutes, every action
+/// pinned. Its runner is admitted by [`check_jobs`]; this holds that it is the only job, that
+/// it runs on Windows, and that it says when it stops.
+fn windows_shape(out: &mut Vec<String>, top: &yaml_rust2::yaml::Hash) {
+    let Some(Yaml::Hash(jobs)) = top.get(&Yaml::String("jobs".into())) else {
+        return;
+    };
+    if jobs.len() != 1 {
+        out.push(format!(
+            "{WINDOWS} has {} jobs — it has one, on `{WINDOWS_RUNNER}`",
+            jobs.len()
+        ));
+    }
+    for (name, job) in jobs {
+        let name = key(name);
+        let Yaml::Hash(job) = job else { continue };
+        match job.get(&Yaml::String("runs-on".into())) {
+            Some(Yaml::String(l)) if l == WINDOWS_RUNNER => {}
+            _ => out.push(format!(
+                "`jobs.{name}.runs-on` in {WINDOWS} is not `{WINDOWS_RUNNER}` — the file is the Windows build, and runs there"
+            )),
+        }
+        match job.get(&Yaml::String("timeout-minutes".into())) {
+            Some(Yaml::Integer(m)) if (1..=WINDOWS_MAX_MINUTES).contains(m) => {}
+            Some(other) => out.push(format!(
+                "`jobs.{name}.timeout-minutes` in {WINDOWS} is {} — it is a whole number of minutes from 1 to {WINDOWS_MAX_MINUTES}",
+                shape(other)
+            )),
+            None => out.push(format!(
+                "`jobs.{name}` in {WINDOWS} has no `timeout-minutes` — a Windows job says when it stops, at most {WINDOWS_MAX_MINUTES}"
+            )),
+        }
+        let Some(Yaml::Array(steps)) = job.get(&Yaml::String("steps".into())) else {
+            out.push(format!("`jobs.{name}.steps` in {WINDOWS} is not a list of steps"));
+            continue;
+        };
+        for (i, step) in steps.iter().enumerate() {
+            let Yaml::Hash(step) = step else { continue };
+            match step.get(&Yaml::String("uses".into())) {
+                None => {}
+                Some(Yaml::String(u)) if pinned(u) => {}
+                Some(other) => out.push(format!(
+                    "`jobs.{name}.steps[{i}].uses` in {WINDOWS} is {} — every action here is `owner/repo@<a full commit>`",
+                    shape(other)
+                )),
+            }
+        }
+    }
 }
 
 /// What [`SIGNOFF`] may do: read the pull request's commits, and nothing else.
@@ -418,7 +510,7 @@ fn push_is_tags_only(out: &mut Vec<String>, push: &Yaml) {
     }
 }
 
-fn check_jobs(out: &mut Vec<String>, jobs: &Yaml) {
+fn check_jobs(out: &mut Vec<String>, file: &str, jobs: &Yaml) {
     let Yaml::Hash(jobs) = jobs else {
         out.push(format!("`jobs` is {}, not a mapping of jobs", shape(jobs)));
         return;
@@ -447,6 +539,7 @@ fn check_jobs(out: &mut Vec<String>, jobs: &Yaml) {
         }
         match job.get(&Yaml::String("runs-on".into())) {
             Some(Yaml::String(label)) if is_linux(label) => {}
+            Some(Yaml::String(label)) if file == WINDOWS && label == WINDOWS_RUNNER => {}
             Some(Yaml::String(label)) => out.push(format!(
                 "`jobs.{name}.runs-on` is `{label}` — only a standard GitHub-hosted Linux label ({}) runs here",
                 RUNNERS.join(", ")
@@ -524,8 +617,9 @@ pub fn run(_args: &[String]) {
         let n = std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0);
         println!(
             "actions-check: OK — {n} workflow file(s) under {DIR}, each admitted: triggered only by `push` \
-             with `tags` (and at most an empty `workflow_dispatch`), or {LINT} or {SIGNOFF} by an empty \
-             `pull_request` and nothing else ({SIGNOFF} only as a pinned checkout and one shell step), every job on a standard `ubuntu-` runner with only named job keys, so no \
+             with `tags` (and at most an empty `workflow_dispatch`), or {LINT}, {SIGNOFF} or {WINDOWS} by an empty \
+             `pull_request` and nothing else ({SIGNOFF} only as a pinned checkout and one shell step), every job on a standard `ubuntu-` runner \
+             ({WINDOWS}'s one job on `{WINDOWS_RUNNER}`, bounded, its actions pinned) with only named job keys, so no \
              reusable-workflow job and no merge key."
         );
         return;
@@ -535,7 +629,7 @@ pub fn run(_args: &[String]) {
         println!("  {file}\n    {why}");
     }
     println!(
-        "\nActions runs the release workflow on a tag and {LINT} and {SIGNOFF} on a pull request, \n\
+        "\nActions runs the release workflow on a tag and {LINT}, {SIGNOFF} and {WINDOWS} on a pull request, \n\
          and nothing else. This admits a workflow only if every trigger, runner and job form is one it names."
     );
     std::process::exit(1);
@@ -884,5 +978,116 @@ mod tests {
                 "a refusal that does not say why:\n{text}\n{got:?}"
             );
         }
+    }
+
+    /// The Windows workflow this repository carries.
+    const WINDOWS_TEXT: &str = include_str!("../../.github/workflows/windows.yml");
+
+    /// A plain form of [`WINDOWS`]: one job, on its runner, bounded, its action pinned.
+    const WINDOWS_GOOD: &str = "on:\n  pull_request:\npermissions:\n  contents: read\njobs:\n  windows:\n    runs-on: windows-latest\n    timeout-minutes: 120\n    steps:\n      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n      - run: cargo build --workspace --locked\n";
+
+    /// **The Windows workflow is admitted, by its name and beside the other three**, and the
+    /// same file under any other name is refused, on its trigger and on its runner.
+    #[test]
+    fn the_windows_workflow_passes_under_its_own_name() {
+        assert_eq!(refusals("windows.yml", WINDOWS_TEXT), Vec::<String>::new());
+        assert_eq!(refusals("windows.yml", WINDOWS_GOOD), Vec::<String>::new());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lint.yml"), LINT_GOOD).unwrap();
+        std::fs::write(dir.path().join("release.yml"), GOOD).unwrap();
+        std::fs::write(dir.path().join("signoff.yml"), SIGNOFF_TEXT).unwrap();
+        std::fs::write(dir.path().join("windows.yml"), WINDOWS_TEXT).unwrap();
+        assert_eq!(check_dir(dir.path()), Vec::<(String, String)>::new());
+        for name in ["windows.yaml", "Windows.yml", "win.yml", "ci.yml", "lint2.yml"] {
+            let got = planted(name, WINDOWS_TEXT);
+            assert!(
+                got.iter().any(|(_, why)| why.contains("on.pull_request")),
+                "{name} admitted on pull_request: {got:?}"
+            );
+            assert!(
+                got.iter().any(|(_, why)| why.contains("runs-on") && why.contains("windows-latest")),
+                "{name} admitted on a Windows runner: {got:?}"
+            );
+        }
+    }
+
+    /// **Planted: `windows-latest` anywhere but [`WINDOWS`]**, and any other runner in it.
+    #[test]
+    fn the_windows_runner_is_admitted_in_windows_yml_alone() {
+        let lint = LINT_GOOD.replace("runs-on: ubuntu-latest", "runs-on: windows-latest");
+        assert!(!planted("lint.yml", &lint).is_empty(), "windows-latest admitted in lint.yml");
+        let signoff = SIGNOFF_TEXT.replace("runs-on: ubuntu-24.04", "runs-on: windows-latest");
+        assert_ne!(signoff, SIGNOFF_TEXT, "the runner was not planted");
+        assert!(!planted("signoff.yml", &signoff).is_empty(), "windows-latest admitted in signoff.yml");
+        let release = GOOD.replace("runs-on: ubuntu-latest", "runs-on: windows-latest");
+        assert!(!planted("release.yml", &release).is_empty(), "windows-latest admitted in release.yml");
+        for runs_on in [
+            "windows-2022",
+            "windows-2025",
+            "windows-latest-8-cores",
+            "windows-11-arm",
+            "ubuntu-latest",
+            "macos-latest",
+            "self-hosted",
+            "[windows-latest]",
+            "[self-hosted, windows]",
+            "\"${{ matrix.os }}\"",
+            "{group: big}",
+            "",
+        ] {
+            let text = WINDOWS_GOOD.replace("runs-on: windows-latest", &format!("runs-on: {runs_on}"));
+            let got = refusals("windows.yml", &text);
+            assert!(
+                got.iter().any(|r| r.contains("runs-on")),
+                "windows.yml admitted `runs-on: {runs_on}`: {got:?}"
+            );
+        }
+    }
+
+    /// **Planted: `windows.yml` doing more than one bounded job with pinned actions** — a second
+    /// job, no ceiling or one past it, an unpinned, short or local action, a matrix, a second
+    /// trigger or a filter — each refused, for a reason that names the file or the key.
+    #[test]
+    fn windows_yml_is_one_bounded_job_with_pinned_actions() {
+        let pin = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0";
+        let planted_forms = [
+            format!("{WINDOWS_GOOD}  second:\n    runs-on: windows-latest\n    timeout-minutes: 10\n    steps:\n      - run: echo\n"),
+            WINDOWS_GOOD.replace("    timeout-minutes: 120\n", ""),
+            WINDOWS_GOOD.replace("timeout-minutes: 120", "timeout-minutes: 121"),
+            WINDOWS_GOOD.replace("timeout-minutes: 120", "timeout-minutes: 0"),
+            WINDOWS_GOOD.replace("timeout-minutes: 120", "timeout-minutes: '60'"),
+            WINDOWS_GOOD.replace("timeout-minutes: 120", "timeout-minutes: 6.5"),
+            WINDOWS_GOOD.replace(pin, "actions/checkout@v4"),
+            WINDOWS_GOOD.replace(pin, "actions/checkout@11d5960a"),
+            WINDOWS_GOOD.replace(pin, "actions/checkout@11d5960a326750d5838078e36cf38b85af677262x"),
+            WINDOWS_GOOD.replace(pin, "./.github/actions/x@11d5960a326750d5838078e36cf38b85af677262"),
+            WINDOWS_GOOD.replace(pin, "docker://alpine@11d5960a326750d5838078e36cf38b85af677262"),
+            WINDOWS_GOOD.replace(
+                "      - run: cargo build",
+                "      - uses: actions/cache@v4\n      - run: cargo build",
+            ),
+            WINDOWS_GOOD.replace(
+                "    timeout-minutes: 120\n",
+                "    timeout-minutes: 120\n    strategy:\n      matrix:\n        n: [1, 2]\n",
+            ),
+            WINDOWS_GOOD.replace("  pull_request:\n", "  pull_request:\n  push:\n    tags: [v*]\n"),
+            WINDOWS_GOOD.replace("  pull_request:\n", "  pull_request:\n    branches: [main]\n"),
+            WINDOWS_GOOD.replace("  pull_request:\n", "  pull_request_target:\n"),
+            WINDOWS_GOOD.replace("jobs:\n  windows:\n", "jobs:\n  windows:\n    uses: org/r/.github/workflows/x.yml@11d5960a326750d5838078e36cf38b85af677262\n"),
+        ];
+        for text in planted_forms {
+            assert_ne!(text, WINDOWS_GOOD, "a form was not planted");
+            let got = refusals("windows.yml", &text);
+            assert!(!got.is_empty(), "admitted, and should not be:\n{text}");
+            assert!(
+                got.iter().all(|r| r.contains("windows.yml")
+                    || r.starts_with("`on.")
+                    || r.starts_with("`jobs.windows.uses`")
+                    || r.contains("is not a job key")),
+                "a refusal that does not say why:\n{text}\n{got:?}"
+            );
+        }
+        assert!(pinned("actions/checkout@11d5960a326750d5838078e36cf38b85af677262"));
+        assert!(pinned("github/codeql-action/init@11d5960a326750d5838078e36cf38b85af677262"));
     }
 }

@@ -626,6 +626,7 @@ fn install_test_in(archive: &Path, scratch: &Path, home: &Path, top: &str) -> Re
     //    to `/tmp/kotton-<hash>/`, so under a long `TMPDIR`, which the scratch `HOME`
     //    sits in, it would wait 60 s at a door nobody opened
     //    (`TASK-two-harnesses-still-derive-a-daemons-door-by-a-copy-of-the-rule`).
+    #[cfg(unix)]
     let env = |key: &str| envs.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_string());
     // The door is `kotton_common::paths::kuserd_door_in` over the environment
     // `command` gives the `kuserd` that `kotton-start` execs; `kotton-start` adds only
@@ -752,9 +753,16 @@ fn stop(daemon: &mut std::process::Child) {
 /// Anything still running out of the installed prefix — a sidecar the
 /// daemon started and did not take down with it. Named in the test's output rather
 /// than left behind, so a daemon that orphans its children is seen.
+#[cfg(not(target_os = "linux"))]
+fn stop_what_it_left(_prefix: &Path) -> Vec<String> {
+    // Only Linux names a process's image under `/proc`; elsewhere nothing is looked for.
+    Vec::new()
+}
+
+/// Anything still running out of the installed prefix (above), read from `/proc`.
+#[cfg(target_os = "linux")]
 fn stop_what_it_left(prefix: &Path) -> Vec<String> {
     let mut left = Vec::new();
-    #[cfg(target_os = "linux")]
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for e in entries.flatten() {
             let Ok(exe) = std::fs::read_link(e.path().join("exe")) else {
