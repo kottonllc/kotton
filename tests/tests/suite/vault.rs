@@ -4991,6 +4991,27 @@ async fn a_friend_invited_from_the_desktop_types_the_digits_the_desktop_shows() 
         assert!(std::time::Instant::now() < deadline, "the vault keeps nobody as sam after the admit\n{said}");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    // The vault keeps the digits only while the ceremony waits, and its watch
+    // ends where the ceremony's stream ends, not at a frame it names (#140):
+    // so the desktop showing none now is the invite's stream having ended
+    // after its result.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match within("vault digits", desk.client.as_operator("lee", "kotton", OperatorVerb::Digits { pool: "sam".into() }))
+            .await
+            .expect("the desktop's daemon answers")
+        {
+            UserResponse::InviteDigits { digits } if digits.is_empty() => break,
+            UserResponse::InviteDigits { digits } => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the vault still shows {digits:?} after its ceremony completed: the invite's stream did not end"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            other => panic!("the desktop did not say the digits: {other:?}"),
+        }
+    }
 }
 
 /// A device whose user is `alice` admits a vault under an invite the landlord
