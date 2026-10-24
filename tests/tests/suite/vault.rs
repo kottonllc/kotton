@@ -566,12 +566,13 @@ fn pool_of(vault: &RunningVault, user: &str) -> Vec<(String, u64)> {
     held
 }
 
-/// RFC-0070 M3 at the vault: everything in `user`'s pool is a pack of exactly
-/// `PACK_SIZE` or a superblock, every superblock is one length, and there is
-/// at least one pack — so no object there says how large anything was.
+/// RFC-0070 M3 at the vault: everything in `user`'s pool is a pack of its
+/// class's fixed size (a content pack `PACK_SIZE`, an index pack
+/// `INDEX_PACK_SIZE` or `PACK_SIZE`, kotton #55) or a superblock, every
+/// superblock is one length, and there is at least one pack — so no object
+/// there says how large anything was.
 pub(crate) fn the_pool_holds_only_packs(vault: &RunningVault, user: &str) {
-    use kotton_store::pack::PACK_SIZE;
-    use kotton_store::packed::PACK_PREFIX;
+    use kotton_store::packed::{has_its_fixed_size, PACK_PREFIX};
     use kotton_store::superblock::SUPERBLOCK_PREFIX;
 
     let held = pool_of(vault, user);
@@ -582,7 +583,7 @@ pub(crate) fn the_pool_holds_only_packs(vault: &RunningVault, user: &str) {
     let mut superblock_lengths = std::collections::BTreeSet::new();
     for (key, len) in &held {
         if key.starts_with(&format!("{PACK_PREFIX}/")) {
-            assert_eq!(*len, PACK_SIZE as u64, "pack {key} is not exactly PACK_SIZE");
+            assert!(has_its_fixed_size(key, *len), "pack {key} is {len} bytes, not its class's fixed size");
         } else if key.starts_with(&format!("{SUPERBLOCK_PREFIX}/")) {
             superblock_lengths.insert(*len);
         } else {

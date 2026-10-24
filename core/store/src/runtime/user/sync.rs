@@ -77,6 +77,49 @@ impl Outbound {
     }
 }
 
+/// What a device keeps of the drive a pass is with (kotton #55, pins): which
+/// of the drive's files it keeps whole, and the room it has for them.
+///
+/// Decided by the sync domain, which reads the person's pin settings
+/// (`kotton_device::users::pins`); held here, at the one loop that moves
+/// bytes, because a pass that fetched first and asked afterwards would have
+/// kept what it was told not to.
+/// What names the setting that keeps a path whole ([`Keep::whole`]).
+pub type KeptBy = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+pub struct Keep {
+    /// The setting that keeps the file at `path` — a logical store key,
+    /// `files/<person path>` for the person's tree — whole, as the person
+    /// would say it to keep less (`personal:/photos`), or `None` for a file
+    /// this device keeps the index of and fetches when it is opened.
+    pub whole: KeptBy,
+    /// The bytes of packs this device may hold of the drive, or `None` for no
+    /// bound but the disk's.
+    pub budget: Option<u64>,
+}
+
+/// What a pass kept, against the room it had.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeepReport {
+    /// Bytes of packs this device holds of the drive after the pass: each
+    /// pack is one of two fixed sizes (`crate::pack::PACK_SIZE`,
+    /// `crate::pack::INDEX_PACK_SIZE`), read from one listing of the pack
+    /// directory; no pack is opened or walked to know it.
+    pub held: u64,
+    /// The room it was given, as [`Keep::budget`].
+    pub budget: Option<u64>,
+    /// Bytes of the content packs its whole pins want.
+    pub wanted: u64,
+    /// The settings that keep more than the room allows, each as the person
+    /// would say it to keep less — empty when every whole pin was kept.
+    pub short: Vec<String>,
+    /// Content packs fetched for a whole pin in this pass.
+    pub fetched: u32,
+    /// Content packs no whole pin keeps, let go to make room: the drive holds
+    /// each, and a read fetches it again (`crate::fetch`).
+    pub evicted: u32,
+}
+
 impl UserStore {
     /// Synchronise a local mount against a named remote.
     ///
@@ -94,6 +137,33 @@ impl UserStore {
         direction: Option<SyncDirection>,
         outbound: Outbound,
     ) -> Result<SyncResult> {
+        Ok(self.sync_mount_keeping(local_mount, remote_name, direction, outbound, None).await?.0)
+    }
+
+    /// [`Self::sync_mount`], keeping what `keep` says of the remote's content
+    /// and no more (kotton #55).
+    ///
+    /// With `keep`, a pass pulls in two steps. First everything but content
+    /// packs (`crate::packed::CONTENT_PACK_PREFIX`) — the superblocks and the
+    /// index packs, which carry the history log and the manifests — and
+    /// reconciles, so this device knows every file the drive holds and where
+    /// its content is. Then, from the reconciled manifest, the content packs
+    /// of the files `keep` keeps whole, as far as the room allows; a setting
+    /// whose packs do not fit is named in the report, never dropped silently.
+    /// Then, over the room, content packs no whole pin keeps and the drive
+    /// holds are let go, since a read fetches them again. A content pack is
+    /// the unit: a file kept whole brings whatever else its pack holds — what
+    /// one packing pass on one device wrote beside it.
+    ///
+    /// `None` keeps everything, as every pass did before pins.
+    pub async fn sync_mount_keeping(
+        &self,
+        local_mount: &str,
+        remote_name: &str,
+        direction: Option<SyncDirection>,
+        outbound: Outbound,
+        keep: Option<&Keep>,
+    ) -> Result<(SyncResult, Option<KeepReport>)> {
         let local = self
             .get_remote(local_mount)
             .ok_or_else(|| anyhow!("Local mount '{}' not found", local_mount))?;
@@ -149,6 +219,11 @@ impl UserStore {
                     _ => false,
                 },
             };
+            // A content pack is kept by what the reconciled index says this
+            // device keeps whole, which is the second step's to decide. A pack
+            // is immutable and uniquely named, so one this device holds is
+            // never pulled again either way.
+            let pull = pull && !(keep.is_some() && crate::packed::is_content_pack(key));
 
             if push {
                 let bytes = transfer_sealed(local.as_ref(), remote.as_ref(), key_path).await?;
@@ -212,13 +287,142 @@ impl UserStore {
             ),
         }
 
-        Ok(SyncResult {
-            pushed,
-            pulled,
-            skipped,
-            transfers,
-        })
+        let report = match keep {
+            Some(keep) if !matches!(direction, Some(SyncDirection::Push)) => {
+                let on_remote: BTreeSet<String> = remote_map
+                    .keys()
+                    .chain(transfers.iter().filter(|(d, _, _)| matches!(d, SyncDirection::Push)).map(|(_, k, _)| k))
+                    .cloned()
+                    .collect();
+                let kept_paths = |path: &str| (keep.whole)(path).is_some();
+                let holding = local.packs_holding(&kept_paths).await?;
+                let r = keep_whole(local.as_ref(), remote.as_ref(), keep, holding, &on_remote, &mut transfers).await?;
+                pulled += r.fetched;
+                Some(r)
+            }
+            _ => None,
+        };
+
+        Ok((
+            SyncResult {
+                pushed,
+                pulled,
+                skipped,
+                transfers,
+            },
+            report,
+        ))
     }
+}
+
+impl UserStore {
+    /// Whether this device holds, here, every pack the content of the file at
+    /// `path` in the person's tree is in — kept whole, or fetched since — so
+    /// reading it asks no drive. `false` for a path the index does not name.
+    pub async fn kept_here(&self, path: &str) -> Result<bool> {
+        let local = self.get_remote("local").ok_or_else(|| anyhow!("Local mount 'local' not found"))?;
+        let key = crate::fs_view::rooted_key(super::files::PERSON_TREE_ROOT, path);
+        let named = |p: &str| p == key;
+        let Some(holding) = local.packs_holding(&named).await? else {
+            return Ok(true);
+        };
+        if holding.is_empty() {
+            return Ok(false);
+        }
+        let here: BTreeSet<String> = local
+            .list_sealed(Path::new(crate::packed::PACK_PREFIX))
+            .await?
+            .into_iter()
+            .map(|m| m.key.trim_start_matches('/').to_string())
+            .collect();
+        Ok(holding.keys().all(|id| here.contains(id.trim_start_matches('/'))))
+    }
+}
+
+/// The second step of a pass that keeps less than everything
+/// ([`UserStore::sync_mount_keeping`]): fetch the content packs `holding` names
+/// that this device lacks, within the room, and let go of content packs no
+/// whole pin keeps when it is over the room.
+async fn keep_whole(
+    local: &dyn SyncableStore,
+    remote: &dyn SyncableStore,
+    keep: &Keep,
+    holding: Option<BTreeMap<String, Vec<String>>>,
+    on_remote: &BTreeSet<String>,
+    transfers: &mut Vec<(SyncDirection, String, u64)>,
+) -> Result<KeepReport> {
+    let pack = crate::pack::PACK_SIZE as u64;
+    let canon = |k: &str| k.trim_start_matches('/').to_string();
+    // What this device holds of the drive: its packs, each its fixed size —
+    // one listing of the pack directory, never a walk of what is in them.
+    let mut held: BTreeMap<String, u64> = local
+        .list_sealed(Path::new(crate::packed::PACK_PREFIX))
+        .await?
+        .into_iter()
+        .filter(|m| !m.is_dir)
+        .map(|m| (canon(&m.key), m.size))
+        .collect();
+    let bytes = |held: &BTreeMap<String, u64>| held.values().sum::<u64>();
+    let on_remote: BTreeSet<String> = on_remote.iter().map(|k| canon(k)).collect();
+    let holding = holding.unwrap_or_default();
+    let wanted: BTreeMap<String, &Vec<String>> = holding
+        .iter()
+        .filter(|(id, _)| crate::packed::is_content_pack(id))
+        .map(|(id, paths)| (canon(id), paths))
+        .collect();
+    let mut report = KeepReport { budget: keep.budget, wanted: wanted.len() as u64 * pack, ..Default::default() };
+    let fits = |held: &BTreeMap<String, u64>| keep.budget.is_none_or(|b| bytes(held) + pack <= b);
+    let mut short: BTreeSet<String> = BTreeSet::new();
+    for (id, paths) in &wanted {
+        if held.contains_key(id) {
+            continue;
+        }
+        if !on_remote.contains(id) {
+            // Named by the index and held by neither side: the pass that wrote
+            // it has not reached this drive yet, and a later one brings it.
+            continue;
+        }
+        if !fits(&held) {
+            short.extend(paths.iter().filter_map(|p| (keep.whole)(p)));
+            continue;
+        }
+        let got = transfer_sealed(remote, local, Path::new(id.as_str())).await?;
+        transfers.push((SyncDirection::Pull, id.clone(), got));
+        held.insert(id.clone(), got);
+        report.fetched += 1;
+    }
+    if let Some(budget) = keep.budget {
+        let spare: Vec<String> = held
+            .keys()
+            .filter(|k| crate::packed::is_content_pack(k) && !wanted.contains_key(*k) && on_remote.contains(*k))
+            .cloned()
+            .collect();
+        for key in spare {
+            if bytes(&held) <= budget {
+                break;
+            }
+            local.delete_sealed(Path::new(&key)).await?;
+            held.remove(&key);
+            report.evicted += 1;
+        }
+    }
+    report.held = bytes(&held);
+    // Over the room with nothing left to let go: what it holds is the index
+    // and what its whole pins keep, so each of those settings keeps more than
+    // fits.
+    if keep.budget.is_some_and(|b| report.held > b) {
+        for (id, paths) in &wanted {
+            if held.contains_key(id) {
+                short.extend(paths.iter().filter_map(|p| (keep.whole)(p)));
+            }
+        }
+        if short.is_empty() {
+            // The index alone: no setting keeps less, and the notice says so.
+            short.insert(String::new());
+        }
+    }
+    report.short = short.into_iter().collect();
+    Ok(report)
 }
 
 /// Every leaf `(key, modified)` on a store, recursing into the directory entries
@@ -269,4 +473,156 @@ async fn transfer_sealed(
     let bytes = blob.len() as u64;
     to.put_sealed(key, &blob).await?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod keep_tests {
+    use super::*;
+    use crate::runtime::{pack_mount, UserKeys};
+    use kotton_crypto::derive_cek;
+    use kotton_wire::remote::{KeyFormat, RemoteBackend, RemoteConfig};
+    use std::sync::Arc;
+
+    fn noise(len: usize, seed: u64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        let mut state = seed;
+        while out.len() < len {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            out.extend_from_slice(&state.to_le_bytes());
+        }
+        out.truncate(len);
+        out
+    }
+
+    /// A device of alice's, writing as `writer`.
+    fn device(dir: &tempfile::TempDir, writer: &str) -> UserStore {
+        UserStore::create(
+            "alice",
+            "did:key:zAlice",
+            dir.path().to_path_buf(),
+            UserKeys::new(Some(derive_cek(&[42u8; 32]))).with_log(writer, &[7u8; 32]),
+            &crate::LocalShelves(kotton_fs::OsFilesystem),
+        )
+        .unwrap()
+    }
+
+    /// A drive: a keyless tree that takes sealed bytes, as a vault keeps one.
+    fn drive(dir: &tempfile::TempDir) -> Arc<dyn SyncableStore> {
+        crate::stack::build_local_store(dir.path().to_path_buf(), kotton_fs::OsFilesystem, None, None, None, KeyFormat::Blinded)
+    }
+
+    fn reach(rt: &UserStore, drive: &Arc<dyn SyncableStore>, at: &tempfile::TempDir) {
+        rt.add_remote(
+            "drive".into(),
+            Arc::clone(drive),
+            RemoteConfig { backend: RemoteBackend::Local { path: at.path().to_path_buf() }, cache_dir: None, key_format: KeyFormat::Blinded },
+        )
+        .unwrap();
+    }
+
+    /// Keeps `/photos` whole, the rest of the person's tree on demand, and
+    /// the daemon's own objects whole by no setting.
+    fn photos_whole(budget: Option<u64>) -> Keep {
+        Keep {
+            whole: Box::new(|key: &str| match key.strip_prefix("files/") {
+                Some(p) if p.starts_with("photos/") => Some("personal:/photos".to_string()),
+                Some(_) => None,
+                None => Some(String::new()),
+            }),
+            budget,
+        }
+    }
+
+    struct FromDrive(Arc<dyn SyncableStore>);
+
+    #[async_trait::async_trait]
+    impl crate::fetch::PackSource for FromDrive {
+        async fn fetch(&self, _user_id: &str, key: &str) -> anyhow::Result<Option<bytes::Bytes>> {
+            Ok(self.0.get_sealed(Path::new(key)).await.ok())
+        }
+    }
+
+    /// **A pass keeps what the pins keep whole and the index of the rest;
+    /// the rest is fetched when it is opened; and the room is held.** A
+    /// writes a photo and a note in two passes, and pushes both to the drive.
+    /// B, keeping `/photos` whole, pulls the index and the photo's content
+    /// pack and not the note's; it lists the note, cannot read it offline,
+    /// and reads it once a source is lent — fetched on open, and kept. Then a
+    /// budget with room for the index alone: the note's pack, which no pin
+    /// keeps, is let go, and the photo's pack, which a pin keeps, is not
+    /// fetched again by a fresh device, which names the setting that keeps
+    /// less.
+    #[tokio::test]
+    async fn a_pass_keeps_what_the_pins_keep_whole_and_fetches_the_rest_on_open() {
+        let (dir_a, dir_b, dir_c, dir_drive) =
+            (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (a, b) = (device(&dir_a, "did:key:zA"), device(&dir_b, "did:key:zB"));
+        let the_drive = drive(&dir_drive);
+        reach(&a, &the_drive, &dir_drive);
+        reach(&b, &the_drive, &dir_drive);
+
+        let photo = noise(64 * 1024, 1);
+        a.write_file("/photos/a.jpg", &photo).await.unwrap();
+        pack_mount(&*a.get_remote("local").unwrap(), "local").await.unwrap().unwrap();
+        a.write_file("/notes/b.md", b"a note").await.unwrap();
+        pack_mount(&*a.get_remote("local").unwrap(), "local").await.unwrap().unwrap();
+        a.sync_mount("local", "drive", Some(SyncDirection::Push), Outbound::PacksOnly).await.unwrap();
+
+        let (_, report) = b
+            .sync_mount_keeping("local", "drive", Some(SyncDirection::Pull), Outbound::PacksOnly, Some(&photos_whole(None)))
+            .await
+            .unwrap();
+        let report = report.expect("a keeping pass reports");
+        assert_eq!(report.fetched, 1, "{report:?}");
+        assert!(report.short.is_empty(), "{report:?}");
+        assert!(b.kept_here("/photos/a.jpg").await.unwrap(), "the photo was not kept");
+        assert!(!b.kept_here("/notes/b.md").await.unwrap(), "the note was kept, which nothing pins");
+        assert_eq!(b.read_file("/photos/a.jpg").await.unwrap(), photo);
+        let listed = b.list_files("/notes").await.unwrap();
+        assert!(format!("{listed:?}").contains("b.md"), "the index does not name the note: {listed:?}");
+        assert!(b.read_file("/notes/b.md").await.is_err(), "the note read with no drive to fetch it from");
+
+        b.lend_pack_source(Arc::new(FromDrive(Arc::clone(&the_drive))));
+        assert_eq!(b.read_file("/notes/b.md").await.unwrap(), b"a note", "fetched on open");
+        assert!(b.kept_here("/notes/b.md").await.unwrap(), "what was opened is kept");
+
+        // Room for all B holds but the note's pack, which no pin keeps: it goes.
+        let held = |rt: &UserStore| {
+            let local = rt.get_remote("local").unwrap();
+            async move { local.list_sealed(Path::new(crate::packed::PACK_PREFIX)).await.unwrap().iter().map(|m| m.size).sum::<u64>() }
+        };
+        let room = held(&b).await - crate::pack::PACK_SIZE as u64;
+        let (_, kept) = b
+            .sync_mount_keeping("local", "drive", Some(SyncDirection::Pull), Outbound::PacksOnly, Some(&photos_whole(Some(room))))
+            .await
+            .unwrap();
+        let kept = kept.unwrap();
+        assert_eq!((kept.evicted, kept.held), (1, room), "{kept:?}");
+        assert!(!b.kept_here("/notes/b.md").await.unwrap());
+        assert!(b.kept_here("/photos/a.jpg").await.unwrap(), "a pinned pack was let go");
+        assert_eq!(b.read_file("/notes/b.md").await.unwrap(), b"a note", "fetched again");
+
+        // A fresh device with room for the index alone: short, and it says
+        // which setting keeps less.
+        let c = device(&dir_c, "did:key:zC");
+        reach(&c, &the_drive, &dir_drive);
+        let index_only: u64 = the_drive
+            .list_sealed(Path::new(crate::packed::PACK_PREFIX))
+            .await
+            .unwrap()
+            .iter()
+            .filter(|m| !crate::packed::is_content_pack(&m.key))
+            .map(|m| m.size)
+            .sum();
+        assert!(index_only < crate::pack::PACK_SIZE as u64, "an index pack was sealed at the full size: {index_only}");
+        let (_, short) = c
+            .sync_mount_keeping("local", "drive", Some(SyncDirection::Pull), Outbound::PacksOnly, Some(&photos_whole(Some(index_only))))
+            .await
+            .unwrap();
+        let short = short.unwrap();
+        assert_eq!(short.fetched, 0, "{short:?}");
+        assert_eq!(short.short, ["personal:/photos"], "{short:?}");
+        assert_eq!(short.wanted, crate::pack::PACK_SIZE as u64);
+        assert!(!c.kept_here("/photos/a.jpg").await.unwrap());
+    }
 }

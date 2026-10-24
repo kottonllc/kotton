@@ -54,7 +54,7 @@ use crate::history::{Entry as HistoryEntry, Segment};
 use crate::manifest::{
     chunk_digest, frame_chunk, unframe_chunk, ChunkKind, FileEntry, Manifest, PackChunkRef,
 };
-use crate::pack::{open_pack, read_chunk_from_plaintext, scan_chunks, seal_pack, ChunkRef};
+use crate::pack::{open_pack, read_chunk_from_plaintext, scan_chunks, ChunkRef};
 use crate::superblock::{
     commit_superblock, load_current_superblock, retire_old_superblocks, Superblock,
     SUPERBLOCK_PREFIX,
@@ -79,6 +79,43 @@ use std::sync::{Arc, Mutex};
 /// Storage-key prefix for sealed packs. Reserved: base32 blinded components
 /// can never start with `_`.
 pub const PACK_PREFIX: &str = "_pack";
+
+/// Storage-key prefix of a **content pack**: a pack that holds file content
+/// and nothing else — no history segment, no manifest (kotton #55, pins).
+///
+/// Every other pack under [`PACK_PREFIX`] is an **index pack**: it may hold a
+/// segment of the history log or a manifest, and a device that reads the store
+/// must have it to know what the store holds. A content pack it needs only for
+/// the files it keeps whole, or a file it opens. The split is what lets a
+/// device keep the index of a drive without its content ("a device keeps
+/// what its person chose"; on demand, the index is fetched and content when
+/// opened).
+///
+/// What the split shows a holder who cannot open a pack: which of the packs it
+/// holds are index packs. A packing pass writes one index pack beside the
+/// content packs it fills, so the holder learns how many content packs each
+/// pass wrote — which the count of packs and the superblock's commit already
+/// told it — and nothing about what is in them. What it costs: a pass that
+/// writes content now seals two packs where it sealed one, the index one at
+/// the smaller fixed size, [`crate::pack::INDEX_PACK_SIZE`], when it fits.
+/// Packs written before the split carry no mark and are read as index packs,
+/// so a store written before keeps every byte on every device, as it did.
+pub const CONTENT_PACK_PREFIX: &str = "_pack/c-";
+
+/// Whether a pack stored under `key` is `len` bytes long as its class says it
+/// must be: a content pack exactly [`crate::pack::PACK_SIZE`], an index pack
+/// exactly [`crate::pack::INDEX_PACK_SIZE`] or, when its index did not fit
+/// that, [`crate::pack::PACK_SIZE`]. Two sizes a holder can see, each saying
+/// nothing of what is inside.
+pub fn has_its_fixed_size(key: &str, len: u64) -> bool {
+    let (full, index) = (crate::pack::PACK_SIZE as u64, crate::pack::INDEX_PACK_SIZE as u64);
+    len == full || (!is_content_pack(key) && len == index)
+}
+
+/// Whether the storage key `key` names a content pack ([`CONTENT_PACK_PREFIX`]).
+pub fn is_content_pack(key: &str) -> bool {
+    key.trim_start_matches('/').starts_with(CONTENT_PACK_PREFIX)
+}
 
 /// Storage key of the sealed tombstone set (pending deletes of packed files).
 pub const TOMBSTONES_KEY: &str = "_tombstones";
@@ -438,8 +475,9 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         }
 
         // Chunk every loose file, filling packs as chunks accumulate so
-        // memory stays bounded by one pack plus one file.
-        let mut writer = PackWriter::new(Arc::clone(&self.inner), self.k_pack);
+        // memory stays bounded by one pack plus one file. Content packs: the
+        // index goes in a pack of its own at the commit.
+        let mut writer = PackWriter::content(Arc::clone(&self.inner), self.k_pack);
         let mut planned: Vec<String> = Vec::with_capacity(loose.len());
         for entry in &loose {
             let data = self.inner.get(Path::new(&entry.path)).await?;
@@ -675,8 +713,11 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         let to_retire = sparse;
 
         // 1. Salvage. Chunks are read in offset order so each doomed pack is
-        //    opened once.
+        //    opened once. File content goes to content packs and everything
+        //    else — segments — to index packs, so a compacted store keeps the
+        //    split a device keeps the index by ([`CONTENT_PACK_PREFIX`]).
         let mut writer = PackWriter::new(Arc::clone(&self.inner), self.k_pack);
+        let mut content = PackWriter::content(Arc::clone(&self.inner), self.k_pack);
         let mut moved: HashMap<String, PackChunkRef> = HashMap::new();
         let mut packs_rewritten = 0usize;
         for pack_id in &to_retire {
@@ -690,7 +731,12 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             let plaintext = open_pack(&self.k_pack, &blob)?;
             for r in refs {
                 let framed = Self::framed_from_plaintext(&plaintext, r)?;
-                let new_ref = writer.push(framed, &r.digest).await?;
+                let is_data = matches!(unframe_chunk(&framed), Ok((ChunkKind::Data, _)));
+                let new_ref = if is_data {
+                    content.push(framed, &r.digest).await?
+                } else {
+                    writer.push(framed, &r.digest).await?
+                };
                 moved.insert(r.digest.clone(), new_ref);
             }
             packs_rewritten += 1;
@@ -746,8 +792,9 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         let manifest_framed = new_manifest.to_chunk()?;
         let manifest_digest = chunk_digest(&manifest_framed);
         let manifest_ref = writer.push(manifest_framed, &manifest_digest).await?;
+        content.flush().await?;
         writer.flush().await?;
-        let packs_written = writer.written.len();
+        let packs_written = writer.written.len() + content.written.len();
 
 
         // The liveness check against the failure mode that matters here.
@@ -1118,7 +1165,9 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         let mut segments = Vec::new();
         let mut manifests = Vec::new();
         for m in self.inner.list_sealed(Path::new(PACK_PREFIX)).await? {
-            if m.is_dir {
+            // A content pack holds neither a segment nor a manifest
+            // (`CONTENT_PACK_PREFIX`), so it is not opened to look.
+            if m.is_dir || is_content_pack(&m.key) {
                 continue;
             }
             let Ok(blob) = self.inner.get_sealed(Path::new(&m.key)).await else {
@@ -1736,6 +1785,13 @@ async fn commit_new_state<S: SealedObjectAccess + ?Sized>(
     let generation = base_gen + 1;
     new_manifest.generation = generation;
 
+    // The content this change wrote is sealed in its own packs, and the index
+    // — the segment and the manifest — in packs of its own
+    // ([`CONTENT_PACK_PREFIX`]), so a device can keep the index without the
+    // content. `writer` may hold content chunks; the index writer holds none.
+    writer.flush().await?;
+    let mut index = PackWriter::new(Arc::clone(&writer.store), *k_pack);
+
     // The history segment for this change, appended before the
     // manifest so both land in the same pack when they fit.
     //
@@ -1785,7 +1841,7 @@ async fn commit_new_state<S: SealedObjectAccess + ?Sized>(
 
             let framed = segment.to_chunk(&log.k_log)?;
             let digest = chunk_digest(&framed);
-            let r = writer.push(framed, &digest).await?;
+            let r = index.push(framed, &digest).await?;
             new_manifest.log.push(r.clone());
             Some(r)
         }
@@ -1796,9 +1852,9 @@ async fn commit_new_state<S: SealedObjectAccess + ?Sized>(
     // so there is no circularity in it landing in that same pack.
     let manifest_framed = new_manifest.to_chunk()?;
     let manifest_digest = chunk_digest(&manifest_framed);
-    let manifest_ref = writer.push(manifest_framed, &manifest_digest).await?;
-    writer.flush().await?;
-    let packs_written = writer.written.len();
+    let manifest_ref = index.push(manifest_framed, &manifest_digest).await?;
+    index.flush().await?;
+    let packs_written = writer.written.len() + index.written.len();
 
     // Verify every chunk this change's files now depend on — including
     // reused ones, because retiring what they replace stakes those files on
@@ -2033,6 +2089,10 @@ impl<S: LooseObjectSource + 'static> ObjectSink for PackStreamSink<S> {
 struct PackWriter<S: SealedObjectAccess + ?Sized> {
     store: Arc<S>,
     k_pack: [u8; 32],
+    /// Whether every pack this writer seals holds file content and nothing
+    /// else — named under [`CONTENT_PACK_PREFIX`] — or may hold the index
+    /// (a history segment, a manifest), named as every pack was before.
+    content: bool,
     pack_id: String,
     group: Vec<Vec<u8>>,
     /// Σ (4-byte length prefix + framed chunk) for the open pack.
@@ -2044,27 +2104,42 @@ struct PackWriter<S: SealedObjectAccess + ?Sized> {
 const CHUNK_LEN_BYTES: usize = 4;
 
 impl<S: SealedObjectAccess + ?Sized> PackWriter<S> {
+    /// A writer of index packs: what it seals may hold a history segment or a
+    /// manifest, and every device that reads the store fetches it.
     fn new(store: Arc<S>, k_pack: [u8; 32]) -> Self {
         Self {
             store,
             k_pack,
-            pack_id: Self::fresh_id(),
+            content: false,
+            pack_id: Self::fresh_id(false),
             group: Vec::new(),
             payload: 0,
             written: Vec::new(),
         }
     }
 
+    /// A writer of content packs: file content and nothing else, which a
+    /// device fetches only for what it keeps whole, or when a file is opened
+    /// ([`is_content_pack`]).
+    fn content(store: Arc<S>, k_pack: [u8; 32]) -> Self {
+        Self { content: true, pack_id: Self::fresh_id(true), ..Self::new(store, k_pack) }
+    }
+
     /// Random 128-bit pack id. Random rather than sequential so two devices
     /// packing independently can never write the same pack key (packs are
     /// immutable; a key collision would pit two contents against each other).
-    fn fresh_id() -> String {
+    /// A content pack's id carries [`CONTENT_PACK_PREFIX`]'s `c-`, which no
+    /// index pack's hex id can begin with.
+    fn fresh_id(content: bool) -> String {
         let mut id = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut id);
         use std::fmt::Write as _;
-        let mut s = String::with_capacity(PACK_PREFIX.len() + 1 + 32);
+        let mut s = String::with_capacity(PACK_PREFIX.len() + 2 + 32);
         s.push_str(PACK_PREFIX);
         s.push('/');
+        if content {
+            s.push_str("c-");
+        }
         for b in id {
             let _ = write!(s, "{b:02x}");
         }
@@ -2106,7 +2181,15 @@ impl<S: SealedObjectAccess + ?Sized> PackWriter<S> {
             return Ok(());
         }
         let chunks: Vec<&[u8]> = self.group.iter().map(|c| c.as_slice()).collect();
-        let (blob, refs) = seal_pack(&self.k_pack, &chunks)?;
+        // An index pack whose index fits the smaller size is sealed at it
+        // (`crate::pack::INDEX_PACK_SIZE`); content, and an index that does
+        // not fit, at the full size.
+        let size = if !self.content && self.payload <= crate::pack::max_payload_of(crate::pack::INDEX_PACK_SIZE) {
+            crate::pack::INDEX_PACK_SIZE
+        } else {
+            crate::pack::PACK_SIZE
+        };
+        let (blob, refs) = crate::pack::seal_pack_sized(&self.k_pack, &chunks, size)?;
 
         // The refs handed out by `push` must be exactly what the sealer
         // produced — a divergence would mean every ref in the manifest is a
@@ -2123,7 +2206,7 @@ impl<S: SealedObjectAccess + ?Sized> PackWriter<S> {
 
         self.store.put_sealed(Path::new(&self.pack_id), &blob).await?;
         self.written
-            .push(std::mem::replace(&mut self.pack_id, Self::fresh_id()));
+            .push(std::mem::replace(&mut self.pack_id, Self::fresh_id(self.content)));
         self.group.clear();
         self.payload = 0;
         Ok(())
@@ -2759,7 +2842,7 @@ impl<S: LooseObjectSource + 'static> ObjectStorage for PackedObjectStorage<S> {
             tombstone_cache: Arc::clone(&self.tombstone_cache),
             path: Self::canon(key),
             chunker: crate::chunker::StreamChunker::new(),
-            writer: Some(PackWriter::new(Arc::clone(&self.inner), self.k_pack)),
+            writer: Some(PackWriter::content(Arc::clone(&self.inner), self.k_pack)),
             chunks: Vec::new(),
             seen: HashMap::new(),
             size: 0,
@@ -2918,6 +3001,35 @@ impl<S: LooseObjectSource + 'static> SealedObjectAccess for PackedObjectStorage<
 
     async fn reconcile(&self) -> ObjectStorageResult<Option<ReconcileSummary>> {
         self.run_reconcile().await
+    }
+
+    /// Every pack the current files (and the losers a conflict retained) that
+    /// `kept` keeps have their content in, read from the manifest alone — no
+    /// pack is opened, so a pack this store does not hold is named as surely
+    /// as one it does.
+    async fn packs_holding(
+        &self,
+        kept: &(dyn for<'p> Fn(&'p str) -> bool + Send + Sync),
+    ) -> ObjectStorageResult<Option<BTreeMap<String, Vec<String>>>> {
+        let mut packs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let Some((_, manifest)) = self.manifest().await? else {
+            return Ok(Some(packs));
+        };
+        let current = manifest.files.iter();
+        let retained = manifest.conflicts.iter().flat_map(|(path, entries)| entries.iter().map(move |e| (path, e)));
+        let named: Vec<(&String, &FileEntry)> = current.chain(retained).collect();
+        for (path, entry) in named {
+            if !kept(path) {
+                continue;
+            }
+            for r in &entry.chunks {
+                let paths = packs.entry(r.pack_id.clone()).or_default();
+                if paths.last() != Some(path) {
+                    paths.push(path.clone());
+                }
+            }
+        }
+        Ok(Some(packs))
     }
 
     async fn retained_conflicts(&self) -> ObjectStorageResult<BTreeMap<String, Vec<String>>> {
@@ -3094,7 +3206,7 @@ mod tests {
         let mut superblock_sizes = Vec::new();
         for m in backing.list(Path::new("")).await.unwrap() {
             if m.key.starts_with(PACK_PREFIX) {
-                assert_eq!(m.size as usize, PACK_SIZE, "pack {} is not PACK_SIZE", m.key);
+                assert!(has_its_fixed_size(&m.key, m.size), "pack {} is {} bytes, not its class's fixed size", m.key, m.size);
             } else if m.key.starts_with(SUPERBLOCK_PREFIX) {
                 superblock_sizes.push(m.size);
             } else {
@@ -3387,20 +3499,31 @@ mod tests {
 
         let before = pack_ids(&s).await;
 
-        // Corrupt one pack the salvage must read. A failure anywhere
-        // before the commit leaves every original in place.
-        let victim = before.iter().next().unwrap().clone();
+        // Corrupt one pack the salvage must read — one holding a survivor's
+        // content. A failure anywhere before the commit leaves every original
+        // in place.
+        let survivor = |p: &str| p == "b_small.bin";
+        let holding = s.packs_holding(&survivor).await.unwrap().unwrap();
+        let victim = holding.keys().next().unwrap().clone();
         s.inner
             .put_sealed(Path::new(&victim), &vec![0u8; PACK_SIZE])
             .await
             .unwrap();
 
         assert!(s.compact().await.is_err(), "corruption was not refused");
-        assert_eq!(
-            pack_ids(&s).await,
-            before,
-            "a pack was retired despite a failed pass"
-        );
+        // Every pack a live file's content is in survives. A pack nothing
+        // references — here the first pass's index pack, whose manifest the
+        // second superseded — is swept before any salvage, which needs no
+        // commit and loses nothing (the index pack is its own since the
+        // content split, `CONTENT_PACK_PREFIX`).
+        let everything = |_: &str| true;
+        let live: BTreeSet<String> = s.packs_holding(&everything).await.unwrap().unwrap().into_keys().collect();
+        let after = pack_ids(&s).await;
+        assert!(!live.is_empty());
+        for id in live.iter().filter(|id| before.contains(*id)) {
+            assert!(after.contains(id), "{id}, which a live file needs, was retired despite a failed pass");
+        }
+        assert!(after.contains(&victim), "the pack the salvage failed on was retired");
     }
 
     // ── the history log ─────────────────────────────────────────────────────
@@ -4205,16 +4328,59 @@ mod tests {
 
         let r = b.reconcile().await.unwrap().unwrap();
         assert_eq!(r.segments_adopted, 1);
-        // Either the content rode along in the same pack, or it is pending —
-        // both are correct; what must never happen is a name that fails on read.
-        if r.paths_pending_content == 0 {
-            assert!(b.get(Path::new("big.bin")).await.is_ok());
-        } else {
-            assert!(matches!(
-                b.get(Path::new("big.bin")).await,
-                Err(ObjectStorageError::NotFound(_))
-            ));
+        // The index rides in a pack of its own (`CONTENT_PACK_PREFIX`), so the
+        // pack with the segment carries the manifest that names the file and
+        // where its content is: the name is known, not pending, and its
+        // content is a pack this store does not hold — not found until it
+        // arrives (a device fetches it on open, `crate::fetch`), and read
+        // whole once it does. What must never happen is a name whose content,
+        // once here, reads wrong.
+        assert_eq!(r.paths_pending_content, 0, "the index named the file");
+        assert!(matches!(
+            b.get(Path::new("big.bin")).await,
+            Err(ObjectStorageError::NotFound(_))
+        ));
+        for key in packs.iter().filter(|k| is_content_pack(k)) {
+            let blob = a.inner.get_sealed(Path::new(key)).await.unwrap();
+            b.inner.put_sealed(Path::new(key), &blob).await.unwrap();
         }
+        assert_eq!(b.get(Path::new("big.bin")).await.unwrap(), noise(64 * 1024, 5));
+    }
+
+    /// **A packing pass seals content and index apart**: the file's chunks in
+    /// content packs, which hold nothing else, and the segment and manifest in
+    /// an index pack, which holds no content — so a device can keep the index
+    /// and leave the content (kotton #55). `packs_holding` names a file's
+    /// content packs from the manifest alone.
+    #[tokio::test]
+    async fn a_pass_seals_content_and_index_in_packs_of_their_own() {
+        let a = device("did:kel:zA");
+        a.put(Path::new("photo.jpg"), &noise(64 * 1024, 7)).await.unwrap();
+        a.put(Path::new("note.md"), b"a note").await.unwrap();
+        a.pack_loose().await.unwrap();
+        let mut kinds: Vec<(bool, Vec<ChunkKind>)> = Vec::new();
+        for m in a.inner.list_sealed(Path::new(PACK_PREFIX)).await.unwrap() {
+            let blob = a.inner.get_sealed(Path::new(&m.key)).await.unwrap();
+            let pt = open_pack(&a.k_pack, &blob).unwrap();
+            let in_it = scan_chunks(&pt).iter().map(|(_, f)| unframe_chunk(f).unwrap().0).collect();
+            kinds.push((is_content_pack(&m.key), in_it));
+        }
+        assert_eq!(kinds.len(), 2, "{kinds:?}");
+        for (content, in_it) in &kinds {
+            if *content {
+                assert!(in_it.iter().all(|k| *k == ChunkKind::Data), "a content pack holds {in_it:?}");
+            } else {
+                assert!(!in_it.contains(&ChunkKind::Data), "an index pack holds content: {in_it:?}");
+                assert!(in_it.contains(&ChunkKind::Manifest));
+            }
+        }
+        let photo = |p: &str| p == "photo.jpg";
+        let holding = a.packs_holding(&photo).await.unwrap().unwrap();
+        assert_eq!(holding.len(), 1);
+        let (id, paths) = holding.iter().next().unwrap();
+        assert!(is_content_pack(id), "{id}");
+        assert_eq!(paths, &["photo.jpg".to_string()]);
+        assert!(!is_content_pack("_pack/c0ffee00c0ffee00c0ffee00c0ffee00"), "an index pack whose hex begins with c");
     }
 
     // ── scan recovery ───────────────────────────────────────────────────────
@@ -5104,14 +5270,18 @@ mod tests {
         a.compact().await.unwrap();
         assert!(held_anywhere(&a, &one).await);
 
-        let mut sizes: Vec<u64> = Vec::new();
-        for m in a.inner.list_sealed(Path::new(PACK_PREFIX)).await.unwrap() {
-            if !m.is_dir {
-                sizes.push(m.size);
-            }
+        // Every pack is its class's fixed size (`has_its_fixed_size`), and the
+        // pack the version is in is a content pack like any other.
+        let packs = a.inner.list_sealed(Path::new(PACK_PREFIX)).await.unwrap();
+        for m in packs.iter().filter(|m| !m.is_dir) {
+            assert!(has_its_fixed_size(&m.key, m.size), "pack {} is shaped differently: {}", m.key, m.size);
         }
-        sizes.dedup();
-        assert_eq!(sizes.len(), 1, "a pack holding a version is shaped differently: {sizes:?}");
+        let held_in = |r: &PackChunkRef| packs.iter().find(|m| m.key == r.pack_id).map(|m| (is_content_pack(&m.key), m.size));
+        let (_, manifest) = a.manifest().await.unwrap().unwrap();
+        let kept = manifest.versions.get(NOTE).expect("the version is kept");
+        for r in kept.iter().flat_map(|e| &e.chunks) {
+            assert_eq!(held_in(r), Some((true, PACK_SIZE as u64)), "a version is not in a content pack like any other");
+        }
         ship_packs(&a, &b).await;
         assert!(held_anywhere(&b, &one).await, "a kept version did not travel with the packs");
 

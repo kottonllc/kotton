@@ -482,7 +482,6 @@ mod packing_tests {
     use crate::runtime::pack_mount;
     use crate::runtime::UserKeys;
     use kotton_crypto::derive_cek;
-    use crate::pack::PACK_SIZE;
     use crate::runtime::user::sync::Outbound;
 
     /// A write that lands after the pre-push pack is withheld from a peer that
@@ -682,15 +681,16 @@ mod packing_tests {
         );
 
         // What rests on disk — what a replica would hold — is only packs of
-        // exactly PACK_SIZE and superblocks of one constant size.
+        // their class's fixed size (`crate::packed::has_its_fixed_size`) and
+        // superblocks of one constant size.
         let files = walk_files(&temp.path().join("data"));
         assert!(!files.is_empty());
         let mut superblock_sizes = Vec::new();
         for (path, size) in &files {
             if path.starts_with("_pack/") {
-                assert_eq!(
-                    *size as usize, PACK_SIZE,
-                    "pack {path} is not exactly PACK_SIZE"
+                assert!(
+                    crate::packed::has_its_fixed_size(path, *size),
+                    "pack {path} is {size} bytes, not its class's fixed size"
                 );
             } else if path.starts_with("_superblock/") {
                 superblock_sizes.push(*size);

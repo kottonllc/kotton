@@ -58,6 +58,9 @@ pub struct UserStore {
     /// Everything the user's domains act upon: id, DID, base dir, and the key
     /// material. Moved rather than cloned — see the module note.
     pub(crate) ctx: kotton_context::UserContext,
+    /// Where a pack this store's `local` mount does not hold is fetched from
+    /// when read (`crate::fetch`): empty until the host lends a source.
+    pub(crate) pack_slot: crate::fetch::PackSlot,
 }
 
 impl UserStore {
@@ -71,7 +74,14 @@ impl UserStore {
             remotes: std::sync::RwLock::new(remotes),
             mount_router: std::sync::RwLock::new(None),
             ctx,
+            pack_slot: crate::fetch::PackSlot::default(),
         }
+    }
+
+    /// Lend this store somewhere to fetch a pack its `local` mount does not
+    /// hold, when something reads it (`crate::fetch`, kotton #55).
+    pub fn lend_pack_source(&self, source: Arc<dyn crate::fetch::PackSource>) {
+        self.pack_slot.lend(source);
     }
 
     /// Build a brand-new user's stores: the `data/` directory and the one
@@ -107,8 +117,10 @@ impl UserStore {
                 .with_context(|| format!("Failed to set permissions on {data_dir:?}"))?;
         }
 
+        let slot = crate::fetch::PackSlot::default();
+        let shelves = crate::fetch::FetchingShelves { inner: shelves, slot: slot.clone() };
         let local = crate::stack::build_sealed_store(
-            crate::stack::ArcStore(shelves.open(user_id, "local", &data_dir)),
+            crate::stack::ArcStore(kotton_sys::store::Shelves::open(&shelves, user_id, "local", &data_dir)),
             cek,
             path_key,
             log.as_ref(),
@@ -136,7 +148,7 @@ impl UserStore {
             .with_keys(cek, path_key)
             .with_log(log);
 
-        Ok(Self::new(config, remotes, ctx))
+        Ok(Self { pack_slot: slot, ..Self::new(config, remotes, ctx) })
     }
 
     /// Reopen an existing user's stores from disk.
@@ -157,13 +169,15 @@ impl UserStore {
     ) -> Result<Self> {
         let UserKeys { cek, path_key, log } = keys;
         let config = super::load_config(&base_dir)?;
+        let slot = crate::fetch::PackSlot::default();
+        let shelves = crate::fetch::FetchingShelves { inner: shelves, slot: slot.clone() };
         let remotes =
-            super::instantiate_remotes(&config, user_id, shelves, cek, path_key, log.as_ref())
+            super::instantiate_remotes(&config, user_id, &shelves, cek, path_key, log.as_ref())
                 .await?;
         let ctx = kotton_context::UserContext::new(user_id, did, base_dir)
             .with_keys(cek, path_key)
             .with_log(log);
-        Ok(Self::new(config, remotes, ctx))
+        Ok(Self { pack_slot: slot, ..Self::new(config, remotes, ctx) })
     }
 
     /// The key material this user's objects seal under, when this node holds it.
