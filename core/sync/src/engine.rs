@@ -18,7 +18,11 @@
 //! device's direction for it, never a node. So what the engine can reach is
 //! exactly what the drive record holds, and the record is as good as its
 //! writers: enrolment, recovery after the proof, and the membership
-//! projection, each of which names a vault. One writer does not yet: a local
+//! projection, each of which names a vault; and the join, which records the
+//! drives the admitting device handed over, resting on that device's word
+//! inside the SAS-confirmed, identity-attested ceremony — the device that
+//! holds the identity, which could put a member in the sealed set or
+//! introduce the joiner anywhere already. One writer does not yet: a local
 //! session's `PeerAdd { drive: true }` records whatever key it is given as a
 //! drive, and a node so recorded is then reached like any drive — only the
 //! key-domain gate stands in front of it, which the person's own device
