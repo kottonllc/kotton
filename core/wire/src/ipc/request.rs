@@ -252,13 +252,25 @@ pub enum UserRequest {
     /// bound to the channel — and the reply comes back sealed in
     /// `UserResponse::BrowserFrame`.
     ///
-    /// The only verb `khttpd` speaks. It carries no `user_id`: the gateway's
-    /// bootstrap token — or, for a gateway reached through the relay, its paired
-    /// key's posture (`Posture::Gateway`) — names the user it serves.
+    /// The only verb `khttpd` speaks. Who it is for is named where the
+    /// gateway is admitted. On the local IPC path that is the gateway's
+    /// bootstrap token, which names exactly one person. On the peer path the
+    /// handshake proves only a key, and one key may be paired as a gateway by
+    /// two people here (rows are each person's), so the frame names the person
+    /// in `user_id` and is served only when **that person's** row pairs the
+    /// key as `Posture::Gateway`; the browser's channel is that person's,
+    /// keyed by the gateway, the person and the channel's name.
     BrowserFrame {
         /// The frame, base64 on the wire.
         #[serde(with = "crate::base64_bytes")]
         bytes: Vec<u8>,
+        /// The person this frame is for. Required on the peer path, where it
+        /// selects among the persons who pair the gateway's key as theirs and
+        /// reaches no one else; absent on the local IPC path, where the
+        /// bootstrap token names the person and a frame naming another is
+        /// refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
         /// Which browser this frame belongs to, for a gateway that carries
         /// several over one peer identity. Absent on the local IPC path, where
         /// the connection is the channel.

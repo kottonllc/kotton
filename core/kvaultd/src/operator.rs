@@ -100,11 +100,9 @@ pub async fn revoke_all_but(ctx: &PeerContext, keep: &str) -> io::Result<usize> 
 /// tenant's paired device, whose own row still admits it.
 async fn unadmit(ctx: &PeerContext, keys: &[[u8; 32]]) {
     for key in keys {
-        let paired = kotton_peer::daemon::db::paired_node_for_pubkey(&ctx.db, key)
+        let paired = kotton_peer::daemon::db::paired_users_for_pubkey(&ctx.db, key)
             .await
-            .ok()
-            .flatten()
-            .is_some();
+            .is_ok_and(|pools| !pools.is_empty());
         if !paired {
             ctx.runtime.paired_keys().write().unwrap().remove(key);
         }

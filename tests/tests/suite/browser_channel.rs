@@ -30,7 +30,7 @@ pub(crate) const USER: &str = "browsertest";
 /// Relay one frame the way khttpd does: `BrowserFrame` in, `BrowserFrame` out.
 pub(crate) async fn relay(gw: &mut IpcClient<UserRequest, UserResponse>, frame: Vec<u8>) -> Vec<u8> {
     match gw
-        .send(&UserRequest::BrowserFrame { bytes: frame, channel: None })
+        .send(&UserRequest::BrowserFrame { bytes: frame, channel: None, user_id: None })
         .await
         .expect("relay BrowserFrame")
     {
@@ -300,6 +300,7 @@ impl Duplex {
             .send(&UserRequest::BrowserFrame {
                 bytes: frame,
                 channel: Some(self.channel.clone()),
+                user_id: None,
             })
             .await
             .expect("relay a browser frame")
@@ -331,6 +332,7 @@ impl Duplex {
             .send(&UserRequest::BrowserFrame {
                 bytes: sealed,
                 channel: Some(self.channel.clone()),
+                user_id: None,
             })
             .await
             .expect("relay a call")
