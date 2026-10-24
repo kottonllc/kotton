@@ -25,7 +25,9 @@
 //! the sealed set or introduce the joiner anywhere already
 //! (`kotton_peer::daemon::drives`). No other caller's word makes a node a
 //! drive: the `PeerAdd { drive: true }` that recorded any key it was given went
-//! with #80, and the record refuses a node paired under another posture. So no
+//! with #80, and the record refuses a node paired under another posture,
+//! whichever writer hands it the row: the join writes no posture over a row
+//! this device holds and replaces none under another key (#105). So no
 //! device of the person's is a target, and every peer a pass reaches holds no
 //! data keys: a pass toward one sends packs and nothing loose
 //! ([`ensure_packed_for_peer`]).
