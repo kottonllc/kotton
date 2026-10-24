@@ -14,13 +14,18 @@ tests/fixtures/calendar/** -text
 # the enums generate, which is LF.
 core/wire/*-surface.txt text eol=lf
 
-# What a Linux archive ships is checked out with LF on every platform, so an archive packed
-# from a Windows checkout carries the bytes a Linux host reads: settings that parse by line
-# and refuse a carriage return (kvaultd's `settings`), systemd units, and `sh` scripts, which
-# a CRLF breaks. By directory, so a file added beside them is held without being named:
+# Every file a Linux archive copies from this tree is checked out with LF on every platform,
+# so an archive packed from a Windows checkout carries the bytes a Linux host reads: settings
+# that parse by line and refuse a carriage return (kvaultd's `settings`), systemd units, `sh`
+# scripts, which a CRLF breaks, and the license and notice every archive carries. By
+# directory where there is one, so a file added beside them is held without being named:
 # `infra/release/` (the launcher, the installers and the notes the archives carry) and
 # `infra/vault/` (the vault's unit, settings and compose file), the relay's unit and settings
-# (its directory is also its crate, whose sources need no pin), and every shell script.
+# (its directory is also its crate, whose sources need no pin), every shell script, and the
+# root's `LICENSE` and `NOTICES` (`release::OWN`). What the archive writes rather than copies
+# (`THIRD-PARTY-NOTICES`, `REVISION`) and the binaries are not files of this tree.
+/LICENSE text eol=lf
+/NOTICES text eol=lf
 infra/release/** text eol=lf
 infra/vault/** text eol=lf
 infra/relay/*.service text eol=lf

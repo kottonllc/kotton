@@ -18,8 +18,11 @@
 #   - The daemons' own unit tests run (`--lib --bins` on kuserd, kdeviced, kvaultd, kquicd and
 #     ksyncd): in-process, no daemon started.
 # What it does not run, and why each:
-#   - kvaultd's `tests/` targets: they install the built vault and drive it with `/bin/sh`,
-#     `setpriv` and `sha256sum`. `--lib --bins` leaves them out; they still compile above.
+#   - kvaultd's `tests/` targets, which `--lib --bins` leaves out; they still compile above.
+#     Three install the built vault and drive it with `/bin/sh`, `setpriv` and `sha256sum`.
+#     The fourth, `the_vault_reads_its_settings_as_the_installer_and_systemd_do.rs`, is
+#     `#![cfg(target_os = "linux")]`: it compares kvaultd's reader of its settings with
+#     systemd's parser, through that library or `python3`.
 #   - The integration suite (`tests/`, kotton-integration-tests): it starts kuserd, kvaultd and
 #     the relay as processes, the daemon this job does not run. It compiles above.
 #   - xtask's tests: the gate's own tooling, written for the Linux it runs on; no job runs
