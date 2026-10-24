@@ -10,14 +10,12 @@
 //! carries the tree carries it, and the other device reads it back, byte for byte.
 //! Each way, because the phone hands things to the computer as well.
 //!
-//! Two carriers, as the protocol names two: **through a target**, a vault holding
-//! ciphertext between two devices that never meet; and **directly**, two devices
-//! paired to one identity and reachable to each other with no target at all. The
-//! direct one runs over the paired peer channel on loopback. It is *not* driven
-//! through the local-network door (`DoorCommand`), which announces nothing under
-//! `KOTTON_PAIR_LOCAL_ONLY` and has no suite path that lets one device find
-//! another through it; that waits on
-//! `TASK-the-local-network-is-a-door-opened-on-purpose-for-ten-minutes-and-a-relay-introduces-your-devices`.
+//! One carrier: the person's drive, a vault holding ciphertext between two
+//! devices that never meet — a device recovered from the phrase, and a device
+//! that joined. A device syncs to its drives and never to another device, so
+//! the direct carrier these tests once drove — two devices pulling from each
+//! other over the paired peer channel — left with the mesh; handing a thing
+//! straight to a device nearby is a verb of its own, not a sync.
 //!
 //! Each also reads the roster the share sheet lists from — the occupant's own
 //! `list-devices` — and holds the one fact the sheet filters on: a device of the
@@ -28,9 +26,7 @@ use kotton_app::daemon::apps::OccupantHost as _;
 use kotton_schemas::membership::Posture;
 use kotton_secret::MemorySecrets;
 use kotton_sys::secret::SecretsStore;
-use kotton_wire::remote::RemoteBackend;
 use kuserd::DeviceDaemon;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::common::free_port;
@@ -150,21 +146,18 @@ async fn a_file_handed_to_a_device_of_yours_lands_in_its_inbox_through_a_vault_e
     assert_eq!(pc_client.read_file("alice", "Inbox/beach.jpg").await.unwrap(), photo);
 }
 
-/// **Directly, each way, with no target.** Two devices of one person, paired by
-/// the streamed ceremony and reachable to each other over the peer channel: the
-/// computer writes `Inbox/beach.jpg` and the phone pulls it from the computer
-/// itself; the phone writes `Inbox/receipt.pdf` and pushes it to the computer.
-/// No vault is enrolled anywhere. The computer's roster lists the phone as a
-/// device that opens the person's files — the row the sheet offers.
+/// **To a device that joined, each way, by way of the drive.** Two devices of
+/// one person, paired by the streamed ceremony: the computer enrols the
+/// person's drive first, so the phone's join introduces the phone to it. The
+/// computer writes `Inbox/beach.jpg` and syncs; the phone syncs and reads it;
+/// the phone writes `Inbox/receipt.pdf` and syncs; the computer syncs and reads
+/// it. Neither device reaches the other: a device syncs to its drives and never
+/// to another device. The computer's roster lists the phone as a device that
+/// opens the person's files — the row the sheet offers.
 #[tokio::test]
-async fn a_file_handed_to_a_device_of_yours_lands_in_its_inbox_directly_each_way() {
+async fn a_file_handed_to_a_joined_device_lands_in_its_inbox_by_way_of_the_drive_each_way() {
     init_crypto();
     let pc = a_device("the computer").await;
-    let op_port = free_port();
-    pc.daemon
-        .start_peer_listener_background(op_port)
-        .await
-        .expect("the computer's peer listener");
     let phone_device = a_device("the phone").await;
 
     let mut pc_client = connect_when_ready(&pc.ipc, "the computer's client").await;
@@ -172,7 +165,7 @@ async fn a_file_handed_to_a_device_of_yours_lands_in_its_inbox_directly_each_way
         .create_user("alice", crate::common::TEST_PASSPHRASE)
         .await
         .expect("create_user");
-    let (pc_did, pc_key) = pc_client.get_node_identity().await.expect("the computer's identity");
+    let (pc_client, drive) = crate::drive_sync::a_drive_for(pc_client, "device-e", "alice").await;
     let phone_client = connect_when_ready(&phone_device.ipc, "the phone's client").await;
     let (mut pc_client, mut phone, phone_node) =
         enroll_streamed(pc_client, phone_client, "alice", "the phone", free_port(), Posture::Full).await;
@@ -186,31 +179,22 @@ async fn a_file_handed_to_a_device_of_yours_lands_in_its_inbox_directly_each_way
     assert!(!row.is_this_device);
     assert_eq!(row.name.as_deref(), Some("the phone"), "the roster's name for the phone");
 
-    // The phone reaches the computer directly.
-    let pc_addr: SocketAddr = format!("127.0.0.1:{op_port}").parse().unwrap();
-    phone
-        .peer_add("alice", "the computer", &pc_did, &pc_key, pc_addr)
-        .await
-        .expect("tell the phone where the computer answers");
-    phone
-        .remote_add(
-            "alice",
-            "the computer",
-            RemoteBackend::Kotton { peer_did: pc_did.clone(), label: "the computer".to_string() },
-            None,
-        )
-        .await
-        .expect("the computer as the phone's remote");
+    // The phone is told where the drive is; it is never told where the computer is.
+    crate::drive_sync::tell_of_the_drive(&mut phone, "alice", &drive).await;
 
     let photo = a_photo(3, 40_000);
     pc_client
         .write_file("alice", "Inbox/beach.jpg", &photo)
         .await
         .expect("the hand-over's write");
-    phone
-        .sync_mount("alice", "local", "the computer", Some(SyncDirection::Pull))
+    pc_client
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
         .await
-        .expect("the phone pulls from the computer");
+        .expect("the computer syncs to the drive");
+    phone
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Pull))
+        .await
+        .expect("the phone syncs from the drive");
     assert_eq!(
         phone.read_file("alice", "Inbox/beach.jpg").await.expect("the photo on the phone"),
         photo,
@@ -223,9 +207,13 @@ async fn a_file_handed_to_a_device_of_yours_lands_in_its_inbox_directly_each_way
         .await
         .expect("the phone's write");
     phone
-        .sync_mount("alice", "local", "the computer", Some(SyncDirection::Push))
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
         .await
-        .expect("the phone hands it to the computer");
+        .expect("the phone syncs to the drive");
+    pc_client
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Pull))
+        .await
+        .expect("the computer syncs from the drive");
     assert_eq!(
         pc_client.read_file("alice", "Inbox/receipt.pdf").await.expect("the receipt on the computer"),
         receipt,

@@ -55,15 +55,15 @@ impl Sync<'_> {
         self.client.sync_mount(&u, mount, remote, direction).await
     }
 
-    /// Add a standing rule. See [`KottonClient::configure_sync`].
+    /// Keep this device's rule for a drive. See [`KottonClient::configure_sync`].
     pub async fn configure(
         &mut self,
-        node_id: &str,
-        path: &str,
+        drive: &str,
+        direction: Option<SyncDirection>,
         watch: bool,
     ) -> io::Result<SyncRule> {
         let u = self.user_id.clone();
-        self.client.configure_sync(&u, node_id, path, watch).await
+        self.client.configure_sync(&u, drive, direction, watch).await
     }
 
     /// Every standing rule. See [`KottonClient::list_sync_rules`].
@@ -72,16 +72,17 @@ impl Sync<'_> {
         self.client.list_sync_rules(&u).await
     }
 
-    /// Drop a standing rule. See [`KottonClient::remove_sync_rule`].
-    pub async fn remove_rule(&mut self, node_id: &str, path: &str) -> io::Result<()> {
+    /// Drop this device's rule for a drive. See [`KottonClient::remove_sync_rule`].
+    pub async fn remove_rule(&mut self, drive: &str) -> io::Result<()> {
         let u = self.user_id.clone();
-        self.client.remove_sync_rule(&u, node_id, path).await
+        self.client.remove_sync_rule(&u, drive).await
     }
 
-    /// Start a run, returning its job id. See [`KottonClient::sync_trigger`].
-    pub async fn trigger(&mut self, node_id: Option<&str>) -> io::Result<String> {
+    /// Sync this device's drives now, returning the run's job id. See
+    /// [`KottonClient::sync_drives`].
+    pub async fn drives(&mut self) -> io::Result<(String, u32)> {
         let u = self.user_id.clone();
-        self.client.sync_trigger(&u, node_id).await
+        self.client.sync_drives(&u).await
     }
 
     /// Wait for a run to finish. See [`KottonClient::sync_await`].
@@ -131,18 +132,22 @@ impl KottonClient {
         }
     }
 
-    /// Add or update a background sync rule.
+    /// Keep this device's rule for one of its person's drives: `drive` is the
+    /// node the drive is reached through, `direction` this device's choice
+    /// (`None` both ways), `watch` whether the background pass syncs it. A
+    /// rule names a drive, never a device: another of the person's devices is
+    /// refused.
     pub async fn configure_sync(
         &mut self,
         user_id: &str,
-        node_id: &str,
-        path: &str,
+        drive: &str,
+        direction: Option<SyncDirection>,
         watch: bool,
     ) -> io::Result<SyncRule> {
         let request = UserRequest::SyncConfigure {
             user_id: user_id.to_string(),
-            node_id: node_id.to_string(),
-            path: path.to_string(),
+            drive: drive.to_string(),
+            direction,
             watch,
         };
         match self.client.send(&request).await? {
@@ -164,17 +169,11 @@ impl KottonClient {
         }
     }
 
-    /// Remove a sync rule.
-    pub async fn remove_sync_rule(
-        &mut self,
-        user_id: &str,
-        node_id: &str,
-        path: &str,
-    ) -> io::Result<()> {
+    /// Remove this device's rule for a drive.
+    pub async fn remove_sync_rule(&mut self, user_id: &str, drive: &str) -> io::Result<()> {
         let request = UserRequest::SyncRuleRemove {
             user_id: user_id.to_string(),
-            node_id: node_id.to_string(),
-            path: path.to_string(),
+            drive: drive.to_string(),
         };
         match self.client.send(&request).await? {
             UserResponse::SyncRuleRemoved => Ok(()),
@@ -183,21 +182,19 @@ impl KottonClient {
         }
     }
 
-    /// Enqueue a sync pass and return a job id.
+    /// Sync this device's drives now and return a job id: every drive the
+    /// person has recorded here, each in the direction its rule chooses.
     ///
-    /// `node_id = None` syncs all configured rules. Non-blocking: returns as
-    /// soon as the pass is enqueued. Use [`sync_await`] to block for the result.
-    pub async fn sync_trigger(
-        &mut self,
-        user_id: &str,
-        node_id: Option<&str>,
-    ) -> io::Result<String> {
-        let request = UserRequest::SyncTrigger {
+    /// Non-blocking: returns as soon as the pass is enqueued. Use
+    /// [`sync_await`] to block for the result.
+    ///
+    /// Answers the job id and how many drives the pass syncs.
+    pub async fn sync_drives(&mut self, user_id: &str) -> io::Result<(String, u32)> {
+        let request = UserRequest::SyncDrives {
             user_id: user_id.to_string(),
-            node_id: node_id.map(str::to_string),
         };
         match self.client.send(&request).await? {
-            UserResponse::SyncStarted { job_id, .. } => Ok(job_id),
+            UserResponse::SyncStarted { job_id, targets } => Ok((job_id, targets)),
             UserResponse::Error { message } => Err(io::Error::other(message)),
             got => Err(crate::protocol::unexpected(got)),
         }

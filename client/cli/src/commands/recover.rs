@@ -266,14 +266,17 @@ async fn recover_here(client: &mut KottonClient, a: &Answers) -> io::Result<u32>
     // 4. The identity this machine acts as.
     kotton::active_identity::set(name)?;
 
-    // 5. Your things, from each node this name has here, as `kotton sync` brings them.
+    // 5. Your things, from your drives, as `kotton sync` brings them: a device
+    // syncs to its person's drives and to nothing else, and the vault just
+    // recorded is one.
     let mut pulled = 0;
     let mut unsynced = Vec::new();
-    for node in client.list_nodes(name).await? {
-        match client.sync_mount(name, "local", &node.id, None).await {
-            Ok(r) => pulled += r.pulled,
-            Err(e) => unsynced.push(format!("{}: {e}", node.id)),
-        }
+    match client.sync_drives(name).await {
+        Ok((job, _drives)) => match client.sync_await(name, job, 300).await {
+            Ok(outcome) => pulled += outcome.files,
+            Err(e) => unsynced.push(e.to_string()),
+        },
+        Err(e) => unsynced.push(e.to_string()),
     }
     if let Some(why) = undrived {
         return Err(io::Error::other(format!(

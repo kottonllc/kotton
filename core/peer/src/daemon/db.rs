@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! DB access for network/pairing tables.
 //!
-//! Tables: `paired_nodes`, `ephemeral_sessions`, `sync_rules`, `mount_configs`,
+//! Tables: `paired_nodes`, `ephemeral_sessions`, `mount_configs`,
 //! created by `migrations/0002_v0_3_network.sql`; and `operator_key`, by
 //! `migrations/0024_operator_key.sql`. The `drives` table beside `paired_nodes`
 //! is [`super::drives`]'s, which says what a drive record is; the two functions
-//! here that write or remove a node row keep its drive with it.
+//! here that write or remove a node row keep its drive with it. A device's
+//! sync rules, which name drives, are [`super::drive_rules`]'s.
 
 use kotton_wire::did::{Did, DidError};
-use kotton_wire::peer::{EphemeralSession, MountConfig, PairedNode, SyncRule};
+use kotton_wire::peer::{EphemeralSession, MountConfig, PairedNode};
 use kotton_wire::GrantEnvelope;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashSet;
@@ -585,65 +586,6 @@ pub async fn list_revoked_session_ids(
     Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
 }
 
-// ---------------------------------------------------------------------------
-// sync_rules
-// ---------------------------------------------------------------------------
-
-pub(crate) async fn upsert_sync_rule(
-    db: &Arc<SqlitePool>,
-    user_id: &str,
-    node_id: &str,
-    path: &str,
-    watch: bool,
-    now: i64,
-) -> io::Result<SyncRule> {
-    sqlx::query(
-        "INSERT INTO sync_rules (user_id, node_id, path, watch, configured_at) \
-         VALUES (?, ?, ?, ?, ?) \
-         ON CONFLICT(user_id, node_id, path) DO UPDATE SET \
-           watch=excluded.watch, configured_at=excluded.configured_at",
-    )
-    .bind(user_id)
-    .bind(node_id)
-    .bind(path)
-    .bind(watch as i32)
-    .bind(now)
-    .execute(db.as_ref())
-    .await
-    .map_err(db_err)?;
-
-    Ok(SyncRule {
-        node_id: node_id.to_owned(),
-        path: path.to_owned(),
-        watch,
-        configured_at: now,
-    })
-}
-
-pub async fn list_sync_rules(
-    db: &Arc<SqlitePool>,
-    user_id: &str,
-) -> io::Result<Vec<SyncRule>> {
-    let rows = sqlx::query(
-        "SELECT node_id, path, watch, configured_at \
-         FROM sync_rules WHERE user_id = ? ORDER BY configured_at DESC",
-    )
-    .bind(user_id)
-    .fetch_all(db.as_ref())
-    .await
-    .map_err(db_err)?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| SyncRule {
-            node_id: row.get("node_id"),
-            path: row.get("path"),
-            watch: row.get::<i64, _>("watch") != 0,
-            configured_at: row.get("configured_at"),
-        })
-        .collect())
-}
-
 /// Get a single paired node by its label (`id`) for a given user.
 pub async fn get_paired_node_by_id(
     db: &Arc<SqlitePool>,
@@ -685,24 +627,6 @@ pub async fn get_paired_node_by_id(
         relay_url: row.get::<Option<String>, _>("relay_url").filter(|u| !u.is_empty()),
         posture: row_posture(&row),
     }))
-}
-
-/// Delete a sync rule. Returns `true` if a row was removed.
-pub(crate) async fn delete_sync_rule(
-    db: &Arc<SqlitePool>,
-    user_id: &str,
-    node_id: &str,
-    path: &str,
-) -> io::Result<bool> {
-    let result =
-        sqlx::query("DELETE FROM sync_rules WHERE user_id = ? AND node_id = ? AND path = ?")
-            .bind(user_id)
-            .bind(node_id)
-            .bind(path)
-            .execute(db.as_ref())
-            .await
-            .map_err(db_err)?;
-    Ok(result.rows_affected() > 0)
 }
 
 // ---------------------------------------------------------------------------

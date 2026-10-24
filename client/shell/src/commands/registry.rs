@@ -194,14 +194,16 @@ const HELP_TOPICS: &[(&str, &str)] = &[
     ),
     (
         "syncing",
-        "syncing — keep your files the same across your devices\n\
+        "syncing — keep your files the same across your devices, by way of your drive\n\
          \n\
-         sync                    two-way sync with all your paired devices\n\
-         sync add <node> <path>  set up a background sync rule for a path\n\
-         sync list               show your sync rules\n\
+         sync                    sync this device's drives now\n\
+         sync add <drive>        keep this device's rule for a drive (--push, --pull, --watch)\n\
+         sync list               show this device's rules\n\
          \n\
+         Your things live on a drive, and each device syncs with it: what one\n\
+         device writes reaches your others by way of the drive, never directly.\n\
          Files are encrypted before they leave a device — only your own devices\n\
-         can read them; the network and any relay see ciphertext.\n",
+         can read them; the drive, the network and any relay see ciphertext.\n",
     ),
     (
         "identity",

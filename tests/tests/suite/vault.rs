@@ -29,7 +29,7 @@ const NOTE: &[u8] = b"the whole of what alice owns";
 /// landlord would hold (to raise the quota while it serves).
 pub(crate) struct RunningVault {
     _base: tempfile::TempDir,
-    base_path: std::path::PathBuf,
+    pub(crate) base_path: std::path::PathBuf,
     pub(crate) ipc: crate::common::Door,
     op_port: u16,
     pub(crate) vault: Arc<Vault>,
@@ -557,7 +557,7 @@ fn pool_of(vault: &RunningVault, user: &str) -> Vec<(String, u64)> {
 /// RFC-0070 M3 at the vault: everything in `user`'s pool is a pack of exactly
 /// `PACK_SIZE` or a superblock, every superblock is one length, and there is
 /// at least one pack — so no object there says how large anything was.
-fn the_pool_holds_only_packs(vault: &RunningVault, user: &str) {
+pub(crate) fn the_pool_holds_only_packs(vault: &RunningVault, user: &str) {
     use kotton_store::pack::PACK_SIZE;
     use kotton_store::packed::PACK_PREFIX;
     use kotton_store::superblock::SUPERBLOCK_PREFIX;
@@ -645,7 +645,7 @@ async fn files_pushed_by_hand_rest_at_the_vault_only_in_packs() {
 }
 
 /// The background engine's half of the same property: a pass the engine runs
-/// toward a vault — `SyncTrigger`, through its transient `__sync_bg__` remote
+/// toward a vault — `SyncDrives`, through its transient `__sync_bg__` remote
 /// with a `Kotton` backend — leaves the pool holding only packs and
 /// superblocks, and every file comes back from it.
 #[tokio::test]
@@ -661,10 +661,10 @@ async fn files_the_engine_syncs_rest_at_the_vault_only_in_packs() {
         let (mut client, id) = enrol_vault(client, &vault, "alice", "vault").await;
         identity = id;
         client
-            .configure_sync("alice", "vault", "/", false)
+            .configure_sync("alice", "vault", Some(SyncDirection::Push), false)
             .await
             .expect("a sync rule for the vault");
-        let job = client.sync_trigger("alice", Some("vault")).await.expect("trigger the engine");
+        let (job, _drives) = client.sync_drives("alice").await.expect("trigger the engine");
         let outcome = client.sync_await("alice", job, 120).await.expect("the engine's pass");
         assert!(outcome.files >= 1, "the engine pushed something: {outcome:?}");
     }

@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 /// A device that has been paired with this device via the pairing ceremony.
 ///
 /// `id` is a stable human-chosen label (e.g. "my-vps", "phone"). It is used
-/// as a foreign key in `SyncRule` and `MountConfig`.
+/// as a foreign key in `MountConfig`, and names a drive's node to a person.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-types", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts-types", ts(export))]
@@ -65,15 +65,23 @@ pub struct PairedNode {
 // SyncRule
 // ---------------------------------------------------------------------------
 
-/// A configured background sync rule between a local path and a paired node.
+/// This device's rule for one of its person's drives: which way it syncs it,
+/// and whether the background pass does.
+///
+/// A rule names a drive — a tenancy on a vault — and never a device: devices
+/// replicate to drives and read from them, and no device is another's target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRule {
-    /// References `PairedNode::id`.
-    pub node_id: String,
-    /// Local path prefix to sync, e.g. `"/notes"`.
-    pub path: String,
-    /// If `true`, the daemon watches for changes and syncs continuously.
-    /// If `false`, sync only runs when explicitly triggered.
+    /// The node the drive is reached through, as this device names it now;
+    /// empty when the drive the rule was kept for is no longer recorded here.
+    pub drive: String,
+    /// The vault's key, hex: what the rule is kept under, with the tenancy.
+    pub vault_key: String,
+    /// The tenancy on that vault.
+    pub tenancy: String,
+    /// This device's direction for the drive; `None` is both ways.
+    pub direction: Option<crate::ipc::SyncDirection>,
+    /// If `true`, the background pass syncs this drive as well.
     pub watch: bool,
     /// Unix timestamp when this rule was created or last modified.
     pub configured_at: i64,
@@ -665,15 +673,19 @@ mod tests {
     #[test]
     fn sync_rule_round_trip() {
         let rule = SyncRule {
-            node_id: "my-server".to_string(),
-            path: "/notes".to_string(),
+            drive: "vault".to_string(),
+            vault_key: "ab".repeat(32),
+            tenancy: "alice".to_string(),
+            direction: Some(crate::ipc::SyncDirection::Push),
             watch: true,
             configured_at: 1_700_000_001,
         };
         let json = serde_json::to_string(&rule).expect("serialize");
         let back: SyncRule = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.node_id, rule.node_id);
-        assert_eq!(back.path, rule.path);
+        assert_eq!(back.drive, rule.drive);
+        assert_eq!(back.vault_key, rule.vault_key);
+        assert_eq!(back.tenancy, rule.tenancy);
+        assert!(matches!(back.direction, Some(crate::ipc::SyncDirection::Push)));
         assert_eq!(back.watch, rule.watch);
         assert_eq!(back.configured_at, rule.configured_at);
     }

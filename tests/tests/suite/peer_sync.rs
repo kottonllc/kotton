@@ -9,7 +9,7 @@
 //! * Full loopback QUIC sync (marked `#[ignore]` until the peer-listener accept
 //!   loop routing pipeline is wired — v0.4 deliverable)
 
-use crate::common::{connect_when_ready, unique_ipc, wait_for_daemon, TestEnv};
+use crate::common::{connect_when_ready, TestEnv};
 use kotton_wire::remote::RemoteBackend;
 use kotton::SyncDirection;
 use std::path::PathBuf;
@@ -406,153 +406,51 @@ fn init_crypto() {
     });
 }
 
-/// Find a free UDP port by binding to port 0 and reading the assigned port.
-fn free_port() -> u16 {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind :0 for port probe");
-    s.local_addr().expect("local_addr").port()
-}
-
-/// Two nodes in **different key domains** are refused, over real loopback QUIC.
+/// A drive serving **another key domain's** packs is refused, over real
+/// loopback QUIC.
 ///
-/// This test used to assert the opposite — that the three objects pulled and
-/// read back in the clear on B — and it passed, which is precisely the defect
-/// RFC-0041 exists to fix. Its setup fakes pairing by writing reciprocal
-/// `paired_nodes` rows instead of running enrollment, so A and B hold
-/// independently generated CEKs. The old sync path made that "work" by reading
-/// through the encrypting store (`get` decrypts) and writing plaintext to the
-/// peer, which B then re-sealed under its own unrelated key. Data moved between
-/// two key domains by passing through plaintext, and a test asserted it.
+/// This test used to pull from another *device* in an unrelated key domain,
+/// and before that it asserted the pull worked — the defect the key-domain
+/// gate exists to fix: data moved between two key domains by passing through
+/// plaintext. A device now syncs only with a drive, so the gate's subject is a
+/// drive: two people both named `alice`, each with a real vault enrolled as
+/// their own drive and a file kept on it, and the second's vault made to serve
+/// the first's pool whole — its packs and the key domain recorded for them (a
+/// landlord's mistake or malice, which a vault that cannot open what it holds
+/// cannot notice). The pull is refused at the boundary, in words naming both
+/// domains, and nothing crosses. No test records a device as a drive.
 ///
-/// The setup is left exactly as it was, because faking pairing is the *right*
-/// setup for a negative test: these two nodes genuinely are strangers. What
-/// changed is the expectation. A transfer is now refused with a
-/// `SealedDomainMismatch`, and the message names both domains.
-///
-/// Note what the earlier CEK-**epoch** check could not have caught here: two
-/// nodes that were never in the same fleet both start at epoch 0 and compare
-/// equal. Only a fingerprint derived from the key itself separates them.
-///
-/// The positive case — enrolled peers, one key domain, sync over QUIC — is
-/// covered by `enroll_threshold_sign::file_written_on_one_device_syncs_to_a_joined_device`,
-/// which reaches the same transport through a real device-join.
-#[tokio::test]
-async fn peer_sync_across_key_domains_is_refused() {
-    use kuserd::DeviceDaemon;
-    use kotton_sys::secret::SecretsStore;
-    use kotton_secret::MemorySecrets;
-    use kotton::SyncDirection;
-    use std::sync::Arc;
-
+/// The positive case — one key domain, sync by way of a drive — is covered by
+/// `enroll_threshold_sign::file_written_on_one_device_syncs_to_a_joined_device`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drive_serving_another_key_domain_is_refused() {
     init_crypto();
-
-    // ── Device A (source) ─────────────────────────────────────────────────────
-    let base_a = tempfile::tempdir().expect("base_a tempdir");
-    let ipc_a = unique_ipc();
-    let secrets_a: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_a = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(base_a.path().to_owned(), ipc_a.clone(), Arc::clone(&secrets_a))
-            .await
-            .expect("DeviceDaemon A"),
-    );
-    let a_pubkey = daemon_a.device_signing_pubkey_bytes();
-    let a_did = daemon_a.device_did().to_owned();
-
-    // ── Device B (sink) ──────────────────────────────────────────────────
-    let base_b = tempfile::tempdir().expect("base_b tempdir");
-    let ipc_b = unique_ipc();
-    let secrets_b: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_b = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(base_b.path().to_owned(), ipc_b.clone(), Arc::clone(&secrets_b))
-            .await
-            .expect("DeviceDaemon B"),
-    );
-    let b_pubkey = daemon_b.device_signing_pubkey_bytes();
-    let b_did = daemon_b.device_did().to_owned();
-
-    // ── Peer listener port ────────────────────────────────────────────────────
-    let port_a = free_port();
-    let a_addr: std::net::SocketAddr = format!("127.0.0.1:{port_a}").parse().expect("parse addr");
-
-    // ── A's mTLS allowlist: permit B by inserting B's key into A's paired_keys ─
-    // `insert_paired_node` updates both the DB and the live allowlist set.
-    // Note: user "alice" is created later; SQLite doesn't enforce FK so the
-    // row is accepted before the user row exists.
-    let dummy_b_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-    daemon_a
-        .insert_paired_node("alice", &b_did, b_pubkey, dummy_b_addr)
-        .await
-        .expect("insert B into A's paired_nodes");
-
-    // ── B's DB: record A as a paired node so remote_add can resolve the DID ──
-    daemon_b
-        .insert_paired_node("alice", &a_did, a_pubkey, a_addr)
-        .await
-        .expect("insert_paired_node A into B");
-
-    // ── Start A's peer listener (uses self.paired_keys seeded above) ──────────
-    daemon_a
-        .start_peer_listener_background(port_a)
-        .await
-        .expect("start A peer listener");
-
-    // ── Spawn IPC loops ───────────────────────────────────────────────────────
-    let daemon_a =
-        Arc::try_unwrap(daemon_a).unwrap_or_else(|_| panic!("sole arc owner for daemon_a"));
-    let daemon_b =
-        Arc::try_unwrap(daemon_b).unwrap_or_else(|_| panic!("sole arc owner for daemon_b"));
-    let _task_a = tokio::spawn(async move { std::sync::Arc::new(daemon_a).run().await });
-    let _task_b = tokio::spawn(async move { std::sync::Arc::new(daemon_b).run().await });
-    wait_for_daemon(&ipc_a, "daemon A").await;
-    wait_for_daemon(&ipc_b, "daemon B").await;
-
-    // ── Clients ───────────────────────────────────────────────────────────────
-    let mut client_a = connect_when_ready(&ipc_a, "client_a").await;
-    let mut client_b = connect_when_ready(&ipc_b, "client_b").await;
-
-    // ── Write 3 objects to A ──────────────────────────────────────────────────
+    let a = crate::vault::spawn_device("device A").await;
+    let b = crate::vault::spawn_device("device B").await;
+    let mut client_a = connect_when_ready(&a.ipc, "client_a").await;
+    let mut client_b = connect_when_ready(&b.ipc, "client_b").await;
     client_a.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user A");
-    for i in 1u8..=3 {
-        client_a
-            .write_file("alice", &format!("obj{i}.bin"), &[i; 64])
-            .await
-            .expect("write_file A");
-    }
-
-    // ── B syncs from A ────────────────────────────────────────────────────────
     client_b.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user B");
-    client_b
-        .remote_add(
-            "alice",
-            "peer-a",
-            RemoteBackend::Kotton {
-                peer_did: a_did.clone(),
-                label: "device-a".to_string(),
-            },
-            None,
-        )
-        .await
-        .expect("remote_add Kotton on B");
+
+    let (mut client_a, mut client_b, files, (a_domain, b_domain), _vaults) =
+        crate::drive_sync::a_drive_serving_another_domains_packs(client_a, client_b, "alice").await;
 
     let err = client_b
-        .sync_mount("alice", "local", "peer-a", Some(SyncDirection::Pull))
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Pull))
         .await
-        .expect_err("sync across unrelated key domains must be refused, not silently succeed");
-
+        .expect_err("a pull across unrelated key domains must be refused, not silently succeed");
+    // The boundary's own refusal, naming both domains: the object's (A's) and
+    // the one this node holds (B's) — not any earlier failure.
     let msg = err.to_string();
     assert!(
-        msg.contains("key domain"),
-        "refusal should name the key-domain mismatch so the cause is diagnosable, got: {msg}"
+        msg.contains(&format!("belongs to key domain {a_domain}, this node holds {b_domain}")),
+        "the refusal is not the key-domain boundary naming both domains, got: {msg}"
     );
 
     // Nothing crossed. B holds no object A wrote — not a re-sealed copy, not an
-    // envelope it cannot open, nothing.
-    for i in 1u8..=3 {
-        assert!(
-            client_b
-                .read_file("alice", &format!("obj{i}.bin"))
-                .await
-                .is_err(),
-            "obj{i}.bin must not exist on a node in a different key domain"
-        );
+    // envelope it cannot open, nothing — and A still reads its own.
+    for (name, body) in &files {
+        assert!(client_b.read_file("alice", name).await.is_err(), "{name} must not exist on B");
+        assert_eq!(&client_a.read_file("alice", name).await.expect("A reads its own"), body);
     }
 }

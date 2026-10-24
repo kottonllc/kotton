@@ -135,7 +135,7 @@ pub enum Commands {
     Records(RecordsCommand),
     /// Bring your history with you — read an export (.ics) into your own records
     Import(ImportCommand),
-    /// Sync your files across devices (now, add, list, remove) — shares the REPL's `sync` verb
+    /// Sync this device's drives (now, add, list, remove) — shares the REPL's `sync` verb
     #[command(after_help = shell_help(&kotton_shell::commands::SyncCommand))]
     Sync {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)

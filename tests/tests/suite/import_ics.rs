@@ -8,7 +8,6 @@
 //! mangled event with no start — so what these tests count is what a real
 //! export costs, not what a tidy one does.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use kotton::ImportFormat;
@@ -308,42 +307,24 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
     let base_e = tempfile::tempdir().expect("base_e");
     let ipc_e = unique_ipc();
     let secrets_e: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_e = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(
-            base_e.path().to_owned(),
-            ipc_e.clone(),
-            Arc::clone(&secrets_e),
-        )
-        .await
-        .expect("daemon E"),
-    );
-    let op_port_e = free_port();
-    daemon_e
-        .start_peer_listener_background(op_port_e)
-        .await
-        .expect("start E operational listener");
-    let daemon_e =
-        Arc::try_unwrap(daemon_e).unwrap_or_else(|_| panic!("sole arc owner for daemon_e"));
+    let daemon_e = DeviceDaemon::new_with_base_and_secrets(
+        base_e.path().to_owned(),
+        ipc_e.clone(),
+        Arc::clone(&secrets_e),
+    )
+    .await
+    .expect("daemon E");
 
     let base_n = tempfile::tempdir().expect("base_n");
     let ipc_n = unique_ipc();
     let secrets_n: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
-    let daemon_n = Arc::new(
-        DeviceDaemon::new_with_base_and_secrets(
-            base_n.path().to_owned(),
-            ipc_n.clone(),
-            Arc::clone(&secrets_n),
-        )
-        .await
-        .expect("daemon N"),
-    );
-    let op_port_n = free_port();
-    daemon_n
-        .start_peer_listener_background(op_port_n)
-        .await
-        .expect("start N operational listener");
-    let daemon_n =
-        Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
+    let daemon_n = DeviceDaemon::new_with_base_and_secrets(
+        base_n.path().to_owned(),
+        ipc_n.clone(),
+        Arc::clone(&secrets_n),
+    )
+    .await
+    .expect("daemon N");
 
     let _task_e = tokio::spawn(async move { Arc::new(daemon_e).run().await });
     let _task_n = tokio::spawn(async move { Arc::new(daemon_n).run().await });
@@ -357,7 +338,9 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
         .create_user(USER, crate::common::TEST_PASSPHRASE)
         .await
         .expect("create_user E");
-    let (did_e_dev, pubkey_e_hex) = client_e.get_node_identity().await.expect("E node identity");
+    // E keeps the person's things on a drive, enrolled before N joins so the
+    // join introduces N to it: N receives E's records by way of the drive.
+    let (client_e, drive) = crate::drive_sync::a_drive_for(client_e, "device-e", USER).await;
 
     let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) = enroll_streamed(
@@ -369,18 +352,8 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
         Posture::Full,
     )
     .await;
-    let (did_n_dev, pubkey_n_hex) = client_n.get_node_identity().await.expect("N node identity");
-
-    let e_addr: SocketAddr = format!("127.0.0.1:{op_port_e}").parse().unwrap();
-    let n_addr: SocketAddr = format!("127.0.0.1:{op_port_n}").parse().unwrap();
-    client_n
-        .peer_add(USER, "device-e", &did_e_dev, &pubkey_e_hex, e_addr)
-        .await
-        .expect("inject E address into N");
-    client_e
-        .peer_add(USER, "device-n", &did_n_dev, &pubkey_n_hex, n_addr)
-        .await
-        .expect("inject N address into E");
+    // N is told where the drive is; neither device is given the other's address.
+    crate::drive_sync::tell_of_the_drive(&mut client_n, USER, &drive).await;
 
     // The import happens on E, where the person's export is.
     let (_nsid, imported, _skipped) = client_e
@@ -389,39 +362,16 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
         .expect("import on E");
     assert_eq!(imported as usize, IMPORTABLE);
 
-    // E seals its records into its packs (a local remote stands in for E's own
-    // background sync pass, as in the sibling test).
-    let scratch = base_e.path().join("scratch");
+    // E's sync to the drive seals its records into the packs it sends; N takes
+    // them from there.
     client_e
-        .remote_add(
-            USER,
-            "scratch",
-            kotton::RemoteBackend::Local { path: scratch },
-            None,
-        )
+        .sync_mount(USER, "local", "vault", Some(kotton::SyncDirection::Push))
         .await
-        .expect("local remote on E");
-    client_e
-        .sync_mount(USER, "local", "scratch", None)
-        .await
-        .expect("E local sync logs its records");
-
+        .expect("E pushes to the drive");
     client_n
-        .remote_add(
-            USER,
-            "device-e",
-            kotton::RemoteBackend::Kotton {
-                peer_did: did_e_dev.clone(),
-                label: "device-e".to_string(),
-            },
-            None,
-        )
+        .sync_mount(USER, "local", "vault", Some(kotton::SyncDirection::Pull))
         .await
-        .expect("remote_add E on N");
-    client_n
-        .sync_mount(USER, "local", "device-e", None)
-        .await
-        .expect("N sync from E");
+        .expect("N pulls from the drive");
 
     let before = client_n
         .record_query(USER, IMPORTED_CALENDAR_NSID, vec![], None, None)
@@ -443,9 +393,9 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
         .await
         .expect("declare the import shape on N");
     client_n
-        .sync_mount(USER, "local", "device-e", None)
+        .sync_mount(USER, "local", "vault", Some(kotton::SyncDirection::Pull))
         .await
-        .expect("N sync from E again");
+        .expect("N pulls from the drive again");
 
     let after = client_n
         .record_query(USER, IMPORTED_CALENDAR_NSID, vec![], None, None)

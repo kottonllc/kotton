@@ -732,7 +732,7 @@ impl Drop for TestEnv {
 // ── Streamed pairing (RFC-0040) ───────────────────────────────────────────────
 // Moved here 2026-08-22 from `enroll_threshold_sign.rs`, whose module doc already
 // called it "the shared `enroll_streamed` helper" while it was in fact private to
-// that one binary. `relay_peer_sync.rs` needs the same ceremony to put two nodes in
+// that one binary. `introduction.rs` needs the same ceremony to put two nodes in
 // one key domain, and duplicating 80 lines of ceremony driving was the alternative.
 
 /// Keep pairing on loopback (no LAN bind, no mDNS) so the OS firewall never prompts

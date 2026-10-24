@@ -10,20 +10,19 @@
 //! because that is the whole of what the host tells an app who it is running
 //! for — the menubar draws it.
 //!
-//! Two in-process daemons on loopback: E holds the identity, N joins it through
-//! the real streamed ceremony (`enroll_streamed`, `Posture::Full`), then pulls
-//! from E over QUIC mTLS exactly as
+//! Two in-process daemons on loopback and the person's drive: E holds the
+//! identity and enrols a vault as the drive, N joins it through the real
+//! streamed ceremony (`enroll_streamed`, `Posture::Full`), and N takes what E
+//! sent to the drive from there, exactly as
 //! `enroll_threshold_sign::file_written_on_one_device_syncs_to_a_joined_device`
-//! does. The name is set through Settings' door — `DaemonOccupantHost::set_display_name`,
+//! does. A device does not sync from another device. The name is set through Settings' door — `DaemonOccupantHost::set_display_name`,
 //! which is what the shell's account row reaches.
 
 use kotton::SyncDirection;
 use kotton_schemas::membership::Posture;
 use kotton_secret::MemorySecrets;
 use kotton_sys::secret::SecretsStore;
-use kotton_wire::remote::RemoteBackend;
 use kuserd::DeviceDaemon;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::common::{connect_when_ready, enroll_streamed, unique_ipc, wait_for_daemon, InstallApprovingAll as _};
@@ -145,11 +144,6 @@ async fn a_second_device_admitted_to_an_identity_is_handed_the_name_it_already_h
             .await
             .expect("daemon E"),
     );
-    let op_port_e = free_port();
-    daemon_e
-        .start_peer_listener_background(op_port_e)
-        .await
-        .expect("start E operational listener");
 
     // ── N: the device the person adds later ──────────────────────────────────
     let base_n = tempfile::tempdir().expect("base_n");
@@ -194,9 +188,11 @@ async fn a_second_device_admitted_to_an_identity_is_handed_the_name_it_already_h
     );
 
     // N joins the identity. The ceremony carries no name.
-    let (did_e_dev, pubkey_e_hex) = client_e.get_node_identity().await.expect("E node identity");
+    // E keeps the person's things on a drive, enrolled before N joins so the
+    // join introduces N to it.
+    let (client_e, drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
     let bootstrap_port = free_port();
-    let (_client_e, mut client_n, _node_n) =
+    let (mut client_e, mut client_n, _node_n) =
         enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
 
     let (app_id, _, _) = client_n
@@ -209,28 +205,17 @@ async fn a_second_device_admitted_to_an_identity_is_handed_the_name_it_already_h
         "N was handed a name before anything of the person's reached it"
     );
 
-    // N pulls from E: the sync that carries the person's members.
-    let e_op_addr: SocketAddr = format!("127.0.0.1:{op_port_e}").parse().unwrap();
-    client_n
-        .peer_add("alice", "device-e", &did_e_dev, &pubkey_e_hex, e_op_addr)
+    // E syncs to the drive, and N takes from there the sync that carries the
+    // person's members. N is never given E's address.
+    client_e
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
         .await
-        .expect("give N E's operational address");
+        .expect("E pushes to the drive");
+    crate::drive_sync::tell_of_the_drive(&mut client_n, "alice", &drive).await;
     client_n
-        .remote_add(
-            "alice",
-            "device-e",
-            RemoteBackend::Kotton {
-                peer_did: did_e_dev.clone(),
-                label: "device-e".to_string(),
-            },
-            None,
-        )
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Pull))
         .await
-        .expect("remote_add E on N");
-    client_n
-        .sync_mount("alice", "local", "device-e", Some(SyncDirection::Pull))
-        .await
-        .expect("N pulls from E");
+        .expect("N pulls from the drive");
 
     assert_eq!(
         launched_display_name(&mut client_n, &app_id).await.as_deref(),
@@ -259,10 +244,14 @@ async fn a_second_device_admitted_to_an_identity_is_handed_the_name_it_already_h
         .set_display_name("Quillon Ybarra")
         .await
         .expect("the person renames themselves on E");
-    client_n
-        .sync_mount("alice", "local", "device-e", Some(SyncDirection::Pull))
+    client_e
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
         .await
-        .expect("N pulls from E again");
+        .expect("E pushes the rename to the drive");
+    client_n
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Pull))
+        .await
+        .expect("N pulls from the drive again");
     assert_eq!(
         launched_display_name(&mut client_n, &app_id).await.as_deref(),
         Some("Quillon Ybarra"),
