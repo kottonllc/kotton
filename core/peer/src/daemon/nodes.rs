@@ -62,24 +62,11 @@ pub fn json_err(e: serde_json::Error) -> io::Error {
 /// The key is inserted into both the `paired_nodes` DB table and the live
 /// `paired_keys` mTLS allowlist, so the peer can connect immediately.
 ///
-/// `drive` says the node is a vault the person keeps a drive on — `kotton id
-/// recover` says it of the vault its line names — and records the drive, with
-/// the row's posture `blind-storage`, through the one writer enrolment uses
-/// ([`super::drives::record`]). Without it nothing is recorded but the row:
-/// an address and a key say nothing of what a node keeps.
-///
-/// **What bounds `drive`.** `PeerAdd` is a local verb (`ConnTrustOrigin::Local`),
-/// sent on this device's own socket under the person's session, and the same
-/// call without `drive` already gives the key a device's standing here
-/// (`peer_standing` answers `Paired`, which serves the person's files and
-/// sealed objects). Being a drive adds that the device pushes to it what it
-/// pushes to a vault — the phrase-sealed recovery copy, the doors it holds for
-/// the person, introductions of their other devices — each of which a vault
-/// holds without the keys to open, and narrows the node's posture to
-/// `blind-storage`. The CLI says it of one key only: the one the recovery line
-/// names, after the phrase has proved.
-// Allowed: the request's fields plus the two stores it writes, one argument each.
-#[allow(clippy::too_many_arguments)]
+/// **It records a row, never a drive.** An address and a key say nothing of
+/// what a node keeps, so a node added here is no drive until something that
+/// names a vault records it ([`super::drives`]): enrolment, the daemon's
+/// `Recover` after the proof, or the membership projection. The `drive` flag
+/// that let a local session record any key as a drive went with #80.
 pub async fn peer_add(
     db: &Arc<SqlitePool>,
     paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
@@ -88,7 +75,6 @@ pub async fn peer_add(
     peer_did: String,
     peer_pubkey_hex: String,
     peer_addr: SocketAddr,
-    drive: bool,
 ) -> io::Result<UserResponse> {
     let pubkey_bytes = hex::decode(&peer_pubkey_hex)
         .map_err(|e| io::Error::other(format!("peer_pubkey_hex is not valid hex: {e}")))?;
@@ -123,15 +109,12 @@ pub async fn peer_add(
         None,
     )
     .await?;
-    if drive {
-        super::drives::record(db, &user_id, &pubkey).await?;
-    }
 
     // Update live mTLS allowlist.
     paired_keys.write().unwrap().insert(pubkey);
 
     // The row as it now stands: a posture an earlier pairing projected is kept
-    // (`insert_paired_node`), and a drive's is `blind-storage`.
+    // (`insert_paired_node`).
     let node = super::db::get_paired_node_by_id(db, &user_id, &id).await?.unwrap_or(PairedNode {
         id,
         device_did: device_did_parsed,
@@ -142,6 +125,35 @@ pub async fn peer_add(
         posture: None,
     });
     Ok(UserResponse::NodePaired { node })
+}
+
+/// Take back a node row that a request added and nothing has used since: the
+/// row, and its key from the live allowlist unless another row on this
+/// machine (another person's, say, who keeps a drive on the same vault) still
+/// pairs it. What the daemon's `Recover` runs when the words are refused, for
+/// the node it added for the line (`kotton_device::users::recover`).
+///
+/// Unlike [`node_revoke`] it touches no membership record: a node added by
+/// address was never a member, and the person's set may not be open here.
+pub async fn take_back_added(
+    db: &Arc<SqlitePool>,
+    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    user_id: &str,
+    node_id: &str,
+) -> io::Result<()> {
+    let Some(node) = network_db::get_paired_node_by_id(db, user_id, node_id).await? else {
+        return Ok(());
+    };
+    network_db::delete_paired_node(db, user_id, node_id).await?;
+    let still_paired: Option<i64> = sqlx::query_scalar("SELECT 1 FROM paired_nodes WHERE public_key = ? LIMIT 1")
+        .bind(node.public_key.as_slice())
+        .fetch_optional(db.as_ref())
+        .await
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    if still_paired.is_none() {
+        paired_keys.write().unwrap().remove(&node.public_key);
+    }
+    Ok(())
 }
 ///
 /// Constructs a `GuestAccessToken` with:

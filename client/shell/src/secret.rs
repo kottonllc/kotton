@@ -9,9 +9,11 @@
 //!
 //! One prompt, two doors. `kotton id login`, `kotton id unlock` and the other
 //! one-shot verbs that ask for a secret call [`prompt_recovery_phrase`] and
-//! [`prompt_passphrase`]; `kotton id recover` and `kotton id rotate` run the
-//! shell's own `id recover` and `id rotate` through the bridge, and those ask by
-//! [`crate::ShellState::ask_hidden`], whose terminal path is [`read_hidden`].
+//! [`prompt_passphrase`]; `kotton id rotate` runs the shell's own `id rotate`
+//! through the bridge, which asks by [`crate::ShellState::ask_hidden`], and
+//! `kotton id recover` and the REPL's `id recover` ask for the card by
+//! [`crate::recover::ask`]; each asks through [`crate::Asking`], whose terminal
+//! path is [`read_hidden`].
 
 use std::io;
 

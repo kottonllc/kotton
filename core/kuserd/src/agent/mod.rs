@@ -2105,6 +2105,46 @@ impl DeviceDaemon {
         Ok(())
     }
 
+    /// Tell this device, which joined `user_id` after a vault was enrolled, where
+    /// that vault is, as their drive: the node row under `label` at `addr` with
+    /// posture `blind-storage`, and the drive record
+    /// ([`kotton_peer::daemon::drives::record`]).
+    ///
+    /// **For an integration test that holds the daemon, and nothing else.** No
+    /// request does this: a drive is recorded by enrolment, by `Recover` after the
+    /// proof, and by the membership projection, each of which names a vault, and
+    /// the `PeerAdd { drive: true }` that took any caller's word for it is off
+    /// the wire (#80). A device that joined has no first drive until the join
+    /// hands it the admitting device's (#84); the suite cases that sync a joined
+    /// device stand that hand-off in with this, and move to the join when #84
+    /// lands.
+    pub async fn record_drive_until_the_join_hands_it_on(
+        &self,
+        user_id: &str,
+        label: &str,
+        vault_key: [u8; 32],
+        addr: std::net::SocketAddr,
+    ) -> io::Result<()> {
+        let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&vault_key)
+            .map_err(|e| io::Error::other(format!("not a vault's key: {e}")))?
+            .to_string();
+        let addresses_json = serde_json::to_string(&[addr]).map_err(io::Error::other)?;
+        kotton_peer::daemon::db::insert_paired_node(
+            &self.db,
+            label,
+            user_id,
+            &did,
+            &vault_key,
+            &addresses_json,
+            kotton_common::time::now_secs(),
+            Some(kotton_schemas::membership::Posture::BlindStorage.as_str()),
+        )
+        .await?;
+        kotton_peer::daemon::drives::record(&self.db, user_id, &vault_key).await?;
+        self.paired_keys.write().unwrap().insert(vault_key);
+        Ok(())
+    }
+
     /// The drives this device records for `user_id`
     /// ([`kotton_peer::daemon::drives`]): what "a drive" resolves against
     /// here. For a caller that holds the daemon — an integration test that

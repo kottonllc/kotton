@@ -97,7 +97,7 @@ async fn a_folder_kept_on_one_device_is_read_on_another() {
         .sync_mount(USER, "local", "vault", Some(SyncDirection::Push))
         .await
         .expect("E pushes to the drive");
-    crate::drive_sync::tell_of_the_drive(&mut alice_n, USER, &drive).await;
+    crate::drive_sync::tell_of_the_drive(&n.daemon, USER, &drive).await;
     let pulled = alice_n
         .sync_mount(USER, "local", "vault", Some(SyncDirection::Pull))
         .await

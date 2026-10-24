@@ -203,6 +203,28 @@ impl InstanceLine {
         }
     }
 
+    /// Read a vault's line as the vault a recovery dials: its key, and the
+    /// address the line names, `<ip>:<port>`. The one reading of the line the
+    /// recovery card prints, for the daemon that adds and records the vault
+    /// (`kotton_device::users::recover`) and for the doors that ask for it
+    /// before they send anything. Refused, with what is wrong, for anything
+    /// that is not a line, a relay's line, and a line whose address is not one
+    /// a device can dial.
+    pub fn vault(text: &str) -> Result<([u8; 32], std::net::SocketAddr), String> {
+        let line = Self::parse(text)?;
+        if line.kind != OperatedService::Vault {
+            return Err("this is a relay's line; recovery asks for the line of the vault that keeps your things".into());
+        }
+        let addr = line.hint.parse().map_err(|_| {
+            if line.hint.is_empty() {
+                "the line names no address to reach the vault at".to_string()
+            } else {
+                format!("the line's address, `{}`, is not one a device can dial: it reads `<ip>:<port>`", line.hint)
+            }
+        })?;
+        Ok((line.key, addr))
+    }
+
     /// Read pasted lines, each on its own, in the order given — the one parser
     /// for `enrol <line> <line>…` at the terminal and for a block pasted one
     /// line per row (`TASK-enrol-takes-the-lines-an-instance-printed-and-a-vaults-ends-on-an-offer`).
@@ -388,6 +410,27 @@ mod tests {
         }
     }
 
+    /// **A vault's line reads as the vault a recovery dials**: its key and its
+    /// `<ip>:<port>`. A relay's line, a line with no address or a name for one,
+    /// and a line cut short are refused, each saying what is wrong.
+    #[test]
+    fn a_vaults_line_reads_as_the_key_and_the_address_a_recovery_dials() {
+        let key = [7u8; 32];
+        let line = |kind, hint: &str| InstanceLine { kind, hint: hint.into(), key }.to_text();
+        let (k, addr) = InstanceLine::vault(&format!("  {}\n", line(OperatedService::Vault, "203.0.113.9:7710")))
+            .expect("a vault's line");
+        assert_eq!((k, addr), (key, "203.0.113.9:7710".parse().unwrap()));
+        for (bad, says) in [
+            (line(OperatedService::Relay, "http://203.0.113.9:7700"), "relay's line"),
+            (line(OperatedService::Vault, "vault.example:7710"), "<ip>:<port>"),
+            (line(OperatedService::Vault, ""), "names no address"),
+            ("kotton-instance:vault:abcd@203.0.113.9:7710".to_string(), "cut short"),
+        ] {
+            let why = InstanceLine::vault(&bad).expect_err(&bad);
+            assert!(why.contains(says), "`{bad}`: {why}");
+        }
+    }
+
     /// **The module exports the codes, their printer, their parser and their
     /// prefixes, and nothing else `pub`** — no secret, no seal, no lifetime, no
     /// refusal (unit 1's Done-when (1)(g), with the invite beside the line).
@@ -417,7 +460,7 @@ mod tests {
             public,
             [
                 "LINE_PREFIX", "INVITE_PREFIX", "InstanceLine", "kind", "hint", "key", "InviteCode", "Code", "to_text",
-                "parse", "to_text", "parse", "block", "to_text", "parse"
+                "parse", "to_text", "parse", "vault", "block", "to_text", "parse"
             ]
         );
     }

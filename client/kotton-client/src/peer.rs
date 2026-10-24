@@ -571,6 +571,10 @@ impl KottonClient {
     /// and integration tests that exchange identity out-of-band.
     ///
     /// `peer_pubkey_hex` must be 64 lowercase hex characters (32-byte Ed25519 key).
+    ///
+    /// It records a row and never a drive: a vault is recorded as the person's
+    /// drive by enrolling it, by [`Self::recover`] with its line, or by the
+    /// membership set (`kotton_peer::daemon::drives`).
     pub async fn peer_add(
         &mut self,
         user_id: &str,
@@ -579,41 +583,12 @@ impl KottonClient {
         peer_pubkey_hex: &str,
         peer_addr: std::net::SocketAddr,
     ) -> io::Result<PairedNode> {
-        self.peer_add_as(user_id, label, peer_did, peer_pubkey_hex, peer_addr, false).await
-    }
-
-    /// [`Self::peer_add`] for a node that is a vault the person keeps a drive
-    /// on: the device records the drive (vault key and tenancy) and the row's
-    /// posture `blind-storage`, as enrolling the vault would
-    /// (`kotton_peer::daemon::drives`). `kotton id recover` adds the vault its
-    /// line names this way.
-    pub async fn peer_add_drive(
-        &mut self,
-        user_id: &str,
-        label: &str,
-        vault_did: &str,
-        vault_key_hex: &str,
-        vault_addr: std::net::SocketAddr,
-    ) -> io::Result<PairedNode> {
-        self.peer_add_as(user_id, label, vault_did, vault_key_hex, vault_addr, true).await
-    }
-
-    async fn peer_add_as(
-        &mut self,
-        user_id: &str,
-        label: &str,
-        peer_did: &str,
-        peer_pubkey_hex: &str,
-        peer_addr: std::net::SocketAddr,
-        drive: bool,
-    ) -> io::Result<PairedNode> {
         let request = UserRequest::PeerAdd {
             user_id: user_id.to_string(),
             label: label.to_string(),
             peer_did: peer_did.to_string(),
             peer_pubkey_hex: peer_pubkey_hex.to_string(),
             peer_addr,
-            drive,
         };
         match self.client.send(&request).await? {
             UserResponse::NodePaired { node } => Ok(node),

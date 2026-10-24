@@ -6,6 +6,8 @@ pub mod executor;
 mod host;
 mod parser;
 #[cfg(feature = "cli")]
+pub mod recover;
+#[cfg(feature = "cli")]
 pub mod secret;
 #[cfg(feature = "cli")]
 mod shell;

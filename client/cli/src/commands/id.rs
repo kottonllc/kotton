@@ -65,8 +65,9 @@ pub enum IdCommand {
     /// prompt, the vault's line, and a passphrase for this machine, before it begins.
     /// Then it claims the name here, adds the vault the line names, fetches your
     /// identity and sealed keys from it, proves the words against them, makes this
-    /// machine's key yours, seals your keys here under the passphrase, makes the
-    /// identity the one this machine acts as, and syncs your things back. Words that
+    /// machine's key yours, seals your keys here under the passphrase, records the
+    /// vault as your drive, makes the identity the one this machine acts as, and
+    /// syncs your things back. Words that
     /// do not prove the identity are refused: a machine that held nothing of the name
     /// holds nothing of it after, unless the refusal names lines to run, in order, to
     /// remove what it could not take back; and one that held it keeps it.
@@ -237,8 +238,9 @@ impl IdCommand {
         //
         // `kotton id recover` is the terminal's own: it asks before it connects,
         // then claims the name, which is the session the rest runs on
-        // (`super::recover`). The REPL's `id recover` is the piece it runs for an
-        // identity a REPL already runs as.
+        // (`super::recover`). It asks for the card and sends `Recover` as the
+        // REPL's `id recover` does (`kotton_shell::recover`), which is the piece
+        // it runs for an identity a REPL already runs as.
         if let IdCommand::Recover { username } = self {
             return super::recover::run(username.as_deref()).await;
         }

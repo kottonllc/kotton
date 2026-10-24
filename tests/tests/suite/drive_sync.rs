@@ -74,10 +74,7 @@ async fn a_device_its_admitter_introduces_reaches_the_persons_drive_until_revoke
     assert!(admitted(&capacity_as(&b, &drive).await), "B reaches the drive under its own key");
 
     // B is told where the drive is, as a drive, and pulls what A kept there.
-    client_b
-        .peer_add_drive(USER, "vault", &drive.did, &drive.pubkey_hex, drive.op_addr)
-        .await
-        .expect("tell B where the drive is");
+    tell_of(&b.daemon, USER, &drive).await;
     for client in [&mut client_a, &mut client_b] {
         let _ = client
             .remote_add(
@@ -179,7 +176,7 @@ async fn a_recovered_device_sees_its_vault_as_a_drive_and_introduces_the_next_de
         (phrase, drive)
     };
 
-    let (r, mut client_r) = recover_from(&phrase, USER, &drive, "vault").await;
+    let (r, mut client_r) = recover_from(&phrase, USER, &drive).await;
     assert_eq!(client_r.read_file(USER, "kept.txt").await.expect("read on R"), b"kept on the drive");
     let drives = r.daemon.drives(USER).await.expect("R's drives");
     assert_eq!(
@@ -212,7 +209,7 @@ async fn enrolment_and_recovery_record_the_same_drive() {
     assert_eq!(enrolled.len(), 1, "enrolment recorded {enrolled:?}");
     assert_eq!(enrolled[0].0, drive.pubkey_hex, "enrolment recorded another key than the vault's");
 
-    let (r, _client_r) = recover_from(&phrase, USER, &drive, "vault").await;
+    let (r, _client_r) = recover_from(&phrase, USER, &drive).await;
     let recovered = said_of(&r.daemon.drives(USER).await.expect("R's drives"));
     assert_eq!(recovered, enrolled, "recovery recorded a drive other than the one enrolment recorded");
 }
@@ -243,10 +240,7 @@ async fn a_drive_enrolled_after_a_device_joined_reaches_that_device_by_way_of_a_
     client_a.write_file(USER, "from-a.txt", b"written on A").await.expect("write on A");
     synced(&mut client_a, "A").await;
 
-    client_b
-        .peer_add_drive(USER, "vault", &drive.did, &drive.pubkey_hex, drive.op_addr)
-        .await
-        .expect("tell B where the first drive is");
+    tell_of(&b.daemon, USER, &drive).await;
     let outcome = synced(&mut client_b, "B").await;
     assert!(outcome.files >= 1, "B pulled nothing from the drive: {outcome:?}");
 
@@ -278,12 +272,9 @@ async fn two_devices_and_a_drive(
     let (a, client_a, drive) = a_person_with_a_drive(vault).await;
     let b = spawn_device("device B").await;
     let client_b = connect_when_ready(&b.ipc, "client B").await;
-    let (client_a, mut client_b, _node_b) =
+    let (client_a, client_b, _node_b) =
         enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
-    client_b
-        .peer_add_drive(USER, "vault", &drive.did, &drive.pubkey_hex, drive.op_addr)
-        .await
-        .expect("tell B where the drive is");
+    tell_of(&b.daemon, USER, &drive).await;
     (a, client_a, b, client_b, drive)
 }
 
@@ -373,10 +364,25 @@ pub(crate) async fn a_drive_for(client: kotton::KottonClient, device_name: &str,
 }
 
 /// Tell a joined device where its person's drive is, as a drive, labelled
-/// `vault`: what `recover` tells a recovered one.
-pub(crate) async fn tell_of_the_drive(client: &mut kotton::KottonClient, user: &str, drive: &ADrive) {
-    client
-        .peer_add_drive(user, "vault", &drive.drive.did, &drive.drive.pubkey_hex, drive.drive.op_addr)
+/// `vault`, through the daemon it runs (`daemon`).
+///
+/// **A stand-in for the join, until #84.** No request tells a device a drive on
+/// the caller's word: `PeerAdd { drive: true }` went with #80, and a drive is
+/// recorded by enrolment, by `Recover` after the proof, and by the membership
+/// projection. A device that joined has no first drive to sync the projection
+/// from until the join hands it the admitting device's drives (#84), so the
+/// cases that sync a joined device write the record through the daemon the test
+/// holds (`DeviceDaemon::record_drive_until_the_join_hands_it_on`), and move to
+/// the join when it does.
+pub(crate) async fn tell_of_the_drive(daemon: &kuserd::DeviceDaemon, user: &str, drive: &ADrive) {
+    tell_of(daemon, user, &drive.drive).await;
+}
+
+/// [`tell_of_the_drive`], for the vault `drive` names.
+async fn tell_of(daemon: &kuserd::DeviceDaemon, user: &str, drive: &VaultIdentity) {
+    let key: [u8; 32] = hex::decode(&drive.pubkey_hex).expect("hex").try_into().expect("32 bytes");
+    daemon
+        .record_drive_until_the_join_hands_it_on(user, "vault", key, drive.op_addr)
         .await
         .expect("tell the joined device where the drive is");
 }

@@ -254,7 +254,12 @@ async fn id_rotate_at_the_repl_asks_at_hidden_prompts_and_keeps_neither_secret_i
 /// transcript holds neither secret and says, in one line, that the copy under the
 /// old passphrase is replaced; the copy on disk opens under the new passphrase to
 /// this device's key and not under the old one; the history file holds neither.
-#[tokio::test]
+///
+/// The line asked for between the phrase and the passphrase is the line of the vault
+/// this device enrolled, as the card prints it: `Recover` takes it, and finds the
+/// vault paired where the line says. Multi-threaded because the vault runs in this
+/// process while the REPL's process waits on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn id_recover_where_a_sealed_copy_was_kept_asks_for_a_new_passphrase_at_a_hidden_prompt() {
     use kotton_identity::provisioning::open_vault_under;
 
@@ -265,6 +270,11 @@ async fn id_recover_where_a_sealed_copy_was_kept_asks_for_a_new_passphrase_at_a_
     env.client.create_user(USER, TEST_PASSPHRASE).await.expect("create_user");
     let phrase = env.client.add_recovery_phrase(USER).await.expect("a recovery phrase");
     let token = env.client.session_token.clone().expect("create_user binds a session");
+    let vault = crate::vault::spawn_vault("the vault").await;
+    let mut alice = crate::common::connect_when_ready(&env.endpoint, "alice's device").await;
+    alice.authenticate(&token).await.expect("present the session");
+    let (_alice, identity) = crate::vault::enrol_vault(alice, &vault, USER, "vault").await;
+    let line = identity.line();
     let cli = Cli::for_env(&env);
     cli.seed_session(USER, &token);
     let used = cli.run(&["id", "use", USER]);
@@ -274,12 +284,12 @@ async fn id_recover_where_a_sealed_copy_was_kept_asks_for_a_new_passphrase_at_a_
         "the premise: this device keeps a copy sealed under the old passphrase"
     );
 
-    // The phrase, the new passphrase and its confirmation answer the three hidden
-    // prompts; were any read as a REPL line instead, the run would be an answer
-    // short at `exit` and would not end cleanly.
+    // The phrase, the line, the new passphrase and its confirmation answer the four
+    // prompts, the secrets at the hidden one; were any read as a REPL line instead,
+    // the run would be an answer short at `exit` and would not end cleanly.
     let session = cli.run_on_a_terminal(
         &[],
-        &["id recover", &phrase, NEW_PASSPHRASE, NEW_PASSPHRASE, "exit"],
+        &["id recover", &phrase, &line, NEW_PASSPHRASE, NEW_PASSPHRASE, "exit"],
     );
     assert!(session.ok, "the REPL did not exit cleanly.\n{session}");
     assert!(
@@ -316,13 +326,14 @@ async fn id_recover_where_a_sealed_copy_was_kept_asks_for_a_new_passphrase_at_a_
     assert!(history.contains("id recover"), "history missed the verb:\n{history}");
     assert!(!history.contains(phrase.as_str()), "the phrase is in the REPL's history:\n{history}");
     assert!(!history.contains(NEW_PASSPHRASE), "the new passphrase is in the REPL's history:\n{history}");
+    drop(vault);
 }
 
 /// **`id recover` refuses before anything happens when no passphrase is chosen.**
-/// The phrase and the passphrase are both read before `Recover` is sent, so a
-/// passphrase nobody is here to give, or one not confirmed, refuses with the key
-/// log and the sealed copy as they were: there is no recovered device waiting for
-/// a passphrase.
+/// The phrase, the line and the passphrase are all read before `Recover` is sent,
+/// so a line nobody is here to give, or a passphrase not confirmed, refuses with
+/// the key log and the sealed copy as they were: there is no recovered device
+/// waiting for a passphrase.
 #[tokio::test]
 async fn id_recover_refuses_before_anything_when_no_passphrase_is_chosen() {
     let mut env = TestEnv::spawn().await;
@@ -339,7 +350,16 @@ async fn id_recover_refuses_before_anything_when_no_passphrase_is_chosen() {
 
     for (answers, refusal) in [
         (vec![phrase.clone()], "kotton id recover alice"),
-        (vec![phrase.clone(), "abandon-ability-able-about-above".to_string(), "something else".to_string()], "did not match"),
+        (
+            vec![
+                phrase.clone(),
+                "kotton-instance:vault:0707070707070707070707070707070707070707070707070707070707070707@127.0.0.1:9"
+                    .to_string(),
+                "abandon-ability-able-about-above".to_string(),
+                "something else".to_string(),
+            ],
+            "did not match",
+        ),
     ] {
         state.asking = kotton_shell::Asking::Given(answers.into());
         let out = executor

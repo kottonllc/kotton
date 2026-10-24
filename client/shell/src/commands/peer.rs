@@ -42,7 +42,8 @@ impl Command for PeerCommand {
                 // reached; the log said NAT traversal and the relay both failed,
                 // and the obvious next step was to look at the address recorded
                 // for it. There was nowhere to look. Worse, `peer add` — the
-                // command a fresh device runs before `id recover`, and the whole
+                // command a fresh device ran before `id recover` (until #80, when
+                // `id recover` came to take the vault's line itself), and the whole
                 // reason to write these down before wiping anything — *takes* an
                 // address, and the only command that could have supplied it
                 // dropped the field.

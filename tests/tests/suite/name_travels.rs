@@ -211,7 +211,7 @@ async fn a_second_device_admitted_to_an_identity_is_handed_the_name_it_already_h
         .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
         .await
         .expect("E pushes to the drive");
-    crate::drive_sync::tell_of_the_drive(&mut client_n, "alice", &drive).await;
+    crate::drive_sync::tell_of_the_drive(&daemon_n, "alice", &drive).await;
     client_n
         .sync_mount("alice", "local", "vault", Some(SyncDirection::Pull))
         .await

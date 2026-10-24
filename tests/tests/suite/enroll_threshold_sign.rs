@@ -557,7 +557,11 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
     .expect("daemon N");
 
     let _task_e = tokio::spawn(async move { std::sync::Arc::new(daemon_e).run().await });
-    let _task_n = tokio::spawn(async move { std::sync::Arc::new(daemon_n).run().await });
+    let daemon_n = std::sync::Arc::new(daemon_n);
+    let _task_n = tokio::spawn({
+        let d = std::sync::Arc::clone(&daemon_n);
+        async move { d.run().await }
+    });
     wait_for_daemon(&ipc_e, "daemon E").await;
     wait_for_daemon(&ipc_n, "daemon N").await;
 
@@ -601,7 +605,7 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
 
     // N is told where the drive is, as a drive. It is never given E's address:
     // a device does not sync from another device.
-    crate::drive_sync::tell_of_the_drive(&mut client_n, "alice", &drive).await;
+    crate::drive_sync::tell_of_the_drive(&daemon_n, "alice", &drive).await;
 
     // E writes a top-level file and a nested one. The nested path is the pull
     // regression: `SealedListEntry` carries no `is_dir`, so unless the drive
@@ -706,7 +710,11 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
     .expect("daemon N");
 
     let _task_e = tokio::spawn(async move { std::sync::Arc::new(daemon_e).run().await });
-    let _task_n = tokio::spawn(async move { std::sync::Arc::new(daemon_n).run().await });
+    let daemon_n = std::sync::Arc::new(daemon_n);
+    let _task_n = tokio::spawn({
+        let d = std::sync::Arc::clone(&daemon_n);
+        async move { d.run().await }
+    });
     wait_for_daemon(&ipc_e, "daemon E").await;
     wait_for_daemon(&ipc_n, "daemon N").await;
 
@@ -721,7 +729,7 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
         enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
     // N is told where the drive is, as a drive; neither device is given the
     // other's address. A record reaches N by way of the drive.
-    crate::drive_sync::tell_of_the_drive(&mut client_n, "alice", &drive).await;
+    crate::drive_sync::tell_of_the_drive(&daemon_n, "alice", &drive).await;
 
     // The schema must be registered on both — E to insert, N to build the table
     // from its own registry when it applies the segment.
@@ -1429,15 +1437,19 @@ async fn a_user_who_loses_every_device_recovers_everything_from_the_phrase() {
         .expect("the phrase alone claims the identity on a cold device");
 
     let b_op_addr: SocketAddr = format!("127.0.0.1:{op_port_b}").parse().unwrap();
-    client_c
-        .peer_add_drive("alice", "blind-vps", &did_b_dev, &pubkey_b_hex, b_op_addr)
-        .await
-        .expect("tell C where its blind node is");
+    // B's line, as the recovery card prints it: `Recover` adds B as the node
+    // `vault`, and records it as the person's drive once the phrase proves.
+    let b_line = kotton_wire::line::InstanceLine {
+        kind: kotton_wire::ipc::OperatedService::Vault,
+        hint: b_op_addr.to_string(),
+        key: hex::decode(&pubkey_b_hex).expect("B's key is hex").try_into().expect("B's key is 32 bytes"),
+    }
+    .to_text();
     // The phrase proves the identity against the chain the blind node kept, opens
     // the sealed copy of the data roots it kept beside it, and rotates the identity
     // onto this device — which is what the blind node then admits it on.
     let recovered_did = client_c
-        .recover("alice", &recovery_phrase, crate::common::TEST_PASSPHRASE)
+        .recover("alice", &recovery_phrase, crate::common::TEST_PASSPHRASE, &b_line)
         .await
         .expect("recover from the phrase and the blind node alone")
         .did;
@@ -1455,7 +1467,7 @@ async fn a_user_who_loses_every_device_recovers_everything_from_the_phrase() {
             "blind-vps",
             RemoteBackend::Kotton {
                 peer_did: did_b_dev.clone(),
-                label: "blind-vps".to_string(),
+                label: "vault".to_string(),
             },
             None,
         )

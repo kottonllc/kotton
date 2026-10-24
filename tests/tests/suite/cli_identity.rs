@@ -279,14 +279,17 @@ async fn a_wiped_device_given_only_the_words_and_the_line_recovers_in_one_comman
     recover_from_the_card(None, Door::OneShot).await;
 }
 
-/// **The REPL's `id recover`, the piece, on a wiped device, and the REPL's history
-/// keeps no phrase.**
+/// **The REPL's `id recover`, the piece, on a wiped device: it records the vault as
+/// the person's drive, and the REPL's history keeps no phrase.**
 ///
 /// The pieces `kotton id recover` runs are kept, and this drives them by hand:
-/// `kotton id login` claims the name, a `peer add` names the vault the line names,
-/// and a bare `kotton` enters the REPL as the claimed identity, where `id recover`
-/// is typed: the phrase is asked at a hidden prompt, read from the terminal and
-/// never by the line editor, and the terminal never shows it.
+/// `kotton id login` claims the name, and a bare `kotton` enters the REPL as the
+/// claimed identity, where `id recover` is typed and asks for the words, the line
+/// and a passphrase, as the one-shot does. No `peer add` comes first: the REPL
+/// sends the same `Recover`, with the line, and the daemon adds the vault and
+/// records it as the person's drive once the words prove (#80; #76, which this
+/// door used to miss). The phrase is asked at a hidden prompt, read from the
+/// terminal and never by the line editor, and the terminal never shows it.
 ///
 /// The same REPL then pulls from the vault and reads the person's file back, on the
 /// session it entered with — opened on the claim, which held no data key. Recovery
@@ -302,7 +305,7 @@ async fn a_wiped_device_recovers_in_the_repl_and_its_history_keeps_no_phrase() {
 enum Door {
     /// `kotton id recover`, its own process, the whole of it.
     OneShot,
-    /// The pieces by hand, and `id recover` inside the REPL a bare `kotton` enters.
+    /// The claim by hand, and `id recover` inside the REPL a bare `kotton` enters.
     Repl,
     /// `kotton id recover` on the device that set recovery up, which still holds the
     /// identity and pairs the vault.
@@ -526,7 +529,9 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
             assert!(out.status.success(), "`kotton peer add` of the line's vault failed.\n{}", said(&out));
             assert!(drives_of(&fresh.daemon, &name).await.is_empty(), "a plain `peer add` recorded a drive");
             // The claim goes; the name's node rows stay (`id recover`'s module doc), so
-            // the vault is paired here, by hand, when the recovery begins.
+            // the vault is paired here, by hand, when the recovery begins. The claim
+            // must go before the one-shot runs: `kotton id recover` after a by-hand
+            // `id login` refuses the right words at its own claim (#78, open).
             let out = new_cli.run(&["id", "rm", &name, "--force"]);
             assert!(out.status.success(), "`kotton id rm --force` failed.\n{}", said(&out));
 
@@ -555,23 +560,25 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
         }
         Door::Repl => {
             assert!(someone_else.is_none(), "the REPL door is driven on a device that held no identity");
-            // The pieces, by hand: the claim, then the vault the line names.
+            // The claim, by hand; nothing else. The vault is the REPL's `id recover`'s
+            // to add, from the line.
             let login = new_cli.run_on_a_terminal(&["id", "login", &name], &[&phrase]);
             assert!(login.ok, "`kotton id login` refused the phrase on a fresh device.\n{login}");
-            let parsed = kotton_wire::line::InstanceLine::parse(&line).expect("the card's line parses");
-            let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&parsed.key)
-                .expect("the line's key")
-                .to_string();
-            let key = hex::encode(parsed.key);
-            let out = new_cli.run(&["peer", "--user", &name, "add", "vault", &did, &key, &parsed.hint]);
-            assert!(out.status.success(), "`kotton peer add` of the line's vault failed.\n{}", said(&out));
+            assert!(drives_of(&fresh.daemon, &name).await.is_empty(), "the claim recorded a drive");
 
             let typed = "id recover".to_string();
             let session = new_cli.run_on_a_terminal(
                 &[],
-                &[&typed, &phrase, NEW_PASSPHRASE, NEW_PASSPHRASE, "sync --pull vault", "cat notes.txt", "exit"],
+                &[&typed, &phrase, &line, NEW_PASSPHRASE, NEW_PASSPHRASE, "sync --pull vault", "cat notes.txt", "exit"],
             );
             assert!(session.ok, "the REPL did not exit cleanly.\n{session}");
+            // The vault the line names is the person's drive here, as the one-shot
+            // records it: the REPL's door no longer leaves it a row with no posture.
+            assert_eq!(
+                drives_of(&fresh.daemon, &name).await,
+                the_lines_drive(&line, &name, "vault"),
+                "the REPL's `id recover` did not record the line's vault as the person's drive.\n{session}"
+            );
             assert!(
                 !session.transcript.contains(phrase.as_str()) && !session.transcript.contains(NEW_PASSPHRASE),
                 "the terminal showed the phrase or the passphrase.\n{session}"

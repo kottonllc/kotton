@@ -113,10 +113,21 @@ pub enum UserRequest {
     /// terminal before the recovery began: the recovered roots are sealed under
     /// it, and the lock policy set to it, before the answer, so a recovered
     /// device is never held without a sealed copy.
+    ///
+    /// `vault_line` is the line the recovery card printed under the words, the
+    /// vault's own (`kotton-instance:vault:<key>@<ip>:<port>`,
+    /// [`crate::line::InstanceLine::vault`]). The daemon reads it, adds the vault
+    /// as the node to dial unless one is paired under its key already, proves
+    /// the phrase, and only then records the vault as the person's drive
+    /// (`kotton_peer::daemon::drives`); a refusal takes back the node it added.
+    /// All of it here, in one request, so every door that recovers records the
+    /// drive the same way (`kotton_device::users::recover`). Required: a
+    /// `Recover` without the line is not on the wire.
     Recover {
         user_id: String,
         recovery_key: crate::ipc::vault_request::SecretText,
         passphrase: crate::ipc::vault_request::SecretText,
+        vault_line: String,
     },
     ListUsers,
 
@@ -868,6 +879,14 @@ pub enum UserRequest {
     /// It must match the key the peer daemon was started with; it is inserted into
     /// the local `paired_nodes` table and live `paired_keys` allowlist so the peer
     /// can authenticate its mTLS connection immediately.
+    ///
+    /// **It records a row and never a drive.** An address and a key say nothing
+    /// of what a node keeps, so no caller's word makes a node a drive here: a
+    /// drive is recorded by enrolment, by `Recover` after the proof, and by the
+    /// membership projection, each of which names a vault. The `drive` flag it
+    /// carried until #80 is off the wire: a request that still sends it does not
+    /// decode ([`peer_add_fields`]), rather than being read as a plain add.
+    #[serde(deserialize_with = "peer_add_fields")]
     PeerAdd {
         user_id: String,
         /// Human label for this node, e.g. `"node-b"`.
@@ -878,12 +897,6 @@ pub enum UserRequest {
         peer_pubkey_hex: String,
         /// QUIC listener address of the peer.
         peer_addr: std::net::SocketAddr,
-        /// The node is a vault the person keeps a drive on: record the drive
-        /// (`kotton_peer::daemon::drives`), and the row's posture
-        /// `blind-storage`. `kotton id recover` says it of the vault its line
-        /// names; absent, nothing but the row is recorded.
-        #[serde(default)]
-        drive: bool,
     },
 
     /// Return this daemon's stable device DID and ephemeral signing public key.
@@ -2512,6 +2525,31 @@ pub enum UserRequest {
     },
 }
 
+
+/// `PeerAdd`'s fields, and nothing else: the one variant read through a shape
+/// that refuses a field it does not name, because the field it lost — `drive`,
+/// which made any key a drive on the caller's word — must not decode as a
+/// plain add (#80). Every other variant keeps serde's default and ignores an
+/// unknown field.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PeerAddFields {
+    user_id: String,
+    label: String,
+    peer_did: String,
+    peer_pubkey_hex: String,
+    peer_addr: std::net::SocketAddr,
+}
+
+/// Read `PeerAdd` through [`PeerAddFields`].
+fn peer_add_fields<'de, D>(d: D) -> Result<(String, String, String, String, std::net::SocketAddr), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let f = PeerAddFields::deserialize(d)?;
+    Ok((f.user_id, f.label, f.peer_did, f.peer_pubkey_hex, f.peer_addr))
+}
+
 impl UserRequest {
     /// Returns the `user_id` for requests that operate on behalf of a specific
     /// user, or `None` for device-level and public operations.
@@ -4137,6 +4175,39 @@ mod trust_origin_tests {
         let bytes = serde_json::to_value(&now).unwrap();
         assert_eq!(bytes, serde_json::json!({ "SyncDrives": { "user_id": "alice" } }));
     }
+
+    /// **No request makes a node a drive on the caller's word** (#80). A
+    /// `PeerAdd` that still carries `drive`, true or false, does not decode: it
+    /// is refused, never read as a plain add. A `Recover` without the vault's
+    /// line does not decode either, since the line is what the drive is
+    /// recorded from. The shapes that are on the wire round-trip.
+    #[test]
+    fn a_request_naming_a_drive_on_the_callers_word_is_not_on_the_wire() {
+        let add = serde_json::json!({
+            "user_id": "alice",
+            "label": "vault",
+            "peer_did": "did:key:z6Mk",
+            "peer_pubkey_hex": "00",
+            "peer_addr": "127.0.0.1:7710",
+        });
+        for drive in [true, false] {
+            let mut old = add.clone();
+            old["drive"] = serde_json::json!(drive);
+            let old = serde_json::json!({ "PeerAdd": old });
+            assert!(serde_json::from_value::<UserRequest>(old.clone()).is_err(), "{old} still decodes");
+        }
+        let now = serde_json::json!({ "PeerAdd": add });
+        let read: UserRequest = serde_json::from_value(now.clone()).expect("a plain PeerAdd decodes");
+        assert_eq!(serde_json::to_value(&read).unwrap(), now);
+
+        let old = serde_json::json!({ "Recover": { "user_id": "alice", "recovery_key": "w", "passphrase": "p" } });
+        assert!(serde_json::from_value::<UserRequest>(old.clone()).is_err(), "{old} still decodes");
+        let now = serde_json::json!({
+            "Recover": { "user_id": "alice", "recovery_key": "w", "passphrase": "p", "vault_line": "kotton-instance:vault:00@127.0.0.1:1" }
+        });
+        let read: UserRequest = serde_json::from_value(now.clone()).expect("a Recover with its line decodes");
+        assert_eq!(serde_json::to_value(&read).unwrap(), now);
+    }
 }
 
 #[cfg(test)]
@@ -4212,7 +4283,12 @@ mod secret_debug_tests {
             &[PHRASE, PASSPHRASE],
         );
         hides(
-            &UserRequest::Recover { user_id: user(), recovery_key: s(PHRASE), passphrase: s(NEW_PASSPHRASE) },
+            &UserRequest::Recover {
+                user_id: user(),
+                recovery_key: s(PHRASE),
+                passphrase: s(NEW_PASSPHRASE),
+                vault_line: "kotton-instance:vault:00@127.0.0.1:1".into(),
+            },
             &[PHRASE, NEW_PASSPHRASE],
         );
         hides(

@@ -30,6 +30,41 @@
 //! public by construction, the copy opens under the phrase alone, and the phrase never
 //! leaves this device. Article XIII holds — a node reachable directly needs no third
 //! party for any of this.
+//!
+//! **The vault the person's line names, and the drive.** The request carries the line
+//! the recovery card printed under the words (`kotton-instance:vault:<key>@<ip>:<port>`),
+//! and [`recover`] reads it here, in the daemon, for every door that recovers —
+//! `kotton id recover` and the REPL's `id recover` send the same request:
+//!
+//! - **Before anything is written**, the words are read as a phrase, the passphrase is
+//!   held to the bar, and the line is read as a vault's. A line whose key this device
+//!   pairs for the person under a posture other than `blind-storage` (one of their own
+//!   devices, a cosigner) is refused here: a drive is a vault, and nothing is relabelled.
+//! - **The node to dial.** Unless the person pairs a node under the line's key already,
+//!   the vault is added under `vault` (or `vault-` and eight hex of its key, when that
+//!   label is taken) at the line's address. One paired under the key at another address
+//!   is re-addressed as `peer add` does, keeping its posture and relay route: the line
+//!   is where the person says the vault is now.
+//! - **Steps 1 to 5**, against every node the person pairs, the vault among them.
+//! - **Refused: the node added is taken back.** Everything the steps can fail on comes
+//!   before the rotation is presented to any node, so a refused recovery has changed
+//!   nothing anywhere but here, and here the node this request added is removed
+//!   ([`kotton_peer::daemon::nodes::take_back_added`]). A node re-addressed is left at
+//!   the line's address. The claim a door made is the door's to take back.
+//! - **Proved: the vault is recorded as the person's drive**, through the one writer
+//!   ([`kotton_peer::daemon::drives::record`]), with the row's posture `blind-storage`,
+//!   the record enrolling the vault writes. Only after the proof, so words that prove
+//!   nothing make no node a drive and there is no drive to take back. A record that
+//!   cannot be written then is said beside the success ([`Recovered::drive_not_recorded`]),
+//!   never as a refusal: the identity is already rotated, and recovering again would
+//!   rotate it again.
+//!
+//! This is one of the three places a device records a drive, each naming a vault:
+//! enrolment, this, and the membership projection (`kotton_peer::daemon::drives`).
+//! Until #80 a door added the vault itself and then said "this is a drive" with
+//! `PeerAdd { drive: true }`, a flag any local session could set on any key; the
+//! REPL's door never said it (#76). Both are gone: the drive is recorded where the
+//! proof is.
 
 use crate::users::commands::{phrase_holds_authority, rotate_identity_to_key};
 use crate::users::residency::Residency;
@@ -72,13 +107,20 @@ pub struct Recovered {
     /// person's old passphrase, now replaced: it sealed the key the rotation
     /// replaced. Either way the roots are sealed under the new passphrase.
     pub sealed_copy_removed: bool,
+    /// Why the vault the line names was not recorded as the person's drive, when
+    /// the phrase proved and the record could not be written; `None` when it is
+    /// recorded.
+    pub drive_not_recorded: Option<String>,
 }
 
-/// Recover `user_id` onto this device from `recovery_key`, and seal it under
-/// `passphrase`, the one the person chose for this device. See the module doc.
+/// Recover `user_id` onto this device from `recovery_key` and the vault `vault_line`
+/// names, and seal it under `passphrase`, the one the person chose for this device:
+/// add the vault, prove, rotate, be admitted, and record the vault as the person's
+/// drive, or take the node back on a refusal. See the module doc.
 ///
-/// The passphrase is held to the bar before anything is fetched or written, so
-/// a weak one changes nothing.
+/// The words, the passphrase and the line are read, and the passphrase held to the
+/// bar, before anything is fetched or written, so a refusal of any of them changes
+/// nothing.
 ///
 /// **Not idempotent, deliberately.** A second run rotates again and climbs the
 /// reserve ladder a rung; the first run's local state is complete on its own, so
@@ -90,15 +132,136 @@ pub async fn recover(
     user_id: &str,
     recovery_key: &str,
     passphrase: &str,
+    vault_line: &str,
 ) -> Result<Recovered> {
+    let asked = what_was_asked(runtime, user_id, recovery_key, passphrase)?;
+    let (vault_key, vault_addr) =
+        kotton_wire::line::InstanceLine::vault(vault_line).map_err(|why| anyhow!("{why}; nothing was changed"))?;
+
+    let vault = point_at_the_vault(runtime, db, user_id, vault_key, vault_addr).await?;
+    let mut done = match prove_and_rotate(runtime, users, db, user_id, recovery_key, passphrase, asked).await {
+        Ok(done) => done,
+        Err(refused) => {
+            let Some(added) = vault.added.then_some(vault.label.as_str()) else {
+                return Err(refused);
+            };
+            return Err(
+                match kotton_peer::daemon::nodes::take_back_added(db, &runtime.paired_keys(), user_id, added).await {
+                    Ok(()) => refused,
+                    Err(e) => anyhow!(
+                        "{refused:#}; and the node '{added}' this recovery added for the line is still paired \
+                         here ({e}) — `kotton peer --user {user_id} revoke {added}` removes it"
+                    ),
+                },
+            );
+        }
+    };
+    // The phrase proved: the vault the person's line names is their drive.
+    done.drive_not_recorded = kotton_peer::daemon::drives::record(db, user_id, &vault_key)
+        .await
+        .err()
+        .map(|e| format!("the vault at '{}' was not recorded as your drive ({e})", vault.label));
+    Ok(done)
+}
+
+/// What [`recover`] reads before anything is written: the words as a phrase's seed,
+/// and whether attempts are limited here, with the passphrase held to the bar that
+/// sets.
+#[derive(Clone, Copy)]
+struct Asked {
+    seed32: [u8; 32],
+    limiting: kotton_sys::secret::AttemptLimiting,
+}
+
+fn what_was_asked(runtime: &DeviceRuntime, user_id: &str, recovery_key: &str, passphrase: &str) -> Result<Asked> {
     let seed32 = try_mnemonic_to_seed32(recovery_key).map_err(|e| anyhow!(e))?;
-    let base = runtime.base_dir();
     let limiting = kotton_identity::provisioning::attempt_limiting_for_user(runtime, user_id);
     kotton_crypto::daily_credential::assess(
         passphrase,
         kotton_crypto::daily_credential::required_entropy_bits_for(limiting),
     )
     .map_err(|weak| anyhow!("{weak}; nothing was changed"))?;
+    Ok(Asked { seed32, limiting })
+}
+
+/// The node a recovery dials for the line's vault: its label, and whether this
+/// recovery added it (and so takes it back on a refusal).
+struct VaultNode {
+    label: String,
+    added: bool,
+}
+
+/// Make the line's vault a node `user_id` pairs here (module doc): kept where it is
+/// paired at the line's address, re-addressed where it is paired at another, added
+/// where it is not paired. Refused, with nothing written, where its key is paired
+/// under a posture other than `blind-storage`.
+async fn point_at_the_vault(
+    runtime: &DeviceRuntime,
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    key: [u8; 32],
+    addr: std::net::SocketAddr,
+) -> Result<VaultNode> {
+    let nodes = kotton_peer::daemon::db::list_paired_nodes(db, user_id).await.context("list paired nodes")?;
+    let paired = nodes.iter().find(|n| n.public_key == key);
+    if let Some(n) = paired {
+        if let Some(other) = n.posture.as_deref().filter(|p| *p != kotton_schemas::membership::Posture::BlindStorage.as_str()) {
+            return Err(anyhow!(
+                "the line's key is '{}' here, paired as {other} and not as a vault, so it is not the vault \
+                 that keeps your things — check the line against what you wrote down; nothing was changed",
+                n.id
+            ));
+        }
+        if n.addresses.first() == Some(&addr) {
+            return Ok(VaultNode { label: n.id.clone(), added: false });
+        }
+    }
+    let (label, added) = match paired {
+        Some(n) => (n.id.clone(), false),
+        None => (label_for(&nodes, &key), true),
+    };
+    let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key)
+        .map_err(|e| anyhow!("the line's key is not a vault's key: {e}; nothing was changed"))?
+        .to_string();
+    match kotton_peer::daemon::nodes::peer_add(
+        db,
+        &runtime.paired_keys(),
+        user_id.to_string(),
+        label.clone(),
+        did,
+        hex::encode(key),
+        addr,
+    )
+    .await?
+    {
+        UserResponse::NodePaired { .. } => Ok(VaultNode { label, added }),
+        UserResponse::Error { message } => Err(anyhow!("{message}; nothing was changed")),
+        other => Err(anyhow!("unexpected reply {other:?}")),
+    }
+}
+
+/// The label a vault the line names is added under: `vault`, or, when the person
+/// pairs a node under that label already, `vault-` and the first eight hex of its key.
+fn label_for(taken: &[PairedNode], key: &[u8; 32]) -> String {
+    if taken.iter().any(|n| n.id == "vault") {
+        format!("vault-{}", &hex::encode(key)[..8])
+    } else {
+        "vault".to_string()
+    }
+}
+
+/// Steps 1 to 5 of the module doc, against every node `user_id` pairs here.
+async fn prove_and_rotate(
+    runtime: &DeviceRuntime,
+    users: &dyn Residency,
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    recovery_key: &str,
+    passphrase: &str,
+    asked: Asked,
+) -> Result<Recovered> {
+    let Asked { seed32, limiting } = asked;
+    let base = runtime.base_dir();
 
     let nodes = kotton_peer::daemon::db::list_paired_nodes(db, user_id)
         .await
@@ -110,8 +273,7 @@ pub async fn recover(
         if nodes.is_empty() {
             return Err(anyhow!(
                 "'{user_id}' has no key history on this device and no paired node to fetch it \
-                 from. Add the node that keeps your data (`kotton peer add`) and run recover \
-                 again."
+                 from. Recover with the line of the vault that keeps your data."
             ));
         }
         let (fetched, bundle, from) = fetch_material(runtime, &nodes, user_id, &seed32).await?;
@@ -227,6 +389,7 @@ pub async fn recover(
         new_key_hex: hex::encode(device_sk.verifying_key().to_bytes()),
         nodes_admitted,
         sealed_copy_removed,
+        drive_not_recorded: None,
     })
 }
 
@@ -340,6 +503,8 @@ mod tests {
     };
     use kotton_session::lock_policy::{self, PinAttempt};
     use kotton_store::runtime::user::UserStore;
+    use kotton_wire::ipc::OperatedService;
+    use kotton_wire::line::InstanceLine;
 
     /// Five BIP-39 words, above the bar `create_user` holds a credential to.
     const OLD_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
@@ -390,7 +555,7 @@ mod tests {
         assert!(sealed.exists() && staged.exists(), "the premise: this device kept sealed copies");
         let pool = agent_db().await;
 
-        let done = recover(&rt, &NobodyResident, &pool, "alice", &phrase, NEW_PASSPHRASE).await.unwrap();
+        let done = proved(&rt, &pool, &phrase).await.unwrap();
 
         assert!(done.sealed_copy_removed, "the replacement is reported");
         assert!(!staged.exists(), "the staged copy is gone");
@@ -413,14 +578,15 @@ mod tests {
         );
         assert!(sessions.read().unwrap().is_empty(), "the old passphrase opened a session");
 
-        let again = recover(&rt, &NobodyResident, &pool, "alice", &phrase, NEW_PASSPHRASE).await.unwrap();
+        let again = proved(&rt, &pool, &phrase).await.unwrap();
         assert!(again.sealed_copy_removed, "the copy under the first recovery's passphrase is replaced too");
     }
 
-    /// A passphrase below the bar is refused before anything happens: no rotation,
-    /// and the sealed copy and the old passphrase are as they were.
+    /// A passphrase below the bar, and a line that is not a vault's, are refused
+    /// before anything happens: no node added, no rotation, and the sealed copy and
+    /// the old passphrase are as they were.
     #[tokio::test]
-    async fn a_weak_passphrase_is_refused_before_the_recovery_begins() {
+    async fn a_weak_passphrase_or_a_line_that_is_no_vaults_is_refused_before_the_recovery_begins() {
         let temp = tempfile::tempdir().unwrap();
         let (rt, phrase) = a_device_that_kept_its_sealed_copy(&temp).await;
         let sealed = rt.base_dir().join("users").join("alice").join(VAULT_FILE);
@@ -428,12 +594,124 @@ mod tests {
             (kel_store::load_chain(rt.base_dir(), "alice").unwrap().len(), std::fs::read(&sealed).unwrap());
         let pool = agent_db().await;
 
-        let refused = recover(&rt, &NobodyResident, &pool, "alice", &phrase, "hunter2").await;
-
-        let e = refused.expect_err("a weak passphrase recovered");
-        assert!(e.to_string().contains("nothing was changed"), "{e}");
+        let relay = InstanceLine { kind: OperatedService::Relay, hint: "http://127.0.0.1:7700".into(), key: key(9) }.to_text();
+        for (passphrase, line) in [("hunter2", line_of(key(9), ADDR)), (NEW_PASSPHRASE, relay)] {
+            let refused = recover(&rt, &NobodyResident, &pool, "alice", &phrase, passphrase, &line).await;
+            let e = refused.expect_err("a weak passphrase or a relay's line recovered");
+            assert!(e.to_string().contains("nothing was changed"), "{e}");
+        }
         assert_eq!(kel_store::load_chain(rt.base_dir(), "alice").unwrap().len(), chain_before, "a rotation was appended");
         assert_eq!(std::fs::read(&sealed).unwrap(), copy_before, "the sealed copy changed");
         assert!(open_vault_under(&rt, "alice", OLD_PASSPHRASE).is_ok(), "the old passphrase no longer opens its copy");
+        assert!(rows(&pool).await.is_empty(), "a refusal before the recovery added a node");
+    }
+
+    /// **Words that prove nothing take back the node the line added, and add no
+    /// drive.** The device holds alice's log, so the words are checked against it
+    /// and refused before any node is dialled. The node `Recover` added for the
+    /// line is gone afterwards, its key off the live allowlist; a node the person
+    /// already paired under the line's key at another address is left, at the
+    /// line's address, and is no drive.
+    #[tokio::test]
+    async fn words_that_prove_nothing_take_back_the_node_the_line_added() {
+        let temp = tempfile::tempdir().unwrap();
+        let (rt, _phrase) = a_device_that_kept_its_sealed_copy(&temp).await;
+        let pool = agent_db().await;
+        let chain_before = kel_store::load_chain(rt.base_dir(), "alice").unwrap().len();
+
+        let refused = recover(&rt, &NobodyResident, &pool, "alice", NOT_THEIRS, NEW_PASSPHRASE, &line_of(key(9), ADDR)).await;
+        assert!(refused.expect_err("words that prove nothing").to_string().contains("not an authority"));
+        assert!(rows(&pool).await.is_empty(), "the node the line added was left");
+        assert!(!rt.paired_keys().read().unwrap().contains(&key(9)), "the line's key was left on the allowlist");
+
+        kotton_peer::daemon::nodes::peer_add(
+            &pool,
+            &rt.paired_keys(),
+            "alice".into(),
+            "home".into(),
+            did_of(&key(9)),
+            hex::encode(key(9)),
+            "127.0.0.1:7000".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        let refused = recover(&rt, &NobodyResident, &pool, "alice", NOT_THEIRS, NEW_PASSPHRASE, &line_of(key(9), ADDR)).await;
+        assert!(refused.is_err(), "words that prove nothing recovered");
+        let left = rows(&pool).await;
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert_eq!((left[0].id.as_str(), left[0].addresses[0]), ("home", ADDR.parse().unwrap()), "{left:?}");
+        assert!(kotton_peer::daemon::drives::list(&pool, "alice").await.unwrap().is_empty(), "a refusal recorded a drive");
+        assert_eq!(kel_store::load_chain(rt.base_dir(), "alice").unwrap().len(), chain_before, "a rotation was appended");
+    }
+
+    /// **A line whose key is one of the person's own devices is refused before
+    /// anything, and the device is not relabelled.** A drive is a vault; a row
+    /// paired as `full` is the person's device, and recovery does not make it a
+    /// sync target. The right words do not change that.
+    #[tokio::test]
+    async fn a_line_naming_a_device_of_the_persons_is_refused_and_the_row_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let (rt, phrase) = a_device_that_kept_its_sealed_copy(&temp).await;
+        let pool = agent_db().await;
+        kotton_peer::daemon::db::insert_paired_node(&pool, "laptop", "alice", &did_of(&key(6)), &key(6), "[]", 0, Some("full"))
+            .await
+            .unwrap();
+        let chain_before = kel_store::load_chain(rt.base_dir(), "alice").unwrap().len();
+
+        let refused = recover(&rt, &NobodyResident, &pool, "alice", &phrase, NEW_PASSPHRASE, &line_of(key(6), ADDR)).await;
+        let e = refused.expect_err("a device's key recovered as a vault");
+        assert!(e.to_string().contains("not as a vault") && e.to_string().contains("nothing was changed"), "{e}");
+        let row = &rows(&pool).await[0];
+        assert_eq!((row.id.as_str(), row.posture.as_deref()), ("laptop", Some("full")));
+        assert!(row.addresses.is_empty(), "the device was re-addressed to the line's address");
+        assert_eq!(kel_store::load_chain(rt.base_dir(), "alice").unwrap().len(), chain_before, "a rotation was appended");
+    }
+
+    /// The vault is added as `vault`, or beside a `vault` already there under its key.
+    #[test]
+    fn the_vault_is_added_as_vault_unless_that_label_is_taken() {
+        assert_eq!(label_for(&[], &key(9)), "vault");
+        let taken = PairedNode {
+            id: "vault".to_string(),
+            device_did: kotton_wire::did::Did::new("key", "z6MktGLn5v9bCrdxWgRojExample"),
+            public_key: key(4),
+            paired_at: 0,
+            addresses: vec![],
+            relay_url: None,
+            posture: None,
+        };
+        assert_eq!(label_for(&[taken], &key(9)), format!("vault-{}", &hex::encode(key(9))[..8]));
+    }
+
+    /// Twenty-four words of the list, with the checksum right, that are no
+    /// authority in alice's log.
+    const NOT_THEIRS: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon \
+                              abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon \
+                              abandon abandon abandon art";
+    /// Where the test lines say their vault is: nothing listens there, and nothing
+    /// here dials it.
+    const ADDR: &str = "127.0.0.1:9";
+
+    fn key(seed: u8) -> [u8; 32] {
+        ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes()
+    }
+
+    fn did_of(key: &[u8; 32]) -> String {
+        kotton_crypto::DidKeyMethod::from_public_key_bytes(key).unwrap().to_string()
+    }
+
+    fn line_of(key: [u8; 32], addr: &str) -> String {
+        InstanceLine { kind: OperatedService::Vault, hint: addr.into(), key }.to_text()
+    }
+
+    async fn rows(pool: &Arc<SqlitePool>) -> Vec<PairedNode> {
+        kotton_peer::daemon::db::list_paired_nodes(pool, "alice").await.unwrap()
+    }
+
+    /// Steps 1 to 5 alone, for a device that holds the log and pairs no node: what
+    /// the sealing tests are about, with no vault to add or record.
+    async fn proved(rt: &DeviceRuntime, pool: &Arc<SqlitePool>, phrase: &str) -> Result<Recovered> {
+        let asked = what_was_asked(rt, "alice", phrase, NEW_PASSPHRASE)?;
+        prove_and_rotate(rt, &NobodyResident, pool, "alice", phrase, NEW_PASSPHRASE, asked).await
     }
 }

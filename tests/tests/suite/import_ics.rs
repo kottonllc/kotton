@@ -327,7 +327,11 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
     .expect("daemon N");
 
     let _task_e = tokio::spawn(async move { Arc::new(daemon_e).run().await });
-    let _task_n = tokio::spawn(async move { Arc::new(daemon_n).run().await });
+    let daemon_n = Arc::new(daemon_n);
+    let _task_n = tokio::spawn({
+        let d = Arc::clone(&daemon_n);
+        async move { d.run().await }
+    });
     wait_for_daemon(&ipc_e, "daemon E").await;
     wait_for_daemon(&ipc_n, "daemon N").await;
 
@@ -353,7 +357,7 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
     )
     .await;
     // N is told where the drive is; neither device is given the other's address.
-    crate::drive_sync::tell_of_the_drive(&mut client_n, USER, &drive).await;
+    crate::drive_sync::tell_of_the_drive(&daemon_n, USER, &drive).await;
 
     // The import happens on E, where the person's export is.
     let (_nsid, imported, _skipped) = client_e

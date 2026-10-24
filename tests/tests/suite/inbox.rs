@@ -111,7 +111,7 @@ async fn a_file_handed_to_a_device_of_yours_lands_in_its_inbox_through_a_vault_e
         .expect("push to the vault");
 
     // The phone: the same person, with only the phrase and the vault.
-    let (_phone_device, mut phone) = recover_from(&phrase, "alice", &identity, "vault").await;
+    let (_phone_device, mut phone) = recover_from(&phrase, "alice", &identity).await;
     assert_eq!(
         phone.read_file("alice", "Inbox/beach.jpg").await.expect("the photo on the phone"),
         photo,
@@ -180,7 +180,7 @@ async fn a_file_handed_to_a_joined_device_lands_in_its_inbox_by_way_of_the_drive
     assert_eq!(row.name.as_deref(), Some("the phone"), "the roster's name for the phone");
 
     // The phone is told where the drive is; it is never told where the computer is.
-    crate::drive_sync::tell_of_the_drive(&mut phone, "alice", &drive).await;
+    crate::drive_sync::tell_of_the_drive(&phone_device.daemon, "alice", &drive).await;
 
     let photo = a_photo(3, 40_000);
     pc_client

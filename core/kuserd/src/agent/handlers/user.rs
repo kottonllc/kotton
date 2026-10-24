@@ -341,9 +341,12 @@ pub(crate) async fn login_with_recovery_key(
     }
 }
 
-/// `Recover`: the verb that makes a cold `login`'s claim good. The
-/// body is `kotton_device::users::recover`; this is the daemon's part — the
-/// registry it hands over, the event it publishes, the response it shapes.
+/// `Recover`: the verb that makes a cold `login`'s claim good, from the words
+/// and the line of the vault that keeps the person's things. The body is
+/// `kotton_device::users::recover` — the vault added, the proof, the rotation,
+/// the drive recorded after the proof and the node taken back on a refusal, in
+/// this one request for every door; this is the daemon's part — the registry it
+/// hands over, the event it publishes, the response it shapes.
 pub(crate) async fn recover(
     runtime: &DeviceRuntime,
     users: &crate::residency::UserRegistry,
@@ -351,8 +354,9 @@ pub(crate) async fn recover(
     user_id: String,
     recovery_key: String,
     passphrase: String,
+    vault_line: String,
 ) -> io::Result<UserResponse> {
-    match kotton_device::users::recover::recover(runtime, users, db, &user_id, &recovery_key, &passphrase)
+    match kotton_device::users::recover::recover(runtime, users, db, &user_id, &recovery_key, &passphrase, &vault_line)
         .await
     {
         Ok(done) => {
@@ -380,10 +384,14 @@ pub(crate) async fn recover(
                     "recovered locally, but no paired node admitted this device yet"
                 );
             }
+            if let Some(why) = done.drive_not_recorded.as_deref() {
+                tracing::warn!(user_id = %user_id, "recovered, but {why}");
+            }
             Ok(UserResponse::Recovered {
                 did: done.did,
                 new_key_hex: done.new_key_hex,
                 sealed_copy_removed: done.sealed_copy_removed,
+                drive_not_recorded: done.drive_not_recorded,
             })
         }
         Err(e) => {

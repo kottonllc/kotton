@@ -177,6 +177,13 @@ pub enum UserResponse {
         /// request carried.
         #[serde(default)]
         sealed_copy_removed: bool,
+        /// Why the vault the request's line names was not recorded as the
+        /// person's drive, when the phrase proved and the record could not be
+        /// written; absent when it is recorded. The identity is recovered
+        /// either way, so this is said beside the success and not as a refusal:
+        /// recovering again would rotate again.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drive_not_recorded: Option<String>,
     },
     /// Answer to `RecoveryFetch`: the identity's public chain and, when this node
     /// holds one, its phrase-sealed recovery copy as the JSON it was written in.
