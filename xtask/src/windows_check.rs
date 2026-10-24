@@ -1,14 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Catch a Unix-only API used where Windows will also compile it.
 //!
-//! # Why this is a grep and not a compiler
+//! # What the compiler holds now, and what this still holds
 //!
-//! The honest gate is `cargo check --target x86_64-pc-windows-msvc`, and it is
-//! what this should become. It does not run here: `ring`'s build script needs a
-//! Windows C toolchain, and neither clang nor mingw satisfied it in the Linux
-//! container this was written in. A gate that cannot run is worth less than a
-//! narrower one that does, so this checks the shape both recorded defects had
-//! rather than the whole language.
+//! The honest gate is a compiler on Windows, and it exists: `.github/workflows/windows.yml`
+//! runs `cargo build --workspace --locked` on `windows-latest` on every pull request, and the
+//! tests of the library crates it names. Everything that build compiles is held there, by
+//! rustc, and better than a grep can: an alias, a re-export, a macro, the mirror case.
+//!
+//! The job also compiles every target of the workspace (`cargo build --workspace
+//! --all-targets`), the daemons' tests, xtask's and the integration suite's included. So this stays
+//! for two things only:
+//!
+//! - **`infra/`.** The relay is a workspace of its own, released for Linux alone, and is
+//!   not built on Windows. A Unix-only path there is read by this and by nothing else.
+//! - **Before the pull request.** This runs in `just lint`, on the contributor's own Linux
+//!   machine, in seconds. A Windows build there is not available: `ring`'s build script needs a
+//!   Windows C toolchain, and neither clang nor mingw satisfied it in the Linux container this
+//!   was written in. The Windows job answers the whole question once the pull request is
+//!   open; this answers the narrow form of it before a push.
+//!
+//! It leaves when the relay is either built on Windows or excluded from these roots by a
+//! reason written beside it, and a contributor's slower answer is judged good enough.
 //!
 //! # What it can and cannot see
 //!
@@ -40,7 +53,7 @@
 //! while failing the second, which makes it worse than an unguarded path — that at
 //! least fails loudly at build time.
 //!
-//! Passing this is not "it builds on Windows". Failing it is a real defect.
+//! Passing this is not "it builds on Windows": the Windows job is. Failing it is a real defect.
 
 /// Paths that exist only on Unix. Substring-matched against source lines.
 const UNIX_ONLY: &[&str] = &[

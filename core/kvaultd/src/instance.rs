@@ -502,12 +502,15 @@ pub(crate) mod tests {
     /// directory only when it is closed
     /// (`TASK-kvaultd-create-chmods-any-existing-directory-it-is-pointed-at`).
     pub(crate) fn a_state_dir() -> tempfile::TempDir {
-        let mut dir = tempfile::Builder::new();
         #[cfg(unix)]
-        {
+        let dir = {
             use std::os::unix::fs::PermissionsExt as _;
+            let mut dir = tempfile::Builder::new();
             dir.permissions(std::fs::Permissions::from_mode(0o700));
-        }
+            dir
+        };
+        #[cfg(not(unix))]
+        let dir = tempfile::Builder::new();
         dir.tempdir().unwrap()
     }
 
@@ -825,7 +828,9 @@ pub(crate) mod tests {
     }
 
     /// Every file under `dir` with its bytes, and every directory, sorted: what
-    /// a refusal that "writes nothing" must leave exactly as it found.
+    /// a refusal that "writes nothing" must leave exactly as it found. Read only by
+    /// the unix-only refusals above.
+    #[cfg(unix)]
     fn snapshot(dir: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
         let mut all = Vec::new();
         let mut dirs = vec![dir.to_path_buf()];

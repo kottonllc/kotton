@@ -525,14 +525,12 @@ fn a_device_grant_reaches_that_device_and_not_another() {
 /// could pass against a kernel that ignored the ruleset, and this one could
 /// not.
 ///
-/// **On Windows** there is no fork, so no child in which `execve` could be
-/// denied: the kernel checks the AppContainer's token against the image while
-/// *creating* the process, and `CreateProcessW` itself fails with
-/// `ERROR_ACCESS_DENIED` — `PermissionDenied`, the same assertion one step
-/// earlier. That arm is
-/// `provider::sandbox::windows::tests::a_profile_that_grants_nothing_cannot_even_start_the_program`,
-/// and it is the Windows test that fails if the container is silently not
-/// attached.
+/// **On Windows** this property does not hold, and is not claimed:
+/// `CreateProcessW` opens the image with the parent's token, so a child with no
+/// grant is created (#65). What the kernel enforces is the child's token once it
+/// runs, and the Windows test that fails if the container is silently not
+/// attached is
+/// `provider::sandbox::windows::tests::a_child_granted_nothing_can_read_neither_its_own_image_nor_a_file_beside_it`.
 #[test]
 fn a_profile_that_grants_nothing_cannot_even_start_the_program() {
     let mut cmd = tokio::process::Command::new(test_binary());

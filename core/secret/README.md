@@ -14,9 +14,11 @@ another machine cannot).
 in this order:
 
 1. **`SecretsProvider::Memory`** when `base_dir` is under the system temp directory. Both
-   paths are normalized before they are compared, so a path not yet created and Windows'
-   verbatim prefix still match, and on Windows so does a difference in case. A throwaway root writes nothing that
-   outlives the process.
+   paths are spelled the same way before they are compared: the deepest ancestor that exists
+   is canonicalized and the missing rest put back, so a path not yet created, Windows' 8.3
+   short names and its verbatim prefix still match, and on Windows so does a difference in
+   case. A base directory none of whose ancestors exists is throwaway. A throwaway root
+   writes nothing that outlives the process.
 2. **`SecretsProvider::File`** when the environment sets `KOTTON_SECRETS=file`.
 3. **`SecretsProvider::Keychain`** otherwise.
 

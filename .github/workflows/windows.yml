@@ -1,0 +1,126 @@
+# Builds the workspace on Windows x86_64, compiles every test target, and runs the tests that
+# need no daemon, on every pull request, on one Windows runner, and nothing else.
+#
+# The protocol names Windows on x86_64 as a device at v0.1.0, and says each device
+# platform is built and tested in the gate on every pull request, so that what a person runs
+# is what the release was held to. `lint.yml` holds the tree on Linux; this holds it on
+# Windows. It is a `cargo build`, not a `cargo check`: a check stops before codegen and the
+# link, and the link is where a Windows-only symbol, an import library or `rust-lld` fails.
+#
+# `cargo xtask actions-check`, in `just lint`, admits `pull_request` for this file by name and
+# `windows-latest` for this file alone: one job, with a ceiling on its minutes, every action
+# pinned to a full commit. Windows on arm64 is not built and not promised.
+#
+# What it holds, by test rather than by crate:
+#   - Every target in the workspace compiles, under `-D warnings` (`--all-targets`): the
+#     integration suite's, xtask's and the daemons' included, run or not.
+#   - Every test of the 35 library crates named in their step below runs.
+#   - The daemons' own unit tests run (`--lib --bins` on kuserd, kdeviced, kvaultd, kquicd and
+#     ksyncd): in-process, no daemon started.
+# What it does not run, and why each:
+#   - kvaultd's `tests/` targets, which `--lib --bins` leaves out; they still compile above.
+#     Three install the built vault and drive it with `/bin/sh`, `setpriv` and `sha256sum`.
+#     The fourth, `the_vault_reads_its_settings_as_the_installer_and_systemd_do.rs`, is
+#     `#![cfg(target_os = "linux")]`: it compares kvaultd's reader of its settings with
+#     systemd's parser, through that library or `python3`.
+#   - The integration suite (`tests/`, kotton-integration-tests): it starts kuserd, kvaultd and
+#     the relay as processes, the daemon this job does not run. It compiles above.
+#   - xtask's tests: the gate's own tooling, written for the Linux it runs on; no job runs
+#     them, here or there. They compile above.
+#   - kotton-mock-runner (`tests/fixtures/mock-runner`): a fixture binary with no tests.
+#
+# `KOTTON_PAIR_LOCAL_ONLY` declares the run same-machine, as `cargo xtask bind-check` does on
+# Linux: every inbound socket binds loopback and no mDNS advertise is made, so no test raises
+# the Windows Defender firewall dialog that would leave a run waiting on a prompt nobody sees.
+#
+# OpenSSL: `bundled-sqlcipher` links the system's, and `.cargo/config.toml` forbids a vendored
+# build. The runner image carries a full OpenSSL (headers, import libraries and DLLs) at
+# `C:\Program Files\OpenSSL`, and `OPENSSL_DIR` names it, as a contributor's `.env` names
+# theirs. Its import libraries are not in `lib\` itself but in a per-CRT directory below it,
+# so a step finds `libcrypto.lib` for the dynamic CRT Rust links (`MD`, not `MDd` or `MT`) and
+# names its directory as `OPENSSL_LIB_DIR`, and puts the DLLs' `bin\` on the path the tests
+# run with; it fails, naming what it found, if there is none.
+#
+# The toolchain is the one `rust-toolchain.toml` names, which the runner's rustup reads on the
+# first `cargo`, as on Linux.
+#
+# Every `uses:` is pinned to a full commit SHA with its version in a trailing comment, as in
+# release.yml; do not "update" it back to a tag. Resolved 2026-10-23:
+#   git ls-remote --tags https://github.com/actions/checkout | grep 11d5960a  -> v4, v4.4.0
+
+name: windows
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    # A ceiling against a hung step, not an estimate: a cold debug build of the workspace and
+    # its tests on 4 vCPU.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      OPENSSL_DIR: C:\Program Files\OpenSSL
+      KOTTON_PAIR_LOCAL_ONLY: '1'
+      # Held to no warning, as `just lint` holds Linux with clippy: what only Windows
+      # compiles (a `#[cfg(unix)]` helper's caller, a value read on one platform) warns
+      # nowhere else. Set for the job, not a step, so the tests reuse the build.
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Every tag, so `kotton-version`'s build script derives the version from them as it
+          # does on a contributor's clone.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Find the runner's OpenSSL import libraries
+        run: |
+          $found = @(Get-ChildItem -Path $env:OPENSSL_DIR -Recurse -Filter libcrypto.lib `
+            -ErrorAction SilentlyContinue)
+          $found | ForEach-Object { Write-Host $_.FullName }
+          $md = @($found | Where-Object { $_.DirectoryName -match '\\MD$' })
+          $pick = if ($md.Count -gt 0) { $md[0] } elseif ($found.Count -gt 0) { $found[0] } else { $null }
+          if ($null -eq $pick) { Write-Error "no libcrypto.lib under $env:OPENSSL_DIR"; exit 1 }
+          "OPENSSL_LIB_DIR=$($pick.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "OPENSSL_INCLUDE_DIR=$env:OPENSSL_DIR\include" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$env:OPENSSL_DIR\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Host "OPENSSL_LIB_DIR=$($pick.DirectoryName)"
+
+      - name: cargo build --workspace --locked
+        run: cargo build --workspace --locked
+
+      # `--all-targets`: every test, bench and example target, the ones no step below runs
+      # included. `--keep-going`: every crate that fails to compile is named, not the first.
+      - name: Every test target compiles
+        run: cargo build --workspace --all-targets --locked --keep-going
+
+      # `--no-fail-fast`: every test binary runs and every red is named, not the first. Runs
+      # after a red in the step above too, as the next one does, so one run names every red.
+      - name: The crate tests that need no daemon
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo test --locked --no-fail-fast
+          -p kotton-common -p kotton-sys -p kotton-pair -p kotton-proc -p kotton-infer
+          -p kotton-version -p kotton-context -p kotton-wire -p kotton-schemas -p kotton-crypto
+          -p kotton-net -p kotton-fs -p kotton-diag -p kotton-ipc -p kotton-identity
+          -p kotton-peer -p kotton-record -p kotton-sealed -p kotton-store -p kotton-sync
+          -p kotton-org -p kotton-grant -p kotton-msg -p kotton-app -p kotton-outbound
+          -p kotton-surface -p kotton-secret -p kotton-device -p kotton-session -p kotton
+          -p kotton-operator -p kotton-shell -p kotton-cli -p kotton-record-file
+          -p kotton-pty-drive
+
+      - name: The daemons' own unit tests, in-process
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo test --locked --no-fail-fast
+          -p kuserd -p kdeviced -p kvaultd -p kquicd -p ksyncd --lib --bins
