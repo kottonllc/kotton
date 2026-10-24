@@ -57,16 +57,18 @@
 //! not made a vault. Enrolment and the projection record only `BlindStorage`
 //! members, and `Recover` and the join refuse, before they write anything, a
 //! vault whose key is paired under another posture; the join also refuses a
-//! handed drive whose label this device holds under another key
+//! handed drive whose DID this device pairs for the person under another key
 //! (`check_handed_rows` in `kotton_device::users::pairing`). The join writes
 //! the row it records with no posture of its own, so `record` is handed the
 //! row as the device held it. No writer of the record relabels a row.
-//! What holds them together after that is what may rewrite the row:
-//! re-adding the same key keeps the posture, a different key under the label
-//! takes neither the posture nor the drive, and removing the row removes the
-//! record — each in one transaction ([`super::db`]). A caller that writes an
-//! explicit posture over a drive's row (no caller does) would make them
-//! disagree, and the record, not the posture, is what readers believe.
+//! What holds them together after that is what may rewrite the row, and a row
+//! is the person's and the node's DID's, never a label's ([`super::db`]):
+//! re-adding the same key keeps the posture, a different key under the same
+//! label is another row and takes neither the posture nor the drive, and
+//! removing the row removes the record — each in one transaction. A caller
+//! that writes an explicit posture over a drive's row (no caller does) would
+//! make them disagree, and the record, not the posture, is what readers
+//! believe.
 //!
 //! **Who reads it.** [`list`] and [`is_drive`] answer *which nodes are drives*
 //! for every caller — introducing and withdrawing a device at the person's
@@ -78,13 +80,16 @@
 //! row's posture for it: a row with no posture is a vault added by address or
 //! the person's own full device, and nothing in the row tells them apart.
 //!
-//! **What goes with the node.** Revoking the node a drive is reached through
-//! removes the record with it, in one transaction
+//! **What goes with the node.** The record finds its node by the vault's key
+//! among the person's rows ([`list`]); its `node_id` is the label that row is
+//! shown under, kept current, and keys nothing. Revoking the node a drive is
+//! reached through removes the record with it, in one transaction, unless
+//! another row of the person's still carries the key
 //! ([`super::db::delete_paired_node`]). [`super::db::insert_paired_node`]
-//! writes the row and re-points or drops its drive in one transaction: a node
-//! row rewritten under another label for the same key keeps its drive and its
-//! posture; a label taken by a different key inherits neither the drive nor
-//! the old row's posture.
+//! writes the row and keeps its drive with it in one transaction: a node row
+//! rewritten under another label for the same key keeps its drive and its
+//! posture; a different key under a label some row carries is another row,
+//! and inherits neither.
 //!
 //! **What it composes into.** Nothing beyond what the node row already holds:
 //! the vault's key is on that row, and the tenancy is the person's own name on
@@ -127,14 +132,16 @@ pub struct Drive {
 /// node is something else is not relabelled here (module doc).
 pub async fn record(db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32]) -> io::Result<()> {
     let mut tx = db.begin().await.map_err(db_err)?;
-    let node: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT id, posture FROM paired_nodes WHERE user_id = ? AND public_key = ? LIMIT 1")
-            .bind(user_id)
-            .bind(vault_key.as_slice())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(db_err)?;
-    let Some((node_id, posture)) = node else {
+    let node: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, device_did, posture FROM paired_nodes WHERE user_id = ? AND public_key = ? \
+         ORDER BY device_did LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(vault_key.as_slice())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?;
+    let Some((node_id, device_did, posture)) = node else {
         return Err(io::Error::other(format!(
             "'{user_id}' pairs no node under the vault key {}, so there is no drive to record",
             hex::encode(vault_key)
@@ -147,10 +154,10 @@ pub async fn record(db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32]) -
             hex::encode(vault_key)
         )));
     }
-    sqlx::query("UPDATE paired_nodes SET posture = ? WHERE user_id = ? AND id = ?")
+    sqlx::query("UPDATE paired_nodes SET posture = ? WHERE user_id = ? AND device_did = ?")
         .bind(Posture::BlindStorage.as_str())
         .bind(user_id)
-        .bind(&node_id)
+        .bind(&device_did)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -176,11 +183,13 @@ fn tenancy_of(user_id: &str) -> &str {
 }
 
 /// Every drive `user_id` has, each with the node it is reached through, in the
-/// order they were recorded. A record whose node no longer carries the vault's
-/// key is not a drive this device can reach, and is not listed.
+/// order they were recorded. The node is the person's row carrying the vault's
+/// key, found by that key: the record's `node_id` is the label that row is
+/// shown under, and a label keys no row. A record no row of theirs carries the
+/// key of is not a drive this device can reach, and is not listed.
 pub async fn list(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<Drive>> {
     let rows = sqlx::query(
-        "SELECT vault_key, tenancy, node_id FROM drives WHERE user_id = ? ORDER BY recorded_at, node_id, tenancy",
+        "SELECT vault_key, tenancy FROM drives WHERE user_id = ? ORDER BY recorded_at, node_id, tenancy",
     )
     .bind(user_id)
     .fetch_all(db.as_ref())
@@ -192,13 +201,9 @@ pub async fn list(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<Drive>>
             .get::<Vec<u8>, _>("vault_key")
             .try_into()
             .map_err(|_| io::Error::other("corrupt vault_key length in drives"))?;
-        let node_id: String = row.get("node_id");
-        let Some(node) = super::db::get_paired_node_by_id(db, user_id, &node_id).await? else {
+        let Some(node) = super::db::paired_node_for_key(db, user_id, &vault_key).await? else {
             continue;
         };
-        if node.public_key != vault_key {
-            continue;
-        }
         drives.push(Drive { vault_key, tenancy: row.get("tenancy"), node });
     }
     Ok(drives)
@@ -208,17 +213,18 @@ pub async fn list(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<Drive>>
 pub async fn nodes(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<PairedNode>> {
     let mut nodes: Vec<PairedNode> = Vec::new();
     for drive in list(db, user_id).await? {
-        if !nodes.iter().any(|n| n.id == drive.node.id) {
+        if !nodes.iter().any(|n| n.device_did == drive.node.device_did) {
             nodes.push(drive.node);
         }
     }
     Ok(nodes)
 }
 
-/// Whether the node `user_id` pairs as `node_id` is one a drive of theirs is
-/// reached through.
-pub async fn is_drive(db: &Arc<SqlitePool>, user_id: &str, node_id: &str) -> io::Result<bool> {
-    Ok(list(db, user_id).await?.iter().any(|d| d.node.id == node_id))
+/// Whether `node`, a row of `user_id`'s, is one a drive of theirs is reached
+/// through: the row a drive's key finds, by its DID, never by the label it
+/// shares with some other row.
+pub async fn is_drive(db: &Arc<SqlitePool>, user_id: &str, node: &PairedNode) -> io::Result<bool> {
+    Ok(list(db, user_id).await?.iter().any(|d| d.node.device_did == node.device_did))
 }
 
 #[cfg(test)]
@@ -268,8 +274,12 @@ mod tests {
         assert_eq!(drives[0].tenancy, "alice");
         assert_eq!(drives[0].node.id, "vault");
         assert_eq!(drives[0].node.posture.as_deref(), Some("blind-storage"));
-        assert!(is_drive(&db, "alice", "vault").await.unwrap());
-        assert!(!is_drive(&db, "alice", "laptop").await.unwrap());
+        let row = |id: &'static str| {
+            let db = db.clone();
+            async move { network_db::paired_node_named(&db, "alice", id).await.unwrap().unwrap() }
+        };
+        assert!(is_drive(&db, "alice", &row("vault").await).await.unwrap());
+        assert!(!is_drive(&db, "alice", &row("laptop").await).await.unwrap());
         assert!(list(&db, "bob").await.unwrap().is_empty(), "alice's drive is nobody else's");
     }
 
@@ -284,7 +294,7 @@ mod tests {
             pair(&db, id, key(seed), Some(posture)).await;
             let refused = record(&db, "alice", &key(seed)).await.unwrap_err();
             assert!(refused.to_string().contains("not as a vault"), "{refused}");
-            let row = network_db::get_paired_node_by_id(&db, "alice", id).await.unwrap().unwrap();
+            let row = network_db::paired_node_named(&db, "alice", id).await.unwrap().unwrap();
             assert_eq!(row.posture.as_deref(), Some(posture), "the row was relabelled");
         }
         assert!(list(&db, "alice").await.unwrap().is_empty(), "a device was recorded as a drive");
@@ -300,7 +310,8 @@ mod tests {
 
     /// **The record goes with its node.** Revoking the node removes the drive;
     /// the same key re-added under another label keeps it, re-pointed; and a
-    /// different key under the vault's old label is not the drive.
+    /// different key under the vault's label is another row beside it, which
+    /// takes neither the drive nor the vault's posture.
     #[tokio::test]
     async fn the_record_follows_the_node_it_is_reached_through() {
         let (_dir, db) = machine_db().await;
@@ -314,24 +325,56 @@ mod tests {
         // The same key re-added by address alone keeps its posture; the row
         // and the record still agree.
         pair(&db, "home-vault", key(9), None).await;
-        let row = network_db::get_paired_node_by_id(&db, "alice", "home-vault").await.unwrap().unwrap();
-        assert_eq!(row.posture.as_deref(), Some("blind-storage"), "re-adding the vault's key dropped its posture");
-        assert!(is_drive(&db, "alice", "home-vault").await.unwrap());
+        let vault = network_db::paired_node_named(&db, "alice", "home-vault").await.unwrap().unwrap();
+        assert_eq!(vault.posture.as_deref(), Some("blind-storage"), "re-adding the vault's key dropped its posture");
+        assert!(is_drive(&db, "alice", &vault).await.unwrap());
 
-        // Another key under the vault's label is not the vault: no drive, and
-        // no posture taken from the row it replaced.
+        // Another key under the vault's label is another node: the vault's row
+        // and its drive stay, and the new row takes no posture from them.
         pair(&db, "home-vault", key(4), None).await;
-        assert!(list(&db, "alice").await.unwrap().is_empty(), "another key under the label is not the drive");
-        let row = network_db::get_paired_node_by_id(&db, "alice", "home-vault").await.unwrap().unwrap();
-        assert_eq!(row.public_key, key(4));
-        assert_eq!(row.posture, None, "another key under a vault's label took the vault's posture");
+        let drives = list(&db, "alice").await.unwrap();
+        assert_eq!(drives.len(), 1, "another key under the label took the drive: {drives:?}");
+        assert_eq!(drives[0].node.public_key, key(9));
+        let other = network_db::get_paired_node(&db, "alice", &did(&key(4))).await.unwrap().unwrap();
+        assert_eq!(other.posture, None, "another key under a vault's label took the vault's posture");
+        assert!(!is_drive(&db, "alice", &other).await.unwrap());
+        let named = network_db::paired_node_named(&db, "alice", "home-vault").await.unwrap_err();
+        let named = named.to_string();
+        assert!(named.contains(&did(&key(9))) && named.contains(&did(&key(4))), "the refusal names both DIDs: {named}");
+
+        assert!(network_db::delete_paired_node(&db, "alice", &did(&key(9))).await.unwrap());
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap();
-        assert_eq!(left, 0, "a drive record outlived the key it named under that label");
+        assert_eq!(left, 0, "revoking the node left its drive recorded");
+    }
+
+    /// **Two people's rows under one label are both kept** (kotton #99). A row
+    /// is keyed by the person and the node's DID, so alice pairing a node as
+    /// `vault` — by `peer add`, at enrolment, or from a handout at a join —
+    /// reaches no row of bob's, and bob's drive still names bob's vault.
+    #[tokio::test]
+    async fn two_peoples_rows_under_one_label_are_both_kept() {
+        let (_dir, db) = machine_db().await;
+        network_db::insert_paired_node(&db, "vault", "bob", &did(&key(7)), &key(7), "[]", 0, None).await.unwrap();
+        record(&db, "bob", &key(7)).await.unwrap();
 
         pair(&db, "vault", key(9), None).await;
         record(&db, "alice", &key(9)).await.unwrap();
-        assert!(network_db::delete_paired_node(&db, "alice", "vault").await.unwrap());
-        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap();
-        assert_eq!(left, 0, "revoking the node left its drive recorded");
+
+        for (user, k) in [("alice", key(9)), ("bob", key(7))] {
+            let rows = network_db::list_paired_nodes(&db, user).await.unwrap();
+            assert_eq!(rows.len(), 1, "{user}: {rows:?}");
+            assert_eq!((rows[0].id.as_str(), rows[0].public_key), ("vault", k), "{user}'s row was taken");
+            let drives = list(&db, user).await.unwrap();
+            assert_eq!(drives.len(), 1, "{user}'s drive went: {drives:?}");
+            assert_eq!(drives[0].node.public_key, k, "{user}'s drive names a node that is not theirs");
+        }
+
+        // One key, two people (two tenants of one vault): each keeps a row,
+        // and revoking it for one leaves the other's.
+        network_db::insert_paired_node(&db, "household", "bob", &did(&key(9)), &key(9), "[]", 0, None).await.unwrap();
+        assert_eq!(network_db::list_paired_nodes(&db, "alice").await.unwrap().len(), 1);
+        assert_eq!(network_db::list_paired_nodes(&db, "bob").await.unwrap().len(), 2);
+        assert!(network_db::delete_paired_node(&db, "bob", &did(&key(9))).await.unwrap());
+        assert_eq!(list(&db, "alice").await.unwrap().len(), 1, "bob's revoke took alice's drive");
     }
 }

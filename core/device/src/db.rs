@@ -261,4 +261,90 @@ mod tests {
         .await;
         assert_eq!(get(&moved, "relay_url").await.as_deref(), Some("https://new"));
     }
+
+    /// **A machine database from before #99 keeps every row when its
+    /// `paired_nodes` is re-keyed by person and DID**
+    /// (`migrations/0027_paired_nodes_per_person.sql`): every column of the
+    /// `paired_nodes`, `drives`, legacy `sync_rules` and legacy `mount_configs`
+    /// row reads back as written before the migration, and the
+    /// reference those two held to `paired_nodes(id)` is gone with the key it
+    /// named: with foreign keys enforced, as every pool here opens, a row can
+    /// still be written and removed in each, and two people's rows under one
+    /// label are both kept.
+    #[tokio::test]
+    async fn the_rekeyed_paired_nodes_keep_every_row_and_two_peoples_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = kotton_record::open_sqlite(&dir.path().join("agent.db")).await.unwrap();
+        let (before, rekey): (Vec<_>, Vec<_>) = MIGRATOR.iter().partition(|m| m.version < 27);
+        for m in before {
+            sqlx::raw_sql(&m.sql[..]).execute(&pool).await.unwrap();
+        }
+        sqlx::raw_sql(
+            "INSERT INTO paired_nodes (id, user_id, device_did, public_key, addresses, paired_at, posture, relay_url) \
+             VALUES ('vault', 'bob', 'did:key:zBob', x'07', '[]', 5, 'blind-storage', 'https://relay'); \
+             INSERT INTO drives (user_id, vault_key, tenancy, node_id, recorded_at) VALUES ('bob', x'07', 'bob', 'vault', 5); \
+             INSERT INTO sync_rules (user_id, node_id, path, watch, configured_at) VALUES ('bob', 'vault', '/notes', 1, 5); \
+             INSERT INTO mount_configs (user_id, node_id, remote_path, local_path, mounted_at) VALUES ('bob', 'vault', '/', '/v', 5);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for m in rekey {
+            sqlx::raw_sql(&m.sql[..]).execute(&pool).await.unwrap();
+        }
+
+        let row: (String, String, String, Vec<u8>, i64, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT user_id, device_did, id, public_key, paired_at, posture, relay_url FROM paired_nodes",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            ("bob".into(), "did:key:zBob".into(), "vault".into(), vec![7], 5, Some("blind-storage".into()), Some("https://relay".into()))
+        );
+        let drives: Vec<(String, Vec<u8>, String, String, i64)> =
+            sqlx::query_as("SELECT user_id, vault_key, tenancy, node_id, recorded_at FROM drives")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(drives, [("bob".into(), vec![7], "bob".into(), "vault".into(), 5)]);
+        let rules: Vec<(i64, String, String, String, i64, i64)> =
+            sqlx::query_as("SELECT id, user_id, node_id, path, watch, configured_at FROM sync_rules")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rules, [(1, "bob".into(), "vault".into(), "/notes".into(), 1, 5)]);
+        // id, user_id, node_id, remote_path, local_path, cache_budget_bytes, pins, mounted_at
+        type Mount = (i64, String, String, String, String, Option<i64>, String, i64);
+        let mounts: Vec<Mount> = sqlx::query_as(
+            "SELECT id, user_id, node_id, remote_path, local_path, cache_budget_bytes, pins, mounted_at FROM mount_configs",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mounts, [(1, "bob".into(), "vault".into(), "/".into(), "/v".into(), None, "[]".into(), 5)]);
+
+        // Another person's row under the same label sits beside bob's.
+        sqlx::query(
+            "INSERT INTO paired_nodes (id, user_id, device_did, public_key, addresses, paired_at) \
+             VALUES ('vault', 'alice', 'did:key:zAlice', x'09', '[]', 6)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paired_nodes WHERE id = 'vault'").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 2);
+        // And the legacy tables, which referenced a key that is gone, are
+        // still written and emptied under enforced foreign keys.
+        sqlx::raw_sql(
+            "INSERT INTO mount_configs (user_id, node_id, remote_path, local_path, mounted_at) VALUES ('alice', 'vault', '/', '/a', 6); \
+             INSERT INTO sync_rules (user_id, node_id, path, configured_at) VALUES ('alice', 'vault', '/a', 6); \
+             DELETE FROM paired_nodes WHERE user_id = 'bob'; \
+             DELETE FROM mount_configs; DELETE FROM sync_rules;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
 }
