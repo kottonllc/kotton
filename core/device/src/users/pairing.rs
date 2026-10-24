@@ -63,9 +63,11 @@
 //!   [`kotton_peer::pairing::JOINER_KEEPS_WITHIN`] leaves the issuer with no
 //!   row and no introduction, and the issuer's person is told so
 //!   ([`kotton_peer::pairing::JoinNotKept`]). There is nothing to revoke.
-//!   What can still be one-sided is the safe way round: a joiner whose `kept`
-//!   the issuer did not hear has written what it was handed and is admitted
-//!   nowhere, and is told to join again.
+//!   The joiner calls the join complete only on the issuer's sealed reply
+//!   that it heard `kept`. Without it the joiner cannot tell an issuer that
+//!   gave up from a reply that was lost, so its person is told the other
+//!   device may not have kept this one and to check there — never that it
+//!   is joined when the issuer may have kept nothing.
 //! - *The drives learn the device.* When the joiner has answered that it kept
 //!   what it was handed, the issuer — which holds the identity — records it
 //!   and tells each drive about it, under the identity's signature, before it
@@ -330,11 +332,14 @@ pub async fn finalize_joined_node(
 /// [`finalize_joined_node`] answered, or a refusal before it. A `PairFailed`
 /// is said to the issuer in the same words, and stands whether or not the
 /// issuer hears it: the issuer keeps nothing it was not told was kept. A
-/// `PairingComplete` is said as `kept`; if the issuer does not hear it — it
-/// stopped waiting ([`kotton_peer::pairing::JOINER_KEEPS_WITHIN`]) or is
-/// gone — it kept nothing and introduced this device nowhere, so the join is
-/// not complete: the session it minted is withdrawn, and the person is told
-/// to join again.
+/// `PairingComplete` is said as `kept`, and stands only on the issuer's
+/// sealed reply that it heard ([`JoinAnswer::kept`]). Without that reply the
+/// issuer either stopped waiting
+/// ([`kotton_peer::pairing::JOINER_KEEPS_WITHIN`]) and kept nothing, or kept
+/// this device and the reply was lost; this side cannot tell which. So the
+/// join is not reported complete: the session it minted is withdrawn, and
+/// the person is told to check the other device and join again from it if it
+/// does not list this one.
 pub(crate) async fn answer_the_issuer(
     answer: JoinAnswer,
     sessions: &sessions::SessionMap,
@@ -357,8 +362,9 @@ pub(crate) async fn answer_the_issuer(
                 UserResponse::PairFailed {
                     reason: format!(
                         "This device kept what it was handed, but the device admitting it did not \
-                         hear so ({e}), so that device kept nothing and told none of your drives of \
-                         this one. Join again from it — a second join keeps what this one wrote."
+                         confirm it heard so ({e}), so it may not have kept this device. Check there: \
+                         if it does not list this device, join again from it — a second join keeps \
+                         what this one wrote."
                     ),
                 }
             }

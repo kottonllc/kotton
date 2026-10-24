@@ -16,9 +16,13 @@
 //! [`JOINER_KEEPS_WITHIN`] is [`JoinNotKept`] — so its caller records the joiner
 //! and introduces it at the person's drives only for a join the joiner kept,
 //! and a join the joiner refused leaves the issuer with no row and no
-//! introduction. What stays one-sided is the other way round and safe: a
-//! joiner whose `kept` the issuer did not hear has written what it was handed,
-//! is admitted nowhere, and is told so when its answer fails.
+//! introduction. The issuer replies to `kept` with a sealed `heard`, and the
+//! joiner calls the join complete only on that reply; any other end — the
+//! issuer's give-up, a reset, a relay's close, which a relay may say on its
+//! own — is *the other device may not have kept this*. What stays uncertain
+//! is the last message, as it always is: a `heard` lost after the issuer sent
+//! it leaves a joiner told to check a device that did keep it, never the
+//! reverse.
 //!
 //! This module also holds:
 //! * `open_pair_listener` — bind the bootstrap QUIC listener.
@@ -731,6 +735,19 @@ enum Answer {
     Refused { why: String },
 }
 
+/// The issuer's reply to [`Answer::Kept`], and the last thing either side
+/// says: it heard the answer and commits. Sealed like every frame after the
+/// six digits, because the end of a transport is not the issuer's word — a
+/// relay forwards no WebSocket close and ends both legs with its own, so a
+/// close, however coded, says only what the relay chose to say. Sent only for
+/// `kept`: a refusal needs no reply, since the issuer keeps nothing either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Reply {
+    /// The issuer heard `kept`, and commits.
+    Heard,
+}
+
 /// Why an admitting device keeps nothing of a ceremony whose payload it sent:
 /// the joiner did not say it kept it. The issuer's ceremony returns this
 /// before its caller writes the joiner's row or introduces it anywhere, so a
@@ -800,13 +817,13 @@ type JoinerChannel = crate::pair_channel::EstablishedChannel<
 ///
 /// Dropping it unanswered closes the ceremony, which the issuer reads as no.
 ///
-/// **The issuer ends the ceremony, never the joiner.** After its answer the
-/// joiner says nothing more and reads until the issuer closes, at most
-/// [`JOINER_KEEPS_WITHIN`]: a joiner that closed first could leave the
-/// issuer's last bytes unread, and a socket closed over unread bytes is reset,
-/// which a relay passes on by discarding what it had not yet forwarded — the
-/// answer among it. The issuer, symmetrically, sends nothing that ends its
-/// side before it has heard the answer.
+/// **Each side reads to the other's end before it lets go.** After its answer
+/// the joiner reads the issuer's [`Reply`] and then until the issuer finishes;
+/// the issuer, having replied, reads until the joiner lets go. A socket
+/// closed over bytes it has not read is reset, and a relay passes a reset on
+/// by discarding what it had not yet forwarded — an answer or a reply among
+/// it. Neither side sends anything that ends its half before what it must
+/// hear has arrived. Every such read is bounded by [`JOINER_KEEPS_WITHIN`].
 #[must_use = "the admitting device keeps nothing until it is answered; dropping this answers no"]
 pub struct JoinAnswer {
     channel: JoinerChannel,
@@ -817,31 +834,49 @@ pub struct JoinAnswer {
 }
 
 impl JoinAnswer {
-    /// This device kept what it was handed. `Err` when the issuer did not hear
-    /// it — it stopped waiting ([`JOINER_KEEPS_WITHIN`]) or is gone — and then
-    /// it kept nothing.
+    /// This device kept what it was handed. `Ok` only when the issuer replied,
+    /// sealed, that it heard — and so commits. `Err` for every other end: the
+    /// issuer stopped waiting ([`JOINER_KEEPS_WITHIN`]) and kept nothing, or
+    /// the reply was lost and it did keep this device; this side cannot tell
+    /// which, and says so.
     pub async fn kept(self) -> Result<()> {
         self.say(Answer::Kept).await
     }
 
     /// This device did not keep what it was handed, for `why`, which the
-    /// issuer repeats to its person. `Err` when the issuer did not hear it;
-    /// it keeps nothing either way.
+    /// issuer repeats to its person when it hears it. The issuer keeps
+    /// nothing either way, so `Err` only when the refusal could not be sent.
     pub async fn refused(self, why: &str) -> Result<()> {
         self.say(Answer::Refused { why: why.to_string() }).await
     }
 
     async fn say(mut self, answer: Answer) -> Result<()> {
+        let kept = answer == Answer::Kept;
         let frame = serde_json::to_vec(&answer).context("serialize the join's answer")?;
         self.channel
             .send_encrypted(&frame)
             .await
             .map_err(|e| anyhow!("the admitting device is no longer listening: {e}"))?;
-        // Until the issuer ends it: it sends nothing more, so whatever ends
-        // this read — its finish, its close, a reset — is the ceremony's end.
-        let _ = tokio::time::timeout(JOINER_KEEPS_WITHIN, self.channel.recv_encrypted()).await;
+        // The issuer's reply to `kept`; to a refusal, its end.
+        let reply = tokio::time::timeout(JOINER_KEEPS_WITHIN, self.channel.recv_encrypted()).await;
+        let heard = match &reply {
+            Ok(Ok(frame)) => matches!(serde_json::from_slice::<Reply>(frame), Ok(Reply::Heard)),
+            _ => false,
+        };
+        if heard {
+            // Then to the issuer's finish, which follows the reply at once.
+            let _ = tokio::time::timeout(JOINER_KEEPS_WITHIN, self.channel.recv_encrypted()).await;
+        }
         drop(self.connection);
-        Ok(())
+        match (kept, heard, reply) {
+            (false, _, _) | (true, true, _) => Ok(()),
+            (true, false, Err(_)) => Err(anyhow!(
+                "the admitting device did not reply within {}s that it heard",
+                JOINER_KEEPS_WITHIN.as_secs()
+            )),
+            (true, false, Ok(Err(e))) => Err(anyhow!("the ceremony ended before the admitting device replied that it heard ({e})")),
+            (true, false, Ok(Ok(_))) => Err(anyhow!("the admitting device replied with something that is not `heard`")),
+        }
     }
 }
 
@@ -907,8 +942,9 @@ pub async fn run_enroll_issuer_committed(
         JOINER_KEEPS_WITHIN,
     )
     .await;
-    // The ceremony is over either way, and this end says so: the joiner,
-    // having answered, reads until it does (`JoinAnswer`).
+    // The ceremony is over either way: on `kept` the joiner has read the
+    // reply and let go (`issuer_over`), and on anything else it is owed
+    // nothing. The close is said rather than left to the idle timeout.
     connection.close(0u32.into(), b"");
     enrolled
 }
@@ -970,7 +1006,7 @@ pub async fn run_enroll_issuer_dialing(
         JOINER_KEEPS_WITHIN,
     )
     .await;
-    // As the listening issuer closes: the joiner reads until it does.
+    // As the listening issuer closes, and for the same reason.
     connection.close(0u32.into(), b"");
     enrolled
 }
@@ -1606,9 +1642,10 @@ fn dialable_addr(announced: Option<SocketAddr>, observed: Option<SocketAddr>) ->
 /// After the payload and the attestation it waits, at most `kept_within`
 /// ([`JOINER_KEEPS_WITHIN`] on every live path), for the joiner's answer;
 /// a refusal, a close, or silence is [`JoinNotKept`], and the caller then writes
-/// nothing and introduces the joiner nowhere. The answer is the join's last
-/// frame, so it also means the joiner has pulled every frame before it, and
-/// the transport may be dropped as soon as this returns.
+/// nothing and introduces the joiner nowhere. To `kept` it replies a sealed
+/// [`Reply::Heard`], finishes, and reads until the joiner lets go (at most
+/// [`JOINER_KEEPS_WITHIN`]), so the transport may be dropped as soon as this
+/// returns without cutting the reply short.
 #[allow(clippy::too_many_arguments)]
 async fn issuer_over<W, R>(
     transport: Transport<W, R>,
@@ -1767,9 +1804,17 @@ where
     // finish waits for the answer — over a relay it is a close the joiner
     // would have to read before answering (see `JoinAnswer`).
     hear_kept(&mut channel, kept_within).await?;
-    // Heard and kept: the joiner reads until this end closes. A finish that
-    // fails now ends the ceremony all the same, and takes nothing back.
+    // Heard and kept: say so, sealed — the joiner calls its join complete on
+    // this and nothing else — then finish, and read until the joiner lets go,
+    // so the reply is not cut short by this side's close. A reply that fails
+    // now takes nothing back: the joiner kept, and this side commits; the
+    // joiner is told to check here.
+    let reply = serde_json::to_vec(&Reply::Heard).context("serialize the issuer's reply")?;
+    if let Err(e) = channel.send_encrypted(&reply).await {
+        tracing::warn!(error = %e, "the joiner kept the join, but the reply that this side heard was not sent");
+    }
     let _ = channel.finish().await;
+    let _ = tokio::time::timeout(JOINER_KEEPS_WITHIN, channel.recv_encrypted()).await;
 
     let node = PairedNode {
         id: joiner_name,
@@ -2637,6 +2682,57 @@ mod tests {
         );
     }
 
+    /// **Over QUIC, a `kept` the issuer stopped waiting for is not complete on
+    /// the joiner.** The issuer half as `run_enroll_issuer_committed` runs it,
+    /// with a short bound in place of [`JOINER_KEEPS_WITHIN`]: it gives up and
+    /// closes, and the joiner, answering after, gets no sealed `heard` and
+    /// says so — whatever the close looked like.
+    #[tokio::test]
+    async fn committed_enroll_a_kept_the_issuer_gave_up_on_is_not_complete_on_the_joiner() {
+        let issuer_identity = SigningKey::from_bytes(&[11u8; 32]);
+        let op_key = SigningKey::from_bytes(&[42u8; 32]);
+        let n_node = SigningKey::from_bytes(&[20u8; 32]);
+        let n_warm = SigningKey::from_bytes(&[2u8; 32]);
+        let sid = [9u8; 16];
+        let bound = Duration::from_millis(300);
+
+        let (_code, listen_addr, _expires, listener) = open_pair_listener(&op_key, 0, 30).await.unwrap();
+        let dial = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen_addr.port());
+        let e = tokio::spawn(async move {
+            let connection = listener.accept().await.expect("a joiner dials").await.expect("handshake");
+            let (send, recv) = connection.accept_bi().await.expect("the joiner's stream");
+            let transport = Transport::over_quic(&connection, send, recv).expect("a presented key");
+            let enrolled = issuer_over(
+                transport,
+                None,
+                &issuer_identity,
+                sid,
+                Some(full_keys([3u8; 32])),
+                kotton_schemas::membership::Posture::Full,
+                "new-device",
+                None,
+                9_999_999_999,
+                vec![],
+                None,
+                Vec::new(),
+                None,
+                &AutoConfirm,
+                bound,
+            )
+            .await;
+            connection.close(0u32.into(), b"");
+            enrolled.map(|_| ())
+        });
+        let (_joined, answer) =
+            run_enroll_join_committed(&n_node, &n_warm, sid, &[dial], "issuer", None, &AutoConfirm, None)
+                .await
+                .expect("the joiner is handed the payload");
+        let gave_up = e.await.unwrap().expect_err("the issuer committed a join nobody answered");
+        assert!(matches!(gave_up.downcast_ref::<JoinNotKept>(), Some(JoinNotKept::Unanswered(_))), "{gave_up}");
+        let late = answer.kept().await;
+        assert!(late.is_err(), "a `kept` the issuer gave up on was taken as heard");
+    }
+
     /// A wrong SAS on the joiner (human says "codes don't match") aborts before
     /// any payload is transferred — the join returns an error and the issuer does
     /// not complete.
@@ -2871,6 +2967,34 @@ mod relayed_tests {
         SigningKey::generate(&mut rand::rngs::OsRng)
     }
 
+    /// Two byte streams with a relay between them, as `circuit::bridge` in
+    /// `infra/relay` behaves: each way is forwarded as it comes, the issuer's
+    /// end ends the joiner's leg (a relay forwards no close of its own
+    /// bytes, it ends both legs), and the joiner's bytes are still taken after
+    /// the issuer is gone, as a relay's socket takes them until it is closed.
+    /// So an answer sent after the issuer gave up is sent, and only the reply
+    /// is missing. Returns the issuer's end and the joiner's.
+    fn a_relay_between() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+        use tokio::io::AsyncWriteExt;
+        let (issuer, at_issuer) = tokio::io::duplex(1 << 16);
+        let (joiner, at_joiner) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let (mut from_issuer, mut to_issuer) = tokio::io::split(at_issuer);
+            let (mut from_joiner, mut to_joiner) = tokio::io::split(at_joiner);
+            let down = async {
+                let _ = tokio::io::copy(&mut from_issuer, &mut to_joiner).await;
+                let _ = to_joiner.shutdown().await;
+            };
+            let up = async {
+                let _ = tokio::io::copy(&mut from_joiner, &mut to_issuer).await;
+                let _ = to_issuer.shutdown().await;
+                let _ = tokio::io::copy(&mut from_joiner, &mut tokio::io::sink()).await;
+            };
+            tokio::join!(down, up);
+        });
+        (issuer, joiner)
+    }
+
     /// How the joiner answers once it holds what it was handed.
     enum Answering {
         /// `kept`, at once.
@@ -2908,7 +3032,7 @@ mod relayed_tests {
         answering: Answering,
         kept_within: Duration,
     ) -> (Result<EnrolledNode>, Result<JoinedNode>, u32, u32) {
-        let (a, b) = tokio::io::duplex(1 << 16);
+        let (a, b) = a_relay_between();
         let issuer_identity = key();
         let issuer_op = key();
         let vault_op = key();
@@ -3082,7 +3206,9 @@ mod relayed_tests {
     /// on every live path; a short bound here, through the same parameter):
     /// a joiner silent past it leaves the issuer nothing, the issuer returns
     /// at the bound and not at the joiner's leisure, and the joiner's late
-    /// `kept` is refused, so it is told the issuer did not hear it.
+    /// `kept` — sent, into a relay still taking bytes — is not complete,
+    /// because no sealed `heard` came back: the relay's end of the circuit
+    /// is not the issuer's word.
     #[tokio::test]
     async fn the_issuer_waits_for_the_answer_only_within_its_bound() {
         let bound = Duration::from_millis(300);
@@ -3097,7 +3223,7 @@ mod relayed_tests {
         }
         assert!(started.elapsed() >= bound, "the issuer stopped waiting before its bound");
         let late = j.err().expect("a late `kept` was taken as heard");
-        assert!(late.to_string().contains("no longer listening"), "{late}");
+        assert!(late.to_string().contains("before the admitting device replied that it heard"), "{late}");
     }
 
     /// **A relay that refuses an invite's reservation is told apart from one
