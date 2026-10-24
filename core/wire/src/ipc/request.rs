@@ -269,6 +269,14 @@ pub enum UserRequest {
         /// reaches no one else; absent on the local IPC path, where the
         /// bootstrap token names the person and a frame naming another is
         /// refused.
+        ///
+        /// **A break, not a compatible addition, on the peer path.** A relayed
+        /// gateway built before it sends this field (`khttpd`'s
+        /// `relay_over_relay`, kotton-ahead#339) is refused on every frame,
+        /// with a sentence naming the missing field. The local path is
+        /// unaffected. A frame naming no one is not resolved to the one person
+        /// who pairs the key as a gateway, even when there is exactly one:
+        /// that is the person-less read kotton #119 removes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user_id: Option<String>,
         /// Which browser this frame belongs to, for a gateway that carries

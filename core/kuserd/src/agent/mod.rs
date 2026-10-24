@@ -1967,6 +1967,12 @@ enum PeerAsk {
 /// key as their gateway is refused, and another verb naming a person whose
 /// row says gateway is held to the gateway's verbs.
 ///
+/// A `BrowserFrame` naming no one is refused, never resolved to the one person
+/// who pairs the key as a gateway: that fallback is the person-less read
+/// kotton #119 removes, narrowed to the unambiguous case. So a relayed gateway
+/// that does not yet send `user_id` is refused on every frame, naming the
+/// field, until it does (kotton-ahead#339); the local path never comes here.
+///
 /// `Err` is the refusal to send back.
 async fn peer_ask(
     db: &Arc<SqlitePool>,
