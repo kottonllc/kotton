@@ -17,18 +17,18 @@
 //! (`kotton_peer::daemon::drive_rules`) — a rule names a drive and this
 //! device's direction for it, never a node. So what the engine can reach is
 //! exactly what the drive record holds, and the record is as good as its
-//! writers: enrolment, recovery after the proof, and the membership
-//! projection, each of which names a vault; and the join, which records the
-//! drives the admitting device handed over, resting on that device's word
-//! inside the SAS-confirmed, identity-attested ceremony — the device that
-//! holds the identity, which could put a member in the sealed set or
-//! introduce the joiner anywhere already. One writer does not yet: a local
-//! session's `PeerAdd { drive: true }` records whatever key it is given as a
-//! drive, and a node so recorded is then reached like any drive — only the
-//! key-domain gate stands in front of it, which the person's own device
-//! passes. That writer goes with #80, which has `Recover` record the drive
-//! from the line after the proof; until it lands, this is the one way a
-//! device can still be made a target.
+//! writers: enrolment, the daemon's `Recover` after the proof (it takes the
+//! vault's line), and the membership projection, each of which names a vault;
+//! and the join, which records the drives the admitting device handed over,
+//! resting on that device's word inside the SAS-confirmed, identity-attested
+//! ceremony — the device that holds the identity, which could put a member in
+//! the sealed set or introduce the joiner anywhere already
+//! (`kotton_peer::daemon::drives`). No other caller's word makes a node a
+//! drive: the `PeerAdd { drive: true }` that recorded any key it was given went
+//! with #80, and the record refuses a node paired under another posture. So no
+//! device of the person's is a target, and every peer a pass reaches holds no
+//! data keys: a pass toward one sends packs and nothing loose
+//! ([`ensure_packed_for_peer`]).
 //!
 //! **What left, with the mesh.** Rules that named a paired node (any node,
 //! another of the person's devices among them) and a path nothing read; the
@@ -60,7 +60,6 @@
 //! logic belongs in `05_runtime`; migration is tracked in
 //! `IDEA-tier-discipline`.
 
-use kotton_peer::membership::Membership as _;
 use kotton_peer::daemon::drive_rules::DriveRule;
 use kotton_peer::daemon::drives::Drive;
 use kotton_wire::ipc::{SyncDirection, SyncOutcome, VfsChangeKind};
@@ -968,42 +967,13 @@ async fn sync_drive_with_outcome(
     })
 }
 
-/// Whether `peer_did` holds the data capability — i.e. may be sent material that
-/// is not sealed (RFC-0036).
-///
-/// Fails closed: an unknown DID, an unreadable membership set, or a member with
-/// no recorded posture all answer `false`. A peer we cannot classify is treated
-/// as one that must not receive plaintext.
-/// Whether `peer_did` holds the data keys for `user_id` — i.e. whether replicating
-/// records to it can succeed at all.
-///
-/// `pub` since the engine left `kuserd` (2026-08-24). It is a coherent question about
-/// replication eligibility rather than an internal step, and the daemon's integration
-/// tests ask it directly. Widening it was a judgement call: the alternative was a
-/// second `SyncHost` implementation in this crate for the tests to run against, which
-/// can drift from the one that ships.
-pub async fn peer_holds_data_keys(resources: &dyn crate::SyncHost, user_id: &str, peer_did: &str) -> bool {
-    use kotton_schemas::membership::Posture;
-    let Some(rt) = resources.user_store(user_id) else {
-        return false;
-    };
-    let Ok(members) = rt.list_members().await else {
-        return false;
-    };
-    members
-        .iter()
-        .find(|m| m.did == peer_did)
-        .map(|m| matches!(m.posture, Some(Posture::Full)))
-        .unwrap_or(false)
-}
-
 /// Run one object sync pass with **record sync riding alongside it** (RFC-0046).
 ///
 /// The single place records and objects sync together, called by both sync entry
 /// points — the manual/SDK `SyncMount` handler and the background engine — so a
 /// record reaches a peer whichever way a sync is triggered. Four steps:
 ///
-/// 0. **Toward a peer that holds no data keys, send only packs**
+/// 0. **Toward a peer, send only packs**
 ///    ([`ensure_packed_for_peer`]): pack the mount first, so nothing is left
 ///    behind, and have the transfer send packs and superblocks and nothing else
 ///    ([`Outbound::PacksOnly`]), so a loose object never crosses whatever
@@ -1063,7 +1033,7 @@ pub async fn sync_mount_with_records(
     let outbound = match user_rt.peer_of(remote) {
         Some(peer_did) => {
             let pushes = !matches!(direction, Some(kotton_wire::ipc::SyncDirection::Pull));
-            ensure_packed_for_peer(resources, user_id, &peer_did, mount, mount_store.as_ref(), pushes)
+            ensure_packed_for_peer(user_id, &peer_did, mount, mount_store.as_ref(), pushes)
                 .await
                 .map_err(anyhow::Error::msg)?
         }
@@ -1102,8 +1072,8 @@ pub async fn sync_mount_with_records(
     Ok(result)
 }
 
-/// What a pass may send toward `peer_did`, packing `mount` first when the peer
-/// holds no data keys (RFC-0070 M3, carried over from RFC-0045).
+/// What a pass may send toward `peer_did`, a drive, packing `mount` first
+/// before a push (RFC-0070 M3, carried over from RFC-0045).
 ///
 /// A keyless peer receives only sealed bytes — but object **sizes** are a
 /// channel that packing exists to close, and loose objects on the wire reopen
@@ -1117,23 +1087,25 @@ pub async fn sync_mount_with_records(
 /// None` means it could never send its files. A pull sends the peer nothing, so
 /// it packs nothing.
 ///
-/// A peer that does hold the data keys is one of the user's own `Full` devices,
-/// already sees plaintext by construction, and needs none of this.
+/// **Every peer is answered this way.** Until #80 a peer holding the data keys
+/// (a `Full` member) was answered [`Outbound::Everything`], because one of the
+/// person's own devices could be a sync target. Since #54 a peer remote is a
+/// drive and nothing else, and since #80 no writer of the drive record can make
+/// a device one, so that branch had no peer left to answer; it went with the
+/// writer, and a pass toward any peer is held to packs. Were a device ever
+/// reached again, it would be sent packs, which it can read, and never loose
+/// objects.
 ///
 /// Private, with one caller: [`sync_mount_with_records`], which both entry
 /// points sync by. A guard each entry point had to remember was a guard the
 /// `SyncMount` request forgot.
 async fn ensure_packed_for_peer(
-    resources: &dyn crate::SyncHost,
     user_id: &str,
     peer_did: &str,
     mount: &str,
     store: &dyn kotton_sys::store::SyncableStore,
     pushes: bool,
 ) -> Result<Outbound, String> {
-    if peer_holds_data_keys(resources, user_id, peer_did).await {
-        return Ok(Outbound::Everything);
-    }
     if !pushes {
         return Ok(Outbound::PacksOnly);
     }

@@ -111,7 +111,7 @@ async fn a_file_handed_to_a_device_of_yours_lands_in_its_inbox_through_a_vault_e
         .expect("push to the vault");
 
     // The phone: the same person, with only the phrase and the vault.
-    let (_phone_device, mut phone) = recover_from(&phrase, "alice", &identity, "vault").await;
+    let (_phone_device, mut phone) = recover_from(&phrase, "alice", &identity).await;
     assert_eq!(
         phone.read_file("alice", "Inbox/beach.jpg").await.expect("the photo on the phone"),
         photo,

@@ -78,34 +78,6 @@ mod b3_tests {
         (dir, rt, resources)
     }
 
-    /// Only a `Full` peer may receive record changesets — they are structured
-    /// plaintext, the one data path sealed replication does not cover (B3).
-    #[tokio::test]
-    async fn only_a_full_peer_may_receive_record_changesets() {
-        let (_dir, _runtime, resources) = env().await;
-        let user_rt = resources.user_store("alice").expect("user runtime");
-
-        for (did, posture, expected) in [
-            ("did:key:zFull", Some(Posture::Full), true),
-            ("did:key:zCosigner", Some(Posture::Cosigner), false),
-            ("did:key:zBlind", Some(Posture::BlindStorage), false),
-            // A member with no recorded posture cannot be classified, so it is
-            // treated as one that must not receive plaintext.
-            ("did:key:zUnknownPosture", None, false),
-        ] {
-            user_rt
-                .write_member(&member(did, posture))
-                .await
-                .expect("write_member");
-            assert_eq!(
-                peer_holds_data_keys(&*resources, "alice", did).await,
-                expected,
-                "posture {posture:?} should {} receive record changesets",
-                if expected { "" } else { "NOT" },
-            );
-        }
-    }
-
     /// A mount with no pack layer, and beside it a remote reaching `peer_did`.
     ///
     /// A plain store answers `pack_loose()` with `None`, so a pass that tries to
@@ -149,12 +121,14 @@ mod b3_tests {
             .expect("add_remote peer");
     }
 
-    /// A `Full` peer already sees plaintext, so the pack requirement does not
-    /// apply to it at all — including for a mount that could never satisfy it.
-    /// Asked through `sync_mount_with_records`, the one function both entry
-    /// points sync by, so passing proves the posture short-circuits there.
+    /// **A peer is held to packs whatever its posture** (#80). A `Full` peer was
+    /// once let through without a pack pass, because one of the person's own
+    /// devices could be a sync target; since no writer of the drive record can
+    /// make a device a drive, that branch went, and a mount that cannot pack is
+    /// refused toward a `Full` member as toward any peer. Asked through
+    /// `sync_mount_with_records`, the one function both entry points sync by.
     #[tokio::test]
-    async fn a_full_peer_needs_no_pre_sync_pack_pass() {
+    async fn a_full_peer_is_held_to_packs_as_any_peer_is() {
         let (_dir, runtime, resources) = env().await;
         let user_rt = resources.user_store("alice").expect("user runtime");
         user_rt
@@ -163,7 +137,7 @@ mod b3_tests {
             .expect("write_member");
         a_plain_mount_and_a_peer(&user_rt, "did:key:zFull");
 
-        sync_mount_with_records(
+        let err = sync_mount_with_records(
             &runtime,
             &*resources,
             "alice",
@@ -172,7 +146,8 @@ mod b3_tests {
             Some(kotton_wire::ipc::SyncDirection::Push),
         )
         .await
-        .expect("a full peer is pushed to without a pack layer");
+        .expect_err("a full peer was pushed loose objects");
+        assert!(err.to_string().contains("no pack layer"), "unexpected reason: {err}");
     }
 
     /// The packing boundary: a peer holding no data keys must not be sent
@@ -206,15 +181,5 @@ mod b3_tests {
         )
         .await
         .expect("a pull hands the peer nothing, so it needs no pack");
-    }
-
-    /// A DID that is not a member at all is refused — the gate fails closed on
-    /// anything it cannot classify, not only on postures it recognises.
-    #[tokio::test]
-    async fn an_unknown_peer_is_refused() {
-        let (_dir, _runtime, resources) = env().await;
-        assert!(!peer_holds_data_keys(&*resources, "alice", "did:key:zStranger").await);
-        // An unknown *user* likewise resolves to no runtime, and so to no keys.
-        assert!(!peer_holds_data_keys(&*resources, "nobody", "did:key:zFull").await);
     }
 }

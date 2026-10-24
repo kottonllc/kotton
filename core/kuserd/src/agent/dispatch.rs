@@ -777,6 +777,7 @@ pub(super) async fn handle_request(
             user_id,
             recovery_key,
             passphrase,
+            vault_line,
         } => {
             let resp =
                 handlers::user::recover(
@@ -786,6 +787,7 @@ pub(super) async fn handle_request(
                     user_id.clone(),
                     recovery_key.expose().to_owned(),
                     passphrase.expose().to_owned(),
+                    vault_line,
                 )
                     .await?;
             // The session that ran this was opened on a locked claim (no CEK).
@@ -1289,7 +1291,6 @@ pub(super) async fn handle_request(
             peer_did,
             peer_pubkey_hex,
             peer_addr,
-            drive,
         } => {
             kotton_peer::daemon::nodes::peer_add(
                 db,
@@ -1299,7 +1300,6 @@ pub(super) async fn handle_request(
                 peer_did,
                 peer_pubkey_hex,
                 peer_addr,
-                drive,
             )
             .await
         }

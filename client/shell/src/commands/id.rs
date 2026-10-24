@@ -10,8 +10,9 @@ use crate::state::ShellState;
 /// `rotate` — by `kotton id <sub> <name>` too, which runs this same command
 /// through the bridge (terminal UX Pillar 4: one command, two doors). `id recover`
 /// here is the piece for the identity the REPL runs as; `kotton id recover` at a
-/// terminal claims the name, adds the vault, runs the same `Recover` and syncs, in
-/// one command, because before it runs there is no identity for a REPL to run as.
+/// terminal claims the name, sends the same `Recover` with the vault's line
+/// ([`crate::recover`]) and syncs, in one command, because before it runs there is
+/// no identity for a REPL to run as.
 ///
 /// `id use <name>` requests a switch; the REPL loop performs it after the command
 /// returns (reconnecting the session and swapping to the new identity's history).
@@ -71,7 +72,7 @@ const USAGE: &str = "usage: id list | id use <name> | id lock | id add-recovery 
 #[async_trait]
 impl Command for IdCommand {
     fn help_text(&self) -> &'static str {
-        "id — your identities: list, switch, lock your vault, set up recovery, rotate, recover\n\nUSAGE:\n  id list            list identities on this device (`*` marks current)\n  id use <name>      switch this session to another identity\n  id lock            close your vault now; your passphrase opens it again\n  id add-recovery    mint a 24-word recovery phrase for this identity, printed once\n                     with the line of each vault that keeps a copy\n  id rotate          retire this identity's key for a new one; asks for the phrase\n                     and your passphrase at hidden prompts\n  id recover         bring this identity back onto this device from a node that keeps\n                     your data; asks for the phrase and a new passphrase for this device\n                     at hidden prompts before it begins\n\nWhat you type at a hidden prompt is not shown and is not kept in the shell's history.\nThe other `kotton id` verbs (create, join, rm, login, set-passphrase, bind-device, unlock)\nare answered with the one-shot form to run outside the shell.\n"
+        "id — your identities: list, switch, lock your vault, set up recovery, rotate, recover\n\nUSAGE:\n  id list            list identities on this device (`*` marks current)\n  id use <name>      switch this session to another identity\n  id lock            close your vault now; your passphrase opens it again\n  id add-recovery    mint a 24-word recovery phrase for this identity, printed once\n                     with the line of each vault that keeps a copy\n  id rotate          retire this identity's key for a new one; asks for the phrase\n                     and your passphrase at hidden prompts\n  id recover         bring this identity back onto this device from the vault that keeps\n                     your data; asks for the phrase, the vault's line and a new passphrase\n                     for this device before it begins, and records that vault as your drive\n\nWhat you type at a hidden prompt is not shown and is not kept in the shell's history.\nThe other `kotton id` verbs (create, join, rm, login, set-passphrase, bind-device, unlock)\nare answered with the one-shot form to run outside the shell.\n"
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
@@ -266,14 +267,18 @@ async fn rotate(rest: &[&str], state: &mut ShellState) -> Result<CommandOutput> 
 }
 
 /// `id recover [<name>]`: take this identity back onto this device from the
-/// recovery phrase — fetched from a node this identity has as a peer, proved, and
-/// rotated onto this device's key. The phrase is asked at a hidden prompt.
+/// recovery phrase and the line of the vault that keeps a copy — fetched from that
+/// vault, proved, and rotated onto this device's key. The phrase is asked at a
+/// hidden prompt.
 ///
 /// This is the piece the REPL runs, for the identity it runs as: on a new machine
-/// the session is the one `kotton id login <name>` opened on the claim, and a
-/// `peer add` has said where the data is. `kotton id recover` at a terminal is the
-/// whole of it in one command — the claim, the vault its line names, this recovery
-/// and the first sync (`kotton_cli`'s `id recover`).
+/// the session is the one `kotton id login <name>` opened on the claim. It asks for
+/// the card as `kotton id recover` does and sends the same one `Recover`
+/// ([`crate::recover`]): the daemon adds the vault the line names, proves the words,
+/// and records the vault as the person's drive once they have proved, so no `peer
+/// add` comes first. `kotton id recover` at a terminal is the whole of it in one
+/// command — the claim, this recovery and the first sync (`kotton_cli`'s `id
+/// recover`).
 ///
 /// **The session this shell runs on comes back with the keys.** It was opened on
 /// the claim, which holds no data key; the daemon puts the keys back and tells
@@ -281,50 +286,35 @@ async fn rotate(rest: &[&str], state: &mut ShellState) -> Result<CommandOutput> 
 /// reopens the identity's store under them. This shell sends every command on that
 /// connection, so the next one reads the person's data with nothing re-established.
 ///
-/// **The passphrase is chosen before the recovery begins.** A recovery rotates the
+/// **Everything is asked before the recovery begins.** A recovery rotates the
 /// identity onto this device's key, and on a device the person used before the copy
-/// sealed under their old passphrase seals the key it replaces. So the phrase and
-/// then a passphrase for this device are read here, both at the hidden prompt, the
-/// passphrase offered and confirmed as every new one is
+/// sealed under their old passphrase seals the key it replaces. So the phrase, the
+/// line and then a passphrase for this device are read here, the secrets at the
+/// hidden prompt, the passphrase offered and confirmed as every new one is
 /// ([`crate::secret::choose_new_passphrase`]), before anything is sent; the daemon
 /// seals the recovered roots under it and sets the lock policy to it in the same
 /// act, replacing any old copy. A recovered device is never held without a sealed
-/// copy, and the old passphrase opens nothing. With nobody to ask, or a passphrase
+/// copy, and the old passphrase opens nothing. With nobody to ask, or an answer
 /// refused, nothing is sent and nothing changes.
 async fn recover(rest: &[&str], state: &mut ShellState) -> Result<CommandOutput> {
-    use crate::secret::{choose_new_passphrase, NewPassphrase};
+    use crate::recover::NotAsked;
 
     let username = match this_identity("recover", rest, state) {
         Ok(u) => u,
         Err(refused) => return Ok(refused),
     };
     let mut said = Vec::new();
-    let Some(entered) = state.ask_hidden(&mut said, &crate::secret::recovery_phrase_question(&username))? else {
-        return Ok(nobody_to_ask("recover", "your recovery phrase", &username));
+    let card = match crate::recover::ask(&username, &mut state.asking, &mut said)? {
+        Ok(card) => card,
+        Err(NotAsked::NobodyToAsk(what)) => return Ok(nobody_to_ask("recover", what, &username)),
+        Err(NotAsked::Refused(why)) => return Ok(CommandOutput::error(1, format!("id recover: {why}"))),
     };
-    let phrase = crate::secret::require_phrase(&entered)?;
-    said.push(Out::Note(
-        "Choose the passphrase that unlocks your keys on this device. It replaces any \
-         passphrase this device knew for them."
-            .to_string(),
-    ));
-    let question = format!("passphrase for '{username}' on this device (hidden, Enter to accept the suggestion)");
-    let passphrase = match choose_new_passphrase(&mut state.asking, &mut said, &question)? {
-        NewPassphrase::Chosen(passphrase) => passphrase,
-        NewPassphrase::NobodyToAsk => {
-            return Ok(nobody_to_ask("recover", "a passphrase for this device", &username))
-        }
-        NewPassphrase::Refused(why) => {
-            return Ok(CommandOutput::error(1, format!("id recover: {why} — nothing was changed")))
-        }
+    let recovered = {
+        let mut client = state.client.lock().await;
+        crate::recover::send(&mut client, &username, &card)
+            .await
+            .map_err(|e| anyhow::anyhow!("id recover: {e}"))?
     };
-    let recovered = state
-        .client
-        .lock()
-        .await
-        .recover(&username, &phrase, &passphrase)
-        .await
-        .map_err(|e| anyhow::anyhow!("id recover: {e}"))?;
     let mut said = vec![
         Out::Confirm { action: "recovered onto this device".to_string(), subject: username },
         Out::Record(vec![
@@ -337,7 +327,13 @@ async fn recover(rest: &[&str], state: &mut ShellState) -> Result<CommandOutput>
     } else {
         "The recovered key is sealed here under the passphrase you chose.".to_string()
     }));
-    said.push(Out::Hint("`sync` from your node brings your files and records back".to_string()));
+    match recovered.drive_not_recorded {
+        None => said.push(Out::Hint("`sync` brings your files and records back from your drive".to_string())),
+        Some(why) => said.push(Out::Warn {
+            what: why,
+            consequence: "this device does not yet treat the vault as your drive; do not recover again".to_string(),
+        }),
+    }
     Ok(CommandOutput::shapes(said))
 }
 

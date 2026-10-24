@@ -421,7 +421,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
             // person reads. The share sheet lists only the rows this is true
             // of: *a device of your own*. A record that cannot
             // be read, or names no posture, answers `false` — the side that
-            // offers nothing, as `peer_holds_data_keys` fails closed.
+            // offers nothing.
             let opens_your_files = member.as_ref().is_some_and(|m| {
                 m.role == kotton_schemas::membership::Role::OwnDevice
                     && m.posture == Some(kotton_schemas::membership::Posture::Full)

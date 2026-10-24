@@ -632,12 +632,16 @@ async fn a_model_comes_back_from_the_phrase_after_every_device_is_lost() {
         .expect("the phrase alone claims the identity on a cold device");
 
     let b_op_addr: SocketAddr = format!("127.0.0.1:{op_port_b}").parse().unwrap();
+    // B's line, as the recovery card prints it: `Recover` adds B as the node
+    // `vault`, and records it as the person's drive once the phrase proves.
+    let b_line = kotton_wire::line::InstanceLine {
+        kind: kotton_wire::ipc::OperatedService::Vault,
+        hint: b_op_addr.to_string(),
+        key: hex::decode(&pubkey_b_hex).expect("B's key is hex").try_into().expect("B's key is 32 bytes"),
+    }
+    .to_text();
     client_c
-        .peer_add_drive(USER, "blind-vps", &did_b_dev, &pubkey_b_hex, b_op_addr)
-        .await
-        .expect("tell C where its blind node is");
-    client_c
-        .recover(USER, &recovery_phrase, crate::common::TEST_PASSPHRASE)
+        .recover(USER, &recovery_phrase, crate::common::TEST_PASSPHRASE, &b_line)
         .await
         .expect("recover from the phrase and the blind node alone");
     client_c
@@ -646,7 +650,7 @@ async fn a_model_comes_back_from_the_phrase_after_every_device_is_lost() {
             "blind-vps",
             RemoteBackend::Kotton {
                 peer_did: did_b_dev.clone(),
-                label: "blind-vps".to_string(),
+                label: "vault".to_string(),
             },
             None,
         )

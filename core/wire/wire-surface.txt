@@ -408,8 +408,6 @@ PeerAdd
     peer_did: String
     peer_pubkey_hex: String
     peer_addr: std::net::SocketAddr
-    #[serde(default)]
-    drive: bool
 PurgeFile
     user_id: String
     path: String
@@ -482,6 +480,7 @@ Recover
     user_id: String
     recovery_key: crate::ipc::vault_request::SecretText
     passphrase: crate::ipc::vault_request::SecretText
+    vault_line: String
 RecoveryFetch
     user_id: String
 RecoveryStore

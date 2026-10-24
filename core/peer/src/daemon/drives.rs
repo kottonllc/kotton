@@ -20,16 +20,20 @@
 //! several, for when a vault keeps more than one drive for a person.
 //!
 //! **Who writes it: [`record`], and nothing else.** It is called from every
-//! place a device learns that a node is a vault keeping the person's things:
+//! place a device learns that a node is a vault keeping the person's things,
+//! and each of them names a vault; no caller's word makes a node a drive:
 //!
 //! - **enrolment** — [`super::nodes::finalize_enrolled_node`], for a node
 //!   admitted under `Posture::BlindStorage` (`device add --blind`, `device
 //!   admit`, an invite pasted at Settings' door);
-//! - **`recover`** — the CLI's `kotton id recover` adds the vault the person's
-//!   line names with `PeerAdd { drive: true }` ([`super::nodes::peer_add`]),
-//!   because the line it was given is a vault's (`OperatedService::Vault`) and
-//!   says so. A plain `PeerAdd` records no drive: an address and a key say
-//!   nothing about what the node keeps;
+//! - **recovery** — the daemon's `Recover` (`kotton_device::users::recover`),
+//!   which takes the line the person's recovery card printed, a vault's
+//!   (`OperatedService::Vault`) and saying so, adds that vault as the node to
+//!   dial, and records it only once the phrase has proved. Both doors that
+//!   recover, `kotton id recover` and the REPL's `id recover`, send that one
+//!   request. A `PeerAdd` records no drive: an address and a key say nothing
+//!   about what the node keeps, and the flag that once let it say otherwise is
+//!   off the wire (#80);
 //! - **the membership set** —
 //!   [`super::nodes::project_membership_into_allowlist`], for an own-device
 //!   member admitted under `Posture::BlindStorage`: what the enrolling device
@@ -47,7 +51,19 @@
 //!
 //! All arrive at the same row: the vault key is the key of the node row the
 //! drive is reached through, the tenancy is the person's name, and the row's
-//! posture is set to `blind-storage` in the same transaction as the record.
+//! posture is `blind-storage`, set in the same transaction as the record on a
+//! row that named none. [`record`] never relabels a row: a node paired under
+//! another posture (one of the person's own devices, a cosigner) is refused,
+//! not made a vault. Enrolment and the projection record only `BlindStorage`
+//! members, and `Recover` refuses a line whose key is paired under another
+//! posture before it writes anything. **The join is the exception, and it is
+//! the join's own write, not `record`'s:** `record_handed_drives` writes each
+//! handed drive's row with posture `blind-storage` (`insert_paired_node`),
+//! over whatever posture the row for that node (its label or DID) held, and
+//! only then calls `record`, which sees a `blind-storage` row. So a row the
+//! joiner already held under another posture is relabelled by the join, on
+//! the issuer's word inside the ceremony, until #105 has the join hand
+//! `record` the row it finds.
 //! What holds them together after that is what may rewrite the row:
 //! re-adding the same key keeps the posture, a different key under the label
 //! takes neither the posture nor the drive, and removing the row removes the
@@ -108,21 +124,32 @@ pub struct Drive {
 /// Idempotent: recording a drive again re-points it at the node now holding
 /// the key and leaves it otherwise as it was. Refused when `user_id` pairs no
 /// node under `vault_key`: a drive is reached through a node, and a record
-/// with none to reach would be a drive nothing can dial.
+/// with none to reach would be a drive nothing can dial. Refused, with the row
+/// left as it is, when that node is paired under a posture other than
+/// `blind-storage`: a drive is a tenancy on a vault, and a row that says the
+/// node is something else is not relabelled here (module doc).
 pub async fn record(db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32]) -> io::Result<()> {
     let mut tx = db.begin().await.map_err(db_err)?;
-    let node: Option<String> = sqlx::query_scalar("SELECT id FROM paired_nodes WHERE user_id = ? AND public_key = ? LIMIT 1")
-        .bind(user_id)
-        .bind(vault_key.as_slice())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(db_err)?;
-    let Some(node_id) = node else {
+    let node: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, posture FROM paired_nodes WHERE user_id = ? AND public_key = ? LIMIT 1")
+            .bind(user_id)
+            .bind(vault_key.as_slice())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    let Some((node_id, posture)) = node else {
         return Err(io::Error::other(format!(
             "'{user_id}' pairs no node under the vault key {}, so there is no drive to record",
             hex::encode(vault_key)
         )));
     };
+    if let Some(other) = posture.filter(|p| p != Posture::BlindStorage.as_str()) {
+        return Err(io::Error::other(format!(
+            "'{user_id}' pairs '{node_id}' under the key {} as {other}, not as a vault, so it is not \
+             recorded as a drive",
+            hex::encode(vault_key)
+        )));
+    }
     sqlx::query("UPDATE paired_nodes SET posture = ? WHERE user_id = ? AND id = ?")
         .bind(Posture::BlindStorage.as_str())
         .bind(user_id)
@@ -247,6 +274,23 @@ mod tests {
         assert!(is_drive(&db, "alice", "vault").await.unwrap());
         assert!(!is_drive(&db, "alice", "laptop").await.unwrap());
         assert!(list(&db, "bob").await.unwrap().is_empty(), "alice's drive is nobody else's");
+    }
+
+    /// **A node paired under another posture is refused, and its row is left
+    /// as it was.** One of the person's own devices (`full`) and a cosigner are
+    /// not vaults: recording either as a drive would make it a sync target and
+    /// relabel what the row says it is.
+    #[tokio::test]
+    async fn a_node_paired_as_something_else_is_refused_and_not_relabelled() {
+        let (_dir, db) = machine_db().await;
+        for (id, seed, posture) in [("laptop", 6, "full"), ("cosigner", 5, "cosigner")] {
+            pair(&db, id, key(seed), Some(posture)).await;
+            let refused = record(&db, "alice", &key(seed)).await.unwrap_err();
+            assert!(refused.to_string().contains("not as a vault"), "{refused}");
+            let row = network_db::get_paired_node_by_id(&db, "alice", id).await.unwrap().unwrap();
+            assert_eq!(row.posture.as_deref(), Some(posture), "the row was relabelled");
+        }
+        assert!(list(&db, "alice").await.unwrap().is_empty(), "a device was recorded as a drive");
     }
 
     /// A key no node carries has no drive to record.

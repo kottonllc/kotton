@@ -39,6 +39,11 @@ pub struct Recovery {
     /// recovery replaced. Either way the roots are sealed under the passphrase
     /// the recovery was given.
     pub sealed_copy_removed: bool,
+    /// Why the vault the line names was not recorded as the person's drive,
+    /// when the phrase proved and the record could not be written; `None` when
+    /// it is recorded. Said beside the success: recovering again would rotate
+    /// again.
+    pub drive_not_recorded: Option<String>,
 }
 
 /// The `identity` domain, bound to one user.
@@ -98,9 +103,9 @@ impl Identity<'_> {
 
     /// Take this identity back onto a device that holds only the phrase.
     /// See [`KottonClient::recover`].
-    pub async fn recover(&mut self, recovery_key: &str, passphrase: &str) -> io::Result<Recovery> {
+    pub async fn recover(&mut self, recovery_key: &str, passphrase: &str, vault_line: &str) -> io::Result<Recovery> {
         let u = self.user_id.clone();
-        self.client.recover(&u, recovery_key, passphrase).await
+        self.client.recover(&u, recovery_key, passphrase, vault_line).await
     }
 
     /// Rotate to a new key, retiring the old one. See [`KottonClient::rotate_identity`].
@@ -274,22 +279,30 @@ impl KottonClient {
     /// replacing a copy of the replaced key this device kept sealed under an old
     /// one ([`Recovery`]). Read `passphrase` at a terminal, as the phrase is.
     ///
-    /// Run after `login_with_recovery_key` claimed the name and `peer_add` said
-    /// where the data is. Rotates every time it runs, so run it once.
+    /// `vault_line` is the line the recovery card printed under the words
+    /// (`kotton-instance:vault:<key>@<ip>:<port>`): the daemon adds that vault as
+    /// the node to dial unless it is paired already, and records it as the
+    /// person's drive once the phrase has proved; a refusal takes back the node
+    /// it added (`kotton_device::users::recover`).
+    ///
+    /// Run after `login_with_recovery_key` claimed the name. Rotates every time
+    /// it runs, so run it once.
     pub async fn recover(
         &mut self,
         user_id: &str,
         recovery_key: &str,
         passphrase: &str,
+        vault_line: &str,
     ) -> io::Result<Recovery> {
         let request = UserRequest::Recover {
             user_id: user_id.to_string(),
             recovery_key: kotton_wire::ipc::SecretText::new(recovery_key),
             passphrase: kotton_wire::ipc::SecretText::new(passphrase),
+            vault_line: vault_line.trim().to_string(),
         };
         match self.client.send(&request).await? {
-            UserResponse::Recovered { did, new_key_hex, sealed_copy_removed } => {
-                Ok(Recovery { did, new_key_hex, sealed_copy_removed })
+            UserResponse::Recovered { did, new_key_hex, sealed_copy_removed, drive_not_recorded } => {
+                Ok(Recovery { did, new_key_hex, sealed_copy_removed, drive_not_recorded })
             }
             UserResponse::Error { message } => Err(io::Error::other(message)),
             got => Err(crate::protocol::unexpected(got)),

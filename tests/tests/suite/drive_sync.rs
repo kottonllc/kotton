@@ -175,7 +175,7 @@ async fn a_recovered_device_sees_its_vault_as_a_drive_and_introduces_the_next_de
         (phrase, drive)
     };
 
-    let (r, mut client_r) = recover_from(&phrase, USER, &drive, "vault").await;
+    let (r, mut client_r) = recover_from(&phrase, USER, &drive).await;
     assert_eq!(client_r.read_file(USER, "kept.txt").await.expect("read on R"), b"kept on the drive");
     let drives = r.daemon.drives(USER).await.expect("R's drives");
     assert_eq!(
@@ -208,7 +208,7 @@ async fn enrolment_and_recovery_record_the_same_drive() {
     assert_eq!(enrolled.len(), 1, "enrolment recorded {enrolled:?}");
     assert_eq!(enrolled[0].0, drive.pubkey_hex, "enrolment recorded another key than the vault's");
 
-    let (r, _client_r) = recover_from(&phrase, USER, &drive, "vault").await;
+    let (r, _client_r) = recover_from(&phrase, USER, &drive).await;
     let recovered = said_of(&r.daemon.drives(USER).await.expect("R's drives"));
     assert_eq!(recovered, enrolled, "recovery recorded a drive other than the one enrolment recorded");
 }

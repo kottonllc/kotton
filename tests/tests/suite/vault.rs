@@ -127,6 +127,23 @@ pub(crate) struct VaultIdentity {
     pub(crate) op_addr: SocketAddr,
 }
 
+impl VaultIdentity {
+    /// The vault's line, as the recovery card prints it under the words:
+    /// `kotton-instance:vault:<key>@<address>`. What `Recover` takes.
+    pub(crate) fn line(&self) -> String {
+        let key: [u8; 32] = hex::decode(&self.pubkey_hex)
+            .expect("the vault's key is hex")
+            .try_into()
+            .expect("the vault's key is 32 bytes");
+        kotton_wire::line::InstanceLine {
+            kind: kotton_wire::ipc::OperatedService::Vault,
+            hint: self.op_addr.to_string(),
+            key,
+        }
+        .to_text()
+    }
+}
+
 /// Enrol `vault` blind for `user` from the device behind `client`, then tell
 /// the device where the vault listens and name it as a remote. Returns the
 /// device's client, now paired.
@@ -234,6 +251,11 @@ async fn a_person_with_things(
 /// A phrase-only device recovers everything from `vault`, and the caller
 /// checks what came back.
 ///
+/// The recovery is the one `kotton id recover` and the REPL's `id recover` send:
+/// `Recover` with the vault's line, in which the daemon adds the vault as the node
+/// `vault`, proves the phrase and records the vault as the person's drive. Nothing
+/// here adds the vault or says it is a drive.
+///
 /// The cold device comes back with its client, so the caller holds it for as
 /// long as it reads and it drops at the caller's scope end, its [`Door`] and
 /// base with it. Until 2026-09-28 it was forgotten here to keep it
@@ -245,7 +267,6 @@ pub(crate) async fn recover_from(
     phrase: &str,
     user: &str,
     vault: &VaultIdentity,
-    label: &str,
 ) -> (RunningDevice, kotton::KottonClient) {
     let cold = spawn_device("cold device").await;
     let mut client = connect_when_ready(&cold.ipc, "cold client").await;
@@ -253,33 +274,27 @@ pub(crate) async fn recover_from(
         .login_with_recovery_key(phrase, Some(user.to_string()), None)
         .await
         .expect("the phrase alone claims the identity on a cold device");
-    // As `kotton id recover` does: the vault the person's line names, added as
-    // the node to dial and recorded as their drive.
-    client
-        .peer_add_drive(user, label, &vault.did, &vault.pubkey_hex, vault.op_addr)
+    let recovered = client
+        .recover(user, phrase, crate::common::TEST_PASSPHRASE, &vault.line())
         .await
-        .expect("tell the cold device where its vault is");
-    let recovered_did = client
-        .recover(user, phrase, crate::common::TEST_PASSPHRASE)
-        .await
-        .expect("recover from the phrase and the vault alone")
-        .did;
-    assert!(recovered_did.starts_with("did:kel:"), "{recovered_did}");
+        .expect("recover from the phrase and the vault's line alone");
+    assert!(recovered.did.starts_with("did:kel:"), "{}", recovered.did);
+    assert_eq!(recovered.drive_not_recorded, None, "the line's vault was not recorded as the drive");
     client.schema_register(user, &notes_schema()).await.expect("schema on cold");
     client
         .remote_add(
             user,
-            label,
+            "vault",
             RemoteBackend::Kotton {
                 peer_did: vault.did.clone(),
-                label: label.to_string(),
+                label: "vault".to_string(),
             },
             None,
         )
         .await
         .expect("remote_add on cold");
     client
-        .sync_mount(user, "local", label, Some(SyncDirection::Pull))
+        .sync_mount(user, "local", "vault", Some(SyncDirection::Pull))
         .await
         .expect("pull everything back from the vault");
     (cold, client)
@@ -315,7 +330,7 @@ async fn a_vault_keeps_what_a_device_pushes_and_gives_it_back_from_the_phrase() 
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let (_cold_device, mut cold) = recover_from(&phrase, "alice", &identity, "vault").await;
+    let (_cold_device, mut cold) = recover_from(&phrase, "alice", &identity).await;
     assert_eq!(cold.read_file("alice", "notes.txt").await.expect("file").as_slice(), NOTE);
     let recs = cold
         .record_query("alice", "com.test.notes", vec![], None, None)
@@ -417,7 +432,7 @@ async fn recovering_on_a_device_that_kept_its_sealed_copy_reseals_under_the_new_
     let device = spawn_device("device D").await;
     let mut client = connect_when_ready(&device.ipc, "client D").await;
     let phrase = a_person_with_things(&mut client, "alice", NOTE).await;
-    let (mut client, _identity) = enrol_vault(client, &vault, "alice", "vault").await;
+    let (mut client, identity) = enrol_vault(client, &vault, "alice", "vault").await;
     let base = device._base.path().to_owned();
     assert!(
         base.join("users").join("alice").join(kotton_identity::provisioning::VAULT_FILE).exists(),
@@ -428,7 +443,7 @@ async fn recovering_on_a_device_that_kept_its_sealed_copy_reseals_under_the_new_
         .expect("a key before the recovery");
 
     let recovered = client
-        .recover("alice", &phrase, NEW_PASSPHRASE)
+        .recover("alice", &phrase, NEW_PASSPHRASE, &identity.line())
         .await
         .expect("recover on the device that kept its copy");
     assert!(recovered.sealed_copy_removed, "the daemon did not say it replaced the copy");
@@ -462,11 +477,8 @@ async fn recovering_on_a_fresh_device_seals_under_the_passphrase_chosen_there() 
         .login_with_recovery_key(&phrase, Some("alice".to_string()), None)
         .await
         .expect("the phrase alone claims the identity on a cold device");
-    client
-        .peer_add("alice", "vault", &identity.did, &identity.pubkey_hex, identity.op_addr)
-        .await
-        .expect("tell the cold device where its vault is");
-    let recovered = client.recover("alice", &phrase, NEW_PASSPHRASE).await.expect("recover on a cold device");
+    let recovered =
+        client.recover("alice", &phrase, NEW_PASSPHRASE, &identity.line()).await.expect("recover on a cold device");
     assert!(!recovered.sealed_copy_removed, "a device that never held the identity had a copy to replace");
 
     only_the_chosen_passphrase_unlocks(&cold, "alice", &recovered.new_key_hex).await;
@@ -524,7 +536,7 @@ async fn a_vault_on_a_bucket_keeps_what_a_device_pushes_and_gives_it_back_from_t
         .unwrap_or(0);
     assert_eq!(on_disk, 0, "the pool's objects are on the shelf, not beside the vault");
 
-    let (_cold_device, mut cold) = recover_from(&phrase, "alice", &identity, "vault").await;
+    let (_cold_device, mut cold) = recover_from(&phrase, "alice", &identity).await;
     assert_eq!(cold.read_file("alice", "notes.txt").await.expect("file").as_slice(), NOTE);
     let recs = cold
         .record_query("alice", "com.test.notes", vec![], None, None)
@@ -603,7 +615,7 @@ async fn a_person_with_sized_files(client: &mut kotton::KottonClient, user: &str
 /// every [`SIZED`] file from it. A push that withheld a loose file rather than
 /// packing it would leave the vault holding only packs and still fail here.
 async fn every_sized_file_comes_back(phrase: &str, user: &str, identity: &VaultIdentity) {
-    let (_cold_device, mut cold) = recover_from(phrase, user, identity, "vault").await;
+    let (_cold_device, mut cold) = recover_from(phrase, user, identity).await;
     for (name, len) in SIZED {
         assert_eq!(
             cold.read_file(user, name).await.unwrap_or_else(|e| panic!("{name} from the vault: {e}")),
@@ -2966,7 +2978,7 @@ async fn recovery_works_while_the_boxs_relay_admits_only_my_devices() {
     );
     assert!(refused_by_the_rule(&a_push_at(&bx.relay_url, None).await), "a stranger is refused at the relay");
 
-    let (_cold_device, mut cold) = within_for(WHOLE, "recovering from the phrase", recover_from(&phrase, "sam", &identity, "vault")).await;
+    let (_cold_device, mut cold) = within_for(WHOLE, "recovering from the phrase", recover_from(&phrase, "sam", &identity)).await;
     assert_eq!(cold.read_file("sam", "notes.txt").await.expect("file").as_slice(), NOTE);
     assert_eq!(bx.rule_at_the_relay().await, AdmissionRule::OnlyMyDevices, "recovery ran with the rule in place");
 }
@@ -4139,15 +4151,13 @@ async fn a_landlord_drops_one_of_two_tenants(
     )
     .await
     .expect("the phrase claims the identity locally");
-    within(
-        "telling the cold device where the vault is",
-        cold_client.peer_add("alice", "vault", &alice_vault.did, &alice_vault.pubkey_hex, alice_vault.op_addr),
+    within_for(
+        WHOLE,
+        "alice's recovery",
+        cold_client.recover("alice", &alice_phrase, crate::common::TEST_PASSPHRASE, &alice_vault.line()),
     )
     .await
-    .expect("peer_add");
-    within_for(WHOLE, "alice's recovery", cold_client.recover("alice", &alice_phrase, crate::common::TEST_PASSPHRASE))
-        .await
-        .expect_err("a dropped tenant's phrase recovers nothing from this vault");
+    .expect_err("a dropped tenant's phrase recovers nothing from this vault");
 
     // Alicex keeps everything: his chain, his sealed copy and his packs are byte
     // for byte what they were ...
@@ -4176,7 +4186,7 @@ async fn a_landlord_drops_one_of_two_tenants(
     .expect("alicex still writes");
     assert!(pushed.pushed >= 1);
     // ... and his phrase still recovers everything from here.
-    let (_recovered_device, mut recovered) = within_for(WHOLE, "alicex's recovery", recover_from(&alicex_phrase, "alicex", &alicex_vault, "vault")).await;
+    let (_recovered_device, mut recovered) = within_for(WHOLE, "alicex's recovery", recover_from(&alicex_phrase, "alicex", &alicex_vault)).await;
     assert_eq!(
         within("alicex's note", recovered.read_file("alicex", "notes.txt")).await.expect("file").as_slice(),
         b"alicex's note"
@@ -4275,7 +4285,7 @@ async fn two_people_keep_at_one_vault_and_each_recovers_their_own() {
         .into_iter()
         .enumerate()
     {
-        let (_cold_device, mut cold) = recover_from(&phrases[i], user, &identities[i], "vault").await;
+        let (_cold_device, mut cold) = recover_from(&phrases[i], user, &identities[i]).await;
         assert_eq!(cold.read_file(user, "notes.txt").await.expect("file").as_slice(), note);
     }
 }
@@ -4338,7 +4348,7 @@ async fn a_person_moves_vaults_and_the_first_landlord_is_never_asked() {
     assert!(!a_path.exists(), "nothing of A survives");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let (_cold_device, mut cold) = recover_from(&phrase, "alice", &identity_b, "vault-b").await;
+    let (_cold_device, mut cold) = recover_from(&phrase, "alice", &identity_b).await;
     assert_eq!(cold.read_file("alice", "notes.txt").await.expect("file").as_slice(), NOTE);
     let recs = cold
         .record_query("alice", "com.test.notes", vec![], None, None)
