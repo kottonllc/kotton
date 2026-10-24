@@ -1,7 +1,7 @@
 # Kotton
 
-Nine lines at a terminal on Linux: install, an identity, a folder kept, a second device, a host
-of your own, and recovery. Each comment says what happens when you press Enter.
+Nine lines at a terminal on Linux: install, an identity, a folder kept, a host of your own, a
+second device, and recovery. Each comment says what happens when you press Enter.
 
 ```sh
 # Downloads the release archive, checks its signature against the key in the
@@ -21,19 +21,20 @@ kotton id create alice
 # how many went in. Run it again and it copies only what is new or changed.
 kotton keep ~/Photos
 
-# Prints a code and waits. On the other device, after installing: kotton id join alice <code>
-# That device shows six digits; type them here. kotton sync on either then
-# brings the other's things over.
-kotton device add
-
 # Makes a key for your relay and one for your vault, and prints two lines. Paste
 # both on an always-on machine with a public address, as root; it prints one line back.
 kotton mint host
 
-# Tells this device where its relay and vault are, and asks "keep your things
-# here too?". Answer y: your other devices now reach this one from anywhere, and
-# the vault keeps a sealed copy it cannot read.
+# Tells this device where its relay and vault are, and asks nothing. Your other
+# devices now reach this one from anywhere, and kotton sync sends your things to
+# the vault, sealed so it cannot read them.
 kotton enrol <the line the host printed>
+
+# After the host, since a device learns your vault as it joins. Prints a code and
+# waits. On the other device, after installing: kotton id join alice <code>
+# That device shows six digits; type them here. Your things arrive there on
+# demand, when you run kotton sync on it.
+kotton device add
 
 # Prints twenty-four words and one line, once. Write both on paper.
 kotton id add-recovery alice
@@ -159,16 +160,11 @@ Your desktop reads the row as the relay's line and the vault's. It dials each at
 its line names and holds it to the key its line names, then asks it, as its operator, under the
 key you minted for it: an instance proving another key, or refusing that one, is refused and
 nothing of it is kept. Then it keeps both credentials sealed in your store, sets the relay's
-first rule, and tells the vault to stand at the relay. It ends on one question:
-
-```text
-keep your things here too? [y/N]
-```
-
-`y` makes this desktop a tenant of your own vault and runs the first sync; and a desktop that
-stands at no relay yet then stands at yours, held to its key, so your other devices reach it
-away from its own network. Anything else changes nothing, and `kotton vault invite --me` takes
-the offer later.
+first rule, and tells the vault to stand at the relay. It asks you nothing: a vault is where
+your things are kept. It makes this desktop a tenant of your own vault, and records the vault
+as the place your things go, so `kotton sync` sends them there, sealed, each time you run it.
+A desktop that stands at no relay yet then stands at yours, held to its key, so your other
+devices reach it away from its own network.
 
 From your PC, `curl http://<ip>:7700/health` answers `{"address_entries":0,"status":"ok"}`:
 the relay's port is reachable, not merely bound.

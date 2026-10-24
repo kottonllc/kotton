@@ -18,7 +18,7 @@
 //! 3. **paste the lines** creation returned, once, in one `enrol` and in
 //!    either order — `enrol <the vault's line> <the relay's line>`
 //!    (`TASK-enrol-takes-the-lines-an-instance-printed-and-a-vaults-ends-on-an-offer`)
-//!    — and say yes to *keep your things here too*.
+//!    — which asks nothing: a vault is where things are kept (#57).
 //!
 //! The desktop is a daemon with no window, spoken to through the REPL's own
 //! registry, as `kotton` at a terminal speaks to it. It ends with the vault
@@ -265,11 +265,12 @@ async fn a_second_nameless_mint_typed_at_the_repl_is_refused_by_the_daemon() {
 /// told it. Both lines are pasted once, in one `enrol`, the vault's first:
 /// each completes the one key waiting for its kind, with no name, the relay
 /// before the vault, so the vault is told where to stand at once — each said
-/// as reached and its key matched. The vault's completion ends on the offer,
-/// answered yes: `vault invite --me` and the first sync, and the vault's own
-/// door says it stands at the relay, by the relay's key, and keeps this
-/// person's things; and this device, which stood at no relay, now stands at
-/// the relay the same enrol kept
+/// as reached and its key matched. The vault's completion asks nothing (#57):
+/// it runs `vault invite --me`, which records the vault as this person's
+/// drive, and syncs nothing; a `sync` asked for afterwards syncs that one
+/// drive. The vault's own door says it stands at the relay, by the relay's
+/// key, and keeps this person's things; and this device, which stood at no
+/// relay, now stands at the relay the same enrol kept
 /// (`TASK-enrol-takes-the-lines-an-instance-printed-and-a-vaults-ends-on-an-offer`,
 /// Done-when (1), (3)). Then, with one of each held, `relay rule
 /// only_my_devices` and `vault people` are typed with no name and each is said
@@ -372,7 +373,8 @@ async fn a_headless_desktop_operates_a_vault_and_a_relay_from_the_terminal_alone
     };
     assert_eq!(stands_at(&repl).await, None, "this device stood at a relay before the enrol");
 
-    // 3. Paste both lines once, the vault's first, and take the offer.
+    // 3. Paste both lines once, the vault's first. An answer is given, and
+    // left: the enrol asks nothing (#57).
     repl.asking = kotton_shell::Asking::Given(["y".to_string()].into());
     let said = typed(&mut repl, &format!("enrol {} {}", vault_line.to_text(), relay_line.to_text())).await;
     let fields = |f: &str| -> Vec<String> {
@@ -390,12 +392,12 @@ async fn a_headless_desktop_operates_a_vault_and_a_relay_from_the_terminal_alone
     assert_eq!(fields("reached from here"), vec!["yes".to_string(), "yes".to_string()], "{said:?}");
     assert_eq!(fields("its key"), vec!["matched".to_string(), "matched".to_string()], "{said:?}");
     assert!(fields("not yet standing").is_empty(), "the relay was completed first, so the vault stands: {said:?}");
-    assert_eq!(repl.asking, kotton_shell::Asking::Given(Default::default()), "the offer was put");
+    assert_eq!(repl.asking, kotton_shell::Asking::Given(["y".to_string()].into()), "the enrol asked something: {said:?}");
     assert!(
-        said.iter().any(|o| matches!(o, Out::Confirm { action, .. } if action.starts_with("first sync"))),
-        "a yes is the invite and the first sync: {said:?}"
+        !said.iter().any(|o| matches!(o, Out::Confirm { action, .. } if action.starts_with("first sync"))),
+        "the enrol synced: a drive syncs when the person asks: {said:?}"
     );
-    // The yes also stands this device at the relay the same enrol kept, held to
+    // The enrol also stands this device at the relay the same enrol kept, held to
     // its key: said once, nothing said to have failed, and this device's own
     // relay is now the host's.
     assert!(!said.iter().any(|o| matches!(o, Out::Fail { .. })), "the enrol said something failed: {said:?}");
@@ -406,7 +408,7 @@ async fn a_headless_desktop_operates_a_vault_and_a_relay_from_the_terminal_alone
             _ => None,
         })
         .collect();
-    assert_eq!(stood, vec![&relay_url], "the yes did not say this device stands at the relay it kept: {said:?}");
+    assert_eq!(stood, vec![&relay_url], "the enrol did not say this device stands at the relay it kept: {said:?}");
     assert_eq!(stands_at(&repl).await, Some(relay_url.clone()), "this device does not stand at the host's relay: {said:?}");
     assert_eq!(waiting(typed(&mut repl, "mint").await), Vec::<Vec<String>>::new(), "each key enrolled is no longer waiting");
 
@@ -429,10 +431,18 @@ async fn a_headless_desktop_operates_a_vault_and_a_relay_from_the_terminal_alone
     }
     match asked.send(&VaultRequest::Tenants).await.expect("the vault's door answers") {
         UserResponse::VaultTenants { tenants } => {
-            assert!(tenants.iter().any(|t| t.user_id == USER), "the yes did not make this desktop a tenant: {tenants:?}")
+            assert!(tenants.iter().any(|t| t.user_id == USER), "the enrol did not make this desktop a tenant: {tenants:?}")
         }
         other => panic!("{other:?}"),
     }
+    // The vault is this person's one drive, and a `sync` asked for syncs it.
+    let (job, drives) = {
+        let mut client = repl.client.lock().await;
+        client.sync_drives(USER).await.expect("the sync asked for")
+    };
+    assert_eq!(drives, 1, "the enrol did not record the vault as this person's one drive");
+    let synced = repl.client.lock().await.sync_await(USER, job, 60).await;
+    assert!(synced.is_ok(), "the sync asked for did not reach the vault: {synced:?}");
 
     // One relay and one vault held: the operating verbs name neither
     // (`docs/use/run-a-relay.md`, `docs/use/run-a-vault.md`, "Using it").
