@@ -153,6 +153,7 @@ async fn dispatch(ctx: &ControlContext, request: VaultRequest) -> io::Result<Han
                 JoinPolicy::BlindOnly,
             )
             .await
+            .map(HandlerOutput::Stream)
         }
         // The join hands the joining client a session token; binding it is the
         // client's next frame. A vault has no verb that needs a session, so the
@@ -406,7 +407,6 @@ pub async fn mint_invite(
         JoinPolicy::BlindOnly,
     )
     .await
-    .map(HandlerOutput::into_stream)
 }
 
 async fn invite_confirmed_on_sight(

@@ -2,18 +2,18 @@
 //! Contact pairing **ceremony entry points**, the person-to-person
 //! counterpart of [`super::pairing`].
 //!
-//! Both verbs stream. Each builds this user's identity as the other side will
-//! see it, runs [`kotton_peer::contact_pairing`] over the node's relay, and on
-//! the human's yes writes what came back: one `contact` member (a key that may
-//! be messaged, and nothing else) and the contact's key log
-//! beside it. A delivery from them reaches the pair's own door, which the
+//! Both verbs stream, and their type is the stream (see [`super::pairing`]
+//! for why a refusal here cannot be one frame left open). Each builds this
+//! user's identity as the other side will see it, runs
+//! [`kotton_peer::contact_pairing`] over the node's relay, and on the human's
+//! yes writes what came back: one `contact` member (a key that may be
+//! messaged, and nothing else) and the contact's key log beside it. A delivery from them reaches the pair's own door, which the
 //! mailbox registry opens from that member; the device allowlist is not theirs
 //! to be on.
 
 use crate::users::DeviceUsers as _;
 use crate::DeviceRuntime;
 use kotton_common::time::now_secs;
-use kotton_ipc::HandlerOutput;
 use kotton_peer::contact_pairing::{self, ContactIdentity, PairedContact};
 use kotton_peer::daemon::nodes::{ceremony_failure, load_signing_key, PendingConfirms, StreamingConfirmer};
 use kotton_peer::membership::Membership as _;
@@ -149,7 +149,7 @@ async fn run(
     as_name: Option<String>,
     code: Option<String>,
     ttl_seconds: u64,
-) -> io::Result<HandlerOutput<UserResponse>> {
+) -> io::Result<mpsc::Receiver<UserResponse>> {
     let (ours, key) = own_identity(&runtime, users.as_ref(), &user_id, as_name).await?;
     // The ceremony meets at this node's relay; the note is what the other
     // side's card keeps.
@@ -228,7 +228,7 @@ async fn run(
         };
         let _ = tx.send(frame).await;
     });
-    Ok(HandlerOutput::Stream(rx))
+    Ok(rx)
 }
 
 /// `ContactPairStart`: print a code and wait for the other person.
@@ -239,7 +239,7 @@ pub async fn handle_contact_pair_start(
     user_id: String,
     as_name: Option<String>,
     ttl_seconds: u64,
-) -> io::Result<HandlerOutput<UserResponse>> {
+) -> io::Result<mpsc::Receiver<UserResponse>> {
     run(Side::Start, runtime, users, pending, user_id, as_name, None, ttl_seconds).await
 }
 
@@ -251,7 +251,7 @@ pub async fn handle_contact_pair_join(
     user_id: String,
     code: String,
     as_name: Option<String>,
-) -> io::Result<HandlerOutput<UserResponse>> {
+) -> io::Result<mpsc::Receiver<UserResponse>> {
     // The joiner's wait is the SAS dialog; the dial itself has its own window.
     run(Side::Join, runtime, users, pending, user_id, as_name, Some(code), 180).await
 }

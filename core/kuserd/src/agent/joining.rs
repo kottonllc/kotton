@@ -59,7 +59,6 @@
 
 use std::sync::Arc;
 
-use kotton_ipc::provider::acceptor::HandlerOutput;
 use kotton_wire::runner::{RunnerJoiningState, JOINING_FRAME_KIND};
 use kotton_wire::UserResponse;
 
@@ -225,17 +224,12 @@ impl Ceremonies {
         .await;
 
         let mut rx = match out {
-            Ok(HandlerOutput::Stream(rx)) => rx,
+            Ok(rx) => rx,
             // A ceremony that refuses before it starts still owes the screen a
             // sentence, for the reason `ceremony::drive` says: an unopenable
-            // one that says nothing looks exactly like one still thinking.
-            Ok(HandlerOutput::Single(resp)) => {
-                let state = as_join_state(resp, &named).unwrap_or(RunnerJoiningState::Failed {
-                    reason: UNEXPLAINED.to_string(),
-                });
-                self.finish_join(&user_id, state).await;
-                return;
-            }
+            // one that says nothing looks exactly like one still thinking. The
+            // handler's type is the stream, so its refusal is this `Err` or a
+            // frame on the stream, never a lone frame (#120).
             Err(e) => {
                 self.finish_join(
                     &user_id,
@@ -378,13 +372,6 @@ const NO_OFFER: &str = "There is no relay to stand at: nothing this window admit
 
 /// What `admit` says when handed nothing.
 const NO_INVITE: &str = "That is empty. An invite is one line, and it begins `kotton-invite:`.";
-
-/// What a frame with no words of its own is turned into.
-///
-/// Reachable only if the ceremony ends without saying why, which is a fault
-/// rather than an outcome — and it still gets a sentence, because a person
-/// staring at a stopped screen is owed one either way.
-const UNEXPLAINED: &str = "It stopped without saying why. Nothing was joined.";
 
 /// The name a relay is shown under: its address without the scheme.
 ///
