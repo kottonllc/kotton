@@ -343,14 +343,17 @@ impl KottonClient {
     /// as, so the pool and the name it syncs under cannot differ — and admit it
     /// here, held to the vault key the credential pins
     /// ([`Self::device_admit_as_operator_stream`]). No words are typed and no
-    /// digits are asked. The vault's refusal to mint (it already keeps for
-    /// `user_id`, or no credential is kept for `vault`) is the `Err`.
+    /// digits are asked. A vault that keeps for `user_id` already mints
+    /// nothing and says so in its own answer (`VaultKeepsAlready`), which is
+    /// [`InvitedMe::KeptAlready`]: what this act asks for is so already (#108).
+    /// Any other refusal to mint (no credential is kept for `vault`, the vault
+    /// stands at no relay) is the `Err`.
     pub async fn vault_invite_me_stream(
         &mut self,
         user_id: &str,
         vault: &str,
         ttl_seconds: u64,
-    ) -> io::Result<tokio::sync::mpsc::Receiver<UserResponse>> {
+    ) -> io::Result<InvitedMe> {
         let verb = kotton_wire::ipc::OperatorVerb::Invite {
             pool: user_id.to_string(),
             quota: None,
@@ -358,11 +361,13 @@ impl KottonClient {
         };
         let code = match self.as_operator(user_id, vault, verb).await? {
             UserResponse::PairAdvertising { code, .. } => code.expose().to_string(),
+            UserResponse::VaultKeepsAlready { .. } => return Ok(InvitedMe::KeptAlready),
             UserResponse::Error { message } => return Err(io::Error::other(message)),
             got => return Err(crate::protocol::unexpected(got)),
         };
         self.device_admit_as_operator_stream(user_id, &code, ttl_seconds, vault)
             .await
+            .map(InvitedMe::Admitting)
     }
 
     /// Aggregated network status: peers, both gateways, rendezvous, and sync.
@@ -393,6 +398,18 @@ impl KottonClient {
             got => Err(crate::protocol::unexpected(got)),
         }
     }
+}
+
+/// What `vault invite --me` came to at the vault
+/// ([`crate::KottonClient::vault_invite_me_stream`]).
+#[derive(Debug)]
+pub enum InvitedMe {
+    /// The vault minted an invite for this person, and this device's admit is
+    /// running: its frames, as a ceremony streams them.
+    Admitting(tokio::sync::mpsc::Receiver<UserResponse>),
+    /// The vault keeps for this person's name already, in its own word, and
+    /// minted nothing: the keep the act asks for is done.
+    KeptAlready,
 }
 
 /// Where the local-network door stands, as `LocalDoor` answers.

@@ -2325,7 +2325,10 @@ async fn say(
 /// Send `requests` one after another, each only once the one before it was
 /// answered and not refused. The answer is the first request's — the verb's
 /// own, the invite's text for an invite — unless one is refused, and then it
-/// is that refusal, and nothing after it is sent.
+/// is that refusal, and nothing after it is sent. A refusal is an `Error`, or
+/// the vault's typed answer that it keeps the invite's name already
+/// (`VaultKeepsAlready`, #108): either way nothing was minted, so no number
+/// follows it.
 async fn in_order<F, Fut>(requests: Vec<UserRequest>, mut send: F) -> anyhow::Result<UserResponse>
 where
     F: FnMut(UserRequest) -> Fut,
@@ -2334,7 +2337,7 @@ where
     let mut answer = None;
     for request in requests {
         let said = send(request).await?;
-        if matches!(said, UserResponse::Error { .. }) {
+        if matches!(said, UserResponse::Error { .. } | UserResponse::VaultKeepsAlready { .. }) {
             return Ok(said);
         }
         answer.get_or_insert(said);
@@ -3439,16 +3442,15 @@ mod tests {
         (sent.into_inner().unwrap(), answer)
     }
 
-    /// **A refused invite resets nobody's number.** The vault refuses an invite naming a pool it already keeps;
-    /// the number is asked for only after the invite is answered, so a refusal
-    /// is the whole answer and no `SetQuota` is sent. An invite the vault mints
+    /// **A refused invite resets nobody's number.** The vault refuses an invite
+    /// naming a pool it already keeps (`VaultKeepsAlready`), or for any other
+    /// cause in words; the number is asked for only after the invite is
+    /// answered, so a refusal is the whole answer and no `SetQuota` is sent. An invite the vault mints
     /// is answered with the invite's text — not the number's readout, which
     /// comes second — and a number refused after it is what the landlord reads.
     #[tokio::test]
     async fn a_refused_invite_sends_no_number_and_a_minted_one_answers_with_the_invite() {
-        let refusal = UserResponse::Error {
-            message: "this vault already keeps for 'sam'".into(),
-        };
+        let refusal = UserResponse::VaultKeepsAlready { user_id: "sam".into() };
         let minted = UserResponse::PairAdvertising {
             code: SecretText::new("http://relay#three-words-here"),
             expires_at: 1,
@@ -3457,7 +3459,10 @@ mod tests {
 
         let (sent, answer) = an_invite_answered(refusal.clone(), readout.clone()).await;
         assert_eq!(sent, ["DeviceInvite"], "a refused invite sent the number after it");
-        assert!(matches!(answer, UserResponse::Error { ref message } if message.contains("already keeps")));
+        assert!(matches!(answer, UserResponse::VaultKeepsAlready { ref user_id } if user_id == "sam"));
+        let other_refusal = UserResponse::Error { message: "this vault stands at no relay".into() };
+        let (sent, _) = an_invite_answered(other_refusal, readout.clone()).await;
+        assert_eq!(sent, ["DeviceInvite"], "an invite refused in words sent the number after it");
 
         let (sent, answer) = an_invite_answered(minted.clone(), readout).await;
         assert_eq!(sent, ["DeviceInvite", "SetQuota"]);
@@ -3466,7 +3471,8 @@ mod tests {
             "the answer is the invite: {answer:?}"
         );
 
-        let (_, answer) = an_invite_answered(minted, refusal).await;
+        let number_refused = UserResponse::Error { message: "the number does not fit".into() };
+        let (_, answer) = an_invite_answered(minted, number_refused).await;
         assert!(matches!(answer, UserResponse::Error { .. }), "a refused number is not hidden behind the invite");
     }
 

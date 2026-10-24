@@ -565,6 +565,19 @@ pub enum UserResponse {
         held: u64,
         quota: u64,
     },
+    /// An invite refused because this vault already keeps a pool named
+    /// `user_id`: an invite admits someone new, under a name nobody holds
+    /// here, and the tenant's own devices need none (`kvaultd::control::mint_invite`).
+    /// Typed rather than an `Error` string because one caller reads it as done,
+    /// not refused: `vault invite --me` asks the vault to keep this person's
+    /// things, and a vault that keeps them already has (#108). Every other
+    /// reader of an invite's answer says it as a refusal, in
+    /// [`vault_keeps_already_said`]: `kvaultd invite` at the vault's own door,
+    /// and on the operator's desktop `vault invite <v> <name>` and a guest's
+    /// `landlord.invite`.
+    VaultKeepsAlready {
+        user_id: String,
+    },
     /// Answer to the door's `VaultRequest::Tenants`: every tenant the vault
     /// keeps anything for, by name, with bytes held, quota and a device count.
     VaultTenants {
@@ -1316,6 +1329,16 @@ pub enum UserResponse {
     SurfaceClosed {
         app_id: String,
     },
+}
+
+/// The vault's refusal of an invite naming `user_id`, a pool it keeps
+/// ([`UserResponse::VaultKeepsAlready`]), in the one sentence every reader
+/// that refuses on it says.
+pub fn vault_keeps_already_said(user_id: &str) -> String {
+    format!(
+        "this vault already keeps for '{user_id}' — an invite admits someone new, so it takes a name nobody holds \
+         here; their own devices need none"
+    )
 }
 
 /// A handler's error, as the frame a door answers it with

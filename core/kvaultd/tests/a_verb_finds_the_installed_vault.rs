@@ -305,6 +305,25 @@ fn a_verb_typed_bare_reaches_the_installed_vault_and_is_refused_in_one_sentence_
     assert!(err.contains("`enrol <the vault's line>`"), "{}", said(&out));
     assert!(!err.contains("vault.env"), "{}", said(&out));
     assert!(!String::from_utf8_lossy(&out.stdout).contains("invite="), "{}", said(&out));
+    // A name the vault keeps is refused before the relay is looked for: the
+    // vault's typed answer (`VaultKeepsAlready`, #108), said in one sentence,
+    // exit 1. `sam` is written into the registry the vault reads at each invite
+    // (`keeps_someone_as`), as a join's save writes it.
+    let system = b.root.join("var/lib/kotton-vault/system");
+    let mut registry = kotton_device::registry::load_users(&system).unwrap();
+    registry.users.push(
+        serde_json::from_value(serde_json::json!({
+            "user_id": "sam",
+            "did": "did:kel:sam",
+            "created_at": { "secs_since_epoch": 1, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 1, "nanos_since_epoch": 0 },
+        }))
+        .unwrap(),
+    );
+    kotton_device::registry::save_users(&system, &registry).unwrap();
+    let out = typed(&b.bin(), None, &[], &["invite", "sam", "--ttl", "5"]);
+    refused_in_one_sentence(&out, "this vault already keeps for 'sam' — an invite admits someone new");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("invite="), "{}", said(&out));
 
     // The same binary outside an install reads no file, and looks where the login says.
     let out = typed(Path::new(env!("CARGO_BIN_EXE_kvaultd")), None, &[], &["tenants"]);
