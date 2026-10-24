@@ -176,7 +176,7 @@ async fn dispatch(ctx: &ControlContext, request: VaultRequest) -> io::Result<Han
             user_id,
             ttl_seconds,
             as_name,
-        } => mint_invite(ctx, user_id, ttl_seconds, as_name).await,
+        } => mint_invite(ctx, user_id, ttl_seconds, as_name).await.map(HandlerOutput::Stream),
         VaultRequest::PairConfirmCode { token, matches, .. } => Ok(HandlerOutput::Single(
             kotton_peer::daemon::nodes::confirm_code(&ctx.pending_confirms, token.expose().to_owned(), matches).await?,
         )),
@@ -354,6 +354,13 @@ fn keeps_someone_as(peer: &PeerContext, user_id: &str) -> io::Result<bool> {
 /// says whom the vault keeps for; a guess from its people list disagrees with
 /// it once a tenant has withdrawn every device.
 ///
+/// **Every answer is a stream, and a refusal is one that ends after it.** The
+/// terminal reads an invite as a stream, until the door closes it
+/// (`kotton_ipc::HandlerOutput::into_stream`). A refusal answered as one
+/// frame left the door open for a next request the terminal never sends, so
+/// `kvaultd invite` waited forever on any refusal it did not name (#112). The
+/// type is a stream so no answer here can be otherwise.
+///
 /// **An invite needs a relay to meet at, and a vault that has none says so.**
 /// This is the only place a vault checks: `handle_device_invite` takes the URL
 /// checked here rather than reading its own, and refuses nothing about it
@@ -368,16 +375,17 @@ pub async fn mint_invite(
     user_id: String,
     ttl_seconds: u64,
     as_name: Option<String>,
-) -> io::Result<HandlerOutput<UserResponse>> {
+) -> io::Result<tokio::sync::mpsc::Receiver<UserResponse>> {
     let peer = &ctx.peer;
     if keeps_someone_as(peer, &user_id)? {
-        return Ok(HandlerOutput::Single(UserResponse::VaultKeepsAlready { user_id }));
+        return Ok(HandlerOutput::Single(UserResponse::VaultKeepsAlready { user_id }).into_stream());
     }
     let relay_url = peer.runtime.reachability().nat().relay_url;
     if relay_url.is_empty() {
         return Ok(HandlerOutput::Single(UserResponse::Error {
             message: NO_RELAY.to_string(),
-        }));
+        })
+        .into_stream());
     }
     let users: Arc<dyn kotton_device::users::residency::Residency> = Arc::new(peer.pools.clone());
     kotton_device::users::pairing::handle_device_invite(
@@ -398,6 +406,7 @@ pub async fn mint_invite(
         JoinPolicy::BlindOnly,
     )
     .await
+    .map(HandlerOutput::into_stream)
 }
 
 async fn invite_confirmed_on_sight(
@@ -409,14 +418,15 @@ async fn invite_confirmed_on_sight(
 ) -> UserResponse {
     let pool = user_id.clone();
     match mint_invite(ctx, user_id, ttl_seconds, as_name).await {
-        Ok(HandlerOutput::Stream(mut rx)) => {
+        // A refusal is the first frame of a stream that then ends, and the
+        // ceremony read after it ends at once.
+        Ok(mut rx) => {
             let first = rx.recv().await;
             tokio::spawn(confirmed_on_sight(rx, Arc::clone(&ctx.pending_confirms), ctx.shown.clone(), *key, pool));
             first.unwrap_or_else(|| UserResponse::Error {
                 message: "the vault ended the invite before minting it".to_string(),
             })
         }
-        Ok(HandlerOutput::Single(answer)) => answer,
         Err(e) => UserResponse::Error {
             message: e.to_string(),
         },
@@ -541,7 +551,8 @@ pub(crate) mod tests {
     /// doors, before anything is minted** (`TASK-networking-is-the-drawn-one`,
     /// 2026-09-23). The operator's key over the wire and the terminal's
     /// `kvaultd invite` at the door run one body, so both answer the refusal,
-    /// in one frame, with no invite in it. A name nobody holds is not refused
+    /// in one frame, with no invite in it; at the door that frame ends the
+    /// stream (#112). A name nobody holds is not refused
     /// by name: it reaches the ceremony, which a vault with no relay then
     /// refuses for that — so what refuses `alice` is that she is kept, and not
     /// every invite.
@@ -570,20 +581,41 @@ pub(crate) mod tests {
             UserResponse::VaultKeepsAlready { user_id } => assert_eq!(user_id, "alice"),
             other => panic!("the operator's key minted an invite naming a kept pool: {other:?}"),
         }
-        match dispatch(
-            ctx,
-            VaultRequest::DeviceInvite {
-                user_id: "alice".into(),
-                ttl_seconds: 60,
-                as_name: None,
-            },
-        )
-        .await
-        {
-            Ok(HandlerOutput::Single(UserResponse::VaultKeepsAlready { user_id })) => assert_eq!(user_id, "alice"),
-            Ok(HandlerOutput::Single(other)) => panic!("the door answered {other:?}"),
-            Ok(HandlerOutput::Stream(_)) => panic!("the terminal's door minted an invite naming a kept pool"),
+        // At the terminal's door the refusal is the one frame of a stream
+        // that then ends (#112): `kvaultd invite` reads until the door closes.
+        async fn ended(rx: &mut tokio::sync::mpsc::Receiver<UserResponse>) -> bool {
+            matches!(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await, Ok(None))
+        }
+        let at_the_door = |user_id: &str| {
+            dispatch(
+                ctx,
+                VaultRequest::DeviceInvite {
+                    user_id: user_id.to_string(),
+                    ttl_seconds: 60,
+                    as_name: None,
+                },
+            )
+        };
+        let mut rx = match at_the_door("alice").await {
+            Ok(HandlerOutput::Stream(rx)) => rx,
+            Ok(HandlerOutput::Single(other)) => panic!("the door answered a stream with one frame: {other:?}"),
             Err(e) => panic!("the door failed rather than refusing: {e}"),
+        };
+        match rx.recv().await {
+            Some(UserResponse::VaultKeepsAlready { user_id }) => assert_eq!(user_id, "alice"),
+            other => panic!("the terminal's door minted an invite naming a kept pool: {other:?}"),
+        }
+        assert!(ended(&mut rx).await, "the door's stream went on after its refusal");
+        if ctx.peer.runtime.reachability().nat().relay_url.is_empty() {
+            // The other refusal, a vault that stands at no relay, ends its stream too.
+            let Ok(HandlerOutput::Stream(mut rx)) = at_the_door("bob").await else {
+                panic!("the door answered a stream with one frame");
+            };
+            assert!(
+                matches!(rx.recv().await, Some(UserResponse::Error { ref message }) if message == NO_RELAY),
+                "a vault with no relay minted an invite"
+            );
+            assert!(ended(&mut rx).await, "the door's stream went on after its refusal");
         }
 
         match landlord(ctx, &[1u8; 32], invite("bob")).await {

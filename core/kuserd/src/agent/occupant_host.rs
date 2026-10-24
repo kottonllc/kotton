@@ -1907,15 +1907,18 @@ mod message_tests {
 }
 
 /// What the guest is told of the vault's answer to `landlord_invite`: the
-/// invite's text, or the refusal in the vault's own words. A name the vault
-/// keeps is refused here, as everywhere but `vault invite --me` (#108): a
-/// guest's invite admits someone new.
+/// invite's text, and any other answer as a refusal, said in
+/// [`kotton_wire::ipc::answer_said`]. A name the vault keeps is refused here,
+/// as everywhere but `vault invite --me` (#108): a guest's invite admits
+/// someone new.
+///
+/// **The invite is read; nothing else is.** There is no list of refusals here
+/// to miss one a release adds (#114): anything but the invite is not one, and
+/// is said in the vault's words where it carries them, by its name where not.
 fn invite_answered(answer: UserResponse) -> Result<String, String> {
     match answer {
         UserResponse::PairAdvertising { code, .. } => Ok(code.expose().to_string()),
-        UserResponse::VaultKeepsAlready { user_id } => Err(kotton_wire::ipc::vault_keeps_already_said(&user_id)),
-        UserResponse::Error { message } => Err(message),
-        other => Err(format!("landlord.invite: an answer this does not read: {other:?}")),
+        refused => Err(kotton_wire::ipc::answer_said(&refused)),
     }
 }
 
@@ -1941,6 +1944,22 @@ mod a_guests_invite {
         };
         assert_eq!(invite_answered(minted).as_deref(), Ok("kotton-invite:vault:the-words"));
         assert_eq!(invite_answered(UserResponse::Error { message: "no relay".into() }), Err("no relay".to_string()));
+    }
+
+    /// **A refusal no reader names is refused to the guest and said, not
+    /// printed** (#114). `VaultFull` stands in for a typed refusal a later
+    /// release adds: the guest is told no invite, in `answer_said`'s words,
+    /// with none of the answer's fields. Nothing follows it at the vault
+    /// either: `landlord_invite` speaks through `operator::in_order`, which
+    /// sends the number only on the invite
+    /// (`an_invite_answered_with_a_refusal_nobody_names_sends_no_number`).
+    #[test]
+    fn a_refusal_nobody_names_is_refused_to_the_guest_and_said() {
+        let unnamed = UserResponse::VaultFull { held: 3, quota: 2 };
+        let said = invite_answered(unnamed.clone()).expect_err("an answer other than the invite was taken as one");
+        assert_eq!(said, kotton_wire::ipc::answer_said(&unnamed));
+        assert!(said.starts_with("the vault answered `VaultFull`"), "{said}");
+        assert!(!said.contains('{') && !said.contains("does not read"), "{said}");
     }
 }
 
