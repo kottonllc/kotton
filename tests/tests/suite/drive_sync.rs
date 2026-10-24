@@ -382,18 +382,33 @@ pub(crate) async fn tell_of_the_drive(client: &mut kotton::KottonClient, user: &
 }
 
 /// **A drive serving another key domain's packs**: what the key-domain gate is
-/// for, now that a device syncs only with a drive. Two people both named
-/// `user` — the one behind `owner`, and the one behind `other` — each keep a
-/// drive of their own, enrolled the way a person enrols one. The owner keeps
-/// three files on theirs; then the other's vault is made to serve the owner's
-/// pool as the other's own: a landlord's mistake or malice, which a vault that
-/// cannot open what it holds cannot itself notice. Returns both clients, the
-/// three files' names and contents, and both vaults, which stay up while held.
+/// for, now that a device syncs only with a drive.
+///
+/// What runs. Two people both named `user` — the one behind `owner`, and the
+/// one behind `other` — each enrol a vault as their own drive, the way a
+/// person enrols one. The owner keeps three files on theirs. The other keeps a
+/// file on theirs too, so their vault records the other's key domain for the
+/// mount (a vault records it on a mount's first sealed write). Then the
+/// other's vault is made to serve the owner's pool whole, as it rests on the
+/// owner's vault: its packs, and the key domain recorded for them — a
+/// landlord's mistake or malice, which a vault that cannot open what it holds
+/// cannot itself notice. A pull by the other then meets objects the vault says
+/// are in the owner's key domain, which the other's device refuses at the
+/// boundary (`KottonPeerObjectStorage::get_sealed`).
+///
+/// Returns both clients, the owner's three files, the two key domains (the
+/// owner's, then the other's), and both vaults, which stay up while held.
 pub(crate) async fn a_drive_serving_another_domains_packs(
     owner: kotton::KottonClient,
     other: kotton::KottonClient,
     user: &str,
-) -> (kotton::KottonClient, kotton::KottonClient, Vec<(String, Vec<u8>)>, (RunningVault, RunningVault)) {
+) -> (
+    kotton::KottonClient,
+    kotton::KottonClient,
+    Vec<(String, Vec<u8>)>,
+    (String, String),
+    (RunningVault, RunningVault),
+) {
     let owners_vault = spawn_vault("the owner's vault").await;
     let others_vault = spawn_vault("the other's vault").await;
     let (mut owner, _) = enrol_vault_from(owner, "owners-device", &owners_vault, user, "vault").await;
@@ -405,13 +420,38 @@ pub(crate) async fn a_drive_serving_another_domains_packs(
         .sync_mount(user, "local", "vault", Some(SyncDirection::Push))
         .await
         .expect("the owner keeps their files on their drive");
-    let (other, _) = enrol_vault_from(other, "others-device", &others_vault, user, "vault").await;
+    let (mut other, _) = enrol_vault_from(other, "others-device", &others_vault, user, "vault").await;
+    other.write_file(user, "mine.txt", b"the other's own").await.expect("the other's write");
+    other
+        .sync_mount(user, "local", "vault", Some(SyncDirection::Push))
+        .await
+        .expect("the other keeps a file on their drive");
 
+    let label = kotton_common::crypto::kdf_labels::sealed_mount_domain(user, "local");
+    let domain_of = |vault: &RunningVault| {
+        vault
+            .vault
+            .runtime()
+            .secrets()
+            .get_secret(&label)
+            .expect("the vault's secrets read")
+            .expect("the vault recorded the mount's key domain at its first sealed write")
+    };
+    let (owners_domain, others_domain) = (domain_of(&owners_vault), domain_of(&others_vault));
+    assert_ne!(owners_domain, others_domain, "two people's key domains are one");
+
+    // The owner's pool, whole, served as the other's.
     let pool = |vault: &RunningVault| vault.base_path.join("users").join(user).join("data");
     let (from, to) = (pool(&owners_vault), pool(&others_vault));
-    let _ = std::fs::remove_dir_all(&to);
+    std::fs::remove_dir_all(&to).expect("the other's pool cleared");
     copy_tree(&from, &to);
-    (owner, other, files, (owners_vault, others_vault))
+    others_vault
+        .vault
+        .runtime()
+        .secrets()
+        .set_secret(&label, &owners_domain)
+        .expect("the owner's key domain recorded for the other's mount");
+    (owner, other, files, (owners_domain, others_domain), (owners_vault, others_vault))
 }
 
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) {

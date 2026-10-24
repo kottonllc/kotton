@@ -414,10 +414,11 @@ fn init_crypto() {
 /// gate exists to fix: data moved between two key domains by passing through
 /// plaintext. A device now syncs only with a drive, so the gate's subject is a
 /// drive: two people both named `alice`, each with a real vault enrolled as
-/// their own drive, and the second's vault made to serve the first's pool (a
+/// their own drive and a file kept on it, and the second's vault made to serve
+/// the first's pool whole — its packs and the key domain recorded for them (a
 /// landlord's mistake or malice, which a vault that cannot open what it holds
-/// cannot notice). The pull is refused as a key-domain mismatch, and nothing
-/// crosses. No test records a device as a drive.
+/// cannot notice). The pull is refused at the boundary, in words naming both
+/// domains, and nothing crosses. No test records a device as a drive.
 ///
 /// The positive case — one key domain, sync by way of a drive — is covered by
 /// `enroll_threshold_sign::file_written_on_one_device_syncs_to_a_joined_device`.
@@ -431,17 +432,19 @@ async fn a_drive_serving_another_key_domain_is_refused() {
     client_a.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user A");
     client_b.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user B");
 
-    let (mut client_a, mut client_b, files, _vaults) =
+    let (mut client_a, mut client_b, files, (a_domain, b_domain), _vaults) =
         crate::drive_sync::a_drive_serving_another_domains_packs(client_a, client_b, "alice").await;
 
     let err = client_b
         .sync_mount("alice", "local", "vault", Some(SyncDirection::Pull))
         .await
         .expect_err("a pull across unrelated key domains must be refused, not silently succeed");
+    // The boundary's own refusal, naming both domains: the object's (A's) and
+    // the one this node holds (B's) — not any earlier failure.
     let msg = err.to_string();
     assert!(
-        msg.contains("key domain"),
-        "refusal should name the key-domain mismatch so the cause is diagnosable, got: {msg}"
+        msg.contains(&format!("belongs to key domain {a_domain}, this node holds {b_domain}")),
+        "the refusal is not the key-domain boundary naming both domains, got: {msg}"
     );
 
     // Nothing crossed. B holds no object A wrote — not a re-sealed copy, not an

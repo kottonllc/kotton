@@ -132,8 +132,9 @@ impl Drop for DaemonProcess {
 ///
 /// Two `kuserd` processes run in separate OS processes, each with its own
 /// independently created "alice" — two unrelated key domains — and each
-/// enrols a real vault as its own drive. A keeps three files on its drive;
-/// B's vault is then made to serve A's pool as B's own
+/// enrols a real vault as its own drive and keeps a file there. A keeps three
+/// files on its drive; B's vault is then made to serve A's pool whole — its
+/// packs and the key domain recorded for them — as B's own
 /// (`drive_sync::a_drive_serving_another_domains_packs`). B's pull from its
 /// drive is refused as a key-domain mismatch, nothing half-transfers, and A
 /// still reads its own. A device syncs only with a drive, so the two
@@ -154,17 +155,20 @@ async fn two_node_transfer_across_key_domains_is_refused() {
     client_a.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user A");
     client_b.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user B");
 
-    let (mut client_a, mut client_b, files, _vaults) =
+    let (mut client_a, mut client_b, files, (a_domain, b_domain), _vaults) =
         crate::drive_sync::a_drive_serving_another_domains_packs(client_a, client_b, "alice").await;
 
     // B's "alice" holds a different CEK than A's — sealed replication across
-    // key domains must be refused, not "succeed" by moving blobs B can never
-    // open.
+    // key domains must be refused at the boundary, in words naming both
+    // domains, not "succeed" by moving blobs B can never open.
     let result = client_b.sync_mount("alice", "local", "vault", Some(SyncDirection::Pull)).await;
     match result {
         Err(e) => {
-            let msg = e.to_string().to_lowercase();
-            assert!(msg.contains("domain"), "pull must be refused as a key-domain mismatch, got: {e}");
+            let msg = e.to_string();
+            assert!(
+                msg.contains(&format!("belongs to key domain {a_domain}, this node holds {b_domain}")),
+                "pull must be refused at the key-domain boundary naming both domains, got: {e}"
+            );
         }
         Ok(r) => panic!("cross-domain pull must be refused, but reported pulled={} pushed={}", r.pulled, r.pushed),
     }
