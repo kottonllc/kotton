@@ -5551,7 +5551,9 @@ async fn a_relays_enrol_does_not_invite_again_a_vault_that_keeps_your_things() {
 /// invited, was refused "already keeps", said a not-kept `Fail` naming a
 /// `vault invite --me` refused the same way, and exited 1. The vault's answer
 /// is typed now: the keep is said done, nothing fails, nothing is minted, and
-/// the enrol exits 0.
+/// the enrol exits 0. `vault invite --me` typed after it reads the same word
+/// the same way, and `vault invite lee` — an invite for someone new under the
+/// kept name — is refused in the vault's words, exit 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_relays_enrol_takes_the_vaults_word_that_it_keeps_a_person_with_no_device_there() {
@@ -5608,6 +5610,30 @@ async fn a_relays_enrol_takes_the_vaults_word_that_it_keeps_a_person_with_no_dev
         then.out
     );
     assert!(said_kept_already(&then, "vault"), "the keep the vault had done was not said: {:?}", then.out);
+    assert_eq!(tenants_at_the_door(&vault.ipc).await, left, "the vault's people changed");
+
+    // `vault invite --me` typed by hand reads the same word as done: said,
+    // nothing failed, exit 0, nothing minted.
+    let me = at_the_repl(&mut repl, "vault invite --me", &[]).await;
+    assert!(
+        matches!(me.exit_code, kotton_shell::ExitCode::Success),
+        "`vault invite --me` at a vault that keeps lee exited {:?}: {:?}",
+        me.exit_code,
+        me.out
+    );
+    assert!(!me.out.iter().any(|o| matches!(o, kotton_shell::out::Out::Fail { .. })), "{:?}", me.out);
+    assert!(said_kept_already(&me, "vault"), "`vault invite --me` did not say the keep done: {:?}", me.out);
+    assert_eq!(tenants_at_the_door(&vault.ipc).await, left, "the vault's people changed");
+
+    // An invite for someone new under the kept name is the refusal it is:
+    // one failure, in the vault's words, exit 1, nothing minted.
+    let named = at_the_repl(&mut repl, "vault invite lee", &[]).await;
+    assert!(matches!(named.exit_code, kotton_shell::ExitCode::Code(1)), "{:?}: {:?}", named.exit_code, named.out);
+    let why = failed_with(&named);
+    assert!(
+        why.starts_with("vault: this vault already keeps for 'lee' — an invite admits someone new"),
+        "`vault invite lee` was not refused as kept: {why}"
+    );
     assert_eq!(tenants_at_the_door(&vault.ipc).await, left, "the vault's people changed");
 }
 
