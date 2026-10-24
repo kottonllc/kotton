@@ -346,13 +346,31 @@ async fn join(user: &str, code: &str) -> io::Result<()> {
     let client = IpcClient::<UserRequest, UserResponse>::connect(ep.clone())
         .await
         .map_err(|_| unanswered(&ep))?;
-    let mut rx = client
+    let rx = client
         .send_streaming(&UserRequest::DeviceJoin {
             user_id: user.to_string(),
             code: kotton_wire::ipc::SecretText::new(code),
             as_name: None,
         })
         .await?;
+    joined(user, &ep, rx).await
+}
+
+/// Read a join's ceremony from the door at `ep` until it ends: act on the
+/// ceremony's own frames, and on nothing else — as [`admitted`] reads an
+/// invite's.
+///
+/// **What it does not act on, it says when the door ends the stream** (#121).
+/// A join the vault refuses before the ceremony starts (a code that is not
+/// one, no operational key) is answered as the handler's error, in the
+/// refusal's own words, and the door closes after it; one a later release
+/// adds is answered in its own frame. Neither is named here: the last frame
+/// this reader did not act on is held and, once the door ends the stream,
+/// said in [`kotton_wire::ipc::answer_said`], exit 1 — never dropped, as a
+/// catch-all that ignored it dropped it and said only that the ceremony
+/// closed.
+async fn joined(user: &str, ep: &IpcEndpoint, mut rx: tokio::sync::mpsc::Receiver<UserResponse>) -> io::Result<()> {
+    let mut unread = None;
     while let Some(frame) = rx.recv().await {
         match frame {
             UserResponse::PairConnecting => println!("connecting to the device that offered the code…"),
@@ -383,21 +401,14 @@ async fn join(user: &str, code: &str) -> io::Result<()> {
                 println!("this vault now keeps for {user}: paired with {} ({}).", node.id, node.device_did);
                 return Ok(());
             }
-            UserResponse::PairFailed { reason } => {
-                eprintln!("pairing failed: {reason}");
-                std::process::exit(1);
-            }
-            // A join the vault refuses before the ceremony starts — a code
-            // that is not one, no operational key — arrives in the refusal's
-            // own words (`TASK-an-ipc-door-answers-a-handlers-error-by-closing-with-nothing-said`).
-            UserResponse::Error { message } => {
-                eprintln!("{message}");
-                std::process::exit(1);
-            }
-            _ => {}
+            UserResponse::PairFailed { reason } => return Err(io::Error::other(format!("pairing failed: {reason}"))),
+            not_the_ceremonys => unread = Some(not_the_ceremonys),
         }
     }
-    Err(io::Error::other("the vault closed the ceremony without a result"))
+    Err(io::Error::other(match unread {
+        Some(answer) => kotton_wire::ipc::answer_said(&answer),
+        None => "the vault closed the ceremony without a result".to_string(),
+    }))
 }
 
 /// Mint an invite and wait to be admitted through the relay: print the invite
@@ -791,13 +802,55 @@ mod tests {
             .expect("the verb waited on after the door ended the stream")
             .expect_err("an answer other than the ceremony's was taken as one");
         assert_eq!(ended.to_string(), kotton_wire::ipc::answer_said(&unnamed));
-        assert!(ended.to_string().starts_with("the vault answered `VaultFull`"), "{ended}");
+        assert!(ended.to_string().starts_with("the answer was `VaultFull`"), "{ended}");
 
         // A stream that ends with nothing in it says so.
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         drop(tx);
         let ended = admitted("sam", None, &nobody, rx).await.expect_err("nothing was admitted");
         assert_eq!(ended.to_string(), "the vault closed the ceremony without a result");
+    }
+
+    /// **`kvaultd join` holds an answer it does not read and says it when the
+    /// door ends the stream** (#121). It named the vault's `Error` and dropped
+    /// anything else (`_ => {}`), saying only that the ceremony closed; now it
+    /// names neither. `VaultFull` stands in for a typed answer a later release
+    /// adds: the verb returns with it said in `answer_said`, no field of it
+    /// printed. A refusal in the vault's words is said in those words, though
+    /// the reader names no `Error`; and a frame of the ceremony after an unread
+    /// one does not lose it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_join_answered_with_what_the_verb_does_not_read_ends_saying_it() {
+        let dir = tempfile::tempdir_in("/tmp").expect("a directory under /tmp");
+        let nobody = IpcEndpoint::UnixSocket(dir.path().join("nobody.sock"));
+        let ended_on = |frames: Vec<UserResponse>| {
+            let nobody = nobody.clone();
+            async move {
+                let (tx, rx) = tokio::sync::mpsc::channel(frames.len().max(1));
+                for f in frames {
+                    tx.send(f).await.expect("queued");
+                }
+                drop(tx);
+                tokio::time::timeout(std::time::Duration::from_secs(5), joined("sam", &nobody, rx))
+                    .await
+                    .expect("the verb waited on after the door ended the stream")
+                    .expect_err("an answer other than the ceremony's was taken as one")
+                    .to_string()
+            }
+        };
+        let unnamed = UserResponse::VaultFull { held: 3, quota: 2 };
+        let said = ended_on(vec![unnamed.clone()]).await;
+        assert_eq!(said, kotton_wire::ipc::answer_said(&unnamed));
+        assert!(said.starts_with("the answer was `VaultFull`") && !said.contains('{'), "{said}");
+
+        let refused = UserResponse::Error { message: "invalid connection code: not one".into() };
+        assert_eq!(ended_on(vec![refused]).await, "invalid connection code: not one");
+
+        let said = ended_on(vec![unnamed.clone(), UserResponse::PairConnecting]).await;
+        assert_eq!(said, kotton_wire::ipc::answer_said(&unnamed));
+
+        assert_eq!(ended_on(Vec::new()).await, "the vault closed the ceremony without a result");
     }
 
     #[test]

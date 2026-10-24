@@ -353,6 +353,15 @@ fn a_verb_typed_bare_reaches_the_installed_vault_and_is_refused_in_one_sentence_
     refused_in_one_sentence(&out, "this vault already keeps for 'sam' — an invite admits someone new");
     assert!(!String::from_utf8_lossy(&out.stdout).contains("invite="), "{}", said(&out));
 
+    // `join` reaches it too, and ends by itself on a code that is not one: the
+    // vault refuses it before any ceremony, in its own words, and the door
+    // closes after them. The verb names no refusal (#121): it says what is not
+    // the ceremony once the stream ends — said, not dropped for "closed the
+    // ceremony without a result".
+    let out = typed_within(Duration::from_secs(60), &b.bin(), &["join", "sam", "not-a-code"]);
+    refused_in_one_sentence(&out, "connection code");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("without a result"), "{}", said(&out));
+
     // The same binary outside an install reads no file, and looks where the login says.
     let out = typed(Path::new(env!("CARGO_BIN_EXE_kvaultd")), None, &[], &["tenants"]);
     refused_in_one_sentence(&out, "nothing answers at /run/user/0/kotton/kvaultd.sock");

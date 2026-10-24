@@ -966,27 +966,42 @@ async fn run(parsed: Parsed<'_>, state: &mut ShellState) -> Result<CommandOutput
         Parsed::Speak(to, verb) => (to, verb),
         Parsed::Refuse(why) => return Ok(CommandOutput::fail(why, None)),
     };
-    let word = verb.service().word();
-    let stand = matches!(verb, OperatorVerb::Stand | OperatorVerb::Move { .. });
-    // The person an invite or its digits are for, to name in the answer.
-    let pool = match &verb {
-        OperatorVerb::Invite { pool, .. } | OperatorVerb::Digits { pool } => pool.clone(),
-        _ => String::new(),
-    };
-    let name = to.name();
+    let asked = verb.clone();
     let mut client = state.client.lock().await;
     let answer = client
-        .as_operator(&user_id, name, verb)
+        .as_operator(&user_id, to.name(), verb)
         .await
-        .map_err(|e| anyhow::anyhow!("{word}: {e}"))?;
-    Ok(match answer {
-        UserResponse::PairAdvertising { code, .. } => CommandOutput::shapes(vec![Out::Record(vec![
-            ("invite".into(), code.expose().to_string()),
-            ("on their device".into(), "device admit <invite>".into()),
-            ("the six digits".into(), format!("`vault digits{} {pool}` once their device asks for them; read them out", to.said())),
-        ])]),
-        UserResponse::InviteDigits { digits } => CommandOutput::shapes(vec![Out::Record(digits_said(&pool, &digits))]),
-        UserResponse::VaultTenants { tenants } => CommandOutput::shapes(vec![Out::Table {
+        .map_err(|e| anyhow::anyhow!("{}: {e}", asked.service().word()))?;
+    Ok(spoken(&asked, to, answer))
+}
+
+/// What a verb said to the instance `to` comes to, read from the answer it
+/// was given: each verb acts on the one answer it asked for, and on no other.
+///
+/// **No list of refusals, and no answer read as another verb's** (#121). Any
+/// answer that is not the one `asked` asks for — the daemon's or the vault's
+/// `Error`, a name the vault keeps (`VaultKeepsAlready`, refused here as
+/// everywhere but `--me`, #108), an answer meant for another verb, or one a
+/// later release adds — is a failure said in
+/// [`kotton_wire::ipc::answer_said`]: the vault's words where the answer
+/// carries them, its name where not, and never its fields.
+fn spoken(asked: &OperatorVerb, to: To<'_>, answer: UserResponse) -> CommandOutput {
+    let word = asked.service().word();
+    match (asked, answer) {
+        (OperatorVerb::Invite { pool, .. }, UserResponse::PairAdvertising { code, .. }) => {
+            CommandOutput::shapes(vec![Out::Record(vec![
+                ("invite".into(), code.expose().to_string()),
+                ("on their device".into(), "device admit <invite>".into()),
+                (
+                    "the six digits".into(),
+                    format!("`vault digits{} {pool}` once their device asks for them; read them out", to.said()),
+                ),
+            ])])
+        }
+        (OperatorVerb::Digits { pool }, UserResponse::InviteDigits { digits }) => {
+            CommandOutput::shapes(vec![Out::Record(digits_said(pool, &digits))])
+        }
+        (OperatorVerb::Pools, UserResponse::VaultTenants { tenants }) => CommandOutput::shapes(vec![Out::Table {
             columns: vec!["name".into(), "held (bytes)".into(), "space (bytes)".into(), "devices".into()],
             rows: tenants
                 .into_iter()
@@ -1000,36 +1015,31 @@ async fn run(parsed: Parsed<'_>, state: &mut ShellState) -> Result<CommandOutput
                 })
                 .collect(),
         }]),
-        UserResponse::VaultCapacityResult { held, quota } => CommandOutput::shapes(vec![Out::Record(vec![
-            ("held (bytes)".into(), held.to_string()),
-            ("space (bytes)".into(), quota.map_or_else(|| "none".to_string(), |q| q.to_string())),
-        ])]),
-        UserResponse::TenantDropped { tenant } => CommandOutput::shapes(vec![Out::Confirm {
+        (OperatorVerb::SetQuota { .. }, UserResponse::VaultCapacityResult { held, quota }) => {
+            CommandOutput::shapes(vec![Out::Record(vec![
+                ("held (bytes)".into(), held.to_string()),
+                ("space (bytes)".into(), quota.map_or_else(|| "none".to_string(), |q| q.to_string())),
+            ])])
+        }
+        (OperatorVerb::Drop { .. }, UserResponse::TenantDropped { tenant }) => CommandOutput::shapes(vec![Out::Confirm {
             action: format!("dropped — {} bytes, {} device(s) unpaired", tenant.held, tenant.devices),
             subject: tenant.user_id,
         }]),
-        UserResponse::RelayRule { rule } => CommandOutput::shapes(vec![Out::Record(vec![(
-            "rule".into(),
-            rule_word(rule).to_string(),
-        )])]),
+        (OperatorVerb::ReadRule | OperatorVerb::SetRule { .. }, UserResponse::RelayRule { rule }) => {
+            CommandOutput::shapes(vec![Out::Record(vec![("rule".into(), rule_word(rule).to_string())])])
+        }
         // The relay's invite, in the one code grammar: the person pastes it at
         // their Settings door, or names it to `relay set` at a terminal.
-        UserResponse::RelayInvite { invite } => CommandOutput::shapes(vec![Out::Record(vec![
+        (OperatorVerb::RelayInvite, UserResponse::RelayInvite { invite }) => CommandOutput::shapes(vec![Out::Record(vec![
             ("invite".into(), invite.expose().to_string()),
             ("on their device".into(), "paste it at Settings' door, or `relay set <invite>`".into()),
         ])]),
-        UserResponse::Ok if stand => CommandOutput::shapes(vec![Out::Confirm {
+        (OperatorVerb::Stand | OperatorVerb::Move { .. }, UserResponse::Ok) => CommandOutput::shapes(vec![Out::Confirm {
             action: "told where to stand".into(),
-            subject: name.to_string(),
+            subject: to.name().to_string(),
         }]),
-        // An invite for someone new, under a name the vault keeps: refused.
-        // Only `--me` reads it as done (#108).
-        UserResponse::VaultKeepsAlready { user_id } => {
-            CommandOutput::fail(format!("{word}: {}", kotton_wire::ipc::vault_keeps_already_said(&user_id)), None)
-        }
-        UserResponse::Error { message } => CommandOutput::fail(format!("{word}: {message}"), None),
-        other => CommandOutput::fail(format!("{word}: an answer this does not read: {other:?}"), None),
-    })
+        (_, unread) => CommandOutput::fail(format!("{word}: {}", kotton_wire::ipc::answer_said(&unread)), None),
+    }
 }
 
 /// What `vault digits [<v>] <name>` says: the six digits the ceremony `name`'s
@@ -2413,5 +2423,53 @@ mod tests {
             assert!(create.ends_with(&format!(" sh kotton-{}-<rev>-linux-x86_64/install.sh", service.word())), "{create}");
         }
         assert!(to_create(OperatedService::Vault, "07ab", None).starts_with("KOTTON_OPERATOR_KEY=07ab "));
+    }
+
+    /// The one failure a verb's answer came to, and nothing else drawn.
+    fn failed(out: CommandOutput) -> String {
+        match out.out.as_slice() {
+            [Out::Fail { what, try_: None }] => what.clone(),
+            other => panic!("not one failure: {other:?}"),
+        }
+    }
+
+    /// **A verb's answer it did not ask for is said by its name, never
+    /// printed** (#121). `VaultFull` stands in for a typed refusal a later
+    /// release adds, as #122's tests: every verb says it in `answer_said`'s
+    /// words, with none of its fields, and draws nothing else.
+    #[test]
+    fn an_answer_no_verb_names_is_said_by_its_name_never_printed() {
+        let unnamed = UserResponse::VaultFull { held: 3, quota: 2 };
+        for (_, _, verb) in nameless() {
+            let word = verb.service().word();
+            let said = failed(spoken(&verb, To::Only("home"), unnamed.clone()));
+            assert_eq!(said, format!("{word}: {}", kotton_wire::ipc::answer_said(&unnamed)), "{verb:?}");
+            assert!(!said.contains('{') && !said.contains("does not read"), "{said}");
+        }
+    }
+
+    /// **Each verb acts on the answer it asked for, and on no other** (#121):
+    /// a drop answered to `vault people` is not drawn as a drop, and an `Ok`
+    /// answered to `relay rule` is not drawn as a rule. The answer asked for
+    /// is drawn; a refusal is said in the vault's words, and a name the vault
+    /// keeps in its one sentence (#108), through `answer_said` and no arm of
+    /// this reader's own.
+    #[test]
+    fn a_verb_acts_on_the_answer_it_asked_for_and_says_any_other() {
+        let tenant = || kotton_wire::ipc::VaultTenant { user_id: "sam".into(), held: 7, quota: None, devices: 1 };
+        let people = spoken(&OperatorVerb::Pools, To::Named("home"), UserResponse::VaultTenants { tenants: vec![tenant()] });
+        assert!(matches!(people.out.as_slice(), [Out::Table { rows, .. }] if rows.len() == 1));
+        let not_asked = failed(spoken(&OperatorVerb::Pools, To::Named("home"), UserResponse::TenantDropped { tenant: tenant() }));
+        assert!(not_asked.starts_with("vault: the answer was `TenantDropped`"), "{not_asked}");
+        let not_a_rule = failed(spoken(&OperatorVerb::ReadRule, To::Only("gate"), UserResponse::Ok));
+        assert!(not_a_rule.starts_with("relay: the answer was `Ok`"), "{not_a_rule}");
+        let stood = spoken(&OperatorVerb::Stand, To::Only("home"), UserResponse::Ok);
+        assert!(matches!(stood.out.as_slice(), [Out::Confirm { subject, .. }] if subject == "home"));
+
+        let invite = OperatorVerb::Invite { pool: "sam".into(), quota: None, ttl_seconds: 5 };
+        let kept = failed(spoken(&invite, To::Only("home"), UserResponse::VaultKeepsAlready { user_id: "sam".into() }));
+        assert_eq!(kept, format!("vault: {}", kotton_wire::ipc::vault_keeps_already_said("sam")));
+        let refused = failed(spoken(&OperatorVerb::Pools, To::Only("home"), UserResponse::Error { message: "no relay".into() }));
+        assert_eq!(refused, "vault: no relay");
     }
 }
