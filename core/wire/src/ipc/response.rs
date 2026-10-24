@@ -1331,8 +1331,6 @@ pub enum UserResponse {
     },
 }
 
-/// A handler's error, as the frame a door answers it with
-/// (`kotton_ipc::ChannelAcceptor` requires this of every `Resp` it serves).
 /// The vault's refusal of an invite naming `user_id`, a pool it keeps
 /// ([`UserResponse::VaultKeepsAlready`]), in the one sentence every reader
 /// that refuses on it says.
@@ -1343,6 +1341,8 @@ pub fn vault_keeps_already_said(user_id: &str) -> String {
     )
 }
 
+/// A handler's error, as the frame a door answers it with
+/// (`kotton_ipc::ChannelAcceptor` requires this of every `Resp` it serves).
 /// The text is the error's own; the door closes the connection after it.
 impl From<std::io::Error> for UserResponse {
     fn from(e: std::io::Error) -> Self {
