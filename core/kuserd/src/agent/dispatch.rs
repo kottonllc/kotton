@@ -473,6 +473,8 @@ pub(super) fn stream_entry_refusal(
     session_refusal(session_user.as_deref(), request)
 }
 
+/// The door's one-frame answer to `request`. The eleven verbs whose clients
+/// read a stream never arrive here: `super::streamed` answers them first.
 pub(super) async fn handle_request(
     ctx: &super::AgentContext,
     request: UserRequest,
