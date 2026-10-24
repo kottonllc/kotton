@@ -42,7 +42,7 @@
 //!   then `drives::record`, which makes a row naming no posture a vault —
 //!   before it answers `PairingComplete` ([`record_handed_drives`]), so its
 //!   first `sync` has drives to reach. A handout it cannot keep refuses the
-//!   join on the joiner with the reason, before the joiner writes anything:
+//!   join with the reason, before the joiner writes anything:
 //!   one that does not hold together ([`check_handed_drives`]), and one whose
 //!   rows would be written over a row this device holds — its key paired here
 //!   as something other than a vault, or its DID paired here beside another
@@ -55,28 +55,29 @@
 //!   writes no posture over any. A write that fails after that point also
 //!   fails the join there, which the person runs again.
 //!
-//!   **A late refusal is one-sided.** The issuer sends the payload and gets no
-//!   acknowledgement after it: once its frames are sent its side returns, it
-//!   records the joiner as a device, introduces it at every drive, and reports
-//!   `PairingComplete`. So when the joiner refuses the handout or fails to
-//!   record it, the joiner keeps nothing (or, on a failed write, what it wrote
-//!   before the failure), while the issuer keeps the device admitted — in its
-//!   node table and at every drive — until the person runs `device revoke`
-//!   there. The refusal says so to the person. Closing the gap — an
-//!   acknowledgement before the issuer commits, or a withdrawal on refusal —
-//!   is kotton #98.
-//! - *The drives learn the device.* When the issuer's ceremony completes, the
-//!   issuer — which holds the identity — tells each drive about the joiner,
-//!   under the identity's signature, before it answers `PairingComplete`
-//!   ([`crate::users::drive_devices`]); `device revoke` withdraws the device
-//!   the same way. A joined device holds a key share and introduces nobody.
+//!   **A refusal reaches both sides, because the joiner's answer is the
+//!   join's last step.** The issuer's ceremony returns only once the joiner
+//!   has answered that it kept what it was handed
+//!   ([`kotton_peer::pairing::JoinAnswer`], [`answer_the_issuer`]); a joiner
+//!   that refuses the handout, fails to record it, or says nothing within
+//!   [`kotton_peer::pairing::JOINER_KEEPS_WITHIN`] leaves the issuer with no
+//!   row and no introduction, and the issuer's person is told so
+//!   ([`kotton_peer::pairing::JoinNotKept`]). There is nothing to revoke.
+//!   What can still be one-sided is the safe way round: a joiner whose `kept`
+//!   the issuer did not hear has written what it was handed and is admitted
+//!   nowhere, and is told to join again.
+//! - *The drives learn the device.* When the joiner has answered that it kept
+//!   what it was handed, the issuer — which holds the identity — records it
+//!   and tells each drive about it, under the identity's signature, before it
+//!   answers `PairingComplete` ([`crate::users::drive_devices`]); `device
+//!   revoke` withdraws the device the same way. A joined device holds a key
+//!   share and introduces nobody.
 use kotton_session::service::tokens as sessions;
 use kotton_peer::daemon::nodes::{
     PendingConfirms,
     StreamingConfirmer,
     WARM_KEY_TTL_SECONDS,
     ceremony_failure,
-    ceremony_failure_copy,
     finalize_enrolled_node,
     json_err,
     load_device_operational_key,
@@ -91,7 +92,7 @@ use ed25519_dalek::SigningKey;
 use hex;
 use kotton_peer::pairing::{
     encode_connection_code, open_pair_listener, parse_connection_code,
-    run_enroll_issuer_committed, run_enroll_join_committed, Invite,
+    run_enroll_issuer_committed, run_enroll_join_committed, Invite, JoinAnswer,
 };
 use kotton_peer::relay_keys::relay_id;
 use crate::users::DeviceUsers as _;
@@ -111,7 +112,9 @@ use kotton_common::time::now_secs;
 /// record the issuer as a paired node, issue a session (the join cryptographically
 /// authenticates this device), then live-refresh + record membership + wire sync.
 ///
-/// The single joiner-completion path for the pairing ceremony.
+/// The single joiner-completion path for the pairing ceremony. What it answers
+/// is what the caller tells the issuer ([`answer_the_issuer`]): `PairFailed`
+/// is a refusal, and the issuer keeps nothing of the join.
 // Allowed: the daemon state a join's completion writes, as `handle_device_add` below takes it.
 #[allow(clippy::too_many_arguments)]
 pub async fn finalize_joined_node(
@@ -134,9 +137,8 @@ pub async fn finalize_joined_node(
     };
     // The drives the issuer handed over, checked before anything is written:
     // a device that joins with a drive it cannot record has nothing to sync and
-    // no way back, so such a join is refused here with the reason. The issuer
-    // has already committed its side and does not hear of it (kotton #98), so
-    // the refusal tells the person what is left there.
+    // no way back, so such a join is refused here with the reason — which the
+    // caller says to the issuer as well, and the issuer then keeps nothing.
     // So are the rows this device already holds: the issuer's word does not
     // write over them (`check_handed_rows`).
     let checked = match check_handed_drives(user_id, &joined.peer, &joined.drives) {
@@ -147,9 +149,9 @@ pub async fn finalize_joined_node(
         tracing::warn!(user_id, %why, "refused a join whose drives cannot be recorded");
         return Ok(UserResponse::PairFailed {
             reason: format!(
-                "This device was not joined: {why}. Nothing was kept here, but the device that \
-                 admitted you will still list this device until you run `device revoke` there; \
-                 then join again from the device that holds your identity."
+                "This device was not joined: {why}. Nothing was kept here, and the device that \
+                 would have admitted you keeps nothing of it either; join again from the device \
+                 that holds your identity once this is resolved."
             ),
         });
     }
@@ -268,10 +270,10 @@ pub async fn finalize_joined_node(
     if let Err(e) = record_handed_drives(db, paired_keys, user_id, &joined.drives).await {
         return Ok(UserResponse::PairFailed {
             reason: format!(
-                "Joined, but recording your drives failed ({e}), so this device has nothing to \
-                 sync yet. The device that admitted you lists this device and has introduced it \
-                 to your drives; join again from the device that holds your identity — a second \
-                 join keeps what this one did — or run `device revoke` there to withdraw it."
+                "This device was not joined: recording your drives failed ({e}). The device that \
+                 would have admitted you keeps nothing of it and told none of your drives of \
+                 this one; join again from the device that holds your identity — a second join \
+                 keeps what this one wrote."
             ),
         });
     }
@@ -319,6 +321,49 @@ pub async fn finalize_joined_node(
         session_token: Some(kotton_wire::ipc::SecretText::new(token)),
         relay_offer: None,
     })
+}
+
+/// The join's last step: tell the admitting device whether this one kept what
+/// it was handed, and answer this device's person with what is then true.
+///
+/// `outcome` is what this device made of the payload — what
+/// [`finalize_joined_node`] answered, or a refusal before it. A `PairFailed`
+/// is said to the issuer in the same words, and stands whether or not the
+/// issuer hears it: the issuer keeps nothing it was not told was kept. A
+/// `PairingComplete` is said as `kept`; if the issuer does not hear it — it
+/// stopped waiting ([`kotton_peer::pairing::JOINER_KEEPS_WITHIN`]) or is
+/// gone — it kept nothing and introduced this device nowhere, so the join is
+/// not complete: the session it minted is withdrawn, and the person is told
+/// to join again.
+pub(crate) async fn answer_the_issuer(
+    answer: JoinAnswer,
+    sessions: &sessions::SessionMap,
+    outcome: UserResponse,
+) -> UserResponse {
+    match outcome {
+        UserResponse::PairFailed { reason } => {
+            if let Err(e) = answer.refused(&reason).await {
+                tracing::warn!(error = %e, "the admitting device did not hear this join refused; it keeps nothing unheard");
+            }
+            UserResponse::PairFailed { reason }
+        }
+        complete => match answer.kept().await {
+            Ok(()) => complete,
+            Err(e) => {
+                if let UserResponse::PairingComplete { session_token: Some(token), .. } = &complete {
+                    sessions.write().unwrap().remove(token.expose());
+                }
+                tracing::warn!(error = %e, "the admitting device did not hear this join kept");
+                UserResponse::PairFailed {
+                    reason: format!(
+                        "This device kept what it was handed, but the device admitting it did not \
+                         hear so ({e}), so that device kept nothing and told none of your drives of \
+                         this one. Join again from it — a second join keeps what this one wrote."
+                    ),
+                }
+            }
+        },
+    }
 }
 
 /// Issuer side of the streamed `device add` ceremony. Opens a bootstrap
@@ -486,7 +531,7 @@ pub async fn handle_device_add(
             Err(e) => {
                 tracing::warn!(error = %e, "device-add ceremony failed");
                 UserResponse::PairFailed {
-                    reason: ceremony_failure_copy(&e.to_string()),
+                    reason: ceremony_failure(&e),
                 }
             }
         };
@@ -598,7 +643,7 @@ pub async fn handle_gateway_enroll(
             Err(e) => {
                 tracing::warn!(error = %e, "gateway-enrol ceremony failed");
                 UserResponse::PairFailed {
-                    reason: ceremony_failure_copy(&e.to_string()),
+                    reason: ceremony_failure(&e),
                 }
             }
         };
@@ -746,24 +791,25 @@ pub async fn handle_device_join(
         )
         .await;
         let frame = match result {
-            Ok(joined)
+            Ok((joined, answer))
                 if policy == JoinPolicy::BlindOnly
                     && (joined.data_keys.is_some()
                         || joined.frost_share.is_some()
                         || joined.warm_key_delegation.is_some()) =>
             {
                 // Dropped here, unwritten: the vault never holds what it was
-                // handed, and the issuer learns why on its own frame.
+                // handed, and the issuer is told why in its answer.
                 tracing::warn!(user_id = %user_id, "a vault refused a payload carrying keys");
-                UserResponse::PairFailed {
+                let refused = UserResponse::PairFailed {
                     reason: "this node is a vault: it keeps sealed bytes and holds no key, so \
                              enrol it blind (`device add --blind`)"
                         .to_string(),
-                }
+                };
+                answer_the_issuer(answer, &sessions, refused).await
             }
-            Ok(joined) => {
+            Ok((joined, answer)) => {
                 let _ = tx.send(UserResponse::PairTransferring).await;
-                match finalize_joined_node(
+                let outcome = match finalize_joined_node(
                     &runtime, &*users,
                     &db,
                     &sessions,
@@ -776,14 +822,15 @@ pub async fn handle_device_join(
                 {
                     Ok(resp) => resp,
                     Err(e) => UserResponse::PairFailed {
-                        reason: format!("Joined, but saving your keys failed: {e}"),
+                        reason: format!("This device was not joined: saving your keys failed ({e})"),
                     },
-                }
+                };
+                answer_the_issuer(answer, &sessions, outcome).await
             }
             Err(e) => {
                 tracing::warn!(error = %e, "device-join ceremony failed");
                 UserResponse::PairFailed {
-                    reason: ceremony_failure_copy(&e.to_string()),
+                    reason: ceremony_failure(&e),
                 }
             }
         };
@@ -1432,36 +1479,38 @@ pub async fn handle_device_invite(
         )
         .await;
         let frame = match result {
-            Ok(joined)
+            Ok((joined, answer))
                 if policy == JoinPolicy::BlindOnly
                     && (joined.data_keys.is_some()
                         || joined.frost_share.is_some()
                         || joined.warm_key_delegation.is_some()) =>
             {
                 tracing::warn!(user_id = %user_id, "a vault refused a payload carrying keys");
-                UserResponse::PairFailed {
+                let refused = UserResponse::PairFailed {
                     reason: "this node is a vault: it keeps sealed bytes and holds no key, so \
                              admit it blind"
                         .to_string(),
-                }
+                };
+                answer_the_issuer(answer, &sessions, refused).await
             }
-            Ok(joined) => {
+            Ok((joined, answer)) => {
                 let _ = tx.send(UserResponse::PairTransferring).await;
-                match finalize_joined_node(
+                let outcome = match finalize_joined_node(
                     &runtime, &*users, &db, &sessions, &paired_keys, &user_id, &warm_key, joined,
                 )
                 .await
                 {
                     Ok(resp) => resp,
                     Err(e) => UserResponse::PairFailed {
-                        reason: format!("Admitted, but saving failed: {e}"),
+                        reason: format!("Not admitted: saving failed ({e})"),
                     },
-                }
+                };
+                answer_the_issuer(answer, &sessions, outcome).await
             }
             Err(e) => {
                 tracing::warn!(error = %e, "invite ceremony failed");
                 UserResponse::PairFailed {
-                    reason: ceremony_failure_copy(&e.to_string()),
+                    reason: ceremony_failure(&e),
                 }
             }
         };

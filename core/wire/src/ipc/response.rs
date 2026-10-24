@@ -613,7 +613,10 @@ pub enum UserResponse {
     NodeRevoked,
 
     /// The pairing ceremony completed successfully (terminal frame of the RFC-0040
-    /// `DeviceAdd` / `DeviceJoin` stream).
+    /// `DeviceAdd` / `DeviceJoin` stream). On the admitting side it is sent only
+    /// after the joining device answered that it kept what it was handed, and
+    /// the device was then recorded and introduced at the person's drives; on
+    /// the joining side, only once the admitting device heard that answer.
     PairingComplete {
         node: PairedNode,
         /// A session token for the newly-joined device (the joiner side of
@@ -675,7 +678,10 @@ pub enum UserResponse {
     PairAwaitingPeer,
     /// Both sides confirmed; key material is transferring / installing.
     PairTransferring,
-    /// The ceremony aborted (mismatch, cancel, timeout, or peer vanished).
+    /// The ceremony aborted (mismatch, cancel, timeout, or peer vanished), or
+    /// the joining device did not keep what it was handed — it refused it, or
+    /// did not say it kept it in time — in which case the admitting device kept
+    /// nothing of the join either: no row, and no drive told of it.
     /// `reason` is calm, specific §7 copy suitable to show verbatim.
     PairFailed {
         reason: String,
