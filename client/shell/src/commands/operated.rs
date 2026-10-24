@@ -32,9 +32,11 @@
 //! anything (V21). `enrol` takes no name: the name was given at the mint, and the line
 //! completes the one key waiting for its kind, asking which only when several
 //! wait (`TASK-enrol-takes-the-lines-an-instance-printed-and-a-vaults-ends-on-an-offer`).
-//! A vault's completion ends on the offer *keep your things here too*: on a
-//! yes, `vault invite --me` for that vault and the first sync; on anything
-//! else, nothing.
+//! A vault is where things are kept, so a vault's completion asks nothing
+//! more: it runs `vault invite --me` for that vault, and the vault is recorded
+//! as this person's drive, as the admit of a vault records one. Nothing is
+//! synced then: `sync` syncs this device's drives when the person asks
+//! (RFC 0002, Consequences; #57).
 //!
 //! From then on the vault's four acts — invite someone with the space set
 //! aside for them, list who keeps there, change one person's space, drop one
@@ -50,10 +52,10 @@
 //! tells every vault told nothing yet; `relay rule [<r>] <rule>` tells every vault you
 //! told to stand at that relay again, with its keys — found by the relay's key,
 //! never a URL — and `vault drop` rotates the invited key at each relay you
-//! operate that the vault stands at. When the offer a vault's enrol ends on is
-//! taken and its ceremony offers this device the relay the same `enrol` kept,
-//! this device stands there too, held to that relay's key: the line was the
-//! person's own, typed into this `enrol` ([`relays_kept`]).
+//! operate that the vault stands at. When the ceremony a vault's enrol runs
+//! offers this device the relay the same `enrol` kept, this device stands
+//! there too, held to that relay's key: the line was the person's own, typed
+//! into this `enrol` ([`relays_kept`]).
 //!
 //! A drop is confirmed as the terminal confirms it: the landlord types the
 //! pool's name back (`vault drop [<v>] <name> --confirm <name>`), as `kvaultd
@@ -536,14 +538,13 @@ impl Command for MintCommand {
 
 /// `enrol <line> [<line>…]` — complete the keys minted here from the lines
 /// their instances printed when they were created, each on its own; a vault's
-/// ends on the offer to keep your things there too
-/// (`TASK-enrol-takes-the-lines-an-instance-printed-and-a-vaults-ends-on-an-offer`).
+/// then keeps this person's things, asking nothing (#57).
 pub struct EnrolCommand;
 
 #[async_trait::async_trait]
 impl Command for EnrolCommand {
     fn help_text(&self) -> &'static str {
-        "enrol <line> [<line>…] — paste the line each relay or vault of your own printed when it was created, space-separated or one per row, in any order, or the one line a host printed, which names both: each completes the key minted for it, and says what it names, whether it is reached from here and whether its key matched; a vault's ends by offering to keep your things there too, and on a yes this device stands at the relay the same enrol kept. mint and enrol make one; relay and vault operate one"
+        "enrol <line> [<line>…] — paste the line each relay or vault of your own printed when it was created, space-separated or one per row, in any order, or the one line a host printed, which names both: each completes the key minted for it, and says what it names, whether it is reached from here and whether its key matched; a vault's then keeps your things, sealed, as one of your drives — `sync` syncs them there when you ask — and this device stands at the relay the same enrol kept. mint and enrol make one; relay and vault operate one"
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
@@ -586,7 +587,7 @@ fn parse_enrol(text: &str) -> Option<(Vec<String>, Vec<kotton_wire::ipc::LineEnr
 }
 
 /// `enrol`: send the lines, ask which where several keys of a kind wait, say
-/// what each came to, then offer each vault kept. Every decision is the
+/// what each came to, then keep this person's things at each vault kept. Every decision is the
 /// daemon's (`operator::enrol_lines`); this asks the person what only they
 /// can answer, and sends their answer back as the line's `mint`.
 async fn enrol(text: &str, state: &mut ShellState) -> Result<CommandOutput> {
@@ -648,7 +649,7 @@ async fn enrol(text: &str, state: &mut ShellState) -> Result<CommandOutput> {
     let relays = relays_kept(&came);
     for c in &came {
         if let (Some(OperatedService::Vault), LineCame::Kept { name, only, .. }) = (c.kind, &c.came_to) {
-            offer(state, &mut out, name, *only, &relays).await?;
+            keep_at(state, &mut out, name, *only, &relays).await?;
         }
     }
     let mut answer = CommandOutput::shapes(out);
@@ -714,93 +715,42 @@ fn readout(c: &kotton_wire::ipc::LineEnrolled) -> Vec<(String, String)> {
     rows
 }
 
-/// What the offer does on `answer` (Done-when (3)): on a yes, this desktop
-/// becomes a tenant of the vault `vault` — `vault invite --me` — and then the
-/// first sync; on anything else, nothing at all. The one place the answer is
-/// read, so a no that wrote anything would have to be written here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum OfferAct {
-    InviteMe(String),
-    FirstSync,
-}
-
-fn offer_taken(vault: &str, answer: &str) -> Vec<OfferAct> {
-    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-        vec![OfferAct::InviteMe(vault.to_string()), OfferAct::FirstSync]
-    } else {
-        Vec::new()
-    }
-}
-
-/// The question the offer puts: *keep your things here too*, naming the vault
-/// only when this desktop operates more than one.
-fn offer_question(vault: &str, only: bool) -> String {
-    if only {
-        "keep your things here too? [y/N]".to_string()
-    } else {
-        format!("keep your things at the vault '{vault}' too? [y/N]")
-    }
-}
-
-/// A vault's completion ends on the offer, in place. Asked at a terminal and
-/// taken on a yes; with nobody to ask, said as the commands to type — naming
-/// the vault only when this desktop operates more than one, as the verb then
-/// needs it. When the ceremony a yes runs offers this device a relay among
-/// `relays` — the ones this `enrol` kept — this device stands there, held to
-/// its key, rather than being told the `relay set` that would.
-async fn offer(state: &mut ShellState, out: &mut Vec<Out>, vault: &str, only: bool, relays: &[[u8; 32]]) -> Result<()> {
+/// A vault's completion keeps this person's things there, and asks nothing
+/// (RFC 0002, Consequences: "a vault is where things are kept"; #57): this
+/// desktop becomes a tenant of the vault `vault` — `vault invite --me`, whose
+/// admit records the vault as the person's drive — and nothing is synced
+/// now; `sync` syncs this device's drives when the person asks. When the
+/// ceremony offers this device a relay among `relays` — the ones this `enrol`
+/// kept — this device stands there, held to its key, rather than being told
+/// the `relay set` that would. A vault that cannot keep them yet — one that
+/// stands at no relay, so its invite has nowhere to meet — is said as a
+/// failure naming why and the `vault invite --me` that takes it up later; the
+/// enrol's exit stays what its lines came to, since the credential is kept.
+async fn keep_at(state: &mut ShellState, out: &mut Vec<Out>, vault: &str, only: bool, relays: &[[u8; 32]]) -> Result<()> {
     let to = if only { To::Only(vault) } else { To::Named(vault) };
-    let Some(answer) = state.ask(out, &offer_question(vault, only))? else {
-        out.push(Out::Hint(format!("keep your things here too: `vault invite{} --me`, then `sync`", to.said())));
-        return Ok(());
+    let not_kept = |why: String| Out::Fail {
+        what: format!("your things are not kept at the vault: {why}"),
+        try_: Some(format!("`vault invite{} --me`", to.said())),
     };
     let user_id = state.user_id.clone();
-    let mut remote = None;
-    // The relay the ceremony offered and this `enrol` kept, stood at once
-    // the first sync is done, so the sync is the one a yes always ran.
-    let mut stand = None;
-    for act in offer_taken(vault, &answer) {
-        match act {
-            OfferAct::InviteMe(v) => {
-                let mut rx = {
-                    let mut client = state.client.lock().await;
-                    client
-                        .vault_invite_me_stream(&user_id, &v, INVITE_ME_TTL_SECS)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("vault invite --me: {e}"))?
-                };
-                let client = state.client.lock().await;
-                let (said, node, taken) =
-                    super::device::run_ceremony_to(&client, &user_id, &mut rx, super::device::Role::OwnVault, None, relays)
-                        .await?;
-                out.extend(said.out);
-                stand = taken;
-                if let Some(why) = said.stderr {
-                    out.push(Out::Fail {
-                        what: format!("your things are not kept at the vault: {why}"),
-                        try_: Some(format!("`vault invite{} --me`", to.said())),
-                    });
-                }
-                remote = node;
-                if remote.is_none() {
-                    break;
-                }
-            }
-            OfferAct::FirstSync => {
-                let Some(node) = remote.as_deref() else { break };
-                let mut client = state.client.lock().await;
-                match client.sync_mount(&user_id, "local", node, None).await {
-                    Ok(r) => out.push(Out::Confirm {
-                        action: format!("first sync — {} pushed, {} pulled", r.pushed, r.pulled),
-                        subject: node.to_string(),
-                    }),
-                    Err(e) => out.push(Out::Fail {
-                        what: format!("the first sync with your vault did not finish: {e}"),
-                        try_: Some(format!("`sync {node}`")),
-                    }),
-                }
-            }
+    let invited = {
+        let mut client = state.client.lock().await;
+        client.vault_invite_me_stream(&user_id, vault, INVITE_ME_TTL_SECS).await
+    };
+    let mut rx = match invited {
+        Ok(rx) => rx,
+        Err(e) => {
+            out.push(not_kept(e.to_string()));
+            return Ok(());
         }
+    };
+    let (said, _, stand) = {
+        let client = state.client.lock().await;
+        super::device::run_ceremony_to(&client, &user_id, &mut rx, super::device::Role::OwnVault, None, relays).await?
+    };
+    out.extend(said.out);
+    if let Some(why) = said.stderr {
+        out.push(not_kept(why));
     }
     if let Some(line) = stand {
         let mut client = state.client.lock().await;
@@ -1867,8 +1817,8 @@ mod tests {
         assert_eq!(parse_enrol(&format!("{relay}\n{vault}")).expect("two rows").0, sent, "one parser");
     }
 
-    /// **On a yes to the offer, this device stands at the relay the same
-    /// `enrol` kept, and is told of any other**: the relay a ceremony offers is
+    /// **When a vault's enrol keeps your things there, this device stands at
+    /// the relay the same `enrol` kept, and is told of any other**: the relay a ceremony offers is
     /// taken only when its key is a relay whose line was typed into this
     /// `enrol` and kept there — not one refused, not a vault's line, not
     /// another relay's. What standing there came to is said either way.
@@ -2204,22 +2154,6 @@ mod tests {
         let asked = readout(&line(false, None, None, LineCame::Which { names: vec!["home".into(), "attic".into()] }));
         assert_eq!((field(&asked, "reached from here"), field(&asked, "its key")), ("not dialled".into(), "not checked".into()));
         assert!(field(&asked, "not enrolled").contains("home, attic"), "{asked:?}");
-    }
-
-    /// **A vault's completion ends on the offer; a yes is `vault invite --me`
-    /// for that vault and then the first sync, and anything else is nothing**
-    /// (Done-when (3), (6)): red when the offer would do anything on a no. The
-    /// question names the vault only when this desktop operates more than one.
-    #[test]
-    fn the_offer_on_a_yes_is_invite_me_and_the_first_sync_and_on_a_no_is_nothing() {
-        for no in ["n", "N", "no", "", "\n", "yes please", "nope", "y es"] {
-            assert_eq!(offer_taken("vault", no), Vec::<OfferAct>::new(), "a no that does something: {no:?}");
-        }
-        for yes in ["y", "Y", "yes", "YES\n", " y "] {
-            assert_eq!(offer_taken("attic", yes), vec![OfferAct::InviteMe("attic".into()), OfferAct::FirstSync], "{yes:?}");
-        }
-        assert_eq!(offer_question("vault", true), "keep your things here too? [y/N]");
-        assert_eq!(offer_question("attic", false), "keep your things at the vault 'attic' too? [y/N]");
     }
 
     /// **`relay rule <r>` reads the relay's rule and `relay rule <r> <rule>`

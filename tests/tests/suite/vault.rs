@@ -5286,24 +5286,28 @@ fn said_as(out: &kotton_shell::CommandOutput, field: &str) -> Vec<String> {
 }
 
 /// **`enrol` at the REPL completes each vault by the key it was created for,
-/// asks which only between two keys of a kind, and a no to the offer writes
-/// nothing** (`TASK-enrol-takes-the-lines-an-instance-printed-and-a-vaults-ends-on-an-offer`,
-/// Done-when (1), (2), (3), (6)).
+/// asks which only between two keys of a kind, and asks nothing else: a vault
+/// is where things are kept** (`TASK-enrol-takes-the-lines-an-instance-printed-and-a-vaults-ends-on-an-offer`,
+/// Done-when (1), (2), (6); #57).
 ///
 /// Two vault keys are minted, `home` and `attic`, and each vault is created
 /// for its own. `enrol <attic's line>` takes no name, so with two waiting it
 /// asks which. Answered wrong — `home` — the vault at attic's address refuses
 /// home's key: red when a line is matched to the wrong mint; nothing is kept
 /// and both keys still wait. Answered `attic`, it is kept under the mint's
-/// name, said by its three readouts, and the offer is put; answered no, the
-/// vault holds no tenant and the desktop no node — nothing was written. Then
-/// `enrol <home's line>` asks nothing — one key waits — and, with nobody left
-/// to answer the offer, says it as the command to type, naming the vault, since
-/// there are two. With two held, `vault people` is refused listing both, and
-/// `vault people attic` is answered.
+/// name, said by its three readouts, and nothing more is asked — an answer
+/// given beyond *which* is left unread. The enrol goes on to keep `lee`'s
+/// things there unasked, and the vault, standing at no relay here, cannot meet
+/// the invite: that is said with why and the `vault invite --me` that takes it
+/// up, and nothing is written — no tenant, no node. (Keeping at a vault that
+/// stands at a relay is `headless::a_headless_desktop_operates_…`.) Then
+/// `enrol <home's line>` asks nothing at all — one key waits — with nobody to
+/// answer, and says the same of home, naming it, since there are two. With two
+/// held, `vault people` is refused listing both, and `vault people attic` is
+/// answered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn enrol_at_the_repl_asks_which_between_two_vault_keys_and_a_no_to_the_offer_writes_nothing() {
+async fn enrol_at_the_repl_asks_which_between_two_vault_keys_and_nothing_else() {
     use kotton_wire::ipc::{OperatedService, OperatorVerb};
 
     init_crypto();
@@ -5346,29 +5350,36 @@ async fn enrol_at_the_repl_asks_which_between_two_vault_keys_and_a_no_to_the_off
         other => panic!("a credential was kept under the wrong mint: {other:?}"),
     }
 
-    // Answered right: kept under the mint's name, said by its readouts, and the offer — answered no.
+    // Answered right: kept under the mint's name, said by its readouts, and nothing else asked.
     let kept = at_the_repl(&mut repl, &format!("enrol {attic}"), &["attic", "n"]).await;
     assert!(matches!(kept.exit_code, kotton_shell::ExitCode::Success), "{:?}", kept.out);
-    assert_eq!(repl.asking, kotton_shell::Asking::Given(Default::default()), "which, and then the offer, were each asked once");
+    assert_eq!(
+        repl.asking,
+        kotton_shell::Asking::Given(["n".to_string()].into()),
+        "which was asked once, and nothing after it: {:?}",
+        kept.out
+    );
     assert!(said_as(&kept, "names")[0].starts_with("a vault at 127.0.0.1:"), "{:?}", kept.out);
     assert_eq!(said_as(&kept, "reached from here"), vec!["yes".to_string()]);
     assert_eq!(said_as(&kept, "its key"), vec!["matched".to_string()]);
     assert!(said_as(&kept, "enrolled")[0].contains("you operate the vault 'attic'"), "{:?}", kept.out);
     match within("attic's people", desk.client.as_operator("lee", "attic", OperatorVerb::Pools)).await.expect("answers") {
-        UserResponse::VaultTenants { tenants } => assert!(tenants.is_empty(), "a no wrote a tenant: {tenants:?}"),
+        UserResponse::VaultTenants { tenants } => assert!(tenants.is_empty(), "a vault at no relay wrote a tenant: {tenants:?}"),
         other => panic!("attic's credential was not kept: {other:?}"),
     }
+    assert!(not_kept(&kept).contains("stands at no relay"), "{:?}", kept.out);
     let nodes = within("the desktop's nodes", desk.client.list_nodes("lee")).await.expect("nodes");
-    assert!(nodes.is_empty(), "a no paired the vault: {nodes:?}");
+    assert!(nodes.is_empty(), "a keep that could not meet paired the vault: {nodes:?}");
     assert_eq!(waiting_for(&mut desk.client, "lee", OperatedService::Vault).await, vec!["home".to_string()]);
 
-    // One key waits: nothing is asked; nobody answers the offer, so it is said as the command.
+    // One key waits: nothing is asked, with nobody to answer, and the keep at home is said the same, by name.
     let one = at_the_repl(&mut repl, &format!("enrol {home}"), &[]).await;
     assert!(matches!(one.exit_code, kotton_shell::ExitCode::Success), "{:?}", one.out);
     assert!(said_as(&one, "enrolled")[0].contains("you operate the vault 'home'"), "{:?}", one.out);
+    assert!(not_kept(&one).contains("stands at no relay"), "{:?}", one.out);
     assert!(
-        one.out.iter().any(|o| matches!(o, kotton_shell::out::Out::Hint(h) if h.contains("`vault invite home --me`, then `sync`"))),
-        "{:?}",
+        one.out.iter().any(|o| matches!(o, kotton_shell::out::Out::Fail { try_: Some(t), .. } if t == "`vault invite home --me`")),
+        "the keep that could not meet does not name home's `vault invite --me`: {:?}",
         one.out
     );
     assert!(waiting_for(&mut desk.client, "lee", OperatedService::Vault).await.is_empty());
@@ -5386,6 +5397,18 @@ async fn enrol_at_the_repl_asks_which_between_two_vault_keys_and_a_no_to_the_off
     }
     let named = at_the_repl(&mut repl, "vault people attic", &[]).await;
     assert!(matches!(named.exit_code, kotton_shell::ExitCode::Success), "{:?}", named.out);
+}
+
+/// What an `enrol` said of a vault that does not keep this person's things,
+/// panicking when it said nothing of the kind.
+fn not_kept(out: &kotton_shell::CommandOutput) -> String {
+    out.out
+        .iter()
+        .find_map(|o| match o {
+            kotton_shell::out::Out::Fail { what, .. } => what.strip_prefix("your things are not kept at the vault: ").map(str::to_string),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the enrol did not say the vault keeps nothing: {:?}", out.out))
 }
 
 /// The one line a command failed with, panicking when it did not fail in one.

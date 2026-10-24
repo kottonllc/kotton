@@ -964,7 +964,7 @@ Complete a key `mint` made, from the line its relay or vault printed when it was
 **Usage:** `Kotton enrol [OPTIONS] [ARGS]...`
 
 ```text
-enrol <line> [<line>…] — paste the line each relay or vault of your own printed when it was created, space-separated or one per row, in any order, or the one line a host printed, which names both: each completes the key minted for it, and says what it names, whether it is reached from here and whether its key matched; a vault's ends by offering to keep your things there too, and on a yes this device stands at the relay the same enrol kept. mint and enrol make one; relay and vault operate one
+enrol <line> [<line>…] — paste the line each relay or vault of your own printed when it was created, space-separated or one per row, in any order, or the one line a host printed, which names both: each completes the key minted for it, and says what it names, whether it is reached from here and whether its key matched; a vault's then keeps your things, sealed, as one of your drives — `sync` syncs them there when you ask — and this device stands at the relay the same enrol kept. mint and enrol make one; relay and vault operate one
 ```
 
 ###### **Arguments:**

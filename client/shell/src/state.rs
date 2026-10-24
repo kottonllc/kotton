@@ -31,8 +31,8 @@ pub struct ShellState {
     pub pending_identity_switch: Option<String>,
     /// Piped stdin from the previous command (cleared after each command reads it).
     pub stdin: Option<String>,
-    /// Who answers a verb that asks in place — `enrol`'s *which* and its
-    /// *keep your things here too* ([`Asking`]).
+    /// Who answers a verb that asks in place — `enrol`'s *which*, when several
+    /// keys of a kind wait ([`Asking`]).
     #[cfg(feature = "cli")]
     pub asking: Asking,
 }
