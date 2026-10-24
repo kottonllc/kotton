@@ -56,7 +56,6 @@
 //! logic belongs in `05_runtime`; migration is tracked in
 //! `IDEA-tier-discipline`.
 
-use kotton_peer::membership::Membership as _;
 use kotton_peer::daemon::drive_rules::DriveRule;
 use kotton_peer::daemon::drives::Drive;
 use kotton_wire::ipc::{SyncDirection, SyncOutcome, VfsChangeKind};
@@ -962,35 +961,6 @@ async fn sync_drive_with_outcome(
         conflicts_resolved: 0,
         duration_ms: start.elapsed().as_millis() as u64,
     })
-}
-
-/// Whether `peer_did` holds the data capability — i.e. may be sent material that
-/// is not sealed (RFC-0036).
-///
-/// Fails closed: an unknown DID, an unreadable membership set, or a member with
-/// no recorded posture all answer `false`. A peer we cannot classify is treated
-/// as one that must not receive plaintext.
-/// Whether `peer_did` holds the data keys for `user_id` — i.e. whether replicating
-/// records to it can succeed at all.
-///
-/// `pub` since the engine left `kuserd` (2026-08-24). It is a coherent question about
-/// replication eligibility rather than an internal step, and the daemon's integration
-/// tests ask it directly. Widening it was a judgement call: the alternative was a
-/// second `SyncHost` implementation in this crate for the tests to run against, which
-/// can drift from the one that ships.
-pub async fn peer_holds_data_keys(resources: &dyn crate::SyncHost, user_id: &str, peer_did: &str) -> bool {
-    use kotton_schemas::membership::Posture;
-    let Some(rt) = resources.user_store(user_id) else {
-        return false;
-    };
-    let Ok(members) = rt.list_members().await else {
-        return false;
-    };
-    members
-        .iter()
-        .find(|m| m.did == peer_did)
-        .map(|m| matches!(m.posture, Some(Posture::Full)))
-        .unwrap_or(false)
 }
 
 /// Run one object sync pass with **record sync riding alongside it** (RFC-0046).

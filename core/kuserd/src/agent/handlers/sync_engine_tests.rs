@@ -78,34 +78,6 @@ mod b3_tests {
         (dir, rt, resources)
     }
 
-    /// Only a `Full` peer may receive record changesets — they are structured
-    /// plaintext, the one data path sealed replication does not cover (B3).
-    #[tokio::test]
-    async fn only_a_full_peer_may_receive_record_changesets() {
-        let (_dir, _runtime, resources) = env().await;
-        let user_rt = resources.user_store("alice").expect("user runtime");
-
-        for (did, posture, expected) in [
-            ("did:key:zFull", Some(Posture::Full), true),
-            ("did:key:zCosigner", Some(Posture::Cosigner), false),
-            ("did:key:zBlind", Some(Posture::BlindStorage), false),
-            // A member with no recorded posture cannot be classified, so it is
-            // treated as one that must not receive plaintext.
-            ("did:key:zUnknownPosture", None, false),
-        ] {
-            user_rt
-                .write_member(&member(did, posture))
-                .await
-                .expect("write_member");
-            assert_eq!(
-                peer_holds_data_keys(&*resources, "alice", did).await,
-                expected,
-                "posture {posture:?} should {} receive record changesets",
-                if expected { "" } else { "NOT" },
-            );
-        }
-    }
-
     /// A mount with no pack layer, and beside it a remote reaching `peer_did`.
     ///
     /// A plain store answers `pack_loose()` with `None`, so a pass that tries to
@@ -209,15 +181,5 @@ mod b3_tests {
         )
         .await
         .expect("a pull hands the peer nothing, so it needs no pack");
-    }
-
-    /// A DID that is not a member at all is refused — the gate fails closed on
-    /// anything it cannot classify, not only on postures it recognises.
-    #[tokio::test]
-    async fn an_unknown_peer_is_refused() {
-        let (_dir, _runtime, resources) = env().await;
-        assert!(!peer_holds_data_keys(&*resources, "alice", "did:key:zStranger").await);
-        // An unknown *user* likewise resolves to no runtime, and so to no keys.
-        assert!(!peer_holds_data_keys(&*resources, "nobody", "did:key:zFull").await);
     }
 }
