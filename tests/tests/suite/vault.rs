@@ -5042,6 +5042,10 @@ async fn an_admit_under_an_invite_for_another_name_says_so_and_a_matching_one_sy
                 reason.contains("kvaultd invite alice"),
                 "the admit says what to type at the host: {reason}"
             );
+            // The vault's rule is read before the vault is recorded, so a
+            // refused admit leaves no row beside the failure it reports (#157).
+            let nodes = within("the device's paired nodes", client.list_nodes("alice")).await.expect("node list");
+            assert!(nodes.is_empty(), "a refused admit recorded the vault: {nodes:?}");
         }
         UserResponse::PairingComplete { node, .. } => {
             // Today's shape: the admit completes, and the first sync is where
@@ -6374,13 +6378,23 @@ async fn enrolling_a_vault_goes_through_the_relay_already_paired() {
         relay.name, relay_addr,
         "enrolling through the relay you already have must not move you to another"
     );
-    let nodes = within("reading the node roster", env.client.list_nodes("alice"))
-        .await
-        .expect("node list");
-    assert!(
-        nodes.iter().any(|n| n.id == "vault"),
-        "the vault is not among this device's paired nodes: {nodes:?}"
-    );
+    // The vault's side finishing is not the admit finishing: this device
+    // records the vault only once the vault has said it keeps for it (#157),
+    // a dial after the ceremony. So the roster is read until the admit has
+    // written it, bounded like every step here: a vault never recorded is
+    // this step wedged.
+    within_for(WHOLE, "waiting for the vault among this device's paired nodes", async {
+        loop {
+            let nodes = within("reading the node roster", env.client.list_nodes("alice"))
+                .await
+                .expect("node list");
+            if nodes.iter().any(|n| n.id == "vault") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
     // And in the list the pane draws, with nothing typed after the digits.
     let vaults = within_for(WHOLE, "waiting for the vault in the readout", vaults_in_the_readout(&env.daemon))
         .await;
