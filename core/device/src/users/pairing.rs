@@ -74,6 +74,14 @@
 //!   answers `PairingComplete` ([`crate::users::drive_devices`]); `device
 //!   revoke` withdraws the device the same way. A joined device holds a key
 //!   share and introduces nobody.
+//!
+//! **An admit by code records the vault only once the vault has said it keeps
+//! for this device.** The vault wrote its half before it answered `kept`, so
+//! when the ceremony returns its rule — which pool it holds this device's key
+//! in — is already a fact this device can ask about. The admit asks
+//! ([`refused_as`]) and then writes ([`keep_the_admitted`]): a refusal ends it
+//! `PairFailed`, in the vault's words, with nothing recorded here. It never
+//! writes and then withdraws (#157).
 use kotton_session::service::tokens as sessions;
 use kotton_peer::daemon::nodes::{
     PendingConfirms,
@@ -1184,7 +1192,9 @@ pub async fn handle_device_admit(
                         return;
                     }
                 };
-                match finalize_enrolled_node(
+                let the_vaults_rule = refused_as(&runtime, enrolled.node.clone(), &user_id);
+                match keep_the_admitted(
+                    the_vaults_rule,
                     runtime.secrets(),
                     store.as_ref(),
                     &db,
@@ -1195,24 +1205,17 @@ pub async fn handle_device_admit(
                 )
                 .await
                 {
-                    Ok(node) => match refused_as(&runtime, node.clone(), &user_id).await {
-                        None => {
-                            if posture == Posture::Full {
-                                crate::users::drive_devices::introduce(&runtime, &db, &user_id, &node).await;
-                            }
-                            UserResponse::PairingComplete {
-                                node,
-                                session_token: None,
-                                relay_offer,
-                            }
+                    Ok(node) => {
+                        if posture == Posture::Full {
+                            crate::users::drive_devices::introduce(&runtime, &db, &user_id, &node).await;
                         }
-                        Some(message) => UserResponse::PairFailed {
-                            reason: admitted_but_refused(&user_id, &message),
-                        },
-                    },
-                    Err(e) => UserResponse::PairFailed {
-                        reason: format!("Admitted, but recording the node failed: {e}"),
-                    },
+                        UserResponse::PairingComplete {
+                            node,
+                            session_token: None,
+                            relay_offer,
+                        }
+                    }
+                    Err(reason) => UserResponse::PairFailed { reason },
                 }
             }
             Err(e) => {
@@ -1233,6 +1236,44 @@ pub async fn handle_device_admit(
         let _ = tx.send(frame).await;
     });
     Ok(rx)
+}
+
+/// Keep the vault an admit's ceremony enrolled — **after** its rule is read,
+/// and only if it keeps for this device: `the_vaults_rule` is [`refused_as`]
+/// for the admit, and is awaited before anything is written. A refusal ends
+/// the admit with the vault's words ([`not_kept_as`]) and nothing recorded
+/// here: no row, no drive, no key on the allowlist, no member. There is
+/// nothing to withdraw, so there is no withdrawal path (#157).
+///
+/// Why the rule can be read first: what it asks is the vault's own record,
+/// which the vault wrote before it answered that it kept the join
+/// ([`answer_the_issuer`] follows [`finalize_joined_node`] on its side), and
+/// the ceremony returned only on that answer. The question is a dial to the
+/// node the ceremony learned ([`kotton_peer::pairing::EnrolledNode::node`],
+/// the value [`finalize_enrolled_node`] records and returns unchanged), and a
+/// dial reads no row: [`kotton_peer::dialer::Dialer::connect`] takes the node
+/// it is handed.
+///
+/// `Err` is the `PairFailed` reason. A write that fails part-way through
+/// [`finalize_enrolled_node`] is said as such; that function is not one
+/// transaction, which is its own work.
+#[allow(clippy::too_many_arguments)]
+async fn keep_the_admitted(
+    the_vaults_rule: impl std::future::Future<Output = Option<String>>,
+    secrets: &dyn kotton_sys::secret::SecretsStore,
+    member_store: &dyn kotton_peer::membership::MemberStore,
+    db: &Arc<SqlitePool>,
+    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    user_id: &str,
+    posture: Posture,
+    enrolled: kotton_peer::pairing::EnrolledNode,
+) -> Result<kotton_wire::peer::PairedNode, String> {
+    if let Some(message) = the_vaults_rule.await {
+        return Err(not_kept_as(user_id, &message));
+    }
+    finalize_enrolled_node(secrets, member_store, db, paired_keys, user_id, posture, enrolled)
+        .await
+        .map_err(|e| format!("Admitted, but recording the node failed: {e}"))
 }
 
 /// The one posture an admit by code takes, refused before anything else runs.
@@ -1262,8 +1303,9 @@ const STANDING_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 /// lag; an answer in between clears it.
 const REFUSAL_HOLDS: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Ask the vault just admitted, under this device's own user, whether it keeps
-/// for this device — `VaultCapacity`, a tenant's verb, which the vault answers
+/// Ask the vault an admit's ceremony just enrolled — before this device
+/// records it ([`keep_the_admitted`]) — under this device's own user, whether
+/// it keeps for this device — `VaultCapacity`, a tenant's verb, which the vault answers
 /// only to a key paired to the pool the request names. The vault's refusal,
 /// when it holds for [`REFUSAL_HOLDS`]; `None` when it answers anything else,
 /// or cannot be reached within [`STANDING_WAIT`].
@@ -1314,15 +1356,17 @@ async fn refused_as(runtime: &DeviceRuntime, node: kotton_wire::peer::PairedNode
     }
 }
 
-/// What the admit prints when the vault it just admitted refuses this device:
-/// the vault's own sentence, and what to type. When the vault holds this
-/// device's key under another pool, it has said which
-/// ([`crate::users::admission::paired_as_another`]), and the way out is the
-/// operator's: invite again under this device's user. Dropping the tenant the
-/// key was paired to is not a way out — `tenancy::drop_tenant` sweeps the key's
-/// row, which leaves the device paired nowhere and still refused — so it is
-/// named only as the cleanup after the new invite is admitted.
-fn admitted_but_refused(user_id: &str, message: &str) -> String {
+/// What the admit prints when the vault its ceremony reached refuses this
+/// device: the vault's own sentence, that this device kept nothing of it
+/// ([`keep_the_admitted`] reads the refusal before it writes), and what to
+/// type. When the vault holds this device's key under another pool, it has
+/// said which ([`crate::users::admission::paired_as_another`]), and the way out
+/// is the operator's: invite again under this device's user. Dropping the
+/// tenant the key was paired to is not a way out — `tenancy::drop_tenant`
+/// sweeps the key's row, which leaves the device paired nowhere and still
+/// refused — so it is named only as the cleanup after the new invite is
+/// admitted.
+fn not_kept_as(user_id: &str, message: &str) -> String {
     let what_to_do = if message.contains(crate::users::admission::PAIRED_AS_ANOTHER) {
         format!(
             "The vault was given another name for this device than it syncs as. On the host, invite again \
@@ -1337,7 +1381,10 @@ fn admitted_but_refused(user_id: &str, message: &str) -> String {
              that holds its credential), and admit that invite here."
         )
     };
-    format!("Admitted, but the vault will not keep for this device as `{user_id}`: {message}. {what_to_do}")
+    format!(
+        "Not admitted: the vault will not keep for this device as `{user_id}`: {message}. Nothing of it was \
+         recorded here, so there is nothing to revoke. {what_to_do}"
+    )
 }
 
 /// Why no invite is minted at a relay that shows no key: a code names its
@@ -1954,7 +2001,7 @@ mod handed_drive_tests {
 
 #[cfg(test)]
 mod admit_tests {
-    use super::{admits_by_code, admitted_but_refused, adds_instead, not_minted};
+    use super::{admits_by_code, not_kept_as, adds_instead, not_minted};
     use crate::users::admission::{paired_as_another, NOT_PAIRED_WITH};
     use kotton_schemas::membership::Posture;
 
@@ -1985,7 +2032,7 @@ mod admit_tests {
     #[test]
     fn a_device_paired_as_another_tenant_is_told_to_invite_first_and_drop_after() {
         let vault = format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice': {}", paired_as_another("sam", "alice"));
-        let said = admitted_but_refused("alice", &vault);
+        let said = not_kept_as("alice", &vault);
         assert!(said.contains("tenant `sam`, and asked as `alice`"), "{said}");
         let invite = said.find("kvaultd invite alice").expect(&said);
         let drop = said.find("dropped").expect(&said);
@@ -2120,10 +2167,159 @@ mod admit_tests {
     /// told of a tenant to drop, since the vault named none.
     #[test]
     fn a_device_paired_nowhere_is_told_to_be_invited_and_of_no_tenant() {
-        let said = admitted_but_refused("alice", &format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice'"));
+        let said = not_kept_as("alice", &format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice'"));
         assert!(said.contains("kvaultd invite alice"), "{said}");
         // From the desktop, the vault is named only where it operates several.
         assert!(said.contains("`vault invite [<v>] alice`"), "{said}");
         assert!(!said.contains("drop"), "{said}");
+    }
+
+    /// A member store that keeps what it is told, so a test sees whether the
+    /// admit wrote a member.
+    #[derive(Default)]
+    struct Members(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+    #[async_trait::async_trait]
+    impl kotton_peer::membership::MemberStore for Members {
+        async fn member_write(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.0.lock().unwrap().insert(path.to_string(), data.to_vec());
+            Ok(())
+        }
+        async fn member_read(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+            self.0.lock().unwrap().get(path).cloned().ok_or_else(|| anyhow::anyhow!("nothing at {path}"))
+        }
+        async fn member_delete(&self, path: &str) -> anyhow::Result<()> {
+            self.0.lock().unwrap().remove(path);
+            Ok(())
+        }
+        async fn member_list(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            Ok(self.0.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect())
+        }
+    }
+
+    /// What an admit's ceremony hands back for a vault: its node, blind, and
+    /// no share.
+    fn an_enrolled_vault() -> kotton_peer::pairing::EnrolledNode {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]).verifying_key();
+        kotton_peer::pairing::EnrolledNode {
+            issuer_share: None,
+            pubkey_package: None,
+            node: kotton_wire::peer::PairedNode {
+                id: "vault".into(),
+                device_did: kotton_crypto::DidKeyMethod::from_public_key(&key),
+                public_key: key.to_bytes(),
+                paired_at: 0,
+                addresses: vec![],
+                relay_url: Some("http://relay.test:7700".into()),
+                posture: Some("blind-storage".into()),
+            },
+        }
+    }
+
+    /// What an admit records of a vault: its row, its drive, its key on the
+    /// allowlist, and its member — all four, so a test can say none is there.
+    struct Recorded {
+        row: bool,
+        drives: i64,
+        allowed: bool,
+        members: usize,
+    }
+
+    async fn recorded(
+        db: &std::sync::Arc<sqlx::SqlitePool>,
+        paired_keys: &std::sync::Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+        members: &Members,
+    ) -> Recorded {
+        let key = an_enrolled_vault().node.public_key;
+        Recorded {
+            row: kotton_peer::daemon::db::paired_node_named(db, "alice", "vault").await.unwrap().is_some(),
+            drives: sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap(),
+            allowed: paired_keys.read().unwrap().contains(&key),
+            members: members.0.lock().unwrap().len(),
+        }
+    }
+
+    /// **An admit the vault's rule refuses records nothing, and says the
+    /// vault's words** (#157). The rule is read before anything is written —
+    /// the test's rule looks, and finds no row — and its refusal ends the
+    /// admit there: no row, no drive, no key on the allowlist, no member, so
+    /// a `PairFailed` never stands beside a row it denies.
+    #[tokio::test]
+    async fn an_admit_the_vaults_rule_refuses_records_nothing_and_says_the_vaults_words() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, RwLock};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::open_machine_db(dir.path().join("agent.db")).await.unwrap());
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let members = Members::default();
+        let secrets = kotton_secret::MemorySecrets::new();
+        let refusal = format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice': {}", paired_as_another("sam", "alice"));
+
+        let the_vaults_rule = async {
+            let at_the_read = recorded(&db, &paired_keys, &members).await;
+            assert!(!at_the_read.row && at_the_read.drives == 0, "the admit wrote before it read the vault's rule");
+            Some(refusal.clone())
+        };
+        let said = super::keep_the_admitted(
+            the_vaults_rule,
+            &secrets,
+            &members,
+            &db,
+            &paired_keys,
+            "alice",
+            Posture::BlindStorage,
+            an_enrolled_vault(),
+        )
+        .await
+        .expect_err("a vault that refuses this device was kept");
+
+        assert!(said.starts_with("Not admitted"), "{said}");
+        assert!(said.contains(&refusal), "the admit does not say the vault's words: {said}");
+        assert!(said.contains("Nothing of it was recorded here"), "{said}");
+        assert!(said.contains("kvaultd invite alice"), "{said}");
+        let after = recorded(&db, &paired_keys, &members).await;
+        assert!(!after.row, "a refused admit left the vault's row");
+        assert_eq!(after.drives, 0, "a refused admit left a drive");
+        assert!(!after.allowed, "a refused admit left the vault's key on the allowlist");
+        assert_eq!(after.members, 0, "a refused admit left a member");
+    }
+
+    /// The other half: a vault whose rule keeps for this device is recorded
+    /// through `finalize_enrolled_node`, after the rule is read — its row, its
+    /// drive, its key and its member.
+    #[tokio::test]
+    async fn an_admit_the_vaults_rule_keeps_is_recorded_after_the_rule_is_read() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, RwLock};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::open_machine_db(dir.path().join("agent.db")).await.unwrap());
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let members = Members::default();
+        let secrets = kotton_secret::MemorySecrets::new();
+
+        let the_vaults_rule = async {
+            let at_the_read = recorded(&db, &paired_keys, &members).await;
+            assert!(!at_the_read.row && at_the_read.drives == 0, "the admit wrote before it read the vault's rule");
+            None
+        };
+        let node = super::keep_the_admitted(
+            the_vaults_rule,
+            &secrets,
+            &members,
+            &db,
+            &paired_keys,
+            "alice",
+            Posture::BlindStorage,
+            an_enrolled_vault(),
+        )
+        .await
+        .expect("a vault that keeps for this device is recorded");
+
+        assert_eq!(node.public_key, an_enrolled_vault().node.public_key);
+        let after = recorded(&db, &paired_keys, &members).await;
+        assert!(after.row && after.allowed && after.members > 0, "the vault was not recorded");
+        assert_eq!(after.drives, 1, "the vault was not recorded as a drive");
     }
 }

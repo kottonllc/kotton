@@ -615,8 +615,9 @@ pub enum UserResponse {
     /// The pairing ceremony completed successfully (terminal frame of the RFC-0040
     /// `DeviceAdd` / `DeviceJoin` stream). On the admitting side it is sent only
     /// after the joining device answered that it kept what it was handed, and
-    /// the device was then recorded and introduced at the person's drives; on
-    /// the joining side, only once the admitting device replied, sealed in the
+    /// the device was then recorded and introduced at the person's drives —
+    /// and, for a vault admitted by code, after the vault answered that it
+    /// keeps for this device, before it was recorded; on the joining side, only once the admitting device replied, sealed in the
     /// ceremony's channel, that it heard that answer.
     PairingComplete {
         node: PairedNode,
@@ -682,7 +683,9 @@ pub enum UserResponse {
     /// The ceremony aborted (mismatch, cancel, timeout, or peer vanished), or
     /// the joining device did not keep what it was handed — it refused it, or
     /// did not say it kept it in time — in which case the admitting device kept
-    /// nothing of the join either: no row, and no drive told of it. On the
+    /// nothing of the join either: no row, and no drive told of it. On an
+    /// admit by code it is also the frame for a vault whose rule refuses this
+    /// device, which is read before the vault is recorded: no row either. On the
     /// joining side it is also the frame for a join it kept whose admitting
     /// device never replied that it heard: that device may or may not have
     /// kept it, and `reason` says to check there.
