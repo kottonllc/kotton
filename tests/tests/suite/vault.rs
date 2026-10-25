@@ -19,7 +19,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::free_port;
 use crate::common::{connect_when_ready, enroll_streamed, enroll_streamed_as, init_crypto, unique_ipc, wait_for_daemon};
 use kotton_sys::ipc::IpcEndpoint;
 
@@ -54,11 +53,11 @@ async fn spawn_vault_on(label: &str, shelves: Arc<dyn kotton_sys::store::Shelves
             .await
             .expect("vault"),
     );
-    let op_port = free_port();
     vault
-        .start_peer_listener_background(op_port)
+        .start_peer_listener_background(0)
         .await
         .expect("vault peer listener");
+    let op_port = crate::common::peer_port(vault.runtime());
     let task = tokio::spawn(Arc::clone(&vault).run());
     wait_for_daemon(&ipc, label).await;
     RunningVault {
@@ -2816,7 +2815,9 @@ async fn a_vault_enrolled_while_a_stranger_holds_its_relays_address_is_answered_
     drop(bx._relay);
     let elsewhere = tempfile::tempdir().expect("a stranger's relay state");
     crate::common::relay::create_at(elsewhere.path(), &hex::encode(ed25519_dalek::SigningKey::from_bytes(&rand::random()).verifying_key().to_bytes()));
-    let (mut stranger, _) = crate::common::relay::relay_at(elsewhere.path(), &bx.relay_addr, &bx.relay_url).await;
+    // At the address the relay it replaces was given: the point of the case is a
+    // stranger where the vault's relay was, so this one port is not the OS's pick.
+    let (mut stranger, _, _) = crate::common::relay::relay_at(elsewhere.path(), &bx.relay_addr, &bx.relay_url).await;
 
     let kept = within("the vault's credential, a stranger at the relay's address", desk.client.operator_enrol("lee", &bx.vault_credential))
         .await
@@ -6520,9 +6521,8 @@ async fn a_service_started_with_its_operators_key_admits_that_key_and_no_other()
     let operator = ed25519_dalek::SigningKey::from_bytes(&rand::random());
     let state = tempfile::tempdir().expect("a relay state directory");
     crate::common::relay::create_at(state.path(), &hex::encode(operator.verifying_key().to_bytes()));
-    let addr = format!("127.0.0.1:{}", free_port());
+    let (mut relay, addr, _) = crate::common::relay::relay_at(state.path(), "127.0.0.1:0", "").await;
     let url = format!("http://{addr}");
-    let (mut relay, _) = crate::common::relay::relay_at(state.path(), &addr, &url).await;
     let read = kotton_wire::rendezvous::RelayOperatorRequest::ReadRule;
     let ours = kotton_net::rendezvous::say_as_operator(&url, &operator, &read).await;
     let theirs = kotton_net::rendezvous::say_as_operator(&url, &stranger, &read).await;

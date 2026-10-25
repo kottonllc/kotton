@@ -31,11 +31,6 @@ use std::time::Duration;
 use crate::common::{connect_when_ready, enroll_streamed, init_crypto, unique_ipc, wait_for_daemon};
 
 
-fn free_port() -> u16 {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind :0 for port probe");
-    s.local_addr().expect("local_addr").port()
-}
-
 /// The ceremony recorded where `label` answers the protocol, so nothing here
 /// has to say it. Replaces the `peer_add` that used to inject `op_port` right
 /// after each enrolment
@@ -110,11 +105,11 @@ async fn enroll_then_threshold_sign_across_two_nodes() {
         .await
         .expect("daemon N"),
     );
-    let op_port_n = free_port();
     daemon_n
-        .start_peer_listener_background(op_port_n)
+        .start_peer_listener_background(0)
         .await
         .expect("start N operational listener");
+    let op_port_n = crate::common::peer_port(&daemon_n.runtime());
     let daemon_n =
         Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
 
@@ -236,11 +231,11 @@ async fn a_locked_coordinator_says_it_is_locked_rather_than_that_it_has_no_co_si
         .await
         .expect("daemon N"),
     );
-    let op_port_n = free_port();
     daemon_n
-        .start_peer_listener_background(op_port_n)
+        .start_peer_listener_background(0)
         .await
         .expect("start N operational listener");
+    let op_port_n = crate::common::peer_port(&daemon_n.runtime());
     let daemon_n =
         Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
 
@@ -363,9 +358,8 @@ async fn enroll_then_threshold_sign_over_relay() {
 
     // N starts its operational listener (holds a relay reservation so the
     // coordinator can reach it by DID through the relay).
-    let op_port_n = free_port();
     daemon_n
-        .start_peer_listener_background(op_port_n)
+        .start_peer_listener_background(0)
         .await
         .expect("start N operational listener");
     let daemon_n =
@@ -811,11 +805,11 @@ async fn a_blind_storage_receives_ciphertext_it_cannot_read() {
         .await
         .expect("daemon B"),
     );
-    let op_port_b = free_port();
     daemon_b
-        .start_peer_listener_background(op_port_b)
+        .start_peer_listener_background(0)
         .await
         .expect("start B operational listener");
+    let op_port_b = crate::common::peer_port(&daemon_b.runtime());
     let daemon_b =
         Arc::try_unwrap(daemon_b).unwrap_or_else(|_| panic!("sole arc owner for daemon_b"));
 
@@ -1081,11 +1075,11 @@ async fn cosigner_holds_a_share_but_no_data_keys_and_can_co_sign() {
         .await
         .expect("daemon N"),
     );
-    let op_port_n = free_port();
     daemon_n
-        .start_peer_listener_background(op_port_n)
+        .start_peer_listener_background(0)
         .await
         .expect("start N operational listener");
+    let op_port_n = crate::common::peer_port(&daemon_n.runtime());
     let daemon_n =
         Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
 
@@ -1284,11 +1278,11 @@ async fn a_user_who_loses_every_device_recovers_everything_from_the_phrase() {
         .await
         .expect("daemon B"),
     );
-    let op_port_b = free_port();
     daemon_b
-        .start_peer_listener_background(op_port_b)
+        .start_peer_listener_background(0)
         .await
         .expect("start B operational listener");
+    let op_port_b = crate::common::peer_port(&daemon_b.runtime());
     let daemon_b =
         Arc::try_unwrap(daemon_b).unwrap_or_else(|_| panic!("sole arc owner for daemon_b"));
     let _task_b = tokio::spawn(async move { std::sync::Arc::new(daemon_b).run().await });
@@ -1498,11 +1492,11 @@ async fn a_phrase_set_up_after_a_blind_node_was_enrolled_reaches_it() {
         .await
         .expect("daemon B"),
     );
-    let op_port_b = free_port();
     daemon_b
-        .start_peer_listener_background(op_port_b)
+        .start_peer_listener_background(0)
         .await
         .expect("start B operational listener");
+    let op_port_b = crate::common::peer_port(&daemon_b.runtime());
     let daemon_b =
         Arc::try_unwrap(daemon_b).unwrap_or_else(|_| panic!("sole arc owner for daemon_b"));
     let _task_b = tokio::spawn(async move { std::sync::Arc::new(daemon_b).run().await });

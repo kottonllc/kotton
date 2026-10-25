@@ -1280,10 +1280,15 @@ impl InstallApprovingAll for kotton::KottonClient {
     }
 }
 
-/// A port nothing is listening on right now.
-pub fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
-    l.local_addr().expect("reserved port has an address").port()
+/// The port `runtime`'s peer listener bound, read back off its socket.
+///
+/// Start the listener on port 0 (`start_peer_listener_background(0)`) and read its
+/// port here. The OS gives it a port nothing holds, at the bind itself. A port
+/// picked first and let go, as the suite once did, could be taken by
+/// anything on the host before the daemon bound it, and under parallel load
+/// something did (#152).
+pub fn peer_port(runtime: &kotton_device::DeviceRuntime) -> u16 {
+    runtime.peer_listen_addr().expect("the peer listener has bound").port()
 }
 
 // ── Spawning the fixture binaries ────────────────────────────────────────────

@@ -6,13 +6,18 @@
 //! starts its own relay on a free port and stops it when done. `KOTTON_RELAY_ADDR`
 //! is still honoured, for pointing the suite at a relay somewhere else.
 //!
+//! A relay is started on port 0 and the test reads back the address it bound, from
+//! the `listening http=<addr> stun=<addr>` line every start prints once its sockets
+//! are bound ([`started`]). A port picked first and let go could be taken by
+//! anything on the host before the relay bound it (#152).
+//!
 //! The binary comes from `infra/relay` (its own workspace, so it never shares this
 //! one's build lock): `cargo xtask build-relay`, which `just test` runs and which
 //! builds into `out/relay`. A missing binary fails with that command, never silently.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -123,39 +128,24 @@ async fn give_it_a_rule(addr: &str, operator: &ed25519_dalek::SigningKey) {
     }
 }
 
-/// A `kotton-relay` from `state` — created already — at `addr`, announcing
-/// `url`, once `/health` answers, and its whole log (stdout, as the journal
-/// takes it) for as long as it runs. A relay at a state directory, for a test
-/// that starts one itself: a stranger's relay at another's address.
+/// A `kotton-relay` from `state` — created already — at `bind`, announcing
+/// `advertise`, once it has said where it listens: the child, the address it bound,
+/// and its whole log (stdout, as the journal takes it) for as long as it runs
+/// ([`started`]). A relay at a state directory, for a test that starts one itself.
+/// `bind` is `127.0.0.1:0` unless the case is about the address itself: a
+/// stranger's relay at another's address.
 pub(crate) async fn relay_at(
     state: &std::path::Path,
-    addr: &str,
-    url: &str,
-) -> (Child, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
-    use std::io::BufRead as _;
-    let mut child = Command::new(relay_bin())
+    bind: &str,
+    advertise: &str,
+) -> (Child, String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let mut command = Command::new(relay_bin());
+    command
         .arg("--state-dir")
         .arg(state)
-        .args(["--bind", addr, "--stun-bind", addr, "--advertise", url])
-        .env("RUST_LOG", "kotton_relay=info")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn kotton-relay");
-    let out = child.stdout.take().expect("its stdout");
-    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let kept = std::sync::Arc::clone(&log);
-    std::thread::spawn(move || {
-        for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
-            kept.lock().unwrap().push(line);
-        }
-    });
-    let deadline = Instant::now() + READY_TIMEOUT;
-    while !reqwest::get(format!("{url}/health")).await.map(|r| r.status().is_success()).unwrap_or(false) {
-        assert!(Instant::now() < deadline, "the relay did not answer /health");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    (child, log)
+        .args(["--advertise", advertise])
+        .env("RUST_LOG", "kotton_relay=info");
+    started(command, bind)
 }
 
 impl Relay {
@@ -195,42 +185,59 @@ fn enrol_at_the_terminal(state: &std::path::Path, operator_hex: &str) {
 }
 
 async fn spawn_in(state: Option<tempfile::TempDir>) -> (Relay, String) {
-    let bin = relay_bin();
-    assert!(
-        bin.exists(),
-        "{} is missing — run `cargo xtask build-relay` (just test does)",
-        bin.display()
-    );
-    let port = super::free_port();
-    let addr = format!("127.0.0.1:{port}");
-    let mut command = Command::new(&bin);
+    let mut command = Command::new(relay_bin());
     if let Some(dir) = &state {
         command.arg("--state-dir").arg(dir.path());
     }
-    let child = command
-        .arg("--bind")
-        .arg(&addr)
-        .arg("--stun-bind")
-        .arg(&addr)
-        .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "kotton_relay=warn".into()))
-        .stdout(Stdio::null())
+    command.env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "kotton_relay=warn".into()));
+    let (child, addr, _) = started(command, "127.0.0.1:0");
+    (Relay { child: Some(child), state }, addr)
+}
+
+/// The relay `command` starts, at `bind`, once it has said where it listens: the
+/// child, the HTTP address it bound, and its whole stdout (as the journal takes
+/// it) for as long as it runs.
+///
+/// Read off the line the relay prints once its sockets are bound
+/// (`listening http=<addr> stun=<addr>`, `infra/relay/src/main.rs`), never
+/// composed from what it was asked to bind: on port 0 the OS gives the port, at the
+/// bind. Its STUN socket takes a port of its own the same way; nothing here dials
+/// it. A relay that exits before it says so fails here with its status and what it
+/// printed; its stderr is the test's.
+fn started(mut command: Command, bind: &str) -> (Child, String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::BufRead as _;
+    let mut child = command
+        .args(["--bind", bind, "--stun-bind", "127.0.0.1:0"])
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .expect("spawn kotton-relay");
-    let relay = Relay { child: Some(child), state };
-
-    let health = format!("http://{addr}/health");
-    let deadline = Instant::now() + READY_TIMEOUT;
-    loop {
-        if reqwest::get(&health).await.map(|r| r.status().is_success()).unwrap_or(false) {
-            return (relay, addr);
+    let out = child.stdout.take().expect("its stdout");
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kept = std::sync::Arc::clone(&log);
+    let (bound, listening) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+            if let Some(addr) = listening_at(&line) {
+                let _ = bound.send(addr.to_owned());
+            }
+            kept.lock().unwrap().push(line);
         }
-        assert!(
-            Instant::now() < deadline,
-            "kotton-relay at {addr} did not answer /health within {READY_TIMEOUT:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    });
+    match listening.recv_timeout(READY_TIMEOUT) {
+        Ok(addr) => (child, addr, log),
+        Err(e) => {
+            let _ = child.kill();
+            let status = child.wait().map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
+            let printed = log.lock().unwrap().join("\n");
+            panic!("kotton-relay never said where it listens ({e}; {status}); it printed:\n{printed}")
+        }
     }
+}
+
+/// The HTTP address in a relay's `listening http=<addr> stun=<addr>` line.
+pub(crate) fn listening_at(line: &str) -> Option<&str> {
+    line.strip_prefix("listening http=")?.split_whitespace().next()
 }
 
 /// A `TestEnv` whose daemon is pointed at `relay_addr`.
