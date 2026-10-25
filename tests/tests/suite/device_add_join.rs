@@ -216,8 +216,7 @@ struct Typed {
 /// the line where stdout's `[y/N] $` prompt waits with no newline, and a case
 /// counting lines that *start* `error:` counted none (#136). Nothing here reads
 /// where one stream's text falls against the other's: what a person waits for is
-/// read off stdout's own lines, and a refusal is found in either stream, wherever
-/// on a line it starts.
+/// read off stdout's own lines, and a refusal off stderr's, where the CLI writes it.
 #[derive(Clone, Default)]
 struct Said {
     out: String,
@@ -230,17 +229,14 @@ impl Said {
         self.out.lines()
     }
 
-    /// Each sentence of refusal it wrote: from every `error:`, in either stream and
-    /// wherever on its line it starts, to the end of that line.
+    /// Each sentence of refusal it wrote: each stderr line that starts `error:`.
+    ///
+    /// That is the CLI's contract, in one place: `finish()` (`client/cli/src/bridge.rs`)
+    /// writes a refusal as `error: {e}` at the start of a stderr line, once, and never
+    /// on stdout. An `error:` a refusal quotes, or one in the middle of a warning's
+    /// line, is not another refusal (#156).
     fn refusals(&self) -> Vec<&str> {
-        [self.out.as_str(), self.err.as_str()]
-            .into_iter()
-            .flat_map(|stream| {
-                stream
-                    .match_indices("error:")
-                    .map(move |(at, _)| stream[at..].lines().next().unwrap_or_default())
-            })
-            .collect()
+        self.err.lines().filter(|line| line.starts_with("error:")).collect()
     }
 }
 
@@ -440,21 +436,31 @@ async fn id_join_refused_by_the_device_you_have_exits_non_zero_in_one_sentence()
     );
 }
 
-/// **A refusal is one sentence wherever it lands** (#136): on a line of its own, or
-/// on the line where stdout's prompt waits with no newline — the transcript the
-/// refused join was once misread on, under batched load.
+/// **A refusal is one sentence, read where the CLI writes it** (#136, #156): a stderr
+/// line that starts `error:`, whatever stdout's prompt was doing when it came — and
+/// neither an `error:` the sentence quotes nor one inside a warning's line counts again.
 #[test]
 fn a_refusal_is_found_wherever_the_terminal_put_it() {
     let refusal = "error: Lost the connection before anything was shared. Try again.";
+    let nested = "error: Joined, but saving your keys failed: io error: No space left on device";
+    let warning = "warning: the relay said error: busy, trying the next one";
     let prompt = "  join \"device-e\"? [y/N] $ ";
-    for (out, err) in [
-        (prompt.to_string(), format!("{refusal}\n")),
-        (format!("{prompt}{refusal}\n"), String::new()),
-        (format!("{prompt}\n"), format!("  warning first {refusal}\n")),
+    for (out, err, sentence) in [
+        // After a prompt that waits with no newline.
+        (prompt.to_string(), format!("{refusal}\n"), refusal),
+        // A refusal that quotes an inner error is still one sentence.
+        (prompt.to_string(), format!("{nested}\n"), nested),
+        // A warning with `error:` mid-line is not a refusal; the refusal after it is.
+        (format!("{prompt}\n"), format!("{warning}\n{refusal}\n"), refusal),
     ] {
         let said = Said { out, err };
-        assert_eq!(said.refusals(), [refusal], "{said}");
+        assert_eq!(said.refusals(), [sentence], "{said}");
     }
+    let warned = Said { out: String::new(), err: format!("{warning}\n") };
+    assert!(warned.refusals().is_empty(), "{warned}");
+    // The CLI never writes a refusal to stdout, so nothing there is read as one.
+    let on_stdout = Said { out: format!("{refusal}\n"), err: String::new() };
+    assert!(on_stdout.refusals().is_empty(), "{on_stdout}");
     let twice = Said { out: String::new(), err: format!("{refusal}\n{refusal}\n") };
     assert_eq!(twice.refusals().len(), 2, "{twice}");
 }

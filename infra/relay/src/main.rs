@@ -31,6 +31,10 @@
 //! proved to whoever asks at `GET /identity?nonce=<hex>`; `--advertise` (or
 //! `KOTTON_RELAY_ADVERTISE`) is the address it signs beside the nonce, and the
 //! hint its line carries. Every start prints the line; it carries no secret.
+//! Once its sockets are bound it prints where it listens, as the OS bound them,
+//! `listening http=<addr> stun=<addr>`: with `--bind 127.0.0.1:0` that line is
+//! the one meant to be read for the port it was given (the `info` log says it
+//! too, as a log, and only at that level).
 
 mod admission;
 mod auth;
@@ -264,7 +268,8 @@ async fn main() -> anyhow::Result<()> {
     let stun_sock = tokio::net::UdpSocket::bind(cli.stun_bind)
         .await
         .context("failed to bind STUN responder UDP socket")?;
-    info!(stun_bind = %cli.stun_bind, "kotton-relay STUN responder listening (UDP)");
+    let stun_bound = stun_sock.local_addr()?;
+    info!(stun_bind = %stun_bound, "kotton-relay STUN responder listening (UDP)");
     tokio::spawn(stun::run_stun_responder(stun_sock));
 
     let state = Arc::new(AppState {
@@ -279,35 +284,38 @@ async fn main() -> anyhow::Result<()> {
 
     let router = build_router(state);
 
-    match (cli.tls_cert, cli.tls_key) {
+    let tls = match (cli.tls_cert, cli.tls_key) {
         (Some(cert), Some(key)) => {
-            info!(bind = %cli.bind, "kotton-relay starting (TLS)");
-            start_tls(router, cli.bind, cert, key).await?;
+            Some(axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?)
         }
-        (None, None) => {
-            info!(bind = %cli.bind, "kotton-relay starting (plain HTTP)");
-            let listener = tokio::net::TcpListener::bind(cli.bind).await?;
+        (None, None) => None,
+        _ => anyhow::bail!("--tls-cert and --tls-key must be provided together"),
+    };
+    let listener = tokio::net::TcpListener::bind(cli.bind).await?;
+    let bound = listener.local_addr()?;
+    // Where it listens, read off the sockets rather than from `--bind`: a bind on
+    // port 0 is given its port by the OS, and this line is the one meant to be
+    // read for that port; the `info!` lines below are logs. Printed once both are bound, so whoever reads it can dial.
+    println!("{}", listening_line(bound, stun_bound));
+
+    match tls {
+        Some(tls_config) => {
+            info!(bind = %bound, "kotton-relay starting (TLS)");
+            axum_server::from_tcp_rustls(listener.into_std()?, tls_config)
+                .serve(router.into_make_service())
+                .await?;
+        }
+        None => {
+            info!(bind = %bound, "kotton-relay starting (plain HTTP)");
             axum::serve(listener, router).await?;
-        }
-        _ => {
-            anyhow::bail!("--tls-cert and --tls-key must be provided together");
         }
     }
 
     Ok(())
 }
 
-async fn start_tls(
-    router: axum::Router,
-    bind: SocketAddr,
-    cert: std::path::PathBuf,
-    key: std::path::PathBuf,
-) -> anyhow::Result<()> {
-    use axum_server::tls_rustls::RustlsConfig;
-
-    let tls_config = RustlsConfig::from_pem_file(cert, key).await?;
-    axum_server::bind_rustls(bind, tls_config)
-        .serve(router.into_make_service())
-        .await?;
-    Ok(())
+/// What a start prints once its HTTP listener and its STUN socket are bound:
+/// `listening http=<addr> stun=<addr>`, each the address the OS bound.
+fn listening_line(http: SocketAddr, stun: SocketAddr) -> String {
+    format!("listening http={http} stun={stun}")
 }

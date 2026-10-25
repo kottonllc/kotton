@@ -19,11 +19,6 @@ use std::time::Duration;
 
 use crate::common::{connect_when_ready, enroll_streamed, unique_ipc, wait_for_daemon};
 
-fn free_port() -> u16 {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind :0 for port probe");
-    s.local_addr().expect("local_addr").port()
-}
-
 /// B reaches A only through the relay; the relay introduces them; B's request of
 /// A — a co-signature — lands over the introduced connection; and A's introduced
 /// listener is closed once the session ends.
@@ -63,7 +58,7 @@ async fn a_relay_introduces_two_devices_and_they_go_direct() {
 
     let daemon_a = Arc::new(daemon_a);
     daemon_a
-        .start_peer_listener_background(free_port())
+        .start_peer_listener_background(0)
         .await
         .expect("start A peer listener");
     let runtime_a = daemon_a.runtime();
