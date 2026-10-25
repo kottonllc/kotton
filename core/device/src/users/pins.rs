@@ -473,6 +473,12 @@ pub async fn set(
     scope: &PinScope,
     value: Option<PinValue>,
 ) -> io::Result<Result<PinReadout, String>> {
+    // Held here, where the record is made, whatever client sent the scope: a
+    // folder no setting could keep is refused, not recorded and replicated.
+    let scope = &match scope.clone().normalised() {
+        Ok(scope) => scope,
+        Err(e) => return Ok(Err(e)),
+    };
     if let PinScope::Drive { drive } | PinScope::Folder { drive, .. } = scope {
         let names = drive_names(db, user_id).await?;
         if !names.contains(drive) {
@@ -603,6 +609,47 @@ mod tests {
             let all = settings(&registry, &records).await.unwrap();
             assert_eq!(stated_default(&all, &me), Some(PinValue::OnDemand), "round {round}: the stated default was written over");
         }
+    }
+
+    /// **A folder no setting could keep is never recorded**, whatever client
+    /// sent it: `pins::set` holds every scope to `PinScope::normalised`, the
+    /// normaliser `parse` ends in. `/photos/` is kept as `/photos`, and then
+    /// keeps `/photos/x` whole; `photos` and `""` are refused with a sentence
+    /// and nothing is written.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_folder_is_held_to_its_form_where_the_record_is_made() {
+        use crate::users::DeviceUsers as _;
+        let temp = tempfile::TempDir::new().unwrap();
+        let secrets = std::sync::Arc::new(kotton_secret::MemorySecrets::new());
+        let rt = crate::DeviceRuntime::new_with_secrets(temp.path().to_path_buf(), crate::config::RuntimeConfig::default(), secrets)
+            .await
+            .unwrap();
+        let (_, store) = rt.create_user("alice", "canyon-orbit-velvet-fish-hospital").await.unwrap();
+        let records = kotton_record::open::user_record_store(rt.base_dir(), "alice", rt.secrets()).unwrap();
+        let db = Arc::new(kotton_record::open_sqlite(&temp.path().join("machine.db")).await.unwrap());
+        crate::db::MIGRATOR.run(db.as_ref()).await.unwrap();
+        let vault = ed25519_dalek::SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
+        let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&vault).unwrap().to_string();
+        kotton_peer::daemon::db::insert_paired_node(&db, "vault", "alice", &did, &vault, "[]", 0, None).await.unwrap();
+        kotton_peer::daemon::drives::record(&db, "alice", &vault).await.unwrap();
+
+        let me = "did:key:z6Mkme";
+        let folder = |f: &str| PinScope::Folder { drive: FIRST_DRIVE_NAME.into(), folder: f.into() };
+        let set = |scope: PinScope| {
+            let (rt, store, records, db) = (&rt, &store, &records, &db);
+            async move { super::set(&rt.schema_registry, records, store, db, "alice", me, &scope, Some(PinValue::Whole)).await.unwrap() }
+        };
+        set(PinScope::Default).await.unwrap();
+        write(&rt.schema_registry, &records, me, &PinScope::Default, Some(PinValue::OnDemand)).await.unwrap();
+        for bad in ["photos", ""] {
+            let refused = set(folder(bad)).await.expect_err("a folder no setting could keep was recorded");
+            assert!(refused.contains("beginning '/'"), "{bad:?}: {refused}");
+        }
+        let kept = set(folder("/photos/")).await.unwrap();
+        assert_eq!(kept.exceptions.iter().map(|s| s.scope.clone()).collect::<Vec<_>>(), [folder("/photos")]);
+        let all = settings(&rt.schema_registry, &records).await.unwrap();
+        assert_eq!(resolve(&all, me, FIRST_DRIVE_NAME, Some("/photos/x"), UNSTATED).0, PinValue::Whole);
+        assert_eq!(resolve(&all, me, FIRST_DRIVE_NAME, Some("/notes/x"), UNSTATED).0, PinValue::OnDemand);
     }
 
     /// The record is the setting, field for field, and its id is the device

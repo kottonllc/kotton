@@ -150,6 +150,10 @@ impl UserStore {
     /// its content is. Then, from the reconciled manifest, the content packs
     /// of the files `keep` keeps whole, as far as the room allows; a setting
     /// whose packs do not fit is named in the report, never dropped silently.
+    /// A pinned file brings the whole pack it was written in, with whatever
+    /// else that pass wrote: such a neighbour is held as long as the pin is,
+    /// counts against the room as the pin's, and is named under the pin's
+    /// setting when short (kotton #168 cuts packs by folder).
     /// Then, over the room, content packs no whole pin keeps and the drive
     /// holds are let go, since a read fetches them again. A content pack is
     /// the unit: a file kept whole brings whatever else its pack holds — what

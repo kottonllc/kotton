@@ -879,8 +879,10 @@ demand. Pins hold for `personal` today: a device keeps no tree of a drive made
 with `drive create` yet, so its vault alone holds it, and `status` says so.
 
 `pin <drive> whole` collects: this device fetches what it lacks of the drive
-now. Each setting is a record in your drive, sealed like everything else, so
-your other devices read it and the vault cannot.
+now. A pinned file brings the pack it was written in: whatever else was written
+beside it at the same sync comes with it, and stays while the pin does. Each
+setting is a record in your drive, sealed like everything else, so your other
+devices read it and the vault cannot.
 
 You are told when no device of yours keeps a drive whole, and when this device
 runs short of room for what it keeps whole, with the setting that keeps less.

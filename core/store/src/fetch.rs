@@ -18,8 +18,18 @@
 //! and are opened by the same layers that open a pack synced in a pass. It
 //! sees only storage keys under `_pack/`; a pack's name says nothing about
 //! what is in it, and the source is asked for nothing else — not a path, not a
-//! file. What the drive learns is that this device asked for one pack, which a
-//! pass already tells it of every pack a device pulls.
+//! file. What the drive learns is that this device asked for one pack — and,
+//! unlike a pass, *when*: a fetch is timed to a read, often a person's, so the
+//! drive learns when a device opened something it does not keep, and which
+//! pack. That is the cost of keeping on demand, which the protocol's storage
+//! model chooses; a device that keeps a drive whole pays none of it.
+//!
+//! **Offline.** A write on a device that cannot reach a drive fails, not
+//! found, when it reuses a chunk whose pack this device does not hold: the
+//! commit reads back every chunk the new state depends on, the reused one
+//! included (`crate::packed`'s `commit_new_state`), and that read is a fetch
+//! with no drive to answer. An overwrite of a file kept on demand, unopened,
+//! offline, is that case.
 //!
 //! **Who lends the source.** The store cannot dial a vault — it does not know
 //! one exists — so the daemon that hosts it lends one ([`PackSlot::lend`]),

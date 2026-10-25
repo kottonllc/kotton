@@ -476,7 +476,10 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
 
         // Chunk every loose file, filling packs as chunks accumulate so
         // memory stays bounded by one pack plus one file. Content packs: the
-        // index goes in a pack of its own at the commit.
+        // index goes in a pack of its own at the commit. (Compaction holds
+        // more: a content writer and an index writer, each up to a pack open,
+        // beside the pack it is salvaging — about three packs, where one
+        // writer made it about two.)
         let mut writer = PackWriter::content(Arc::clone(&self.inner), self.k_pack);
         let mut planned: Vec<String> = Vec::with_capacity(loose.len());
         for entry in &loose {

@@ -980,7 +980,10 @@ pub enum PinScope {
     /// A drive, by the person's name for it.
     Drive { drive: String },
     /// A folder of a drive: `folder` is a path in the drive, from its root,
-    /// beginning `/`, with no `.` or `..` component and no trailing `/`.
+    /// beginning `/`, with no empty, `.` or `..` component and no trailing
+    /// `/`. The daemon holds a `PinSet` to that through
+    /// [`PinScope::normalised`] before it records anything; a folder that is
+    /// not `/`-led is refused, and the root is kept as the drive.
     Folder { drive: String, folder: String },
 }
 
@@ -1005,12 +1008,28 @@ impl PinScope {
             None if words.is_empty() => Err("name a drive, `<drive>:/<folder>`, or `default`".into()),
             None => Ok(PinScope::Drive { drive: words.to_string() }),
             Some(("", _)) => Err(format!("'{words}' names no drive before the ':'")),
-            Some((drive, folder)) => {
-                let folder = Self::folder_said(folder)?;
+            Some((drive, folder)) => PinScope::Folder { drive: drive.to_string(), folder: folder.to_string() }.normalised(),
+        }
+    }
+
+    /// The scope as it is kept, or the sentence saying why it cannot be:
+    /// a folder normalised as [`Self::Folder`] holds it, and a folder that is
+    /// the drive's root kept as the drive. The one normaliser — [`Self::parse`]
+    /// ends in it, and the daemon calls it on every scope a `PinSet` carries
+    /// before anything is written, so a folder no setting could keep is
+    /// refused where the record is made, whatever client sent it.
+    pub fn normalised(self) -> Result<Self, String> {
+        match self {
+            PinScope::Default => Ok(PinScope::Default),
+            PinScope::Drive { drive } if drive.is_empty() => Err("name a drive".into()),
+            PinScope::Drive { drive } => Ok(PinScope::Drive { drive }),
+            PinScope::Folder { drive, .. } if drive.is_empty() => Err("name the drive the folder is in".into()),
+            PinScope::Folder { drive, folder } => {
+                let folder = Self::folder_said(&folder)?;
                 if folder == "/" {
-                    return Ok(PinScope::Drive { drive: drive.to_string() });
+                    return Ok(PinScope::Drive { drive });
                 }
-                Ok(PinScope::Folder { drive: drive.to_string(), folder })
+                Ok(PinScope::Folder { drive, folder })
             }
         }
     }
@@ -1138,8 +1157,26 @@ mod pin_tests {
         }
         assert_eq!(PinScope::parse("photos:/trip/").unwrap().said(), "photos:/trip");
         assert_eq!(PinScope::parse("photos:/").unwrap(), PinScope::Drive { drive: "photos".into() });
-        for bad in ["", ":/x", "photos:trip", "photos:/a/../b", "photos:/./a"] {
+        for bad in ["", ":/x", "photos:trip", "photos:/a/../b", "photos:/./a", "photos:"] {
             assert!(PinScope::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// **`parse` and the daemon's normalisation agree**: every scope `parse`
+    /// accepts is one [`PinScope::normalised`] keeps unchanged, and a folder
+    /// sent as a struct is held to the same form — `/photos/` kept as
+    /// `/photos`, `photos` and `""` refused.
+    #[test]
+    fn parse_and_the_daemons_normalisation_agree() {
+        for said in ["default", "photos", "photos:/", "photos:/trip", "photos:/trip/", "photos://trip//2026/", "photos:/a b"] {
+            let parsed = PinScope::parse(said).unwrap();
+            assert_eq!(parsed.clone().normalised().unwrap(), parsed, "{said}");
+        }
+        let folder = |f: &str| PinScope::Folder { drive: "personal".into(), folder: f.into() };
+        assert_eq!(folder("/photos/").normalised().unwrap(), folder("/photos"));
+        assert_eq!(folder("/").normalised().unwrap(), PinScope::Drive { drive: "personal".into() });
+        for bad in ["photos", "", "/a/../b"] {
+            assert!(folder(bad).normalised().is_err(), "{bad:?} was kept");
         }
     }
 
