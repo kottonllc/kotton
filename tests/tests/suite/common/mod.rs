@@ -752,27 +752,31 @@ pub fn pair_local_only() {
 /// `node_enroll`/`node_join` triple used to set up a two-node identity. Each device
 /// announces its own name (`device-e` issuer, `device-n` joiner); returns both
 /// clients (the joiner now authenticated) and the issuer's view of the joiner.
+///
+/// There is no port to pass: the issuer's bootstrap listener is bound where the OS
+/// says, and the code it advertises carries the port.
 pub async fn enroll_streamed(
     client_e: KottonClient,
     client_n: KottonClient,
     user: &str,
     joiner_name: &str,
-    bootstrap_port: u16,
     posture: Posture,
 ) -> (KottonClient, KottonClient, PairedNode) {
-    enroll_streamed_as(client_e, client_n, user, "device-e", joiner_name, bootstrap_port, posture).await
+    enroll_streamed_as(client_e, client_n, user, "device-e", joiner_name, posture).await
 }
 
 /// [`enroll_streamed`], with the name the issuing device announces. Two
 /// people's devices enrolling one vault must announce different names today
 /// (`TASK-two-tenants-whose-devices-share-a-name-unpair-each-other-at-a-vault`).
+///
+/// Each side's stream is read by [`issued`] and [`joined`], until the door
+/// ends it; when a side fails, the panic says both sides' words.
 pub async fn enroll_streamed_as(
     client_e: KottonClient,
     mut client_n: KottonClient,
     user: &str,
     issuer_name: &str,
     joiner_name: &str,
-    bootstrap_port: u16,
     posture: Posture,
 ) -> (KottonClient, KottonClient, PairedNode) {
     pair_local_only();
@@ -780,71 +784,166 @@ pub async fn enroll_streamed_as(
     let (code_tx, code_rx) = oneshot::channel::<String>();
     let user_i = user.to_string();
     let issuer = tokio::spawn(async move {
-        let mut rx = client_e
-            .device_add_stream(&user_i, Some(&issuer_name), 30, bootstrap_port, posture)
+        // Port 0: the issuer's daemon binds what the OS gives it and says it
+        // in the code. A port picked here and bound there was a race with every
+        // other test binding one meanwhile, and lost under parallel load (#110).
+        let rx = client_e
+            .device_add_stream(&user_i, Some(&issuer_name), 30, 0, posture)
             .await
             .expect("device_add_stream");
-        let mut code_tx = Some(code_tx);
-        let mut node = None;
-        while let Some(frame) = rx.recv().await {
-            match frame {
-                UserResponse::PairAdvertising { code, .. } => {
-                    let _ = code_tx.take().expect("one advertising frame").send(code.expose().to_string());
-                }
-                UserResponse::PairShowCode { token, .. } => {
-                    client_e
-                        .pair_confirm_code(&user_i, token.expose(), true)
-                        .await
-                        .expect("issuer confirm");
-                }
-                UserResponse::PairingComplete { node: n, .. } => {
-                    node = Some(n);
-                    break;
-                }
-                UserResponse::PairFailed { reason } => panic!("issuer pairing failed: {reason}"),
-                _ => {}
-            }
-        }
-        (client_e, node.expect("issuer completed the ceremony"))
+        let (client, user) = (&client_e, user_i.as_str());
+        let node = issued(rx, code_tx, move |token| async move {
+            client.pair_confirm_code(user, &token, true).await.expect("issuer confirm");
+        })
+        .await;
+        (client_e, node)
     });
     let user_j = user.to_string();
     let joiner_name = joiner_name.to_string();
     let joiner = tokio::spawn(async move {
-        let code = code_rx.await.expect("issuer produced a connection code");
-        let mut rx = client_n
+        let Ok(code) = code_rx.await else {
+            panic!("no code reached the joiner: the issuer's stream gave none (the issuer says why)");
+        };
+        let rx = client_n
             .device_join_stream(&user_j, &code, Some(&joiner_name))
             .await
             .expect("device_join_stream");
-        while let Some(frame) = rx.recv().await {
-            match frame {
-                UserResponse::PairShowCode { token, .. } => {
-                    client_n
-                        .pair_confirm_code(&user_j, token.expose(), true)
-                        .await
-                        .expect("joiner confirm");
-                }
-                UserResponse::PairingComplete { session_token, .. } => {
-                    // The join issues this device a session (it authenticated by
-                    // completing the FROST ceremony). Bind it to the client so
-                    // downstream calls act as the joined identity — mirrors what the
-                    // retired `node_join` SDK method did on completion.
-                    if let Some(token) = session_token {
-                        client_n
-                            .authenticate(token.expose())
-                            .await
-                            .expect("bind joined session");
-                    }
-                    break;
-                }
-                UserResponse::PairFailed { reason } => panic!("joiner pairing failed: {reason}"),
-                _ => {}
-            }
+        let (client, user) = (&client_n, user_j.as_str());
+        let session = joined(rx, move |token| async move {
+            client.pair_confirm_code(user, &token, true).await.expect("joiner confirm");
+        })
+        .await;
+        // The join issues this device a session (it authenticated by completing
+        // the FROST ceremony). Bind it to the client so downstream calls act as
+        // the joined identity — mirrors what the retired `node_join` SDK method
+        // did on completion.
+        if let Some(token) = session {
+            client_n.authenticate(&token).await.expect("bind joined session");
         }
         client_n
     });
-    let (client_e, node_n) = issuer.await.expect("issuer task");
-    let client_n = joiner.await.expect("joiner task");
-    (client_e, client_n, node_n)
+    // Both sides, then one failure that says each: a joiner that fails mid-way
+    // leaves the issuer waiting out its window, so the first side to fail is not
+    // always the one that says why.
+    match tokio::join!(issuer, joiner) {
+        (Ok((client_e, node_n)), Ok(client_n)) => (client_e, client_n, node_n),
+        (issuer, joiner) => panic!(
+            "the ceremony did not complete\n  issuer: {}\n  joiner: {}",
+            side_said(issuer.map(drop)),
+            side_said(joiner.map(drop)),
+        ),
+    }
+}
+
+/// **The issuing side of a device ceremony, read until the door ends its
+/// stream** (#110): the code is handed to `code_tx`, the six digits are
+/// confirmed through `confirm` with the frame's token, and the result is the
+/// paired node. Nothing else is acted on.
+///
+/// Which frame is last is the door's to say by ending the stream
+/// (`kuserd::agent::streamed`), not this reader's to guess by name. Every
+/// frame it does not act on is held, in order, and said ([`Unread`]) when it
+/// fails: when the stream ends before `PairAdvertising` or without
+/// `PairingComplete`, or when anything follows the result. A loop that broke
+/// on the result and dropped the rest with `_ => {}` once lost the one frame
+/// that said why a stream ended before it advertised a code.
+async fn issued<F: std::future::Future<Output = ()>>(
+    mut rx: tokio::sync::mpsc::Receiver<UserResponse>,
+    code_tx: oneshot::Sender<String>,
+    confirm: impl Fn(String) -> F,
+) -> PairedNode {
+    let mut code_tx = Some(code_tx);
+    let mut node = None;
+    let mut unread = Unread::default();
+    while let Some(frame) = rx.recv().await {
+        if node.is_some() {
+            unread.hold(&frame);
+            panic!("the issuer's stream said more after PairingComplete: {unread}");
+        }
+        match frame {
+            UserResponse::PairAdvertising { code, .. } => match code_tx.take() {
+                Some(tx) => {
+                    let _ = tx.send(code.expose().to_string());
+                }
+                None => panic!("the issuer's stream advertised a second code; before it: {unread}"),
+            },
+            UserResponse::PairShowCode { token, .. } => confirm(token.expose().to_string()).await,
+            UserResponse::PairingComplete { node: n, .. } => node = Some(n),
+            not_this_steps => unread.hold(&not_this_steps),
+        }
+    }
+    match (code_tx, node) {
+        (Some(_), _) => panic!("the issuer's stream ended before PairAdvertising; it said: {unread}"),
+        (None, None) => panic!("the issuer's stream ended without PairingComplete; after its code it said: {unread}"),
+        (None, Some(node)) => node,
+    }
+}
+
+/// **The joining side, read the same way as [`issued`]**: the six digits are
+/// confirmed through `confirm`, and the result is the session the join issued
+/// this device, if any. The stream must end after a `PairingComplete` and
+/// nothing past it; any other end is said with the frames not acted on.
+async fn joined<F: std::future::Future<Output = ()>>(
+    mut rx: tokio::sync::mpsc::Receiver<UserResponse>,
+    confirm: impl Fn(String) -> F,
+) -> Option<String> {
+    let mut completed = None;
+    let mut unread = Unread::default();
+    while let Some(frame) = rx.recv().await {
+        if completed.is_some() {
+            unread.hold(&frame);
+            panic!("the joiner's stream said more after PairingComplete: {unread}");
+        }
+        match frame {
+            UserResponse::PairShowCode { token, .. } => confirm(token.expose().to_string()).await,
+            UserResponse::PairingComplete { session_token, .. } => {
+                completed = Some(session_token.map(|t| t.expose().to_string()));
+            }
+            not_this_steps => unread.hold(&not_this_steps),
+        }
+    }
+    completed.unwrap_or_else(|| panic!("the joiner's stream ended without PairingComplete; it said: {unread}"))
+}
+
+/// The frames a ceremony step did not act on, in order, each as
+/// [`kotton_wire::ipc::answer_said`] says it: what the step says when it fails.
+#[derive(Default)]
+struct Unread(Vec<String>);
+
+impl Unread {
+    fn hold(&mut self, frame: &UserResponse) {
+        self.0.push(match frame {
+            // `answer_said` has no sentence for a ceremony's own failure; its
+            // reason is the sentence.
+            UserResponse::PairFailed { reason } => format!("PairFailed: {reason}"),
+            other => kotton_wire::ipc::answer_said(other),
+        });
+    }
+}
+
+impl std::fmt::Display for Unread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.as_slice() {
+            [] => f.write_str("no frame at all"),
+            said => write!(f, "[{}]", said.join("] [")),
+        }
+    }
+}
+
+/// How one side of a ceremony ended: `completed`, or the words it failed with.
+fn side_said(ended: Result<(), tokio::task::JoinError>) -> String {
+    match ended {
+        Ok(()) => "completed".to_string(),
+        Err(e) if e.is_panic() => {
+            let payload = e.into_panic();
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "panicked with no message".to_string())
+        }
+        Err(e) => e.to_string(),
+    }
 }
 
 /// One `surface_open` as [`NullAppHost`] records it: `(handle, app_id, role, edge, title)`.
@@ -1320,5 +1419,61 @@ mod teardown_tests {
              libcrypto's atexit handler races at exit()",
             survivors.join(", ")
         );
+    }
+}
+
+/// What [`issued`] says when its stream ends without the frame its step needed
+/// (#110). No daemon: each case is the frames a door could send, then its end.
+#[cfg(test)]
+mod ceremony_reader_tests {
+    use super::*;
+
+    /// The frames, then the end of the stream, read as the issuer reads them.
+    /// Nothing here shows digits, so nothing is confirmed.
+    async fn issuer_reads(frames: Vec<UserResponse>) -> (PairedNode, oneshot::Receiver<String>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(frames.len().max(1));
+        for frame in frames {
+            tx.send(frame).await.expect("the reader holds the stream");
+        }
+        drop(tx);
+        let (code_tx, code_rx) = oneshot::channel();
+        let node = issued(rx, code_tx, |_| async { unreachable!("no digits were shown") }).await;
+        (node, code_rx)
+    }
+
+    /// A door that refuses before it advertises — the bootstrap listener could
+    /// not be bound — answers its error and ends the stream. The issuer says
+    /// the error, where it once said only that it did not complete.
+    #[tokio::test]
+    #[should_panic(
+        expected = "the issuer's stream ended before PairAdvertising; it said: [open device-add listener: bootstrap QUIC bind failed: Address already in use (os error 98)]"
+    )]
+    async fn a_stream_that_ends_on_a_refusal_before_its_code_says_the_refusal() {
+        issuer_reads(vec![UserResponse::Error {
+            message: "open device-add listener: bootstrap QUIC bind failed: Address already in use (os error 98)".into(),
+        }])
+        .await;
+    }
+
+    /// A stream that ends with nothing in it says that nothing came.
+    #[tokio::test]
+    #[should_panic(expected = "the issuer's stream ended before PairAdvertising; it said: no frame at all")]
+    async fn a_stream_that_ends_with_no_frame_says_none_came() {
+        issuer_reads(Vec::new()).await;
+    }
+
+    /// After the code, a stream that ends without the result says every frame
+    /// it passed by, in order, the ceremony's failure with its reason.
+    #[tokio::test]
+    #[should_panic(
+        expected = "the issuer's stream ended without PairingComplete; after its code it said: [the answer was `PairConnected`, which this release has no sentence for; nothing more was asked of it] [PairFailed: the digits did not match]"
+    )]
+    async fn a_stream_that_ends_without_its_result_says_each_frame_it_passed_by() {
+        issuer_reads(vec![
+            UserResponse::PairAdvertising { code: kotton_wire::ipc::SecretText::new("a code"), expires_at: 0 },
+            UserResponse::PairConnected,
+            UserResponse::PairFailed { reason: "the digits did not match".into() },
+        ])
+        .await;
     }
 }

@@ -90,7 +90,6 @@ async fn a_relay_introduces_two_devices_and_they_go_direct() {
         client_b,
         "alice",
         "device-b",
-        free_port(),
         Posture::Full,
     )
     .await;
