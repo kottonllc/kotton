@@ -90,7 +90,7 @@ given `KOTTON_OPERATOR_KEY` — makes the relay's own key (`identity.key`), writ
 given as the first line of `operators`, and prints the relay's line as its last output:
 `kotton-instance:relay:<its key>@<the address it announces>`. Every start prints that line again;
 it confers nothing. Once bound, a start also prints where it listens, read off its sockets:
-`listening http=<addr> stun=<addr>` — the one place the port is said when `--bind` asks for port 0.
+`listening http=<addr> stun=<addr>` — the one line meant to be read for the port when `--bind` asks for port 0 (the `info` log says it too, as a log).
 Over a relay that has an operator, `create` refuses and changes nothing; over
 state from before `create` existed that names none, it adopts it, keeping its key; it never makes
 a key over existing state. A relay whose `operators` is empty, or missing, refuses to start and

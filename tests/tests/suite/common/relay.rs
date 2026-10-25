@@ -3,7 +3,7 @@
 //!
 //! The relay-gated tests used to wait on `KOTTON_RELAY_ADDR` and skip without it,
 //! which is how a suite about the machine in the middle went unrun. Now each test
-//! starts its own relay on a free port and stops it when done. `KOTTON_RELAY_ADDR`
+//! starts its own relay on port 0 and stops it when done. `KOTTON_RELAY_ADDR`
 //! is still honoured, for pointing the suite at a relay somewhere else.
 //!
 //! A relay is started on port 0 and the test reads back the address it bound, from
@@ -53,7 +53,7 @@ pub(crate) fn relay_bin() -> PathBuf {
 }
 
 /// Start a relay (or adopt the one `KOTTON_RELAY_ADDR` names) and return its
-/// `host:port` once `/health` answers.
+/// `host:port`, read from the `listening` line it prints once bound ([`started`]).
 ///
 /// With a state directory of its own, as every released relay has one: that is
 /// where a relay makes its key, and a relay is its key
