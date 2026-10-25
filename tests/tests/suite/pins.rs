@@ -37,6 +37,48 @@ fn noise(len: usize, seed: u64) -> Vec<u8> {
     out
 }
 
+/// `line`, typed at the REPL of `device` as the person whose session `token`
+/// is, and what it printed — the verb's own words, as a person reads them.
+/// Each line is also written to the test's output, as the transcript.
+async fn said(device: &RunningDevice, who: &str, token: &str, line: &str) -> String {
+    use kotton_shell::ShellState;
+    let mut client = kotton::KottonClient::connect_to(device.ipc.clone()).await.expect("a REPL connection");
+    client.authenticate(token).await.expect("the REPL's identity");
+    let mut state = ShellState::new(USER.to_string(), std::sync::Arc::new(tokio::sync::Mutex::new(client)));
+    let words: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    let out = kotton_cli::bridge::repl_executor()
+        .registry()
+        .execute(&words[0], &words[1..], &mut state)
+        .await
+        .unwrap_or_else(|e| panic!("{who}$ {line}: {e}"));
+    let mut text: String = out.out.iter().map(kotton_shell::out::render_shape).collect::<Vec<_>>().join("\n");
+    for stream in [&out.stdout, &out.stderr].into_iter().flatten() {
+        text.push('\n');
+        text.push_str(stream);
+    }
+    let text = without_styling(&text);
+    eprintln!("{who}$ {line}\n{text}\n");
+    text
+}
+
+/// `text` with the terminal's colour codes taken out.
+fn without_styling(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            for d in chars.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn pin(scope: &str) -> PinScope {
     PinScope::parse(scope).expect("a scope")
 }
@@ -105,15 +147,22 @@ async fn a_device_on_demand_keeps_the_folder_it_pins_whole_and_fetches_the_rest_
     assert_eq!(personal.pinned_whole, ["this device"], "A reads that B does not keep the drive whole: {personal:?}");
     let status = client_a.status(USER).await.expect("A's status");
     let held = status.drives.iter().find(|d| d.name == FIRST_DRIVE_NAME).expect("personal in A's status");
-    assert_eq!((held.keeps, held.pinned_whole.clone()), (PinValue::Whole, vec!["this device".to_string()]), "{status:?}");
+    assert_eq!((held.keeps, held.pinned_whole.clone()), (Some(PinValue::Whole), vec!["this device".to_string()]), "{status:?}");
     assert!(!no_whole(&status.notices), "A keeps the drive whole, and is told otherwise: {:?}", status.notices);
     let b_status = client_b.status(USER).await.expect("B's status");
     let b_held = b_status.drives.iter().find(|d| d.name == FIRST_DRIVE_NAME).expect("personal in B's status");
-    assert_eq!(b_held.keeps, PinValue::OnDemand);
+    assert_eq!(b_held.keeps, Some(PinValue::OnDemand));
     assert_eq!(b_held.pinned_whole.len(), 1, "B reads that A keeps the drive whole: {b_status:?}");
     assert_ne!(b_held.pinned_whole[0], "this device");
-    eprintln!("B's status: {b_status:#?}");
-    let _ = a;
+    let (token_a, token_b) = (
+        client_a.session_token.clone().expect("A's session"),
+        client_b.session_token.clone().expect("B's session"),
+    );
+    let pins = said(&b, "B", &token_b, "pin list").await;
+    assert!(pins.contains("personal:/photos") && pins.contains("on-demand"), "{pins}");
+    let status = said(&b, "B", &token_b, "status").await;
+    assert!(status.contains("/photos whole") && status.contains("device-a"), "{status}");
+    said(&a, "A", &token_a, "status").await;
 }
 
 /// **The two notices, said in `status`, from settings the other device
@@ -139,7 +188,9 @@ async fn the_notices_are_said_in_status_from_the_settings_each_device_wrote() {
     synced(&mut client_b, "B").await;
     let told = client_b.status(USER).await.expect("B's status");
     assert!(no_whole(&told.notices), "B did not read A's setting from the drive: {:?}", told.notices);
-    eprintln!("B, told: {}", told.notices.iter().map(PinNotice::said).collect::<Vec<_>>().join(" | "));
+    let token_b = client_b.session_token.clone().expect("B's session");
+    let shown = said(&b, "B", &token_b, "status").await;
+    assert!(shown.contains("no device of yours keeps 'personal' whole"), "{shown}");
 
     // B collects: everything, on B, without opening it.
     client_a.write_file(USER, "/docs/plan.md", b"the plan").await.expect("write on A");
@@ -170,7 +221,8 @@ async fn the_notices_are_said_in_status_from_the_settings_each_device_wrote() {
         _ => None,
     });
     assert_eq!(room, Some(vec!["personal".to_string()]), "B is not told it is short, by setting: {:?}", short.notices);
-    eprintln!("B, short: {}", short.notices.iter().map(PinNotice::said).collect::<Vec<_>>().join(" | "));
+    let shown = said(&b, "B", &token_b, "status").await;
+    assert!(shown.contains("short of room for 'personal'") && shown.contains("`pin personal on-demand` keeps less"), "{shown}");
 
     // The device that keeps it whole is removed.
     client_a.node_revoke(USER, &node_b.id).await.expect("A revokes B");
@@ -178,25 +230,28 @@ async fn the_notices_are_said_in_status_from_the_settings_each_device_wrote() {
     assert!(no_whole(&after.notices), "B's removal did not tell A: {:?}", after.notices);
 }
 
-/// **The creating device keeps a drive whole, as a record the other device
-/// reads.** A makes a drive; B — on demand by default — reads that A keeps
-/// it whole, and that B does not.
+/// **A made drive is kept whole by no device yet, and `status` says so.** A
+/// device keeps no tree of a drive `drive create` makes until drive paths
+/// (kotton #58) give it one, so the creating device is not recorded as keeping
+/// it whole: `drive create` says nobody keeps it, `status` on both devices
+/// says only the vault holds it, and a pin for it is refused with a sentence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_device_that_creates_a_drive_keeps_it_whole_and_the_other_reads_it() {
+async fn a_made_drive_is_kept_whole_by_no_device_yet_and_status_says_so() {
     init_crypto();
     let vault = spawn_vault("vault").await;
-    let (_a, mut client_a, _b, mut client_b, _node_b) = alice_with_two_devices(&vault).await;
-    client_b.pin_set(USER, pin("default"), Some(PinValue::OnDemand)).await.expect("B on demand");
+    let (a, mut client_a, _b, mut client_b, _node_b) = alice_with_two_devices(&vault).await;
     let made = client_a.drive_create(USER, "photos", None).await.expect("drive create on A");
-    assert_eq!(made[0].pinned_whole, ["this device"], "the creating device does not keep its drive whole: {made:?}");
-    let pins = client_a.pin_list(USER).await.expect("A's pins");
-    assert!(pins.exceptions.iter().any(|s| s.scope.said() == "photos" && s.value == PinValue::Whole), "{pins:?}");
+    assert!(made[0].pinned_whole.is_empty(), "a device is said to keep a drive no device can keep yet: {made:?}");
+    let photos_unkept = |notices: &[PinNotice]| notices.iter().any(|n| matches!(n, PinNotice::NoWholeDevice { drive } if drive == "photos"));
+    assert!(photos_unkept(&client_a.status(USER).await.expect("A's status").notices), "A is not told only the vault holds photos");
     synced(&mut client_a, "A").await;
     synced(&mut client_b, "B").await;
-    let seen = client_b.drive_list(USER).await.expect("B's drive list");
-    let photos = seen.iter().find(|d| d.name == "photos").expect("B follows the drive A made");
-    assert_eq!(photos.pinned_whole.len(), 1, "B reads A's whole pin: {photos:?}");
-    assert_ne!(photos.pinned_whole[0], "this device");
+    assert!(photos_unkept(&client_b.status(USER).await.expect("B's status").notices), "B is not told only the vault holds photos");
+    let refused = client_a.pin_set(USER, pin("photos"), Some(PinValue::Whole)).await.expect_err("a pin for a made drive");
+    assert!(refused.to_string().contains("keeps no tree of yet"), "{refused}");
     let refused = client_b.pin_set(USER, pin("nowhere:/x"), Some(PinValue::Whole)).await.expect_err("a pin for no drive");
     assert!(refused.to_string().contains("no drive called 'nowhere'"), "{refused}");
+    let token_a = client_a.session_token.clone().expect("A's session");
+    let shown = said(&a, "A", &token_a, "status").await;
+    assert!(shown.contains("no device of yours keeps 'photos' whole") && shown.contains("nothing yet: its vault holds it"), "{shown}");
 }

@@ -1059,9 +1059,13 @@ impl PinNotice {
     /// The notice as the person reads it.
     pub fn said(&self) -> String {
         match self {
-            PinNotice::NoWholeDevice { drive } => format!(
+            PinNotice::NoWholeDevice { drive } if drive == FIRST_DRIVE_NAME => format!(
                 "no device of yours keeps '{drive}' whole; only the drive holds all of it. \
                  `pin {drive} whole` on a device keeps it there"
+            ),
+            PinNotice::NoWholeDevice { drive } => format!(
+                "no device of yours keeps '{drive}' whole; only the drive holds all of it. A device keeps \
+                 no tree of a drive `drive create` made yet, so none can"
             ),
             PinNotice::ShortOfRoom { drive, settings, held, budget, wanted } => {
                 let room = budget.map_or_else(|| "the disk".to_string(), |b| format!("{b} bytes"));
@@ -1101,8 +1105,9 @@ pub struct DriveHeld {
     /// The vaults it is kept on, by label.
     pub vaults: Vec<String>,
     /// What this device keeps of the drive as a whole: its drive setting, or
-    /// its default.
-    pub keeps: PinValue,
+    /// its default; `None` for a drive it keeps no tree of yet (a drive
+    /// `drive create` made: its vault alone holds it).
+    pub keeps: Option<PinValue>,
     /// This device's folder settings in it, which the nearest of wins.
     pub folders: Vec<PinSetting>,
     /// The person's devices that keep it whole ([`DriveDescriptor::pinned_whole`]).

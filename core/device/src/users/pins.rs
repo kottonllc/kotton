@@ -26,14 +26,24 @@
 //! only its own settings (`pin` is "what this device holds"), so two devices
 //! never write one record, and a record's last write is its device's word.
 //!
+//! **What is enforced, today: the first drive.** A device keeps a tree of the
+//! person's first drive and of no made drive yet (drive paths, kotton #58; the
+//! first drive becoming one drive among others, #124), so pins are enforced on
+//! the first drive and on nothing else. A setting for a made drive is refused,
+//! and no device is counted as keeping a made drive whole ([`whole_on`]), so
+//! `status` says of every made drive that only its vault holds it — which is
+//! true until #58 and #124 give a device something to keep. The creating
+//! device's whole pin is written then, not before.
+//!
 //! **Where the records live, today.** The records ride the person's record log,
 //! which a device's tree carries to the first drive on each vault — the one
 //! drive a device keeps a tree of. So a setting about a made drive is a record
 //! in the person's first drive, not in the made drive's own tree: a made drive
 //! has no tree on a device until drive paths (kotton #58) and the first drive
 //! becoming one drive among others (#124) give it one. This is the "per-person
-//! record home" kotton #55's first comment names; the protocol says "a record
-//! in the drive", and the two meet when #124 lands.
+//! record home" kotton #55's first comment names. It is the decision taken
+//! here, pending its edit to the protocol's storage model; the protocol says
+//! "a record in the drive", and the two meet when #124 lands.
 //!
 //! **Resolution is a rule, not a check.** [`resolve`] answers, for a device and
 //! a place in a drive, the nearest setting and its value; nothing else decides
@@ -126,10 +136,33 @@ pub async fn settings(registry: &RwLock<SchemaRegistry>, store: &SqliteRecordSto
     Ok(rows.iter().filter_map(from_record).collect())
 }
 
+/// Held by every write of a device's default and across [`state_default`]'s
+/// read and write, so stating the default when none is stated cannot write
+/// over a default stated meanwhile — a `pin default`, or a joining device's
+/// `on-demand`. A device's records are written by its one daemon, so a lock
+/// in that process covers every writer of them; the record store's handles do
+/// not share a transaction.
+static DEFAULT_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Write `device`'s setting at `scope` as `value`; `None` is `default` — the
 /// drive or folder follows the setting above it, which is its record removed.
 /// The device's own default has nothing above it, and is refused `None`.
 pub async fn write(
+    registry: &RwLock<SchemaRegistry>,
+    store: &SqliteRecordStore,
+    device: &str,
+    scope: &PinScope,
+    value: Option<PinValue>,
+) -> io::Result<()> {
+    let _default = match scope {
+        PinScope::Default => Some(DEFAULT_WRITE.lock().await),
+        _ => None,
+    };
+    write_held(registry, store, device, scope, value).await
+}
+
+/// [`write`], with [`DEFAULT_WRITE`] already held where it must be.
+async fn write_held(
     registry: &RwLock<SchemaRegistry>,
     store: &SqliteRecordStore,
     device: &str,
@@ -170,10 +203,11 @@ fn stated_default(all: &[PinSetting], device: &str) -> Option<PinValue> {
 /// before every pass, so a device that predates pins, or recovered the
 /// identity, says what it keeps at its first pass. Returns whether it wrote.
 pub async fn state_default(registry: &RwLock<SchemaRegistry>, store: &SqliteRecordStore, device: &str) -> io::Result<bool> {
+    let _held = DEFAULT_WRITE.lock().await;
     if stated_default(&settings(registry, store).await?, device).is_some() {
         return Ok(false);
     }
-    write(registry, store, device, &PinScope::Default, Some(UNSTATED)).await?;
+    write_held(registry, store, device, &PinScope::Default, Some(UNSTATED)).await?;
     Ok(true)
 }
 
@@ -263,7 +297,13 @@ pub async fn devices(store: &UserStore, me: &str) -> Vec<(String, String)> {
 }
 
 /// The names of the devices among `devices` that keep `drive` whole.
+///
+/// None for a made drive: no device keeps a tree of one yet (module doc), so
+/// none keeps it whole, whatever its settings say.
 pub fn whole_on(all: &[PinSetting], devices: &[(String, String)], me: &str, drive: &str) -> Vec<String> {
+    if drive != FIRST_DRIVE_NAME {
+        return Vec::new();
+    }
     devices
         .iter()
         .filter(|(did, _)| {
@@ -408,7 +448,7 @@ impl Read {
                 .cloned()
                 .collect();
             drives.push(DriveHeld {
-                keeps: resolve(&self.all, &self.me, &name, None, UNSTATED).0,
+                keeps: (name == FIRST_DRIVE_NAME).then(|| resolve(&self.all, &self.me, &name, None, UNSTATED).0),
                 pinned_whole: self.whole_on(&name),
                 vaults: vaults.into_iter().collect(),
                 folders,
@@ -439,6 +479,13 @@ pub async fn set(
             return Ok(Err(format!(
                 "you have no drive called '{drive}'{}; `drive list` names them",
                 if names.is_empty() { String::new() } else { format!(" (you have {})", names.join(", ")) }
+            )));
+        }
+        if drive != FIRST_DRIVE_NAME {
+            return Ok(Err(format!(
+                "'{drive}' is a drive this device keeps no tree of yet, so there is nothing of it to keep \
+                 whole or on demand here; its vault holds all of it. Pins hold for '{FIRST_DRIVE_NAME}' until \
+                 a device can keep a made drive (kotton #58)"
             )));
         }
     }
@@ -514,6 +561,48 @@ mod tests {
         assert_eq!(whole_on(&all, &devices, "a", "personal"), [THIS_DEVICE, "laptop"]);
         let all = vec![at("a", PinScope::Default, PinValue::OnDemand)];
         assert!(whole_on(&all, &devices, "a", "personal").is_empty());
+    }
+
+    /// **A made drive is kept whole by no device yet**, whatever the settings
+    /// say: no device keeps a tree of one (module doc).
+    #[test]
+    fn no_device_keeps_a_made_drive_whole_yet() {
+        let devices = vec![("a".to_string(), THIS_DEVICE.to_string())];
+        let all = vec![at("a", PinScope::Default, PinValue::Whole), at("a", PinScope::Drive { drive: "photos".into() }, PinValue::Whole)];
+        assert!(whole_on(&all, &devices, "a", "photos").is_empty());
+        assert_eq!(whole_on(&all, &devices, "a", FIRST_DRIVE_NAME), [THIS_DEVICE]);
+    }
+
+    /// **Stating the default never writes over one stated meanwhile.** A
+    /// device's first pass states `whole` if it has stated nothing, while a
+    /// `pin default on-demand` — or a joining device's — lands at the same
+    /// time: whichever runs first, the device ends `on-demand`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stating_the_default_does_not_write_over_one_stated_meanwhile() {
+        use crate::users::DeviceUsers as _;
+        let temp = tempfile::TempDir::new().unwrap();
+        let secrets = std::sync::Arc::new(kotton_secret::MemorySecrets::new());
+        let rt = crate::DeviceRuntime::new_with_secrets(temp.path().to_path_buf(), crate::config::RuntimeConfig::default(), secrets)
+            .await
+            .unwrap();
+        rt.create_user("alice", "canyon-orbit-velvet-fish-hospital").await.unwrap();
+        let records = std::sync::Arc::new(kotton_record::open::user_record_store(rt.base_dir(), "alice", rt.secrets()).unwrap());
+        let registry = std::sync::Arc::clone(&rt.schema_registry);
+        for round in 0..20 {
+            let me = format!("did:key:z6Mkround{round}");
+            let stating = tokio::spawn({
+                let (registry, records, me) = (std::sync::Arc::clone(&registry), std::sync::Arc::clone(&records), me.clone());
+                async move { state_default(&registry, &records, &me).await.unwrap() }
+            });
+            let saying = tokio::spawn({
+                let (registry, records, me) = (std::sync::Arc::clone(&registry), std::sync::Arc::clone(&records), me.clone());
+                async move { write(&registry, &records, &me, &PinScope::Default, Some(PinValue::OnDemand)).await.unwrap() }
+            });
+            stating.await.unwrap();
+            saying.await.unwrap();
+            let all = settings(&registry, &records).await.unwrap();
+            assert_eq!(stated_default(&all, &me), Some(PinValue::OnDemand), "round {round}: the stated default was written over");
+        }
     }
 
     /// The record is the setting, field for field, and its id is the device

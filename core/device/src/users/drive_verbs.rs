@@ -109,7 +109,7 @@ use kotton_peer::daemon::drives::{self as record, Drive};
 use kotton_peer::KottonPeerObjectStorage;
 use kotton_store::runtime::user::UserStore;
 use kotton_sys::store::SealedObjectAccess as _;
-use kotton_wire::ipc::{DriveDescriptor, MadeDrive, PinScope, PinValue, TenantDrive, UserRequest, UserResponse, FIRST_DRIVE_TREE};
+use kotton_wire::ipc::{DriveDescriptor, MadeDrive, TenantDrive, UserRequest, UserResponse, FIRST_DRIVE_TREE};
 use kotton_wire::peer::PairedNode;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -449,19 +449,12 @@ pub async fn create(
         .into_iter()
         .find(|d| d.vault_key == vault.vault_key && d.tree == tree)
         .ok_or_else(|| io::Error::other("the vault made the drive but did not list it"))?;
-    // Whatever its default, the device that creates a drive keeps it whole
-    // until told otherwise, so something holds the whole from the first day
-    // (the protocol's storage model) — written as this device's setting, which every device of the
-    // person's reads.
-    let me = runtime.operational_did();
-    let whole = pins::write(&runtime.schema_registry, records, &me, &PinScope::Drive { drive: name.clone() }, Some(PinValue::Whole)).await;
-    if let Err(e) = whole {
-        return refused(format!(
-            "drive create: '{name}' was made on '{}', but this device could not write that it keeps it whole ({e}); \
-             `pin {name} whole` writes it",
-            vault.node.id
-        ));
-    }
+    // The device that creates a drive keeps it whole until told otherwise
+    // (the protocol's storage model) — once a device keeps a tree of a made
+    // drive at all, which drive paths (kotton #58) and the first drive among
+    // others (#124) give it. Until then no device keeps a made drive, so none
+    // is recorded as keeping it: a record saying so would silence the notice
+    // that only the vault holds it (`crate::users::pins`), which is the truth.
     tracing::info!(user_id, vault = %vault.node.id, "made a drive");
     Ok(UserResponse::Drives { drives: vec![describe(&made, &sizes, &pins_now(runtime, records, store).await?)] })
 }

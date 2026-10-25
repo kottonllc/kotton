@@ -695,12 +695,15 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         let replacement_packs = salvage_bytes.div_ceil(capacity).max(1);
         let rewrite = replacement_packs < sparse.len();
 
-        // Sweeping needs no commit, so it happens whether or not a rewrite is
-        // worthwhile — this is the crash-debris path.
+        // Sweeping needs no commit — this is the crash-debris path. With no
+        // rewrite it happens now; with one it waits until the rewrite has
+        // committed, so a pass that fails retires nothing at all.
         let mut packs_retired = 0usize;
-        for pack_id in &dead {
-            self.inner.delete_sealed(Path::new(pack_id)).await?;
-            packs_retired += 1;
+        if !rewrite {
+            for pack_id in &dead {
+                self.inner.delete_sealed(Path::new(pack_id)).await?;
+                packs_retired += 1;
+            }
         }
 
         if !rewrite {
@@ -875,7 +878,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         //    superseded manifest goes too, if nothing live remains in it: it
         //    was spared the sweep above only because it was the root pointer,
         //    and the commit just replaced it.
-        for pack_id in &to_retire {
+        for pack_id in to_retire.iter().chain(&dead) {
             self.inner.delete_sealed(Path::new(pack_id)).await?;
             packs_retired += 1;
         }
@@ -3511,19 +3514,11 @@ mod tests {
             .unwrap();
 
         assert!(s.compact().await.is_err(), "corruption was not refused");
-        // Every pack a live file's content is in survives. A pack nothing
-        // references — here the first pass's index pack, whose manifest the
-        // second superseded — is swept before any salvage, which needs no
-        // commit and loses nothing (the index pack is its own since the
-        // content split, `CONTENT_PACK_PREFIX`).
-        let everything = |_: &str| true;
-        let live: BTreeSet<String> = s.packs_holding(&everything).await.unwrap().unwrap().into_keys().collect();
-        let after = pack_ids(&s).await;
-        assert!(!live.is_empty());
-        for id in live.iter().filter(|id| before.contains(*id)) {
-            assert!(after.contains(id), "{id}, which a live file needs, was retired despite a failed pass");
-        }
-        assert!(after.contains(&victim), "the pack the salvage failed on was retired");
+        // Nothing is retired: not the packs being salvaged, and not a pack
+        // nothing references either — here the first pass's index pack, whose
+        // manifest the second superseded — whose sweep waits for the rewrite
+        // to commit.
+        assert_eq!(pack_ids(&s).await, before, "a pack was retired despite a failed pass");
     }
 
     // ── the history log ─────────────────────────────────────────────────────
@@ -4786,8 +4781,29 @@ mod tests {
     ///
     /// The instrument is `VmHWM`, which only ever rises, so a second larger
     /// ingest that barely moves it is the assertion.
+    ///
+    /// **It is measured in a process of its own.** `VmHWM` is the process's,
+    /// and the test binary runs every test in this crate on threads of one
+    /// process, so a test sealing packs beside this one raised the peak this
+    /// one reads — it went red at 71 MiB against 64 once tests that seal
+    /// several 16 MiB packs across three stores ran beside it. So the test
+    /// runs itself again, alone, in a child of this binary, and asserts that
+    /// the child passed.
     #[tokio::test]
     async fn peak_memory_does_not_scale_with_the_object() {
+        const ALONE: &str = "KOTTON_STORE_PEAK_MEMORY_ALONE";
+        if std::env::var_os(ALONE).is_none() {
+            let name = "provider::packed::tests::peak_memory_does_not_scale_with_the_object";
+            let out = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+                .args([name, "--exact", "--test-threads=1", "--nocapture"])
+                .env(ALONE, "1")
+                .output()
+                .expect("the measurement runs in a process of its own");
+            let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && said.contains("1 passed"), "the measurement alone failed:\n{said}");
+            eprintln!("{}", said.lines().filter(|l| l.contains("peak RSS")).collect::<Vec<_>>().join("\n"));
+            return;
+        }
         let dir = tempfile::tempdir().expect("a temporary directory");
         let backing = crate::LocalObjectStorage::new(
             dir.path().to_path_buf(),

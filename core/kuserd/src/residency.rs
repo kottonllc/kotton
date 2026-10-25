@@ -304,12 +304,14 @@ impl kotton_sync::UserResources for DaemonUserResources {
         }
     }
 
-    /// The name another of the person's devices set arrives as a sealed record
-    /// in a pass; this device's copy of it is brought up to that record here.
+    /// The machine's database, lent so a pass can find the drive it is with
+    /// and keep what it found of this device's room (`kotton_device::users::pins`).
     fn machine_db(&self) -> Option<Arc<sqlx::SqlitePool>> {
         self.machine_db.clone()
     }
 
+    /// The name another of the person's devices set arrives as a sealed record
+    /// in a pass; this device's copy of it is brought up to that record here.
     async fn pass_landed(&self, user_id: &str) {
         let Some(store) = self.users.get(user_id) else {
             return;

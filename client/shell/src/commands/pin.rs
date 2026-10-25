@@ -116,7 +116,8 @@ this device; on demand keeps the index — every name, and where its content is
 — and fetches a file's content when it is opened. The nearest setting wins: a
 folder's over its drive's over this device's default, and `default` follows
 the one above. Your first device starts at whole; a device paired later at on
-demand. The device that creates a drive keeps it whole.
+demand. Pins hold for `personal` today: a device keeps no tree of a drive made
+with `drive create` yet, so its vault alone holds it, and `status` says so.
 
 `pin <drive> whole` collects: this device fetches what it lacks of the drive
 now. Each setting is a record in your drive, sealed like everything else, so

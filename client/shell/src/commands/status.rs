@@ -33,7 +33,7 @@ impl Command for StatusCommand {
                 .drives
                 .iter()
                 .map(|d| {
-                    let mut keeps = d.keeps.said().to_string();
+                    let mut keeps = d.keeps.map_or("nothing yet: its vault holds it", |k| k.said()).to_string();
                     for f in &d.folders {
                         if let kotton_wire::ipc::PinScope::Folder { folder, .. } = &f.scope {
                             keeps.push_str(&format!(", {folder} {}", f.value.said()));
