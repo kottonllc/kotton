@@ -8,6 +8,22 @@
 //! six-digit SAS (interactive) or an out-of-band pinned code. There is no
 //! static–static ECDH seal: it would have no forward secrecy.
 //!
+//! **The joiner's answer is the ceremony's last frame, and the issuer commits
+//! nothing before it.** Every joining ceremony returns what it was handed
+//! together with a [`JoinAnswer`]: the joiner writes what it keeps, then
+//! answers `kept`, or `refused` with its reason. Every issuing ceremony
+//! returns only on `kept` — a refusal, a close, or silence past
+//! [`JOINER_KEEPS_WITHIN`] is [`JoinNotKept`] — so its caller records the joiner
+//! and introduces it at the person's drives only for a join the joiner kept,
+//! and a join the joiner refused leaves the issuer with no row and no
+//! introduction. The issuer replies to `kept` with a sealed `heard`, and the
+//! joiner calls the join complete only on that reply; any other end — the
+//! issuer's give-up, a reset, a relay's close, which a relay may say on its
+//! own — is *the other device may not have kept this*. What stays uncertain
+//! is the last message, as it always is: a `heard` lost after the issuer sent
+//! it leaves a joiner told to check a device that did keep it, never the
+//! reverse.
+//!
 //! This module also holds:
 //! * `open_pair_listener` — bind the bootstrap QUIC listener.
 //! * `encode/parse_connection_code` (sid + addr, base32) — the hand-carried fallback
@@ -690,10 +706,185 @@ fn attest_message(transcript: &kotton_crypto::pair_handshake::Transcript) -> Vec
     m
 }
 
+/// How long the admitting device waits, once it has sent the payload and the
+/// attestation, for the joiner to answer whether it kept them.
+///
+/// The joiner answers after it has written what it was handed — the identity
+/// it adopts, its keys, the drives — and a device's first secret store write
+/// may wait on its person (a keychain asking to be unlocked), so the bound is
+/// the joiner's own window for the dial, the handshake and the six digits
+/// (`kotton_device::users::pairing::handle_device_join`), not a network
+/// round trip. A joiner still writing when it runs out is told so when it
+/// answers: the issuer has stopped listening and kept nothing.
+pub const JOINER_KEEPS_WITHIN: Duration = Duration::from_secs(120);
+
+/// The longest refusal the issuer repeats to its person, in characters. The
+/// joiner's own copy fits well inside it; a longer one is cut, not refused.
+const REFUSAL_SAID_WITHIN: usize = 1024;
+
+/// The ceremony's last frame, joiner to issuer: whether the joiner kept what it
+/// was handed. Sealed under the channel's key like every frame after the six
+/// digits, so it is the confirmed joiner's word and nobody else's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Answer {
+    /// The joiner wrote what it was handed; the issuer may commit.
+    Kept,
+    /// The joiner refused what it was handed, or could not keep it, and says
+    /// why in its person's words.
+    Refused { why: String },
+}
+
+/// The issuer's reply to [`Answer::Kept`], and the last thing either side
+/// says: it heard the answer and commits. Sealed like every frame after the
+/// six digits, because the end of a transport is not the issuer's word — a
+/// relay forwards no WebSocket close and ends both legs with its own, so a
+/// close, however coded, says only what the relay chose to say. Sent only for
+/// `kept`: a refusal needs no reply, since the issuer keeps nothing either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Reply {
+    /// The issuer heard `kept`, and commits.
+    Heard,
+}
+
+/// Why an admitting device keeps nothing of a ceremony whose payload it sent:
+/// the joiner did not say it kept it. The issuer's ceremony returns this
+/// before its caller writes the joiner's row or introduces it anywhere, so a
+/// join the joiner did not keep is admitted nowhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinNotKept {
+    /// The joiner refused what it was handed, and said why (control
+    /// characters dropped, cut at [`REFUSAL_SAID_WITHIN`]).
+    Refused(String),
+    /// The joiner said nothing the issuer could read as an answer: it closed,
+    /// answered with something else, or was silent for [`JOINER_KEEPS_WITHIN`].
+    Unanswered(String),
+}
+
+impl std::fmt::Display for JoinNotKept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JoinNotKept::Refused(why) => {
+                write!(f, "the other device refused what it was handed, and nothing is kept here: {why}")
+            }
+            JoinNotKept::Unanswered(how) => write!(
+                f,
+                "the other device did not say it kept what it was handed ({how}), and nothing is kept here"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for JoinNotKept {}
+
+/// Read the joiner's answer, waiting at most `within`. `Ok` only for
+/// [`Answer::Kept`]; everything else is the [`JoinNotKept`] that says what came.
+async fn hear_kept<W, R>(
+    channel: &mut crate::pair_channel::EstablishedChannel<W, R>,
+    within: Duration,
+) -> Result<(), JoinNotKept>
+where
+    W: AsyncWrite + Unpin + Send,
+    R: AsyncRead + Unpin + Send,
+{
+    let frame = match tokio::time::timeout(within, channel.recv_encrypted()).await {
+        Err(_) => return Err(JoinNotKept::Unanswered(format!("no answer within {}s", within.as_secs()))),
+        Ok(Err(e)) => return Err(JoinNotKept::Unanswered(format!("it closed without answering: {e}"))),
+        Ok(Ok(frame)) => frame,
+    };
+    match serde_json::from_slice::<Answer>(&frame) {
+        Ok(Answer::Kept) => Ok(()),
+        Ok(Answer::Refused { why }) => Err(JoinNotKept::Refused(
+            why.chars().filter(|c| !c.is_control()).take(REFUSAL_SAID_WITHIN).collect(),
+        )),
+        Err(_) => Err(JoinNotKept::Unanswered("it answered with something that is not an answer".into())),
+    }
+}
+
+/// A joiner's half of the channel, boxed so one handle serves every transport.
+type JoinerChannel = crate::pair_channel::EstablishedChannel<
+    Box<dyn AsyncWrite + Unpin + Send>,
+    Box<dyn AsyncRead + Unpin + Send>,
+>;
+
+/// The joiner's last step: telling the admitting device whether it kept what
+/// it was handed. Returned beside the [`JoinedNode`] by every joining
+/// ceremony; the caller writes what it was handed, then answers
+/// [`kept`](Self::kept), or [`refused`](Self::refused) with the reason its own
+/// person is told. The issuer commits — records this device, introduces it at
+/// the person's drives, reports `PairingComplete` — only on `kept`.
+///
+/// Dropping it unanswered closes the ceremony, which the issuer reads as no.
+///
+/// **Each side reads to the other's end before it lets go.** After its answer
+/// the joiner reads the issuer's [`Reply`] and then until the issuer finishes;
+/// the issuer, having replied, reads until the joiner lets go. A socket
+/// closed over bytes it has not read is reset, and a relay passes a reset on
+/// by discarding what it had not yet forwarded — an answer or a reply among
+/// it. Neither side sends anything that ends its half before what it must
+/// hear has arrived. Every such read is bounded by [`JOINER_KEEPS_WITHIN`].
+#[must_use = "the admitting device keeps nothing until it is answered; dropping this answers no"]
+pub struct JoinAnswer {
+    channel: JoinerChannel,
+    /// The QUIC bootstrap connection the channel runs on, held so it outlives
+    /// the ceremony's return until the answer is heard; `None` for a relayed
+    /// circuit, which the channel's halves hold.
+    connection: Option<quinn::Connection>,
+}
+
+impl JoinAnswer {
+    /// This device kept what it was handed. `Ok` only when the issuer replied,
+    /// sealed, that it heard — and so commits. `Err` for every other end: the
+    /// issuer stopped waiting ([`JOINER_KEEPS_WITHIN`]) and kept nothing, or
+    /// the reply was lost and it did keep this device; this side cannot tell
+    /// which, and says so.
+    pub async fn kept(self) -> Result<()> {
+        self.say(Answer::Kept).await
+    }
+
+    /// This device did not keep what it was handed, for `why`, which the
+    /// issuer repeats to its person when it hears it. The issuer keeps
+    /// nothing either way, so `Err` only when the refusal could not be sent.
+    pub async fn refused(self, why: &str) -> Result<()> {
+        self.say(Answer::Refused { why: why.to_string() }).await
+    }
+
+    async fn say(mut self, answer: Answer) -> Result<()> {
+        let kept = answer == Answer::Kept;
+        let frame = serde_json::to_vec(&answer).context("serialize the join's answer")?;
+        self.channel
+            .send_encrypted(&frame)
+            .await
+            .map_err(|e| anyhow!("the admitting device is no longer listening: {e}"))?;
+        // The issuer's reply to `kept`; to a refusal, its end.
+        let reply = tokio::time::timeout(JOINER_KEEPS_WITHIN, self.channel.recv_encrypted()).await;
+        let heard = match &reply {
+            Ok(Ok(frame)) => matches!(serde_json::from_slice::<Reply>(frame), Ok(Reply::Heard)),
+            _ => false,
+        };
+        if heard {
+            // Then to the issuer's finish, which follows the reply at once.
+            let _ = tokio::time::timeout(JOINER_KEEPS_WITHIN, self.channel.recv_encrypted()).await;
+        }
+        drop(self.connection);
+        match (kept, heard, reply) {
+            (false, _, _) | (true, true, _) => Ok(()),
+            (true, false, Err(_)) => Err(anyhow!(
+                "the admitting device did not reply within {}s that it heard",
+                JOINER_KEEPS_WITHIN.as_secs()
+            )),
+            (true, false, Ok(Err(e))) => Err(anyhow!("the ceremony ended before the admitting device replied that it heard ({e})")),
+            (true, false, Ok(Ok(_))) => Err(anyhow!("the admitting device replied with something that is not `heard`")),
+        }
+    }
+}
+
 /// Issuer side of committed-handshake enrollment. Accepts the joiner's bootstrap
 /// connection, runs the SAS handshake (via `confirmer`), then — only after both
 /// humans confirm — transfers the enrollment payload and an identity attestation
-/// over the forward-secret channel.
+/// over the forward-secret channel, and returns once the joiner answers that it
+/// kept them ([`JoinNotKept`] otherwise; see the module's header).
 ///
 /// The issuer's transport (operational) key is baked into `endpoint`'s TLS cert
 /// by the caller (`open_pair_listener`); it is what the joiner records as the
@@ -733,7 +924,7 @@ pub async fn run_enroll_issuer_committed(
         .await
         .map_err(|e| anyhow!("accept stream from joiner: {e}"))?;
     let transport = Transport::over_quic(&connection, send, recv)?;
-    issuer_over(
+    let enrolled = issuer_over(
         transport,
         None,
         issuer_identity_key,
@@ -748,11 +939,14 @@ pub async fn run_enroll_issuer_committed(
         drives,
         None,
         confirmer,
-        async {
-            let _ = connection.closed().await;
-        },
+        JOINER_KEEPS_WITHIN,
     )
-    .await
+    .await;
+    // The ceremony is over either way: on `kept` the joiner has read the
+    // reply and let go (`issuer_over`), and on anything else it is owed
+    // nothing. The close is said rather than left to the idle timeout.
+    connection.close(0u32.into(), b"");
+    enrolled
 }
 
 /// The issuer half with the transport reversed: **this side dials** the joiner's
@@ -794,7 +988,7 @@ pub async fn run_enroll_issuer_dialing(
         .await
         .map_err(|e| anyhow!("accept stream from the listening node: {e}"))?;
     let transport = Transport::over_quic(&connection, send, recv)?;
-    issuer_over(
+    let enrolled = issuer_over(
         transport,
         None,
         issuer_identity_key,
@@ -809,11 +1003,12 @@ pub async fn run_enroll_issuer_dialing(
         drives,
         gateway,
         confirmer,
-        async {
-            let _ = connection.closed().await;
-        },
+        JOINER_KEEPS_WITHIN,
     )
-    .await
+    .await;
+    // As the listening issuer closes, and for the same reason.
+    connection.close(0u32.into(), b"");
+    enrolled
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,7 +1468,7 @@ pub async fn run_enroll_issuer_relayed(
         drives,
         None,
         confirmer,
-        std::future::ready(()),
+        JOINER_KEEPS_WITHIN,
     )
     .await
 }
@@ -1343,7 +1538,7 @@ pub async fn run_enroll_join_relayed(
     joiner_name: &str,
     peer_listen_addr: Option<SocketAddr>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
-) -> Result<JoinedNode> {
+) -> Result<(JoinedNode, JoinAnswer)> {
     let rv = rendezvous_in(&invite.code, &ENROL_DOMAIN)?;
     let ReservedInvite(reservation) = reserved;
     let stream = tokio::time::timeout(Duration::from_secs(ttl_seconds), reservation.accept_one())
@@ -1351,7 +1546,7 @@ pub async fn run_enroll_join_relayed(
         .map_err(|_| anyhow!("enroll timed out: nobody admitted this invite within {ttl_seconds}s"))?
         .map_err(|e| anyhow!("relay circuit: {e}"))?;
     let (read, write) = tokio::io::split(stream);
-    joiner_over(
+    let (joined, channel) = joiner_over(
         Transport::relayed(write, read, &invite.code),
         Some(SelfAnnounce {
             op_key: node_key,
@@ -1364,7 +1559,8 @@ pub async fn run_enroll_join_relayed(
         confirmer,
         None,
     )
-    .await
+    .await?;
+    Ok((joined, JoinAnswer { channel, connection: None }))
 }
 
 /// What a node tells the other side of a ceremony about where to dial it, and
@@ -1442,10 +1638,14 @@ fn dialable_addr(announced: Option<SocketAddr>, observed: Option<SocketAddr>) ->
 
 /// The issuer's protocol, over an established bootstrap transport.
 ///
-/// `linger` is awaited after the last frame: the QUIC transports pass the
-/// connection's close, because dropping it early truncates the payload the
-/// joiner is still pulling; a relayed circuit closes in order and passes a
-/// ready future.
+/// **It returns only once the joiner has said it kept what it was handed.**
+/// After the payload and the attestation it waits, at most `kept_within`
+/// ([`JOINER_KEEPS_WITHIN`] on every live path), for the joiner's answer;
+/// a refusal, a close, or silence is [`JoinNotKept`], and the caller then writes
+/// nothing and introduces the joiner nowhere. To `kept` it replies a sealed
+/// [`Reply::Heard`], finishes, and reads until the joiner lets go (at most
+/// [`JOINER_KEEPS_WITHIN`]), so the transport may be dropped as soon as this
+/// returns without cutting the reply short.
 #[allow(clippy::too_many_arguments)]
 async fn issuer_over<W, R>(
     transport: Transport<W, R>,
@@ -1462,7 +1662,7 @@ async fn issuer_over<W, R>(
     drives: Vec<kotton_wire::peer::DriveHandout>,
     gateway: Option<kotton_wire::peer::GatewayHandout>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
-    linger: impl std::future::Future<Output = ()>,
+    kept_within: Duration,
 ) -> Result<EnrolledNode>
 where
     W: AsyncWrite + Unpin + Send,
@@ -1598,10 +1798,23 @@ where
     };
     let attest_bytes = serde_json::to_vec(&attestation).context("serialize attestation")?;
     channel.send_encrypted(&attest_bytes).await?;
-    channel.finish().await?;
-    // Keep the transport open until the joiner has pulled the payload +
-    // attestation and closed; dropping it early truncates those frames.
-    linger.await;
+    // Nothing is committed on the joiner's behalf until it says it kept what
+    // it was handed: a joiner that refuses, closes or stays silent leaves
+    // this side with nothing to record and nobody to introduce. This side's
+    // finish waits for the answer — over a relay it is a close the joiner
+    // would have to read before answering (see `JoinAnswer`).
+    hear_kept(&mut channel, kept_within).await?;
+    // Heard and kept: say so, sealed — the joiner calls its join complete on
+    // this and nothing else — then finish, and read until the joiner lets go,
+    // so the reply is not cut short by this side's close. A reply that fails
+    // now takes nothing back: the joiner kept, and this side commits; the
+    // joiner is told to check here.
+    let reply = serde_json::to_vec(&Reply::Heard).context("serialize the issuer's reply")?;
+    if let Err(e) = channel.send_encrypted(&reply).await {
+        tracing::warn!(error = %e, "the joiner kept the join, but the reply that this side heard was not sent");
+    }
+    let _ = channel.finish().await;
+    let _ = tokio::time::timeout(JOINER_KEEPS_WITHIN, channel.recv_encrypted()).await;
 
     let node = PairedNode {
         id: joiner_name,
@@ -1721,8 +1934,9 @@ async fn dial_pairing_listener(
 }
 
 /// Joiner side of committed-handshake enrollment. Dials the discovered issuer,
-/// runs the handshake, and installs the payload only after verifying the issuer's
-/// identity attestation.
+/// runs the handshake, and returns the payload only after verifying the issuer's
+/// identity attestation, beside the [`JoinAnswer`] the caller owes the issuer
+/// once it has written what it keeps.
 ///
 /// `sid` is the offer's session id (from the mDNS advertisement or the connection
 /// code); `peer_addrs` are the ranked bootstrap addresses to try in order.
@@ -1750,7 +1964,7 @@ pub async fn run_enroll_join_committed(
     peer_listen_addr: Option<SocketAddr>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
     pinned_issuer_root: Option<[u8; 32]>,
-) -> Result<JoinedNode> {
+) -> Result<(JoinedNode, JoinAnswer)> {
     let client_config = {
         use kotton_net::build_bootstrap_client_config;
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -1765,7 +1979,7 @@ pub async fn run_enroll_join_committed(
         .await
         .map_err(|e| anyhow!("open QUIC stream: {e}"))?;
     let transport = Transport::over_quic(&connection, send, recv)?;
-    joiner_over(
+    let (joined, channel) = joiner_over(
         transport,
         None,
         warm_key,
@@ -1775,7 +1989,8 @@ pub async fn run_enroll_join_committed(
         confirmer,
         pinned_issuer_root,
     )
-    .await
+    .await?;
+    Ok((joined, JoinAnswer { channel, connection: Some(connection) }))
 }
 
 /// The joiner half with the transport reversed: **this side listens** and the
@@ -1789,7 +2004,7 @@ pub async fn run_enroll_join_listening(
     joiner_name: &str,
     peer_listen_addr: Option<SocketAddr>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
-) -> Result<JoinedNode> {
+) -> Result<(JoinedNode, JoinAnswer)> {
     let timeout = tokio::time::Duration::from_secs(ttl_seconds);
     let incoming = tokio::time::timeout(timeout, listener.accept())
         .await
@@ -1804,7 +2019,7 @@ pub async fn run_enroll_join_listening(
         .await
         .map_err(|e| anyhow!("open QUIC stream to the node: {e}"))?;
     let transport = Transport::over_quic(&connection, send, recv)?;
-    joiner_over(
+    let (joined, channel) = joiner_over(
         transport,
         None,
         warm_key,
@@ -1814,10 +2029,15 @@ pub async fn run_enroll_join_listening(
         confirmer,
         None,
     )
-    .await
+    .await?;
+    Ok((joined, JoinAnswer { channel, connection: Some(connection) }))
 }
 
 /// The joiner's protocol, over an established bootstrap transport.
+///
+/// Returns what it was handed, verified, and the channel still open: the
+/// caller writes what it keeps and then answers the issuer over it
+/// ([`JoinAnswer`]), which commits nothing until then.
 #[allow(clippy::too_many_arguments)]
 async fn joiner_over<W, R>(
     transport: Transport<W, R>,
@@ -1828,12 +2048,16 @@ async fn joiner_over<W, R>(
     peer_listen_addr: Option<SocketAddr>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
     pinned_issuer_root: Option<[u8; 32]>,
-) -> Result<JoinedNode>
+) -> Result<(JoinedNode, JoinerChannel)>
 where
-    W: AsyncWrite + Unpin + Send,
-    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
 {
     let Transport { send, recv, presented_key, observed, pake, pinned: _ } = transport;
+    // Boxed here, so the channel the caller answers over is one type whatever
+    // carried it.
+    let send: Box<dyn AsyncWrite + Unpin + Send> = Box::new(send);
+    let recv: Box<dyn AsyncRead + Unpin + Send> = Box::new(recv);
 
     let mut channel =
         crate::pair_channel::joiner_establish_with(send, recv, sid, confirmer, pake.as_deref())
@@ -1924,7 +2148,7 @@ where
     };
     let warm_pubkey = warm_key.verifying_key().to_bytes();
 
-    match payload {
+    let joined = match payload {
         PairingPayload::FrostShare {
             share,
             warm_key_delegation,
@@ -2020,7 +2244,8 @@ where
             })
         }
         other => Err(anyhow!("unexpected enrollment payload, got {other:?}")),
-    }
+    };
+    Ok((joined?, channel))
 }
 
 // Build a quinn ServerConfig using the bootstrap (accept-any) TLS profile.
@@ -2266,10 +2491,11 @@ mod tests {
             .await
         });
 
-        let joined =
+        let (joined, answer) =
             run_enroll_join_committed(&n_node, &n_warm, sid, &[dial], "issuer", None, &AutoConfirm, None)
                 .await
                 .expect("committed join succeeds");
+        answer.kept().await.expect("the issuer hears the join kept");
         let enrolled = e.await.unwrap().expect("committed enroll succeeds");
         let (issuer_share, root_did) = enrolled.issuer_share.expect("Full retains a share");
 
@@ -2341,7 +2567,7 @@ mod tests {
             )
             .await
         });
-        let joined = run_enroll_join_committed(
+        let (joined, answer) = run_enroll_join_committed(
             &n_node,
             &n_warm,
             sid,
@@ -2353,6 +2579,7 @@ mod tests {
         )
         .await
         .expect("pinned join with the correct key succeeds");
+        answer.kept().await.expect("the issuer hears the join kept");
         e.await.unwrap().expect("issuer completes");
         assert_eq!(joined.root_did.to_string(), {
             kotton_crypto::DidKeyMethod::from_public_key_bytes(&issuer_pub)
@@ -2401,7 +2628,109 @@ mod tests {
             rejected.is_err(),
             "a pin that isn't the real issuer must be rejected"
         );
-        let _ = e2.await;
+        let refused = e2.await.unwrap().err().expect("the issuer kept a join the joiner rejected");
+        assert!(
+            matches!(refused.downcast_ref::<JoinNotKept>(), Some(JoinNotKept::Unanswered(_))),
+            "{refused}"
+        );
+    }
+
+    /// **A join the joiner refuses after the payload leaves the issuer
+    /// nothing, over QUIC as over a relay.** The joiner verifies what it was
+    /// handed and then refuses it, as `finalize_joined_node` refuses drives it
+    /// cannot record: the issuer's ceremony returns the refusal, typed and
+    /// carrying the joiner's words, and no `EnrolledNode` for its caller to
+    /// record or introduce.
+    #[tokio::test]
+    async fn committed_enroll_a_refusal_after_the_payload_commits_nothing_on_the_issuer() {
+        let issuer_identity = SigningKey::from_bytes(&[11u8; 32]);
+        let op_key = SigningKey::from_bytes(&[42u8; 32]);
+        let n_node = SigningKey::from_bytes(&[20u8; 32]);
+        let n_warm = SigningKey::from_bytes(&[2u8; 32]);
+        let sid = [9u8; 16];
+
+        let (_code, listen_addr, _expires, endpoint) = open_pair_listener(&op_key, 0, 30).await.unwrap();
+        let dial = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen_addr.port());
+        let e = tokio::spawn(async move {
+            run_enroll_issuer_committed(
+                &issuer_identity,
+                sid,
+                Some(full_keys([3u8; 32])),
+                kotton_schemas::membership::Posture::Full,
+                "new-device",
+                None,
+                endpoint,
+                30,
+                9_999_999_999,
+                vec![],
+                None,
+                Vec::new(),
+                &AutoConfirm,
+            )
+            .await
+        });
+        let (joined, answer) =
+            run_enroll_join_committed(&n_node, &n_warm, sid, &[dial], "issuer", None, &AutoConfirm, None)
+                .await
+                .expect("the joiner is handed the payload");
+        assert!(joined.frost_share.is_some(), "the payload reached the joiner before it refused");
+        answer.refused("the drive at 'vault' cannot be recorded here").await.expect("the issuer hears the refusal");
+        let refused = e.await.unwrap().err().expect("the issuer committed a join the joiner refused");
+        assert_eq!(
+            refused.downcast_ref::<JoinNotKept>(),
+            Some(&JoinNotKept::Refused("the drive at 'vault' cannot be recorded here".into()))
+        );
+    }
+
+    /// **Over QUIC, a `kept` the issuer stopped waiting for is not complete on
+    /// the joiner.** The issuer half as `run_enroll_issuer_committed` runs it,
+    /// with a short bound in place of [`JOINER_KEEPS_WITHIN`]: it gives up and
+    /// closes, and the joiner, answering after, gets no sealed `heard` and
+    /// says so — whatever the close looked like.
+    #[tokio::test]
+    async fn committed_enroll_a_kept_the_issuer_gave_up_on_is_not_complete_on_the_joiner() {
+        let issuer_identity = SigningKey::from_bytes(&[11u8; 32]);
+        let op_key = SigningKey::from_bytes(&[42u8; 32]);
+        let n_node = SigningKey::from_bytes(&[20u8; 32]);
+        let n_warm = SigningKey::from_bytes(&[2u8; 32]);
+        let sid = [9u8; 16];
+        let bound = Duration::from_millis(300);
+
+        let (_code, listen_addr, _expires, listener) = open_pair_listener(&op_key, 0, 30).await.unwrap();
+        let dial = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen_addr.port());
+        let e = tokio::spawn(async move {
+            let connection = listener.accept().await.expect("a joiner dials").await.expect("handshake");
+            let (send, recv) = connection.accept_bi().await.expect("the joiner's stream");
+            let transport = Transport::over_quic(&connection, send, recv).expect("a presented key");
+            let enrolled = issuer_over(
+                transport,
+                None,
+                &issuer_identity,
+                sid,
+                Some(full_keys([3u8; 32])),
+                kotton_schemas::membership::Posture::Full,
+                "new-device",
+                None,
+                9_999_999_999,
+                vec![],
+                None,
+                Vec::new(),
+                None,
+                &AutoConfirm,
+                bound,
+            )
+            .await;
+            connection.close(0u32.into(), b"");
+            enrolled.map(|_| ())
+        });
+        let (_joined, answer) =
+            run_enroll_join_committed(&n_node, &n_warm, sid, &[dial], "issuer", None, &AutoConfirm, None)
+                .await
+                .expect("the joiner is handed the payload");
+        let gave_up = e.await.unwrap().expect_err("the issuer committed a join nobody answered");
+        assert!(matches!(gave_up.downcast_ref::<JoinNotKept>(), Some(JoinNotKept::Unanswered(_))), "{gave_up}");
+        let late = answer.kept().await;
+        assert!(late.is_err(), "a `kept` the issuer gave up on was taken as heard");
     }
 
     /// A wrong SAS on the joiner (human says "codes don't match") aborts before
@@ -2638,6 +2967,46 @@ mod relayed_tests {
         SigningKey::generate(&mut rand::rngs::OsRng)
     }
 
+    /// Two byte streams with a relay between them, as `circuit::bridge` in
+    /// `infra/relay` behaves: each way is forwarded as it comes, the issuer's
+    /// end ends the joiner's leg (a relay forwards no close of its own
+    /// bytes, it ends both legs), and the joiner's bytes are still taken after
+    /// the issuer is gone, as a relay's socket takes them until it is closed.
+    /// So an answer sent after the issuer gave up is sent, and only the reply
+    /// is missing. Returns the issuer's end and the joiner's.
+    fn a_relay_between() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+        use tokio::io::AsyncWriteExt;
+        let (issuer, at_issuer) = tokio::io::duplex(1 << 16);
+        let (joiner, at_joiner) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let (mut from_issuer, mut to_issuer) = tokio::io::split(at_issuer);
+            let (mut from_joiner, mut to_joiner) = tokio::io::split(at_joiner);
+            let down = async {
+                let _ = tokio::io::copy(&mut from_issuer, &mut to_joiner).await;
+                let _ = to_joiner.shutdown().await;
+            };
+            let up = async {
+                let _ = tokio::io::copy(&mut from_joiner, &mut to_issuer).await;
+                let _ = to_issuer.shutdown().await;
+                let _ = tokio::io::copy(&mut from_joiner, &mut tokio::io::sink()).await;
+            };
+            tokio::join!(down, up);
+        });
+        (issuer, joiner)
+    }
+
+    /// How the joiner answers once it holds what it was handed.
+    enum Answering {
+        /// `kept`, at once.
+        Kept,
+        /// `refused`, with this reason.
+        Refused(&'static str),
+        /// Drops the answer unsaid, closing the circuit.
+        Closes,
+        /// Says nothing for this long, then `kept`.
+        Late(Duration),
+    }
+
     /// Both halves over a duplex, each keyed by its own copy of the code.
     async fn run(code_issuer: &str, code_joiner: &str) -> (Result<EnrolledNode>, Result<JoinedNode>, u32, u32) {
         run_pinned(code_issuer, code_joiner, |_| None).await
@@ -2650,7 +3019,20 @@ mod relayed_tests {
         code_joiner: &str,
         pin: impl FnOnce([u8; 32]) -> Option<[u8; 32]>,
     ) -> (Result<EnrolledNode>, Result<JoinedNode>, u32, u32) {
-        let (a, b) = tokio::io::duplex(1 << 16);
+        run_answering(code_issuer, code_joiner, pin, Answering::Kept, JOINER_KEEPS_WITHIN).await
+    }
+
+    /// [`run_pinned`], with the joiner answering as `answering` and the issuer
+    /// waiting for the answer at most `kept_within`. The joiner's result is
+    /// `Err` when its answer was not heard.
+    async fn run_answering(
+        code_issuer: &str,
+        code_joiner: &str,
+        pin: impl FnOnce([u8; 32]) -> Option<[u8; 32]>,
+        answering: Answering,
+        kept_within: Duration,
+    ) -> (Result<EnrolledNode>, Result<JoinedNode>, u32, u32) {
+        let (a, b) = a_relay_between();
         let issuer_identity = key();
         let issuer_op = key();
         let vault_op = key();
@@ -2677,13 +3059,13 @@ mod relayed_tests {
                 Vec::new(),
                 None,
                 &yes_i,
-                std::future::ready(()),
+                kept_within,
             )
             .await
         };
         let joiner_side = async {
             let (read, write) = tokio::io::split(b);
-            joiner_over(
+            let joined = joiner_over(
                 Transport::relayed(write, read, code_joiner),
                 Some(SelfAnnounce { op_key: &vault_op, relay_url: "http://host-relay:7700".into() }),
                 &warm,
@@ -2693,7 +3075,21 @@ mod relayed_tests {
                 &yes_j,
                 None,
             )
-            .await
+            .await;
+            let (joined, channel) = joined?;
+            let answer = JoinAnswer { channel, connection: None };
+            match answering {
+                Answering::Kept => answer.kept().await.map(|()| joined),
+                Answering::Refused(why) => answer.refused(why).await.map(|()| joined),
+                Answering::Closes => {
+                    drop(answer);
+                    Ok(joined)
+                }
+                Answering::Late(after) => {
+                    tokio::time::sleep(after).await;
+                    answer.kept().await.map(|()| joined)
+                }
+            }
         };
         let (e, j) = tokio::join!(issuer_side, joiner_side);
         let (e, j) = match (&e, &j) {
@@ -2770,6 +3166,64 @@ mod relayed_tests {
         assert_ne!(refused.answered, other);
         assert!(err.to_string().contains("nothing was handed over"), "{err}");
         assert!(j.is_err(), "the joiner completed against an issuer that refused it");
+    }
+
+    /// **A joiner that refuses what it was handed leaves the issuer nothing**,
+    /// and the issuer is told why in the joiner's words, with nothing that
+    /// could steer its person's terminal.
+    #[tokio::test]
+    async fn a_refusal_after_the_payload_is_heard_and_nothing_is_enrolled() {
+        let code = normalize_code("ripple canyon ember");
+        let (e, j, _, _) = run_answering(
+            &code,
+            &code,
+            |_| None,
+            Answering::Refused("this node is a vault\u{1b}[2J and holds no key"),
+            JOINER_KEEPS_WITHIN,
+        )
+        .await;
+        assert!(j.is_ok(), "the joiner's refusal was not heard: {:?}", j.err());
+        let err = e.err().expect("the issuer enrolled a node that refused the join");
+        assert_eq!(
+            err.downcast_ref::<JoinNotKept>(),
+            Some(&JoinNotKept::Refused("this node is a vault[2J and holds no key".into())),
+            "{err}"
+        );
+    }
+
+    /// **A joiner that closes without answering leaves the issuer nothing**:
+    /// the answer handle dropped unsaid is a no.
+    #[tokio::test]
+    async fn a_joiner_that_closes_without_answering_enrols_nothing() {
+        let code = normalize_code("ripple canyon ember");
+        let (e, j, _, _) = run_answering(&code, &code, |_| None, Answering::Closes, JOINER_KEEPS_WITHIN).await;
+        assert!(j.is_ok());
+        let err = e.err().expect("the issuer enrolled a node that never answered");
+        assert!(matches!(err.downcast_ref::<JoinNotKept>(), Some(JoinNotKept::Unanswered(_))), "{err}");
+    }
+
+    /// **The issuer's wait for the answer is bounded** ([`JOINER_KEEPS_WITHIN`]
+    /// on every live path; a short bound here, through the same parameter):
+    /// a joiner silent past it leaves the issuer nothing, the issuer returns
+    /// at the bound and not at the joiner's leisure, and the joiner's late
+    /// `kept` — sent, into a relay still taking bytes — is not complete,
+    /// because no sealed `heard` came back: the relay's end of the circuit
+    /// is not the issuer's word.
+    #[tokio::test]
+    async fn the_issuer_waits_for_the_answer_only_within_its_bound() {
+        let bound = Duration::from_millis(300);
+        let code = normalize_code("ripple canyon ember");
+        let started = std::time::Instant::now();
+        let (e, j, _, _) =
+            run_answering(&code, &code, |_| None, Answering::Late(bound * 4), bound).await;
+        let err = e.err().expect("the issuer enrolled a node that answered past the bound");
+        match err.downcast_ref::<JoinNotKept>() {
+            Some(JoinNotKept::Unanswered(how)) => assert!(how.contains("no answer within"), "{how}"),
+            other => panic!("not the bound's refusal: {other:?} ({err})"),
+        }
+        assert!(started.elapsed() >= bound, "the issuer stopped waiting before its bound");
+        let late = j.err().expect("a late `kept` was taken as heard");
+        assert!(late.to_string().contains("before the admitting device replied that it heard"), "{late}");
     }
 
     /// **A relay that refuses an invite's reservation is told apart from one

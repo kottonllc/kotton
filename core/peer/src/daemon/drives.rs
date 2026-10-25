@@ -61,8 +61,9 @@
 //!   (`PairingPayload::FrostShare::drives`). It rests on the issuer's word
 //!   inside the SAS-confirmed, identity-attested ceremony, from the device that
 //!   holds the identity; a handout the joiner cannot record refuses the join on
-//!   the joiner only — the issuer has already committed and still lists the
-//!   device until `device revoke` (kotton #98).
+//!   both sides — the joiner's refusal is the join's last frame, and the issuer
+//!   then records no row for it and introduces it at no drive
+//!   (`crate::pairing::JoinAnswer`).
 //!   A device that joins after a vault was enrolled learns the drive this way.
 //!
 //! **Who writes a made drive: [`reconcile`], and nothing else**, from a

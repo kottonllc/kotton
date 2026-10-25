@@ -24,7 +24,7 @@ use kotton_wire::peer::DataKeys;
 use kotton_crypto::{derive_cek, derive_master_secret};
 use crate::pair_channel::SasConfirmer;
 use crate::relay_keys::{FirstContact, Presented, RefusedAtTheRelay, Tier};
-use crate::pairing::ed25519_to_x25519_private;
+use crate::pairing::{ed25519_to_x25519_private, JoinNotKept};
 use kotton_schemas::membership::{Ceremony, Member, Posture, Role};
 use kotton_schemas::{CapabilityGrant, CapabilityKind};
 use kotton_common::crypto::kdf_labels;
@@ -1259,12 +1259,34 @@ pub async fn confirm_code(
 }
 
 /// What a person is told when a ceremony fails: a relay's refusal at its door
-/// ([`RefusedAtTheRelay`]) as what this device presented there, and every other
-/// failure as [`ceremony_failure_copy`] reads it.
+/// ([`RefusedAtTheRelay`]) as what this device presented there, a join the
+/// other device did not keep ([`JoinNotKept`]) as what is kept here — nothing —
+/// and every other failure as [`ceremony_failure_copy`] reads it.
 pub fn ceremony_failure(err: &anyhow::Error) -> String {
+    if let Some(not_kept) = err.downcast_ref::<JoinNotKept>() {
+        return join_not_kept_copy(not_kept);
+    }
     match err.downcast_ref::<RefusedAtTheRelay>() {
         Some(refused) => refused_at_the_relay_copy(refused),
         None => ceremony_failure_copy(&err.to_string()),
+    }
+}
+
+/// What the admitting device's person is told when the other device did not
+/// keep what it was handed: that this device kept nothing either — no row for
+/// it, and no drive told of it — so there is nothing here to revoke, and, for
+/// a refusal, the other device's own reason. Not
+/// [`ceremony_failure_copy`]'s *nothing was shared*: the payload crossed, and
+/// the other device threw it away.
+pub fn join_not_kept_copy(not_kept: &JoinNotKept) -> String {
+    const NOTHING_KEPT: &str = "Nothing is kept here: this device did not add it, and none of your drives \
+                                was told of it, so there is nothing to revoke.";
+    match not_kept {
+        JoinNotKept::Refused(why) => format!("The other device refused the join. {NOTHING_KEPT} It said: {why}"),
+        JoinNotKept::Unanswered(how) => format!(
+            "The other device did not say it kept what it was handed ({how}). {NOTHING_KEPT} Pair again when \
+             both devices are ready."
+        ),
     }
 }
 
@@ -1460,6 +1482,29 @@ mod refusal_copy {
                 assert!(!said.contains("holds"), "a refusal said what this device holds, not what it presented: {said}");
                 assert!(!said.contains("forget"), "a refusal sent the person to drop a credential: {said}");
             }
+        }
+    }
+
+    /// **A join the other device did not keep is said as what is kept here —
+    /// nothing, and nothing to revoke** — with the other device's reason when
+    /// it refused, and never as *nothing was shared* or a lost connection: the
+    /// payload crossed, and the other device threw it away.
+    #[test]
+    fn a_join_the_other_device_did_not_keep_says_nothing_is_kept_here() {
+        let refused: anyhow::Error = JoinNotKept::Refused("the drive at 'vault' cannot be recorded here".into()).into();
+        let said = ceremony_failure(&refused);
+        assert!(said.starts_with("The other device refused the join."), "{said}");
+        assert!(said.contains("Nothing is kept here") && said.contains("nothing to revoke"), "{said}");
+        assert!(said.ends_with("It said: the drive at 'vault' cannot be recorded here"), "{said}");
+
+        let silent: anyhow::Error = JoinNotKept::Unanswered("no answer within 120s".into()).into();
+        let said = ceremony_failure(&silent);
+        assert!(said.contains("did not say it kept what it was handed (no answer within 120s)"), "{said}");
+        assert!(said.contains("Nothing is kept here"), "{said}");
+
+        for said in [ceremony_failure(&refused), ceremony_failure(&silent)] {
+            assert!(!said.contains("Nothing was shared") && !said.contains("Lost the connection"), "{said}");
+            assert!(!said.contains("device revoke"), "a join nobody kept sent the person to revoke it: {said}");
         }
     }
 
