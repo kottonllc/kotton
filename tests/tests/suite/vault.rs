@@ -171,7 +171,6 @@ pub(crate) async fn enrol_vault_from(
         user,
         device_name,
         label,
-        free_port(),
         Posture::BlindStorage,
     )
     .await;
@@ -4385,7 +4384,7 @@ async fn admitting_a_vault_records_the_port_its_peers_dial() {
         .expect("create_user");
     let client_v = connect_when_ready(&vault.ipc, "vault door").await;
     let (mut client, _client_v, node) =
-        enroll_streamed(client, client_v, "alice", "vault", free_port(), Posture::BlindStorage).await;
+        enroll_streamed(client, client_v, "alice", "vault", Posture::BlindStorage).await;
     assert_eq!(node.id, "vault");
 
     let nodes = client.list_nodes("alice").await.expect("node list");

@@ -13,7 +13,7 @@
 //! Real daemons throughout: an in-process `kvaultd::Vault`, and two device
 //! daemons paired through the streamed ceremony. Nothing is mocked.
 
-use crate::common::{connect_when_ready, enroll_streamed_as, free_port, init_crypto};
+use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto};
 use crate::vault::{enrol_vault_from, recover_from, spawn_device, spawn_vault, tenants_at_the_door, try_ask_the_vault_as, RunningDevice, RunningVault, VaultIdentity};
 use kotton::SyncDirection;
 use kotton_schemas::membership::Posture;
@@ -69,7 +69,7 @@ async fn a_device_its_admitter_introduces_reaches_the_persons_drive_until_revoke
     assert!(!admitted(&capacity_as(&b, &drive).await), "B is a stranger at the drive before it joins");
 
     let (mut client_a, mut client_b, node_b) =
-        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
+        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", Posture::Full).await;
     assert_eq!(devices_at(&vault, USER).await, 2, "the drive pairs both of alice's devices");
     assert!(admitted(&capacity_as(&b, &drive).await), "B reaches the drive under its own key");
 
@@ -188,7 +188,7 @@ async fn a_recovered_device_sees_its_vault_as_a_drive_and_introduces_the_next_de
     let client_b = connect_when_ready(&b.ipc, "client B").await;
     assert!(!admitted(&capacity_as(&b, &drive).await), "B is a stranger at the drive before it joins");
     let (_client_r, _client_b, _node_b) =
-        enroll_streamed_as(client_r, client_b, USER, "device-r", "device-b", free_port(), Posture::Full).await;
+        enroll_streamed_as(client_r, client_b, USER, "device-r", "device-b", Posture::Full).await;
     assert!(admitted(&capacity_as(&b, &drive).await), "the recovered device did not introduce B to its drive");
 }
 
@@ -262,7 +262,7 @@ async fn a_drive_enrolled_after_a_device_joined_reaches_that_device_by_way_of_a_
     let b = spawn_device("device B").await;
     let client_b = connect_when_ready(&b.ipc, "client B").await;
     let (client_a, mut client_b, _node_b) =
-        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
+        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", Posture::Full).await;
     let (mut client_a, _second_drive) = enrol_vault_from(client_a, "device-a", &second, USER, "vault-2").await;
     let enrolled = said_of(&a.daemon.drives(USER).await.expect("A's drives"));
     assert_eq!(enrolled.len(), 2, "A records both drives: {enrolled:?}");
@@ -304,7 +304,7 @@ async fn two_devices_and_a_drive(
     let b = spawn_device("device B").await;
     let client_b = connect_when_ready(&b.ipc, "client B").await;
     let (client_a, client_b, _node_b) =
-        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
+        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", Posture::Full).await;
     (a, client_a, b, client_b, drive)
 }
 
@@ -539,7 +539,7 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
     let b = spawn_device("device B").await;
     let client_b = connect_when_ready(&b.ipc, "client B").await;
     let (mut client_a, mut client_b, _node_b) =
-        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
+        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", Posture::Full).await;
 
     // The first drive at each vault: what A's tree syncs with.
     client_a.write_file(USER, "from-a.txt", b"written on A").await.expect("write on A");

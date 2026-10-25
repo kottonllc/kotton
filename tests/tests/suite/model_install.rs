@@ -454,13 +454,11 @@ async fn an_installed_model_reaches_a_second_paired_device() {
     // join introduces N to it: N receives E's model by way of the drive.
     let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", USER).await;
 
-    let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) = enroll_streamed(
         client_e,
         client_n,
         USER,
         "device-n",
-        bootstrap_port,
         Posture::Full,
     )
     .await;
@@ -569,13 +567,11 @@ async fn a_model_comes_back_from_the_phrase_after_every_device_is_lost() {
             .await
             .expect("add_recovery_phrase");
 
-        let bootstrap_port = free_port();
         let (mut client_e, _client_b, node_b) = enroll_streamed(
             client_e,
             client_b,
             USER,
             "blind-vps",
-            bootstrap_port,
             Posture::BlindStorage,
         )
         .await;

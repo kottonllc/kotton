@@ -17,11 +17,6 @@ use crate::common::{connect_when_ready, enroll_streamed, TestEnv, TEST_PASSPHRAS
 
 const USER: &str = "alice";
 
-fn free_port() -> u16 {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind :0 for port probe");
-    s.local_addr().expect("local_addr").port()
-}
-
 /// **A folder kept on one device is read on another.** `kotton keep <folder>` on E copies
 /// the folder into the tree under its own name; run again, it copies nothing; N, joined to
 /// the same identity, pulls from the person's drive what E synced there, and reads a file of
@@ -51,7 +46,7 @@ async fn a_folder_kept_on_one_device_is_read_on_another() {
     let (alice_e, _drive) = crate::drive_sync::a_drive_for(alice_e, "device-e", USER).await;
     let fresh_n = connect_when_ready(&n.endpoint, "N").await;
     let (mut alice_e, mut alice_n, _) =
-        enroll_streamed(alice_e, fresh_n, USER, "device-n", free_port(), Posture::Full).await;
+        enroll_streamed(alice_e, fresh_n, USER, "device-n", Posture::Full).await;
 
     // ── The folder, on E's computer ──────────────────────────────────────────────
     let home = tempfile::tempdir().expect("a folder of the person's");
