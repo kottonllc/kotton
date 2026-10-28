@@ -74,6 +74,7 @@ mod b3_tests {
             crate::residency::RecordStores::new(),
             Arc::new(RwLock::new(HashMap::new())),
             Arc::clone(&rt),
+            None,
         );
         (dir, rt, resources)
     }

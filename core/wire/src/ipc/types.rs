@@ -917,15 +917,289 @@ pub struct DriveDescriptor {
     /// Sealed bytes the vault holds for it, as the vault last said; `None` when
     /// the vault did not answer this time.
     pub size: Option<u64>,
-    /// The devices that keep it whole, by name. Pins (kotton #55) write what a
-    /// device keeps as a record in the drive; until then no device records one,
-    /// and this is empty.
+    /// The person's devices that keep it whole, by name: each device whose pin
+    /// settings ([`PinSetting`], records in the person's drive) keep the drive
+    /// whole and no folder of it on demand, read by the device answering —
+    /// itself as `this device`. Empty when none does, which is the notice
+    /// [`PinNotice::NoWholeDevice`].
     pub pinned_whole: Vec<String>,
     /// A tree a `drive move` made and did not finish: the vault holds part of
     /// the drive's objects under a name sealed unfinished, and the drive itself
     /// is still where it was. Not a drive; `drive list` shows it so the person
     /// can see it, and the next move of that drive to that vault retires it.
     pub unfinished: bool,
+}
+
+// -- What each device keeps of the person's drives (kotton #55) --------------
+//
+// RFC 0002's Exit and RFC 0003's "What this device holds", and kotton-protocol
+// #20's pin-setting record: a device, a scope (its default, a drive, or a
+// folder of a drive), and a value (whole or on demand). Here beside the drive
+// types for the reason they are (above): kotton-protocol has no type crates
+// yet, and these move with them as one.
+
+/// What a device keeps of a drive or a folder: all of it, or its index and
+/// whatever is opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PinValue {
+    /// Every file's content, fetched at the next pass and kept.
+    Whole,
+    /// The index — every file's name, size and where its content is — and a
+    /// file's content when it is opened.
+    OnDemand,
+}
+
+impl PinValue {
+    /// The word the `pin` verb says it with.
+    pub fn said(&self) -> &'static str {
+        match self {
+            PinValue::Whole => "whole",
+            PinValue::OnDemand => "on-demand",
+        }
+    }
+
+    /// The value `word` says, or `None`.
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "whole" => Some(PinValue::Whole),
+            "on-demand" => Some(PinValue::OnDemand),
+            _ => None,
+        }
+    }
+}
+
+/// Where a pin setting applies: a device's default for every drive it has not
+/// been told about, one drive, or one folder of a drive. The nearest wins — a
+/// folder's over its drive's over the default — and a folder's covers the
+/// folders beneath it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "at", rename_all = "kebab-case")]
+pub enum PinScope {
+    Default,
+    /// A drive, by the person's name for it.
+    Drive { drive: String },
+    /// A folder of a drive: `folder` is a path in the drive, from its root,
+    /// beginning `/`, with no empty, `.` or `..` component and no trailing
+    /// `/`. The daemon holds a `PinSet` to that through
+    /// [`PinScope::normalised`] before it records anything; a folder that is
+    /// not `/`-led is refused, and the root is kept as the drive.
+    Folder { drive: String, folder: String },
+}
+
+impl PinScope {
+    /// The scope as the `pin` verb names it: `default`, `<drive>` or
+    /// `<drive>:/<folder>`.
+    pub fn said(&self) -> String {
+        match self {
+            PinScope::Default => "default".to_string(),
+            PinScope::Drive { drive } => drive.clone(),
+            PinScope::Folder { drive, folder } => format!("{drive}:{folder}"),
+        }
+    }
+
+    /// The scope `words` names, as [`Self::said`] spells it, or the sentence
+    /// saying why it names none.
+    pub fn parse(words: &str) -> Result<Self, String> {
+        if words == "default" {
+            return Ok(PinScope::Default);
+        }
+        match words.split_once(':') {
+            None if words.is_empty() => Err("name a drive, `<drive>:/<folder>`, or `default`".into()),
+            None => Ok(PinScope::Drive { drive: words.to_string() }),
+            Some(("", _)) => Err(format!("'{words}' names no drive before the ':'")),
+            Some((drive, folder)) => PinScope::Folder { drive: drive.to_string(), folder: folder.to_string() }.normalised(),
+        }
+    }
+
+    /// The scope as it is kept, or the sentence saying why it cannot be:
+    /// a folder normalised as [`Self::Folder`] holds it, and a folder that is
+    /// the drive's root kept as the drive. The one normaliser — [`Self::parse`]
+    /// ends in it, and the daemon calls it on every scope a `PinSet` carries
+    /// before anything is written, so a folder no setting could keep is
+    /// refused where the record is made, whatever client sent it.
+    pub fn normalised(self) -> Result<Self, String> {
+        match self {
+            PinScope::Default => Ok(PinScope::Default),
+            PinScope::Drive { drive } if drive.is_empty() => Err("name a drive".into()),
+            PinScope::Drive { drive } => Ok(PinScope::Drive { drive }),
+            PinScope::Folder { drive, .. } if drive.is_empty() => Err("name the drive the folder is in".into()),
+            PinScope::Folder { drive, folder } => {
+                let folder = Self::folder_said(&folder)?;
+                if folder == "/" {
+                    return Ok(PinScope::Drive { drive });
+                }
+                Ok(PinScope::Folder { drive, folder })
+            }
+        }
+    }
+
+    /// A folder as a scope holds it: from the drive's root, `/`-led, with no
+    /// empty, `.` or `..` component and no trailing `/`.
+    fn folder_said(folder: &str) -> Result<String, String> {
+        if !folder.starts_with('/') {
+            return Err(format!("a folder is named from its drive's root, beginning '/': '{folder}' does not"));
+        }
+        let parts: Vec<&str> = folder.split('/').filter(|p| !p.is_empty()).collect();
+        if let Some(bad) = parts.iter().find(|p| **p == "." || **p == "..") {
+            return Err(format!("'{folder}' holds '{bad}': a folder is named by its own path"));
+        }
+        Ok(format!("/{}", parts.join("/")))
+    }
+}
+
+/// One pin setting, as it is kept: a record in the person's drive, sealed like
+/// any other, which every device of theirs reads and nothing else can
+/// (kotton-protocol #20). `device` is the DID of the device the setting is
+/// about — the key that device presents — inside the person's own sealed
+/// records; it is never sent anywhere a drive can read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinSetting {
+    pub device: String,
+    pub scope: PinScope,
+    pub value: PinValue,
+}
+
+/// What a device tells its person about what their devices keep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "notice", rename_all = "kebab-case")]
+pub enum PinNotice {
+    /// No device of the person's keeps `drive` whole, as this device reads
+    /// their pin settings: only the drive holds all of it.
+    NoWholeDevice { drive: String },
+    /// This device keeps some of `drive` whole and its last pass ran short of
+    /// room: `held` bytes of packs in `budget`, of `wanted` its whole pins
+    /// want. `settings` are the settings that keep more than fits, each as
+    /// `pin` names it, so the person can set one to keep less.
+    ShortOfRoom { drive: String, settings: Vec<String>, held: u64, budget: Option<u64>, wanted: u64 },
+}
+
+impl PinNotice {
+    /// The notice as the person reads it.
+    pub fn said(&self) -> String {
+        match self {
+            PinNotice::NoWholeDevice { drive } if drive == FIRST_DRIVE_NAME => format!(
+                "no device of yours keeps '{drive}' whole; only the drive holds all of it. \
+                 `pin {drive} whole` on a device keeps it there"
+            ),
+            PinNotice::NoWholeDevice { drive } => format!(
+                "no device of yours keeps '{drive}' whole; only the drive holds all of it. A device keeps \
+                 no tree of a drive `drive create` made yet, so none can"
+            ),
+            PinNotice::ShortOfRoom { drive, settings, held, budget, wanted } => {
+                let room = budget.map_or_else(|| "the disk".to_string(), |b| format!("{b} bytes"));
+                let less = if settings.is_empty() {
+                    "no setting keeps less: what fills it is the drive's index and the daemon's own objects, \
+                     which every device keeps"
+                        .to_string()
+                } else {
+                    let said = settings.iter().map(|s| format!("`pin {s} on-demand`")).collect::<Vec<_>>().join(" or ");
+                    format!("{said} keeps less")
+                };
+                format!(
+                    "this device is short of room for '{drive}': it holds {held} bytes in {room}, and its whole \
+                     pins want {wanted}; {less}"
+                )
+            }
+        }
+    }
+}
+
+/// What `pin list` answers, and every `pin` setting: this device's default,
+/// its exceptions, and the notices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinReadout {
+    /// This device's default for every drive it has not been told about.
+    pub default: PinValue,
+    /// This device's settings for a drive or a folder, which the nearest of
+    /// wins.
+    pub exceptions: Vec<PinSetting>,
+    pub notices: Vec<PinNotice>,
+}
+
+/// One drive, as `status` says what this device keeps of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriveHeld {
+    pub name: String,
+    /// The vaults it is kept on, by label.
+    pub vaults: Vec<String>,
+    /// What this device keeps of the drive as a whole: its drive setting, or
+    /// its default; `None` for a drive it keeps no tree of yet (a drive
+    /// `drive create` made: its vault alone holds it).
+    pub keeps: Option<PinValue>,
+    /// This device's folder settings in it, which the nearest of wins.
+    pub folders: Vec<PinSetting>,
+    /// The person's devices that keep it whole ([`DriveDescriptor::pinned_whole`]).
+    pub pinned_whole: Vec<String>,
+}
+
+/// What `status` answers: when this device last synced, what it keeps of each
+/// drive, and the notices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceStatus {
+    /// Unix seconds of the last completed pass since the daemon started.
+    pub last_sync_at: Option<i64>,
+    pub default: PinValue,
+    pub drives: Vec<DriveHeld>,
+    pub notices: Vec<PinNotice>,
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    /// **A scope reads back as the verb said it**, a folder normalised, and a
+    /// folder that names its way out of itself is refused with a sentence.
+    #[test]
+    fn a_scope_is_said_and_read_back() {
+        for said in ["default", "photos", "photos:/trip", "photos:/trip/2026"] {
+            assert_eq!(PinScope::parse(said).unwrap().said(), said);
+        }
+        assert_eq!(PinScope::parse("photos:/trip/").unwrap().said(), "photos:/trip");
+        assert_eq!(PinScope::parse("photos:/").unwrap(), PinScope::Drive { drive: "photos".into() });
+        for bad in ["", ":/x", "photos:trip", "photos:/a/../b", "photos:/./a", "photos:"] {
+            assert!(PinScope::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// **`parse` and the daemon's normalisation agree**: every scope `parse`
+    /// accepts is one [`PinScope::normalised`] keeps unchanged, and a folder
+    /// sent as a struct is held to the same form — `/photos/` kept as
+    /// `/photos`, `photos` and `""` refused.
+    #[test]
+    fn parse_and_the_daemons_normalisation_agree() {
+        for said in ["default", "photos", "photos:/", "photos:/trip", "photos:/trip/", "photos://trip//2026/", "photos:/a b"] {
+            let parsed = PinScope::parse(said).unwrap();
+            assert_eq!(parsed.clone().normalised().unwrap(), parsed, "{said}");
+        }
+        let folder = |f: &str| PinScope::Folder { drive: "personal".into(), folder: f.into() };
+        assert_eq!(folder("/photos/").normalised().unwrap(), folder("/photos"));
+        assert_eq!(folder("/").normalised().unwrap(), PinScope::Drive { drive: "personal".into() });
+        for bad in ["photos", "", "/a/../b"] {
+            assert!(folder(bad).normalised().is_err(), "{bad:?} was kept");
+        }
+    }
+
+    /// **The record and the readout as they cross**: kebab-case values, the
+    /// scope tagged by where it applies — the shape kotton-protocol #20 names.
+    #[test]
+    fn a_setting_crosses_as_device_scope_and_value() {
+        let setting = PinSetting {
+            device: "did:key:z6Mk".into(),
+            scope: PinScope::Folder { drive: "personal".into(), folder: "/photos".into() },
+            value: PinValue::OnDemand,
+        };
+        let json = serde_json::to_value(&setting).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"device": "did:key:z6Mk", "scope": {"at": "folder", "drive": "personal", "folder": "/photos"}, "value": "on-demand"})
+        );
+        assert_eq!(serde_json::from_value::<PinSetting>(json).unwrap(), setting);
+        let short = PinNotice::ShortOfRoom { drive: "personal".into(), settings: vec!["personal:/photos".into()], held: 1, budget: Some(2), wanted: 3 };
+        assert!(short.said().contains("`pin personal:/photos on-demand` keeps less"), "{}", short.said());
+        let back: PinNotice = serde_json::from_str(&serde_json::to_string(&short).unwrap()).unwrap();
+        assert_eq!(back, short);
+    }
 }
 
 #[cfg(test)]

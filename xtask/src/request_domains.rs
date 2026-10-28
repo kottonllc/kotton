@@ -129,6 +129,13 @@ const DOMAINS: &[(&str, &[&str])] = &[
             "DriveList",
             "DriveShow",
             "DriveMove",
+            // What this device keeps of the person's drives (RFC 0003, "What
+            // this device holds"; kotton #55): the pin settings are records in
+            // their drive (`kotton_device::users::pins`), and `status` reads
+            // them back with the notices.
+            "PinSet",
+            "PinList",
+            "Status",
             "PeerAdd",
             "GetNodeIdentity",
             "TrustAdd",

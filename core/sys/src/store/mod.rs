@@ -759,6 +759,24 @@ pub trait SealedObjectAccess: ObjectStorage {
     async fn scan_record_segments(&self) -> ObjectStorageResult<Vec<RecordSegmentView>> {
         Ok(Vec::new())
     }
+
+    /// The packs that hold the content of every path `kept` keeps, each with
+    /// the paths it holds content for: what a device must have in hand to keep
+    /// those paths whole (kotton #55, pins).
+    ///
+    /// `kept` is asked of each path the current state names — its current
+    /// version, and the losing versions a conflict retained — in the store's
+    /// logical key space (`files/<person path>` for the person's tree). Kept
+    /// versions are not asked about: they are history, fetched when opened.
+    ///
+    /// Default: `None` — a store with no pack layer has no packs to name, and
+    /// "this store cannot say" is distinguishable from "no pack is needed".
+    async fn packs_holding(
+        &self,
+        _kept: &(dyn for<'p> Fn(&'p str) -> bool + Send + Sync),
+    ) -> ObjectStorageResult<Option<BTreeMap<String, Vec<String>>>> {
+        Ok(None)
+    }
 }
 
 /// A store that can be replicated: it supports ordinary access *and* can expose

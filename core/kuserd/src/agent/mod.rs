@@ -721,6 +721,7 @@ impl DeviceDaemon {
                 record_stores.clone(),
                 Arc::clone(&user_dbs),
                 Arc::clone(&runtime),
+                Some(Arc::clone(&db)),
             );
         let sync_engine = kotton_sync::engine::SyncEngine::new(
             Arc::clone(&db),
@@ -728,6 +729,9 @@ impl DeviceDaemon {
             Arc::clone(&sync_resources),
             Arc::clone(&paired_keys),
         );
+        // A pack a device does not keep is fetched from the person's drives
+        // when something reads it (kotton #55).
+        users.lend_packs(sync_engine.pack_source());
         // Hoisted out of the literal below because the ceremony registry needs
         // them: it is built here rather than lazily so there is one, made once,
         // for the life of the daemon.
@@ -1029,6 +1033,7 @@ impl DeviceDaemon {
                 record_stores.clone(),
                 Arc::clone(&user_dbs),
                 Arc::clone(&runtime),
+                Some(Arc::clone(&db)),
             );
         let sync_engine = kotton_sync::engine::SyncEngine::new(
             Arc::clone(&db),
@@ -1036,6 +1041,9 @@ impl DeviceDaemon {
             Arc::clone(&sync_resources),
             Arc::clone(&paired_keys),
         );
+        // A pack a device does not keep is fetched from the person's drives
+        // when something reads it (kotton #55).
+        users.lend_packs(sync_engine.pack_source());
         // As in the constructor above: hoisted so the one ceremony registry can
         // be built from them before the literal.
         let sessions: sessions::SessionMap = Arc::new(RwLock::new(HashMap::new()));
@@ -1845,6 +1853,18 @@ impl DeviceDaemon {
     /// vault's listing recorded.
     pub async fn drives(&self, user_id: &str) -> io::Result<Vec<kotton_peer::daemon::drives::Drive>> {
         kotton_peer::daemon::drives::all(&self.db, user_id).await
+    }
+
+    /// Whether this device holds, here, the content of the file at `path` in
+    /// `user_id`'s tree — kept whole by its pins, or fetched since it was
+    /// opened (`kotton_store::runtime::user::UserStore::kept_here`). For a
+    /// caller that holds the daemon — an integration test that asks what a
+    /// pass kept (kotton #55).
+    pub async fn kept_here(&self, user_id: &str, path: &str) -> io::Result<bool> {
+        let Some(store) = self.users.get(user_id) else {
+            return Err(io::Error::other(format!("'{user_id}' is not resident")));
+        };
+        store.kept_here(path).await.map_err(|e| io::Error::other(format!("{e:#}")))
     }
 
     /// Build the peer-request handler closure.

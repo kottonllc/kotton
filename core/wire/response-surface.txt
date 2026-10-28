@@ -2,7 +2,7 @@
 # Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
 # Variants sorted by name; fields in declaration order, which is the order
 # serde writes them. See xtask/src/wire_check.rs for why this file exists.
-# variants: 190
+# variants: 192
 ActiveSession
     user_id: String
 AppBundlePath
@@ -317,6 +317,8 @@ PairingComplete
     session_token: Option<crate::ipc::SecretText>
     #[serde(default, skip_serializing_if = "Option::is_none")]
     relay_offer: Option<String>
+Pins
+    pins: crate::ipc::PinReadout
 PrincipalSession
     token: crate::ipc::SecretText
 QuicGatewayStatusResult
@@ -395,6 +397,8 @@ SessionEnded
 SessionList
     sessions: Vec<EphemeralSession>
 SessionLocked
+Status
+    status: crate::ipc::DeviceStatus
 SurfaceClosed
     app_id: String
 SurfaceInputEvent

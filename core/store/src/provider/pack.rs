@@ -41,6 +41,18 @@ use rand::RngCore as _;
 /// exposed here as the default the container is built and validated against.
 pub const PACK_SIZE: usize = 16 * 1024 * 1024;
 
+/// The size of an **index pack** whose index fits it — 1 MiB (kotton #55).
+///
+/// A packing pass seals file content in content packs of [`PACK_SIZE`] and the
+/// history segment and manifest in an index pack of their own
+/// (`crate::packed::CONTENT_PACK_PREFIX`), so a device can keep a drive's
+/// index without its content. A pass's index is small against 16 MiB, and a
+/// device fetches every index pack, so an index pack is sealed at this size
+/// when what it holds fits, and at [`PACK_SIZE`] when it does not (a manifest
+/// past a megabyte). The holder learns which of the two sizes each index pack
+/// is — so whether a pass's index passed a megabyte — and nothing else.
+pub const INDEX_PACK_SIZE: usize = 1024 * 1024;
+
 /// ChaCha20-Poly1305 nonce length.
 const NONCE_LEN: usize = 12;
 /// ChaCha20-Poly1305 tag length.
@@ -64,7 +76,12 @@ pub struct ChunkRef {
 /// Exposed so the packer above this layer knows when to seal and open a fresh
 /// pack rather than discovering it by overflow.
 pub const fn max_payload() -> usize {
-    PACK_SIZE - NONCE_LEN - TAG_LEN
+    max_payload_of(PACK_SIZE)
+}
+
+/// [`max_payload`] for a pack of `size` bytes.
+pub const fn max_payload_of(size: usize) -> usize {
+    size - NONCE_LEN - TAG_LEN
 }
 
 /// Seal `chunks` into one `PACK_SIZE` blob, returning the blob and a `ChunkRef`
@@ -74,6 +91,13 @@ pub const fn max_payload() -> usize {
 /// capacity) is expected to size batches against [`max_payload`], so an overflow
 /// here is a logic error, not a runtime condition.
 pub fn seal_pack(key: &[u8; 32], chunks: &[&[u8]]) -> ObjectStorageResult<(Vec<u8>, Vec<ChunkRef>)> {
+    seal_pack_sized(key, chunks, PACK_SIZE)
+}
+
+/// [`seal_pack`], into a blob of exactly `size` bytes ([`PACK_SIZE`] or
+/// [`INDEX_PACK_SIZE`]).
+pub fn seal_pack_sized(key: &[u8; 32], chunks: &[&[u8]], size: usize) -> ObjectStorageResult<(Vec<u8>, Vec<ChunkRef>)> {
+    let max_payload = || max_payload_of(size);
     let mut plaintext = Vec::with_capacity(max_payload());
     let mut refs = Vec::with_capacity(chunks.len());
 
@@ -119,10 +143,10 @@ pub fn seal_pack(key: &[u8; 32], chunks: &[&[u8]]) -> ObjectStorageResult<(Vec<u
         )
         .map_err(|_| ObjectStorageError::BackendError("pack seal failed".into()))?;
 
-    let mut blob = Vec::with_capacity(PACK_SIZE);
+    let mut blob = Vec::with_capacity(size);
     blob.extend_from_slice(&nonce_bytes);
     blob.extend_from_slice(&ciphertext);
-    debug_assert_eq!(blob.len(), PACK_SIZE, "sealed pack is not PACK_SIZE");
+    debug_assert_eq!(blob.len(), size, "sealed pack is not its size");
 
     Ok((blob, refs))
 }

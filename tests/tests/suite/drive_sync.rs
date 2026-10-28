@@ -693,7 +693,10 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
     assert_eq!(said, want, "B's drive list");
     let photos = listed.iter().find(|d| d.name == "photos").unwrap();
     assert!(photos.size.unwrap_or(0) >= 800, "the drive's size is what it holds: {photos:?}");
-    assert!(photos.pinned_whole.is_empty(), "no device pins a drive yet: {photos:?}");
+    // No device keeps a made drive yet — a device keeps no tree of one until
+    // drive paths (kotton #58) — so neither says any device keeps it whole.
+    assert!(photos.pinned_whole.is_empty(), "a device is said to keep a made drive: {photos:?}");
+    assert!(made[0].pinned_whole.is_empty(), "the creating device is said to keep a drive it keeps no tree of");
 
     // The move: the sealed bytes to the second vault, under the same key.
     let first_drive = sealed_in(&first, FIRST_DRIVE_TREE).await;

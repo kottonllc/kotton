@@ -155,6 +155,25 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },
+    /// What this device keeps of your drives — default, a drive or folder, list — shares the REPL's `pin` verb
+    #[command(after_help = shell_help(&kotton_shell::commands::PinCommand))]
+    Pin {
+        /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
+        #[arg(long)]
+        user: Option<String>,
+        /// Arguments: `default whole|on-demand` | `<drive>[:/<folder>] whole|on-demand|default` | `list`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
+        args: Vec<String>,
+    },
+    /// When this device last synced, what it keeps of each drive, and the notices — shares the REPL's `status` verb
+    #[command(after_help = shell_help(&kotton_shell::commands::StatusCommand))]
+    Status {
+        /// Identity to act as (defaults to the active identity / KOTTON_USER)
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word, hide = true)]
+        args: Vec<String>,
+    },
     /// Trusted-issuer registry (add, remove, list) — shares the REPL's `issuer` verb
     #[command(after_help = shell_help(&kotton_shell::commands::IssuerCommand))]
     Issuer {

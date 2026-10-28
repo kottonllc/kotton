@@ -18,6 +18,7 @@
 //! | `sh.kotton.message.v1`        | Opaque encrypted message envelope          |
 //! | `sh.kotton.channel.key-grant` | A channel key sealed to a new member's DID |
 //! | `sh.kotton.model`             | An installed model's manifest              |
+//! | `sh.kotton.pin`               | What one of the person's devices keeps     |
 //!
 //! The table is gated against [`CoreSchema::all`] in this module's tests, so it
 //! cannot drift from the set again. It had drifted to three different counts at
@@ -69,6 +70,11 @@ pub enum CoreSchema {
     /// negotiates over it — the standing `MessageV1` and `ChannelKeyGrant`
     /// already have.
     Model,
+    /// One pin setting: what one of the person's devices keeps of their
+    /// drives (kotton #55). Core for the reason [`CoreSchema::Model`] is: the
+    /// daemon writes it and reads it, and it must arrive on every device of
+    /// the person's, whose declaration has to be there before it does.
+    Pin,
 }
 
 impl CoreSchema {
@@ -84,6 +90,7 @@ impl CoreSchema {
             CoreSchema::MessageV1,
             CoreSchema::ChannelKeyGrant,
             CoreSchema::Model,
+            CoreSchema::Pin,
         ]
     }
 
@@ -99,6 +106,7 @@ impl CoreSchema {
             CoreSchema::MessageV1 => ns::NSID_MESSAGE_V1,
             CoreSchema::ChannelKeyGrant => ns::NSID_CHANNEL_KEY_GRANT,
             CoreSchema::Model => ns::NSID_MODEL,
+            CoreSchema::Pin => ns::NSID_PIN,
         })
     }
 
@@ -114,6 +122,7 @@ impl CoreSchema {
             CoreSchema::MessageV1 => message_v1(),
             CoreSchema::ChannelKeyGrant => channel_key_grant(),
             CoreSchema::Model => model(),
+            CoreSchema::Pin => pin(),
         }
     }
 }
@@ -301,6 +310,29 @@ fn channel_key_grant() -> SchemaDefinition {
     )
 }
 
+/// One pin setting (kotton #55; kotton-protocol #20's record): `device`, the
+/// DID of the device it is about; `scope`, `default`, `drive` or `folder`, with
+/// `drive` naming the drive for the last two and `folder` the folder for the
+/// last; and `value`, `whole` or `on-demand`. The record id is derived from the
+/// device and the scope, so a device setting a scope again replaces its one
+/// record for it, and `default` at a drive or folder is that record deleted.
+/// Field for field `kotton_wire::ipc::PinSetting`, flattened, because a scope is
+/// three cases and a record's fields are one shape.
+fn pin() -> SchemaDefinition {
+    SchemaDefinition::new(
+        Nsid::from_static(ns::NSID_PIN),
+        1,
+        vec![
+            SchemaField::required("device", FieldType::String),
+            SchemaField::required("scope", FieldType::String),
+            SchemaField::nullable("drive", FieldType::String),
+            SchemaField::nullable("folder", FieldType::String),
+            SchemaField::required("value", FieldType::String),
+        ],
+    )
+    .with_description("What one of the person's devices keeps of their drives: its default, or a drive or folder set the other way.")
+}
+
 /// An installed model (RFC-0085, `DEC-0073`).
 ///
 /// The first twelve fields are [`crate::ModelManifest`]'s, name for name, so a
@@ -360,7 +392,7 @@ mod tests {
 
     #[test]
     fn every_core_schema_is_in_all_and_in_the_module_table() {
-        assert_eq!(CoreSchema::all().len(), 9);
+        assert_eq!(CoreSchema::all().len(), 10);
         for schema in CoreSchema::all() {
             let def = schema.definition();
             assert!(!def.fields.is_empty(), "{} has no fields", def.nsid);

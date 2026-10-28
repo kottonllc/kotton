@@ -49,6 +49,14 @@ pub const NSID_CHANNEL_KEY_GRANT: &str = "sh.kotton.channel.key-grant";
 /// it describe the same model however they spell the name.
 pub const NSID_MODEL: &str = "sh.kotton.model";
 
+/// One pin setting — what one of the person's devices keeps of their drives:
+/// its default, or a drive or a folder set the other way (kotton #55;
+/// kotton-protocol #20, `kotton_wire::ipc::PinSetting`). The daemon writes it,
+/// the daemon reads it, and every device of the person's reads every device's,
+/// which is why it is core: a device that has never seen a declaration skips
+/// the rows.
+pub const NSID_PIN: &str = "sh.kotton.pin";
+
 // ── Meta schema NSID (schema publication) ────────────────────────────────────
 
 /// Well-known NSID for schema publication records.

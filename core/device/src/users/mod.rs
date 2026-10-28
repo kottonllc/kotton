@@ -38,6 +38,8 @@ pub mod contacts;
 pub mod drive_devices;
 pub mod drive_verbs;
 pub mod pairing;
+/// What each device keeps of the person's drives (kotton #55).
+pub mod pins;
 pub mod reach;
 pub mod recover;
 pub mod residency;

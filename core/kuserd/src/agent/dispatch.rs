@@ -1341,28 +1341,70 @@ pub(super) async fn handle_request(
         // under its own key, and keeps the drive record
         // (`kotton_device::users::drive_verbs`).
         UserRequest::DriveCreate { user_id, name, on } => {
-            let Some(store) = users.get(&user_id) else {
-                return Ok(UserResponse::Error { message: format!("user runtime '{user_id}' is not loaded") });
+            let (store, records) = match resident_with_records(runtime, users, record_stores, &user_id) {
+                Ok(both) => both,
+                Err(message) => return Ok(UserResponse::Error { message }),
             };
-            kotton_device::users::drive_verbs::create(runtime, &store, db, &user_id, &name, on.as_deref()).await
+            kotton_device::users::drive_verbs::create(runtime, &store, &records, db, &user_id, &name, on.as_deref()).await
         }
         UserRequest::DriveList { user_id } => {
-            let Some(store) = users.get(&user_id) else {
-                return Ok(UserResponse::Error { message: format!("user runtime '{user_id}' is not loaded") });
+            let (store, records) = match resident_with_records(runtime, users, record_stores, &user_id) {
+                Ok(both) => both,
+                Err(message) => return Ok(UserResponse::Error { message }),
             };
-            kotton_device::users::drive_verbs::list(runtime, &store, db, &user_id).await
+            kotton_device::users::drive_verbs::list(runtime, &store, &records, db, &user_id).await
         }
         UserRequest::DriveShow { user_id, name } => {
-            let Some(store) = users.get(&user_id) else {
-                return Ok(UserResponse::Error { message: format!("user runtime '{user_id}' is not loaded") });
+            let (store, records) = match resident_with_records(runtime, users, record_stores, &user_id) {
+                Ok(both) => both,
+                Err(message) => return Ok(UserResponse::Error { message }),
             };
-            kotton_device::users::drive_verbs::show(runtime, &store, db, &user_id, &name).await
+            kotton_device::users::drive_verbs::show(runtime, &store, &records, db, &user_id, &name).await
         }
         UserRequest::DriveMove { user_id, name, to, from } => {
-            let Some(store) = users.get(&user_id) else {
-                return Ok(UserResponse::Error { message: format!("user runtime '{user_id}' is not loaded") });
+            let (store, records) = match resident_with_records(runtime, users, record_stores, &user_id) {
+                Ok(both) => both,
+                Err(message) => return Ok(UserResponse::Error { message }),
             };
-            kotton_device::users::drive_verbs::move_to(runtime, &store, db, &user_id, &name, &to, from.as_deref()).await
+            kotton_device::users::drive_verbs::move_to(runtime, &store, &records, db, &user_id, &name, &to, from.as_deref()).await
+        }
+        // What this device keeps (kotton #55): its pin settings are records in
+        // the person's drive (`kotton_device::users::pins`). A setting that
+        // keeps something whole starts a pass now — `pin <drive> whole` is
+        // "collect all my things" — which fetches what this device lacks.
+        UserRequest::PinSet { user_id, scope, value } => {
+            let (store, records) = match resident_with_records(runtime, users, record_stores, &user_id) {
+                Ok(both) => both,
+                Err(message) => return Ok(UserResponse::Error { message }),
+            };
+            let me = runtime.operational_did();
+            match kotton_device::users::pins::set(&runtime.schema_registry, &records, &store, db, &user_id, &me, &scope, value).await? {
+                Ok(pins) => {
+                    if value == Some(kotton_wire::ipc::PinValue::Whole) {
+                        let (job_id, _) = sync_engine.enqueue(&user_id).await;
+                        tracing::info!(user_id, scope = %scope.said(), job_id, "pin: collecting what this device keeps whole");
+                    }
+                    Ok(UserResponse::Pins { pins })
+                }
+                Err(message) => Ok(UserResponse::Error { message: format!("pin {}: {message}", scope.said()) }),
+            }
+        }
+        UserRequest::PinList { user_id } => {
+            let (store, records) = match resident_with_records(runtime, users, record_stores, &user_id) {
+                Ok(both) => both,
+                Err(message) => return Ok(UserResponse::Error { message }),
+            };
+            let read = kotton_device::users::pins::Read::now(&runtime.schema_registry, &records, &store, &runtime.operational_did()).await?;
+            Ok(UserResponse::Pins { pins: read.readout(db, &user_id).await? })
+        }
+        UserRequest::Status { user_id } => {
+            let (store, records) = match resident_with_records(runtime, users, record_stores, &user_id) {
+                Ok(both) => both,
+                Err(message) => return Ok(UserResponse::Error { message }),
+            };
+            let read = kotton_device::users::pins::Read::now(&runtime.schema_registry, &records, &store, &runtime.operational_did()).await?;
+            let status = read.status(db, &user_id, sync_engine.last_sync_at(&user_id)).await?;
+            Ok(UserResponse::Status { status })
         }
         UserRequest::SyncDrives { user_id } => {
             let (job_id, targets) = sync_engine.enqueue(&user_id).await;
@@ -3237,6 +3279,24 @@ pub(super) async fn handle_request(
 
 // (load_nat_config moved to kotton_device::config::db)
 
+/// `user_id`'s resident store and record store, or the sentence saying
+/// which is missing — for the verbs over the person's drives and pins, which
+/// read and write both.
+fn resident_with_records(
+    runtime: &kotton_device::DeviceRuntime,
+    users: &crate::residency::UserRegistry,
+    record_stores: &crate::residency::RecordStores,
+    user_id: &str,
+) -> Result<(std::sync::Arc<kotton_store::runtime::user::UserStore>, std::sync::Arc<kotton_record::SqliteRecordStore>), String> {
+    let Some(store) = users.get(user_id) else {
+        return Err(format!("user runtime '{user_id}' is not loaded"));
+    };
+    match record_stores.get_or_open(runtime.base_dir(), user_id, runtime.secrets()) {
+        Ok(records) => Ok((store, records)),
+        Err(e) => Err(format!("{user_id}'s records do not open: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod vfs_watch_opening_frame_tests {
     use super::handle_vfs_watch;
@@ -3302,3 +3362,4 @@ mod vfs_watch_opening_frame_tests {
         );
     }
 }
+

@@ -79,6 +79,14 @@ pub trait UserResources: Send + Sync + 'static {
     /// Infallible to the engine: a copy that could not be refreshed is the
     /// host's to report, and never a reason to call the pass a failure.
     async fn pass_landed(&self, _user_id: &str) {}
+
+    /// The machine's database — the drive record, the paired nodes, and what
+    /// this device last found of its room (`kotton_device::users::pins`) — or
+    /// `None` from a host that keeps none, whose passes then keep every byte
+    /// with no bound.
+    fn machine_db(&self) -> Option<Arc<sqlx::SqlitePool>> {
+        None
+    }
 }
 
 /// Opening a replication link to one of the user's other nodes.

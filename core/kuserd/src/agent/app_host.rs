@@ -1003,6 +1003,7 @@ mod tests {
             crate::residency::RecordStores::new(),
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::clone(&runtime),
+            None,
         );
         let db = Arc::new(
             kotton_record::open_sqlite(&dir.path().join("agent.db"))
