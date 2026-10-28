@@ -16,9 +16,9 @@ use crate::state::ShellState;
 ///   pin list [--json]
 /// ```
 ///
-/// The command-tree decision's "What this device holds". The daemon writes each setting as a record
-/// in your drive and keeps what it says (`kotton_device::users::pins`); this says
-/// what it answered. [`parse`] is the one parser for these words, in either door.
+/// The command-tree decision's "What this device holds". The daemon keeps each setting in this
+/// device's own database, keeps what it says, and writes a claim in a drive this device keeps
+/// whole (`kotton_device::users::pins`); this says what it answered. [`parse`] is the one parser for these words, in either door.
 pub struct PinCommand;
 
 const USAGE: &str =
@@ -172,8 +172,9 @@ alone holds it, and `status` says so.
 `pin <drive> whole` collects: this device fetches what it lacks of the drive
 now. A pinned file brings the pack it was written in: whatever else was written
 beside it at the same sync comes with it, and stays while the pin does. Each
-setting is a record in your drive, sealed like everything else, so your other
-devices read it and the vault cannot.
+setting stays on this device. What your other devices learn is only that this
+device keeps a drive whole: one record in that drive per device that does,
+sealed like everything else, so the vault cannot read it.
 
 You are told when no device of yours keeps a drive whole, and when this device
 runs short of room for what it keeps whole, with the setting that keeps less.
