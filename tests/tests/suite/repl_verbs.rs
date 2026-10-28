@@ -19,7 +19,9 @@
 //!   the REPL is `cli_identity`'s, beside the card it recovers from;
 //! - `id recover` on a device that kept its sealed copy asks for a new passphrase at
 //!   the same hidden prompt before it begins, and ends sealed under it; with no
-//!   passphrase chosen it refuses before anything changes.
+//!   passphrase chosen it refuses before anything changes;
+//! - `device admit`, a word the command-tree decision retired for `drive enrol`, is refused
+//!   at the REPL through the registry with the retired line, exit 2.
 
 use std::sync::Arc;
 
@@ -413,4 +415,36 @@ async fn with_nobody_at_a_terminal_rotate_and_recover_ask_nothing_and_name_the_t
         );
     }
     assert_eq!(events(), before, "a refused verb changed the key log");
+}
+
+/// `device admit` typed at the REPL is refused through the registry's `execute` (the REPL's
+/// door, not the sessionless one the clap door uses): the gone line and `drive enrol
+/// <invite>`, exit 2, whether or not an invite follows, and nothing is asked of the daemon.
+#[tokio::test]
+async fn device_admit_at_the_repl_is_refused_naming_drive_enrol_with_exit_two() {
+    let mut env = TestEnv::spawn().await;
+    env.client.create_user(USER, TEST_PASSPHRASE).await.expect("create_user");
+    let token = env.client.session_token.clone().expect("create_user binds a session");
+    let mut client = KottonClient::connect_to(env.endpoint.clone()).await.expect("connect");
+    client.authenticate(&token).await.expect("authenticate as the REPL's identity");
+    let mut state = ShellState::new(USER.to_string(), Arc::new(Mutex::new(client)));
+
+    let executor = kotton_cli::bridge::repl_executor();
+    for line in [&["admit"][..], &["admit", "CODE"], &["admit", "CODE", "extra"]] {
+        let words: Vec<String> = line.iter().map(|w| w.to_string()).collect();
+        let out = executor
+            .registry()
+            .execute("device", &words, &mut state)
+            .await
+            .unwrap_or_else(|e| panic!("device {line:?}: {e:#}"));
+        assert!(matches!(out.exit_code, ExitCode::Code(2)), "`device {line:?}` did not exit 2");
+        let [Out::Fail { what, try_: Some(try_) }] = out.out.as_slice() else {
+            panic!("`device {line:?}`: not one failure with a next step: {:?}", out.out)
+        };
+        assert_eq!(
+            format!("{what} / try `{try_}`"),
+            "`device admit` is gone / try `drive enrol <invite>`",
+            "{line:?}"
+        );
+    }
 }

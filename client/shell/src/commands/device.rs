@@ -80,6 +80,8 @@ impl Command for DeviceCommand {
     /// `device` is not yet the command-tree decision's: only the word its table moved to `drive` is
     /// declared, so the verb check holds that word and not the rest.
     fn verbs(&self) -> &'static [Verb] {
+        // The table names the verb (`drive enrol`); the printed line adds its argument
+        // (`drive enrol <invite>`). `verb-check` reads only the noun of `now`, so they may differ.
         const VERBS: &[Verb] = &[Verb::gone("admit", "drive enrol")];
         VERBS
     }
@@ -719,7 +721,7 @@ fn human_since(unix_secs: i64) -> String {
 /// invite`, RFC-0084 V8): this node meets it at the invite's relay, taking that
 /// relay as its own if it has none, and the six digits are typed here. Blind is
 /// the only posture this door has, so it is the default and needs no flag
-/// ([`admit_args`]). 
+/// ([`admit_args`]).
 pub(crate) async fn enrol_vault(code: &str, flags: &[String], state: &mut ShellState) -> Result<CommandOutput> {
     let posture = admit_args(flags);
     let user_id = state.user_id.clone();
@@ -951,11 +953,11 @@ mod tests {
         }
     }
 
-    /// **`device admit` is retired and says exactly this**, in both doors and with or
-    /// without an invite: the gone line naming `drive enrol <invite>`, exit 2. It is
-    /// pinned whole so a change to either door cannot alter it silently.
+    /// **`device admit` is retired and says exactly this** before any session, with or
+    /// without an invite: the gone line naming `drive enrol <invite>`, exit 2. The
+    /// REPL's door (`execute`) is pinned by the suite's `repl_verbs`.
     #[tokio::test]
-    async fn device_admit_is_the_retired_line_and_exit_two_in_both_doors() {
+    async fn device_admit_is_the_retired_line_and_exit_two_before_any_session() {
         // The retired line is built by the helper the door answers with, so this holds
         // that both doors answer exactly it, not a second spelling of it.
         let want = crate::commands::retired("device admit", "drive enrol <invite>");
@@ -968,7 +970,15 @@ mod tests {
                 .expect("it answers rather than erring");
             assert_eq!(without.exit_code, ExitCode::Code(2), "{line:?}");
             assert_eq!(format!("{:?}", without.out), format!("{:?}", want.out), "{line:?}");
-            assert!(format!("{:?}", want.out).contains("drive enrol <invite>"), "{:?}", want.out);
+            // What a person reads: the gone line and the verb to type, in these words.
+            let [crate::out::Out::Fail { what, try_: Some(try_) }] = without.out.as_slice() else {
+                panic!("not one failure with a next step: {:?}", without.out)
+            };
+            assert_eq!(
+                format!("{what} / try `{try_}`"),
+                "`device admit` is gone / try `drive enrol <invite>`",
+                "{line:?}"
+            );
         }
     }
 }
