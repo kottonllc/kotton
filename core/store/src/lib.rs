@@ -4,6 +4,7 @@
 //! Laid out by tier within the domain: `provider` holds the implementations,
 //! and `runtime` the tier above them.
 
+pub mod fetch;
 pub mod fs_view;
 pub mod provider;
 pub mod runtime;

@@ -319,6 +319,28 @@ pub async fn finalize_joined_node(
                 wire_own_device_allowlist(store.as_ref(), db, paired_keys, user_id, &node)
                     .await;
             }
+            // A device paired later keeps its person's drives on demand until
+            // told otherwise (the protocol's storage model), and says so as its setting, which
+            // every device of theirs reads (`crate::users::pins`). Best-effort:
+            // a device that could not write it states what it does at its
+            // first pass instead (`pins::state_default`), which is whole.
+            if !keyless {
+                let said = match kotton_record::open::user_record_store(runtime.base_dir(), user_id, runtime.secrets()) {
+                    Ok(records) => crate::users::pins::write(
+                        &runtime.schema_registry,
+                        &records,
+                        &runtime.operational_did(),
+                        &kotton_wire::ipc::PinScope::Default,
+                        Some(crate::users::pins::JOINED),
+                    )
+                    .await
+                    .map_err(|e| e.to_string()),
+                    Err(e) => Err(format!("{e:#}")),
+                };
+                if let Err(e) = said {
+                    tracing::warn!(user_id, error = %e, "a joined device did not write that it keeps drives on demand");
+                }
+            }
         }
         Err(e) => tracing::warn!(
             user_id,

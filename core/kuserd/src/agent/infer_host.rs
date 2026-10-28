@@ -261,6 +261,7 @@ mod tests {
             record_stores.clone(),
             Arc::new(std::sync::RwLock::new(HashMap::new())),
             Arc::clone(&rt),
+            None,
         );
         let store = record_stores
             .get_or_open(rt.base_dir(), "alice", rt.secrets())

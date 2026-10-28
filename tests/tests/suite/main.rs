@@ -46,6 +46,7 @@ mod import_ics;
 mod inbox;
 mod vault;
 mod drive_sync;
+mod pins;
 mod instance;
 mod introduction;
 mod ipc_hardening;
