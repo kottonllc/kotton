@@ -959,7 +959,8 @@ mod tests {
     #[tokio::test]
     async fn device_admit_is_the_retired_line_and_exit_two_before_any_session() {
         // The retired line is built by the helper the door answers with, so this holds
-        // that both doors answer exactly it, not a second spelling of it.
+        // the sessionless door to exactly it; the REPL's door is held to the literal
+        // words by the suite case.
         let want = crate::commands::retired("device admit", "drive enrol <invite>");
         for line in [&["admit"][..], &["admit", "CODE"], &["admit", "CODE", "extra"], &["admit", "--blind"]] {
             let words = args(line);

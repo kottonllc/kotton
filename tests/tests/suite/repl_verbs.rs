@@ -419,7 +419,7 @@ async fn with_nobody_at_a_terminal_rotate_and_recover_ask_nothing_and_name_the_t
 
 /// `device admit` typed at the REPL is refused through the registry's `execute` (the REPL's
 /// door, not the sessionless one the clap door uses): the gone line and `drive enrol
-/// <invite>`, exit 2, whether or not an invite follows, and nothing is asked of the daemon.
+/// <invite>`, exit 2, whether or not an invite follows.
 #[tokio::test]
 async fn device_admit_at_the_repl_is_refused_naming_drive_enrol_with_exit_two() {
     let mut env = TestEnv::spawn().await;

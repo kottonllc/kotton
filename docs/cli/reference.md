@@ -122,7 +122,7 @@ Kotton - Your data sovereignty platform
 * `whoami` — Show the identity your commands act as (the active identity)
 * `repl` — Launch the interactive REPL for a user
 * `peer` — Peer node management (identity, list, show, add, revoke, mount) — shares the REPL's `peer` verb
-* `device` — Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon. `admit <invite>` is `drive enrol <invite>` now, and still runs it
+* `device` — Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon
 * `schema` — Schema management (list, show, register)
 * `handler` — Handler registry (register, unregister, get, list, set-default)
 * `record` — Record addressing — open records by kotton:// URL
@@ -458,7 +458,7 @@ USAGE:
 
 ## `Kotton device`
 
-Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon. `admit <invite>` is `drive enrol <invite>` now, and still runs it
+Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon
 
 **Usage:** `Kotton device [OPTIONS] [ARGS]...`
 

@@ -112,7 +112,6 @@ pub enum Commands {
     /// Manage the devices on your identity — add, join, list, revoke, name
     /// (six-digit pairing) — shares the REPL's `device` verb. `reset` is
     /// the exception: it starts this whole device fresh and needs no daemon.
-    /// `admit <invite>` is `drive enrol <invite>` now, and still runs it
     #[command(after_help = shell_help(&kotton_shell::commands::DeviceCommand))]
     Device {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
