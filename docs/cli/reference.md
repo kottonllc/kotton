@@ -889,8 +889,9 @@ alone holds it, and `status` says so.
 `pin <drive> whole` collects: this device fetches what it lacks of the drive
 now. A pinned file brings the pack it was written in: whatever else was written
 beside it at the same sync comes with it, and stays while the pin does. Each
-setting is a record in your drive, sealed like everything else, so your other
-devices read it and the vault cannot.
+setting stays on this device. What your other devices learn is only that this
+device keeps a drive whole: one record in that drive per device that does,
+sealed like everything else, so the vault cannot read it.
 
 You are told when no device of yours keeps a drive whole, and when this device
 runs short of room for what it keeps whole, with the setting that keeps less.

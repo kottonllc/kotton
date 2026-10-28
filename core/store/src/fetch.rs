@@ -12,6 +12,19 @@
 //! the shelf, the shelf has no such pack, and this layer asks the
 //! [`PackSource`] the host lent the store for it, keeps it, and answers.
 //!
+//! **What is never fetched here: the index, and the claims in it.** A pass
+//! pulls every index pack before anything consults a pin setting or a
+//! whole-keeper claim (kotton #171; kotton-protocol #26), and this layer is
+//! for content packs alone. The index packs carry the history log, the
+//! manifests and the person's record segments — among them each device's
+//! whole-keeper claim, one small sealed record per device and drive it keeps
+//! whole (`kotton_device::users::pins`) — so a device always holds every claim
+//! its passes have brought, and nothing a setting or a claim says can withhold
+//! the index from it. Pin settings are not here at all: they are each device's
+//! own, in its own database, and never in a drive. What this layer fetches is
+//! what a device on demand chose not to keep; how many index packs it holds is
+//! kotton #144's.
+//!
 //! **Where it sits, and why there.** At the very bottom of the stack, over the
 //! shelf, so every layer above reads the pack exactly as if it had always been
 //! here: the bytes it fetches are the sealed pack the drive holds, verbatim,

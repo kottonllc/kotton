@@ -7,9 +7,11 @@
 //! drive on demand and one folder whole; a file the first puts in that folder
 //! lands on the second at its next pass, and a file put anywhere else lands
 //! only as a name in the index, and is fetched when it is opened. Every
-//! setting is a record in the drive, which the other device reads; the two
-//! notices — no device keeps the drive whole, and a device short of room —
-//! are said in `status`.
+//! setting stays on the device that set it; what a device publishes is a
+//! whole-keeper claim in the drive for each drive it keeps whole, which the
+//! other device reads (kotton #171); the two notices — no device keeps the
+//! drive whole, and a device short of room — are said in `status`, from the
+//! claims.
 
 use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto};
 use crate::vault::{enrol_vault_from, spawn_device, spawn_vault, RunningDevice, RunningVault};
@@ -107,8 +109,8 @@ async fn alice_with_two_devices(
 /// pins one folder whole. A file A puts in that folder is on B after B's next
 /// pass, with no drive asked when B reads it; a file A puts elsewhere is on B
 /// as a name in the index only, and is fetched from the drive when B opens
-/// it. A reads B's settings from the drive: `drive list` and `status` on A say
-/// that A keeps the drive whole and B does not.
+/// it. A reads the claims in the drive, B's settings being B's own: `drive
+/// list` and `status` on A say that A keeps the drive whole and B does not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_device_on_demand_keeps_the_folder_it_pins_whole_and_fetches_the_rest_on_open() {
     init_crypto();
@@ -140,7 +142,8 @@ async fn a_device_on_demand_keeps_the_folder_it_pins_whole_and_fetches_the_rest_
     assert_eq!(client_b.read_file(USER, "/notes/todo.md").await.expect("open the note on B"), b"call the plumber");
     assert!(b.daemon.kept_here(USER, "/notes/todo.md").await.unwrap(), "what B opened is not kept");
 
-    // A reads B's settings, which B's pass carried to the drive.
+    // A reads the claims B's and A's passes carried to the drive; B's
+    // settings stayed on B.
     synced(&mut client_a, "A").await;
     let drives = client_a.drive_list(USER).await.expect("A's drive list");
     let personal = drives.iter().find(|d| d.name == FIRST_DRIVE_NAME).expect("personal");
@@ -165,15 +168,16 @@ async fn a_device_on_demand_keeps_the_folder_it_pins_whole_and_fetches_the_rest_
     said(&a, "A", &token_a, "status").await;
 }
 
-/// **The two notices, said in `status`, from settings the other device
-/// wrote.** A sets the drive on demand: no device keeps it whole, and A is
+/// **The two notices, said in `status`, from the claims each device
+/// wrote.** A sets the drive on demand, withdrawing its claim: no device
+/// keeps it whole, and A is
 /// told at once and B at its next pass. B collects (`pin personal whole`):
 /// the notice goes, and B holds a file it never opened. B, given less room
 /// than the index and what it keeps whole, says so and names the setting
 /// that keeps less. A revokes B: the last whole pin's device is removed, and
 /// A is told again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_notices_are_said_in_status_from_the_settings_each_device_wrote() {
+async fn the_notices_are_said_in_status_from_the_claims_each_device_wrote() {
     init_crypto();
     let vault = spawn_vault("vault").await;
     let (_a, mut client_a, b, mut client_b, node_b) = alice_with_two_devices(&vault).await;
@@ -187,7 +191,7 @@ async fn the_notices_are_said_in_status_from_the_settings_each_device_wrote() {
     synced(&mut client_a, "A").await;
     synced(&mut client_b, "B").await;
     let told = client_b.status(USER).await.expect("B's status");
-    assert!(no_whole(&told.notices), "B did not read A's setting from the drive: {:?}", told.notices);
+    assert!(no_whole(&told.notices), "B did not read that A withdrew its claim: {:?}", told.notices);
     let token_b = client_b.session_token.clone().expect("B's session");
     let shown = said(&b, "B", &token_b, "status").await;
     assert!(shown.contains("no device of yours keeps 'personal' whole"), "{shown}");
@@ -254,4 +258,60 @@ async fn a_made_drive_is_kept_whole_by_no_device_yet_and_status_says_so() {
     let token_a = client_a.session_token.clone().expect("A's session");
     let shown = said(&a, "A", &token_a, "status").await;
     assert!(shown.contains("no device of yours keeps 'photos' whole") && shown.contains("nothing yet: its vault holds it"), "{shown}");
+}
+
+/// **A device publishes its claim and nothing else of its pins, and a claim
+/// withdrawn in the second it was made reaches the other device** (kotton
+/// #171's rules, on #158). B, on demand, pins a folder whole: A's record store
+/// holds no pin setting of anyone's and one claim, A's own. B keeps the drive
+/// whole, and A reads it; B flips on demand, whole and on demand again at
+/// once, and A reads that B no longer does; whole, on demand and whole again
+/// at once, and A reads that it does. Each withdrawal is a delete that
+/// replicates, written in the same second as the write before it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_publishes_only_its_claim_and_a_withdrawal_in_the_same_second_replicates() {
+    init_crypto();
+    let vault = spawn_vault("vault").await;
+    let (_a, mut client_a, _b, mut client_b, _node_b) = alice_with_two_devices(&vault).await;
+    synced(&mut client_a, "A").await;
+    synced(&mut client_b, "B").await;
+    client_b.pin_set(USER, pin("personal:/photos"), Some(PinValue::Whole)).await.expect("pin personal:/photos whole on B");
+    synced(&mut client_b, "B").await;
+    synced(&mut client_a, "A").await;
+    let pins = client_a.record_query(USER, kotton_common::namespace::NSID_PIN, vec![], None, None).await.expect("A's pin records");
+    assert!(pins.is_empty(), "a pin setting reached the drive: {pins:?}");
+    let claims = client_a.record_query(USER, kotton_common::namespace::NSID_KEEPS_WHOLE, vec![], None, None).await.expect("A's claims");
+    assert_eq!(claims.len(), 1, "B, keeping a folder and not the drive, claims it, or A does not: {claims:?}");
+
+    // What A reads of who keeps the drive whole, once B's and A's passes
+    // carry it: asked again until it reads `wanted`, because a `sync` asked
+    // while the pass a `pin … whole` started is running joins that pass and
+    // may answer before it lands (kotton #146). A claim or a withdrawal that
+    // never replicates still fails, at the deadline.
+    async fn carried(client_b: &mut kotton::KottonClient, client_a: &mut kotton::KottonClient, wanted: usize, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+        loop {
+            synced(client_b, "B").await;
+            synced(client_a, "A").await;
+            let drives = client_a.drive_list(USER).await.expect("A's drive list");
+            let read = drives.into_iter().find(|d| d.name == FIRST_DRIVE_NAME).expect("personal").pinned_whole;
+            if read.len() == wanted {
+                assert!(read.contains(&"this device".to_string()), "{read:?}");
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{what}: A reads {read:?}");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+    async fn flip(client_b: &mut kotton::KottonClient, values: &[PinValue]) {
+        for value in values {
+            client_b.pin_set(USER, pin("personal"), Some(*value)).await.expect("pin personal on B");
+        }
+    }
+    flip(&mut client_b, &[PinValue::Whole]).await;
+    carried(&mut client_b, &mut client_a, 2, "A does not read that B keeps the drive whole").await;
+    flip(&mut client_b, &[PinValue::OnDemand, PinValue::Whole, PinValue::OnDemand]).await;
+    carried(&mut client_b, &mut client_a, 1, "B's withdrawal did not reach A").await;
+    flip(&mut client_b, &[PinValue::Whole, PinValue::OnDemand, PinValue::Whole]).await;
+    carried(&mut client_b, &mut client_a, 2, "B's claim made again did not reach A").await;
 }

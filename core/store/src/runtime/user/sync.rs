@@ -546,6 +546,49 @@ mod keep_tests {
         }
     }
 
+    /// **Nothing a setting says withholds the index** (kotton #171's rule: a
+    /// device fetches a drive's index before it consults any setting or
+    /// claim). A device whose settings keep nothing whole — not even the
+    /// daemon's own objects — with no room at all still pulls every index
+    /// pack the drive holds, the ones that carry the record segments and so
+    /// every whole-keeper claim, and knows every file; it fetches no content
+    /// pack. The first step of a pass reads only whether there is a `Keep`,
+    /// never what it says.
+    #[tokio::test]
+    async fn nothing_a_setting_says_withholds_the_index() {
+        let (dir_a, dir_b, dir_drive) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (a, b) = (device(&dir_a, "did:key:zA"), device(&dir_b, "did:key:zB"));
+        let the_drive = drive(&dir_drive);
+        reach(&a, &the_drive, &dir_drive);
+        reach(&b, &the_drive, &dir_drive);
+        a.write_file("/photos/a.jpg", &noise(64 * 1024, 2)).await.unwrap();
+        pack_mount(&*a.get_remote("local").unwrap(), "local").await.unwrap().unwrap();
+        a.write_file("/notes/b.md", b"a note").await.unwrap();
+        pack_mount(&*a.get_remote("local").unwrap(), "local").await.unwrap().unwrap();
+        a.sync_mount("local", "drive", Some(SyncDirection::Push), Outbound::PacksOnly).await.unwrap();
+
+        let nothing = Keep { whole: Box::new(|_: &str| None), budget: Some(0) };
+        let (_, report) = b
+            .sync_mount_keeping("local", "drive", Some(SyncDirection::Pull), Outbound::PacksOnly, Some(&nothing))
+            .await
+            .unwrap();
+        assert_eq!(report.expect("a keeping pass reports").fetched, 0);
+        let packs = |rt: Arc<dyn SyncableStore>| async move {
+            rt.list_sealed(Path::new(crate::packed::PACK_PREFIX)).await.unwrap().into_iter().map(|m| m.key).collect::<BTreeSet<String>>()
+        };
+        let (on_drive, on_b) = (packs(Arc::clone(&the_drive)).await, packs(b.get_remote("local").unwrap()).await);
+        let index: BTreeSet<&String> = on_drive.iter().filter(|k| !crate::packed::is_content_pack(k)).collect();
+        assert!(!index.is_empty(), "the drive holds no index pack: {on_drive:?}");
+        for key in &index {
+            assert!(on_b.contains(*key), "an index pack was withheld by what the settings say: {key}");
+        }
+        assert!(on_b.iter().all(|k| !crate::packed::is_content_pack(k)), "a content pack was kept that nothing keeps: {on_b:?}");
+        for (dir, name) in [("/photos", "a.jpg"), ("/notes", "b.md")] {
+            let listed = b.list_files(dir).await.unwrap();
+            assert!(format!("{listed:?}").contains(name), "the index does not name {dir}/{name}: {listed:?}");
+        }
+    }
+
     /// **A pass keeps what the pins keep whole and the index of the rest;
     /// the rest is fetched when it is opened; and the room is held.** A
     /// writes a photo and a note in two passes, and pushes both to the drive.

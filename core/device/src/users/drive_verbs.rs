@@ -50,20 +50,38 @@
 //! the tree is said to be left only when the vault, asked twice, says it keeps
 //! it.
 //!
-//! **Every copy of a drive knows where the drive was made.** A made drive's
-//! sealed name holds the person's name for it and its *origin* — the vault and
-//! tree it was first made as — which a move carries to the copy it makes
-//! ([`SealedName`]); the vault reads neither. Two finished copies of one name
-//! with one origin are one drive kept twice: a move whose source retire
-//! failed, or a device that died between naming the copy and retiring the
-//! source, or two devices moving the same drive at once. **`drive move <name>
-//! --to <vault>` resolves that state** ([`plan_move`]): if `<vault>` holds a
-//! copy, it keeps that one and retires the others, and answers that the drive
-//! moved — the interrupted move, finished; if it holds none, it moves one copy
-//! there and then retires the rest. Two copies of one name with *different*
-//! origins are two drives that no move made — two `create`s that raced — and
-//! are left alone: `move` refuses and names both, and `--from <vault>` names the
-//! one meant. `drive create` asks every vault the person keeps drives on before
+//! **Every copy of a drive carries the drive's id** (kotton #171;
+//! kotton-protocol #26). A made drive's sealed name holds the
+//! person's name for it and the drive's *id*, sixteen random bytes minted once
+//! at `drive create` ([`mint_id`]) and sealed with every copy a move makes
+//! ([`SealedName`]); the vault reads neither, and keeps only its own tree id,
+//! minted fresh at each vault. The id names no vault, so it says nothing of
+//! where the drive was first kept, and it is in no path or name a vault or a
+//! relay sees: it lives inside the sealed name and in this device's record
+//! ([`kotton_peer::daemon::drives::Drive::id`]). Two finished copies that share
+//! an id are one drive kept twice: a move whose source retire failed, or a
+//! device that died between naming the copy and retiring the source, or two
+//! devices moving the same drive at once. **`drive move <name> --to <vault>`
+//! resolves that state by the id** ([`plan_move`]): if `<vault>` holds a copy,
+//! it keeps that one and retires the others, and answers that the drive moved
+//! — the interrupted move, finished; if it holds none, it moves one copy there
+//! and then retires the rest. Two copies of one name with *different* ids are
+//! two drives that no move made — two `create`s that raced — and are left
+//! alone: `move` refuses and names both, and `--from <vault>` names the one
+//! meant.
+//!
+//! **A name sealed before ids, migrated in place.** kotton #155 sealed a
+//! drive's *origin* (the vault and tree it was first made as) where the id now
+//! is. Such a name reads with an id derived from that origin ([`legacy_id`]),
+//! the same on every device and for every copy of one origin, so copies a move
+//! made before ids still resolve as one drive; and the device that reads one
+//! finished re-seals it with that id and names the tree again
+//! (`TenantDriveName`), so the next reader finds an id and no origin. This is
+//! a concession for records that exist (pre-alpha, no tag): a migrated drive's
+//! id is a digest of where it was first made rather than random, so whoever
+//! knows that vault's key and that tree could compute it — though, like every
+//! id, it is only ever inside the sealed name and this device's record, and no
+//! vault or relay is sent it. A drive made from here on carries a random one. `drive create` asks every vault the person keeps drives on before
 //! it takes a name, and refuses while one does not answer, so a device whose
 //! record is stale cannot make a second drive of a name another device took.
 //!
@@ -96,10 +114,23 @@
 //! **What does not move yet: the first drive.** The tenancy's own tree is what
 //! this device's own tree syncs with, at every vault the person keeps drives
 //! on (`kotton_sync::engine`); it is kept at each and lives at none alone, so
-//! `move` refuses it and says so. A device keeping a made drive's files — and
-//! so the first drive becoming one drive among others — is the drive paths'
-//! (kotton #58) and #124's; what a device keeps of a drive is its pin settings
-//! (`crate::users::pins`), which reach the first drive's tree today.
+//! `move` refuses it and says so. Its id is
+//! [`kotton_wire::ipc::FIRST_DRIVE_ID`] until #124 makes it a made drive. A
+//! device keeping a made drive's files — and so the first drive becoming one
+//! drive among others — is the drive paths' (kotton #58) and #124's.
+//!
+//! **Which devices keep a drive whole: its claims, and nothing else.** What a
+//! device keeps of a drive is its pin settings, which are its own and stay in
+//! its own database (`crate::users::pins`); what it publishes is one sealed
+//! whole-keeper claim per drive it keeps whole, a record in that drive keyed by
+//! the device and the drive's id. `drive list`, `show`, `create` and `move`
+//! name the devices that keep each drive whole from those claims, matched by
+//! the drive's id and counted only for devices still in the person's device
+//! set ([`describe`]). A drive's claims ride inside it, so a move carries them
+//! and a retire takes them with the tree. **Seam, not built:** the creating
+//! device's claim at `drive create` waits until a device keeps a tree of a made
+//! drive (kotton #58, #124), so today no claim names a made drive and every
+//! made drive is told of as kept whole by nobody, which is true.
 
 use crate::users::DeviceUsers as _;
 use crate::users::pins;
@@ -109,7 +140,7 @@ use kotton_peer::daemon::drives::{self as record, Drive};
 use kotton_peer::KottonPeerObjectStorage;
 use kotton_store::runtime::user::UserStore;
 use kotton_sys::store::SealedObjectAccess as _;
-use kotton_wire::ipc::{DriveDescriptor, MadeDrive, TenantDrive, UserRequest, UserResponse, FIRST_DRIVE_TREE};
+use kotton_wire::ipc::{DriveDescriptor, MadeDrive, TenantDrive, UserRequest, UserResponse, FIRST_DRIVE_ID, FIRST_DRIVE_TREE};
 use kotton_wire::peer::PairedNode;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -129,7 +160,9 @@ fn refused(message: impl Into<String>) -> io::Result<UserResponse> {
     Ok(UserResponse::Error { message: message.into() })
 }
 
-/// Where a drive was first made: a vault's key, hex, and the tree.
+/// Where kotton #155 sealed that a drive was first made — a vault's key, hex,
+/// and the tree — before a drive had an id. Read from a name sealed then, and
+/// never written ([`legacy_id`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Origin {
     pub vault_key: String,
@@ -137,12 +170,22 @@ pub struct Origin {
 }
 
 /// What a made drive's sealed name holds (module doc): the person's name for
-/// it, and where it was first made — `None` for a drive made where it is.
+/// it, and the drive's id, shared by every copy a move makes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealedName {
     pub name: String,
+    pub id: String,
+}
+
+/// A sealed name as it may have been sealed: with an id, or, by kotton #155,
+/// with an origin in its place.
+#[derive(Deserialize)]
+struct AsSealed {
+    name: String,
     #[serde(default)]
-    pub origin: Option<Origin>,
+    id: Option<String>,
+    #[serde(default)]
+    origin: Option<Origin>,
 }
 
 impl SealedName {
@@ -150,6 +193,31 @@ impl SealedName {
         let bytes = serde_json::to_vec(self).map_err(io::Error::other)?;
         store.seal_drive_name(tree, &bytes, finished).map_err(|e| io::Error::other(format!("{e:#}")))
     }
+
+    /// The name sealed in `bytes`, and whether it was sealed before ids (and
+    /// so carries [`legacy_id`]'s id for `here`, the place it is listed at).
+    fn read(bytes: &[u8], here: &Origin) -> Result<(Self, bool), String> {
+        let sealed: AsSealed = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        Ok(match sealed.id {
+            Some(id) => (Self { name: sealed.name, id }, false),
+            None => (Self { name: sealed.name, id: legacy_id(sealed.origin.as_ref().unwrap_or(here)) }, true),
+        })
+    }
+}
+
+/// A new drive's id: sixteen random bytes, hex (module doc).
+pub fn mint_id() -> String {
+    hex::encode(rand::random::<[u8; 16]>())
+}
+
+/// The id a drive whose name kotton #155 sealed with an `origin` reads with
+/// (module doc): a digest of that origin, so every copy of one origin, read on
+/// any device, has the same id, and copies never share one with a drive made
+/// elsewhere. Sixteen bytes, hex, as [`mint_id`]'s.
+pub fn legacy_id(origin: &Origin) -> String {
+    let said = serde_json::to_vec(&(&origin.vault_key, &origin.tree)).unwrap_or_default();
+    let digest = blake3::derive_key("kotton 2026-10-28 a drive's id from the origin #155 sealed", &said);
+    hex::encode(&digest[..16])
 }
 
 /// One copy of a drive at one vault, as that vault's listing says it.
@@ -158,12 +226,15 @@ pub struct Copy {
     pub vault_key: [u8; 32],
     pub tree: String,
     pub name: String,
-    /// Where the drive was first made: its own place, for a drive made here.
-    pub origin: Origin,
+    /// The drive's id, from its sealed name (module doc).
+    pub id: String,
     /// Sealed bytes the vault holds in the tree.
     pub held: u64,
     /// A name sealed finished: a drive. Unfinished: a move's tree.
     pub finished: bool,
+    /// Its name was sealed before ids ([`legacy_id`]), and is to be sealed
+    /// again with its id.
+    pub sealed_before_ids: bool,
 }
 
 impl Copy {
@@ -206,20 +277,41 @@ pub async fn follow(
         UserResponse::Error { message } => return Err(io::Error::other(message)),
         other => return Err(io::Error::other(format!("the vault answered {other:?} to TenantDrives"))),
     };
-    let recorded: Vec<(String, String)> = record::all(db, user_id)
+    let recorded: Vec<(String, String, Option<String>)> = record::all(db, user_id)
         .await?
         .into_iter()
         .filter(|d| d.vault_key == *vault_key)
-        .map(|d| (d.tree, d.name))
+        .map(|d| (d.tree, d.name, d.id))
         .collect();
     let copies = read_listing(store, user_id, vault_key, &listed, &recorded);
-    let made: Vec<(String, String)> = copies
+    let made: Vec<record::Listed> = copies
         .iter()
         .filter(|c| c.finished && c.tree != FIRST_DRIVE_TREE)
-        .map(|c| (c.tree.clone(), c.name.clone()))
+        .map(|c| record::Listed { tree: c.tree.clone(), name: c.name.clone(), id: c.id.clone() })
         .collect();
     record::reconcile(db, user_id, vault_key, &made).await?;
+    for copy in copies.iter().filter(|c| c.sealed_before_ids && c.finished) {
+        if let Err(e) = seal_with_id(store, user_id, client, copy).await {
+            tracing::warn!(user_id, tree = %copy.tree, error = %e, "a drive's name sealed before ids was not sealed again with its id");
+        }
+    }
     Ok(copies)
+}
+
+/// Seal `copy`'s name again, finished, with the id it was read with, and name
+/// its tree with it (module doc: migrated in place). The id is the one every
+/// device reads for it, so two devices doing this at once seal the same name.
+/// Only a finished name: an unfinished one is a move's tree, which the next
+/// move of that drive retires, and naming it again could undo the naming of a
+/// move that finishes meanwhile.
+async fn seal_with_id(store: &UserStore, user_id: &str, client: &KottonPeerObjectStorage, copy: &Copy) -> io::Result<()> {
+    let Some(drive) = copy.made() else { return Ok(()) };
+    let sealed_name = SealedName { name: copy.name.clone(), id: copy.id.clone() }.seal(store, &copy.tree, true)?;
+    match ask(client, UserRequest::TenantDriveName { user_id: user_id.to_string(), drive, sealed_name }).await? {
+        UserResponse::Ok => Ok(()),
+        UserResponse::Error { message } => Err(io::Error::other(message)),
+        other => Err(io::Error::other(format!("the vault answered {other:?} to TenantDriveName"))),
+    }
 }
 
 /// A vault's listing, read as copies: the first drive, named as every device
@@ -231,35 +323,35 @@ fn read_listing(
     user_id: &str,
     vault_key: &[u8; 32],
     listed: &[TenantDrive],
-    recorded: &[(String, String)],
+    recorded: &[(String, String, Option<String>)],
 ) -> Vec<Copy> {
     let mut copies = Vec::new();
     for drive in listed {
         let here = Origin { vault_key: hex::encode(vault_key), tree: drive.tree.clone() };
-        let copy = |name: String, origin: Option<Origin>, finished: bool| Copy {
+        let copy = |name: String, id: String, finished: bool, sealed_before_ids: bool| Copy {
             vault_key: *vault_key,
             tree: drive.tree.clone(),
             name,
-            origin: origin.unwrap_or_else(|| here.clone()),
+            id,
             held: drive.held,
             finished,
+            sealed_before_ids,
         };
         if drive.tree == FIRST_DRIVE_TREE {
-            copies.push(copy(kotton_wire::ipc::FIRST_DRIVE_NAME.to_string(), None, true));
+            copies.push(copy(kotton_wire::ipc::FIRST_DRIVE_NAME.to_string(), FIRST_DRIVE_ID.to_string(), true, false));
             continue;
         }
         let opened = store
             .open_drive_name(&drive.tree, &drive.sealed_name)
             .map_err(|e| format!("{e:#}"))
-            .and_then(|(bytes, finished)| {
-                serde_json::from_slice::<SealedName>(&bytes).map(|n| (n, finished)).map_err(|e| e.to_string())
-            });
+            .and_then(|(bytes, finished)| SealedName::read(&bytes, &here).map(|(n, before)| (n, finished, before)));
         match opened {
-            Ok((sealed, finished)) => copies.push(copy(sealed.name, sealed.origin, finished)),
+            Ok((sealed, finished, before)) => copies.push(copy(sealed.name, sealed.id, finished, before)),
             Err(e) => {
                 tracing::warn!(user_id, tree = %drive.tree, error = %e, "a drive's name did not open");
-                if let Some((_, name)) = recorded.iter().find(|(tree, _)| *tree == drive.tree) {
-                    copies.push(copy(name.clone(), None, true));
+                if let Some((_, name, id)) = recorded.iter().find(|(tree, _, _)| *tree == drive.tree) {
+                    let id = id.clone().unwrap_or_else(|| legacy_id(&here));
+                    copies.push(copy(name.clone(), id, true, false));
                 }
             }
         }
@@ -306,16 +398,17 @@ fn describe(drive: &Drive, sizes: &HashMap<([u8; 32], String), u64>, pins: &pins
         vault: drive.node.id.clone(),
         vault_key: hex::encode(drive.vault_key),
         size: sizes.get(&(drive.vault_key, drive.tree.clone())).copied(),
-        // What each device of the person's keeps, as this device reads their
-        // pin settings (`crate::users::pins`).
-        pinned_whole: pins.whole_on(&drive.name),
+        // The devices whose whole-keeper claim for this drive's id is in the
+        // drive, and which are still the person's (`crate::users::pins`).
+        pinned_whole: pins.whole_on(drive.id.as_deref()),
         unfinished: false,
     }
 }
 
-/// What a drive's descriptors need of the pin settings, read once per verb.
-async fn pins_now(runtime: &DeviceRuntime, records: &SqliteRecordStore, store: &UserStore) -> io::Result<pins::Read> {
-    pins::Read::now(&runtime.schema_registry, records, store, &runtime.operational_did()).await
+/// What a drive's descriptors need of the whole-keeper claims, read once per
+/// verb.
+async fn pins_now(runtime: &DeviceRuntime, records: &SqliteRecordStore, store: &UserStore, db: &SqlitePool, user_id: &str) -> io::Result<pins::Read> {
+    pins::Read::now(&runtime.schema_registry, records, store, db, user_id, &runtime.operational_did()).await
 }
 
 /// The name of the lock a drive is held under on this device while a verb
@@ -436,7 +529,9 @@ pub async fn create(
     let client = dial(runtime, &vault.node, user_id).await?;
     let drive = MadeDrive(rand::random());
     let tree = drive.tree();
-    let sealed_name = SealedName { name: name.clone(), origin: None }.seal(store, &tree, true)?;
+    // The drive's id, minted once, here, and sealed with every copy a move
+    // makes; the tree's id is the vault's and is minted fresh at each.
+    let sealed_name = SealedName { name: name.clone(), id: mint_id() }.seal(store, &tree, true)?;
     match ask(&client, UserRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
         UserResponse::Ok => {}
         UserResponse::Error { message } => return refused(format!("drive create: the vault '{}' refused: {message}", vault.node.id)),
@@ -450,13 +545,15 @@ pub async fn create(
         .find(|d| d.vault_key == vault.vault_key && d.tree == tree)
         .ok_or_else(|| io::Error::other("the vault made the drive but did not list it"))?;
     // The device that creates a drive keeps it whole until told otherwise
-    // (the protocol's storage model) — once a device keeps a tree of a made
-    // drive at all, which drive paths (kotton #58) and the first drive among
-    // others (#124) give it. Until then no device keeps a made drive, so none
-    // is recorded as keeping it: a record saying so would silence the notice
-    // that only the vault holds it (`crate::users::pins`), which is the truth.
+    // (the protocol's storage model), and says so by a whole-keeper claim in
+    // the drive — once a device keeps a tree of a made drive at all, which
+    // drive paths (kotton #58) and the first drive among others (#124) give
+    // it. That is the seam (module doc): until then no device keeps a made
+    // drive, so none claims it, and a claim saying so would silence the
+    // telling that only the vault holds it (`crate::users::pins`), which is
+    // the truth.
     tracing::info!(user_id, vault = %vault.node.id, "made a drive");
-    Ok(UserResponse::Drives { drives: vec![describe(&made, &sizes, &pins_now(runtime, records, store).await?)] })
+    Ok(UserResponse::Drives { drives: vec![describe(&made, &sizes, &pins_now(runtime, records, store, db, user_id).await?)] })
 }
 
 /// `drive list`: every drive, after asking each vault what it keeps, and
@@ -470,7 +567,7 @@ pub async fn list(
 ) -> io::Result<UserResponse> {
     let seen = follow_every_vault(runtime, store, db, user_id).await?;
     let sizes = seen.sizes();
-    let pins = pins_now(runtime, records, store).await?;
+    let pins = pins_now(runtime, records, store, db, user_id).await?;
     let mut drives: Vec<DriveDescriptor> = record::all(db, user_id).await?.iter().map(|d| describe(d, &sizes, &pins)).collect();
     drives.extend(unfinished_described(db, user_id, &seen).await?);
     Ok(UserResponse::Drives { drives })
@@ -487,7 +584,7 @@ pub async fn show(
 ) -> io::Result<UserResponse> {
     let seen = follow_every_vault(runtime, store, db, user_id).await?;
     let sizes = seen.sizes();
-    let pins = pins_now(runtime, records, store).await?;
+    let pins = pins_now(runtime, records, store, db, user_id).await?;
     let mut drives: Vec<DriveDescriptor> = record::all(db, user_id)
         .await?
         .iter()
@@ -621,7 +718,7 @@ pub enum Plan {
     NoSuch,
     /// It is the tenancy's own tree, which does not move.
     First,
-    /// Copies of that name with more than one origin: drives no move made.
+    /// Copies of that name with more than one id: drives no move made.
     Ambiguous(Vec<Copy>),
     /// The drive is at the vault already; the other copies of it are retired.
     /// No others: it lives there already.
@@ -643,28 +740,25 @@ pub fn plan_move(copies: &[Copy], name: &str, dest: &[u8; 32], from: Option<&[u8
     }
     let named: Vec<&Copy> = named.into_iter().filter(|c| c.tree != FIRST_DRIVE_TREE).collect();
     // `--from` names the drive by the vault one of its copies is at: the
-    // copies of its origin, wherever they are.
-    let origins: Vec<&Origin> = match from {
-        Some(at) => named.iter().filter(|c| &c.vault_key == at).map(|c| &c.origin).collect(),
-        None => named.iter().map(|c| &c.origin).collect(),
+    // copies of its id, wherever they are.
+    let ids: Vec<&str> = match from {
+        Some(at) => named.iter().filter(|c| &c.vault_key == at).map(|c| c.id.as_str()).collect(),
+        None => named.iter().map(|c| c.id.as_str()).collect(),
     };
-    let Some(origin) = origins.first().copied() else {
+    let Some(id) = ids.first().copied() else {
         return Plan::NoSuch;
     };
-    if origins.iter().any(|o| *o != origin) || (from.is_none() && named.iter().any(|c| c.origin != *origin)) {
+    if ids.iter().any(|i| *i != id) || (from.is_none() && named.iter().any(|c| c.id != id)) {
         return Plan::Ambiguous(named.into_iter().cloned().collect());
     }
-    let drive: Vec<Copy> = named.into_iter().filter(|c| c.origin == *origin).cloned().collect();
+    let drive: Vec<Copy> = named.into_iter().filter(|c| c.id == id).cloned().collect();
     if let Some(keep) = drive.iter().find(|c| &c.vault_key == dest).cloned() {
         let retire = drive.into_iter().filter(|c| *c != keep).collect();
         return Plan::AtDestination { keep, retire };
     }
-    // The copy at the drive's origin, if it is still there; else any.
-    let source = drive
-        .iter()
-        .find(|c| hex::encode(c.vault_key) == origin.vault_key && c.tree == origin.tree)
-        .unwrap_or(&drive[0])
-        .clone();
+    // Any copy: each holds the whole drive, as it was named finished only
+    // once it did.
+    let source = drive[0].clone();
     let retire_after = drive.into_iter().filter(|c| *c != source).collect();
     Plan::Carry { source, retire_after }
 }
@@ -686,7 +780,7 @@ pub async fn move_to(
     // Another device's move, or a pass another device runs into the drive,
     // this lock does not see; that needs a lease the vault keeps (module doc).
     let _held = runtime.lock_mount(user_id, &drive_lock(name)).await;
-    let pins = pins_now(runtime, records, store).await?;
+    let pins = pins_now(runtime, records, store, db, user_id).await?;
     let dest = match vault_named(db, user_id, Some(to), "--to").await? {
         Ok(v) => v,
         Err(e) => return refused(format!("drive move: {e}")),
@@ -769,7 +863,8 @@ pub async fn move_to(
     }
     let to_id = MadeDrive(rand::random());
     let to_tree = to_id.tree();
-    let carried_name = SealedName { name: name.to_string(), origin: Some(source.origin.clone()) };
+    // The copy carries the drive's id; its tree gets an id of its own there.
+    let carried_name = SealedName { name: name.to_string(), id: source.id.clone() };
     let unfinished_name = carried_name.seal(store, &to_tree, false)?;
     let finished_name = carried_name.seal(store, &to_tree, true)?;
     match ask(&dest_client, UserRequest::TenantDriveMake { user_id: user_id.to_string(), drive: to_id, sealed_name: unfinished_name }).await? {
@@ -1059,20 +1154,24 @@ mod tests {
     const V2: [u8; 32] = [2; 32];
     const V3: [u8; 32] = [3; 32];
 
-    /// A finished copy of `name` at `vault` under `id`, first made at `origin`.
-    fn a_copy(vault: [u8; 32], id: u8, name: &str, origin: Option<([u8; 32], u8)>) -> Copy {
-        let tree = MadeDrive([id; 16]).tree();
-        let origin = match origin {
-            Some((v, o)) => Origin { vault_key: hex::encode(v), tree: MadeDrive([o; 16]).tree() },
-            None => Origin { vault_key: hex::encode(vault), tree: tree.clone() },
-        };
-        Copy { vault_key: vault, tree, name: name.into(), origin, held: 1, finished: true }
+    /// A finished copy of the drive `drive` (its id), called `name`, at
+    /// `vault` under the tree `tree`.
+    fn a_copy(vault: [u8; 32], tree: u8, name: &str, drive: u8) -> Copy {
+        Copy {
+            vault_key: vault,
+            tree: MadeDrive([tree; 16]).tree(),
+            name: name.into(),
+            id: hex::encode([drive; 16]),
+            held: 1,
+            finished: true,
+            sealed_before_ids: false,
+        }
     }
 
     /// **A move cut off between naming the copy and retiring the source —
     /// a source that refused, or a device that died there — is finished by
     /// the next move to the same vault.** Both vaults then list a finished
-    /// `photos` of one origin; the plan keeps the copy at the destination and
+    /// `photos` of one id; the plan keeps the copy at the destination and
     /// retires the source, and the retire, asked again, takes.
     #[tokio::test]
     async fn a_move_cut_off_after_the_naming_is_finished_by_the_next_move() {
@@ -1081,9 +1180,10 @@ mod tests {
         assert!(matches!(settle(&from, &to).await, Carried::SourceKept(_)));
 
         // What the two vaults list now: the drive where it was, and the copy
-        // the move made and named, which remembers where the drive was made.
-        let at_source = a_copy(V1, 1, "photos", None);
-        let at_dest = a_copy(V2, 2, "photos", Some((V1, 1)));
+        // the move made and named, which carries the drive's id under a tree
+        // id of its own.
+        let at_source = a_copy(V1, 1, "photos", 7);
+        let at_dest = a_copy(V2, 2, "photos", 7);
         let copies = [at_source.clone(), at_dest.clone()];
         match plan_move(&copies, "photos", &V2, None) {
             Plan::AtDestination { keep, retire: rest } => {
@@ -1099,13 +1199,13 @@ mod tests {
     }
 
     /// **Two devices moving one drive at once leave two finished copies of one
-    /// origin**, and the source retired by both (the second retire `Ok`, as a
+    /// id**, and the source retired by both (the second retire `Ok`, as a
     /// retire is idempotent). A move to either vault keeps that copy and
     /// retires the other; a move to a third carries one and retires the other.
     #[test]
     fn two_copies_of_one_drive_two_movers_made_resolve_on_the_next_move() {
-        let first = a_copy(V2, 2, "photos", Some((V1, 1)));
-        let second = a_copy(V3, 3, "photos", Some((V1, 1)));
+        let first = a_copy(V2, 2, "photos", 7);
+        let second = a_copy(V3, 3, "photos", 7);
         let copies = [first.clone(), second.clone()];
         assert_eq!(
             plan_move(&copies, "photos", &V3, None),
@@ -1125,8 +1225,8 @@ mod tests {
     /// names the one meant, which then moves as any drive does.
     #[test]
     fn two_drives_no_move_made_are_refused_and_from_names_the_one_meant() {
-        let on_v1 = a_copy(V1, 1, "photos", None);
-        let on_v2 = a_copy(V2, 2, "photos", None);
+        let on_v1 = a_copy(V1, 1, "photos", 7);
+        let on_v2 = a_copy(V2, 2, "photos", 8);
         let copies = [on_v1.clone(), on_v2.clone()];
         match plan_move(&copies, "photos", &V3, None) {
             Plan::Ambiguous(both) => assert_eq!(both, copies),
@@ -1145,12 +1245,13 @@ mod tests {
             vault_key: V1,
             tree: FIRST_DRIVE_TREE.into(),
             name: "personal".into(),
-            origin: Origin { vault_key: hex::encode(V1), tree: FIRST_DRIVE_TREE.into() },
+            id: FIRST_DRIVE_ID.into(),
             held: 1,
             finished: true,
+            sealed_before_ids: false,
         };
         assert_eq!(plan_move(&[first], "personal", &V2, None), Plan::First);
-        let unfinished = Copy { finished: false, ..a_copy(V2, 2, "photos", Some((V1, 1))) };
+        let unfinished = Copy { finished: false, ..a_copy(V2, 2, "photos", 7) };
         assert_eq!(plan_move(&[unfinished], "photos", &V2, None), Plan::NoSuch);
     }
 
@@ -1160,7 +1261,7 @@ mod tests {
     /// told free.
     #[test]
     fn a_name_is_free_only_when_every_vault_says_so() {
-        let made_elsewhere = Seen { copies: vec![a_copy(V2, 2, "photos", None)], unanswered: vec![] };
+        let made_elsewhere = Seen { copies: vec![a_copy(V2, 2, "photos", 7)], unanswered: vec![] };
         let refused = name_is_free(&made_elsewhere, "photos").unwrap_err();
         assert!(refused.contains("already"), "{refused}");
         assert_eq!(name_is_free(&made_elsewhere, "work"), Ok(()));
@@ -1169,47 +1270,99 @@ mod tests {
         assert!(refused.contains("vault-2 did not answer"), "{refused}");
     }
 
-    /// **A listing, read**: a name sealed finished is a drive with the origin
-    /// it carries (its own place when it carries none); one sealed unfinished
-    /// is a move's tree; one that does not open keeps the name this device
-    /// has for its tree, or names nothing.
+    /// **A listing, read**: a name sealed finished is a drive with the id it
+    /// carries; one sealed unfinished is a move's tree; one that does not open
+    /// keeps the name and id this device has for its tree, or names nothing.
     #[test]
-    fn a_listing_reads_drives_their_origins_and_unfinished_moves() {
+    fn a_listing_reads_drives_their_ids_and_unfinished_moves() {
         let dir = tempfile::tempdir().unwrap();
-        let store = UserStore::create(
-            "alice",
-            "did:key:zAlice",
-            dir.path().to_path_buf(),
-            kotton_store::runtime::UserKeys::new(Some([7; 32])),
-            &kotton_store::LocalShelves(kotton_fs::OsFilesystem),
-        )
-        .unwrap();
+        let store = a_store(dir.path());
         let tree = |id: u8| MadeDrive([id; 16]).tree();
-        let moved_from = Origin { vault_key: hex::encode(V1), tree: tree(9) };
-        let seal = |id: u8, origin: Option<Origin>, finished: bool| {
-            SealedName { name: "photos".into(), origin }.seal(&store, &tree(id), finished).unwrap()
+        let (photos, work) = (mint_id(), mint_id());
+        let seal = |t: u8, id: &str, finished: bool| {
+            SealedName { name: "photos".into(), id: id.into() }.seal(&store, &tree(t), finished).unwrap()
         };
         let listed = vec![
             TenantDrive { tree: FIRST_DRIVE_TREE.into(), sealed_name: vec![], held: 1 },
-            TenantDrive { tree: tree(1), sealed_name: seal(1, None, true), held: 1 },
-            TenantDrive { tree: tree(2), sealed_name: seal(2, Some(moved_from.clone()), false), held: 1 },
+            TenantDrive { tree: tree(1), sealed_name: seal(1, &photos, true), held: 1 },
+            TenantDrive { tree: tree(2), sealed_name: seal(2, &photos, false), held: 1 },
             TenantDrive { tree: tree(3), sealed_name: b"altered".to_vec(), held: 1 },
             TenantDrive { tree: tree(4), sealed_name: b"altered".to_vec(), held: 1 },
         ];
-        let recorded = vec![(tree(3), "work".to_string())];
+        let recorded = vec![(tree(3), "work".to_string(), Some(work.clone()))];
         let copies = read_listing(&store, "alice", &V2, &listed, &recorded);
-        let said: Vec<(String, String, bool, Origin)> =
-            copies.into_iter().map(|c| (c.tree, c.name, c.finished, c.origin)).collect();
-        let here = |t: String| Origin { vault_key: hex::encode(V2), tree: t };
+        let said: Vec<(String, String, bool, String, bool)> =
+            copies.into_iter().map(|c| (c.tree, c.name, c.finished, c.id, c.sealed_before_ids)).collect();
         assert_eq!(
             said,
             [
-                (FIRST_DRIVE_TREE.to_string(), "personal".to_string(), true, here(FIRST_DRIVE_TREE.into())),
-                (tree(1), "photos".into(), true, here(tree(1))),
-                (tree(2), "photos".into(), false, moved_from),
-                (tree(3), "work".into(), true, here(tree(3))),
+                (FIRST_DRIVE_TREE.to_string(), "personal".to_string(), true, FIRST_DRIVE_ID.to_string(), false),
+                (tree(1), "photos".into(), true, photos.clone(), false),
+                (tree(2), "photos".into(), false, photos, false),
+                (tree(3), "work".into(), true, work, false),
             ]
         );
+    }
+
+    /// **A name kotton #155 sealed, with an origin and no id, is read with
+    /// the id derived from that origin** (module doc: migrated in place): the
+    /// drive where it was made, which sealed no origin, and the copy a move
+    /// made of it at another vault, which sealed the origin, read with one id
+    /// — so they are one drive to [`plan_move`] — and a drive made elsewhere
+    /// reads with another. Each is marked to be sealed again with its id; a
+    /// name sealed with one is not.
+    #[test]
+    fn a_name_sealed_with_an_origin_reads_with_the_id_every_copy_shares() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = a_store(dir.path());
+        let tree = |id: u8| MadeDrive([id; 16]).tree();
+        let as_155 = |t: u8, body: serde_json::Value| store.seal_drive_name(&tree(t), &serde_json::to_vec(&body).unwrap(), true).unwrap();
+        let made_here = TenantDrive { tree: tree(1), sealed_name: as_155(1, serde_json::json!({"name": "photos"})), held: 1 };
+        let moved_from_v1 = serde_json::json!({"name": "photos", "origin": {"vault_key": hex::encode(V1), "tree": tree(1)}});
+        let carried = TenantDrive { tree: tree(2), sealed_name: as_155(2, moved_from_v1), held: 1 };
+        let elsewhere = TenantDrive { tree: tree(3), sealed_name: as_155(3, serde_json::json!({"name": "photos"})), held: 1 };
+
+        let at_v1 = read_listing(&store, "alice", &V1, &[made_here], &[]);
+        let at_v2 = read_listing(&store, "alice", &V2, &[carried, elsewhere], &[]);
+        let id = legacy_id(&Origin { vault_key: hex::encode(V1), tree: tree(1) });
+        assert_eq!((at_v1[0].id.as_str(), at_v2[0].id.as_str()), (id.as_str(), id.as_str()), "the copies of one origin read as two drives");
+        assert_ne!(at_v2[1].id, id, "a drive made elsewhere reads as the same drive");
+        assert_eq!(id.len(), 32, "a migrated id is not shaped like a minted one: {id}");
+        assert!(at_v1.iter().chain(&at_v2).all(|c| c.sealed_before_ids), "a name sealed with an origin is not marked to be sealed again");
+        let copies: Vec<Copy> = at_v1.into_iter().chain(at_v2).collect();
+        assert_eq!(plan_move(&copies, "photos", &V2, Some(&V1)), Plan::AtDestination { keep: copies[1].clone(), retire: vec![copies[0].clone()] });
+
+        let resealed = SealedName { name: "photos".into(), id: id.clone() }.seal(&store, &tree(2), true).unwrap();
+        let read = read_listing(&store, "alice", &V2, &[TenantDrive { tree: tree(2), sealed_name: resealed, held: 1 }], &[]);
+        assert_eq!((read[0].id.as_str(), read[0].sealed_before_ids), (id.as_str(), false), "a name sealed again with its id reads as one before ids");
+    }
+
+    /// **A drive's id is in no path or name a vault sees** (CLAUDE.md's
+    /// first test: no new join key). What a vault is sent for a drive is its
+    /// tree id and the sealed name: the tree id is minted apart from the
+    /// drive's id, and the sealed name does not carry the id in the clear.
+    #[test]
+    fn a_drives_id_is_in_nothing_a_vault_is_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = a_store(dir.path());
+        let id = mint_id();
+        let tree = MadeDrive(rand::random()).tree();
+        let sealed = SealedName { name: "photos".into(), id: id.clone() }.seal(&store, &tree, true).unwrap();
+        assert!(!tree.contains(&id), "the tree id carries the drive's id");
+        let hex_sealed = hex::encode(&sealed);
+        assert!(!hex_sealed.contains(&id) && !String::from_utf8_lossy(&sealed).contains(&id), "the sealed name carries the id in the clear");
+        assert_ne!(mint_id(), id, "two drives were minted one id");
+    }
+
+    fn a_store(dir: &Path) -> UserStore {
+        UserStore::create(
+            "alice",
+            "did:key:zAlice",
+            dir.to_path_buf(),
+            kotton_store::runtime::UserKeys::new(Some([7; 32])),
+            &kotton_store::LocalShelves(kotton_fs::OsFilesystem),
+        )
+        .unwrap()
     }
 
     /// **A move holds the drive on this device for the whole of it**
