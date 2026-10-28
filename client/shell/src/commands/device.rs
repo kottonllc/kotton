@@ -964,7 +964,7 @@ mod tests {
             let without = DeviceCommand
                 .execute_without_session(&words, Some("alice"))
                 .await
-                .expect("device admit is refused before a session")
+                .expect("the retired word is refused before a session")
                 .expect("it answers rather than erring");
             assert_eq!(without.exit_code, ExitCode::Code(2), "{line:?}");
             assert_eq!(format!("{:?}", without.out), format!("{:?}", want.out), "{line:?}");
