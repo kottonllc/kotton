@@ -33,14 +33,20 @@ use kotton_schemas::nsid::Nsid;
 /// pack, reaching even a blind node that can never read it.
 ///
 /// **What has already been logged is derived from the log itself**, as a set of
-/// `(id, updated_at)` version identities, rather than from a persisted high-water
-/// mark. The log is the source of truth for what it carries, so a derived view
-/// cannot drift out of step with it the way a remembered watermark can — the
-/// failure mode this project keeps rediscovering. That one dedup also does double
-/// duty: it is why a row written in the same wall-clock second as the last is not
-/// missed (version identity, not a `> timestamp` cursor), and why a row this
-/// device merged *in* from a peer is not re-logged (the peer's segment already
-/// carries that exact version).
+/// `(id, updated_at, revision)` version identities, rather than from a persisted
+/// high-water mark. The log is the source of truth for what it carries, so a
+/// derived view cannot drift out of step with it the way a remembered watermark
+/// can — the failure mode this project keeps rediscovering. That one dedup also
+/// does double duty: it is why a row written in the same wall-clock second as
+/// the last is not missed (version identity, not a `> timestamp` cursor), and why
+/// a row this device merged *in* from a peer is not re-logged (the peer's segment
+/// already carries that exact version).
+///
+/// **Same-second writes of one row are distinct versions too.** The seconds
+/// alone could not tell a record's write from its delete in the same second, so
+/// that delete was taken as already logged and never left the device (kotton
+/// #158). Every write raises the row's [`ChangesetRow::revision`], so a write
+/// never has the identity of the version it replaces, whatever the clock read.
 ///
 /// Exporting the full state each pass is O(store); the dedup keeps the *log*
 /// bounded regardless, since only unlogged versions are appended. A watermark
@@ -56,11 +62,11 @@ pub async fn log_records(
     // The version identities the log already carries — this device's own and any
     // a peer's replication delivered.
     let logged = mount.scan_record_segments().await?;
-    let mut logged_versions: HashSet<(String, SyncWatermark)> = HashSet::new();
+    let mut logged_versions: HashSet<(String, SyncWatermark, i64)> = HashSet::new();
     for seg in &logged {
         for payload in &seg.rows {
             if let Ok(row) = serde_json::from_slice::<ChangesetRow>(payload) {
-                logged_versions.insert((row.id, row.updated_at));
+                logged_versions.insert((row.id, row.updated_at, row.revision));
             }
         }
     }
@@ -71,7 +77,7 @@ pub async fn log_records(
         .export_changeset(0)
         .await?
         .into_iter()
-        .filter(|row| !logged_versions.contains(&(row.id.clone(), row.updated_at)))
+        .filter(|row| !logged_versions.contains(&(row.id.clone(), row.updated_at, row.revision)))
         .collect();
     if fresh.is_empty() {
         return Ok(None);
@@ -219,4 +225,185 @@ pub async fn snapshot_records(
     }
 
     Ok(mount.snapshot(keep_full_secs, &rows).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    //! The producer's dedup, against a mount that keeps its record log in
+    //! memory: the record crate cannot reach `kotton-store`'s mounts, and the
+    //! dedup is the record crate's own.
+
+    use super::*;
+    use bytes::Bytes;
+    use kotton_schemas::core::CoreSchema;
+    use kotton_sys::store::{
+        ObjectMetadata, ObjectStorage, ObjectStorageError, ObjectStorageResult,
+        RecordSegmentView, SealedObjectAccess,
+    };
+    use serde_json::json;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    /// A mount that carries a record log and nothing else.
+    #[derive(Default)]
+    struct LogOnly {
+        segments: Mutex<Vec<Vec<Vec<u8>>>>,
+    }
+
+    fn none<T>(key: &Path) -> ObjectStorageResult<T> {
+        Err(ObjectStorageError::NotFound(key.display().to_string()))
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStorage for LogOnly {
+        async fn get(&self, key: &Path) -> ObjectStorageResult<Bytes> {
+            none(key)
+        }
+        async fn put(&self, key: &Path, _data: &[u8]) -> ObjectStorageResult<()> {
+            none(key)
+        }
+        async fn delete(&self, key: &Path) -> ObjectStorageResult<()> {
+            none(key)
+        }
+        async fn list(&self, _prefix: &Path) -> ObjectStorageResult<Vec<ObjectMetadata>> {
+            Ok(Vec::new())
+        }
+        async fn metadata(&self, key: &Path) -> ObjectStorageResult<ObjectMetadata> {
+            none(key)
+        }
+        fn backend_name(&self) -> &str {
+            "log-only"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SealedObjectAccess for LogOnly {
+        async fn get_sealed(&self, key: &Path) -> ObjectStorageResult<Bytes> {
+            none(key)
+        }
+        async fn put_sealed(&self, key: &Path, _blob: &[u8]) -> ObjectStorageResult<()> {
+            none(key)
+        }
+        async fn append_record_segment(&self, rows: &[Vec<u8>]) -> ObjectStorageResult<Option<u64>> {
+            if rows.is_empty() {
+                return Ok(None);
+            }
+            let mut segments = self.segments.lock().unwrap();
+            segments.push(rows.to_vec());
+            Ok(Some(segments.len() as u64))
+        }
+        async fn scan_record_segments(&self) -> ObjectStorageResult<Vec<RecordSegmentView>> {
+            let segments = self.segments.lock().unwrap();
+            Ok(segments
+                .iter()
+                .enumerate()
+                .map(|(i, rows)| RecordSegmentView {
+                    writer: "did:key:test".to_owned(),
+                    seq: i as u64 + 1,
+                    rows: rows.clone(),
+                })
+                .collect())
+        }
+    }
+
+    impl LogOnly {
+        /// Every row the log carries, in the order it was logged.
+        fn rows(&self) -> Vec<ChangesetRow> {
+            self.segments
+                .lock()
+                .unwrap()
+                .iter()
+                .flatten()
+                .map(|p| serde_json::from_slice(p).unwrap())
+                .collect()
+        }
+    }
+
+    fn notes() -> Nsid {
+        Nsid::new("sh.kotton.notes").unwrap()
+    }
+
+    async fn store() -> SqliteRecordStore {
+        let store = SqliteRecordStore::in_memory().unwrap();
+        store.create_table(&CoreSchema::Notes.definition()).await.unwrap();
+        store
+    }
+
+    /// Wait for the start of the next wall-clock second, so the few in-memory
+    /// writes after it land inside one second rather than straddling two.
+    async fn at_the_start_of_a_second() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let into = now.subsec_millis() as u64;
+        tokio::time::sleep(std::time::Duration::from_millis(1000 - into + 5)).await;
+    }
+
+    /// **A record written, logged and deleted inside one second has its delete
+    /// logged** (kotton #158), and a second store that merges the log holds it
+    /// deleted. The seconds are asserted equal, so this holds the case and does
+    /// not pass by straddling a second.
+    #[tokio::test]
+    async fn a_delete_in_the_second_its_record_was_written_is_logged() {
+        let store = store().await;
+        let mount = LogOnly::default();
+
+        at_the_start_of_a_second().await;
+        let id = store.insert(&notes(), json!({ "title": "brief" })).await.unwrap();
+        assert!(log_records(&store, &mount).await.unwrap().is_some());
+        store.delete(&notes(), &id).await.unwrap();
+        assert!(
+            log_records(&store, &mount).await.unwrap().is_some(),
+            "the delete was taken as already logged"
+        );
+
+        let logged = mount.rows();
+        assert_eq!(logged.len(), 2, "the write and its delete: {logged:?}");
+        let (write, delete) = (&logged[0], &logged[1]);
+        assert_eq!(write.updated_at, delete.updated_at, "the steps straddled a second");
+        assert_eq!((write.deleted_at, delete.deleted_at.is_some()), (None, true));
+        assert!(delete.revision > write.revision);
+
+        // Nothing is left unlogged, so the next pass appends nothing.
+        assert_eq!(log_records(&store, &mount).await.unwrap(), None);
+
+        // A store that took the write and then merges the delete holds it
+        // deleted, so the delete reaches the person's other devices.
+        let peer = store_with(std::slice::from_ref(write)).await;
+        assert_eq!(peer.query(&notes(), Default::default()).await.unwrap().len(), 1);
+        peer.merge_changeset(vec![delete.clone()]).await.unwrap();
+        assert!(peer.query(&notes(), Default::default()).await.unwrap().is_empty());
+    }
+
+    /// A rewrite in the second the record was written is a new version too, so
+    /// it is logged and a peer holding the first version takes it.
+    #[tokio::test]
+    async fn a_rewrite_in_the_second_its_record_was_written_is_logged() {
+        let store = store().await;
+        let mount = LogOnly::default();
+
+        at_the_start_of_a_second().await;
+        let id = store.insert(&notes(), json!({ "title": "first" })).await.unwrap();
+        assert!(log_records(&store, &mount).await.unwrap().is_some());
+        store
+            .insert(&notes(), json!({ "id": id, "title": "second" }))
+            .await
+            .unwrap();
+        assert!(log_records(&store, &mount).await.unwrap().is_some());
+
+        let logged = mount.rows();
+        assert_eq!(logged.len(), 2);
+        assert_eq!(logged[0].updated_at, logged[1].updated_at, "the steps straddled a second");
+
+        let peer = store_with(&logged[..1]).await;
+        peer.merge_changeset(logged[1..].to_vec()).await.unwrap();
+        let held = peer.query(&notes(), Default::default()).await.unwrap();
+        assert_eq!(held[0].body["title"], "second");
+    }
+
+    async fn store_with(rows: &[ChangesetRow]) -> SqliteRecordStore {
+        let peer = store().await;
+        peer.merge_changeset(rows.to_vec()).await.unwrap();
+        peer
+    }
 }

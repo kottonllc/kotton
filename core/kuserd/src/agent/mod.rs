@@ -2591,6 +2591,10 @@ async fn handle_peer_request(
                     schema_nsid: r.schema_nsid,
                     body: r.body,
                     updated_at: r.updated_at,
+                    // The wire row does not carry a revision, so a row
+                    // arriving here is the version an earlier writer
+                    // means by its seconds alone.
+                    revision: 0,
                     deleted_at: r.deleted_at,
                     // A row arrives in the root it left, and
                     // keeps the place it was filed in.
