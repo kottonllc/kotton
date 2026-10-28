@@ -571,7 +571,7 @@ whole` is \"collect all my things\". `sync` syncs this device's drives, now.
                 ("<remote>", Is::Gone("sync".into())),
             ]),
         );
-        tables.insert("device".to_string(), table(&[("admit", Is::Alias("drive enrol".into()))]));
+        tables.insert("device".to_string(), table(&[("admit", Is::Gone("drive enrol".into()))]));
         let mut clap: BTreeMap<String, bool> = ["drive", "pin", "sync", "device", "keep"].iter().map(|n| (n.to_string(), true)).collect();
         for (name, _) in UNPLACED {
             clap.insert(name.to_string(), false);

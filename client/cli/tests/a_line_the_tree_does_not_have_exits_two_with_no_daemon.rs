@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The clap door answers a line `drive`, `pin` or `sync` does not have with exit 2 and the
+//! The clap door answers a line `device`, `drive`, `pin` or `sync` does not have with exit 2 and the
 //! verb to type instead, and asks no daemon for it: the noun's one parser refuses the line
 //! before the door connects (`Command::execute_without_session`), so a usage line is a
 //! usage line whether or not a daemon runs, as the command-tree decision fixes 2 for usage.
@@ -7,6 +7,10 @@
 //! The binary runs with an environment of only the variables named here, so it can reach
 //! no daemon, no session and no active identity of the machine it runs on; `--user nobody`
 //! names an identity nothing here holds.
+//!
+//! `device` is here for one word: `device admit`, which the command-tree decision's table
+//! retires for `drive enrol`, and which was the one retired word that still needed a
+//! daemon to say so (it exited 1 with "connect"). The rest of `device` is not the tree's yet.
 
 use std::process::{Command, Output};
 
@@ -44,6 +48,9 @@ const REFUSED: &[(&[&str], &str)] = &[
     (&["drive", "--user", "nobody", "enrol", "--blind"], "usage: drive enrol <invite>"),
     (&["drive", "--user", "nobody", "enrol", "CODE", "extra"], "usage: drive enrol <invite>"),
     (&["drive", "--user", "nobody", "enrol", "CODE", "--frob"], "usage: drive enrol <invite>"),
+    (&["device", "--user", "nobody", "admit", "--blind"], "drive enrol <invite>"),
+    (&["device", "--user", "nobody", "admit", "CODE"], "drive enrol <invite>"),
+    (&["device", "--user", "nobody", "admit", "CODE", "extra"], "drive enrol <invite>"),
     (&["pin", "--user", "nobody", "personal", "sometimes"], "usage: pin default"),
     (&["pin", "--user", "nobody", "frob"], "usage: pin default"),
 ];

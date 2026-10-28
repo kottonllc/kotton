@@ -463,7 +463,7 @@ Manage the devices on your identity — add, join, list, revoke, name (six-digit
 **Usage:** `Kotton device [OPTIONS] [ARGS]...`
 
 ```text
-device add|join|list|name|revoke — pair another of your machines to this identity (six-digit confirmation); `--browser` admits a phone's browser, `--gateway <code>` a gateway elsewhere. A vault's invite is `drive enrol <invite>` (`device admit` was its name, and still runs it). `kotton device reset` starts this whole device fresh and is the CLI's, not this shell's — it deletes the directory this runtime is using
+device add|join|list|name|revoke — pair another of your machines to this identity (six-digit confirmation); `--browser` admits a phone's browser, `--gateway <code>` a gateway elsewhere. A vault's invite is `drive enrol <invite>`. `kotton device reset` starts this whole device fresh and is the CLI's, not this shell's — it deletes the directory this runtime is using
 ```
 
 ###### **Arguments:**

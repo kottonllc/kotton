@@ -46,7 +46,7 @@ pub(crate) enum Role {
     /// terminal*, so the prompt says so rather than sending the person to look
     /// for a "new device" screen that does not exist.
     Box,
-    /// [`Role::Box`] for a vault (`device admit`): the same prompt, and a success
+    /// [`Role::Box`] for a vault (`drive enrol`): the same prompt, and a success
     /// line that says the posture in words, since no flag said it.
     Vault,
     /// This screen admits the vault it operates (`vault invite <v> --me`,
@@ -59,13 +59,20 @@ pub(crate) enum Role {
 
 pub struct DeviceCommand;
 
+/// `device admit`, whatever follows it: the word the command-tree decision's table retired
+/// for `drive enrol <invite>`. Refused, exit 2, in both doors and before any session; the
+/// words after it are not read, since nothing here runs them.
+fn retired_admit() -> CommandOutput {
+    super::retired("device admit", "drive enrol <invite>")
+}
+
 #[async_trait]
 impl Command for DeviceCommand {
     fn help_text(&self) -> &'static str {
         "device add|join|list|name|revoke — pair another of your machines to this \
          identity (six-digit confirmation); `--browser` admits a phone's browser, \
          `--gateway <code>` a gateway elsewhere. A vault's invite is `drive enrol \
-         <invite>` (`device admit` was its name, and still runs it). \
+         <invite>`. \
          `kotton device reset` starts this whole device fresh and is the CLI's, not this \
          shell's — it deletes the directory this runtime is using"
     }
@@ -73,14 +80,14 @@ impl Command for DeviceCommand {
     /// `device` is not yet the command-tree decision's: only the word its table moved to `drive` is
     /// declared, so the verb check holds that word and not the rest.
     fn verbs(&self) -> &'static [Verb] {
-        const VERBS: &[Verb] = &[Verb::alias("admit", "drive enrol")];
+        const VERBS: &[Verb] = &[Verb::gone("admit", "drive enrol")];
         VERBS
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
         match args.first().map(String::as_str) {
             Some("add") => self.add(&args[1..], state).await,
-            Some("admit") => self.admit(&args[1..], state).await,
+            Some("admit") => Ok(retired_admit()),
             Some("join") => self.join(&args[1..], state).await,
             Some("name") => self.name(&args[1..], state).await,
             Some("list") => self.list(state).await,
@@ -118,8 +125,12 @@ impl Command for DeviceCommand {
         args: &[String],
         named: Option<&str>,
     ) -> Option<Result<CommandOutput>> {
-        if args.first().map(String::as_str) != Some("join") {
-            return None;
+        match args.first().map(String::as_str) {
+            Some("join") => {}
+            // Retired, so refused here: the refusal asks the daemon nothing, and
+            // `drive enrol` is where the ceremony is.
+            Some("admit") => return Some(Ok(retired_admit())),
+            _ => return None,
         }
         let Some(user) = named else {
             return Some(Ok(CommandOutput::fail(
@@ -196,18 +207,6 @@ impl DeviceCommand {
             Some(Duration::from_secs(ADD_TTL_SECS)),
         )
         .await
-    }
-
-    /// `device admit <invite>`, the name the command-tree decision's table retires for `drive
-    /// enrol <invite>`: the same ceremony ([`enrol_vault`]), and a line naming the
-    /// verb the tree has for it.
-    async fn admit(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
-        let Some((invite, flags)) = super::drive::split_invite(args.iter().cloned()) else {
-            return Ok(CommandOutput::usage(super::drive::ENROL_USAGE, None));
-        };
-        let mut answer = enrol_vault(&invite, &flags, state).await?;
-        answer.out.insert(0, super::deprecated("device admit", "drive enrol"));
-        Ok(answer)
     }
 
     /// Open the desk a phone's browser pairs at. The phone opens the gateway's
@@ -345,7 +344,7 @@ impl DeviceCommand {
     }
 }
 
-/// What a vault admitted by `device admit` is, said once it is in: the posture no
+/// What a vault admitted by `drive enrol` is, said once it is in: the posture no
 /// flag named.
 const VAULT_POSTURE_LINE: &str =
     "it keeps what it cannot read: your data reaches it sealed, and no key to open it does.";
@@ -393,7 +392,7 @@ pub(crate) fn relay_offer_taken(line: &str, take: &[[u8; 32]]) -> bool {
         .is_ok_and(|l| l.kind == kotton_wire::ipc::OperatedService::Relay && take.contains(&l.key))
 }
 
-/// The role `device admit` runs its ceremony under. Named, so a test can hold
+/// The role `drive enrol` runs its ceremony under. Named, so a test can hold
 /// that the admit is a vault's ceremony and not the gateway's (`Role::Box`).
 const ADMIT_ROLE: Role = Role::Vault;
 
@@ -720,7 +719,7 @@ fn human_since(unix_secs: i64) -> String {
 /// invite`, RFC-0084 V8): this node meets it at the invite's relay, taking that
 /// relay as its own if it has none, and the six digits are typed here. Blind is
 /// the only posture this door has, so it is the default and needs no flag
-/// ([`admit_args`]). `device admit` was this ceremony's name, and runs it still.
+/// ([`admit_args`]). 
 pub(crate) async fn enrol_vault(code: &str, flags: &[String], state: &mut ShellState) -> Result<CommandOutput> {
     let posture = admit_args(flags);
     let user_id = state.user_id.clone();
@@ -813,7 +812,7 @@ mod tests {
         assert!(VAULT_POSTURE_LINE.starts_with("it keeps what it cannot read"), "{VAULT_POSTURE_LINE}");
         // The admit runs the vault's ceremony, and that ceremony's success says the
         // posture before what to do next.
-        assert!(ADMIT_ROLE == Role::Vault, "device admit must run the vault's ceremony");
+        assert!(ADMIT_ROLE == Role::Vault, "drive enrol must run the vault's ceremony");
         let said = vault_complete_lines("did:key:zV");
         assert_eq!(said.first().map(String::as_str), Some(VAULT_POSTURE_LINE), "{said:?}");
         assert_eq!(said.len(), 2, "{said:?}");
@@ -944,11 +943,35 @@ mod tests {
         assert_eq!(refused.exit_code, ExitCode::Code(1));
         let said = format!("{:?}", refused.out);
         assert!(said.contains("kotton id join <name>"), "{said}");
-        for other in [&["add"][..], &["list"], &["name"], &["admit", "x"], &[]] {
+        for other in [&["add"][..], &["list"], &["name"], &[]] {
             assert!(
                 DeviceCommand.execute_without_session(&args(other), Some("alice")).await.is_none(),
                 "`device {other:?}` ran without a session"
             );
+        }
+    }
+
+    /// **`device admit` is retired and says exactly this**, in both doors and with or
+    /// without an invite: the gone line naming `drive enrol <invite>`, exit 2. It is
+    /// pinned whole so a change to either door cannot alter it silently.
+    #[tokio::test]
+    async fn device_admit_is_the_retired_line_and_exit_two_in_both_doors() {
+        let want = format!(
+            "{:?}",
+            crate::out::Out::Fail {
+                what: "`device admit` is gone".into(),
+                try_: Some("drive enrol <invite>".into()),
+            }
+        );
+        for line in [&["admit"][..], &["admit", "CODE"], &["admit", "CODE", "extra"], &["admit", "--blind"]] {
+            let words = args(line);
+            let without = DeviceCommand
+                .execute_without_session(&words, Some("alice"))
+                .await
+                .expect("device admit is refused before a session")
+                .expect("it answers rather than erring");
+            assert_eq!(without.exit_code, ExitCode::Code(2), "{line:?}");
+            assert_eq!(format!("{:?}", without.out), format!("[{want}]"), "{line:?}");
         }
     }
 }

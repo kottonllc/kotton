@@ -89,7 +89,7 @@ pub(crate) async fn relay_stand(
         }
         Code::Invite(InviteCode::Vault { .. }) => {
             return Err(io::Error::other(
-                "this is a vault's invite: it is admitted, not stood at — `device admit <invite> --blind`",
+                "this is a vault's invite: it is admitted, not stood at — `drive enrol <invite>`",
             ))
         }
     };
