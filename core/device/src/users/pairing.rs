@@ -320,23 +320,20 @@ pub async fn finalize_joined_node(
                     .await;
             }
             // A device paired later keeps its person's drives on demand until
-            // told otherwise (the protocol's storage model), and says so as its setting, which
-            // every device of theirs reads (`crate::users::pins`). Best-effort:
-            // a device that could not write it states what it does at its
-            // first pass instead (`pins::state_default`), which is whole.
+            // told otherwise (the protocol's storage model): its default, kept
+            // in its own database (`crate::users::pins`), and nothing of it
+            // replicated. Best-effort: a device that could not write it keeps
+            // what a device that stated nothing keeps, which is whole, and
+            // says so by its claim at its first pass.
             if !keyless {
-                let said = match kotton_record::open::user_record_store(runtime.base_dir(), user_id, runtime.secrets()) {
-                    Ok(records) => crate::users::pins::write(
-                        &runtime.schema_registry,
-                        &records,
-                        &runtime.operational_did(),
-                        &kotton_wire::ipc::PinScope::Default,
-                        Some(crate::users::pins::JOINED),
-                    )
-                    .await
-                    .map_err(|e| e.to_string()),
-                    Err(e) => Err(format!("{e:#}")),
-                };
+                let said = crate::users::pins::write(
+                    db,
+                    user_id,
+                    &kotton_wire::ipc::PinScope::Default,
+                    Some(crate::users::pins::JOINED),
+                )
+                .await
+                .map_err(|e| e.to_string());
                 if let Err(e) = said {
                     tracing::warn!(user_id, error = %e, "a joined device did not write that it keeps drives on demand");
                 }

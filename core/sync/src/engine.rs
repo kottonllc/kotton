@@ -45,8 +45,11 @@
 //! records reach it as sealed segments in the packs, as before.
 //!
 //! **What a pass keeps** (kotton #55). A device keeps what its person chose:
-//! its pin settings, records in their drive (`kotton_device::users::pins`),
-//! resolved for this device in [`sync_mount_with_records`] — the one function
+//! its pin settings, its own and kept in this device's database, never in a
+//! drive (`kotton_device::users::pins`; kotton #171), resolved in
+//! [`sync_mount_with_records`] — which also makes this device's whole-keeper
+//! claims, the records it publishes in the drive, say what it keeps, so the
+//! pass carries a claim made or withdrawn — the one function
 //! both entry points pass through — and held at the store's transfer loop
 //! (`kotton_store::runtime::user::sync::Keep`). A pass always takes the index
 //! (superblocks and index packs: the history log, the manifests, the record
@@ -1075,10 +1078,13 @@ pub async fn sync_mount_with_records(
     // Who is on the other end is the remote's own configuration, so this asks
     // it rather than being told by each caller. Before any write, so a refusal
     // leaves the mount as it found it.
-    // What this device keeps of the drive (kotton #55): its pin settings,
-    // resolved here for both entry points, as the lock above is taken here.
-    // This device states its default first if it never has, so the setting
-    // rides this pass's log to every other device ([`pins::state_default`]).
+    // What this device keeps of the drive (kotton #55, #171): its pin
+    // settings, its own and in its own database, resolved here for both entry
+    // points, as the lock above is taken here. Its whole-keeper claims are
+    // made to say what they keep first, so a claim made or withdrawn rides
+    // this pass's log to the drive ([`pins::claim`]). Reading the settings
+    // here withholds no index: the pass below pulls every index pack whatever
+    // they say, and consults them only for content packs.
     let keep = keep_for(runtime, resources, &store, user_rt.as_ref(), user_id, mount, remote).await;
 
     let outbound = match user_rt.peer_of(remote) {
@@ -1149,16 +1155,23 @@ async fn keep_for(
         return None;
     }
     let me = runtime.operational_did();
-    if let Err(e) = pins::state_default(&runtime.schema_registry, records, &me).await {
-        tracing::warn!(user_id, error = %e, "sync: this device's default was not written down");
+    let Some(machine_db) = resources.machine_db() else {
+        tracing::warn!(user_id, "sync: this device's database is not open, so its pin settings do not read; this pass keeps everything");
+        return None;
+    };
+    if let Err(e) = pins::migrate(&runtime.schema_registry, records, &machine_db, user_id, &me).await {
+        tracing::warn!(user_id, error = %e, "sync: this device's settings in the drive were not moved into its own database");
     }
-    let all = match pins::settings(&runtime.schema_registry, records).await {
+    let all = match pins::settings(&machine_db, user_id).await {
         Ok(all) => all,
         Err(e) => {
             tracing::warn!(user_id, error = %e, "sync: the pin settings do not read; this pass keeps everything");
             return None;
         }
     };
+    if let Err(e) = pins::claim(&runtime.schema_registry, records, &all, &me).await {
+        tracing::warn!(user_id, error = %e, "sync: this device's whole-keeper claims were not made to say what it keeps");
+    }
     let budget = match (resources.machine_db(), user_rt.peer_of(remote)) {
         (Some(db), Some(peer_did)) => {
             let node = kotton_peer::daemon::drives::list(&db, user_id)
@@ -1178,7 +1191,7 @@ async fn keep_for(
         }
         _ => None,
     };
-    Some(pins::keep(all, &me, budget))
+    Some(pins::keep(all, budget))
 }
 
 /// Where a pack this device does not keep is fetched from when something reads
@@ -1966,6 +1979,7 @@ mod drive_target_tests {
             tenancy: "alice".into(),
             tree: kotton_wire::ipc::FIRST_DRIVE_TREE.into(),
             name: kotton_wire::ipc::FIRST_DRIVE_NAME.into(),
+            id: Some(kotton_wire::ipc::FIRST_DRIVE_ID.into()),
             node: PairedNode {
                 id: label.into(),
                 device_did: kotton_wire::did::Did::parse("did:key:z6MkqQEvkQX8axm6AzW37ZT5bSEJwFnRS7PgYhbrvzKVc4B2").unwrap(),

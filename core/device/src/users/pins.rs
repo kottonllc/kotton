@@ -1,59 +1,90 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! **What each device keeps of the person's drives** (kotton #55): the pin
-//! settings, read and written as records, resolved to what a pass keeps, and
-//! read back as the two notices.
+//! **What each device keeps of the person's drives** (kotton #55, #171): the
+//! pin settings, kept on the device that set them and resolved to what a pass
+//! keeps; the whole-keeper claims a device publishes in a drive; and the two
+//! notices, read from them.
 //!
-//! The protocol's storage model, on what a person's devices keep: every device of the
-//! person's sees every drive; each device has one default for the drives it
-//! has not been told about, and a drive or a folder is set the other way on
-//! that device; the nearest setting wins, a folder's over its drive's over the
-//! device's default, and `default` at any level means follow the one above.
-//! The first device's default is whole and a device paired later defaults to
-//! on demand. The device that creates a drive keeps it whole until told
-//! otherwise. When no device keeps a drive whole the person is told; when a
-//! device that keeps a drive whole runs short of room it says so and names the
-//! setting that keeps less. One verb collects: `pin <drive> whole`.
+//! The protocol's storage model (kotton-protocol #26, RFC 0002's "Exit"), on
+//! what a person's devices keep: every device of the person's sees every
+//! drive; each device has one default for the drives it has not been told
+//! about, and a drive or a folder is set the other way on that device; the
+//! nearest setting wins, a folder's over its drive's over the device's
+//! default, and `default` at any level means follow the one above. The first
+//! device's default is whole and a device paired later defaults to on demand.
+//! The device that creates a drive keeps it whole until told otherwise. When
+//! no device keeps a drive whole the person is told; when a device that keeps
+//! a drive whole runs short of room it says so and names the setting that
+//! keeps less. One verb collects: `pin <drive> whole`.
 //!
-//! **A setting is a record in the person's drive.** One `sh.kotton.pin` record
-//! per device and scope (`kotton_schemas`'s core set; kotton-protocol #20's
-//! record: device, scope, value; on the wire `kotton_wire::ipc::PinSetting`).
-//! Records ride the history log as sealed segments in the index packs a device
-//! always keeps (`kotton_store::packed::CONTENT_PACK_PREFIX`), so every device
-//! of the person's reads every device's settings and the drive reads none. The
-//! device is named by the DID of the key it presents — inside the person's own
-//! sealed records, where the only reader is the person; nothing here is sent
-//! to a vault, so nothing in it is a key a vault can join on. A device writes
-//! only its own settings (`pin` is "what this device holds"), so two devices
-//! never write one record, and a record's last write is its device's word.
+//! **A setting is the device's own, and stays on it.** The default and every
+//! exception live in this device's own database (`pin_settings`, migration
+//! `0030`), one row per person and scope ([`settings`], [`write`]); nothing of
+//! them replicates, and no setting is written to any drive. That is the
+//! per-device "keep on this device / fetch when opened" switch people know
+//! from other services, and a device wiped and paired again comes back to on
+//! demand ([`JOINED`]). On the wire a setting is `kotton_wire::ipc::PinSetting`,
+//! sent only to this device's own client, and it names no device.
 //!
-//! **What is enforced, today: the first drive.** A device keeps a tree of the
+//! **What a device publishes: one claim per drive it keeps whole.** A
+//! whole-keeper claim ([`Claim`]) is a sealed record in that drive
+//! (`sh.kotton.keeps-whole`, `kotton_schemas`'s core set) holding the device,
+//! by the DID of the key it presents, and the drive's id
+//! (`kotton_peer::daemon::drives::Drive::id`), and nothing else; that it
+//! exists is the claim. Its record id is a digest of the two, so a device
+//! claims a drive once. **It is written by that device alone** ([`claim`]):
+//! each device reconciles its own claims to its own settings — at every `pin`
+//! and before every pass, so the first device's first pass writes its claim —
+//! and never touches another device's. **A claim is withdrawn by a delete**,
+//! when its device stops keeping the drive whole (`pin … on-demand`), and the
+//! delete replicates as one: every write of a record is a new version
+//! (kotton #158), so a device flipping whole, on demand and whole again in one
+//! second still says each. The cost is bounded: one small record per keeping
+//! device per drive, written only when the claim changes, never a walk.
+//!
+//! **The telling reads the claims, and nothing else** ([`Read`], [`whole_on`],
+//! [`notices`]): `drive list`'s and `status`'s *which devices keep it whole*,
+//! and the notice that none does, read the claims for each drive this device
+//! records, by its id. A claim counts for nothing once its device is no longer
+//! in the person's device set ([`devices`], the membership set's own filter):
+//! a removed device cannot write, and nobody else may delete its claims, so
+//! readers set them aside instead. A device lost but not removed is counted
+//! until the person removes it. A drive retired by a move leaves no claim:
+//! its claims are in it and go with it, and a drive this device no longer
+//! records is told of to nobody. Claims ride the history log in the index
+//! packs every device always keeps, so the drive reads none of them.
+//!
+//! **The index comes first.** A pass pulls every index pack — and with it
+//! every claim — before anything consults a setting: the first step of a pass
+//! skips content packs only, without reading what the settings say of them,
+//! and the settings decide only which content packs the second step fetches
+//! (`kotton_store::runtime::user::sync::UserStore::sync_mount_keeping`). So
+//! nothing a setting or a claim says can withhold the index.
+//!
+//! **Where claims live, today: the first drive.** A device keeps a tree of the
 //! person's first drive and of no made drive yet (drive paths, kotton #58; the
-//! first drive becoming one drive among others, #124), so pins are enforced on
-//! the first drive and on nothing else. A setting for a made drive is refused,
-//! and no device is counted as keeping a made drive whole ([`whole_on`]), so
-//! `status` says of every made drive that only its vault holds it — which is
-//! true until #58 and #124 give a device something to keep. The creating
-//! device's whole pin is written then, not before.
+//! first drive becoming one drive among others, #124), so a device keeps, and
+//! claims, only the first drive, under `kotton_wire::ipc::FIRST_DRIVE_ID`; its
+//! claims ride the person's record log in that drive. A setting for a made
+//! drive is refused, and no claim names one, so `status` says of every made
+//! drive that only its vault holds it — which is true. **Seam, not built:** the
+//! creating device's claim at `drive create` is written once a device keeps a
+//! tree of a made drive (#58, #124); and a person's claims in a drive are to be
+//! sealed under that person's key and under no key a drive's holders would
+//! share, which today's record log is (one person per log) and a shared drive
+//! must keep.
 //!
-//! **Where the records live, today.** The records ride the person's record log,
-//! which a device's tree carries to the first drive on each vault — the one
-//! drive a device keeps a tree of. So a setting about a made drive is a record
-//! in the person's first drive, not in the made drive's own tree: a made drive
-//! has no tree on a device until drive paths (kotton #58) and the first drive
-//! becoming one drive among others (#124) give it one. This is the "per-person
-//! record home" kotton #55's first comment names. It is the decision taken
-//! here, pending its edit to the protocol's storage model; the protocol says
-//! "a record in the drive", and the two meet when #124 lands.
+//! **What kotton #155 wrote is migrated in place** ([`migrate`]): it kept
+//! every setting as an `sh.kotton.pin` record in the person's drive. The first
+//! time this device reads its settings it moves each of its own such records
+//! into its own database — never over a setting stated here since — and
+//! deletes it from the drive, and the delete replicates. Another device's are
+//! that device's to move; nothing reads them meanwhile.
 //!
-//! **Resolution is a rule, not a check.** [`resolve`] answers, for a device and
-//! a place in a drive, the nearest setting and its value; nothing else decides
-//! what a device keeps, and nothing refuses a setting for being "too far". A
-//! folder's setting covers the folders beneath it, and the deepest wins. A
-//! device with no default record says nothing about other devices' holdings:
-//! another device's silence is never read as "whole", so the no-whole notice
-//! errs toward telling. This device's own silence is its behaviour before pins,
-//! which kept everything — whole — and the first pass after it writes that
-//! down ([`state_default`]).
+//! **Resolution is a rule, not a check.** [`resolve`] answers, for a place in
+//! a drive, the nearest setting and its value; nothing else decides what a
+//! device keeps, and nothing refuses a setting for being "too far". A folder's
+//! setting covers the folders beneath it, and the deepest wins. This device's
+//! silence is its behaviour before pins, which kept everything — whole.
 //!
 //! **What is kept is the person's tree.** A pin is over the paths the person
 //! names (`files/` in the store). The daemon's own objects — the membership
@@ -66,7 +97,7 @@ use kotton_schemas::membership::{Posture, Role};
 use kotton_store::runtime::user::sync::{Keep, KeepReport};
 use kotton_store::runtime::user::UserStore;
 use kotton_wire::ipc::{
-    DeviceStatus, DriveHeld, PinNotice, PinReadout, PinScope, PinSetting, PinValue, FIRST_DRIVE_NAME,
+    DeviceStatus, DriveHeld, PinNotice, PinReadout, PinScope, PinSetting, PinValue, FIRST_DRIVE_ID, FIRST_DRIVE_NAME,
 };
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
@@ -74,8 +105,11 @@ use std::collections::BTreeSet;
 use std::io;
 use std::sync::{Arc, RwLock};
 
-/// The NSID a setting is written under.
+/// The NSID kotton #155 wrote settings under, read only to migrate them.
 const PIN_NSID: &str = kotton_common::namespace::NSID_PIN;
+
+/// The NSID a whole-keeper claim is written under.
+const CLAIM_NSID: &str = kotton_common::namespace::NSID_KEEPS_WHOLE;
 
 /// The store key the person's tree is rooted at: a pin is over these paths.
 const PERSON_TREE: &str = kotton_store::runtime::user::files::PERSON_TREE_ROOT;
@@ -95,131 +129,144 @@ fn err(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 
-/// The record id of `device`'s setting at `scope`: one per device and scope,
-/// so setting a scope again replaces the record. A digest, so the id is as
-/// opaque as the rest of the sealed record and the same on every device.
-fn record_id(device: &str, scope: &PinScope) -> String {
-    let said = serde_json::to_string(&(device, scope)).unwrap_or_default();
-    format!("pin-{}", &blake3::hash(said.as_bytes()).to_hex()[..32])
+/// A scope as the `pin_settings` row keys it: the scope's kind, the drive and
+/// the folder, empty where the kind has none.
+fn scope_row(scope: &PinScope) -> (&'static str, &str, &str) {
+    match scope {
+        PinScope::Default => ("default", "", ""),
+        PinScope::Drive { drive } => ("drive", drive, ""),
+        PinScope::Folder { drive, folder } => ("folder", drive, folder),
+    }
 }
 
-fn to_record(setting: &PinSetting) -> Value {
-    let (scope, drive, folder) = match &setting.scope {
-        PinScope::Default => ("default", None, None),
-        PinScope::Drive { drive } => ("drive", Some(drive.clone()), None),
-        PinScope::Folder { drive, folder } => ("folder", Some(drive.clone()), Some(folder.clone())),
-    };
-    json!({
-        "id": record_id(&setting.device, &setting.scope),
-        "device": setting.device,
-        "scope": scope,
-        "drive": drive,
-        "folder": folder,
-        "value": setting.value.said(),
+fn scope_of(kind: &str, drive: String, folder: String) -> Option<PinScope> {
+    Some(match kind {
+        "default" => PinScope::Default,
+        "drive" => PinScope::Drive { drive },
+        "folder" => PinScope::Folder { drive, folder },
+        _ => return None,
     })
 }
 
-fn from_record(body: &Value) -> Option<PinSetting> {
-    let text = |f: &str| body.get(f).and_then(Value::as_str).map(str::to_string);
-    let scope = match text("scope")?.as_str() {
-        "default" => PinScope::Default,
-        "drive" => PinScope::Drive { drive: text("drive")? },
-        "folder" => PinScope::Folder { drive: text("drive")?, folder: text("folder")? },
-        _ => return None,
-    };
-    Some(PinSetting { device: text("device")?, scope, value: PinValue::parse(&text("value")?)? })
+/// Every pin setting this device holds for `user_id`, from its own database.
+pub async fn settings(db: &SqlitePool, user_id: &str) -> io::Result<Vec<PinSetting>> {
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT scope, drive, folder, value FROM pin_settings WHERE user_id = ? ORDER BY scope, drive, folder",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await
+    .map_err(err)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(kind, drive, folder, value)| Some(PinSetting { scope: scope_of(&kind, drive, folder)?, value: PinValue::parse(&value)? }))
+        .collect())
 }
 
-/// Every pin setting of every device of the person's this device has read.
-pub async fn settings(registry: &RwLock<SchemaRegistry>, store: &SqliteRecordStore) -> io::Result<Vec<PinSetting>> {
-    let rows = Record::new(registry, store).query(PIN_NSID, Vec::new(), None, None, None).await.map_err(err)?;
-    Ok(rows.iter().filter_map(from_record).collect())
-}
-
-/// Held by every write of a device's default and across [`state_default`]'s
-/// read and write, so stating the default when none is stated cannot write
-/// over a default stated meanwhile — a `pin default`, or a joining device's
-/// `on-demand`. A device's records are written by its one daemon, so a lock
-/// in that process covers every writer of them; the record store's handles do
-/// not share a transaction.
-static DEFAULT_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Write `device`'s setting at `scope` as `value`; `None` is `default` — the
-/// drive or folder follows the setting above it, which is its record removed.
-/// The device's own default has nothing above it, and is refused `None`.
-pub async fn write(
-    registry: &RwLock<SchemaRegistry>,
-    store: &SqliteRecordStore,
-    device: &str,
-    scope: &PinScope,
-    value: Option<PinValue>,
-) -> io::Result<()> {
-    let _default = match scope {
-        PinScope::Default => Some(DEFAULT_WRITE.lock().await),
-        _ => None,
-    };
-    write_held(registry, store, device, scope, value).await
-}
-
-/// [`write`], with [`DEFAULT_WRITE`] already held where it must be.
-async fn write_held(
-    registry: &RwLock<SchemaRegistry>,
-    store: &SqliteRecordStore,
-    device: &str,
-    scope: &PinScope,
-    value: Option<PinValue>,
-) -> io::Result<()> {
-    let records = Record::new(registry, store);
+/// Write this device's setting at `scope` as `value`, in its own database;
+/// `None` is `default` — the drive or folder follows the setting above it,
+/// which is its row removed. The device's default has nothing above it, and is
+/// refused `None`. Nothing is written to any drive.
+pub async fn write(db: &SqlitePool, user_id: &str, scope: &PinScope, value: Option<PinValue>) -> io::Result<()> {
+    let (kind, drive, folder) = scope_row(scope);
     match value {
         Some(value) => {
-            let setting = PinSetting { device: device.to_string(), scope: scope.clone(), value };
-            records.insert(PIN_NSID, to_record(&setting)).await.map_err(err)?;
+            sqlx::query(
+                "INSERT INTO pin_settings (user_id, scope, drive, folder, value, set_at) VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (user_id, scope, drive, folder) DO UPDATE SET value = excluded.value, set_at = excluded.set_at",
+            )
+            .bind(user_id)
+            .bind(kind)
+            .bind(drive)
+            .bind(folder)
+            .bind(value.said())
+            .bind(kotton_common::time::now_secs())
+            .execute(db)
+            .await
+            .map_err(err)?;
         }
         None if *scope == PinScope::Default => {
             return Err(err("a device's default has nothing above it to follow: say `whole` or `on-demand`"))
         }
         None => {
-            let id = record_id(device, scope);
-            let held = records
-                .query(PIN_NSID, vec![("id".into(), json!(id))], Some(1), None, None)
+            sqlx::query("DELETE FROM pin_settings WHERE user_id = ? AND scope = ? AND drive = ? AND folder = ?")
+                .bind(user_id)
+                .bind(kind)
+                .bind(drive)
+                .bind(folder)
+                .execute(db)
                 .await
                 .map_err(err)?;
-            if !held.is_empty() {
-                records.delete(PIN_NSID, &id).await.map_err(err)?;
-            }
         }
     }
     Ok(())
 }
 
-/// This device's default, as its records say it, or `None` when it has
-/// stated none.
-fn stated_default(all: &[PinSetting], device: &str) -> Option<PinValue> {
-    all.iter().find(|s| s.device == device && s.scope == PinScope::Default).map(|s| s.value)
+/// A setting as kotton #155 wrote it, an `sh.kotton.pin` record: the device
+/// it was about, and the setting.
+fn from_pin_record(body: &Value) -> Option<(String, PinSetting)> {
+    let text = |f: &str| body.get(f).and_then(Value::as_str).map(str::to_string);
+    let scope = scope_of(&text("scope")?, text("drive").unwrap_or_default(), text("folder").unwrap_or_default())?;
+    Some((text("device")?, PinSetting { scope, value: PinValue::parse(&text("value")?)? }))
 }
 
-/// Write this device's default down, as [`UNSTATED`], when it has stated
-/// none: what it does is then what every other device reads of it. Called
-/// before every pass, so a device that predates pins, or recovered the
-/// identity, says what it keeps at its first pass. Returns whether it wrote.
-pub async fn state_default(registry: &RwLock<SchemaRegistry>, store: &SqliteRecordStore, device: &str) -> io::Result<bool> {
-    let _held = DEFAULT_WRITE.lock().await;
-    if stated_default(&settings(registry, store).await?, device).is_some() {
-        return Ok(false);
+/// **Move this device's settings out of the drive** (module doc): each
+/// `sh.kotton.pin` record kotton #155 wrote about `me` is kept in this
+/// device's own database, unless a setting at that scope is stated here
+/// already, and deleted from the drive; the delete replicates. Another
+/// device's records are left for that device to move. Returns how many it
+/// moved. Idempotent: once moved, there are none of this device's to move.
+pub async fn migrate(
+    registry: &RwLock<SchemaRegistry>,
+    records: &SqliteRecordStore,
+    db: &SqlitePool,
+    user_id: &str,
+    me: &str,
+) -> io::Result<usize> {
+    let rows = Record::new(registry, records).query(PIN_NSID, Vec::new(), None, None, None).await.map_err(err)?;
+    let mut moved = 0;
+    for body in rows {
+        let (Some((device, setting)), Some(id)) = (from_pin_record(&body), body.get("_id").and_then(Value::as_str)) else {
+            continue;
+        };
+        if device != me {
+            continue;
+        }
+        let (kind, drive, folder) = scope_row(&setting.scope);
+        sqlx::query(
+            "INSERT INTO pin_settings (user_id, scope, drive, folder, value, set_at) VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (user_id, scope, drive, folder) DO NOTHING",
+        )
+        .bind(user_id)
+        .bind(kind)
+        .bind(drive)
+        .bind(folder)
+        .bind(setting.value.said())
+        .bind(kotton_common::time::now_secs())
+        .execute(db)
+        .await
+        .map_err(err)?;
+        Record::new(registry, records).delete(PIN_NSID, id).await.map_err(err)?;
+        moved += 1;
     }
-    write_held(registry, store, device, &PinScope::Default, Some(UNSTATED)).await?;
-    Ok(true)
+    Ok(moved)
 }
 
-/// **The nearest setting wins** (module doc): for `device`, at `folder` (a
-/// path in `drive` from its root, or `None` for the drive as a whole), the
-/// value it keeps and the setting that decided it — the deepest folder setting
-/// at or above `folder`, else the drive's, else the device's default, else
-/// `unstated`, which decides as the default would.
-pub fn resolve(all: &[PinSetting], device: &str, drive: &str, folder: Option<&str>, unstated: PinValue) -> (PinValue, PinScope) {
-    let mine = || all.iter().filter(|s| s.device == device);
+/// This device's default, as its settings say it, or `None` when it has
+/// stated none.
+fn stated_default(all: &[PinSetting]) -> Option<PinValue> {
+    all.iter().find(|s| s.scope == PinScope::Default).map(|s| s.value)
+}
+
+/// **The nearest setting wins** (module doc): at `folder` (a path in `drive`
+/// from its root, or `None` for the drive as a whole), the value this device
+/// keeps and the setting that decided it — the deepest folder setting at or
+/// above `folder`, else the drive's, else the device's default, else
+/// [`UNSTATED`].
+pub fn resolve(all: &[PinSetting], drive: &str, folder: Option<&str>) -> (PinValue, PinScope) {
     if let Some(path) = folder {
-        let nearest = mine()
+        let nearest = all
+            .iter()
             .filter_map(|s| match &s.scope {
                 PinScope::Folder { drive: d, folder: f } if d == drive && covers(f, path) => Some((f.len(), s)),
                 _ => None,
@@ -229,10 +276,10 @@ pub fn resolve(all: &[PinSetting], device: &str, drive: &str, folder: Option<&st
             return (s.value, s.scope.clone());
         }
     }
-    if let Some(s) = mine().find(|s| matches!(&s.scope, PinScope::Drive { drive: d } if d == drive)) {
+    if let Some(s) = all.iter().find(|s| matches!(&s.scope, PinScope::Drive { drive: d } if d == drive)) {
         return (s.value, s.scope.clone());
     }
-    (stated_default(all, device).unwrap_or(unstated), PinScope::Default)
+    (stated_default(all).unwrap_or(UNSTATED), PinScope::Default)
 }
 
 /// Whether the folder `folder` is `path` or holds it.
@@ -240,30 +287,27 @@ fn covers(folder: &str, path: &str) -> bool {
     path == folder || path.strip_prefix(folder).is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// Whether `device` keeps `drive` whole: the drive as a whole resolves whole,
-/// and no folder of it is set on demand.
-pub fn keeps_whole(all: &[PinSetting], device: &str, drive: &str, unstated: PinValue) -> bool {
-    resolve(all, device, drive, None, unstated).0 == PinValue::Whole
-        && !all.iter().any(|s| {
-            s.device == device
-                && s.value == PinValue::OnDemand
-                && matches!(&s.scope, PinScope::Folder { drive: d, .. } if d == drive)
-        })
+/// Whether this device's settings keep `drive` whole: the drive as a whole
+/// resolves whole, and no folder of it is set on demand.
+pub fn keeps_whole(all: &[PinSetting], drive: &str) -> bool {
+    resolve(all, drive, None).0 == PinValue::Whole
+        && !all
+            .iter()
+            .any(|s| s.value == PinValue::OnDemand && matches!(&s.scope, PinScope::Folder { drive: d, .. } if d == drive))
 }
 
-/// What a pass keeps of the person's first drive on `device` (the one drive a
-/// device keeps a tree of), within `budget`: each path the store names, read
-/// as the person's path, resolved; the daemon's own objects kept whole by no
-/// setting (module doc).
-pub fn keep(all: Vec<PinSetting>, device: &str, budget: Option<u64>) -> Keep {
-    let device = device.to_string();
+/// What a pass keeps of the person's first drive on this device (the one
+/// drive a device keeps a tree of), within `budget`: each path the store
+/// names, read as the person's path, resolved; the daemon's own objects kept
+/// whole by no setting (module doc).
+pub fn keep(all: Vec<PinSetting>, budget: Option<u64>) -> Keep {
     Keep {
         whole: Box::new(move |key: &str| {
             let Some(rest) = key.strip_prefix(PERSON_TREE).and_then(|r| r.strip_prefix('/')) else {
                 return Some(String::new());
             };
             let path = format!("/{rest}");
-            let (value, scope) = resolve(&all, &device, FIRST_DRIVE_NAME, Some(&path), UNSTATED);
+            let (value, scope) = resolve(&all, FIRST_DRIVE_NAME, Some(&path));
             (value == PinValue::Whole).then(|| match scope {
                 PinScope::Default => "default".to_string(),
                 other => other.said(),
@@ -273,11 +317,74 @@ pub fn keep(all: Vec<PinSetting>, device: &str, budget: Option<u64>) -> Keep {
     }
 }
 
-/// The person's devices whose settings this device reads, by DID and name:
-/// itself, and every own device of theirs that holds the data keys
-/// (`Posture::Full`) in the membership set. A device revoked is no member, so
-/// its settings are no longer read — which is how a removed device stops
-/// keeping anything whole.
+/// A whole-keeper claim (module doc): `device` keeps the drive whose id is
+/// `drive` whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claim {
+    /// The DID of the key the device presents.
+    pub device: String,
+    /// The drive's id (`kotton_peer::daemon::drives::Drive::id`).
+    pub drive: String,
+}
+
+impl Claim {
+    /// The record id: one per device and drive, a digest so it is as opaque
+    /// as the rest of the sealed record and the same on every device.
+    fn record_id(&self) -> String {
+        let said = serde_json::to_string(&(&self.device, &self.drive)).unwrap_or_default();
+        format!("keeps-whole-{}", &blake3::hash(said.as_bytes()).to_hex()[..32])
+    }
+
+    fn to_record(&self) -> Value {
+        json!({ "id": self.record_id(), "device": self.device, "drive": self.drive })
+    }
+
+    fn from_record(body: &Value) -> Option<Self> {
+        let text = |f: &str| body.get(f).and_then(Value::as_str).map(str::to_string);
+        Some(Self { device: text("device")?, drive: text("drive")? })
+    }
+}
+
+/// Every whole-keeper claim this device has read: its own, and every other
+/// device's its passes have brought from the drive.
+pub async fn claims(registry: &RwLock<SchemaRegistry>, records: &SqliteRecordStore) -> io::Result<Vec<Claim>> {
+    let rows = Record::new(registry, records).query(CLAIM_NSID, Vec::new(), None, None, None).await.map_err(err)?;
+    Ok(rows.iter().filter_map(Claim::from_record).collect())
+}
+
+/// The drives this device keeps a tree of, by id: the first drive, and no
+/// made drive yet (module doc).
+const KEPT_TREES: &[(&str, &str)] = &[(FIRST_DRIVE_ID, FIRST_DRIVE_NAME)];
+
+/// **This device's claims, made to say what its settings keep** (module doc):
+/// a claim for each drive it keeps a tree of and keeps whole, and none for
+/// any other. Only `me`'s claims are read or written; a claim already there
+/// is not written again, and one no longer true is deleted. Returns whether
+/// it changed any.
+pub async fn claim(registry: &RwLock<SchemaRegistry>, records: &SqliteRecordStore, all: &[PinSetting], me: &str) -> io::Result<bool> {
+    let wanted: Vec<Claim> = KEPT_TREES
+        .iter()
+        .filter(|(_, name)| keeps_whole(all, name))
+        .map(|(id, _)| Claim { device: me.to_string(), drive: id.to_string() })
+        .collect();
+    let mine: Vec<Claim> = claims(registry, records).await?.into_iter().filter(|c| c.device == me).collect();
+    let writer = Record::new(registry, records);
+    let mut changed = false;
+    for gone in mine.iter().filter(|c| !wanted.contains(c)) {
+        writer.delete(CLAIM_NSID, &gone.record_id()).await.map_err(err)?;
+        changed = true;
+    }
+    for new in wanted.iter().filter(|c| !mine.contains(c)) {
+        writer.insert(CLAIM_NSID, new.to_record()).await.map_err(err)?;
+        changed = true;
+    }
+    Ok(changed)
+}
+
+/// The person's devices whose claims count, by DID and name: this device, and
+/// every own device of theirs that holds the data keys (`Posture::Full`) in
+/// the membership set. A device removed is no member, so its claims count for
+/// nothing — which is how a removed device stops keeping anything whole.
 pub async fn devices(store: &UserStore, me: &str) -> Vec<(String, String)> {
     use kotton_peer::membership::Membership as _;
     let mut out = vec![(me.to_string(), THIS_DEVICE.to_string())];
@@ -291,26 +398,19 @@ pub async fn devices(store: &UserStore, me: &str) -> Vec<(String, String)> {
                 }
             }
         }
-        Err(e) => tracing::warn!(error = format!("{e:#}"), "pins: the membership set did not read; only this device's settings are counted"),
+        Err(e) => tracing::warn!(error = format!("{e:#}"), "pins: the membership set did not read; only this device's claims are counted"),
     }
     out
 }
 
-/// The names of the devices among `devices` that keep `drive` whole.
-///
-/// None for a made drive: no device keeps a tree of one yet (module doc), so
-/// none keeps it whole, whatever its settings say.
-pub fn whole_on(all: &[PinSetting], devices: &[(String, String)], me: &str, drive: &str) -> Vec<String> {
-    if drive != FIRST_DRIVE_NAME {
-        return Vec::new();
-    }
+/// The names of the devices among `devices` that claim the drive whose id is
+/// `drive` whole: the claims, and nothing else (module doc). `None` — a drive
+/// recorded before ids, until its vault is next listed — is claimed by nobody.
+pub fn whole_on(claims: &[Claim], devices: &[(String, String)], drive: Option<&str>) -> Vec<String> {
+    let Some(drive) = drive else { return Vec::new() };
     devices
         .iter()
-        .filter(|(did, _)| {
-            // Another device's silence is not "whole" (module doc).
-            let unstated = if did == me { UNSTATED } else { PinValue::OnDemand };
-            keeps_whole(all, did, drive, unstated)
-        })
+        .filter(|(did, _)| claims.iter().any(|c| c.device == *did && c.drive == drive))
         .map(|(_, name)| name.clone())
         .collect()
 }
@@ -326,13 +426,21 @@ pub async fn drive_names(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<
     Ok(names)
 }
 
-/// Every notice: each drive no device keeps whole, and each drive this
-/// device's last pass found short of room.
-pub async fn notices(db: &Arc<SqlitePool>, user_id: &str, all: &[PinSetting], devices: &[(String, String)], me: &str) -> io::Result<Vec<PinNotice>> {
+/// Every notice: each drive this device records that no device claims whole,
+/// and each drive this device's last pass found short of room. A drive kept at
+/// several vaults is one drive, by its id, and told of once.
+pub async fn notices(db: &Arc<SqlitePool>, user_id: &str, claims: &[Claim], devices: &[(String, String)]) -> io::Result<Vec<PinNotice>> {
     let mut out = Vec::new();
-    for drive in drive_names(db, user_id).await? {
-        if whole_on(all, devices, me, &drive).is_empty() {
-            out.push(PinNotice::NoWholeDevice { drive });
+    let mut told: Vec<(String, Option<String>)> = Vec::new();
+    for d in kotton_peer::daemon::drives::all(db, user_id).await? {
+        let key = (d.name.clone(), d.id.clone());
+        if told.contains(&key) {
+            continue;
+        }
+        told.push(key);
+        let notice = PinNotice::NoWholeDevice { drive: d.name.clone() };
+        if whole_on(claims, devices, d.id.as_deref()).is_empty() && !out.contains(&notice) {
+            out.push(notice);
         }
     }
     let rows: Vec<(String, i64, Option<i64>, i64, String)> = sqlx::query_as(
@@ -404,43 +512,62 @@ pub async fn budget(db: &SqlitePool, user_id: &str, node_id: &str) -> io::Result
     Ok(b.map(|b| b as u64))
 }
 
-/// Everything a reader of this device's pins needs, read once.
+/// Everything a reader of this device's pins needs, read once: this device's
+/// settings, every claim it has read, and the devices whose claims count.
 pub struct Read {
-    pub all: Vec<PinSetting>,
+    pub settings: Vec<PinSetting>,
+    pub claims: Vec<Claim>,
     pub devices: Vec<(String, String)>,
-    pub me: String,
 }
 
 impl Read {
-    pub async fn now(registry: &RwLock<SchemaRegistry>, records: &SqliteRecordStore, store: &UserStore, me: &str) -> io::Result<Self> {
-        Ok(Self { all: settings(registry, records).await?, devices: devices(store, me).await, me: me.to_string() })
+    /// Read them, moving any of this device's settings kotton #155 left in the
+    /// drive into its own database first ([`migrate`]).
+    pub async fn now(
+        registry: &RwLock<SchemaRegistry>,
+        records: &SqliteRecordStore,
+        store: &UserStore,
+        db: &SqlitePool,
+        user_id: &str,
+        me: &str,
+    ) -> io::Result<Self> {
+        migrate(registry, records, db, user_id, me).await?;
+        Ok(Self { settings: settings(db, user_id).await?, claims: claims(registry, records).await?, devices: devices(store, me).await })
     }
 
-    /// The names of the devices that keep `drive` whole.
-    pub fn whole_on(&self, drive: &str) -> Vec<String> {
-        whole_on(&self.all, &self.devices, &self.me, drive)
+    /// The names of the devices that claim the drive whose id is `drive` whole.
+    pub fn whole_on(&self, drive: Option<&str>) -> Vec<String> {
+        whole_on(&self.claims, &self.devices, drive)
     }
 
     /// `pin list`: this device's default and exceptions, and the notices.
     pub async fn readout(&self, db: &Arc<SqlitePool>, user_id: &str) -> io::Result<PinReadout> {
-        let mut exceptions: Vec<PinSetting> =
-            self.all.iter().filter(|s| s.device == self.me && s.scope != PinScope::Default).cloned().collect();
+        let mut exceptions: Vec<PinSetting> = self.settings.iter().filter(|s| s.scope != PinScope::Default).cloned().collect();
         exceptions.sort_by_key(|s| s.scope.said());
         Ok(PinReadout {
-            default: stated_default(&self.all, &self.me).unwrap_or(UNSTATED),
+            default: stated_default(&self.settings).unwrap_or(UNSTATED),
             exceptions,
-            notices: notices(db, user_id, &self.all, &self.devices, &self.me).await?,
+            notices: notices(db, user_id, &self.claims, &self.devices).await?,
         })
     }
 
-    /// `status`: what this device keeps of each drive, and the notices.
+    /// `status`: what this device keeps of each drive, the devices that claim
+    /// each whole, and the notices.
     pub async fn status(&self, db: &Arc<SqlitePool>, user_id: &str, last_sync_at: Option<i64>) -> io::Result<DeviceStatus> {
         let readout = self.readout(db, user_id).await?;
         let recorded = kotton_peer::daemon::drives::all(db, user_id).await?;
         let mut drives = Vec::new();
         for name in drive_names(db, user_id).await? {
-            let vaults: BTreeSet<String> =
-                recorded.iter().filter(|d| d.name == name).map(|d| d.node.id.clone()).collect();
+            let copies: Vec<_> = recorded.iter().filter(|d| d.name == name).collect();
+            let vaults: BTreeSet<String> = copies.iter().map(|d| d.node.id.clone()).collect();
+            let mut pinned_whole: Vec<String> = Vec::new();
+            for d in &copies {
+                for device in self.whole_on(d.id.as_deref()) {
+                    if !pinned_whole.contains(&device) {
+                        pinned_whole.push(device);
+                    }
+                }
+            }
             let folders = readout
                 .exceptions
                 .iter()
@@ -448,8 +575,8 @@ impl Read {
                 .cloned()
                 .collect();
             drives.push(DriveHeld {
-                keeps: (name == FIRST_DRIVE_NAME).then(|| resolve(&self.all, &self.me, &name, None, UNSTATED).0),
-                pinned_whole: self.whole_on(&name),
+                keeps: (name == FIRST_DRIVE_NAME).then(|| resolve(&self.settings, &name, None).0),
+                pinned_whole,
                 vaults: vaults.into_iter().collect(),
                 folders,
                 name,
@@ -460,8 +587,9 @@ impl Read {
 }
 
 /// `pin <scope> <value>`, on this device `me`: refused for a drive the person
-/// does not have, else written as this device's record (module doc), and
-/// answered with what this device keeps after.
+/// does not have, else written to this device's own database, this device's
+/// claims made to say what it now keeps ([`claim`]), and answered with what
+/// this device keeps after.
 #[allow(clippy::too_many_arguments)]
 pub async fn set(
     registry: &RwLock<SchemaRegistry>,
@@ -473,8 +601,8 @@ pub async fn set(
     scope: &PinScope,
     value: Option<PinValue>,
 ) -> io::Result<Result<PinReadout, String>> {
-    // Held here, where the record is made, whatever client sent the scope: a
-    // folder no setting could keep is refused, not recorded and replicated.
+    // Held here, where the setting is kept, whatever client sent the scope: a
+    // folder no setting could keep is refused, not kept.
     let scope = &match scope.clone().normalised() {
         Ok(scope) => scope,
         Err(e) => return Ok(Err(e)),
@@ -495,18 +623,20 @@ pub async fn set(
             )));
         }
     }
-    if let Err(e) = write(registry, records, me, scope, value).await {
+    migrate(registry, records, db, user_id, me).await?;
+    if let Err(e) = write(db, user_id, scope, value).await {
         return Ok(Err(e.to_string()));
     }
-    Ok(Ok(Read::now(registry, records, store, me).await?.readout(db, user_id).await?))
+    claim(registry, records, &settings(db, user_id).await?, me).await?;
+    Ok(Ok(Read::now(registry, records, store, db, user_id, me).await?.readout(db, user_id).await?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn at(device: &str, scope: PinScope, value: PinValue) -> PinSetting {
-        PinSetting { device: device.into(), scope, value }
+    fn at(scope: PinScope, value: PinValue) -> PinSetting {
+        PinSetting { scope, value }
     }
     fn folder(f: &str) -> PinScope {
         PinScope::Folder { drive: "personal".into(), folder: f.into() }
@@ -514,34 +644,31 @@ mod tests {
 
     /// **The nearest setting wins**: a folder's over its drive's over the
     /// device's default, the deepest folder first, a folder covering what is
-    /// beneath it and not a sibling that shares its prefix; and another
-    /// device's settings decide nothing here.
+    /// beneath it and not a sibling that shares its prefix.
     #[test]
     fn the_nearest_setting_wins() {
         let all = vec![
-            at("b", PinScope::Default, PinValue::OnDemand),
-            at("b", folder("/photos"), PinValue::Whole),
-            at("b", folder("/photos/raw"), PinValue::OnDemand),
-            at("a", PinScope::Default, PinValue::Whole),
-            at("a", PinScope::Drive { drive: "work".into() }, PinValue::OnDemand),
+            at(PinScope::Default, PinValue::OnDemand),
+            at(folder("/photos"), PinValue::Whole),
+            at(folder("/photos/raw"), PinValue::OnDemand),
+            at(PinScope::Drive { drive: "work".into() }, PinValue::Whole),
         ];
-        let v = |device: &str, drive: &str, path: &str| resolve(&all, device, drive, Some(path), UNSTATED).0;
-        assert_eq!(v("b", "personal", "/notes/a.md"), PinValue::OnDemand, "the default");
-        assert_eq!(v("b", "personal", "/photos/a.jpg"), PinValue::Whole, "the folder over the default");
-        assert_eq!(v("b", "personal", "/photos"), PinValue::Whole, "the folder itself");
-        assert_eq!(v("b", "personal", "/photos/raw/a.dng"), PinValue::OnDemand, "the deeper folder");
-        assert_eq!(v("b", "personal", "/photosynthesis.md"), PinValue::OnDemand, "a sibling sharing a prefix");
-        assert_eq!(v("a", "personal", "/photos/a.jpg"), PinValue::Whole, "b's folder is b's");
-        assert_eq!(v("a", "work", "/x"), PinValue::OnDemand, "the drive over the default");
-        assert_eq!(resolve(&all, "c", "personal", None, PinValue::OnDemand).0, PinValue::OnDemand, "silence is `unstated`");
-        assert_eq!(resolve(&all, "b", "personal", Some("/photos/a"), UNSTATED).1, folder("/photos"), "it names the setting");
+        let v = |drive: &str, path: &str| resolve(&all, drive, Some(path)).0;
+        assert_eq!(v("personal", "/notes/a.md"), PinValue::OnDemand, "the default");
+        assert_eq!(v("personal", "/photos/a.jpg"), PinValue::Whole, "the folder over the default");
+        assert_eq!(v("personal", "/photos"), PinValue::Whole, "the folder itself");
+        assert_eq!(v("personal", "/photos/raw/a.dng"), PinValue::OnDemand, "the deeper folder");
+        assert_eq!(v("personal", "/photosynthesis.md"), PinValue::OnDemand, "a sibling sharing a prefix");
+        assert_eq!(v("work", "/x"), PinValue::Whole, "the drive over the default");
+        assert_eq!(resolve(&[], "personal", None).0, UNSTATED, "silence is the behaviour before pins");
+        assert_eq!(resolve(&all, "personal", Some("/photos/a")).1, folder("/photos"), "it names the setting");
 
-        assert!(keeps_whole(&all, "a", "personal", UNSTATED));
-        assert!(!keeps_whole(&all, "a", "work", UNSTATED));
-        assert!(!keeps_whole(&all, "b", "personal", UNSTATED), "b's default is on demand");
-        let mut whole_b = all.clone();
-        whole_b.push(at("b", PinScope::Drive { drive: "personal".into() }, PinValue::Whole));
-        assert!(!keeps_whole(&whole_b, "b", "personal", UNSTATED), "a folder on demand is not the drive whole");
+        assert!(keeps_whole(&all, "work"));
+        assert!(!keeps_whole(&all, "personal"), "the default is on demand");
+        let mut whole = all.clone();
+        whole.push(at(PinScope::Drive { drive: "personal".into() }, PinValue::Whole));
+        assert!(!keeps_whole(&whole, "personal"), "a folder on demand is not the drive whole");
+        assert!(keeps_whole(&[], FIRST_DRIVE_NAME), "silence keeps everything");
     }
 
     /// **A pass keeps what the pins say, and names the setting that keeps
@@ -549,78 +676,51 @@ mod tests {
     /// are kept by no setting.
     #[test]
     fn a_pass_keeps_what_resolves_whole_and_names_the_setting() {
-        let all = vec![at("b", PinScope::Default, PinValue::OnDemand), at("b", folder("/photos"), PinValue::Whole)];
-        let keep = keep(all, "b", Some(9));
+        let all = vec![at(PinScope::Default, PinValue::OnDemand), at(folder("/photos"), PinValue::Whole)];
+        let keep = keep(all, Some(9));
         assert_eq!((keep.whole)("files/photos/a.jpg").as_deref(), Some("personal:/photos"));
         assert_eq!((keep.whole)("files/notes/a.md"), None);
         assert_eq!((keep.whole)("network/members/did"), Some(String::new()), "a daemon object is kept, by no setting");
         assert_eq!(keep.budget, Some(9));
-        let unstated = super::keep(vec![], "a", None);
+        let unstated = super::keep(vec![], None);
         assert_eq!((unstated.whole)("files/notes/a.md").as_deref(), Some("default"), "silence keeps everything");
     }
 
-    /// **Another device's silence is not "whole"**, and this device's is.
-    #[test]
-    fn whole_on_counts_only_what_a_device_said() {
-        let devices = vec![("a".to_string(), THIS_DEVICE.to_string()), ("b".to_string(), "laptop".to_string()), ("c".to_string(), "phone".to_string())];
-        let all = vec![at("b", PinScope::Default, PinValue::Whole)];
-        assert_eq!(whole_on(&all, &devices, "a", "personal"), [THIS_DEVICE, "laptop"]);
-        let all = vec![at("a", PinScope::Default, PinValue::OnDemand)];
-        assert!(whole_on(&all, &devices, "a", "personal").is_empty());
+    fn claimed(device: &str, drive: &str) -> Claim {
+        Claim { device: device.into(), drive: drive.into() }
     }
 
-    /// **A made drive is kept whole by no device yet**, whatever the settings
-    /// say: no device keeps a tree of one (module doc).
+    /// **The telling reads the claims and nothing else, and a removed
+    /// device's claim counts for nothing** (kotton #171's rules): a device in
+    /// the set that claims the drive keeps it whole; a claim by a device no
+    /// longer in the set (`c`, removed) is set aside, though nobody deleted
+    /// it; a claim for another drive's id says nothing of this one; a drive
+    /// recorded with no id is claimed by nobody.
     #[test]
-    fn no_device_keeps_a_made_drive_whole_yet() {
-        let devices = vec![("a".to_string(), THIS_DEVICE.to_string())];
-        let all = vec![at("a", PinScope::Default, PinValue::Whole), at("a", PinScope::Drive { drive: "photos".into() }, PinValue::Whole)];
-        assert!(whole_on(&all, &devices, "a", "photos").is_empty());
-        assert_eq!(whole_on(&all, &devices, "a", FIRST_DRIVE_NAME), [THIS_DEVICE]);
+    fn whole_on_reads_claims_only_and_counts_no_removed_device() {
+        let devices = vec![("a".to_string(), THIS_DEVICE.to_string()), ("b".to_string(), "laptop".to_string())];
+        let claims = vec![claimed("b", FIRST_DRIVE_ID), claimed("c", FIRST_DRIVE_ID), claimed("a", "another-drive")];
+        assert_eq!(whole_on(&claims, &devices, Some(FIRST_DRIVE_ID)), ["laptop"]);
+        assert_eq!(whole_on(&claims, &devices, Some("another-drive")), [THIS_DEVICE]);
+        assert!(whole_on(&claims[1..2], &devices, Some(FIRST_DRIVE_ID)).is_empty(), "a removed device's claim was counted");
+        assert!(whole_on(&claims, &devices, None).is_empty());
+        assert!(whole_on(&[], &devices, Some(FIRST_DRIVE_ID)).is_empty(), "silence was read as a claim");
     }
 
-    /// **Stating the default never writes over one stated meanwhile.** A
-    /// device's first pass states `whole` if it has stated nothing, while a
-    /// `pin default on-demand` — or a joining device's — lands at the same
-    /// time: whichever runs first, the device ends `on-demand`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn stating_the_default_does_not_write_over_one_stated_meanwhile() {
+    /// A daemon, its records and its machine database, for one person, with a
+    /// vault recorded as their drive.
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        rt: crate::DeviceRuntime,
+        store: Arc<UserStore>,
+        records: SqliteRecordStore,
+        db: Arc<SqlitePool>,
+    }
+
+    async fn fixture() -> Fixture {
         use crate::users::DeviceUsers as _;
         let temp = tempfile::TempDir::new().unwrap();
-        let secrets = std::sync::Arc::new(kotton_secret::MemorySecrets::new());
-        let rt = crate::DeviceRuntime::new_with_secrets(temp.path().to_path_buf(), crate::config::RuntimeConfig::default(), secrets)
-            .await
-            .unwrap();
-        rt.create_user("alice", "canyon-orbit-velvet-fish-hospital").await.unwrap();
-        let records = std::sync::Arc::new(kotton_record::open::user_record_store(rt.base_dir(), "alice", rt.secrets()).unwrap());
-        let registry = std::sync::Arc::clone(&rt.schema_registry);
-        for round in 0..20 {
-            let me = format!("did:key:z6Mkround{round}");
-            let stating = tokio::spawn({
-                let (registry, records, me) = (std::sync::Arc::clone(&registry), std::sync::Arc::clone(&records), me.clone());
-                async move { state_default(&registry, &records, &me).await.unwrap() }
-            });
-            let saying = tokio::spawn({
-                let (registry, records, me) = (std::sync::Arc::clone(&registry), std::sync::Arc::clone(&records), me.clone());
-                async move { write(&registry, &records, &me, &PinScope::Default, Some(PinValue::OnDemand)).await.unwrap() }
-            });
-            stating.await.unwrap();
-            saying.await.unwrap();
-            let all = settings(&registry, &records).await.unwrap();
-            assert_eq!(stated_default(&all, &me), Some(PinValue::OnDemand), "round {round}: the stated default was written over");
-        }
-    }
-
-    /// **A folder no setting could keep is never recorded**, whatever client
-    /// sent it: `pins::set` holds every scope to `PinScope::normalised`, the
-    /// normaliser `parse` ends in. `/photos/` is kept as `/photos`, and then
-    /// keeps `/photos/x` whole; `photos` and `""` are refused with a sentence
-    /// and nothing is written.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_folder_is_held_to_its_form_where_the_record_is_made() {
-        use crate::users::DeviceUsers as _;
-        let temp = tempfile::TempDir::new().unwrap();
-        let secrets = std::sync::Arc::new(kotton_secret::MemorySecrets::new());
+        let secrets = Arc::new(kotton_secret::MemorySecrets::new());
         let rt = crate::DeviceRuntime::new_with_secrets(temp.path().to_path_buf(), crate::config::RuntimeConfig::default(), secrets)
             .await
             .unwrap();
@@ -632,39 +732,190 @@ mod tests {
         let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&vault).unwrap().to_string();
         kotton_peer::daemon::db::insert_paired_node(&db, "vault", "alice", &did, &vault, "[]", 0, None).await.unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &vault).await.unwrap();
+        Fixture { _temp: temp, rt, store, records, db }
+    }
 
+    impl Fixture {
+        async fn rows(&self, nsid: &str) -> Vec<Value> {
+            Record::new(&self.rt.schema_registry, &self.records).query(nsid, Vec::new(), None, None, None).await.unwrap()
+        }
+        /// The record store's version of `id`: its revision, which every
+        /// write raises (kotton #158), and whether it is a tombstone.
+        async fn version(&self, id: &str) -> Option<(i64, bool)> {
+            use kotton_record::record_store::RecordStore as _;
+            self.records.export_changeset(0).await.unwrap().into_iter().find(|r| r.id == id).map(|r| (r.revision, r.deleted_at.is_some()))
+        }
+    }
+
+    /// **Settings stay in the device's own database, and none is written to
+    /// any drive** (kotton #171's first clause): `pin` at every scope keeps a
+    /// row in `pin_settings`, and the person's record store — what rides the
+    /// history log to the drive — holds no `sh.kotton.pin` record and no
+    /// record but this device's one claim.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settings_stay_in_the_devices_own_database_and_none_reaches_a_drive() {
+        let f = fixture().await;
         let me = "did:key:z6Mkme";
-        let folder = |f: &str| PinScope::Folder { drive: FIRST_DRIVE_NAME.into(), folder: f.into() };
+        let set = |scope: PinScope, value: Option<PinValue>| {
+            let f = &f;
+            async move { super::set(&f.rt.schema_registry, &f.records, &f.store, &f.db, "alice", me, &scope, value).await.unwrap().unwrap() }
+        };
+        set(PinScope::Default, Some(PinValue::OnDemand)).await;
+        set(PinScope::Drive { drive: FIRST_DRIVE_NAME.into() }, Some(PinValue::Whole)).await;
+        let read = set(PinScope::Folder { drive: FIRST_DRIVE_NAME.into(), folder: "/raw".into() }, Some(PinValue::OnDemand)).await;
+        assert_eq!((read.default, read.exceptions.len()), (PinValue::OnDemand, 2), "{read:?}");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pin_settings WHERE user_id = 'alice'").fetch_one(f.db.as_ref()).await.unwrap();
+        assert_eq!(rows, 3, "a setting is not in the device's own database");
+        assert!(f.rows(PIN_NSID).await.is_empty(), "a setting was written to the record log");
+        use kotton_record::record_store::RecordStore as _;
+        let log = f.records.export_changeset(0).await.unwrap();
+        assert!(log.iter().all(|r| r.schema_nsid != PIN_NSID), "a setting rides the log: {log:?}");
+        // A folder on demand: the drive is not kept whole, so nothing is claimed.
+        assert!(f.rows(CLAIM_NSID).await.is_empty(), "a device keeping a folder on demand claims the drive whole");
+    }
+
+    /// **Each device writes only its own claim; a claim is written by `pin …
+    /// whole`, withdrawn by a delete at `pin … on-demand`, and written again —
+    /// each a new version, so each replicates** (kotton #171's rules, on
+    /// #158). Another device's claim, as a pass brought it, is never touched.
+    /// And the cost is bounded: a claim already there is not written again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_device_writes_only_its_own_claim_and_withdraws_it_by_a_delete() {
+        let f = fixture().await;
+        let me = "did:key:z6Mkme";
+        let other = claimed("did:key:z6Mkother", FIRST_DRIVE_ID);
+        Record::new(&f.rt.schema_registry, &f.records).insert(CLAIM_NSID, other.to_record()).await.unwrap();
+        let mine = claimed(me, FIRST_DRIVE_ID);
+        let personal = PinScope::Drive { drive: FIRST_DRIVE_NAME.into() };
+        let set = |value: PinValue| {
+            let (f, personal) = (&f, personal.clone());
+            async move { super::set(&f.rt.schema_registry, &f.records, &f.store, &f.db, "alice", me, &personal, Some(value)).await.unwrap().unwrap() }
+        };
+
+        set(PinValue::Whole).await;
+        let written = f.version(&mine.record_id()).await.expect("`pin personal whole` wrote no claim");
+        assert!(!written.1);
+        let all = settings(&f.db, "alice").await.unwrap();
+        assert!(!claim(&f.rt.schema_registry, &f.records, &all, me).await.unwrap(), "a claim already there was written again");
+        assert_eq!(f.version(&mine.record_id()).await, Some(written), "a claim already there was written again");
+
+        set(PinValue::OnDemand).await;
+        let withdrawn = f.version(&mine.record_id()).await.expect("the withdrawn claim left no tombstone");
+        assert!(withdrawn.1 && withdrawn.0 > written.0, "the withdrawal is not a delete of a later version: {withdrawn:?}");
+        set(PinValue::Whole).await;
+        let again = f.version(&mine.record_id()).await.unwrap();
+        assert!(!again.1 && again.0 > withdrawn.0, "the claim made again is not a later version: {again:?}");
+
+        let claims = claims(&f.rt.schema_registry, &f.records).await.unwrap();
+        assert!(claims.contains(&other), "this device touched another device's claim");
+        assert_eq!(claims.iter().filter(|c| c.device == me).count(), 1, "one record per device and drive");
+        assert_eq!(f.version(&other.record_id()).await.map(|v| v.1), Some(false));
+    }
+
+    /// **What kotton #155 wrote is migrated in place**: this device's
+    /// `sh.kotton.pin` records move into its own database and are deleted
+    /// from the log; another device's are left; a setting stated here since
+    /// is not written over; and a second run moves nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_settings_155_wrote_move_into_the_devices_own_database() {
+        let f = fixture().await;
+        let me = "did:key:z6Mkme";
+        let as_155 = |device: &str, scope: &str, drive: Option<&str>, folder: Option<&str>, value: &str| {
+            json!({
+                "id": format!("pin-{}", blake3::hash(format!("{device}{scope}{drive:?}{folder:?}").as_bytes()).to_hex()),
+                "device": device, "scope": scope, "drive": drive, "folder": folder, "value": value,
+            })
+        };
+        let writer = Record::new(&f.rt.schema_registry, &f.records);
+        for body in [
+            as_155(me, "default", None, None, "on-demand"),
+            as_155(me, "folder", Some(FIRST_DRIVE_NAME), Some("/photos"), "whole"),
+            as_155(me, "drive", Some(FIRST_DRIVE_NAME), None, "on-demand"),
+            as_155("did:key:z6Mkother", "default", None, None, "whole"),
+        ] {
+            writer.insert(PIN_NSID, body).await.unwrap();
+        }
+        write(&f.db, "alice", &PinScope::Drive { drive: FIRST_DRIVE_NAME.into() }, Some(PinValue::Whole)).await.unwrap();
+
+        assert_eq!(migrate(&f.rt.schema_registry, &f.records, &f.db, "alice", me).await.unwrap(), 3);
+        let mut all = settings(&f.db, "alice").await.unwrap();
+        all.sort_by_key(|s| s.scope.said());
+        assert_eq!(
+            all,
+            [
+                at(PinScope::Default, PinValue::OnDemand),
+                at(PinScope::Drive { drive: FIRST_DRIVE_NAME.into() }, PinValue::Whole),
+                at(PinScope::Folder { drive: FIRST_DRIVE_NAME.into(), folder: "/photos".into() }, PinValue::Whole),
+            ],
+            "the stated setting was written over, or a record was not moved"
+        );
+        let left = f.rows(PIN_NSID).await;
+        assert_eq!(left.len(), 1, "this device's records were not deleted, or another's were: {left:?}");
+        assert_eq!(left[0]["device"], "did:key:z6Mkother");
+        assert_eq!(migrate(&f.rt.schema_registry, &f.records, &f.db, "alice", me).await.unwrap(), 0, "a second run moved something");
+    }
+
+    /// **A folder no setting could keep is never kept**, whatever client
+    /// sent it: `pins::set` holds every scope to `PinScope::normalised`, the
+    /// normaliser `parse` ends in. `/photos/` is kept as `/photos`, and then
+    /// keeps `/photos/x` whole; `photos` and `""` are refused with a sentence
+    /// and nothing is written.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_folder_is_held_to_its_form_where_the_setting_is_kept() {
+        let f = fixture().await;
+        let me = "did:key:z6Mkme";
+        let folder = |p: &str| PinScope::Folder { drive: FIRST_DRIVE_NAME.into(), folder: p.into() };
         let set = |scope: PinScope| {
-            let (rt, store, records, db) = (&rt, &store, &records, &db);
-            async move { super::set(&rt.schema_registry, records, store, db, "alice", me, &scope, Some(PinValue::Whole)).await.unwrap() }
+            let f = &f;
+            async move { super::set(&f.rt.schema_registry, &f.records, &f.store, &f.db, "alice", me, &scope, Some(PinValue::Whole)).await.unwrap() }
         };
         set(PinScope::Default).await.unwrap();
-        write(&rt.schema_registry, &records, me, &PinScope::Default, Some(PinValue::OnDemand)).await.unwrap();
+        write(&f.db, "alice", &PinScope::Default, Some(PinValue::OnDemand)).await.unwrap();
         for bad in ["photos", ""] {
-            let refused = set(folder(bad)).await.expect_err("a folder no setting could keep was recorded");
+            let refused = set(folder(bad)).await.expect_err("a folder no setting could keep was kept");
             assert!(refused.contains("beginning '/'"), "{bad:?}: {refused}");
         }
         let kept = set(folder("/photos/")).await.unwrap();
         assert_eq!(kept.exceptions.iter().map(|s| s.scope.clone()).collect::<Vec<_>>(), [folder("/photos")]);
-        let all = settings(&rt.schema_registry, &records).await.unwrap();
-        assert_eq!(resolve(&all, me, FIRST_DRIVE_NAME, Some("/photos/x"), UNSTATED).0, PinValue::Whole);
-        assert_eq!(resolve(&all, me, FIRST_DRIVE_NAME, Some("/notes/x"), UNSTATED).0, PinValue::OnDemand);
+        let all = settings(&f.db, "alice").await.unwrap();
+        assert_eq!(resolve(&all, FIRST_DRIVE_NAME, Some("/photos/x")).0, PinValue::Whole);
+        assert_eq!(resolve(&all, FIRST_DRIVE_NAME, Some("/notes/x")).0, PinValue::OnDemand);
+        assert!(write(&f.db, "alice", &PinScope::Default, None).await.is_err(), "the default was told to follow nothing");
     }
 
-    /// The record is the setting, field for field, and its id is the device
-    /// and the scope, so a scope set again is one record.
+    /// **A drive that no longer exists is told of to nobody, and a claim for
+    /// it counts for nothing** (kotton #171: a retired drive leaves no claim
+    /// behind): the telling walks the drives this device records, never the
+    /// claims, so a claim naming an id no recorded drive has — a drive moved
+    /// away and retired here — is neither a notice nor a keeper; the first
+    /// drive, claimed by nobody, is told of.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retired_drive_leaves_no_claim_in_the_telling() {
+        let f = fixture().await;
+        let devices = vec![("did:key:z6Mkme".to_string(), THIS_DEVICE.to_string())];
+        let claims = vec![claimed("did:key:z6Mkme", &"ab".repeat(16))];
+        let told = notices(&f.db, "alice", &claims, &devices).await.unwrap();
+        assert_eq!(told, [PinNotice::NoWholeDevice { drive: FIRST_DRIVE_NAME.into() }], "{told:?}");
+        let claims = vec![claimed("did:key:z6Mkme", FIRST_DRIVE_ID)];
+        assert!(notices(&f.db, "alice", &claims, &devices).await.unwrap().is_empty());
+    }
+
+    /// The record is the claim, field for field — the device and the drive
+    /// and nothing else — and its id is the two, so a device claims a drive
+    /// once.
     #[test]
-    fn a_setting_is_one_record_per_device_and_scope() {
-        let s = at("did:key:z6Mk", folder("/photos"), PinValue::Whole);
-        assert_eq!(from_record(&to_record(&s)).unwrap(), s);
-        let again = at("did:key:z6Mk", folder("/photos"), PinValue::OnDemand);
-        assert_eq!(to_record(&s)["id"], to_record(&again)["id"]);
-        assert_ne!(to_record(&s)["id"], to_record(&at("did:key:other", folder("/photos"), PinValue::Whole))["id"]);
-        let schema = kotton_schemas::core::CoreSchema::Pin.definition();
-        let body = to_record(&s);
-        for field in schema.fields {
-            assert!(body.get(&field.name).is_some(), "the record has no {}", field.name);
-        }
+    fn a_claim_is_one_record_per_device_and_drive() {
+        let c = claimed("did:key:z6Mk", FIRST_DRIVE_ID);
+        assert_eq!(Claim::from_record(&c.to_record()).unwrap(), c);
+        assert_eq!(c.record_id(), claimed("did:key:z6Mk", FIRST_DRIVE_ID).record_id());
+        assert_ne!(c.record_id(), claimed("did:key:other", FIRST_DRIVE_ID).record_id());
+        assert_ne!(c.record_id(), claimed("did:key:z6Mk", "another").record_id());
+        let schema = kotton_schemas::core::CoreSchema::KeepsWhole.definition();
+        let fields: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(fields, ["device", "drive"], "a claim carries more than the device and the drive");
+        let body = c.to_record();
+        let mut keys: Vec<&str> = body.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["device", "drive", "id"]);
     }
 }

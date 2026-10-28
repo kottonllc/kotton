@@ -1368,10 +1368,12 @@ pub(super) async fn handle_request(
             };
             kotton_device::users::drive_verbs::move_to(runtime, &store, &records, db, &user_id, &name, &to, from.as_deref()).await
         }
-        // What this device keeps (kotton #55): its pin settings are records in
-        // the person's drive (`kotton_device::users::pins`). A setting that
-        // keeps something whole starts a pass now — `pin <drive> whole` is
-        // "collect all my things" — which fetches what this device lacks.
+        // What this device keeps (kotton #55, #171): its pin settings are its
+        // own, in this device's database, and what it publishes is a
+        // whole-keeper claim per drive it keeps whole (`kotton_device::users::pins`).
+        // A setting that keeps something whole starts a pass now — `pin <drive>
+        // whole` is "collect all my things" — which fetches what this device
+        // lacks and carries its claim to the drive.
         UserRequest::PinSet { user_id, scope, value } => {
             let (store, records) = match resident_with_records(runtime, users, record_stores, &user_id) {
                 Ok(both) => both,
@@ -1394,7 +1396,7 @@ pub(super) async fn handle_request(
                 Ok(both) => both,
                 Err(message) => return Ok(UserResponse::Error { message }),
             };
-            let read = kotton_device::users::pins::Read::now(&runtime.schema_registry, &records, &store, &runtime.operational_did()).await?;
+            let read = kotton_device::users::pins::Read::now(&runtime.schema_registry, &records, &store, db, &user_id, &runtime.operational_did()).await?;
             Ok(UserResponse::Pins { pins: read.readout(db, &user_id).await? })
         }
         UserRequest::Status { user_id } => {
@@ -1402,7 +1404,7 @@ pub(super) async fn handle_request(
                 Ok(both) => both,
                 Err(message) => return Ok(UserResponse::Error { message }),
             };
-            let read = kotton_device::users::pins::Read::now(&runtime.schema_registry, &records, &store, &runtime.operational_did()).await?;
+            let read = kotton_device::users::pins::Read::now(&runtime.schema_registry, &records, &store, db, &user_id, &runtime.operational_did()).await?;
             let status = read.status(db, &user_id, sync_engine.last_sync_at(&user_id)).await?;
             Ok(UserResponse::Status { status })
         }
