@@ -53,16 +53,27 @@ enum Line<'a> {
 /// What `drive enrol` (and `device admit`, its retired name) says when no invite is among the words.
 pub(super) const ENROL_USAGE: &str = "usage: drive enrol <invite>";
 
-/// The invite among the words after `enrol` (the first that is not a `--` flag) and the
-/// flags that remain. The one place the invite is found; `None` is the usage refusal.
+/// The flags `drive enrol` knows. They are grammar, not posture: `--cosigner` and `--full`
+/// are still *sent*, and the daemon refuses them. The parser holds the vocabulary the
+/// daemon knows so that a word outside it is usage; the daemon remains the only guard on
+/// posture, and nothing here judges one.
+const ENROL_FLAGS: [&str; 3] = ["--blind", "--cosigner", "--full"];
+
+/// The invite among the words after `enrol` and the flags that remain. The one place the
+/// invite is found, and the one grammar of both doors (`drive enrol`, `device admit`):
+/// exactly one word that is not a `--` flag, and no flag outside [`ENROL_FLAGS`]. `None`
+/// (none, a second word, or an unknown flag) is the usage refusal.
 pub(super) fn split_invite(words: impl IntoIterator<Item = String>) -> Option<(String, Vec<String>)> {
     let mut invite = None;
     let mut flags = Vec::new();
     for w in words {
-        if invite.is_none() && !w.starts_with("--") {
-            invite = Some(w);
-        } else {
+        if w.starts_with("--") {
+            if !ENROL_FLAGS.contains(&w.as_str()) {
+                return None;
+            }
             flags.push(w);
+        } else if invite.replace(w).is_some() {
+            return None;
         }
     }
     invite.map(|i| (i, flags))
@@ -316,6 +327,18 @@ mod tests {
         assert_eq!(parse(&words("list")).ok(), Some(Line::List { json: false }));
         let refused = parse(&words("create photos --json")).expect_err("--json on create");
         assert_eq!(refused.exit_code, ExitCode::Code(2));
+    }
+
+    /// `enrol` takes one invite and the flags the daemon knows; anything else is usage, before a session.
+    #[test]
+    fn enrol_refuses_a_second_word_and_an_unknown_flag() {
+        for line in ["enrol CODE extra", "enrol CODE --frob"] {
+            let refused = parse(&words(line)).expect_err(line);
+            assert_eq!(refused.exit_code, ExitCode::Code(2), "`drive {line}`");
+        }
+        for line in ["enrol CODE --blind", "enrol --cosigner CODE", "enrol CODE --full"] {
+            assert!(parse(&words(line)).is_ok(), "`drive {line}` did not parse");
+        }
     }
 
     /// The command-tree decision: 2 is usage. A line the tree does not have exits 2, in either door.
