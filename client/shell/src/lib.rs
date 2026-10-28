@@ -24,7 +24,7 @@ mod security_tests;
 #[cfg(test)]
 mod execution_tests;
 
-pub use commands::{Command, CommandOutput, CommandRegistry, ExitCode};
+pub use commands::{Command, CommandOutput, CommandRegistry, ExitCode, Verb, VerbIs};
 pub use executor::ShellExecutor;
 pub use host::ShellHost;
 #[cfg(feature = "cli")]

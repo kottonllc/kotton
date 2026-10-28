@@ -126,6 +126,17 @@ impl CommandRegistry {
         self.commands.contains_key(name)
     }
 
+    /// The verbs the command registered as `name` declares ([`super::Verb`]): empty
+    /// for a noun the tree's rewrite has not reached, and for a name nothing answers.
+    pub fn verbs_of(&self, name: &str) -> &'static [super::Verb] {
+        self.commands.get(name).map_or(&[], |cmd| cmd.verbs())
+    }
+
+    /// Whether the command registered as `name` reads `--json` among its own words.
+    pub fn answers_json(&self, name: &str) -> bool {
+        self.commands.get(name).is_some_and(|cmd| cmd.answers_json())
+    }
+
     /// Get all command names for completion
     pub fn command_names(&self) -> Vec<String> {
         self.commands.keys().cloned().collect()
@@ -197,8 +208,8 @@ const HELP_TOPICS: &[(&str, &str)] = &[
         "syncing — keep your files the same across your devices, by way of your drive\n\
          \n\
          sync                    sync this device's drives now\n\
-         sync add <drive>        keep this device's rule for a drive (--push, --pull, --watch)\n\
-         sync list               show this device's rules\n\
+         pin list                what this device keeps of each drive\n\
+         pin <drive> whole       keep a drive on this device (`on-demand`: fetch when opened)\n\
          \n\
          Your things live on a drive, and each device syncs with it: what one\n\
          device writes reaches your others by way of the drive, never directly.\n\

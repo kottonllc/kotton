@@ -341,6 +341,11 @@ lint:
     # docs/cli/reference.md is generated from the CLI's command tree; checked, never
     # rewritten, so a dirty copy cannot go green.
     cargo xtask-docs docs-check
+    # The clap tree and the REPL's registry are kotton-protocol's command-tree decision's: every
+    # name either registers has a place in it, and `drive`, `pin` and `sync` are one tree, held
+    # to its verbs both ways.
+    # Reads kotton-protocol's checkout when there is one, and the words held here otherwise.
+    cargo xtask-docs verb-check
     # Every `kotton` command README.md gives is one the binary has (held through the reference
     # above), and every script it runs from a checkout is in this tree. A page added later is
     # gated by naming it here: `cargo xtask claim-check <page>…`.

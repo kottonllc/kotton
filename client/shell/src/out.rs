@@ -193,8 +193,10 @@ fn truncate(s: &str, width: usize) -> String {
 
 /// Render a sequence of shapes to the terminal. Payloads print verbatim to stdout
 /// (the pipe channel); messages print styled — to stdout on a TTY, to stderr
-/// otherwise, so only `Data`/`Reveal` flow through a pipe. Color auto-strips
-/// off-TTY / under `NO_COLOR` via the `colored` crate.
+/// otherwise, so only `Data`/`Reveal` flow through a pipe. A failure is on stderr
+/// at a terminal too: the command-tree decision's conventions put a refusal's reason there, so
+/// `2>/dev/null` hides it and nothing else. Color auto-strips off-TTY / under
+/// `NO_COLOR` via the `colored` crate.
 pub fn render(outs: &[Out], actor: Option<&str>) {
     let tty = std::io::stdout().is_terminal();
     for out in outs {
@@ -206,7 +208,7 @@ pub fn render(outs: &[Out], actor: Option<&str>) {
         if let (Out::Confirm { .. }, Some(a)) = (out, actor) {
             text.push_str(&format!(" {}", format!("· as {a}").dimmed()));
         }
-        if out.is_payload() || tty {
+        if out.is_payload() || (tty && !matches!(out, Out::Fail { .. })) {
             println!("{text}");
         } else {
             eprintln!("{text}");

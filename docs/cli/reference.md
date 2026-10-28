@@ -122,15 +122,15 @@ Kotton - Your data sovereignty platform
 * `whoami` — Show the identity your commands act as (the active identity)
 * `repl` — Launch the interactive REPL for a user
 * `peer` — Peer node management (identity, list, show, add, revoke, mount) — shares the REPL's `peer` verb
-* `device` — Manage the devices on your identity — add, admit, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon
+* `device` — Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon. `admit <invite>` is `drive enrol <invite>` now, and still runs it
 * `schema` — Schema management (list, show, register)
 * `handler` — Handler registry (register, unregister, get, list, set-default)
 * `record` — Record addressing — open records by kotton:// URL
 * `records` — The project's records in a root its org owns — init, invite, import, export
 * `import` — Bring your history with you — read an export (.ics) into your own records
-* `sync` — Sync this device's drives (now, add, list, remove) — shares the REPL's `sync` verb
-* `drive` — Your drives — create, list, show, move — shares the REPL's `drive` verb
-* `pin` — What this device keeps of your drives — default, a drive or folder, list — shares the REPL's `pin` verb
+* `sync` — Sync this device's drives, now — the REPL's `sync`, one parser for both
+* `drive` — Your drives — create, list, show, move, enrol — the REPL's `drive`, one parser for both
+* `pin` — What this device keeps of your drives — default, a drive or folder, list — the REPL's `pin`, one parser for both
 * `status` — When this device last synced, what it keeps of each drive, and the notices — shares the REPL's `status` verb
 * `issuer` — Trusted-issuer registry (add, remove, list) — shares the REPL's `issuer` verb
 * `cp` — Copy files into and out of your tree — shares the REPL's `cp` verb. `host:` names this computer's own files, a relative one from the directory the command is run in
@@ -151,7 +151,7 @@ Kotton - Your data sovereignty platform
 
 ###### **Options:**
 
-* `--json` — Machine-readable output: print shapes as JSON instead of styled text. Put it before the verb (`kotton --json issuer list`). Only the shared verbs that emit shapes honor it
+* `--json` — Machine-readable output: print shapes as JSON instead of styled text. Put it before the verb (`kotton --json issuer list`). Only the shared verbs that emit shapes honor it. A verb that reads `--json` among its own words (`drive`, `pin`) is handed the word instead, so `kotton --json drive list` is `kotton drive list --json`, as the REPL's `drive list --json` is
 
 
 
@@ -434,8 +434,8 @@ peer — manage paired peer nodes
 
 USAGE:
   peer identity                                    print this node's DID and signing key
-  peer list                                        paired peers: the remote `sync <remote>` takes, where
-                                                   each is reachable, and its relay
+  peer list                                        paired peers: the remote `peer show <remote>` takes,
+                                                   where each is reachable, and its relay
   peer show <remote>                               one peer whole: its line (the one `id recover` asks
                                                    for), its full DID, key, and `peer add` line
   peer add <remote> <did> <pubkey-hex> <addr>      add a peer manually (no ceremony)
@@ -458,17 +458,17 @@ USAGE:
 
 ## `Kotton device`
 
-Manage the devices on your identity — add, admit, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon
+Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon. `admit <invite>` is `drive enrol <invite>` now, and still runs it
 
 **Usage:** `Kotton device [OPTIONS] [ARGS]...`
 
 ```text
-device add|admit|join|list|name|revoke — pair another of your machines to this identity (six-digit confirmation); `admit <invite>` takes in a vault, `--browser` admits a phone's browser, `--gateway <code>` a gateway elsewhere. `kotton device reset` starts this whole device fresh and is the CLI's, not this shell's — it deletes the directory this runtime is using
+device add|join|list|name|revoke — pair another of your machines to this identity (six-digit confirmation); `--browser` admits a phone's browser, `--gateway <code>` a gateway elsewhere. A vault's invite is `drive enrol <invite>` (`device admit` was its name, and still runs it). `kotton device reset` starts this whole device fresh and is the CLI's, not this shell's — it deletes the directory this runtime is using
 ```
 
 ###### **Arguments:**
 
-* `<ARGS>` — Arguments: `add [--as N] [--blind|--cosigner]` | `admit <invite>` | `join [code] [--as N]` | `list` | `revoke <id>` | `name [N]` | `reset [--yes]`
+* `<ARGS>` — Arguments: `add [--as N] [--blind|--cosigner]` | `join [code] [--as N]` | `list` | `revoke <id>` | `name [N]` | `reset [--yes]`
 
 ###### **Options:**
 
@@ -759,44 +759,37 @@ Bring your history with you — read an export (.ics) into your own records
 
 ## `Kotton sync`
 
-Sync this device's drives (now, add, list, remove) — shares the REPL's `sync` verb
+Sync this device's drives, now — the REPL's `sync`, one parser for both
 
 **Usage:** `Kotton sync [OPTIONS] [ARGS]...`
 
 ```text
-sync — keep this device's drives current
+sync — sync this device's drives, now
 
 USAGE:
-  sync [now] [--no-wait]                       sync this device's drives now
-  sync [--push | --pull] <remote>              run an ad-hoc sync against a drive or a remote
-  sync add <drive> [--push | --pull] [--watch] keep this device's rule for a drive
-  sync list                                    list this device's rules
-  sync remove <drive>                          remove the rule for a drive
+  sync [--no-wait]
 
 A device syncs to your drives, never to another device: your other devices
-get what this one writes by way of a drive.
+get what this one writes by way of a drive. What this device keeps of each
+drive is `pin`'s: `pin list` says it.
 
 FLAGS:
-  --push    this device sends to the drive only
-  --pull    this device takes from the drive only
-  (none)    both ways, last-write-wins by modified timestamp
-  --watch   sync the drive in the background as well as when asked
+  --no-wait   start the sync and return; `status` says when it last synced
 
-EXAMPLES:
-  sync                                 # every drive, now
-  sync add vault --watch               # keep 'vault' current in the background
-  sync add vault --pull                # this device only takes from 'vault'
-  sync list                            # show this device's rules
-  sync remove vault                    # drop the rule for 'vault'
+Exit 0 when done, 1 when refused (the reason on stderr), 2 for a line that is
+not the one above.
 
-NOTES:
-  The local 'local' mount is always the sync source/destination.
-  A drive is named by its node's id, the `id` column of 'device list'.
+RETIRED:
+  sync now                 is `sync`, and still runs it
+  sync add|list|remove     gone: what this device keeps of a drive is `pin`
+  sync [--push|--pull] <remote>
+                           gone: `sync` syncs this device's drives
+  sync --node <id>         gone: a device is not a sync target
 ```
 
 ###### **Arguments:**
 
-* `<ARGS>` — Arguments: (none) = all devices | `now …` | `add <node> <path>` | `list` | `remove …` | `--push|--pull <remote>`
+* `<ARGS>` — Arguments: none, or `--no-wait`. `sync now` is `sync`; `sync add|list|remove` and `sync <remote>` are gone (see the help below)
 
 ###### **Options:**
 
@@ -806,7 +799,7 @@ NOTES:
 
 ## `Kotton drive`
 
-Your drives — create, list, show, move — shares the REPL's `drive` verb
+Your drives — create, list, show, move, enrol — the REPL's `drive`, one parser for both
 
 **Usage:** `Kotton drive [OPTIONS] [ARGS]...`
 
@@ -815,10 +808,11 @@ drive — your drives: where your things live
 
 USAGE:
   drive create <name> [--on <vault>]   make a drive on one of your vaults
-  drive list                           every drive: where each lives, its size, which devices keep it whole
-  drive show <name>                    one drive, on each vault it is kept on
+  drive list [--json]                  every drive: where each lives, its size, which devices keep it whole
+  drive show <name> [--json]           one drive, on each vault it is kept on
   drive move <name> --to <vault> [--from <vault>]
                                        carry a drive, sealed, to another of your vaults
+  drive enrol <invite>                 take a vault's invite: the vault keeps drives for you
 
 A drive is a sealed tree a vault keeps for you; a vault keeps as many as you
 make. Its name is sealed under your key: the vault cannot read it. Your first
@@ -832,11 +826,20 @@ unfinished move, and moving the drive there again clears it. A move cut off
 after the other vault has the drive is finished by running it again. `personal`
 does not move.
 
+`enrol` takes the invite a vault's landlord gave you (`vault invite <name>`
+at theirs): this device meets the vault at the invite's relay, and you type
+the six digits they read out. The vault keeps sealed what you put on a drive
+there and can read none of it. It asks nothing else.
+
 FLAGS:
   --on <vault>   the vault to make the drive on: its label, DID or key
                  (needed when you keep drives on more than one)
   --to <vault>   the vault to move the drive to: its label, DID or key
   --from <vault> the copy to move, where two drives of yours share a name
+  --json         `list` and `show`: what the vaults answered, as JSON on stdout
+
+Exit 0 when done, 1 when refused (the reason on stderr), 2 for a line that is
+not one of the above.
 
 EXAMPLES:
   drive create photos                  # on your one vault
@@ -844,11 +847,13 @@ EXAMPLES:
   drive list
   drive show photos
   drive move photos --to office-vault
+  drive list --json
+  drive enrol <invite>                 # the invite the landlord gave you
 ```
 
 ###### **Arguments:**
 
-* `<ARGS>` — Arguments: `create <name> [--on <vault>]` | `list` | `show <name>` | `move <name> --to <vault>`
+* `<ARGS>` — Arguments: `create <name> [--on <vault>]` | `list [--json]` | `show <name> [--json]` | `move <name> --to <vault>` | `enrol <invite>`
 
 ###### **Options:**
 
@@ -858,7 +863,7 @@ EXAMPLES:
 
 ## `Kotton pin`
 
-What this device keeps of your drives — default, a drive or folder, list — shares the REPL's `pin` verb
+What this device keeps of your drives — default, a drive or folder, list — the REPL's `pin`, one parser for both
 
 **Usage:** `Kotton pin [OPTIONS] [ARGS]...`
 
@@ -868,15 +873,18 @@ pin — what this device keeps of your drives
 USAGE:
   pin default whole|on-demand                       this device's default, for every drive it has not been told about
   pin <drive>[:/<folder>] whole|on-demand|default   set a drive or a folder the other way on this device
-  pin list                                          this device's default and exceptions, and the notices
+  pin list [--json]                                 this device's default and exceptions, and the notices
 
-Every device of yours sees every drive. Whole keeps every file's content on
-this device; on demand keeps the index — every name, and where its content is
-— and fetches a file's content when it is opened. The nearest setting wins: a
-folder's over its drive's over this device's default, and `default` follows
-the one above. Your first device starts at whole; a device paired later at on
-demand. Pins hold for `personal` today: a device keeps no tree of a drive made
-with `drive create` yet, so its vault alone holds it, and `status` says so.
+  whole       keep on this device: every file's content is here, opened or not
+  on-demand   fetch when opened: this device keeps the index — every name, and
+              where its content is — and fetches a file's content when it is opened
+  default     follow the setting above: a folder its drive's, a drive this device's default
+
+Every device of yours sees every drive. The nearest setting wins: a folder's
+over its drive's over this device's default. Your first device starts at
+whole; a device paired later at on demand. Pins hold for `personal` today: a
+device keeps no tree of a drive made with `drive create` yet, so its vault
+alone holds it, and `status` says so.
 
 `pin <drive> whole` collects: this device fetches what it lacks of the drive
 now. A pinned file brings the pack it was written in: whatever else was written
@@ -887,9 +895,15 @@ devices read it and the vault cannot.
 You are told when no device of yours keeps a drive whole, and when this device
 runs short of room for what it keeps whole, with the setting that keeps less.
 
+FLAGS:
+  --json   `list`: this device's default, exceptions and notices, as JSON on stdout
+
+Exit 0 when done, 1 when refused (the reason on stderr), 2 for a line that is
+not one of the above.
+
 EXAMPLES:
-  pin default on-demand
-  pin personal:/photos whole
+  pin default on-demand         # fetch when opened, unless told otherwise
+  pin personal:/photos whole    # keep this folder on this device
   pin personal:/photos default
   pin personal whole            # collect all my things
   pin list
@@ -897,7 +911,7 @@ EXAMPLES:
 
 ###### **Arguments:**
 
-* `<ARGS>` — Arguments: `default whole|on-demand` | `<drive>[:/<folder>] whole|on-demand|default` | `list`
+* `<ARGS>` — Arguments: `default whole|on-demand` | `<drive>[:/<folder>] whole|on-demand|default` | `list [--json]`
 
 ###### **Options:**
 

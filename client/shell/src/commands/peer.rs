@@ -356,8 +356,8 @@ peer — manage paired peer nodes
 
 USAGE:
   peer identity                                    print this node's DID and signing key
-  peer list                                        paired peers: the remote `sync <remote>` takes, where
-                                                   each is reachable, and its relay
+  peer list                                        paired peers: the remote `peer show <remote>` takes,
+                                                   where each is reachable, and its relay
   peer show <remote>                               one peer whole: its line (the one `id recover` asks
                                                    for), its full DID, key, and `peer add` line
   peer add <remote> <did> <pubkey-hex> <addr>      add a peer manually (no ceremony)
@@ -399,21 +399,19 @@ mod peer_list_tests {
         }
     }
 
-    /// The column holding what `sync <remote>` takes is headed `remote`, the word
-    /// `sync`'s usage names it by. It was headed `label` until 2026-09-28, and the
-    /// owner, with a vault paired, had to ask which column `sync` wanted.
+    /// The column holding what `peer show <remote>` takes is headed `remote`, the
+    /// word its usage names it by. It was headed `label` until 2026-09-28, and the
+    /// owner, with a vault paired, had to ask which column a verb wanted. `sync`
+    /// took it too until the command-tree decision's tree, where `sync` takes no remote.
     #[test]
-    fn the_column_sync_takes_is_headed_by_the_word_sync_uses() {
+    fn the_column_peer_show_takes_is_headed_by_the_word_its_usage_uses() {
         let Out::Table { columns, rows } = list_table(&[node("ubuntu-s-1vcpu-1gb-nyc1", DID)])
         else {
             panic!("peer list is a table");
         };
         assert_eq!(columns[0], "remote");
         assert_eq!(rows[0][0], "ubuntu-s-1vcpu-1gb-nyc1");
-        assert!(
-            super::super::sync::HELP.contains("<remote>"),
-            "`sync`'s usage names the argument by the same word"
-        );
+        assert!(HELP.contains("peer show <remote>"), "`peer show`'s usage names the argument by the same word");
     }
 
     /// `peer show` prints the DID whole — every character, no `…` — through a

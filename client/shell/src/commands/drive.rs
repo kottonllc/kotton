@@ -3,7 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use kotton_wire::ipc::DriveDescriptor;
 
-use super::{Command, CommandOutput};
+use super::{Command, CommandOutput, Verb};
 use crate::out::Out;
 use crate::state::ShellState;
 
@@ -12,16 +12,68 @@ use crate::state::ShellState;
 /// Usage:
 /// ```text
 ///   drive create <name> [--on <vault>]
-///   drive list
-///   drive show <name>
+///   drive list [--json]
+///   drive show <name> [--json]
 ///   drive move <name> --to <vault> [--from <vault>]
+///   drive enrol <invite>
 /// ```
 ///
-/// The daemon asks the vaults (`kotton_device::users::drive_verbs`); this says
-/// what they answered.
+/// The command-tree decision's "Drives" line, but `export`, which waits on the vault's cut. The
+/// daemon asks the vaults (`kotton_device::users::drive_verbs`); this says what
+/// they answered. `enrol` is the tenant's side of a vault's invite, the ceremony
+/// `device admit` ran and still runs under that name with a line naming this one:
+/// the same request, so the rename reaches nothing it did not.
+///
+/// [`parse`] is the one parser for these words: `kotton drive …` hands it the
+/// words after the noun (`kotton_cli::bridge`), and the REPL hands it the same.
 pub struct DriveCommand;
 
-const USAGE: &str = "usage: drive create <name> [--on <vault>] | drive list | drive show <name> | drive move <name> --to <vault> [--from <vault>]";
+const USAGE: &str = "usage: drive create <name> [--on <vault>] | drive list [--json] | drive show <name> [--json] | \
+                     drive move <name> --to <vault> [--from <vault>] | drive enrol <invite>";
+
+/// The verbs, the command-tree decision's "Drives" line less `export`.
+const VERBS: &[Verb] = &[
+    Verb::current("create"),
+    Verb::current("list"),
+    Verb::current("show"),
+    Verb::current("move"),
+    Verb::current("enrol"),
+];
+
+/// A line of `drive`, parsed.
+#[derive(Debug, PartialEq, Eq)]
+enum Line<'a> {
+    Create { name: &'a str, on: Option<&'a str> },
+    List { json: bool },
+    Show { name: &'a str, json: bool },
+    Move { name: &'a str, to: &'a str, from: Option<&'a str> },
+    Enrol { words: Vec<String> },
+}
+
+/// The words after `drive`, as a [`Line`], or the usage refusal (exit 2).
+fn parse(args: &[String]) -> Result<Line<'_>, CommandOutput> {
+    let json = args.iter().any(|a| a == "--json");
+    let words: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a != "--json").collect();
+    let usage = |what: &str| Err(CommandOutput::usage(what.to_string(), Some(USAGE.into())));
+    if json && !matches!(words.first(), Some(&"list") | Some(&"show")) {
+        return usage("drive: `--json` is for `drive list` and `drive show`");
+    }
+    match words.as_slice() {
+        ["create", name] => Ok(Line::Create { name, on: None }),
+        ["create", name, "--on", on] => Ok(Line::Create { name, on: Some(on) }),
+        ["create", ..] => usage("drive create: unexpected words"),
+        ["list"] => Ok(Line::List { json }),
+        ["show", name] => Ok(Line::Show { name, json }),
+        ["move", name, "--to", to] => Ok(Line::Move { name, to, from: None }),
+        ["move", name, "--to", to, "--from", from] | ["move", name, "--from", from, "--to", to] => {
+            Ok(Line::Move { name, to, from: Some(from) })
+        }
+        ["move", ..] => usage("drive move: needs --to <vault>"),
+        ["enrol", ..] if words.len() > 1 => Ok(Line::Enrol { words: args[1..].to_vec() }),
+        ["enrol"] => usage("drive enrol: needs the invite the vault gave you"),
+        _ => usage("drive: unknown form"),
+    }
+}
 
 /// A size as a person reads it; `?` when the vault did not answer.
 fn size_said(size: Option<u64>) -> String {
@@ -54,94 +106,113 @@ fn table(drives: &[DriveDescriptor]) -> Out {
     }
 }
 
-/// The value of `flag` among `rest`, and whether anything else is there.
-fn flag_value<'a>(rest: &'a [String], flag: &str) -> Result<Option<&'a str>, ()> {
-    match rest {
-        [] => Ok(None),
-        [f, v] if f == flag => Ok(Some(v.as_str())),
-        _ => Err(()),
+/// What `--json` prints: the descriptors the daemon answered, as they cross, a
+/// payload on stdout.
+fn json(drives: &[DriveDescriptor]) -> Result<CommandOutput> {
+    Ok(CommandOutput::shapes(vec![Out::Data(serde_json::to_string_pretty(drives)?)]))
+}
+
+/// Run a parsed line of `drive`.
+async fn run(line: Line<'_>, state: &mut ShellState) -> Result<CommandOutput> {
+    let user_id = state.user_id.clone();
+    let client = std::sync::Arc::clone(&state.client);
+    let said = |verb: &str, e: std::io::Error| anyhow::anyhow!("drive {verb}: {e}");
+    match line {
+        Line::Create { name, on } => {
+            let drives = client.lock().await.drive_create(&user_id, name, on).await.map_err(|e| said("create", e))?;
+            let vault = drives.first().map(|d| d.vault.clone()).unwrap_or_default();
+            Ok(CommandOutput::shapes(vec![Out::Confirm {
+                action: format!("drive made on '{vault}'"),
+                subject: name.to_string(),
+            }]))
+        }
+        Line::List { json: as_json } => {
+            let drives = client.lock().await.drive_list(&user_id).await.map_err(|e| said("list", e))?;
+            if as_json {
+                return json(&drives);
+            }
+            if drives.is_empty() {
+                return Ok(CommandOutput::shapes(vec![Out::Note(
+                    "you keep no drive yet — your things live on a drive; `vault invite --me` makes one".into(),
+                )]));
+            }
+            Ok(CommandOutput::shapes(vec![table(&drives)]))
+        }
+        Line::Show { name, json: as_json } => {
+            let drives = client.lock().await.drive_show(&user_id, name).await.map_err(|e| said("show", e))?;
+            if as_json {
+                return json(&drives);
+            }
+            Ok(CommandOutput::shapes(
+                drives
+                    .iter()
+                    .map(|d| {
+                        Out::Record(vec![
+                            ("drive".into(), name_said(d)),
+                            ("vault".into(), d.vault.clone()),
+                            ("vault key".into(), d.vault_key.clone()),
+                            ("size".into(), size_said(d.size)),
+                            (
+                                "kept whole on".into(),
+                                if d.pinned_whole.is_empty() { "-".into() } else { d.pinned_whole.join(", ") },
+                            ),
+                        ])
+                    })
+                    .collect(),
+            ))
+        }
+        Line::Move { name, to, from } => {
+            let drives = client.lock().await.drive_move(&user_id, name, to, from).await.map_err(|e| said("move", e))?;
+            let vault = drives.first().map(|d| d.vault.clone()).unwrap_or_else(|| to.to_string());
+            Ok(CommandOutput::shapes(vec![Out::Confirm {
+                action: format!("drive moved to '{vault}'; your other devices follow it there at their next sync"),
+                subject: name.to_string(),
+            }]))
+        }
+        // The ceremony takes the lock for itself.
+        Line::Enrol { words } => super::device::enrol_vault(&words, state).await,
     }
 }
 
 #[async_trait]
 impl Command for DriveCommand {
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
-        let user_id = state.user_id.clone();
-        let mut client = state.client.lock().await;
-        let said = |verb: &str, e: std::io::Error| anyhow::anyhow!("drive {verb}: {e}");
-        match args {
-            [sub, name, rest @ ..] if sub == "create" => {
-                let Ok(on) = flag_value(rest, "--on") else {
-                    return Ok(CommandOutput::fail("drive create: unexpected words", Some(USAGE.into())));
-                };
-                let drives = client.drive_create(&user_id, name, on).await.map_err(|e| said("create", e))?;
-                let vault = drives.first().map(|d| d.vault.clone()).unwrap_or_default();
-                Ok(CommandOutput::shapes(vec![Out::Confirm {
-                    action: format!("drive made on '{vault}'"),
-                    subject: name.clone(),
-                }]))
-            }
-            [sub] if sub == "list" => {
-                let drives = client.drive_list(&user_id).await.map_err(|e| said("list", e))?;
-                if drives.is_empty() {
-                    return Ok(CommandOutput::shapes(vec![Out::Note(
-                        "you keep no drive yet — your things live on a drive; `vault invite --me` makes one".into(),
-                    )]));
-                }
-                Ok(CommandOutput::shapes(vec![table(&drives)]))
-            }
-            [sub, name] if sub == "show" => {
-                let drives = client.drive_show(&user_id, name).await.map_err(|e| said("show", e))?;
-                Ok(CommandOutput::shapes(
-                    drives
-                        .iter()
-                        .map(|d| {
-                            Out::Record(vec![
-                                ("drive".into(), name_said(d)),
-                                ("vault".into(), d.vault.clone()),
-                                ("vault key".into(), d.vault_key.clone()),
-                                ("size".into(), size_said(d.size)),
-                                (
-                                    "kept whole on".into(),
-                                    if d.pinned_whole.is_empty() { "-".into() } else { d.pinned_whole.join(", ") },
-                                ),
-                            ])
-                        })
-                        .collect(),
-                ))
-            }
-            [sub, name, rest @ ..] if sub == "move" => {
-                let (to, from) = match rest {
-                    [t, to] if t == "--to" => (to, None),
-                    [t, to, f, from] if t == "--to" && f == "--from" => (to, Some(from.as_str())),
-                    [f, from, t, to] if t == "--to" && f == "--from" => (to, Some(from.as_str())),
-                    _ => return Ok(CommandOutput::fail("drive move: needs --to <vault>", Some(USAGE.into()))),
-                };
-                let drives = client.drive_move(&user_id, name, to, from).await.map_err(|e| said("move", e))?;
-                let vault = drives.first().map(|d| d.vault.clone()).unwrap_or_else(|| to.clone());
-                Ok(CommandOutput::shapes(vec![Out::Confirm {
-                    action: format!("drive moved to '{vault}'; your other devices follow it there at their next sync"),
-                    subject: name.clone(),
-                }]))
-            }
-            _ => Ok(CommandOutput::fail("drive: unknown form", Some(USAGE.into()))),
+        match parse(args) {
+            Ok(line) => run(line, state).await,
+            Err(usage) => Ok(usage),
         }
+    }
+
+    /// A line this noun's parser refuses is answered here, before any door connects:
+    /// a usage line, or a retired word with the verb that replaced it, is the parser's
+    /// to say and asks the daemon nothing, so it exits 2 with no session and no identity.
+    /// Only a line that parses opens a session.
+    async fn execute_without_session(&self, args: &[String], _named: Option<&str>) -> Option<Result<CommandOutput>> {
+        parse(args).err().map(Ok)
     }
 
     fn complete(&self, _args: &[String], arg_index: usize) -> Vec<String> {
         if arg_index == 0 {
-            vec!["create".into(), "list".into(), "show".into(), "move".into()]
+            VERBS.iter().map(|v| v.word.to_string()).collect()
         } else {
             vec![]
         }
     }
 
     fn flags(&self) -> Vec<&'static str> {
-        vec!["--on", "--to", "--from"]
+        vec!["--on", "--to", "--from", "--json"]
     }
 
     fn help_text(&self) -> &'static str {
         HELP
+    }
+
+    fn verbs(&self) -> &'static [Verb] {
+        VERBS
+    }
+
+    fn answers_json(&self) -> bool {
+        true
     }
 }
 
@@ -150,10 +221,11 @@ drive — your drives: where your things live
 
 USAGE:
   drive create <name> [--on <vault>]   make a drive on one of your vaults
-  drive list                           every drive: where each lives, its size, which devices keep it whole
-  drive show <name>                    one drive, on each vault it is kept on
+  drive list [--json]                  every drive: where each lives, its size, which devices keep it whole
+  drive show <name> [--json]           one drive, on each vault it is kept on
   drive move <name> --to <vault> [--from <vault>]
                                        carry a drive, sealed, to another of your vaults
+  drive enrol <invite>                 take a vault's invite: the vault keeps drives for you
 
 A drive is a sealed tree a vault keeps for you; a vault keeps as many as you
 make. Its name is sealed under your key: the vault cannot read it. Your first
@@ -167,15 +239,86 @@ unfinished move, and moving the drive there again clears it. A move cut off
 after the other vault has the drive is finished by running it again. `personal`
 does not move.
 
+`enrol` takes the invite a vault's landlord gave you (`vault invite <name>`
+at theirs): this device meets the vault at the invite's relay, and you type
+the six digits they read out. The vault keeps sealed what you put on a drive
+there and can read none of it. It asks nothing else.
+
 FLAGS:
   --on <vault>   the vault to make the drive on: its label, DID or key
                  (needed when you keep drives on more than one)
   --to <vault>   the vault to move the drive to: its label, DID or key
   --from <vault> the copy to move, where two drives of yours share a name
+  --json         `list` and `show`: what the vaults answered, as JSON on stdout
+
+Exit 0 when done, 1 when refused (the reason on stderr), 2 for a line that is
+not one of the above.
 
 EXAMPLES:
   drive create photos                  # on your one vault
   drive create work --on office-vault  # on the vault labelled office-vault
   drive list
   drive show photos
-  drive move photos --to office-vault";
+  drive move photos --to office-vault
+  drive list --json
+  drive enrol <invite>                 # the invite the landlord gave you";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::ExitCode;
+
+    fn words(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    /// Every verb the table declares is a line this parser answers, so the table the
+    /// verb check reads and the words the parser takes are one list.
+    #[test]
+    fn every_declared_verb_parses() {
+        for (verb, line) in [
+            ("create", "create photos --on office"),
+            ("list", "list"),
+            ("show", "show photos"),
+            ("move", "move photos --to office"),
+            ("enrol", "enrol https://relay.example#amber-otter-kite"),
+        ] {
+            assert!(VERBS.iter().any(|v| v.word == verb), "{verb} is not declared");
+            assert!(parse(&words(line)).is_ok(), "`drive {line}` did not parse");
+        }
+        assert_eq!(VERBS.len(), 5, "a verb was declared that this test does not parse");
+    }
+
+    #[test]
+    fn json_is_a_word_of_list_and_show_and_of_nothing_else() {
+        assert_eq!(parse(&words("list --json")).ok(), Some(Line::List { json: true }));
+        assert_eq!(parse(&words("--json show photos")).ok(), Some(Line::Show { name: "photos", json: true }));
+        assert_eq!(parse(&words("list")).ok(), Some(Line::List { json: false }));
+        let refused = parse(&words("create photos --json")).expect_err("--json on create");
+        assert_eq!(refused.exit_code, ExitCode::Code(2));
+    }
+
+    /// The command-tree decision: 2 is usage. A line the tree does not have exits 2, in either door.
+    #[test]
+    fn a_line_that_is_not_one_exits_two() {
+        for line in ["", "frobnicate", "create", "move photos", "show", "enrol", "export photos /tmp/x"] {
+            let refused = parse(&words(line)).expect_err(line);
+            assert_eq!(refused.exit_code, ExitCode::Code(2), "`drive {line}`");
+        }
+    }
+
+    #[test]
+    fn enrol_hands_the_ceremony_every_word_after_the_verb() {
+        assert_eq!(
+            parse(&words("enrol CODE --blind")).ok(),
+            Some(Line::Enrol { words: words("CODE --blind") })
+        );
+    }
+
+    #[test]
+    fn the_help_names_every_declared_verb() {
+        for v in VERBS {
+            assert!(HELP.contains(&format!("drive {}", v.word)), "the help does not name `drive {}`", v.word);
+        }
+    }
+}

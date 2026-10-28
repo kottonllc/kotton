@@ -4,6 +4,8 @@ use clap::Parser;
 pub mod active_identity;
 pub mod bridge;
 pub mod commands;
+/// The shell the doors share, for the tools that read its registry (`cargo xtask-docs verb-check`).
+pub use kotton_shell as shell;
 use commands::Commands;
 
 /// How every binary in this crate ends: a failure is said as its message, alone,
@@ -32,7 +34,9 @@ pub fn finish(result: std::io::Result<()>) -> std::process::ExitCode {
 pub struct Cli {
     /// Machine-readable output: print shapes as JSON instead of styled text. Put it
     /// before the verb (`kotton --json issuer list`). Only the shared verbs that
-    /// emit shapes honor it.
+    /// emit shapes honor it. A verb that reads `--json` among its own words (`drive`,
+    /// `pin`) is handed the word instead, so `kotton --json drive list` is
+    /// `kotton drive list --json`, as the REPL's `drive list --json` is.
     #[arg(long)]
     pub json: bool,
     /// No subcommand → enter the runtime (identity-first). The front door is the

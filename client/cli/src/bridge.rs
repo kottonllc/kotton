@@ -50,6 +50,7 @@ pub async fn run_verb(
     json: bool,
 ) -> io::Result<()> {
     let executor = ShellExecutor::new();
+    let (args, json) = json_word(&executor, name, args, json);
     let named = named_user(user);
     if let Some(output) = executor
         .registry()
@@ -74,6 +75,20 @@ pub async fn run_verb(
         .await
         .map_err(io::Error::other)?;
     finish(output, json, Some(&actor));
+}
+
+/// A verb that reads `--json` among its own words is handed the word for a
+/// `kotton --json <verb> …`, and its output is then rendered as it says (its JSON
+/// is a payload); any other verb keeps the flag, and its shapes are serialized.
+/// One parser reads `--json` for such a verb, whichever door it was typed at.
+fn json_word(executor: &ShellExecutor, name: &str, mut args: Vec<String>, json: bool) -> (Vec<String>, bool) {
+    if json && executor.registry().answers_json(name) {
+        if !args.iter().any(|a| a == "--json") {
+            args.push("--json".to_string());
+        }
+        return (args, false);
+    }
+    (args, json)
 }
 
 /// Render a verb's output and exit with its code.
@@ -228,7 +243,7 @@ mod tests {
                 );
             }
         }
-        for verb in ["app", "peer", "device", "sync", "drive", "issuer", "cp", "cat", "keep", "mint", "enrol", "relay", "vault"] {
+        for verb in ["app", "peer", "device", "sync", "drive", "pin", "issuer", "cp", "cat", "keep", "mint", "enrol", "relay", "vault"] {
             assert!(
                 walked.iter().any(|w| w == verb),
                 "the walk did not reach `kotton {verb}`: {walked:?}"
@@ -236,13 +251,27 @@ mod tests {
         }
     }
 
+    /// `kotton --json drive list` hands `drive` the word its own parser reads, as the
+    /// REPL's `drive list --json` does; a verb that reads no such word keeps the flag.
+    #[test]
+    fn a_json_flag_before_a_noun_that_reads_it_is_handed_to_the_noun() {
+        let executor = ShellExecutor::new();
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(json_word(&executor, "drive", words(&["list"]), true), (words(&["list", "--json"]), false));
+        assert_eq!(json_word(&executor, "pin", words(&["list", "--json"]), true), (words(&["list", "--json"]), false));
+        assert_eq!(json_word(&executor, "issuer", words(&["list"]), true), (words(&["list"]), true));
+        assert_eq!(json_word(&executor, "drive", words(&["list"]), false), (words(&["list"]), false));
+    }
+
     /// The verbs' own flags still reach them untouched, before and after the first
     /// word — binding `--user` must not cost `--push`, `-n` or `--as` their pass-through.
     #[test]
     fn a_verbs_own_flags_still_pass_through_to_it() {
         for (line, want) in [
-            (&["sync", "--push", "r"][..], &["--push", "r"][..]),
+            (&["sync", "--no-wait"][..], &["--no-wait"][..]),
             (&["sync", "now", "-n"], &["now", "-n"]),
+            (&["drive", "list", "--json"], &["list", "--json"]),
+            (&["pin", "personal:/photos", "whole"], &["personal:/photos", "whole"]),
             (
                 &["device", "add", "--as", "laptop", "--blind"],
                 &["add", "--as", "laptop", "--blind"],
@@ -307,7 +336,7 @@ mod tests {
             );
             seen.push(name.to_string());
         }
-        for verb in ["mint", "enrol", "cp", "cat", "keep", "relay", "vault", "sync", "drive"] {
+        for verb in ["mint", "enrol", "cp", "cat", "keep", "relay", "vault", "sync", "drive", "pin"] {
             assert!(seen.iter().any(|s| s == verb), "`kotton {verb}` is not a pass-through: {seen:?}");
         }
     }
