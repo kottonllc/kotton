@@ -143,6 +143,15 @@ pub fn run(root: &Path) {
 
 /// Every file the check reads, relative to `root` with `/` separators, sorted.
 pub fn files(root: &Path) -> Vec<String> {
+    let mut out = paths_read(root);
+    out.retain(|p| !NOT_READ.contains(&p.as_str()));
+    out
+}
+
+/// Every file under the paths this check names, before [`NOT_READ`] takes out the ones whose
+/// subject is *box*: what a person reads, for a sweep with words of its own to refuse
+/// ([`crate::retired_words`]).
+pub fn paths_read(root: &Path) -> Vec<String> {
     let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
     let mut out = Vec::new();
     for tree in TREES {
@@ -180,7 +189,6 @@ pub fn files(root: &Path) -> Vec<String> {
                 .map(|p| rel(p)),
         );
     }
-    out.retain(|p| !NOT_READ.contains(&p.as_str()));
     out.sort();
     out.dedup();
     out
@@ -291,7 +299,14 @@ const UNSHIPPED: &[&str] = &["windows", "window", "gpu"];
 /// line it starts on, its escapes read as a space. Comments, char literals and lifetimes are
 /// stepped over, so a quote inside one starts nothing.
 pub fn string_literals(src: &str) -> Vec<(usize, String)> {
-    lex(src).0
+    lex(src).0.into_iter().map(|(line, _, lit)| (line, lit)).collect()
+}
+
+/// Where each string literal in Rust source opens: the line it starts on, and the index, in
+/// `src.chars()`, of its opening `"` or, for a raw string, its `r`. The same literals, in the
+/// same order, as [`string_literals`].
+pub fn string_literal_starts(src: &str) -> Vec<(usize, usize)> {
+    lex(src).0.into_iter().map(|(line, at, _)| (line, at)).collect()
 }
 
 /// The comments in Rust source — `//`, `///`, `//!` and `/* … */`, nested ones whole — each with
@@ -305,8 +320,9 @@ pub fn comments(src: &str) -> Vec<(usize, String)> {
 /// Pieces of Rust source, each with the line it starts on.
 type Pieces = Vec<(usize, String)>;
 
-/// One pass over Rust source: its string literals, then its comments.
-fn lex(src: &str) -> (Pieces, Pieces) {
+/// One pass over Rust source: its string literals, each with the index it opens at, then its
+/// comments.
+fn lex(src: &str) -> (Vec<(usize, usize, String)>, Pieces) {
     let c: Vec<char> = src.chars().collect();
     let ident = |k: usize| k < c.len() && is_word(c[k]);
     let mut out = Vec::new();
@@ -373,7 +389,7 @@ fn lex(src: &str) -> (Pieces, Pieces) {
                     continue;
                 }
                 let hashes = k - i - 1;
-                let (start, mut lit) = (line, String::new());
+                let (start, at, mut lit) = (line, i, String::new());
                 k += 1;
                 while k < c.len() {
                     if c[k] == '"' && (1..=hashes).all(|h| c.get(k + h) == Some(&'#')) {
@@ -386,11 +402,11 @@ fn lex(src: &str) -> (Pieces, Pieces) {
                     lit.push(c[k]);
                     k += 1;
                 }
-                out.push((start, lit));
+                out.push((start, at, lit));
                 i = k;
             }
             '"' => {
-                let (start, mut lit) = (line, String::new());
+                let (start, at, mut lit) = (line, i, String::new());
                 i += 1;
                 while i < c.len() && c[i] != '"' {
                     if c[i] == '\\' {
@@ -410,7 +426,7 @@ fn lex(src: &str) -> (Pieces, Pieces) {
                     i += 1;
                 }
                 i += 1;
-                out.push((start, lit));
+                out.push((start, at, lit));
             }
             _ => i += 1,
         }
