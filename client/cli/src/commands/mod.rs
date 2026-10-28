@@ -109,15 +109,16 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },
-    /// Manage the devices on your identity — add, admit, join, list, revoke, name
+    /// Manage the devices on your identity — add, join, list, revoke, name
     /// (six-digit pairing) — shares the REPL's `device` verb. `reset` is
-    /// the exception: it starts this whole device fresh and needs no daemon
+    /// the exception: it starts this whole device fresh and needs no daemon.
+    /// `admit <invite>` is `drive enrol <invite>` now, and still runs it
     #[command(after_help = shell_help(&kotton_shell::commands::DeviceCommand))]
     Device {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        /// Arguments: `add [--as N] [--blind|--cosigner]` | `admit <invite>` | `join [code] [--as N]` | `list` | `revoke <id>` | `name [N]` | `reset [--yes]`
+        /// Arguments: `add [--as N] [--blind|--cosigner]` | `join [code] [--as N]` | `list` | `revoke <id>` | `name [N]` | `reset [--yes]`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },
@@ -135,33 +136,34 @@ pub enum Commands {
     Records(RecordsCommand),
     /// Bring your history with you — read an export (.ics) into your own records
     Import(ImportCommand),
-    /// Sync this device's drives (now, add, list, remove) — shares the REPL's `sync` verb
+    /// Sync this device's drives, now — the REPL's `sync`, one parser for both
     #[command(after_help = shell_help(&kotton_shell::commands::SyncCommand))]
     Sync {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        /// Arguments: (none) = all devices | `now …` | `add <node> <path>` | `list` | `remove …` | `--push|--pull <remote>`
+        /// Arguments: none, or `--no-wait`. `sync now` is `sync`; `sync add|list|remove` and `sync <remote>` are gone
+        /// (see the help below)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },
-    /// Your drives — create, list, show, move — shares the REPL's `drive` verb
+    /// Your drives — create, list, show, move, enrol — the REPL's `drive`, one parser for both
     #[command(after_help = shell_help(&kotton_shell::commands::DriveCommand))]
     Drive {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        /// Arguments: `create <name> [--on <vault>]` | `list` | `show <name>` | `move <name> --to <vault>`
+        /// Arguments: `create <name> [--on <vault>]` | `list [--json]` | `show <name> [--json]` | `move <name> --to <vault>` | `enrol <invite>`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },
-    /// What this device keeps of your drives — default, a drive or folder, list — shares the REPL's `pin` verb
+    /// What this device keeps of your drives — default, a drive or folder, list — the REPL's `pin`, one parser for both
     #[command(after_help = shell_help(&kotton_shell::commands::PinCommand))]
     Pin {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        /// Arguments: `default whole|on-demand` | `<drive>[:/<folder>] whole|on-demand|default` | `list`
+        /// Arguments: `default whole|on-demand` | `<drive>[:/<folder>] whole|on-demand|default` | `list [--json]`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },

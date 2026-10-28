@@ -84,7 +84,7 @@ door, and then the file is not read.
 
 | Verb | Does |
 | --- | --- |
-| `invite <user> [--quota <bytes>] [--ttl <seconds>]` | mints an invite at the relay — its URL and three words — and waits (a day by default) for `device admit <invite>`. A name already kept is refused |
+| `invite <user> [--quota <bytes>] [--ttl <seconds>]` | mints an invite at the relay — its URL and three words — and waits (a day by default) for `drive enrol <invite>`. A name already kept is refused |
 | `join <user> <code>` | the vault dials instead, for a device on its own network running `device add --blind` |
 | `tenants` | everyone kept for: name, bytes held, quota, how many devices paired — never a device's name or a key |
 | `capacity <user> [--set <bytes>]` | one person's bytes and number; `--set` changes it while it runs. Lower than what is held deletes nothing: the next write is refused |

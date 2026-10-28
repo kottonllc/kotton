@@ -386,7 +386,7 @@ pub fn recovery_card(
             "The phrase proves who you are. On a device that has never held this identity \
              it has nothing to prove it *to*: `id recover` asks a node for your key history \
              and the copy sealed under this phrase, and there is no node to ask. Rent or run \
-             one, admit it (`device admit <code>`), then run this command again — \
+             one, take it in (`drive enrol <invite>`), then run this command again — \
              setting the phrase again re-delivers."
                 .to_string(),
         ));

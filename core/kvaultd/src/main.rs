@@ -465,7 +465,7 @@ async fn admitted(
                 }
                 let code = code.expose();
                 println!("invite={code}");
-                eprintln!("on the person's device: `device admit {code}`  (until {expires_at})");
+                eprintln!("on the person's device: `drive enrol {code}`  (until {expires_at})");
             }
             UserResponse::PairShowCode { token, sas, .. } => {
                 println!("sas={sas:06}");

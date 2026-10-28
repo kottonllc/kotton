@@ -102,7 +102,7 @@ async fn id_add_recovery_runs_through_the_repls_registry_and_hands_back_the_card
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        text.contains("No node has a copy of your sealed keys") && text.contains("device admit"),
+        text.contains("No node has a copy of your sealed keys") && text.contains("drive enrol"),
         "no card after the phrase:\n{text}"
     );
 }
