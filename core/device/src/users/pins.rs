@@ -246,10 +246,27 @@ pub async fn migrate(
         .execute(db)
         .await
         .map_err(err)?;
-        Record::new(registry, records).delete(PIN_NSID, id).await.map_err(err)?;
+        withdraw(registry, records, PIN_NSID, id).await.map_err(|e| {
+            tracing::warn!(user_id, error = format!("{e:#}"), "pins: a setting kept in the drive was not deleted from it");
+            err("a pin setting this device kept in the drive was moved here, and was not deleted from the drive; it is tried again at the next pass")
+        })?;
         moved += 1;
     }
     Ok(moved)
+}
+
+/// Delete the record `id` under `nsid`, **a delete already made counted as
+/// made**: a withdrawal is idempotent, so two callers withdrawing one record
+/// at once — a `pin` while a pass runs, or the first `status` after an
+/// upgrade during the first pass — both succeed, and the tombstone is the
+/// state both wanted. No lock is needed for it: this device is the only
+/// writer of its own claims and its own #155 settings, so a record found
+/// already deleted was deleted by this device, for the same reason.
+async fn withdraw(registry: &RwLock<SchemaRegistry>, records: &SqliteRecordStore, nsid: &str, id: &str) -> anyhow::Result<()> {
+    match Record::new(registry, records).delete(nsid, id).await {
+        Err(e) if matches!(e.downcast_ref(), Some(kotton_record::record_store::RecordStoreError::RecordNotFound(_))) => Ok(()),
+        done => done,
+    }
 }
 
 /// This device's default, as its settings say it, or `None` when it has
@@ -367,15 +384,28 @@ pub async fn claim(registry: &RwLock<SchemaRegistry>, records: &SqliteRecordStor
         .filter(|(_, name)| keeps_whole(all, name))
         .map(|(id, _)| Claim { device: me.to_string(), drive: id.to_string() })
         .collect();
-    let mine: Vec<Claim> = claims(registry, records).await?.into_iter().filter(|c| c.device == me).collect();
-    let writer = Record::new(registry, records);
+    let mine: Vec<Claim> = claims(registry, records)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "pins: this device's claims did not read");
+            err("this device's claims to keep a drive whole did not read, so none was made or withdrawn")
+        })?
+        .into_iter()
+        .filter(|c| c.device == me)
+        .collect();
     let mut changed = false;
     for gone in mine.iter().filter(|c| !wanted.contains(c)) {
-        writer.delete(CLAIM_NSID, &gone.record_id()).await.map_err(err)?;
+        withdraw(registry, records, CLAIM_NSID, &gone.record_id()).await.map_err(|e| {
+            tracing::warn!(error = format!("{e:#}"), "pins: a claim was not withdrawn");
+            err("this device's claim to keep a drive whole was not withdrawn; it is tried again at the next pass")
+        })?;
         changed = true;
     }
     for new in wanted.iter().filter(|c| !mine.contains(c)) {
-        writer.insert(CLAIM_NSID, new.to_record()).await.map_err(err)?;
+        Record::new(registry, records).insert(CLAIM_NSID, new.to_record()).await.map_err(|e| {
+            tracing::warn!(error = format!("{e:#}"), "pins: a claim was not written");
+            err("this device's claim to keep a drive whole was not written; it is tried again at the next pass")
+        })?;
         changed = true;
     }
     Ok(changed)
@@ -810,6 +840,43 @@ mod tests {
         assert!(claims.contains(&other), "this device touched another device's claim");
         assert_eq!(claims.iter().filter(|c| c.device == me).count(), 1, "one record per device and drive");
         assert_eq!(f.version(&other.record_id()).await.map(|v| v.1), Some(false));
+    }
+
+    /// **A withdrawal is idempotent, so two callers withdrawing at once both
+    /// succeed** (what `stating_the_default_does_not_write_over_one_stated_meanwhile`
+    /// held of the default before settings left the drive, in its new shape).
+    /// `pin … on-demand` runs [`claim`] while a pass runs it too, and the first
+    /// `status` after an upgrade runs [`migrate`] while the first pass does:
+    /// twenty rounds of each pair at once end with both `Ok` and one tombstone
+    /// at a higher revision than the record withdrawn. No lock holds it: a
+    /// record this device finds already deleted was deleted by this device.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_withdrawals_at_once_both_succeed_and_leave_one_tombstone() {
+        let f = fixture().await;
+        let me = "did:key:z6Mkme";
+        let (registry, records) = (&f.rt.schema_registry, &f.records);
+        let mine = claimed(me, FIRST_DRIVE_ID);
+        let whole = [at(PinScope::Default, PinValue::Whole)];
+        let on_demand = [at(PinScope::Default, PinValue::OnDemand)];
+        for round in 0..20 {
+            assert!(claim(registry, records, &whole, me).await.unwrap(), "round {round}: no claim was made");
+            let made = f.version(&mine.record_id()).await.unwrap();
+            let (one, two) = tokio::join!(claim(registry, records, &on_demand, me), claim(registry, records, &on_demand, me));
+            assert!(one.is_ok() && two.is_ok(), "round {round}: a withdrawal at once failed: {one:?} {two:?}");
+            let left = f.version(&mine.record_id()).await.unwrap();
+            assert!(left.1 && left.0 > made.0, "round {round}: no tombstone above {made:?}: {left:?}");
+
+            let id = format!("pin-round-{round}");
+            let row = json!({"id": id, "device": me, "scope": "folder", "drive": FIRST_DRIVE_NAME, "folder": format!("/r{round}"), "value": "whole"});
+            Record::new(registry, records).insert(PIN_NSID, row).await.unwrap();
+            let written = f.version(&id).await.unwrap();
+            let (one, two) = tokio::join!(migrate(registry, records, &f.db, "alice", me), migrate(registry, records, &f.db, "alice", me));
+            assert!(one.is_ok() && two.is_ok(), "round {round}: a migration at once failed: {one:?} {two:?}");
+            let left = f.version(&id).await.unwrap();
+            assert!(left.1 && left.0 > written.0, "round {round}: no tombstone above {written:?}: {left:?}");
+            let folder = PinScope::Folder { drive: FIRST_DRIVE_NAME.into(), folder: format!("/r{round}") };
+            assert!(settings(&f.db, "alice").await.unwrap().iter().any(|s| s.scope == folder), "round {round}: the setting was not moved");
+        }
     }
 
     /// **What kotton #155 wrote is migrated in place**: this device's
