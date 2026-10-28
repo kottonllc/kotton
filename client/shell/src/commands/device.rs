@@ -824,7 +824,7 @@ mod tests {
         assert!(VAULT_POSTURE_LINE.starts_with("it keeps what it cannot read"), "{VAULT_POSTURE_LINE}");
         // The admit runs the vault's ceremony, and that ceremony's success says the
         // posture before what to do next.
-        assert!(ADMIT_ROLE == Role::Vault, "device admit must run the vault's ceremony");
+        assert!(ADMIT_ROLE == Role::Vault, "`drive enrol` must run the vault's ceremony");
         let said = vault_complete_lines("did:key:zV");
         assert_eq!(said.first().map(String::as_str), Some(VAULT_POSTURE_LINE), "{said:?}");
         assert_eq!(said.len(), 2, "{said:?}");

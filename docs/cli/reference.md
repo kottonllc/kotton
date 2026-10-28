@@ -151,7 +151,7 @@ Kotton - Your data sovereignty platform
 
 ###### **Options:**
 
-* `--json` — Machine-readable output: print shapes as JSON instead of styled text. Put it before the verb (`kotton --json issuer list`). Only the shared verbs that emit shapes honor it. A verb that reads `--json` among its own words (`drive`, `pin`) is handed the word instead, so `kotton --json drive list` is `kotton drive list --json`, as the REPL's `drive list --json` is
+* `--json` — Machine-readable output: print shapes as JSON instead of styled text. Put it before the verb (`kotton --json issuer list`). Only the shared verbs that emit shapes honor it. A verb that reads `--json` among its own words (`drive`, `pin`) is handed the word instead, so `kotton --json drive list` is `kotton drive list --json`, as the REPL's `drive list --json` is. There it is for `list` and `show` alone, and any other verb refuses it, exit 2 (`kotton --json drive create …`, `kotton --json pin <drive> whole`)
 
 
 
@@ -789,7 +789,7 @@ RETIRED:
 
 ###### **Arguments:**
 
-* `<ARGS>` — Arguments: none, or `--no-wait`. `sync now` is `sync`; `sync add|list|remove` and `sync <remote>` are gone (see the help below)
+* `<ARGS>` — Arguments: none, or `--no-wait`. `sync now` is `sync`; what `sync add|list|remove` did is `pin`'s, and `sync <remote>` is gone (see the help below)
 
 ###### **Options:**
 
