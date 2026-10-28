@@ -245,6 +245,7 @@ const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
             schema_nsid: nsid.as_str().to_string(),
             body: json!({"title": "from a peer"}),
             updated_at: 100,
+            revision: 0,
             deleted_at: None,
             root: None,
             filed_at: None,

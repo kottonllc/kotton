@@ -1,11 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `RecordStore` trait — last-write-wins record storage abstraction.
 //!
-//! Each record carries an `updated_at` Unix-second timestamp.  During sync,
-//! `export_changeset` returns all rows (including tombstones) modified after a
-//! given watermark; `merge_changeset` applies them with LWW semantics — an
-//! incoming row is written only when its `updated_at` is strictly newer than
-//! the local row's `updated_at`.
+//! Each record carries an `updated_at` Unix-second timestamp and a `revision`,
+//! a per-row count of writes. During sync, `export_changeset` returns all rows
+//! (including tombstones) modified after a given watermark; `merge_changeset`
+//! applies them with LWW semantics — an incoming row is written only when its
+//! version, `(updated_at, revision)` compared in that order, is strictly newer
+//! than the local row's.
+//!
+//! **Why the revision.** `updated_at` is whole seconds, so on its own it cannot
+//! tell a write from the next write of the same row in the same second: a record
+//! written and deleted inside one second had one version, the delete was never
+//! logged, and a peer holding the write would not have applied it (kotton #158).
+//! Every write on this device raises the row's revision by one, so a write is
+//! strictly newer than the version it replaces whatever the clock says, and the
+//! seconds still order writes made on different devices, which is what
+//! "last save wins" means to the person.
 //!
 //! # Future: field-level CRDTs
 //! For v0.4 personal-data workloads (notes, contacts, calendar) row-level LWW
@@ -48,6 +58,22 @@ pub struct ChangesetRow {
     pub body: Value,
     /// Unix timestamp (seconds) of the last write.
     pub updated_at: SyncWatermark,
+    /// How many times this row has been written, counting every device's writes
+    /// that reached the writer: each write takes the revision it replaces plus
+    /// one, and a merge keeps the revision the row arrived with.
+    ///
+    /// **With `updated_at`, it is the row's version**, and the version is what
+    /// both halves of sync key on: [`RecordStore::merge_changeset`] applies a row
+    /// whose `(updated_at, revision)` is strictly newer, and
+    /// `replication::log_records` logs every `(id, updated_at, revision)` the log
+    /// does not yet carry. A write and the delete after it in the same second
+    /// are two versions, not one (kotton #158).
+    ///
+    /// `0` on a row written before the count existed, and skipped then, so a
+    /// segment written by this version for such a row is the segment an earlier
+    /// version wrote, and an earlier version's segment reads as revision `0`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub revision: i64,
     /// Unix timestamp when the record was deleted, or `None` if alive.
     pub deleted_at: Option<SyncWatermark>,
     /// The root this record belongs to (RFC-0071 R17), or `None` for the
@@ -75,6 +101,11 @@ pub struct ChangesetRow {
     /// version for such a row is the segment an earlier version wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filed_at: Option<i64>,
+}
+
+/// Whether a revision is the one a row written before the count carries.
+fn is_zero(revision: &i64) -> bool {
+    *revision == 0
 }
 
 /// Batch of record changes for sync; produced by
@@ -393,9 +424,11 @@ pub trait RecordStore: Send + Sync {
     /// Apply an incoming [`RecordChangeset`] from a peer.
     ///
     /// Each row is applied with last-write-wins semantics: the row is written
-    /// only when `incoming.updated_at > local.updated_at` (or the record
-    /// doesn't exist locally).  Tombstones (`deleted_at` set) are applied the
-    /// same way.
+    /// only when its version is strictly newer — `incoming.updated_at >
+    /// local.updated_at`, or the same second and `incoming.revision >
+    /// local.revision` — or the record doesn't exist locally. Tombstones
+    /// (`deleted_at` set) are applied the same way, so a delete made in the
+    /// second its record was written still replaces it.
     ///
     /// The sync layer must ensure schema tables exist (via [`Self::create_table`])
     /// before calling this; rows for unknown tables return
