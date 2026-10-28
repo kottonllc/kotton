@@ -202,7 +202,10 @@ impl DeviceCommand {
     /// enrol <invite>`: the same ceremony ([`enrol_vault`]), and a line naming the
     /// verb the tree has for it.
     async fn admit(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
-        let mut answer = enrol_vault(args, state).await?;
+        let Some((invite, flags)) = super::drive::split_invite(args.iter().cloned()) else {
+            return Ok(CommandOutput::usage(super::drive::ENROL_USAGE, None));
+        };
+        let mut answer = enrol_vault(&invite, &flags, state).await?;
         answer.out.insert(0, super::deprecated("device admit", "drive enrol"));
         Ok(answer)
     }
@@ -718,15 +721,12 @@ fn human_since(unix_secs: i64) -> String {
 /// relay as its own if it has none, and the six digits are typed here. Blind is
 /// the only posture this door has, so it is the default and needs no flag
 /// ([`admit_args`]). `device admit` was this ceremony's name, and runs it still.
-pub(crate) async fn enrol_vault(args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
-    let (code, posture) = match admit_args(args) {
-        Ok(asked) => asked,
-        Err(why) => return Ok(CommandOutput::usage(why, None)),
-    };
+pub(crate) async fn enrol_vault(code: &str, flags: &[String], state: &mut ShellState) -> Result<CommandOutput> {
+    let posture = admit_args(flags);
     let user_id = state.user_id.clone();
     let client = state.client.lock().await;
     let mut rx = client
-        .device_admit_stream(&user_id, &code, ADD_TTL_SECS, posture)
+        .device_admit_stream(&user_id, code, ADD_TTL_SECS, posture)
         .await
         .map_err(|e| anyhow::anyhow!("drive enrol: {e}"))?;
     run_ceremony(
@@ -739,25 +739,22 @@ pub(crate) async fn enrol_vault(args: &[String], state: &mut ShellState) -> Resu
     .await
 }
 
-/// What `drive enrol` was asked: the invite, and the posture to send with it.
+/// The posture `drive enrol` was asked for, from the flags alone (the invite is found by
+/// `drive::split_invite`, once).
 ///
 /// Blind is the default because it is the one posture admit-by-invite has; `--blind`
 /// is still read so a line typed from an older guide works, and changes nothing. A
 /// posture that would hold keys (`--cosigner`, `--full`) is *sent*, not refused here:
 /// the refusal is `handle_device_admit`'s, in the daemon, and a second copy of it in
 /// the client would be a guard with nothing behind it that the first does not hold.
-fn admit_args(args: &[String]) -> Result<(String, Posture), &'static str> {
-    let Some(code) = args.iter().find(|a| !a.starts_with("--")).cloned() else {
-        return Err("usage: drive enrol <invite>");
-    };
-    let posture = if args.iter().any(|a| a == "--cosigner") {
+fn admit_args(flags: &[String]) -> Posture {
+    if flags.iter().any(|a| a == "--cosigner") {
         Posture::Cosigner
-    } else if args.iter().any(|a| a == "--full") {
+    } else if flags.iter().any(|a| a == "--full") {
         Posture::Full
     } else {
         Posture::BlindStorage
-    };
-    Ok((code, posture))
+    }
 }
 
 /// The value following `flag` in `args` (e.g. `--as phone` → `Some("phone")`).
@@ -792,21 +789,12 @@ mod tests {
         words.iter().map(|w| w.to_string()).collect()
     }
 
-    /// `device admit <invite>` with no flag reaches the ceremony, under the one
-    /// posture admit-by-invite has
-    /// (`TASK-device-admit-refuses-without-a-flag-that-has-one-legal-value`).
+    /// Blind is the default posture, whatever blind flag is or is not typed; `--blind`
+    /// (from an older guide) changes nothing.
     #[test]
-    fn admit_with_no_flag_asks_for_the_blind_posture() {
-        let invite = "https://relay.example#amber-otter-kite";
-        assert_eq!(admit_args(&args(&[invite])), Ok((invite.to_string(), Posture::BlindStorage)));
-    }
-
-    /// `--blind`, typed from an older guide, is still accepted and changes nothing.
-    #[test]
-    fn admit_with_blind_is_the_same_request() {
-        for words in [&["CODE", "--blind"][..], &["--blind", "CODE"][..]] {
-            assert_eq!(admit_args(&args(words)), Ok(("CODE".to_string(), Posture::BlindStorage)), "{words:?}");
-        }
+    fn admit_with_no_flag_or_with_blind_asks_for_the_blind_posture() {
+        assert_eq!(admit_args(&args(&[])), Posture::BlindStorage);
+        assert_eq!(admit_args(&args(&["--blind"])), Posture::BlindStorage);
     }
 
     /// A posture that would hold keys is not refused here: it is sent, and the
@@ -814,7 +802,8 @@ mod tests {
     /// guard stays where the keys are.
     #[test]
     fn admit_with_cosigner_is_sent_for_the_daemon_to_refuse() {
-        assert_eq!(admit_args(&args(&["CODE", "--cosigner"])), Ok(("CODE".to_string(), Posture::Cosigner)));
+        assert_eq!(admit_args(&args(&["--cosigner"])), Posture::Cosigner);
+        assert_eq!(admit_args(&args(&["--full"])), Posture::Full);
     }
 
     /// The admit ends by saying what the flag used to: the vault keeps what it
@@ -841,12 +830,6 @@ mod tests {
         let said = relay_offer_lines(&line);
         assert!(said[0].contains("stands at no relay") && said[0].contains("http://relay.example:7700"), "{said:?}");
         assert_eq!(said[1], format!("to stand this device there too: `relay set {line}`"));
-    }
-
-    /// No invite is the usage line, which names no flag.
-    #[test]
-    fn admit_with_no_invite_is_the_usage_line() {
-        assert_eq!(admit_args(&args(&[])).err(), Some("usage: drive enrol <invite>"));
     }
 
     /// The pairing screen says bare `sync`, which reaches every paired node, and

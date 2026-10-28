@@ -41,6 +41,7 @@ const REFUSED: &[(&[&str], &str)] = &[
     (&["sync", "--user", "nobody", "vault"], "`sync` syncs this device's drives"),
     (&["drive", "--user", "nobody", "frob"], "usage: drive create <name>"),
     (&["drive", "--user", "nobody", "move", "photos"], "usage: drive create <name>"),
+    (&["drive", "--user", "nobody", "enrol", "--blind"], "usage: drive enrol <invite>"),
     (&["pin", "--user", "nobody", "personal", "sometimes"], "usage: pin default"),
     (&["pin", "--user", "nobody", "frob"], "usage: pin default"),
 ];
