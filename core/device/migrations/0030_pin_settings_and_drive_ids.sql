@@ -1,4 +1,4 @@
--- kotton #171, on kotton-protocol #26 (RFC 0002, "Exit" and "The types").
+-- kotton #171, on kotton-protocol #26 (the protocol's storage model).
 --
 -- **A device's pin settings are its own** — its default, and each drive or
 -- folder set the other way — kept on this device and nothing of them

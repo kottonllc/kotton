@@ -943,9 +943,12 @@ pub struct DriveDescriptor {
 
 // -- What each device keeps of the person's drives (kotton #55) --------------
 //
-// RFC 0002's Exit and RFC 0003's "What this device holds", and kotton-protocol
-// #20's pin-setting record: a device, a scope (its default, a drive, or a
-// folder of a drive), and a value (whole or on demand). Here beside the drive
+// The protocol's storage model and its first release's "What this device
+// holds", as kotton-protocol #26 has them: a pin setting is a scope (its default, a
+// drive, or a folder of a drive) and a value (whole or on demand), the
+// device's own and never sent to another device or a vault; what a device
+// publishes is a whole-keeper claim in each drive it keeps whole, a record
+// that is not a type here (`kotton_device::users::pins`). Here beside the drive
 // types for the reason they are (above): kotton-protocol has no type crates
 // yet, and these move with them as one.
 
@@ -1061,7 +1064,7 @@ impl PinScope {
 
 /// One pin setting of the device answering: its default, or a drive or a
 /// folder set the other way. A setting is the device's own (kotton-protocol
-/// #26, RFC 0002's "The types"): kept in that device's own database and never
+/// #26): kept in that device's own database and never
 /// sent to another device or a vault, so it names no device — it is always the
 /// answering device's. What a device publishes of its settings is a
 /// whole-keeper claim per drive it keeps whole (`kotton_device::users::pins`),

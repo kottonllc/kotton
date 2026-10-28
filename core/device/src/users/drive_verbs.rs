@@ -51,7 +51,7 @@
 //! it.
 //!
 //! **Every copy of a drive carries the drive's id** (kotton #171;
-//! kotton-protocol #26, RFC 0002). A made drive's sealed name holds the
+//! kotton-protocol #26). A made drive's sealed name holds the
 //! person's name for it and the drive's *id*, sixteen random bytes minted once
 //! at `drive create` ([`mint_id`]) and sealed with every copy a move makes
 //! ([`SealedName`]); the vault reads neither, and keeps only its own tree id,

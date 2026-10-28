@@ -58,8 +58,7 @@ pub const NSID_MODEL: &str = "sh.kotton.model";
 pub const NSID_PIN: &str = "sh.kotton.pin";
 
 /// A whole-keeper claim: that one of the person's devices keeps one drive
-/// whole (kotton #171; kotton-protocol #26, RFC 0002's "Exit" and "The
-/// types"). A sealed record in that drive, written by that device alone and
+/// whole (kotton #171; the protocol's storage model, kotton-protocol #26). A sealed record in that drive, written by that device alone and
 /// deleted when it stops keeping the drive whole; its fields are the device and
 /// the drive's id, and nothing else. The daemon writes it, and every device of
 /// the person's reads every device's, which is why it is core: a device that

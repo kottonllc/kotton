@@ -18,7 +18,8 @@
 //! | `sh.kotton.message.v1`        | Opaque encrypted message envelope          |
 //! | `sh.kotton.channel.key-grant` | A channel key sealed to a new member's DID |
 //! | `sh.kotton.model`             | An installed model's manifest              |
-//! | `sh.kotton.pin`               | What one of the person's devices keeps     |
+//! | `sh.kotton.pin`               | Retired: a setting #155 kept in a drive    |
+//! | `sh.kotton.keeps-whole`       | That a device keeps a drive whole          |
 //!
 //! The table is gated against [`CoreSchema::all`] in this module's tests, so it
 //! cannot drift from the set again. It had drifted to three different counts at
@@ -78,7 +79,7 @@ pub enum CoreSchema {
     /// writes one.
     Pin,
     /// A whole-keeper claim: that one of the person's devices keeps one drive
-    /// whole (kotton #171; kotton-protocol #26, RFC 0002's "The types"). A
+    /// whole (kotton #171; the protocol's storage model, kotton-protocol #26). A
     /// record in that drive, written and withdrawn by that device alone.
     /// Core for the reason [`CoreSchema::Model`] is: the daemon writes it and
     /// reads it, and it must arrive on every device of the person's.
@@ -419,7 +420,7 @@ mod tests {
 
     #[test]
     fn every_core_schema_is_in_all_and_in_the_module_table() {
-        assert_eq!(CoreSchema::all().len(), 10);
+        assert_eq!(CoreSchema::all().len(), 11);
         for schema in CoreSchema::all() {
             let def = schema.definition();
             assert!(!def.fields.is_empty(), "{} has no fields", def.nsid);

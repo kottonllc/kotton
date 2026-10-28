@@ -4,7 +4,7 @@
 //! keeps; the whole-keeper claims a device publishes in a drive; and the two
 //! notices, read from them.
 //!
-//! The protocol's storage model (kotton-protocol #26, RFC 0002's "Exit"), on
+//! The protocol's storage model (kotton-protocol #26), on
 //! what a person's devices keep: every device of the person's sees every
 //! drive; each device has one default for the drives it has not been told
 //! about, and a drive or a folder is set the other way on that device; the
