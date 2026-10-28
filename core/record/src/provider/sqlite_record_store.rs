@@ -13,6 +13,7 @@
 //!     created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
 //!     updated_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
 //!     deleted_at  INTEGER,            -- NULL = alive; non-NULL = tombstone
+//!     revision    INTEGER NOT NULL DEFAULT 0, -- writes of this row; 0 = before the count
 //!     root        TEXT,               -- NULL = Personal; else the root's id
 //!     filed_at    INTEGER             -- ms, the filing device's clock; NULL = filed before the stamp
 //! );
@@ -44,12 +45,29 @@
 //! not a copy. Why Personal is unmarked rather than stamped with its id is
 //! [`ChangesetRow::root`]'s note.
 //!
+//! ## Every write is a new version
+//!
+//! A row's version is `(updated_at, revision)`. `updated_at` is whole seconds;
+//! `revision` counts the row's writes. Every write here — an insert, a rewrite,
+//! a delete — sets `revision` to the one it replaces plus one, **in the same
+//! statement as the write**, so no read precedes it that another writer could
+//! make stale and two writes of a row can never share a version. A merge keeps
+//! the revision the row arrived with, so the next write here counts on from it.
+//!
+//! The seconds alone could not do this: a record written and deleted inside one
+//! second had one version, so the delete was never logged and a peer holding the
+//! write would not have taken it (kotton #158). A finer clock would only have
+//! shrunk that second; a count cannot tie. A table written before the column is
+//! given it on open, every row at `0`, the version an earlier device logged it
+//! at, so nothing already logged is logged again.
+//!
 //! ## Sync
 //!
 //! `export_changeset(since)` queries all schema tables for rows with
 //! `updated_at > since` (including tombstones) and returns them as a
 //! [`RecordChangeset`].  `merge_changeset` applies incoming rows with
-//! last-write-wins semantics via a SQLite upsert.
+//! last-write-wins semantics via a SQLite upsert: a row is taken when its
+//! version is strictly newer than the one held.
 //!
 //! ## Threading
 //!
@@ -108,7 +126,8 @@ fn create_table_sql(table: &str) -> String {
             updated_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
             deleted_at  INTEGER,
             root        TEXT,
-            filed_at    INTEGER
+            filed_at    INTEGER,
+            revision    INTEGER NOT NULL DEFAULT 0
         ) STRICT;
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_{t}_id ON {t} (id);
@@ -177,10 +196,26 @@ fn adopt_filing_order(conn: &Connection, table: &str) -> rusqlite::Result<()> {
     ))
 }
 
+/// Give `table` its `revision` column if it predates it.
+///
+/// In place, like [`adopt_into_roots`]: every row already there takes `0`, the
+/// revision a row written before the count carries on the wire too, so its
+/// version is the one an earlier version of this device logged it at and
+/// nothing is logged twice. The next write of the row takes `1`.
+fn adopt_write_revision(conn: &Connection, table: &str) -> rusqlite::Result<()> {
+    if !columns_of(conn, table)?.iter().any(|c| c == "revision") {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;"
+        ))?;
+    }
+    Ok(())
+}
+
 /// Everything a table written by an earlier version is given on open.
 fn adopt(conn: &Connection, table: &str) -> rusqlite::Result<()> {
     adopt_into_roots(conn, table)?;
-    adopt_filing_order(conn, table)
+    adopt_filing_order(conn, table)?;
+    adopt_write_revision(conn, table)
 }
 
 /// Run [`adopt`] over every record table in the file.
@@ -342,11 +377,15 @@ impl RecordStore for SqliteRecordStore {
                 Some(filed) => filed,
                 None => next_filing_stamp(&conn, &table, now)?,
             };
+            // A new version: the revision this write replaces, tombstone
+            // included, plus one, read inside the statement that writes it
+            // (module doc, "Every write is a new version").
             conn.execute(
                 &format!(
                     "INSERT OR REPLACE INTO {table} \
-                    (id, schema_nsid, body, created_at, updated_at, root, filed_at) \
-                    VALUES (?1, ?2, ?3, strftime('%s','now'), strftime('%s','now'), ?4, ?5)"
+                    (id, schema_nsid, body, created_at, updated_at, root, filed_at, revision) \
+                    VALUES (?1, ?2, ?3, strftime('%s','now'), strftime('%s','now'), ?4, ?5, \
+                    COALESCE((SELECT revision FROM {table} WHERE id = ?1), 0) + 1)"
                 ),
                 params![id_clone, nsid_str, body, root, filed_at],
             )?;
@@ -480,7 +519,8 @@ impl RecordStore for SqliteRecordStore {
             let affected = conn.execute(
                 &format!(
                     "UPDATE {table} SET deleted_at = strftime('%s','now'), \
-                     updated_at = strftime('%s','now') \
+                     updated_at = strftime('%s','now'), \
+                     revision = revision + 1 \
                      WHERE id = ? AND deleted_at IS NULL AND {in_roots}"
                 ),
                 params.as_slice(),
@@ -564,7 +604,11 @@ impl RecordStore for SqliteRecordStore {
                 }
 
                 let body = serde_json::to_string(&row.body)?;
-                // LWW upsert: apply only when the incoming row is strictly newer.
+                // LWW upsert: apply only when the incoming row is strictly newer
+                // — a later second, or the same second and a higher revision,
+                // which is how a delete made in the second its record was
+                // written replaces it (kotton #158). The revision it arrives with
+                // is kept, so a write here after it counts on from it.
                 //
                 // The root is written on insert and **never changed by a
                 // merge**: a record belongs to exactly one root (RFC-0071 R17),
@@ -587,14 +631,17 @@ impl RecordStore for SqliteRecordStore {
                 conn.execute(
                     &format!(
                         "INSERT INTO {table} \
-                         (id, schema_nsid, body, created_at, updated_at, deleted_at, root, filed_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7) \
+                         (id, schema_nsid, body, created_at, updated_at, deleted_at, root, filed_at, revision) \
+                         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8) \
                          ON CONFLICT(id) DO UPDATE SET \
                            body       = excluded.body, \
                            updated_at = excluded.updated_at, \
                            deleted_at = excluded.deleted_at, \
+                           revision   = excluded.revision, \
                            filed_at   = COALESCE({table}.filed_at, excluded.filed_at) \
-                         WHERE excluded.updated_at > {table}.updated_at \
+                         WHERE (excluded.updated_at > {table}.updated_at \
+                                OR (excluded.updated_at = {table}.updated_at \
+                                    AND excluded.revision > {table}.revision)) \
                            AND excluded.root IS {table}.root"
                     ),
                     params![
@@ -604,7 +651,8 @@ impl RecordStore for SqliteRecordStore {
                         row.updated_at,
                         row.deleted_at,
                         row.root,
-                        filed_at
+                        filed_at,
+                        row.revision
                     ],
                 )?;
             }
@@ -647,7 +695,7 @@ impl RecordStore for SqliteRecordStore {
                 }
 
                 let mut stmt = conn.prepare(&format!(
-                    "SELECT id, schema_nsid, body, updated_at, deleted_at, root, filed_at \
+                    "SELECT id, schema_nsid, body, updated_at, deleted_at, root, filed_at, revision \
                      FROM {table} WHERE updated_at > ?1"
                 ))?;
                 let rows_data: Vec<_> = stmt
@@ -660,19 +708,23 @@ impl RecordStore for SqliteRecordStore {
                             row.get::<_, Option<i64>>(4)?,
                             row.get::<_, Option<String>>(5)?,
                             row.get::<_, Option<i64>>(6)?,
+                            row.get::<_, i64>(7)?,
                         ))
                     })?
                     .filter_map(|r| r.ok())
                     .collect();
-                // Each row leaves with its root and its place in the filing
-                // order: records travel with both.
-                for (id, schema_nsid, body_str, updated_at, deleted_at, root, filed_at) in rows_data {
+                // Each row leaves with its root, its place in the filing order
+                // and its revision: records travel with all three.
+                for (id, schema_nsid, body_str, updated_at, deleted_at, root, filed_at, revision) in
+                    rows_data
+                {
                     let body = serde_json::from_str(&body_str).unwrap_or(Value::Null);
                     changeset.push(ChangesetRow {
                         id,
                         schema_nsid,
                         body,
                         updated_at,
+                        revision,
                         deleted_at,
                         root,
                         filed_at,
@@ -1037,6 +1089,7 @@ mod tests {
             schema_nsid: "sh.kotton.notes".to_owned(),
             body: json!({ "title": "Updated by peer" }),
             updated_at: newer_ts,
+            revision: 0,
             deleted_at: None,
             root: None,
             filed_at: None,
@@ -1064,6 +1117,7 @@ mod tests {
             schema_nsid: "sh.kotton.notes".to_owned(),
             body: json!({ "title": "Stale peer version" }),
             updated_at: 1,
+            revision: 0,
             deleted_at: None,
             root: None,
             filed_at: None,
@@ -1088,6 +1142,7 @@ mod tests {
             schema_nsid: "sh.kotton.notes".to_owned(),
             body: json!({ "title": "Peer note" }),
             updated_at: 1_000_000,
+            revision: 0,
             deleted_at: None,
             root: None,
             filed_at: None,
@@ -1581,5 +1636,102 @@ mod tests {
         let rows = filed(&store.query(&notes_nsid(), RecordFilter::new()).await.unwrap());
         assert_eq!(rows.iter().find(|(t, _)| t == "old").unwrap().1, 1_700_000_000_000);
         assert!(rows.iter().find(|(t, _)| t == "new").unwrap().1 > 1_700_000_000_000);
+    }
+
+    /// A table written before the revision is adopted in place on open, with
+    /// foreign keys on as every open sets them: every row already there takes
+    /// revision `0` and leaves on the wire with no `revision`, the bytes an
+    /// earlier version logged it as, so it is not logged again; its next write
+    /// is revision `1`, and a delete after that `2`.
+    #[tokio::test]
+    async fn a_table_written_before_the_revision_is_adopted_and_counts_on_from_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.db");
+        {
+            // The DDL as it stood before the column.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sh_kotton_notes (
+                    id TEXT NOT NULL, schema_nsid TEXT NOT NULL, body TEXT NOT NULL,
+                    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                    deleted_at INTEGER,
+                    root TEXT,
+                    filed_at INTEGER
+                ) STRICT;
+                CREATE UNIQUE INDEX idx_sh_kotton_notes_id ON sh_kotton_notes (id);
+                INSERT INTO sh_kotton_notes (id, schema_nsid, body, updated_at)
+                  VALUES ('old', 'sh.kotton.notes', '{\"title\":\"old\"}', 1700000000);",
+            )
+            .unwrap();
+        }
+        let store = SqliteRecordStore::open(&path, None).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+            assert_eq!(fk, 1, "the store is opened with foreign keys on");
+            let cols = columns_of(&conn, "sh_kotton_notes").unwrap();
+            assert!(cols.iter().any(|c| c == "revision"), "the table was not adopted: {cols:?}");
+        }
+
+        let exported = store.export_changeset(0).await.unwrap();
+        assert_eq!(exported.len(), 1, "no row was lost or added");
+        assert_eq!(exported[0].revision, 0);
+        let wire = serde_json::to_value(&exported[0]).unwrap();
+        assert!(wire.get("revision").is_none(), "an adopted row is not re-encoded: {wire}");
+
+        store
+            .insert(&notes_nsid(), json!({ "id": "old", "title": "rewritten" }))
+            .await
+            .unwrap();
+        store.delete(&notes_nsid(), &"old".to_owned()).await.unwrap();
+        let revision = |rows: &RecordChangeset| rows[0].revision;
+        assert_eq!(revision(&store.export_changeset(0).await.unwrap()), 2);
+
+        // Opening again leaves an adopted table as it is.
+        drop(store);
+        let again = SqliteRecordStore::open(&path, None).unwrap();
+        assert_eq!(revision(&again.export_changeset(0).await.unwrap()), 2);
+    }
+
+    /// The merge orders by `(updated_at, revision)`: in the same second a higher
+    /// revision wins and a lower one does not, and a later second wins whatever
+    /// its revision, so last save still wins across devices.
+    #[tokio::test]
+    async fn merge_orders_the_same_second_by_revision() {
+        let store = store_with_notes_table().await;
+        let nsid = notes_nsid();
+        let row = |title: &str, updated_at: i64, revision: i64| ChangesetRow {
+            id: "r".to_owned(),
+            schema_nsid: "sh.kotton.notes".to_owned(),
+            body: json!({ "title": title }),
+            updated_at,
+            revision,
+            deleted_at: None,
+            root: None,
+            filed_at: None,
+        };
+        let title = |s: &SqliteRecordStore| {
+            let nsid = nsid.clone();
+            let s = s.clone();
+            async move { s.query(&nsid, RecordFilter::new()).await.unwrap()[0].body["title"].clone() }
+        };
+
+        store.merge_changeset(vec![row("a", 100, 3)]).await.unwrap();
+        store.merge_changeset(vec![row("same", 100, 3)]).await.unwrap();
+        assert_eq!(title(&store).await, "a", "an equal version is not newer");
+        store.merge_changeset(vec![row("lower", 100, 2)]).await.unwrap();
+        assert_eq!(title(&store).await, "a");
+        store.merge_changeset(vec![row("higher", 100, 4)]).await.unwrap();
+        assert_eq!(title(&store).await, "higher");
+        store.merge_changeset(vec![row("later", 101, 1)]).await.unwrap();
+        assert_eq!(title(&store).await, "later", "a later second wins whatever its revision");
+
+        // A write here counts on from the revision the merge kept.
+        store
+            .insert(&nsid, json!({ "id": "r", "title": "local" }))
+            .await
+            .unwrap();
+        assert_eq!(store.export_changeset(0).await.unwrap()[0].revision, 2);
     }
 }

@@ -49,6 +49,8 @@ hex = "0.4"
 workspace-hack = { path = "../../tools/workspace-hack" }
 tokio = { version = "1.35", features = ["full", "test-util", "macros"] }
 tempfile = "3.8"
+# The replication tests' in-memory mount names `Bytes` in `ObjectStorage`'s signatures.
+bytes = "1.5"
 
 [lints]
 workspace = true
