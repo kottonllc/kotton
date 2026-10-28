@@ -22,7 +22,7 @@ use kotton::{KottonClient, UserResponse};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use super::{Command, CommandOutput};
+use super::{Command, CommandOutput, Verb};
 use crate::out::Out;
 use crate::state::ShellState;
 use crate::ui;
@@ -62,11 +62,19 @@ pub struct DeviceCommand;
 #[async_trait]
 impl Command for DeviceCommand {
     fn help_text(&self) -> &'static str {
-        "device add|admit|join|list|name|revoke — pair another of your machines to this \
-         identity (six-digit confirmation); `admit <invite>` takes in a vault, \
-         `--browser` admits a phone's browser, `--gateway <code>` a gateway elsewhere. \
+        "device add|join|list|name|revoke — pair another of your machines to this \
+         identity (six-digit confirmation); `--browser` admits a phone's browser, \
+         `--gateway <code>` a gateway elsewhere. A vault's invite is `drive enrol \
+         <invite>` (`device admit` was its name, and still runs it). \
          `kotton device reset` starts this whole device fresh and is the CLI's, not this \
          shell's — it deletes the directory this runtime is using"
+    }
+
+    /// `device` is not yet the command-tree decision's: only the word its table moved to `drive` is
+    /// declared, so the verb check holds that word and not the rest.
+    fn verbs(&self) -> &'static [Verb] {
+        const VERBS: &[Verb] = &[Verb::alias("admit", "drive enrol")];
+        VERBS
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
@@ -91,7 +99,7 @@ impl Command for DeviceCommand {
             )),
             _ => Ok(CommandOutput::fail(
                 "usage: device add [--as NAME] [--blind|--cosigner] | device add --browser | \
-                 device add --gateway <code> | device admit <invite> | \
+                 device add --gateway <code> | \
                  device join [code] [--as NAME] | device list | \
                  device revoke <id> | device revoke --browser <name> | \
                  device name [NAME]   (`kotton device reset` starts this device fresh)",
@@ -190,30 +198,13 @@ impl DeviceCommand {
         .await
     }
 
-    /// `device admit <invite>` — admit a vault by the invite it minted
-    /// (`kvaultd invite`, RFC-0084 V8): this node meets it at the invite's
-    /// relay, taking that relay as its own if it has none, and the six digits
-    /// are typed here. Blind is the only posture this door has, so it is the
-    /// default and needs no flag ([`admit_args`]).
+    /// `device admit <invite>`, the name the command-tree decision's table retires for `drive
+    /// enrol <invite>`: the same ceremony ([`enrol_vault`]), and a line naming the
+    /// verb the tree has for it.
     async fn admit(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
-        let (code, posture) = match admit_args(args) {
-            Ok(asked) => asked,
-            Err(why) => return Ok(CommandOutput::fail(why, None)),
-        };
-        let user_id = state.user_id.clone();
-        let client = state.client.lock().await;
-        let mut rx = client
-            .device_admit_stream(&user_id, &code, ADD_TTL_SECS, posture)
-            .await
-            .map_err(|e| anyhow::anyhow!("device admit: {e}"))?;
-        run_ceremony(
-            &client,
-            &user_id,
-            &mut rx,
-            ADMIT_ROLE,
-            Some(Duration::from_secs(ADD_TTL_SECS)),
-        )
-        .await
+        let mut answer = enrol_vault(args, state).await?;
+        answer.out.insert(0, super::deprecated("device admit", "drive enrol"));
+        Ok(answer)
     }
 
     /// Open the desk a phone's browser pairs at. The phone opens the gateway's
@@ -722,7 +713,33 @@ fn human_since(unix_secs: i64) -> String {
     }
 }
 
-/// What `device admit` was asked: the invite, and the posture to send with it.
+/// `drive enrol <invite>` — take in a vault by the invite it minted (`kvaultd
+/// invite`, RFC-0084 V8): this node meets it at the invite's relay, taking that
+/// relay as its own if it has none, and the six digits are typed here. Blind is
+/// the only posture this door has, so it is the default and needs no flag
+/// ([`admit_args`]). `device admit` was this ceremony's name, and runs it still.
+pub(crate) async fn enrol_vault(args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
+    let (code, posture) = match admit_args(args) {
+        Ok(asked) => asked,
+        Err(why) => return Ok(CommandOutput::usage(why, None)),
+    };
+    let user_id = state.user_id.clone();
+    let client = state.client.lock().await;
+    let mut rx = client
+        .device_admit_stream(&user_id, &code, ADD_TTL_SECS, posture)
+        .await
+        .map_err(|e| anyhow::anyhow!("drive enrol: {e}"))?;
+    run_ceremony(
+        &client,
+        &user_id,
+        &mut rx,
+        ADMIT_ROLE,
+        Some(Duration::from_secs(ADD_TTL_SECS)),
+    )
+    .await
+}
+
+/// What `drive enrol` was asked: the invite, and the posture to send with it.
 ///
 /// Blind is the default because it is the one posture admit-by-invite has; `--blind`
 /// is still read so a line typed from an older guide works, and changes nothing. A
@@ -731,7 +748,7 @@ fn human_since(unix_secs: i64) -> String {
 /// the client would be a guard with nothing behind it that the first does not hold.
 fn admit_args(args: &[String]) -> Result<(String, Posture), &'static str> {
     let Some(code) = args.iter().find(|a| !a.starts_with("--")).cloned() else {
-        return Err("usage: device admit <invite>");
+        return Err("usage: drive enrol <invite>");
     };
     let posture = if args.iter().any(|a| a == "--cosigner") {
         Posture::Cosigner
@@ -829,7 +846,7 @@ mod tests {
     /// No invite is the usage line, which names no flag.
     #[test]
     fn admit_with_no_invite_is_the_usage_line() {
-        assert_eq!(admit_args(&args(&[])).err(), Some("usage: device admit <invite>"));
+        assert_eq!(admit_args(&args(&[])).err(), Some("usage: drive enrol <invite>"));
     }
 
     /// The pairing screen says bare `sync`, which reaches every paired node, and

@@ -87,6 +87,17 @@ impl CommandOutput {
         }
     }
 
+    /// A line the tree does not have, said as an [`Out::Fail`](crate::out::Out::Fail)
+    /// shape with the usage to try, exit code 2: the command-tree decision's conventions give 0 to done,
+    /// 1 to a refusal and 2 to usage, and a verb's own parser is where a line is found
+    /// not to be one, in either door.
+    #[cfg(feature = "cli")]
+    pub fn usage(what: impl Into<String>, try_: Option<String>) -> Self {
+        let mut out = Self::fail(what, try_);
+        out.exit_code = ExitCode::Code(2);
+        out
+    }
+
     /// A failure rendered as an [`Out::Fail`](crate::out::Out::Fail) shape (red
     /// `error:` + an optional `try:` next step), exit code 1. The shape twin of
     /// [`error`](Self::error).
@@ -102,6 +113,63 @@ impl CommandOutput {
             }],
         }
     }
+}
+
+/// One verb of a noun, as the command-tree decision's tree has it or had it: the word typed after the
+/// noun, and whether it is the tree's or a word it retired.
+///
+/// The table a noun declares ([`Command::verbs`]) is the one list of its verbs: the
+/// noun's parser answers each word in it, and `cargo xtask-docs verb-check` reads it
+/// from the REPL's registry and from the clap tree's door to the same command, and
+/// holds it to the command-tree decision and its table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verb {
+    /// The word after the noun: `create`; `""` for the bare noun (`sync`); a
+    /// placeholder in angle brackets for a position a name fills (`pin <drive>`).
+    pub word: &'static str,
+    /// Whether the tree has it, or what replaced it.
+    pub is: VerbIs,
+}
+
+/// Whether a [`Verb`] is the tree's, or a word the command-tree decision's table retired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerbIs {
+    /// In the command-tree decision, and answered.
+    Current,
+    /// Retired, and still run as the verb that replaced it, with a line naming it.
+    Alias { now: &'static str },
+    /// Retired, and refused with a line naming what replaced it; exit 2.
+    Gone { now: &'static str },
+}
+
+impl Verb {
+    pub const fn current(word: &'static str) -> Self {
+        Self { word, is: VerbIs::Current }
+    }
+    pub const fn alias(word: &'static str, now: &'static str) -> Self {
+        Self { word, is: VerbIs::Alias { now } }
+    }
+    pub const fn gone(word: &'static str, now: &'static str) -> Self {
+        Self { word, is: VerbIs::Gone { now } }
+    }
+}
+
+/// The line an alias is answered with beside what it ran: the words typed, and the
+/// verb the command-tree decision's tree has for them. A warning, so off a terminal it is on stderr
+/// and a script reading stdout reads only the verb's own answer.
+#[cfg(feature = "cli")]
+pub fn deprecated(was: &str, now: &str) -> crate::out::Out {
+    crate::out::Out::Warn {
+        what: format!("`{was}` is `{now}` now"),
+        consequence: format!("`{was}` is deprecated; type `{now}`"),
+    }
+}
+
+/// The line a retired word is refused with, exit 2: the words typed, and what the
+/// command-tree decision's tree has in their place.
+#[cfg(feature = "cli")]
+pub fn retired(was: &str, now: &str) -> CommandOutput {
+    CommandOutput::usage(format!("`{was}` is gone"), Some(now.to_string()))
 }
 
 /// Trait for shell commands
@@ -135,6 +203,18 @@ pub trait Command: Send + Sync {
     /// commands out of the surface a user reads. Nothing that doesn't work earns a
     /// place in `help`.
     fn hidden(&self) -> bool {
+        false
+    }
+
+    /// This noun's verbs, current and retired ([`Verb`]). Empty for a noun the command-tree decision's
+    /// rewrite has not reached yet: the check then holds its name and not its verbs.
+    fn verbs(&self) -> &'static [Verb] {
+        &[]
+    }
+
+    /// Whether this noun reads `--json` among its own words (`drive list --json`), so
+    /// a door told `--json` hands it the word rather than serializing the shapes.
+    fn answers_json(&self) -> bool {
         false
     }
 

@@ -4904,7 +4904,7 @@ async fn the_admit_as(client: &mut kotton::KottonClient, user: &str, invite: &st
 /// **A friend invited from the desktop types the six digits the desktop shows.**
 /// The landlord mints the invite at their desktop, under the
 /// vault's operator credential, as `vault invite <v> <name>` does; the friend
-/// says `device admit <invite>` at their own `kotton`, a process of its own,
+/// says `drive enrol <invite>` at their own `kotton`, a process of its own,
 /// and is asked for six digits. Those digits are the whole of the security, so
 /// they must have been shown to the landlord, who reads them out: the test
 /// takes them from the landlord's desktop and nowhere else, types them at the
@@ -4944,7 +4944,7 @@ async fn a_friend_invited_from_the_desktop_types_the_digits_the_desktop_shows() 
     within("the friend's things", a_person_with_things(&mut friend.client, "sam", NOTE)).await;
     let cli = crate::common::cli::Cli::for_env(&friend);
     cli.seed_session("sam", friend.client.session_token.as_deref().expect("create_user bound a session"));
-    let mut admit = cli.spawn_on_pipes(&["device", "--user", "sam", "admit", &invite]);
+    let mut admit = cli.spawn_on_pipes(&["drive", "--user", "sam", "enrol", &invite]);
     let said = Arc::new(std::sync::Mutex::new(String::new()));
     let pumps: Vec<_> = [
         Box::new(admit.stdout.take().expect("stdout")) as Box<dyn std::io::Read + Send>,

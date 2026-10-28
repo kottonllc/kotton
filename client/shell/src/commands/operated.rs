@@ -991,7 +991,7 @@ fn spoken(asked: &OperatorVerb, to: To<'_>, answer: UserResponse) -> CommandOutp
         (OperatorVerb::Invite { pool, .. }, UserResponse::PairAdvertising { code, .. }) => {
             CommandOutput::shapes(vec![Out::Record(vec![
                 ("invite".into(), code.expose().to_string()),
-                ("on their device".into(), "device admit <invite>".into()),
+                ("on their device".into(), "drive enrol <invite>".into()),
                 (
                     "the six digits".into(),
                     format!("`vault digits{} {pool}` once their device asks for them; read them out", to.said()),

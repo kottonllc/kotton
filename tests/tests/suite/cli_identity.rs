@@ -394,15 +394,16 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
     let (mut alice, _vault_identity) = crate::vault::enrol_vault(alice, &vault, USER, "vault").await;
 
     alice.write_file(USER, "notes.txt", NOTE).await.expect("write a file");
-    let out = cli.run(&["sync", "--user", USER, "vault"]);
-    assert!(out.status.success(), "`kotton sync vault` failed.\n{}", said(&out));
+    // `sync`: this device's drives, the vault among them.
+    let out = cli.run(&["sync", "--user", USER]);
+    assert!(out.status.success(), "`kotton sync` failed.\n{}", said(&out));
     let synced = said(&out);
     let pushed: u64 = synced
         .lines()
-        .find_map(|l| l.trim().strip_prefix("pushed"))
-        .and_then(|rest| rest.trim().trim_start_matches(':').trim().parse().ok())
-        .unwrap_or_else(|| panic!("`sync` did not report a pushed count.\n{synced}"));
-    assert!(pushed >= 1, "nothing was pushed, so there is nothing to recover.\n{synced}");
+        .find_map(|l| l.trim().strip_prefix("synced "))
+        .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+        .unwrap_or_else(|| panic!("`sync` did not report what it synced.\n{synced}"));
+    assert!(pushed >= 1, "nothing was synced, so there is nothing to recover.\n{synced}");
 
     // ── The one moment the product tells the person anything ─────────────────
     let out = cli.run(&["id", "add-recovery", USER]);
@@ -569,7 +570,7 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
             let typed = "id recover".to_string();
             let session = new_cli.run_on_a_terminal(
                 &[],
-                &[&typed, &phrase, &line, NEW_PASSPHRASE, NEW_PASSPHRASE, "sync --pull vault", "cat notes.txt", "exit"],
+                &[&typed, &phrase, &line, NEW_PASSPHRASE, NEW_PASSPHRASE, "sync", "cat notes.txt", "exit"],
             );
             assert!(session.ok, "the REPL did not exit cleanly.\n{session}");
             // The vault the line names is the person's drive here, as the one-shot
