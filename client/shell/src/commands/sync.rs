@@ -113,6 +113,14 @@ impl Command for SyncCommand {
         Ok(CommandOutput::shapes(out))
     }
 
+    /// A line this noun's parser refuses is answered here, before any door connects:
+    /// a usage line, or a retired word with the verb that replaced it, is the parser's
+    /// to say and asks the daemon nothing, so it exits 2 with no session and no identity.
+    /// Only a line that parses opens a session.
+    async fn execute_without_session(&self, args: &[String], _named: Option<&str>) -> Option<Result<CommandOutput>> {
+        parse(args).err().map(Ok)
+    }
+
     fn flags(&self) -> Vec<&'static str> {
         vec!["--no-wait"]
     }

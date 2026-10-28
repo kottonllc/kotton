@@ -394,7 +394,7 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
     let (mut alice, _vault_identity) = crate::vault::enrol_vault(alice, &vault, USER, "vault").await;
 
     alice.write_file(USER, "notes.txt", NOTE).await.expect("write a file");
-    // `sync`: this device's drives, the vault among them (RFC 0003).
+    // `sync`: this device's drives, the vault among them.
     let out = cli.run(&["sync", "--user", USER]);
     assert!(out.status.success(), "`kotton sync` failed.\n{}", said(&out));
     let synced = said(&out);

@@ -402,7 +402,7 @@ mod peer_list_tests {
     /// The column holding what `peer show <remote>` takes is headed `remote`, the
     /// word its usage names it by. It was headed `label` until 2026-09-28, and the
     /// owner, with a vault paired, had to ask which column a verb wanted. `sync`
-    /// took it too until RFC 0003's tree, where `sync` takes no remote.
+    /// took it too until the command-tree decision's tree, where `sync` takes no remote.
     #[test]
     fn the_column_peer_show_takes_is_headed_by_the_word_its_usage_uses() {
         let Out::Table { columns, rows } = list_table(&[node("ubuntu-s-1vcpu-1gb-nyc1", DID)])
