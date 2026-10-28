@@ -47,7 +47,25 @@ enum Line<'a> {
     List { json: bool },
     Show { name: &'a str, json: bool },
     Move { name: &'a str, to: &'a str, from: Option<&'a str> },
-    Enrol { words: Vec<String> },
+    Enrol { invite: String, flags: Vec<String> },
+}
+
+/// What `drive enrol` (and `device admit`, its retired name) says when no invite is among the words.
+pub(super) const ENROL_USAGE: &str = "usage: drive enrol <invite>";
+
+/// The invite among the words after `enrol` (the first that is not a `--` flag) and the
+/// flags that remain. The one place the invite is found; `None` is the usage refusal.
+pub(super) fn split_invite(words: impl IntoIterator<Item = String>) -> Option<(String, Vec<String>)> {
+    let mut invite = None;
+    let mut flags = Vec::new();
+    for w in words {
+        if invite.is_none() && !w.starts_with("--") {
+            invite = Some(w);
+        } else {
+            flags.push(w);
+        }
+    }
+    invite.map(|i| (i, flags))
 }
 
 /// The words after `drive`, as a [`Line`], or the usage refusal (exit 2).
@@ -69,8 +87,10 @@ fn parse(args: &[String]) -> Result<Line<'_>, CommandOutput> {
             Ok(Line::Move { name, to, from: Some(from) })
         }
         ["move", ..] => usage("drive move: needs --to <vault>"),
-        ["enrol", ..] if words.len() > 1 => Ok(Line::Enrol { words: args[1..].to_vec() }),
-        ["enrol"] => usage("drive enrol: needs the invite the vault gave you"),
+        ["enrol", rest @ ..] => match split_invite(rest.iter().map(|w| w.to_string())) {
+            Some((invite, flags)) => Ok(Line::Enrol { invite, flags }),
+            None => usage(ENROL_USAGE),
+        },
         _ => usage("drive: unknown form"),
     }
 }
@@ -170,7 +190,7 @@ async fn run(line: Line<'_>, state: &mut ShellState) -> Result<CommandOutput> {
             }]))
         }
         // The ceremony takes the lock for itself.
-        Line::Enrol { words } => super::device::enrol_vault(&words, state).await,
+        Line::Enrol { invite, flags } => super::device::enrol_vault(&invite, &flags, state).await,
     }
 }
 
@@ -308,11 +328,21 @@ mod tests {
     }
 
     #[test]
-    fn enrol_hands_the_ceremony_every_word_after_the_verb() {
-        assert_eq!(
-            parse(&words("enrol CODE --blind")).ok(),
-            Some(Line::Enrol { words: words("CODE --blind") })
-        );
+    fn enrol_hands_the_ceremony_the_invite_and_the_flags() {
+        for line in ["enrol CODE --blind", "enrol --blind CODE"] {
+            assert_eq!(
+                parse(&words(line)).ok(),
+                Some(Line::Enrol { invite: "CODE".into(), flags: words("--blind") }),
+                "{line}"
+            );
+        }
+    }
+
+    /// An `enrol` line with only flags has no invite: usage, exit 2, before any session.
+    #[test]
+    fn enrol_with_only_flags_is_usage_exit_two() {
+        let refused = parse(&words("enrol --blind")).expect_err("no invite");
+        assert_eq!(refused.exit_code, ExitCode::Code(2));
     }
 
     #[test]
