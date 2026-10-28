@@ -41,7 +41,7 @@ pub use record_store::{
     ChangesetRow, Record, RecordChangeset, RecordFilter, RecordId, RecordStore, RecordStoreError,
     RootSelection, SyncWatermark,
 };
-pub use sqlite_record_store::SqliteRecordStore;
+pub use sqlite_record_store::{SqliteRecordStore, StoreClock};
 
 // Re-exports — connection pool
 pub use sqlx::SqlitePool;
