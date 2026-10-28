@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 use kotton_wire::ipc::OperatedService;
 use kotton_wire::line::InstanceLine;
 
-use crate::common::free_port;
 use crate::common::relay::{create_at, relay_bin};
 
 /// ed25519's base point: a key whose secret half nobody here holds.
@@ -30,14 +29,12 @@ fn said(out: &Output) -> String {
     )
 }
 
-/// `kotton-relay` with `args`, bound to a free loopback port, run to its end
-/// or for at most ten seconds; and the port it was given.
-fn relay_run(args: &[&str]) -> (Output, u16) {
-    let port = free_port();
-    let addr = format!("127.0.0.1:{port}");
+/// `kotton-relay` with `args`, on loopback ports the OS gives it, run to its end
+/// or for at most ten seconds.
+fn relay_run(args: &[&str]) -> Output {
     let mut child = Command::new(relay_bin())
         .args(args)
-        .args(["--bind", &addr, "--stun-bind", &addr])
+        .args(["--bind", "127.0.0.1:0", "--stun-bind", "127.0.0.1:0"])
         .env("RUST_LOG", "kotton_relay=warn")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -52,7 +49,19 @@ fn relay_run(args: &[&str]) -> (Output, u16) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    (child.wait_with_output().expect("its output"), port)
+    child.wait_with_output().expect("its output")
+}
+
+/// A refused start bound nothing: it never printed where it listens, the line a
+/// start prints once its sockets are bound. It was given port 0 for both, so no
+/// port was named before it ran for the test to look at instead.
+fn bound_nothing(out: &Output) {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.lines().any(|l| crate::common::relay::listening_at(l).is_some()),
+        "a refused start bound a socket first: {}",
+        said(out)
+    );
 }
 
 /// Every run of hex digits exactly 32 long — the shape of the claim's
@@ -82,21 +91,20 @@ fn kept(dir: &Path) -> Vec<(String, Vec<u8>)> {
 fn an_instance_with_no_operator_refuses_to_start_and_names_create() {
     let state = tempfile::tempdir().expect("a relay state directory");
     let dir = state.path().display().to_string();
-    let (out, port) = relay_run(&["--state-dir", &dir]);
+    let out = relay_run(&["--state-dir", &dir]);
     assert_eq!(out.status.code(), Some(1), "{}", said(&out));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains(&dir) && err.contains("kotton-relay create --state-dir"), "{}", said(&out));
     assert!(err.contains("--operator <key>"), "{}", said(&out));
     let made: Vec<String> = kept(state.path()).into_iter().map(|(f, _)| f).collect();
     assert_eq!(made, ["instance.lock"], "the refused start made something in the state directory but its lock");
-    std::net::TcpListener::bind(("127.0.0.1", port)).expect("nothing bound its port");
-    std::net::UdpSocket::bind(("127.0.0.1", port)).expect("nothing bound its STUN port");
+    bound_nothing(&out);
 
-    let (out, port) = relay_run(&[]);
+    let out = relay_run(&[]);
     assert_eq!(out.status.code(), Some(1), "{}", said(&out));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("kotton-relay --operator <key>") && err.contains("create --state-dir <dir> --operator <key>"), "{}", said(&out));
-    std::net::TcpListener::bind(("127.0.0.1", port)).expect("nothing bound its port");
+    bound_nothing(&out);
 }
 
 /// **`kotton-relay create` prints the relay's line as its last output; every
@@ -107,20 +115,21 @@ fn an_instance_with_no_operator_refuses_to_start_and_names_create() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_services_start_prints_its_line_and_no_secret() {
     let state = tempfile::tempdir().expect("a relay state directory");
-    let addr = format!("127.0.0.1:{}", free_port());
-    let url = format!("http://{addr}");
+    // The hint its line carries, written at creation, before it runs: what it says
+    // it is reached at, signed, never dialled here — so not a port it binds.
+    let url = "http://relay.test:7700";
     let created = Command::new(relay_bin())
         .arg("--state-dir")
         .arg(state.path())
-        .args(["--advertise", &url, "create", "--operator", OPERATOR])
+        .args(["--advertise", url, "create", "--operator", OPERATOR])
         .output()
         .expect("kotton-relay create");
     assert!(created.status.success(), "{}", said(&created));
     let stdout = String::from_utf8_lossy(&created.stdout);
     let line = InstanceLine::parse(stdout.lines().last().unwrap_or_default()).unwrap_or_else(|e| panic!("{e}: {}", said(&created)));
-    assert_eq!((line.kind, line.hint.as_str()), (OperatedService::Relay, url.as_str()));
+    assert_eq!((line.kind, line.hint.as_str()), (OperatedService::Relay, url));
 
-    let (mut relay, log) = crate::common::relay::relay_at(state.path(), &addr, &url).await;
+    let (mut relay, addr, log) = crate::common::relay::relay_at(state.path(), "127.0.0.1:0", url).await;
     let key = crate::common::relay::key_of(&addr).await;
     let _ = relay.kill();
     let _ = relay.wait();
@@ -128,7 +137,7 @@ async fn a_services_start_prints_its_line_and_no_secret() {
     assert!(printed.lines().any(|l| l == line.to_text()), "the start printed another line than creation's:\n{printed}");
     assert_eq!(line.key, key, "the line names the key the relay proves");
 
-    let (in_memory, _) = relay_run(&["--operator", OPERATOR]);
+    let in_memory = relay_run(&["--operator", OPERATOR]);
     let in_memory_out = String::from_utf8_lossy(&in_memory.stdout).to_string();
     let first = in_memory_out.lines().next().unwrap_or_default();
     let line = InstanceLine::parse(first).unwrap_or_else(|e| panic!("{e}: {}", said(&in_memory)));
@@ -156,8 +165,7 @@ async fn a_services_start_prints_its_line_and_no_secret() {
 async fn create_refuses_while_an_instance_runs_on_the_state() {
     let state = tempfile::tempdir().expect("a relay state directory");
     create_at(state.path(), OPERATOR);
-    let addr = format!("127.0.0.1:{}", free_port());
-    let (mut relay, _) = crate::common::relay::relay_at(state.path(), &addr, &format!("http://{addr}")).await;
+    let (mut relay, _, _) = crate::common::relay::relay_at(state.path(), "127.0.0.1:0", "").await;
     let before = kept(state.path());
     let out = Command::new(relay_bin())
         .arg("--state-dir")
@@ -183,10 +191,10 @@ fn an_instance_does_not_start_while_create_holds_its_state() {
         .expect("the lock file creation made");
     lock.try_lock().expect("held here, as create holds it");
     let dir = state.path().display().to_string();
-    let (out, port) = relay_run(&["--state-dir", &dir]);
+    let out = relay_run(&["--state-dir", &dir]);
     assert_eq!(out.status.code(), Some(1), "{}", said(&out));
     assert!(String::from_utf8_lossy(&out.stderr).contains("held by another kotton-relay"), "{}", said(&out));
-    std::net::TcpListener::bind(("127.0.0.1", port)).expect("nothing bound its port");
+    bound_nothing(&out);
     drop(lock);
 }
 
@@ -200,8 +208,7 @@ async fn a_start_deletes_a_leftover_claim_file() {
     create_at(state.path(), OPERATOR);
     let leftover = state.path().join("claim");
     std::fs::write(&leftover, b"an open secret the deleted claim kept").unwrap();
-    let addr = format!("127.0.0.1:{}", free_port());
-    let (mut relay, _) = crate::common::relay::relay_at(state.path(), &addr, &format!("http://{addr}")).await;
+    let (mut relay, _, _) = crate::common::relay::relay_at(state.path(), "127.0.0.1:0", "").await;
     let _ = relay.kill();
     let _ = relay.wait();
     assert!(!leftover.exists(), "the start kept the claim's secret on disk");
@@ -219,10 +226,10 @@ fn a_start_never_mints_a_key_over_existing_state() {
     let key = state.path().join("identity.key");
     std::fs::remove_file(&key).unwrap();
     let dir = state.path().display().to_string();
-    let (out, port) = relay_run(&["--state-dir", &dir]);
+    let out = relay_run(&["--state-dir", &dir]);
     assert_eq!(out.status.code(), Some(1), "{}", said(&out));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("identity.key") && err.contains("never makes a"), "{}", said(&out));
     assert!(!key.exists(), "the start made a key over existing state");
-    std::net::TcpListener::bind(("127.0.0.1", port)).expect("nothing bound its port");
+    bound_nothing(&out);
 }

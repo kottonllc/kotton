@@ -19,7 +19,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::free_port;
 use crate::common::{connect_when_ready, enroll_streamed, enroll_streamed_as, init_crypto, unique_ipc, wait_for_daemon};
 use kotton_sys::ipc::IpcEndpoint;
 
@@ -54,11 +53,11 @@ async fn spawn_vault_on(label: &str, shelves: Arc<dyn kotton_sys::store::Shelves
             .await
             .expect("vault"),
     );
-    let op_port = free_port();
     vault
-        .start_peer_listener_background(op_port)
+        .start_peer_listener_background(0)
         .await
         .expect("vault peer listener");
+    let op_port = crate::common::peer_port(vault.runtime());
     let task = tokio::spawn(Arc::clone(&vault).run());
     wait_for_daemon(&ipc, label).await;
     RunningVault {
@@ -171,7 +170,6 @@ pub(crate) async fn enrol_vault_from(
         user,
         device_name,
         label,
-        free_port(),
         Posture::BlindStorage,
     )
     .await;
@@ -2818,7 +2816,9 @@ async fn a_vault_enrolled_while_a_stranger_holds_its_relays_address_is_answered_
     drop(bx._relay);
     let elsewhere = tempfile::tempdir().expect("a stranger's relay state");
     crate::common::relay::create_at(elsewhere.path(), &hex::encode(ed25519_dalek::SigningKey::from_bytes(&rand::random()).verifying_key().to_bytes()));
-    let (mut stranger, _) = crate::common::relay::relay_at(elsewhere.path(), &bx.relay_addr, &bx.relay_url).await;
+    // At the address the relay it replaces was given: the point of the case is a
+    // stranger where the vault's relay was, so this one port is not the OS's pick.
+    let (mut stranger, _, _) = crate::common::relay::relay_at(elsewhere.path(), &bx.relay_addr, &bx.relay_url).await;
 
     let kept = within("the vault's credential, a stranger at the relay's address", desk.client.operator_enrol("lee", &bx.vault_credential))
         .await
@@ -4386,7 +4386,7 @@ async fn admitting_a_vault_records_the_port_its_peers_dial() {
         .expect("create_user");
     let client_v = connect_when_ready(&vault.ipc, "vault door").await;
     let (mut client, _client_v, node) =
-        enroll_streamed(client, client_v, "alice", "vault", free_port(), Posture::BlindStorage).await;
+        enroll_streamed(client, client_v, "alice", "vault", Posture::BlindStorage).await;
     assert_eq!(node.id, "vault");
 
     let nodes = client.list_nodes("alice").await.expect("node list");
@@ -4992,6 +4992,27 @@ async fn a_friend_invited_from_the_desktop_types_the_digits_the_desktop_shows() 
         assert!(std::time::Instant::now() < deadline, "the vault keeps nobody as sam after the admit\n{said}");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    // The vault keeps the digits only while the ceremony waits, and its watch
+    // ends where the ceremony's stream ends, not at a frame it names (#140):
+    // so the desktop showing none now is the invite's stream having ended
+    // after its result.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match within("vault digits", desk.client.as_operator("lee", "kotton", OperatorVerb::Digits { pool: "sam".into() }))
+            .await
+            .expect("the desktop's daemon answers")
+        {
+            UserResponse::InviteDigits { digits } if digits.is_empty() => break,
+            UserResponse::InviteDigits { digits } => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the vault still shows {digits:?} after its ceremony completed: the invite's stream did not end"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            other => panic!("the desktop did not say the digits: {other:?}"),
+        }
+    }
 }
 
 /// A device whose user is `alice` admits a vault under an invite the landlord
@@ -5023,6 +5044,10 @@ async fn an_admit_under_an_invite_for_another_name_says_so_and_a_matching_one_sy
                 reason.contains("kvaultd invite alice"),
                 "the admit says what to type at the host: {reason}"
             );
+            // The vault's rule is read before the vault is recorded, so a
+            // refused admit leaves no row beside the failure it reports (#157).
+            let nodes = within("the device's paired nodes", client.list_nodes("alice")).await.expect("node list");
+            assert!(nodes.is_empty(), "a refused admit recorded the vault: {nodes:?}");
         }
         UserResponse::PairingComplete { node, .. } => {
             // Today's shape: the admit completes, and the first sync is where
@@ -6355,13 +6380,23 @@ async fn enrolling_a_vault_goes_through_the_relay_already_paired() {
         relay.name, relay_addr,
         "enrolling through the relay you already have must not move you to another"
     );
-    let nodes = within("reading the node roster", env.client.list_nodes("alice"))
-        .await
-        .expect("node list");
-    assert!(
-        nodes.iter().any(|n| n.id == "vault"),
-        "the vault is not among this device's paired nodes: {nodes:?}"
-    );
+    // The vault's side finishing is not the admit finishing: this device
+    // records the vault only once the vault has said it keeps for it (#157),
+    // a dial after the ceremony. So the roster is read until the admit has
+    // written it, bounded like every step here: a vault never recorded is
+    // this step wedged.
+    within_for(WHOLE, "waiting for the vault among this device's paired nodes", async {
+        loop {
+            let nodes = within("reading the node roster", env.client.list_nodes("alice"))
+                .await
+                .expect("node list");
+            if nodes.iter().any(|n| n.id == "vault") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
     // And in the list the pane draws, with nothing typed after the digits.
     let vaults = within_for(WHOLE, "waiting for the vault in the readout", vaults_in_the_readout(&env.daemon))
         .await;
@@ -6501,9 +6536,8 @@ async fn a_service_started_with_its_operators_key_admits_that_key_and_no_other()
     let operator = ed25519_dalek::SigningKey::from_bytes(&rand::random());
     let state = tempfile::tempdir().expect("a relay state directory");
     crate::common::relay::create_at(state.path(), &hex::encode(operator.verifying_key().to_bytes()));
-    let addr = format!("127.0.0.1:{}", free_port());
+    let (mut relay, addr, _) = crate::common::relay::relay_at(state.path(), "127.0.0.1:0", "").await;
     let url = format!("http://{addr}");
-    let (mut relay, _) = crate::common::relay::relay_at(state.path(), &addr, &url).await;
     let read = kotton_wire::rendezvous::RelayOperatorRequest::ReadRule;
     let ours = kotton_net::rendezvous::say_as_operator(&url, &operator, &read).await;
     let theirs = kotton_net::rendezvous::say_as_operator(&url, &stranger, &read).await;

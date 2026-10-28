@@ -40,11 +40,6 @@ use crate::common::{
 const USER: &str = "alice";
 const MODEL_NSID: &str = "sh.kotton.model";
 
-fn free_port() -> u16 {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind :0 for port probe");
-    s.local_addr().expect("local_addr").port()
-}
-
 /// Weights, as far as this unit is concerned: bytes with a hash.
 ///
 /// No backend parses them — `StubBackend` is still what runs, and choosing a
@@ -454,13 +449,11 @@ async fn an_installed_model_reaches_a_second_paired_device() {
     // join introduces N to it: N receives E's model by way of the drive.
     let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", USER).await;
 
-    let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) = enroll_streamed(
         client_e,
         client_n,
         USER,
         "device-n",
-        bootstrap_port,
         Posture::Full,
     )
     .await;
@@ -530,11 +523,11 @@ async fn a_model_comes_back_from_the_phrase_after_every_device_is_lost() {
         .await
         .expect("daemon B"),
     );
-    let op_port_b = free_port();
     daemon_b
-        .start_peer_listener_background(op_port_b)
+        .start_peer_listener_background(0)
         .await
         .expect("start B operational listener");
+    let op_port_b = crate::common::peer_port(&daemon_b.runtime());
     let daemon_b =
         Arc::try_unwrap(daemon_b).unwrap_or_else(|_| panic!("sole arc owner for daemon_b"));
     let _task_b = tokio::spawn(async move { std::sync::Arc::new(daemon_b).run().await });
@@ -569,13 +562,11 @@ async fn a_model_comes_back_from_the_phrase_after_every_device_is_lost() {
             .await
             .expect("add_recovery_phrase");
 
-        let bootstrap_port = free_port();
         let (mut client_e, _client_b, node_b) = enroll_streamed(
             client_e,
             client_b,
             USER,
             "blind-vps",
-            bootstrap_port,
             Posture::BlindStorage,
         )
         .await;

@@ -591,10 +591,11 @@ pub enum UserResponse {
     /// not refused: `vault invite --me` asks the vault to keep this person's
     /// things, and a vault that keeps them already has (#108). Every other
     /// reader of an invite's answer says it as a refusal, in
-    /// [`vault_keeps_already_said`]: `kvaultd invite` at the vault's own door
-    /// and a guest's `landlord.invite` through [`answer_said`], as they say
-    /// any answer but the invite, and on the operator's desktop
-    /// `vault invite <v> <name>`. No reader names it to decide what to send
+    /// [`vault_keeps_already_said`] through [`answer_said`], as each says any
+    /// answer but the invite: `kvaultd invite` at the vault's own door, a
+    /// guest's `landlord.invite`, and on the operator's desktop
+    /// `vault invite <v> <name>`. No reader but `--me` names it, and no reader
+    /// names it to decide what to send
     /// next: the operator's desktop sends a number after an invite only on
     /// the invite itself (`kuserd::agent::operator::in_order`, #114).
     VaultKeepsAlready {
@@ -621,7 +622,12 @@ pub enum UserResponse {
     NodeRevoked,
 
     /// The pairing ceremony completed successfully (terminal frame of the RFC-0040
-    /// `DeviceAdd` / `DeviceJoin` stream).
+    /// `DeviceAdd` / `DeviceJoin` stream). On the admitting side it is sent only
+    /// after the joining device answered that it kept what it was handed, and
+    /// the device was then recorded and introduced at the person's drives —
+    /// and, for a vault admitted by code, after the vault answered that it
+    /// keeps for this device, before it was recorded; on the joining side, only once the admitting device replied, sealed in the
+    /// ceremony's channel, that it heard that answer.
     PairingComplete {
         node: PairedNode,
         /// A session token for the newly-joined device (the joiner side of
@@ -683,7 +689,15 @@ pub enum UserResponse {
     PairAwaitingPeer,
     /// Both sides confirmed; key material is transferring / installing.
     PairTransferring,
-    /// The ceremony aborted (mismatch, cancel, timeout, or peer vanished).
+    /// The ceremony aborted (mismatch, cancel, timeout, or peer vanished), or
+    /// the joining device did not keep what it was handed — it refused it, or
+    /// did not say it kept it in time — in which case the admitting device kept
+    /// nothing of the join either: no row, and no drive told of it. On an
+    /// admit by code it is also the frame for a vault whose rule refuses this
+    /// device, which is read before the vault is recorded: no row either. On the
+    /// joining side it is also the frame for a join it kept whose admitting
+    /// device never replied that it heard: that device may or may not have
+    /// kept it, and `reason` says to check there.
     /// `reason` is calm, specific §7 copy suitable to show verbatim.
     PairFailed {
         reason: String,
@@ -1363,24 +1377,32 @@ pub fn vault_keeps_already_said(user_id: &str) -> String {
     )
 }
 
-/// What a reader of the vault's answer to an invite says of an answer it does
-/// not act on: anything but the invite (`PairAdvertising`) and the ceremony's
-/// own frames. The vault's own words where the answer carries them — an
-/// `Error`'s message, [`vault_keeps_already_said`] — and otherwise the
-/// answer's name, never its fields.
+/// What a reader of an operated vault's or relay's answer says of an answer
+/// it does not act on: anything but the one its verb asked for (and, for an
+/// invite or a join at the vault's door, the ceremony's own frames). The
+/// vault's own words where the answer carries them — an `Error`'s message,
+/// [`vault_keeps_already_said`] — and otherwise the answer's name, never its
+/// fields. The name is said without naming who answered: the same words
+/// serve a relay's answer and a vault's, and the reader's own word (`relay:`,
+/// `vault:`) says which.
 ///
-/// **This says; it does not decide** (#114). Each reader acts only on the
-/// answer it asked for and stops on anything else, so an answer a release
+/// **This says; it does not decide** (#114, #121). Each reader acts only on
+/// the answer it asked for and stops on anything else, so an answer a release
 /// adds is never misread as leave to go on: it is said here by its name
 /// until it is given a sentence, and then said in it by every reader at once.
-/// `kvaultd invite` at the vault's door and a guest's `landlord.invite` say
-/// through this.
+/// The readers that say through this: `kvaultd invite` and `kvaultd join` at
+/// the vault's door; six of a guest's landlord verbs, through `kuserd`'s
+/// `occupant_host::answered!` — `landlord.invite`, `landlord.people`,
+/// `landlord.drop-pool`, `landlord.rule`, `landlord.set-rule` and
+/// `landlord.move-vault` (not `landlord.enrol`, which reads through
+/// `door::enrolled`, #139; `landlord.resolve` reads no answer); and the shell's
+/// verbs said to an operated vault or relay (`operated::spoken`).
 pub fn answer_said(answer: &UserResponse) -> String {
     match answer {
         UserResponse::Error { message } => message.clone(),
         UserResponse::VaultKeepsAlready { user_id } => vault_keeps_already_said(user_id),
         unsaid => format!(
-            "the vault answered `{}`, which this release has no sentence for; nothing more was asked of it",
+            "the answer was `{}`, which this release has no sentence for; nothing more was asked of it",
             unsaid.name()
         ),
     }
@@ -1437,15 +1459,15 @@ mod answer_said_tests {
             vault_keeps_already_said("sam")
         );
         let full = answer_said(&UserResponse::VaultFull { held: 17, quota: 9 });
-        assert!(full.starts_with("the vault answered `VaultFull`,"), "{full}");
+        assert!(full.starts_with("the answer was `VaultFull`,"), "{full}");
         assert!(!full.contains("17") && !full.contains('{'), "fields were printed: {full}");
         let unit = answer_said(&UserResponse::NoActiveSession);
-        assert!(unit.starts_with("the vault answered `NoActiveSession`,"), "{unit}");
+        assert!(unit.starts_with("the answer was `NoActiveSession`,"), "{unit}");
         let secret = answer_said(&UserResponse::PairAdvertising {
             code: SecretText::new("kotton-invite:vault:the-words"),
             expires_at: 1,
         });
-        assert!(secret.starts_with("the vault answered `PairAdvertising`,") && !secret.contains("the-words"), "{secret}");
+        assert!(secret.starts_with("the answer was `PairAdvertising`,") && !secret.contains("the-words"), "{secret}");
     }
 }
 

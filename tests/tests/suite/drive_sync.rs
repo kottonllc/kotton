@@ -13,7 +13,7 @@
 //! Real daemons throughout: an in-process `kvaultd::Vault`, and two device
 //! daemons paired through the streamed ceremony. Nothing is mocked.
 
-use crate::common::{connect_when_ready, enroll_streamed_as, free_port, init_crypto};
+use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto};
 use crate::vault::{enrol_vault_from, recover_from, spawn_device, spawn_vault, tenants_at_the_door, try_ask_the_vault_as, RunningDevice, RunningVault, VaultIdentity};
 use kotton::SyncDirection;
 use kotton_schemas::membership::Posture;
@@ -69,7 +69,7 @@ async fn a_device_its_admitter_introduces_reaches_the_persons_drive_until_revoke
     assert!(!admitted(&capacity_as(&b, &drive).await), "B is a stranger at the drive before it joins");
 
     let (mut client_a, mut client_b, node_b) =
-        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
+        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", Posture::Full).await;
     assert_eq!(devices_at(&vault, USER).await, 2, "the drive pairs both of alice's devices");
     assert!(admitted(&capacity_as(&b, &drive).await), "B reaches the drive under its own key");
 
@@ -188,7 +188,7 @@ async fn a_recovered_device_sees_its_vault_as_a_drive_and_introduces_the_next_de
     let client_b = connect_when_ready(&b.ipc, "client B").await;
     assert!(!admitted(&capacity_as(&b, &drive).await), "B is a stranger at the drive before it joins");
     let (_client_r, _client_b, _node_b) =
-        enroll_streamed_as(client_r, client_b, USER, "device-r", "device-b", free_port(), Posture::Full).await;
+        enroll_streamed_as(client_r, client_b, USER, "device-r", "device-b", Posture::Full).await;
     assert!(admitted(&capacity_as(&b, &drive).await), "the recovered device did not introduce B to its drive");
 }
 
@@ -262,7 +262,7 @@ async fn a_drive_enrolled_after_a_device_joined_reaches_that_device_by_way_of_a_
     let b = spawn_device("device B").await;
     let client_b = connect_when_ready(&b.ipc, "client B").await;
     let (client_a, mut client_b, _node_b) =
-        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
+        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", Posture::Full).await;
     let (mut client_a, _second_drive) = enrol_vault_from(client_a, "device-a", &second, USER, "vault-2").await;
     let enrolled = said_of(&a.daemon.drives(USER).await.expect("A's drives"));
     assert_eq!(enrolled.len(), 2, "A records both drives: {enrolled:?}");
@@ -304,8 +304,90 @@ async fn two_devices_and_a_drive(
     let b = spawn_device("device B").await;
     let client_b = connect_when_ready(&b.ipc, "client B").await;
     let (client_a, client_b, _node_b) =
-        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
+        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", Posture::Full).await;
     (a, client_a, b, client_b, drive)
+}
+
+/// Run `device add` on A and `device join` on B, confirming the six digits on
+/// both, to each side's terminal frame. Returns what each side ended on:
+/// `Ok(())` for `PairingComplete`, `Err(reason)` for `PairFailed`.
+async fn a_join_to_its_end(
+    client_a: &kotton::KottonClient,
+    client_b: &kotton::KottonClient,
+) -> (Result<(), String>, Result<(), String>) {
+    crate::common::pair_local_only();
+    let mut issuer = client_a
+        .device_add_stream(USER, Some("device-a"), 30, 0, Posture::Full)
+        .await
+        .expect("device add");
+    let mut code = None;
+    while code.is_none() {
+        match issuer.recv().await.expect("the add ended before its code") {
+            UserResponse::PairAdvertising { code: c, .. } => code = Some(c.expose().to_string()),
+            other => panic!("the add began with {other:?}"),
+        }
+    }
+    let mut joiner = client_b
+        .device_join_stream(USER, &code.unwrap(), Some("device-b"))
+        .await
+        .expect("device join");
+    async fn to_the_end(
+        client: &kotton::KottonClient,
+        frames: &mut tokio::sync::mpsc::Receiver<UserResponse>,
+    ) -> Result<(), String> {
+        while let Some(frame) = frames.recv().await {
+            match frame {
+                UserResponse::PairShowCode { token, .. } => {
+                    client.pair_confirm_code(USER, token.expose(), true).await.expect("confirm the digits");
+                }
+                UserResponse::PairingComplete { .. } => return Ok(()),
+                UserResponse::PairFailed { reason } => return Err(reason),
+                _ => {}
+            }
+        }
+        panic!("the ceremony ended without a terminal frame")
+    }
+    tokio::join!(to_the_end(client_a, &mut issuer), to_the_end(client_b, &mut joiner))
+}
+
+/// **A join the joiner refuses after the payload leaves the issuer nothing:
+/// no row for the device, and no admission at the drive.** B already pairs the
+/// drive's DID under another key, so the drive A hands it at the join is one B
+/// cannot record, and B refuses the join after it was handed the payload
+/// (`check_handed_rows`). A, which holds the identity, hears the refusal as the
+/// join's last frame: it says so, records no row for B, and tells the drive
+/// nothing — the drive still pairs one of alice's devices and refuses B. Nobody
+/// has anything to revoke.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_join_the_joiner_refuses_leaves_no_row_on_the_issuer_and_no_admission_at_the_drive() {
+    init_crypto();
+    let vault = spawn_vault("vault").await;
+    let (_a, mut client_a, drive) = a_person_with_a_drive(&vault).await;
+    let b = spawn_device("device B").await;
+    let mut client_b = connect_when_ready(&b.ipc, "client B").await;
+    let (_, b_key_hex) = client_b.get_node_identity().await.expect("B's identity");
+    let b_key: [u8; 32] = hex::decode(&b_key_hex).unwrap().try_into().unwrap();
+    b.daemon
+        .insert_paired_node(USER, &drive.did, [7u8; 32], "127.0.0.1:9".parse().unwrap())
+        .await
+        .expect("B pairs the drive's DID under another key");
+
+    let (issuer, joiner) = a_join_to_its_end(&client_a, &client_b).await;
+    let joiner = joiner.expect_err("B completed a join it cannot record");
+    assert!(joiner.starts_with("This device was not joined"), "{joiner}");
+    assert!(joiner.contains("keeps nothing of it either"), "{joiner}");
+    let issuer = issuer.expect_err("A completed a join B refused");
+    assert!(issuer.starts_with("The other device refused the join."), "{issuer}");
+    assert!(issuer.contains("nothing to revoke") && issuer.contains("This device was not joined"), "{issuer}");
+
+    let rows = client_a.list_nodes(USER).await.expect("A's rows");
+    assert!(
+        rows.iter().all(|n| n.public_key != b_key),
+        "A keeps a row for the device that refused the join: {rows:?}"
+    );
+    assert_eq!(devices_at(&vault, USER).await, 1, "the drive was told of the device that refused the join");
+    assert!(!admitted(&capacity_as(&b, &drive).await), "the drive admits the device that refused the join");
+    assert!(b.daemon.drives(USER).await.expect("B's drives").is_empty(), "B recorded the drive it refused");
 }
 
 /// **A write on one device reaches the other only by way of the drive.** A
@@ -539,7 +621,7 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
     let b = spawn_device("device B").await;
     let client_b = connect_when_ready(&b.ipc, "client B").await;
     let (mut client_a, mut client_b, _node_b) =
-        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
+        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", Posture::Full).await;
 
     // The first drive at each vault: what A's tree syncs with.
     client_a.write_file(USER, "from-a.txt", b"written on A").await.expect("write on A");

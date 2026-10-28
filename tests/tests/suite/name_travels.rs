@@ -35,11 +35,6 @@ fn init_crypto() {
     });
 }
 
-fn free_port() -> u16 {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind :0 for port probe");
-    s.local_addr().expect("local_addr").port()
-}
-
 /// Minimal valid WASM magic bytes: the mock runner reports the launch without
 /// running anything. Long-lived, because that is the mode in which the mock's
 /// `report-input` paints the launch arguments back.
@@ -191,9 +186,8 @@ async fn a_second_device_admitted_to_an_identity_is_handed_the_name_it_already_h
     // E keeps the person's things on a drive, enrolled before N joins so the
     // join introduces N to it.
     let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
-    let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) =
-        enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
+        enroll_streamed(client_e, client_n, "alice", "device-n", Posture::Full).await;
 
     let (app_id, _, _) = client_n
         .app_install_approving_all("", PROBE_MANIFEST.to_string(), STUB_WASM.to_vec())

@@ -35,7 +35,6 @@ kotton-fs = { path = "../fs" }
 # `users::models` installs a model: the manifest is `kotton_schemas::ModelManifest`,
 # the record body, unchanged. The inference runtime is not linked here to name one.
 kotton-schemas = { path = "../schemas" }
-kotton-ipc = { path = "../ipc" }
 kotton-session = { path = "../session" }
 chrono = { version = "0.4", features = ["serde"] }
 hostname = "0.4"

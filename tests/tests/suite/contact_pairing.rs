@@ -1340,7 +1340,6 @@ pub(crate) async fn holding_a_vault(env: &mut TestEnv, user: &str, relay_url: &s
         client_v,
         user,
         "vault",
-        common::free_port(),
         Posture::BlindStorage,
     )
     .await;
@@ -1380,11 +1379,11 @@ pub(crate) async fn spawn_vault_for_test(label: &str) -> TestVault {
             .await
             .expect("vault"),
     );
-    let op_port = common::free_port();
     vault
-        .start_peer_listener_background(op_port)
+        .start_peer_listener_background(0)
         .await
         .expect("vault peer listener");
+    let op_port = common::peer_port(vault.runtime());
     let task = tokio::spawn(std::sync::Arc::clone(&vault).run());
     common::wait_for_daemon(&ipc, label).await;
     TestVault {

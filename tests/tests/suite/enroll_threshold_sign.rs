@@ -31,11 +31,6 @@ use std::time::Duration;
 use crate::common::{connect_when_ready, enroll_streamed, init_crypto, unique_ipc, wait_for_daemon};
 
 
-fn free_port() -> u16 {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind :0 for port probe");
-    s.local_addr().expect("local_addr").port()
-}
-
 /// The ceremony recorded where `label` answers the protocol, so nothing here
 /// has to say it. Replaces the `peer_add` that used to inject `op_port` right
 /// after each enrolment
@@ -110,11 +105,11 @@ async fn enroll_then_threshold_sign_across_two_nodes() {
         .await
         .expect("daemon N"),
     );
-    let op_port_n = free_port();
     daemon_n
-        .start_peer_listener_background(op_port_n)
+        .start_peer_listener_background(0)
         .await
         .expect("start N operational listener");
+    let op_port_n = crate::common::peer_port(&daemon_n.runtime());
     let daemon_n =
         Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
 
@@ -129,9 +124,8 @@ async fn enroll_then_threshold_sign_across_two_nodes() {
     // ── 1. E creates the user (group root); did_e is E's did:kel AID. ─────────
     let (did_e, _fp) = client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
     // ── 2. Enrollment ceremony: E enrolls, N joins (RFC-0040 streamed). ────────
-    let bootstrap_port = free_port();
     let (mut client_e, _client_n, node_n) =
-        enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
+        enroll_streamed(client_e, client_n, "alice", "device-n", Posture::Full).await;
 
     // ── RFC-0038 (8e): the joiner adopted E's did:kel identity. E delivered its
     //    KEL in the enrollment; N stored it and now agrees on the same user DID.
@@ -237,11 +231,11 @@ async fn a_locked_coordinator_says_it_is_locked_rather_than_that_it_has_no_co_si
         .await
         .expect("daemon N"),
     );
-    let op_port_n = free_port();
     daemon_n
-        .start_peer_listener_background(op_port_n)
+        .start_peer_listener_background(0)
         .await
         .expect("start N operational listener");
+    let op_port_n = crate::common::peer_port(&daemon_n.runtime());
     let daemon_n =
         Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
 
@@ -263,9 +257,8 @@ async fn a_locked_coordinator_says_it_is_locked_rather_than_that_it_has_no_co_si
         .set_lock_policy("alice", kotton::LockMode::Passphrase, 0, Some(PASSPHRASE))
         .await
         .expect("set_lock_policy");
-    let bootstrap_port = free_port();
     let (mut client_e, _client_n, node_n) =
-        enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
+        enroll_streamed(client_e, client_n, "alice", "device-n", Posture::Full).await;
     let n_op_addr: SocketAddr = format!("127.0.0.1:{op_port_n}").parse().unwrap();
     client_e
         .peer_add(
@@ -365,9 +358,8 @@ async fn enroll_then_threshold_sign_over_relay() {
 
     // N starts its operational listener (holds a relay reservation so the
     // coordinator can reach it by DID through the relay).
-    let op_port_n = free_port();
     daemon_n
-        .start_peer_listener_background(op_port_n)
+        .start_peer_listener_background(0)
         .await
         .expect("start N operational listener");
     let daemon_n =
@@ -384,9 +376,8 @@ async fn enroll_then_threshold_sign_over_relay() {
     let client_n = connect_when_ready(&ipc_n, "client_n").await;
 
     let (_did_e, _f) = client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
-    let bootstrap_port = free_port();
     let (mut client_e, _client_n, _node_n) =
-        enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
+        enroll_streamed(client_e, client_n, "alice", "device-n", Posture::Full).await;
 
     // No peer_add / address injection — reach is entirely via the relay.
     let message = b"sprint-08: threshold-signed across two nodes, reached via the relay";
@@ -446,9 +437,8 @@ async fn joined_device_gets_a_working_session() {
 
     client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
 
-    let bootstrap_port = free_port();
     let (_client_e, mut client_n, _node_n) =
-        enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
+        enroll_streamed(client_e, client_n, "alice", "device-n", Posture::Full).await;
 
     // The join bound a session: the joined client is authenticated as "alice" with
     // no separate login (it never saw a mnemonic).
@@ -571,9 +561,8 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
     // join introduces N to it: N receives E's writes by way of the drive.
     let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
 
-    let bootstrap_port = free_port();
     let (mut client_e, mut client_n, node_n) =
-        enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
+        enroll_streamed(client_e, client_n, "alice", "device-n", Posture::Full).await;
 
     // `peer identity` on N and `peer list` on E name N by the same key
     // (`TASK-a-node-identity-is-two-keys-pretending-to-be-one`). Until
@@ -715,9 +704,8 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
     client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
     let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
 
-    let bootstrap_port = free_port();
     let (mut client_e, mut client_n, _node_n) =
-        enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
+        enroll_streamed(client_e, client_n, "alice", "device-n", Posture::Full).await;
     // N learned the drive at the join; neither device is given the other's
     // address. A record reaches N by way of the drive.
 
@@ -817,11 +805,11 @@ async fn a_blind_storage_receives_ciphertext_it_cannot_read() {
         .await
         .expect("daemon B"),
     );
-    let op_port_b = free_port();
     daemon_b
-        .start_peer_listener_background(op_port_b)
+        .start_peer_listener_background(0)
         .await
         .expect("start B operational listener");
+    let op_port_b = crate::common::peer_port(&daemon_b.runtime());
     let daemon_b =
         Arc::try_unwrap(daemon_b).unwrap_or_else(|_| panic!("sole arc owner for daemon_b"));
 
@@ -847,13 +835,11 @@ async fn a_blind_storage_receives_ciphertext_it_cannot_read() {
 
     client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
     // E enrols B provider-blind: no FROST share, no CEK, no master_secret.
-    let bootstrap_port = free_port();
     let (mut client_e, mut client_b, node_b) = enroll_streamed(
         client_e,
         client_b,
         "alice",
         "blind-vps",
-        bootstrap_port,
         Posture::BlindStorage,
     )
     .await;
@@ -981,14 +967,12 @@ async fn blind_enroll_delivers_the_chain_but_no_key_material_e2e() {
 
     client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
 
-    let bootstrap_port = free_port();
     // blind = true → provider-blind enrollment. The joiner announces its own name.
     let (_client_e, _client_n, node) = enroll_streamed(
         client_e,
         client_n,
         "alice",
         "blind-vps",
-        bootstrap_port,
         Posture::BlindStorage,
     )
     .await;
@@ -1091,11 +1075,11 @@ async fn cosigner_holds_a_share_but_no_data_keys_and_can_co_sign() {
         .await
         .expect("daemon N"),
     );
-    let op_port_n = free_port();
     daemon_n
-        .start_peer_listener_background(op_port_n)
+        .start_peer_listener_background(0)
         .await
         .expect("start N operational listener");
+    let op_port_n = crate::common::peer_port(&daemon_n.runtime());
     let daemon_n =
         Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
 
@@ -1108,13 +1092,11 @@ async fn cosigner_holds_a_share_but_no_data_keys_and_can_co_sign() {
     let client_n = connect_when_ready(&ipc_n, "client_n").await;
 
     let (_did_e, _f) = client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
-    let bootstrap_port = free_port();
     let (mut client_e, _client_n, node_n) = enroll_streamed(
         client_e,
         client_n,
         "alice",
         "cosigner-vps",
-        bootstrap_port,
         Posture::Cosigner,
     )
     .await;
@@ -1213,9 +1195,8 @@ async fn a_reenrolled_device_resolves_the_rotated_key() {
         .expect("rotate identity");
 
     // E enrolls N under the now-rotated identity.
-    let bootstrap_port = free_port();
     let (_client_e, _client_n, _node_n) =
-        enroll_streamed(client_e, client_n, "alice", "device-n", bootstrap_port, Posture::Full).await;
+        enroll_streamed(client_e, client_n, "alice", "device-n", Posture::Full).await;
 
     // N stored the whole KEL and adopts the same AID; it replays to the ROTATED
     // key — not the retired inception key.
@@ -1297,11 +1278,11 @@ async fn a_user_who_loses_every_device_recovers_everything_from_the_phrase() {
         .await
         .expect("daemon B"),
     );
-    let op_port_b = free_port();
     daemon_b
-        .start_peer_listener_background(op_port_b)
+        .start_peer_listener_background(0)
         .await
         .expect("start B operational listener");
+    let op_port_b = crate::common::peer_port(&daemon_b.runtime());
     let daemon_b =
         Arc::try_unwrap(daemon_b).unwrap_or_else(|_| panic!("sole arc owner for daemon_b"));
     let _task_b = tokio::spawn(async move { std::sync::Arc::new(daemon_b).run().await });
@@ -1345,13 +1326,11 @@ async fn a_user_who_loses_every_device_recovers_everything_from_the_phrase() {
             .expect("add_recovery_phrase");
         recovery_phrase = phrase;
 
-        let bootstrap_port = free_port();
         let (mut client_e, _client_b, node_b) = enroll_streamed(
             client_e,
             client_b,
             "alice",
             "blind-vps",
-            bootstrap_port,
             Posture::BlindStorage,
         )
         .await;
@@ -1513,11 +1492,11 @@ async fn a_phrase_set_up_after_a_blind_node_was_enrolled_reaches_it() {
         .await
         .expect("daemon B"),
     );
-    let op_port_b = free_port();
     daemon_b
-        .start_peer_listener_background(op_port_b)
+        .start_peer_listener_background(0)
         .await
         .expect("start B operational listener");
+    let op_port_b = crate::common::peer_port(&daemon_b.runtime());
     let daemon_b =
         Arc::try_unwrap(daemon_b).unwrap_or_else(|_| panic!("sole arc owner for daemon_b"));
     let _task_b = tokio::spawn(async move { std::sync::Arc::new(daemon_b).run().await });
@@ -1540,13 +1519,11 @@ async fn a_phrase_set_up_after_a_blind_node_was_enrolled_reaches_it() {
     let client_b = connect_when_ready(&ipc_b, "client_b").await;
     client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
     // Enrolled blind *before* any phrase exists: nothing to carry.
-    let bootstrap_port = free_port();
     let (mut client_e, _client_b, node_b) = enroll_streamed(
         client_e,
         client_b,
         "alice",
         "blind-vps",
-        bootstrap_port,
         Posture::BlindStorage,
     )
     .await;

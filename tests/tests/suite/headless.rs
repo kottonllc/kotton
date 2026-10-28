@@ -42,7 +42,6 @@ use kotton_wire::ipc::{OperatedService, UserResponse, VaultRequest};
 use kotton_wire::line::InstanceLine;
 use tokio::sync::Mutex;
 
-use crate::common::free_port;
 use crate::common::relay::relay_bin;
 
 const USER: &str = "lee";
@@ -318,7 +317,11 @@ async fn a_headless_desktop_operates_a_vault_and_a_relay_from_the_terminal_alone
         unit: "infra/vault/kotton-vault.service",
         settings: "infra/vault/vault.env",
     };
-    let (relay_port, vault_port) = (free_port(), free_port());
+    // Fixed before either runs, because the install writes each port into the
+    // instance's line — the hint the enrol below dials — and the line is printed
+    // before the service starts, as a host's installer prints it. The two ports of
+    // the suite that are not the OS's pick at the bind (#152).
+    let (relay_port, vault_port) = (port_named_before_it_runs(), port_named_before_it_runs());
     host.settings(&relay, &[
         ("KOTTON_RELAY_BIND", format!("127.0.0.1:{relay_port}")),
         ("KOTTON_RELAY_STUN_BIND", format!("127.0.0.1:{relay_port}")),
@@ -455,5 +458,21 @@ async fn a_headless_desktop_operates_a_vault_and_a_relay_from_the_terminal_alone
     match people.as_slice() {
         [Out::Table { rows, .. }] => assert!(rows.iter().any(|r| r[0] == USER), "`vault people` did not list this desktop: {rows:?}"),
         other => panic!("`vault people` was not said to the one vault: {other:?}"),
+    }
+}
+
+/// A loopback port free on TCP and on UDP when asked, for a service whose port is
+/// written into its line before it runs (the self-host case). Let go before
+/// the service binds it, so something else on the host can take it in between:
+/// that is the price of an address recorded before its service runs, and the suite
+/// picks no other port ahead of its bind. The relay binds both protocols on it and the vault
+/// binds UDP (QUIC), so both are asked.
+fn port_named_before_it_runs() -> u16 {
+    loop {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback TCP port");
+        let port = tcp.local_addr().expect("its address").port();
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
     }
 }

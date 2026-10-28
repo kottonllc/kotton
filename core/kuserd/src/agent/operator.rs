@@ -3508,7 +3508,7 @@ mod tests {
         assert_eq!(sent, ["DeviceInvite"], "an invite answered otherwise sent the number after it");
         assert!(matches!(answer, UserResponse::VaultFull { held: 3, quota: 2 }), "{answer:?}");
         assert!(
-            kotton_wire::ipc::answer_said(&answer).starts_with("the vault answered `VaultFull`"),
+            kotton_wire::ipc::answer_said(&answer).starts_with("the answer was `VaultFull`"),
             "the answer handed back is not said"
         );
     }

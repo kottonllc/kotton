@@ -32,11 +32,6 @@ fn init_crypto() {
     });
 }
 
-fn free_port() -> u16 {
-    let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind :0 for port probe");
-    s.local_addr().expect("local_addr").port()
-}
-
 /// Outcome collected from one side's ceremony stream.
 struct Outcome {
     /// The SAS shown to this side's human (they must match across both sides).
@@ -134,14 +129,16 @@ async fn device_add_join_streams_a_confirmed_six_digit_ceremony() {
     let (did_e, _fp) = client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
 
     // ── Run the streamed ceremony: E adds, N joins, both confirm the SAS. ──────
-    let bootstrap_port = free_port();
     let (code_tx, code_rx) = oneshot::channel::<String>();
 
     // Each device announces its OWN name; the peer adopts it (RFC-0040 §1). E is
     // the existing device, N is the new one.
+    // Port 0: E's daemon binds what the OS gives it and says it in the code. A
+    // port picked here and bound there is a race with every other test binding
+    // one meanwhile (#110).
     let issuer = tokio::spawn(async move {
         let rx = client_e
-            .device_add_stream("alice", Some("device-e"), 30, bootstrap_port, Posture::Full)
+            .device_add_stream("alice", Some("device-e"), 30, 0, Posture::Full)
             .await
             .expect("device_add_stream");
         drive(client_e, "alice".to_string(), rx, Some(code_tx)).await
@@ -208,27 +205,67 @@ async fn device_add_join_streams_a_confirmed_six_digit_ceremony() {
 /// A `kotton` process on pipes, and everything it has written to either stream so far.
 struct Typed {
     child: std::process::Child,
-    said: Arc<std::sync::Mutex<String>>,
+    said: Arc<std::sync::Mutex<Said>>,
     pumps: Vec<std::thread::JoinHandle<()>>,
+}
+
+/// What a `kotton` process wrote, **each stream kept on its own**.
+///
+/// Its two streams are pipes read by two threads. One string for both held them
+/// in whatever order the threads ran, so under load a refusal on stderr landed on
+/// the line where stdout's `[y/N] $` prompt waits with no newline, and a case
+/// counting lines that *start* `error:` counted none (#136). Nothing here reads
+/// where one stream's text falls against the other's: what a person waits for is
+/// read off stdout's own lines, and a refusal off stderr's, where the CLI writes it.
+#[derive(Clone, Default)]
+struct Said {
+    out: String,
+    err: String,
+}
+
+impl Said {
+    /// The lines it wrote to stdout: its prompts, the code, the digits, the result.
+    fn lines(&self) -> std::str::Lines<'_> {
+        self.out.lines()
+    }
+
+    /// Each sentence of refusal it wrote: each stderr line that starts `error:`.
+    ///
+    /// That is the CLI's contract, in one place: `finish()` (`client/cli/src/bridge.rs`)
+    /// writes a refusal as `error: {e}` at the start of a stderr line, once, and never
+    /// on stdout. An `error:` a refusal quotes, or one in the middle of a warning's
+    /// line, is not another refusal (#156).
+    fn refusals(&self) -> Vec<&str> {
+        self.err.lines().filter(|line| line.starts_with("error:")).collect()
+    }
+}
+
+impl std::fmt::Display for Said {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "--- stdout ---\n{}\n--- stderr ---\n{}", self.out, self.err)
+    }
 }
 
 impl Typed {
     fn start(cli: &crate::common::cli::Cli, args: &[&str]) -> Self {
         use std::io::Read as _;
         let mut child = cli.spawn_on_pipes(args);
-        let said = Arc::new(std::sync::Mutex::new(String::new()));
-        let streams: [Box<dyn std::io::Read + Send>; 2] = [
-            Box::new(child.stdout.take().expect("stdout")),
-            Box::new(child.stderr.take().expect("stderr")),
+        let said = Arc::new(std::sync::Mutex::new(Said::default()));
+        // Each stream into its own string: `false` is stdout, `true` stderr.
+        let streams: [(Box<dyn std::io::Read + Send>, bool); 2] = [
+            (Box::new(child.stdout.take().expect("stdout")), false),
+            (Box::new(child.stderr.take().expect("stderr")), true),
         ];
         let pumps = streams
             .into_iter()
-            .map(|mut out| {
+            .map(|(mut stream, is_err)| {
                 let said = Arc::clone(&said);
                 std::thread::spawn(move || {
                     let mut buf = [0u8; 4096];
-                    while let Ok(n @ 1..) = out.read(&mut buf) {
-                        said.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n]));
+                    while let Ok(n @ 1..) = stream.read(&mut buf) {
+                        let mut said = said.lock().unwrap();
+                        let into = if is_err { &mut said.err } else { &mut said.out };
+                        into.push_str(&String::from_utf8_lossy(&buf[..n]));
                     }
                 })
             })
@@ -236,12 +273,12 @@ impl Typed {
         Self { child, said, pumps }
     }
 
-    fn said(&self) -> String {
+    fn said(&self) -> Said {
         self.said.lock().unwrap().clone()
     }
 
-    /// Wait for a line this process prints that `read` finds something in — what a
-    /// person waits for before reading it off the screen.
+    /// Wait for a line this process prints to stdout that `read` finds something in —
+    /// what a person waits for before reading it off the screen.
     async fn shows<T>(&self, what: &str, read: impl Fn(&str) -> Option<T>) -> T {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
@@ -264,7 +301,7 @@ impl Typed {
     }
 
     /// Wait for it to exit; whether it succeeded, and all it said.
-    async fn exits(mut self) -> (bool, String) {
+    async fn exits(mut self) -> (bool, Said) {
         drop(self.child.stdin.take());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
         let status = loop {
@@ -358,6 +395,8 @@ async fn id_join_at_a_terminal_with_no_identity_takes_the_digits_device_add_asks
     let (joined, join_said) = join.exits().await;
     assert!(added, "the add, given the digits the new device showed, failed\n{add_said}");
     assert!(joined, "the join failed\n--- the new device ---\n{join_said}");
+    // The last line it printed to stdout; a refusal or a warning on stderr is not it,
+    // wherever the pipes put one against the other.
     let last = join_said.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or_default();
     assert!(
         last.contains("this device acts as") && last.contains("alice"),
@@ -388,11 +427,40 @@ async fn id_join_refused_by_the_device_you_have_exits_non_zero_in_one_sentence()
     let (joined, join_said) = join.exits().await;
     assert!(!added, "the add took digits the new device never showed\n{add_said}");
     assert!(!joined, "the join completed though the other device refused it\n{join_said}");
-    let errors: Vec<&str> = join_said.lines().filter(|l| l.starts_with("error:")).collect();
-    assert_eq!(errors.len(), 1, "not one sentence of refusal\n{join_said}");
-    assert!(!join_said.contains("this device acts as"), "{join_said}");
+    let refusals = join_said.refusals();
+    assert_eq!(refusals.len(), 1, "not one sentence of refusal: {refusals:?}\n{join_said}");
+    assert!(!join_said.to_string().contains("this device acts as"), "{join_said}");
     assert!(
         !new.base_dir.join("active_identity").exists(),
         "a refused join left the new device acting as someone"
     );
+}
+
+/// **A refusal is one sentence, read where the CLI writes it** (#136, #156): a stderr
+/// line that starts `error:`, whatever stdout's prompt was doing when it came — and
+/// neither an `error:` the sentence quotes nor one inside a warning's line counts again.
+#[test]
+fn a_refusal_is_found_wherever_the_terminal_put_it() {
+    let refusal = "error: Lost the connection before anything was shared. Try again.";
+    let nested = "error: Joined, but saving your keys failed: io error: No space left on device";
+    let warning = "warning: the relay said error: busy, trying the next one";
+    let prompt = "  join \"device-e\"? [y/N] $ ";
+    for (out, err, sentence) in [
+        // After a prompt that waits with no newline.
+        (prompt.to_string(), format!("{refusal}\n"), refusal),
+        // A refusal that quotes an inner error is still one sentence.
+        (prompt.to_string(), format!("{nested}\n"), nested),
+        // A warning with `error:` mid-line is not a refusal; the refusal after it is.
+        (format!("{prompt}\n"), format!("{warning}\n{refusal}\n"), refusal),
+    ] {
+        let said = Said { out, err };
+        assert_eq!(said.refusals(), [sentence], "{said}");
+    }
+    let warned = Said { out: String::new(), err: format!("{warning}\n") };
+    assert!(warned.refusals().is_empty(), "{warned}");
+    // The CLI never writes a refusal to stdout, so nothing there is read as one.
+    let on_stdout = Said { out: format!("{refusal}\n"), err: String::new() };
+    assert!(on_stdout.refusals().is_empty(), "{on_stdout}");
+    let twice = Said { out: String::new(), err: format!("{refusal}\n{refusal}\n") };
+    assert_eq!(twice.refusals().len(), 2, "{twice}");
 }

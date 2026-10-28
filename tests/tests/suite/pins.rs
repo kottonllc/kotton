@@ -11,7 +11,7 @@
 //! notices — no device keeps the drive whole, and a device short of room —
 //! are said in `status`.
 
-use crate::common::{connect_when_ready, enroll_streamed_as, free_port, init_crypto};
+use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto};
 use crate::vault::{enrol_vault_from, spawn_device, spawn_vault, RunningDevice, RunningVault};
 use kotton_schemas::membership::Posture;
 use kotton_wire::ipc::{PinNotice, PinScope, PinValue, FIRST_DRIVE_NAME};
@@ -99,7 +99,7 @@ async fn alice_with_two_devices(
     let b = spawn_device("device B").await;
     let client_b = connect_when_ready(&b.ipc, "client B").await;
     let (client_a, client_b, node_b) =
-        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", free_port(), Posture::Full).await;
+        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", Posture::Full).await;
     (a, client_a, b, client_b, node_b)
 }
 
