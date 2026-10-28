@@ -49,13 +49,21 @@ pub const NSID_CHANNEL_KEY_GRANT: &str = "sh.kotton.channel.key-grant";
 /// it describe the same model however they spell the name.
 pub const NSID_MODEL: &str = "sh.kotton.model";
 
-/// One pin setting — what one of the person's devices keeps of their drives:
-/// its default, or a drive or a folder set the other way (kotton #55;
-/// kotton-protocol #20, `kotton_wire::ipc::PinSetting`). The daemon writes it,
-/// the daemon reads it, and every device of the person's reads every device's,
-/// which is why it is core: a device that has never seen a declaration skips
-/// the rows.
+/// One pin setting as kotton #155 wrote it, a record in the person's drive.
+/// **Retired** (kotton #171, kotton-protocol #26): a pin setting is the
+/// device's own, kept in its own database, and nothing of it replicates. The
+/// NSID stays declared so the device that wrote such a record can read it once,
+/// move it into its own database and delete it from the drive
+/// (`kotton_device::users::pins::migrate`).
 pub const NSID_PIN: &str = "sh.kotton.pin";
+
+/// A whole-keeper claim: that one of the person's devices keeps one drive
+/// whole (kotton #171; the protocol's storage model, kotton-protocol #26). A sealed record in that drive, written by that device alone and
+/// deleted when it stops keeping the drive whole; its fields are the device and
+/// the drive's id, and nothing else. The daemon writes it, and every device of
+/// the person's reads every device's, which is why it is core: a device that
+/// has never seen a declaration skips the rows.
+pub const NSID_KEEPS_WHOLE: &str = "sh.kotton.keeps-whole";
 
 // ── Meta schema NSID (schema publication) ────────────────────────────────────
 

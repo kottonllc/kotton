@@ -18,7 +18,8 @@
 //! | `sh.kotton.message.v1`        | Opaque encrypted message envelope          |
 //! | `sh.kotton.channel.key-grant` | A channel key sealed to a new member's DID |
 //! | `sh.kotton.model`             | An installed model's manifest              |
-//! | `sh.kotton.pin`               | What one of the person's devices keeps     |
+//! | `sh.kotton.pin`               | Retired: a setting #155 kept in a drive    |
+//! | `sh.kotton.keeps-whole`       | That a device keeps a drive whole          |
 //!
 //! The table is gated against [`CoreSchema::all`] in this module's tests, so it
 //! cannot drift from the set again. It had drifted to three different counts at
@@ -70,11 +71,19 @@ pub enum CoreSchema {
     /// negotiates over it — the standing `MessageV1` and `ChannelKeyGrant`
     /// already have.
     Model,
-    /// One pin setting: what one of the person's devices keeps of their
-    /// drives (kotton #55). Core for the reason [`CoreSchema::Model`] is: the
-    /// daemon writes it and reads it, and it must arrive on every device of
-    /// the person's, whose declaration has to be there before it does.
+    /// One pin setting as kotton #155 wrote it, a record in the person's
+    /// drive. **Retired** (kotton #171, kotton-protocol #26): a setting is the
+    /// device's own and is kept in its own database. Declared still so that
+    /// the device that wrote one can read it once, move it there and delete
+    /// it from the drive (`kotton_device::users::pins::migrate`); nothing
+    /// writes one.
     Pin,
+    /// A whole-keeper claim: that one of the person's devices keeps one drive
+    /// whole (kotton #171; the protocol's storage model, kotton-protocol #26). A
+    /// record in that drive, written and withdrawn by that device alone.
+    /// Core for the reason [`CoreSchema::Model`] is: the daemon writes it and
+    /// reads it, and it must arrive on every device of the person's.
+    KeepsWhole,
 }
 
 impl CoreSchema {
@@ -91,6 +100,7 @@ impl CoreSchema {
             CoreSchema::ChannelKeyGrant,
             CoreSchema::Model,
             CoreSchema::Pin,
+            CoreSchema::KeepsWhole,
         ]
     }
 
@@ -107,6 +117,7 @@ impl CoreSchema {
             CoreSchema::ChannelKeyGrant => ns::NSID_CHANNEL_KEY_GRANT,
             CoreSchema::Model => ns::NSID_MODEL,
             CoreSchema::Pin => ns::NSID_PIN,
+            CoreSchema::KeepsWhole => ns::NSID_KEEPS_WHOLE,
         })
     }
 
@@ -123,6 +134,7 @@ impl CoreSchema {
             CoreSchema::ChannelKeyGrant => channel_key_grant(),
             CoreSchema::Model => model(),
             CoreSchema::Pin => pin(),
+            CoreSchema::KeepsWhole => keeps_whole(),
         }
     }
 }
@@ -310,14 +322,16 @@ fn channel_key_grant() -> SchemaDefinition {
     )
 }
 
-/// One pin setting (kotton #55; kotton-protocol #20's record): `device`, the
+/// One pin setting as kotton #155 wrote it, **retired** (kotton #171: read once
+/// by the device that wrote it, moved into its own database, and deleted;
+/// nothing writes one). Its shape (kotton-protocol #20's record): `device`, the
 /// DID of the device it is about; `scope`, `default`, `drive` or `folder`, with
 /// `drive` naming the drive for the last two and `folder` the folder for the
 /// last; and `value`, `whole` or `on-demand`. The record id is derived from the
 /// device and the scope, so a device setting a scope again replaces its one
 /// record for it, and `default` at a drive or folder is that record deleted.
-/// Field for field `kotton_wire::ipc::PinSetting`, flattened, because a scope is
-/// three cases and a record's fields are one shape.
+/// A scope flattened, because a scope is three cases and a record's fields are
+/// one shape.
 fn pin() -> SchemaDefinition {
     SchemaDefinition::new(
         Nsid::from_static(ns::NSID_PIN),
@@ -331,6 +345,20 @@ fn pin() -> SchemaDefinition {
         ],
     )
     .with_description("What one of the person's devices keeps of their drives: its default, or a drive or folder set the other way.")
+}
+
+/// A whole-keeper claim (kotton #171; kotton-protocol #26): `device`, the
+/// identifier of the key the device presents, and `drive`, the id of the drive
+/// it keeps whole — and nothing else; that the record exists is the claim. The
+/// record id is derived from the two, so a device claims a drive once, and the
+/// claim withdrawn is that record deleted.
+fn keeps_whole() -> SchemaDefinition {
+    SchemaDefinition::new(
+        Nsid::from_static(ns::NSID_KEEPS_WHOLE),
+        1,
+        vec![SchemaField::required("device", FieldType::String), SchemaField::required("drive", FieldType::String)],
+    )
+    .with_description("That one of the person's devices keeps one of their drives whole.")
 }
 
 /// An installed model (RFC-0085, `DEC-0073`).
@@ -392,7 +420,7 @@ mod tests {
 
     #[test]
     fn every_core_schema_is_in_all_and_in_the_module_table() {
-        assert_eq!(CoreSchema::all().len(), 10);
+        assert_eq!(CoreSchema::all().len(), 11);
         for schema in CoreSchema::all() {
             let def = schema.definition();
             assert!(!def.fields.is_empty(), "{} has no fields", def.nsid);

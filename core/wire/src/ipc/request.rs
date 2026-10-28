@@ -728,8 +728,9 @@ pub enum UserRequest {
     /// or a drive or a folder set the other way (kotton #55). `value` `None`
     /// is `default`: the drive or folder follows the setting above it, and the
     /// device's own default has nothing above it, so it is refused there. The
-    /// setting is a record in the person's drive (`PinSetting`), which every
-    /// device of theirs reads. `pin <drive> whole` is "collect all my things":
+    /// setting is this device's own, kept in its own database (`PinSetting`;
+    /// kotton #171); what it publishes is a whole-keeper claim in the drive
+    /// while it keeps the drive whole. `pin <drive> whole` is "collect all my things":
     /// the daemon starts a pass, which fetches what this device lacks of it.
     /// Answered with `Pins`, this device's settings and the notices after.
     PinSet {
@@ -3476,8 +3477,9 @@ impl UserRequest {
             // four dials them under this device's key; said at the machine.
             Self::DriveCreate { .. } | Self::DriveList { .. } | Self::DriveShow { .. } | Self::DriveMove { .. } => Local,
             // What this device keeps (RFC 0003, "What this device holds"), and
-            // its status: said at the machine, of this device; `pin` writes a
-            // record in the person's drive and may start a pass.
+            // its status: said at the machine, of this device; `pin` keeps a
+            // setting in this device's database, makes its whole-keeper claim
+            // in the drive say what it keeps, and may start a pass.
             Self::PinSet { .. } | Self::PinList { .. } | Self::Status { .. } => Local,
             // An introduction opens a listener on the network this machine is on.
             // It is served only over a peer connection to one of the person's own

@@ -838,6 +838,17 @@ pub const FIRST_DRIVE_NAME: &str = "personal";
 /// The mount a vault keeps the tenancy's own tree under — the first drive.
 pub const FIRST_DRIVE_TREE: &str = "local";
 
+/// The id every device gives the tenancy's own tree (kotton-protocol #26's
+/// "the drive's id"): a made drive's id is minted at random at `drive create`
+/// and sealed with its name, and this tree has no sealed name, so every device
+/// reads this one for it, as it reads [`FIRST_DRIVE_NAME`]. It is never sent to
+/// a vault; it keys the person's own records about the drive (a whole-keeper
+/// claim, `kotton_device::users::pins`) and this device's record of it. It
+/// cannot be a made drive's id, which is thirty-two hex digits. When the first
+/// drive becomes a made drive (kotton #124) it is minted an id like any other,
+/// and the claims keyed by this one move to it.
+pub const FIRST_DRIVE_ID: &str = "first";
+
 /// A drive made on a vault after the first, by the id the device that made it
 /// minted: sixteen random bytes, fresh for each vault it is kept on, so the id
 /// one landlord holds is not the id another holds for the same drive after a
@@ -917,11 +928,11 @@ pub struct DriveDescriptor {
     /// Sealed bytes the vault holds for it, as the vault last said; `None` when
     /// the vault did not answer this time.
     pub size: Option<u64>,
-    /// The person's devices that keep it whole, by name: each device whose pin
-    /// settings ([`PinSetting`], records in the person's drive) keep the drive
-    /// whole and no folder of it on demand, read by the device answering —
-    /// itself as `this device`. Empty when none does, which is the notice
-    /// [`PinNotice::NoWholeDevice`].
+    /// The person's devices that keep it whole, by name: each device whose
+    /// whole-keeper claim is in the drive and which is still in the person's
+    /// device set, read from the claims and nothing else by the device
+    /// answering — itself as `this device`. Empty when none does, which is the
+    /// notice [`PinNotice::NoWholeDevice`].
     pub pinned_whole: Vec<String>,
     /// A tree a `drive move` made and did not finish: the vault holds part of
     /// the drive's objects under a name sealed unfinished, and the drive itself
@@ -932,9 +943,12 @@ pub struct DriveDescriptor {
 
 // -- What each device keeps of the person's drives (kotton #55) --------------
 //
-// RFC 0002's Exit and RFC 0003's "What this device holds", and kotton-protocol
-// #20's pin-setting record: a device, a scope (its default, a drive, or a
-// folder of a drive), and a value (whole or on demand). Here beside the drive
+// The protocol's storage model and its first release's "What this device
+// holds", as kotton-protocol #26 has them: a pin setting is a scope (its default, a
+// drive, or a folder of a drive) and a value (whole or on demand), the
+// device's own and never sent to another device or a vault; what a device
+// publishes is a whole-keeper claim in each drive it keeps whole, a record
+// that is not a type here (`kotton_device::users::pins`). Here beside the drive
 // types for the reason they are (above): kotton-protocol has no type crates
 // yet, and these move with them as one.
 
@@ -1048,14 +1062,15 @@ impl PinScope {
     }
 }
 
-/// One pin setting, as it is kept: a record in the person's drive, sealed like
-/// any other, which every device of theirs reads and nothing else can
-/// (kotton-protocol #20). `device` is the DID of the device the setting is
-/// about — the key that device presents — inside the person's own sealed
-/// records; it is never sent anywhere a drive can read it.
+/// One pin setting of the device answering: its default, or a drive or a
+/// folder set the other way. A setting is the device's own (kotton-protocol
+/// #26): kept in that device's own database and never
+/// sent to another device or a vault, so it names no device — it is always the
+/// answering device's. What a device publishes of its settings is a
+/// whole-keeper claim per drive it keeps whole (`kotton_device::users::pins`),
+/// which is not this type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinSetting {
-    pub device: String,
     pub scope: PinScope,
     pub value: PinValue,
 }
@@ -1065,7 +1080,7 @@ pub struct PinSetting {
 #[serde(tag = "notice", rename_all = "kebab-case")]
 pub enum PinNotice {
     /// No device of the person's keeps `drive` whole, as this device reads
-    /// their pin settings: only the drive holds all of it.
+    /// the drive's whole-keeper claims: only the drive holds all of it.
     NoWholeDevice { drive: String },
     /// This device keeps some of `drive` whole and its last pass ran short of
     /// room: `held` bytes of packs in `budget`, of `wanted` its whole pins
@@ -1180,19 +1195,19 @@ mod pin_tests {
         }
     }
 
-    /// **The record and the readout as they cross**: kebab-case values, the
-    /// scope tagged by where it applies — the shape kotton-protocol #20 names.
+    /// **The readout as it crosses to the device's own client**: kebab-case
+    /// values, the scope tagged by where it applies, and no device named — a
+    /// setting is the answering device's own (kotton-protocol #26).
     #[test]
-    fn a_setting_crosses_as_device_scope_and_value() {
+    fn a_setting_crosses_as_scope_and_value() {
         let setting = PinSetting {
-            device: "did:key:z6Mk".into(),
             scope: PinScope::Folder { drive: "personal".into(), folder: "/photos".into() },
             value: PinValue::OnDemand,
         };
         let json = serde_json::to_value(&setting).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"device": "did:key:z6Mk", "scope": {"at": "folder", "drive": "personal", "folder": "/photos"}, "value": "on-demand"})
+            serde_json::json!({"scope": {"at": "folder", "drive": "personal", "folder": "/photos"}, "value": "on-demand"})
         );
         assert_eq!(serde_json::from_value::<PinSetting>(json).unwrap(), setting);
         let short = PinNotice::ShortOfRoom { drive: "personal".into(), settings: vec!["personal:/photos".into()], held: 1, budget: Some(2), wanted: 3 };
