@@ -36,7 +36,9 @@ pub struct Cli {
     /// before the verb (`kotton --json issuer list`). Only the shared verbs that
     /// emit shapes honor it. A verb that reads `--json` among its own words (`drive`,
     /// `pin`) is handed the word instead, so `kotton --json drive list` is
-    /// `kotton drive list --json`, as the REPL's `drive list --json` is.
+    /// `kotton drive list --json`, as the REPL's `drive list --json` is. There it is for
+    /// `list` and `show` alone, and any other verb refuses it, exit 2 (`kotton --json
+    /// drive create …`, `kotton --json pin <drive> whole`).
     #[arg(long)]
     pub json: bool,
     /// No subcommand → enter the runtime (identity-first). The front door is the

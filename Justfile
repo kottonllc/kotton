@@ -343,7 +343,8 @@ lint:
     cargo xtask-docs docs-check
     # The clap tree and the REPL's registry are kotton-protocol's command-tree decision's: every
     # name either registers has a place in it, and `drive`, `pin` and `sync` are one tree, held
-    # to its verbs both ways.
+    # to its verbs both ways. And no line a person reads (the files host-word-check reads) names
+    # a verb a table retired, but to point from it to what replaced it.
     # Reads kotton-protocol's checkout when there is one, and the words held here otherwise.
     cargo xtask-docs verb-check
     # Every `kotton` command README.md gives is one the binary has (held through the reference

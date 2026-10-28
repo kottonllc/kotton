@@ -812,7 +812,7 @@ mod tests {
         assert!(VAULT_POSTURE_LINE.starts_with("it keeps what it cannot read"), "{VAULT_POSTURE_LINE}");
         // The admit runs the vault's ceremony, and that ceremony's success says the
         // posture before what to do next.
-        assert!(ADMIT_ROLE == Role::Vault, "drive enrol must run the vault's ceremony");
+        assert!(ADMIT_ROLE == Role::Vault, "`drive enrol` must run the vault's ceremony");
         let said = vault_complete_lines("did:key:zV");
         assert_eq!(said.first().map(String::as_str), Some(VAULT_POSTURE_LINE), "{said:?}");
         assert_eq!(said.len(), 2, "{said:?}");
@@ -956,13 +956,9 @@ mod tests {
     /// pinned whole so a change to either door cannot alter it silently.
     #[tokio::test]
     async fn device_admit_is_the_retired_line_and_exit_two_in_both_doors() {
-        let want = format!(
-            "{:?}",
-            crate::out::Out::Fail {
-                what: "`device admit` is gone".into(),
-                try_: Some("drive enrol <invite>".into()),
-            }
-        );
+        // The retired line is built by the helper the door answers with, so this holds
+        // that both doors answer exactly it, not a second spelling of it.
+        let want = crate::commands::retired("device admit", "drive enrol <invite>");
         for line in [&["admit"][..], &["admit", "CODE"], &["admit", "CODE", "extra"], &["admit", "--blind"]] {
             let words = args(line);
             let without = DeviceCommand
@@ -971,7 +967,8 @@ mod tests {
                 .expect("device admit is refused before a session")
                 .expect("it answers rather than erring");
             assert_eq!(without.exit_code, ExitCode::Code(2), "{line:?}");
-            assert_eq!(format!("{:?}", without.out), format!("[{want}]"), "{line:?}");
+            assert_eq!(format!("{:?}", without.out), format!("{:?}", want.out), "{line:?}");
+            assert!(format!("{:?}", want.out).contains("drive enrol <invite>"), "{:?}", want.out);
         }
     }
 }
