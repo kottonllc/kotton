@@ -131,6 +131,18 @@
 //! device's claim at `drive create` waits until a device keeps a tree of a made
 //! drive (kotton #58, #124), so today no claim names a made drive and every
 //! made drive is told of as kept whole by nobody, which is true.
+//!
+//! **What a drive is, told to its person** (the drive decision's types).
+//! `drive create`, `list`, `show` and `move` answer with descriptors
+//! ([`describe`]), one per vault a drive is kept at: the drive's id, its
+//! name, the vault that keeps it, its size as that vault last said, the
+//! devices that claim it whole, and whether it is a move's unfinished tree.
+//! The id is the record's ([`kotton_peer::daemon::drives::Drive::id`]) —
+//! [`kotton_wire::ipc::FIRST_DRIVE_ID`] for the first drive until #124 mints
+//! it one — and an unfinished tree's is the id sealed with it, so copies of
+//! one drive show one id and two drives of one name show two. A descriptor is
+//! this device's answer to its own person over its own IPC; no descriptor,
+//! and so no id, is sent to a vault or a relay.
 
 use crate::users::DeviceUsers as _;
 use crate::users::pins;
@@ -394,6 +406,9 @@ async fn follow_every_vault(runtime: &DeviceRuntime, store: &UserStore, db: &Arc
 
 fn describe(drive: &Drive, sizes: &HashMap<([u8; 32], String), u64>, pins: &pins::Read) -> DriveDescriptor {
     DriveDescriptor {
+        // The record's id, as this device opened it from the sealed name
+        // ([`kotton_peer::daemon::drives::Drive::id`]).
+        id: drive.id.clone(),
         name: drive.name.clone(),
         vault: drive.node.id.clone(),
         vault_key: hex::encode(drive.vault_key),
@@ -430,6 +445,9 @@ async fn unfinished_described(db: &Arc<SqlitePool>, user_id: &str, seen: &Seen) 
         .iter()
         .filter(|c| !c.finished)
         .map(|c| DriveDescriptor {
+            // The id sealed with the unfinished tree's name: the drive the
+            // move was of.
+            id: Some(c.id.clone()),
             name: c.name.clone(),
             vault: vaults.iter().find(|v| v.vault_key == c.vault_key).map(|v| v.node.id.clone()).unwrap_or_default(),
             vault_key: hex::encode(c.vault_key),

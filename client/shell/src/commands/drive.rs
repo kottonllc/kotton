@@ -120,14 +120,30 @@ fn name_said(d: &DriveDescriptor) -> String {
     }
 }
 
+/// How many leading characters of a drive's id `drive list` prints: enough to
+/// tell two drives of one name apart at a glance; `drive show` prints it whole.
+const ID_SHOWN: usize = 8;
+
+/// A drive's id as `drive show` prints it; `-` for a drive this device
+/// recorded before ids, until its vault's next listing.
+fn id_said(d: &DriveDescriptor) -> String {
+    d.id.clone().unwrap_or_else(|| "-".to_string())
+}
+
+/// A drive's id as `drive list` prints it: its first [`ID_SHOWN`] characters.
+fn id_short(d: &DriveDescriptor) -> String {
+    id_said(d).chars().take(ID_SHOWN).collect()
+}
+
 fn table(drives: &[DriveDescriptor]) -> Out {
     Out::Table {
-        columns: vec!["drive".into(), "vault".into(), "size".into(), "kept whole on".into()],
+        columns: vec!["drive".into(), "id".into(), "vault".into(), "size".into(), "kept whole on".into()],
         rows: drives
             .iter()
             .map(|d| {
                 vec![
                     name_said(d),
+                    id_short(d),
                     d.vault.clone(),
                     size_said(d.size),
                     if d.pinned_whole.is_empty() { "-".to_string() } else { d.pinned_whole.join(", ") },
@@ -180,6 +196,7 @@ async fn run(line: Line<'_>, state: &mut ShellState) -> Result<CommandOutput> {
                     .map(|d| {
                         Out::Record(vec![
                             ("drive".into(), name_said(d)),
+                            ("id".into(), id_said(d)),
                             ("vault".into(), d.vault.clone()),
                             ("vault key".into(), d.vault_key.clone()),
                             ("size".into(), size_said(d.size)),
@@ -366,6 +383,29 @@ mod tests {
     fn enrol_with_only_flags_is_usage_exit_two() {
         let refused = parse(&words("enrol --blind")).expect_err("no invite");
         assert_eq!(refused.exit_code, ExitCode::Code(2));
+    }
+
+    /// `drive list` names each drive's id by its first characters, and a
+    /// drive recorded before ids by `-`; `--json` carries the whole id.
+    #[test]
+    fn list_names_each_drives_id_and_json_carries_it_whole() {
+        let described = |id: Option<String>| DriveDescriptor {
+            id,
+            name: "photos".into(),
+            vault: "home".into(),
+            vault_key: "00".repeat(32),
+            size: None,
+            pinned_whole: vec![],
+            unfinished: false,
+        };
+        let drives = [described(Some("ab".repeat(16))), described(None)];
+        let Out::Table { columns, rows } = table(&drives) else { panic!("drive list is a table") };
+        assert_eq!(columns[1], "id");
+        assert_eq!((rows[0][1].as_str(), rows[1][1].as_str()), ("abababab", "-"));
+        let out = json(&drives).unwrap();
+        let Some(Out::Data(text)) = out.out.first() else { panic!("--json is data") };
+        let back: Vec<DriveDescriptor> = serde_json::from_str(text).unwrap();
+        assert_eq!(back[0].id.as_deref(), Some("ab".repeat(16).as_str()));
     }
 
     #[test]
