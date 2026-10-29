@@ -122,7 +122,7 @@ Kotton - Your data sovereignty platform
 * `whoami` — Show the identity your commands act as (the active identity)
 * `repl` — Launch the interactive REPL for a user
 * `peer` — Peer node management (identity, list, show, add, revoke, mount) — shares the REPL's `peer` verb
-* `device` — Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon. `admit <invite>` is `drive enrol <invite>` now, and still runs it
+* `device` — Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon
 * `schema` — Schema management (list, show, register)
 * `handler` — Handler registry (register, unregister, get, list, set-default)
 * `record` — Record addressing — open records by kotton:// URL
@@ -458,12 +458,12 @@ USAGE:
 
 ## `Kotton device`
 
-Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon. `admit <invite>` is `drive enrol <invite>` now, and still runs it
+Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon
 
 **Usage:** `Kotton device [OPTIONS] [ARGS]...`
 
 ```text
-device add|join|list|name|revoke — pair another of your machines to this identity (six-digit confirmation); `--browser` admits a phone's browser, `--gateway <code>` a gateway elsewhere. A vault's invite is `drive enrol <invite>` (`device admit` was its name, and still runs it). `kotton device reset` starts this whole device fresh and is the CLI's, not this shell's — it deletes the directory this runtime is using
+device add|join|list|name|revoke — pair another of your machines to this identity (six-digit confirmation); `--browser` admits a phone's browser, `--gateway <code>` a gateway elsewhere. A vault's invite is `drive enrol <invite>`. `kotton device reset` starts this whole device fresh and is the CLI's, not this shell's — it deletes the directory this runtime is using
 ```
 
 ###### **Arguments:**
