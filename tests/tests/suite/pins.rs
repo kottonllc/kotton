@@ -16,7 +16,7 @@
 use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto};
 use crate::vault::{enrol_vault_from, spawn_device, spawn_vault, RunningDevice, RunningVault};
 use kotton_schemas::membership::Posture;
-use kotton_wire::ipc::{PinNotice, PinScope, PinValue, FIRST_DRIVE_NAME};
+use kotton_wire::ipc::{PinNotice, PinScope, PinValue, FIRST_DRIVE_ID, FIRST_DRIVE_NAME};
 
 const USER: &str = "alice";
 
@@ -258,6 +258,52 @@ async fn a_made_drive_is_kept_whole_by_no_device_yet_and_status_says_so() {
     let token_a = client_a.session_token.clone().expect("A's session");
     let shown = said(&a, "A", &token_a, "status").await;
     assert!(shown.contains("no device of yours keeps 'photos' whole") && shown.contains("nothing yet: its vault holds it"), "{shown}");
+}
+
+/// `line --json`, typed at the REPL of `device`: the descriptors it printed.
+async fn drives_said(device: &RunningDevice, who: &str, token: &str, line: &str) -> Vec<kotton_wire::ipc::DriveDescriptor> {
+    let text = said(device, who, token, line).await;
+    serde_json::from_str(text.trim()).unwrap_or_else(|e| panic!("{who}$ {line} printed no descriptors ({e}): {text}"))
+}
+
+/// **Each drive's id, said by `drive list --json` and `drive show --json`,
+/// is the one id every device gives it** (kotton #188; the drive decision's
+/// types). A makes two drives; A and B each list them. The first drive is
+/// [`FIRST_DRIVE_ID`] on both; `photos` carries one id on both, and `work`
+/// another; `drive show photos --json` on B says the id A's list said, and the
+/// person reads it in `drive show`'s own words.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_device_names_a_drive_by_one_id_and_two_drives_by_two() {
+    init_crypto();
+    let vault = spawn_vault("vault").await;
+    let (a, mut client_a, b, client_b, _node_b) = alice_with_two_devices(&vault).await;
+    client_a.drive_create(USER, "photos", None).await.expect("drive create photos on A");
+    client_a.drive_create(USER, "work", None).await.expect("drive create work on A");
+    let (token_a, token_b) = (
+        client_a.session_token.clone().expect("A's session"),
+        client_b.session_token.clone().expect("B's session"),
+    );
+    let id_of = |drives: &[kotton_wire::ipc::DriveDescriptor], name: &str| -> String {
+        let d = drives.iter().find(|d| d.name == name).unwrap_or_else(|| panic!("{name} is not listed: {drives:?}"));
+        d.id.clone().unwrap_or_else(|| panic!("{name} is listed with no id: {d:?}"))
+    };
+    let on_a = drives_said(&a, "A", &token_a, "drive list --json").await;
+    let on_b = drives_said(&b, "B", &token_b, "drive list --json").await;
+    for (who, listed) in [("A", &on_a), ("B", &on_b)] {
+        assert_eq!(id_of(listed, FIRST_DRIVE_NAME), FIRST_DRIVE_ID, "{who}'s first drive");
+    }
+    let photos = id_of(&on_a, "photos");
+    assert!(
+        photos.len() == 32 && photos.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "a made drive's id is thirty-two hex digits: {photos}"
+    );
+    assert_eq!(id_of(&on_b, "photos"), photos, "A and B name one drive by two ids");
+    assert_eq!(id_of(&on_b, "work"), id_of(&on_a, "work"), "A and B name one drive by two ids");
+    assert_ne!(id_of(&on_a, "work"), photos, "two drives carry one id");
+    let shown = drives_said(&b, "B", &token_b, "drive show photos --json").await;
+    assert_eq!(shown.iter().map(|d| d.id.clone()).collect::<Vec<_>>(), [Some(photos.clone())], "{shown:?}");
+    let words = said(&b, "B", &token_b, "drive show photos").await;
+    assert!(words.contains(&photos), "drive show does not name the drive's id: {words}");
 }
 
 /// **A device publishes its claim and nothing else of its pins, and a claim

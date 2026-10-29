@@ -914,11 +914,22 @@ pub struct TenantDrive {
     pub held: u64,
 }
 
-/// A drive, as a person's device describes it (kotton-protocol #20): its name,
-/// the vault it lives on, its size, and which of the person's devices keep it
-/// whole.
+/// A drive, as a person's device describes it to its person (the drive
+/// decision's types): its id, its name, the vault that keeps this copy of it,
+/// its size as that vault last said, the devices that claim it whole, and
+/// whether it is a move's unfinished tree. A drive kept at several vaults is
+/// one descriptor per vault, all carrying the one id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DriveDescriptor {
+    /// The drive's own id, the same for every copy a move makes of it and on
+    /// every device of the person's: thirty-two hex digits minted at `drive
+    /// create` and sealed with the name, or [`FIRST_DRIVE_ID`] for the
+    /// tenancy's own tree until it becomes a made drive (kotton #124). What
+    /// tells two copies of one drive from two drives of one name. `None` for a
+    /// made drive this device recorded before ids existed, until its vault's
+    /// next listing. It is the device's answer to its own person and is never
+    /// sent to a vault.
+    pub id: Option<String>,
     /// The person's name for it.
     pub name: String,
     /// The vault it lives on, as the person's paired node for it is labelled.
@@ -1244,6 +1255,7 @@ mod made_drive_tests {
         assert_eq!(json["sealed_name"], "AQID");
         assert_eq!(serde_json::from_value::<TenantDrive>(json).unwrap(), listed);
         let described = DriveDescriptor {
+            id: Some("cd".repeat(16)),
             name: "photos".into(),
             vault: "home".into(),
             vault_key: "00".repeat(32),
@@ -1251,7 +1263,9 @@ mod made_drive_tests {
             pinned_whole: vec![],
             unfinished: false,
         };
-        let back: DriveDescriptor = serde_json::from_str(&serde_json::to_string(&described).unwrap()).unwrap();
+        let json = serde_json::to_value(&described).unwrap();
+        assert_eq!(json["id"], "cd".repeat(16), "the drive's id crosses by name: {json}");
+        let back: DriveDescriptor = serde_json::from_value(json).unwrap();
         assert_eq!(back, described);
     }
 }

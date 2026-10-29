@@ -131,6 +131,18 @@
 //! device's claim at `drive create` waits until a device keeps a tree of a made
 //! drive (kotton #58, #124), so today no claim names a made drive and every
 //! made drive is told of as kept whole by nobody, which is true.
+//!
+//! **What a drive is, told to its person** (the drive decision's types).
+//! `drive create`, `list`, `show` and `move` answer with descriptors
+//! ([`describe`]), one per vault a drive is kept at: the drive's id, its
+//! name, the vault that keeps it, its size as that vault last said, the
+//! devices that claim it whole, and whether it is a move's unfinished tree.
+//! The id is the record's ([`kotton_peer::daemon::drives::Drive::id`]) —
+//! [`kotton_wire::ipc::FIRST_DRIVE_ID`] for the first drive until #124 mints
+//! it one — and an unfinished tree's is the id sealed with it, so copies of
+//! one drive show one id and two drives of one name show two. A descriptor is
+//! this device's answer to its own person over its own IPC; no descriptor,
+//! and so no id, is sent to a vault or a relay.
 
 use crate::users::DeviceUsers as _;
 use crate::users::pins;
@@ -394,6 +406,9 @@ async fn follow_every_vault(runtime: &DeviceRuntime, store: &UserStore, db: &Arc
 
 fn describe(drive: &Drive, sizes: &HashMap<([u8; 32], String), u64>, pins: &pins::Read) -> DriveDescriptor {
     DriveDescriptor {
+        // The record's id, as this device opened it from the sealed name
+        // ([`kotton_peer::daemon::drives::Drive::id`]).
+        id: drive.id.clone(),
         name: drive.name.clone(),
         vault: drive.node.id.clone(),
         vault_key: hex::encode(drive.vault_key),
@@ -430,6 +445,9 @@ async fn unfinished_described(db: &Arc<SqlitePool>, user_id: &str, seen: &Seen) 
         .iter()
         .filter(|c| !c.finished)
         .map(|c| DriveDescriptor {
+            // The id sealed with the unfinished tree's name: the drive the
+            // move was of.
+            id: Some(c.id.clone()),
             name: c.name.clone(),
             vault: vaults.iter().find(|v| v.vault_key == c.vault_key).map(|v| v.node.id.clone()).unwrap_or_default(),
             vault_key: hex::encode(c.vault_key),
@@ -1363,6 +1381,62 @@ mod tests {
             &kotton_store::LocalShelves(kotton_fs::OsFilesystem),
         )
         .unwrap()
+    }
+
+    /// **Copies of one drive describe with one id; two drives of one name
+    /// with two** (kotton #188; the drive decision's types). Alice keeps drives
+    /// at `home` and `office`. `photos` is recorded at `home`; a move of it to
+    /// `office` left an unfinished tree there, sealed with the same id; and a
+    /// second `photos`, made at `office` by a `create` that raced, carries an
+    /// id of its own. The descriptors say the first drive is
+    /// [`FIRST_DRIVE_ID`], the raced drive's id differs from the recorded one,
+    /// and the unfinished copy carries the recorded one.
+    #[tokio::test]
+    async fn copies_of_one_drive_describe_with_one_id_and_two_drives_of_one_name_with_two() {
+        use kotton_peer::daemon::db as network_db;
+        let temp = tempfile::TempDir::new().unwrap();
+        let db = Arc::new(kotton_record::open_sqlite(&temp.path().join("machine.db")).await.unwrap());
+        crate::db::MIGRATOR.run(db.as_ref()).await.unwrap();
+        let key = |seed: u8| ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
+        for (label, k) in [("home", key(9)), ("office", key(4))] {
+            let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&k).unwrap().to_string();
+            network_db::insert_paired_node(&db, label, "alice", &did, &k, "[]", 0, None).await.unwrap();
+            record::record(&db, "alice", &k).await.unwrap();
+        }
+        let (recorded, raced) = ("ab".repeat(16), "cd".repeat(16));
+        let listed = |tree: String, id: &str| record::Listed { tree, name: "photos".into(), id: id.into() };
+        record::reconcile(&db, "alice", &key(9), &[listed(MadeDrive([1; 16]).tree(), &recorded)]).await.unwrap();
+        record::reconcile(&db, "alice", &key(4), &[listed(MadeDrive([2; 16]).tree(), &raced)]).await.unwrap();
+        let seen = Seen {
+            copies: vec![Copy {
+                vault_key: key(4),
+                tree: MadeDrive([3; 16]).tree(),
+                name: "photos".into(),
+                id: recorded.clone(),
+                held: 7,
+                finished: false,
+                sealed_before_ids: false,
+            }],
+            unanswered: Vec::new(),
+        };
+        let pins = pins::Read { settings: Vec::new(), claims: Vec::new(), devices: Vec::new() };
+        let described: Vec<DriveDescriptor> = record::all(&db, "alice").await.unwrap().iter().map(|d| describe(d, &HashMap::new(), &pins)).collect();
+        let id_at = |vault: &str, name: &str| -> Option<String> {
+            let found: Vec<_> = described.iter().filter(|d| d.vault == vault && d.name == name).collect();
+            assert_eq!(found.len(), 1, "{vault}/{name}: {described:?}");
+            found[0].id.clone()
+        };
+        for vault in ["home", "office"] {
+            assert_eq!(id_at(vault, kotton_wire::ipc::FIRST_DRIVE_NAME).as_deref(), Some(FIRST_DRIVE_ID), "the first drive at {vault}");
+        }
+        assert_eq!(id_at("home", "photos"), Some(recorded.clone()));
+        assert_eq!(id_at("office", "photos"), Some(raced.clone()));
+        assert_ne!(id_at("home", "photos"), id_at("office", "photos"), "two drives of one name describe with one id");
+
+        let unfinished = unfinished_described(&db, "alice", &seen).await.unwrap();
+        assert_eq!(unfinished.len(), 1, "{unfinished:?}");
+        assert!(unfinished[0].unfinished && unfinished[0].vault == "office", "{unfinished:?}");
+        assert_eq!(unfinished[0].id, Some(recorded), "the copy a move left does not carry its drive's id: {unfinished:?}");
     }
 
     /// **A move holds the drive on this device for the whole of it**
