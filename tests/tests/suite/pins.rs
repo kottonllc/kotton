@@ -293,7 +293,10 @@ async fn every_device_names_a_drive_by_one_id_and_two_drives_by_two() {
         assert_eq!(id_of(listed, FIRST_DRIVE_NAME), FIRST_DRIVE_ID, "{who}'s first drive");
     }
     let photos = id_of(&on_a, "photos");
-    assert_eq!(photos.len(), 32, "a made drive's id is thirty-two hex digits: {photos}");
+    assert!(
+        photos.len() == 32 && photos.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "a made drive's id is thirty-two hex digits: {photos}"
+    );
     assert_eq!(id_of(&on_b, "photos"), photos, "A and B name one drive by two ids");
     assert_eq!(id_of(&on_b, "work"), id_of(&on_a, "work"), "A and B name one drive by two ids");
     assert_ne!(id_of(&on_a, "work"), photos, "two drives carry one id");

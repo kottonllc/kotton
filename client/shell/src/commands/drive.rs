@@ -269,7 +269,7 @@ drive — your drives: where your things live
 
 USAGE:
   drive create <name> [--on <vault>]   make a drive on one of your vaults
-  drive list [--json]                  every drive: where each lives, its size, which devices keep it whole
+  drive list [--json]                  every drive: its id, where it lives, its size, which devices keep it whole
   drive show <name> [--json]           one drive, on each vault it is kept on
   drive move <name> --to <vault> [--from <vault>]
                                        carry a drive, sealed, to another of your vaults
