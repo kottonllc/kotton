@@ -240,6 +240,7 @@ mod tests {
         ObjectMetadata, ObjectStorage, ObjectStorageError, ObjectStorageResult,
         RecordSegmentView, SealedObjectAccess,
     };
+    use crate::provider::sqlite_record_store::StoreClock;
     use serde_json::json;
     use std::path::Path;
     use std::sync::Mutex;
@@ -329,26 +330,26 @@ mod tests {
         store
     }
 
-    /// Wait for the start of the next wall-clock second, so the few in-memory
-    /// writes after it land inside one second rather than straddling two.
-    async fn at_the_start_of_a_second() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
-        let into = now.subsec_millis() as u64;
-        tokio::time::sleep(std::time::Duration::from_millis(1000 - into + 5)).await;
+    /// A store whose clock is held on one second, so every write it makes lands
+    /// in that second however the scheduler runs the steps (kotton #177).
+    async fn store_in_one_second() -> SqliteRecordStore {
+        let store = SqliteRecordStore::in_memory()
+            .unwrap()
+            .with_clock(StoreClock::fixed(1_700_000_000_500));
+        store.create_table(&CoreSchema::Notes.definition()).await.unwrap();
+        store
     }
 
     /// **A record written, logged and deleted inside one second has its delete
     /// logged** (kotton #158), and a second store that merges the log holds it
-    /// deleted. The seconds are asserted equal, so this holds the case and does
-    /// not pass by straddling a second.
+    /// deleted. The store's clock is held on one second, and the seconds are
+    /// asserted equal, so this holds the case and cannot pass by straddling a
+    /// second.
     #[tokio::test]
     async fn a_delete_in_the_second_its_record_was_written_is_logged() {
-        let store = store().await;
+        let store = store_in_one_second().await;
         let mount = LogOnly::default();
 
-        at_the_start_of_a_second().await;
         let id = store.insert(&notes(), json!({ "title": "brief" })).await.unwrap();
         assert!(log_records(&store, &mount).await.unwrap().is_some());
         store.delete(&notes(), &id).await.unwrap();
@@ -360,7 +361,7 @@ mod tests {
         let logged = mount.rows();
         assert_eq!(logged.len(), 2, "the write and its delete: {logged:?}");
         let (write, delete) = (&logged[0], &logged[1]);
-        assert_eq!(write.updated_at, delete.updated_at, "the steps straddled a second");
+        assert_eq!(write.updated_at, delete.updated_at, "the held clock was not used");
         assert_eq!((write.deleted_at, delete.deleted_at.is_some()), (None, true));
         assert!(delete.revision > write.revision);
 
@@ -379,10 +380,9 @@ mod tests {
     /// it is logged and a peer holding the first version takes it.
     #[tokio::test]
     async fn a_rewrite_in_the_second_its_record_was_written_is_logged() {
-        let store = store().await;
+        let store = store_in_one_second().await;
         let mount = LogOnly::default();
 
-        at_the_start_of_a_second().await;
         let id = store.insert(&notes(), json!({ "title": "first" })).await.unwrap();
         assert!(log_records(&store, &mount).await.unwrap().is_some());
         store
@@ -393,7 +393,7 @@ mod tests {
 
         let logged = mount.rows();
         assert_eq!(logged.len(), 2);
-        assert_eq!(logged[0].updated_at, logged[1].updated_at, "the steps straddled a second");
+        assert_eq!(logged[0].updated_at, logged[1].updated_at, "the held clock was not used");
 
         let peer = store_with(&logged[..1]).await;
         peer.merge_changeset(logged[1..].to_vec()).await.unwrap();
