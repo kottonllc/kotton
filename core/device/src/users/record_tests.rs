@@ -329,7 +329,15 @@ const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
             .await
             .unwrap();
 
-        let store = record_store(&rt, "alice");
+        // The writing store's clock is held on one second, so alpha's write and
+        // its delete always share a second: the case a version of seconds alone
+        // could not log (kotton #158), held rather than hit by the scheduler
+        // (kotton #177).
+        let store = std::sync::Arc::new(
+            kotton_record::open::user_record_store(rt.base_dir(), "alice", rt.secrets())
+                .expect("open record store")
+                .with_clock(kotton_record::StoreClock::fixed(1_700_000_000_500)),
+        );
         store.create_table(&def).await.unwrap();
 
         // Two records, logged; then delete one, logged — several segments accrue,
@@ -339,6 +347,11 @@ const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
         assert!(log_records(&alice, &record_store(&rt, "alice"), "local").await.unwrap().is_some());
         store.delete(&nsid, &id_a).await.unwrap();
         assert!(log_records(&alice, &record_store(&rt, "alice"), "local").await.unwrap().is_some());
+
+        let alpha: Vec<ChangesetRow> =
+            logged_rows(&alice).await.into_iter().filter(|r| r.id == id_a).collect();
+        assert_eq!(alpha.len(), 2, "alpha's write and its delete were both logged");
+        assert_eq!(alpha[0].updated_at, alpha[1].updated_at, "the held clock was not used");
 
         let mount = alice.get_remote("local").unwrap();
         assert!(

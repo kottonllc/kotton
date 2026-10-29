@@ -49,10 +49,13 @@
 //!
 //! A row's version is `(updated_at, revision)`. `updated_at` is whole seconds;
 //! `revision` counts the row's writes. Every write here — an insert, a rewrite,
-//! a delete — sets `revision` to the one it replaces plus one, **in the same
-//! statement as the write**, so no read precedes it that another writer could
-//! make stale and two writes of a row can never share a version. A merge keeps
-//! the revision the row arrived with, so the next write here counts on from it.
+//! a delete — sets `revision` to the one it replaces plus one, read inside the
+//! statement that writes it. An insert does read the row first (`SELECT root,
+//! filed_at`, for its root and its place in the filing order), but that read and
+//! the write both run under the store's held `conn` mutex, which serialises the
+//! pair: no other write of the row lands between them, so two writes of a row can
+//! never share a version. A merge keeps the revision the row arrived with, so the
+//! next write here counts on from it.
 //!
 //! The seconds alone could not do this: a record written and deleted inside one
 //! second had one version, so the delete was never logged and a peer holding the
@@ -60,6 +63,18 @@
 //! shrunk that second; a count cannot tie. A table written before the column is
 //! given it on open, every row at `0`, the version an earlier device logged it
 //! at, so nothing already logged is logged again.
+//!
+//! ## One clock
+//!
+//! Every time this store writes — `created_at`, `updated_at` and `deleted_at` in
+//! seconds, `filed_at` in milliseconds — is read from one [`StoreClock`] and
+//! bound into the statement, never taken from SQL's `now`. The clock is the
+//! system clock unless a caller gives the store another with
+//! [`SqliteRecordStore::with_clock`], which is how a test holds a second instead
+//! of racing the wall clock for one (kotton #177). It is read under the held
+//! `conn` mutex, so the writes of one store take their times in the order they
+//! are written. The column defaults in the DDL above are for rows written
+//! without the store; the store itself always binds its stamps.
 //!
 //! ## Sync
 //!
@@ -226,12 +241,51 @@ fn adopt_every_table(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// This device's clock, in milliseconds.
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+/// The clock a [`SqliteRecordStore`] stamps its writes with, in milliseconds
+/// since the Unix epoch (module doc, "One clock").
+///
+/// The system clock by default. A value from it is a time, not an identifier:
+/// it names no person and no device, and it already rides on every row.
+#[derive(Clone)]
+pub struct StoreClock(Arc<dyn Fn() -> i64 + Send + Sync>);
+
+impl StoreClock {
+    /// This device's clock.
+    pub fn system() -> Self {
+        Self::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0)
+        })
+    }
+
+    /// A clock that reads `now`, in milliseconds since the epoch.
+    pub fn new(now: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        Self(Arc::new(now))
+    }
+
+    /// A clock held at `millis`: every read returns it.
+    pub fn fixed(millis: i64) -> Self {
+        Self::new(move || millis)
+    }
+
+    /// The time now, in milliseconds since the epoch.
+    pub fn millis(&self) -> i64 {
+        (self.0)()
+    }
+}
+
+impl Default for StoreClock {
+    fn default() -> Self {
+        Self::system()
+    }
+}
+
+/// Whole seconds of a millisecond time — the unit `created_at`, `updated_at`
+/// and `deleted_at` are kept in.
+fn seconds(millis: i64) -> i64 {
+    millis.div_euclid(1000)
 }
 
 /// The stamp a record filed now takes in `table`: this device's clock, or one
@@ -254,6 +308,7 @@ fn next_filing_stamp(conn: &Connection, table: &str, now: i64) -> rusqlite::Resu
 #[derive(Clone)]
 pub struct SqliteRecordStore {
     conn: Arc<Mutex<Connection>>,
+    clock: StoreClock,
 }
 
 impl SqliteRecordStore {
@@ -293,7 +348,17 @@ impl SqliteRecordStore {
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            clock: StoreClock::system(),
         })
+    }
+
+    /// Stamp this store's writes from `clock` instead of the system clock.
+    ///
+    /// Set it where the store is opened, before the store is cloned: a clone
+    /// shares the connection but carries its own clock.
+    pub fn with_clock(mut self, clock: StoreClock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Open an in-memory database (useful for testing).
@@ -302,6 +367,7 @@ impl SqliteRecordStore {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            clock: StoreClock::system(),
         })
     }
 }
@@ -349,10 +415,13 @@ impl RecordStore for SqliteRecordStore {
         let body = serde_json::to_string(&record_with_id)?;
         let conn = Arc::clone(&self.conn);
         let id_clone = id.clone();
-        let now = now_millis();
+        let clock = self.clock.clone();
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
+            // Read under the lock, so this store's writes take their times in
+            // the order they are written (module doc, "One clock").
+            let now = clock.millis();
             // A record does not change root by being rewritten: the replace
             // below would delete a row that may be in a root this writer cannot
             // read. Tombstones included — a deleted row is still that root's.
@@ -378,16 +447,19 @@ impl RecordStore for SqliteRecordStore {
                 None => next_filing_stamp(&conn, &table, now)?,
             };
             // A new version: the revision this write replaces, tombstone
-            // included, plus one, read inside the statement that writes it
-            // (module doc, "Every write is a new version").
+            // included, plus one, read inside the statement that writes it. The
+            // `SELECT root, filed_at` above ran first, and the held `conn`
+            // mutex serialises it with this INSERT, so no other write of the
+            // row comes between them (module doc, "Every write is a new
+            // version").
             conn.execute(
                 &format!(
                     "INSERT OR REPLACE INTO {table} \
                     (id, schema_nsid, body, created_at, updated_at, root, filed_at, revision) \
-                    VALUES (?1, ?2, ?3, strftime('%s','now'), strftime('%s','now'), ?4, ?5, \
+                    VALUES (?1, ?2, ?3, ?6, ?6, ?4, ?5, \
                     COALESCE((SELECT revision FROM {table} WHERE id = ?1), 0) + 1)"
                 ),
-                params![id_clone, nsid_str, body, root, filed_at],
+                params![id_clone, nsid_str, body, root, filed_at, seconds(now)],
             )?;
             Ok::<(), RecordStoreError>(())
         })
@@ -507,10 +579,13 @@ impl RecordStore for SqliteRecordStore {
         let id = record_id.clone();
         let conn = Arc::clone(&self.conn);
         let (in_roots, root_ids) = roots.predicate();
+        let clock = self.clock.clone();
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
-            let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id.clone())];
+            let now = seconds(clock.millis());
+            let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(now), Box::new(now), Box::new(id.clone())];
             for r in root_ids {
                 bound.push(Box::new(r));
             }
@@ -518,8 +593,8 @@ impl RecordStore for SqliteRecordStore {
                 bound.iter().map(|b| b.as_ref()).collect();
             let affected = conn.execute(
                 &format!(
-                    "UPDATE {table} SET deleted_at = strftime('%s','now'), \
-                     updated_at = strftime('%s','now'), \
+                    "UPDATE {table} SET deleted_at = ?, \
+                     updated_at = ?, \
                      revision = revision + 1 \
                      WHERE id = ? AND deleted_at IS NULL AND {in_roots}"
                 ),
@@ -535,6 +610,17 @@ impl RecordStore for SqliteRecordStore {
 
     async fn gc_tombstones(&self, before_ts: SyncWatermark) -> Result<u64> {
         // Remove all rows tombstoned before `before_ts` (Unix seconds).
+        //
+        // The invariant this relies on: a tombstone is collected only when it
+        // is strictly older than `before_ts`, and `before_ts` is no later than
+        // this store's clock reads now (no caller in the tree passes one yet;
+        // its one test passes `i64::MAX` and re-inserts nothing after). A record
+        // re-inserted under a collected id restarts at revision 1, but its
+        // `updated_at` is now, a strictly later second than the tombstone's
+        // `deleted_at`, so on a peer still holding the tombstone it wins on
+        // the second, whatever the count. A `before_ts` in the future, or the
+        // clock stepped back past a collected tombstone, breaks that: the
+        // re-insert can then lose to the tombstone it replaced.
         let conn = Arc::clone(&self.conn);
 
         tokio::task::spawn_blocking(move || {
@@ -585,6 +671,7 @@ impl RecordStore for SqliteRecordStore {
 
     async fn merge_changeset(&self, changeset: RecordChangeset) -> Result<()> {
         let conn = Arc::clone(&self.conn);
+        let clock = self.clock.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
             for row in &changeset {
@@ -626,7 +713,7 @@ impl RecordStore for SqliteRecordStore {
                 // moves a stamp the row already has.
                 let filed_at = match row.filed_at {
                     Some(filed) => filed,
-                    None => next_filing_stamp(&conn, &table, now_millis())?,
+                    None => next_filing_stamp(&conn, &table, clock.millis())?,
                 };
                 conn.execute(
                     &format!(
@@ -1692,6 +1779,68 @@ mod tests {
         drop(store);
         let again = SqliteRecordStore::open(&path, None).unwrap();
         assert_eq!(revision(&again.export_changeset(0).await.unwrap()), 2);
+    }
+
+    // ── the clock (kotton #177)
+
+    /// **Two stores given one held clock stamp their rows alike.** Every time
+    /// a store writes comes from its clock, in Rust, not from SQL's `now`: the
+    /// seconds of a write and a delete are the held second, and the filing
+    /// stamp is the held millisecond, on both stores.
+    #[tokio::test]
+    async fn two_stores_given_one_held_clock_stamp_their_rows_alike() {
+        const HELD: i64 = 1_700_000_000_999;
+        let clock = StoreClock::fixed(HELD);
+        let mut exported = Vec::new();
+        for _ in 0..2 {
+            let store = notes_store().with_clock(clock.clone());
+            store.create_table(&CoreSchema::Notes.definition()).await.unwrap();
+            let id = store.insert(&notes_nsid(), json!({ "title": "t" })).await.unwrap();
+            store.delete(&notes_nsid(), &id).await.unwrap();
+            let created_at: i64 = store
+                .conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT created_at FROM sh_kotton_notes", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(created_at, HELD / 1000);
+            exported.push(store.export_changeset(0).await.unwrap().remove(0));
+        }
+        for row in &exported {
+            assert_eq!(row.updated_at, HELD / 1000, "updated_at is not the held second");
+            assert_eq!(row.deleted_at, Some(HELD / 1000), "deleted_at is not the held second");
+            assert_eq!(row.filed_at, Some(HELD), "filed_at is not the held millisecond");
+        }
+        assert_eq!(exported[0].updated_at, exported[1].updated_at);
+    }
+
+    /// **A store opened without a clock stamps from the system clock**, and
+    /// that clock advances. The write's second lies between two readings of the
+    /// system clock taken around it.
+    #[tokio::test]
+    async fn the_default_clock_is_the_system_clock_and_advances() {
+        let system = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+        };
+        let first = StoreClock::default().millis();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert!(StoreClock::default().millis() > first, "the default clock did not advance");
+
+        let store = store_with_notes_table().await;
+        let before = system();
+        store.insert(&notes_nsid(), json!({ "title": "t" })).await.unwrap();
+        let after = system();
+        let row = store.export_changeset(0).await.unwrap().remove(0);
+        assert!(
+            (before / 1000..=after / 1000).contains(&row.updated_at),
+            "updated_at {} is not the system clock's second ({before}..={after} ms)",
+            row.updated_at
+        );
+        let filed = row.filed_at.unwrap();
+        assert!((before..=after).contains(&filed), "filed_at {filed} is not the system clock");
     }
 
     /// The merge orders by `(updated_at, revision)`: in the same second a higher
