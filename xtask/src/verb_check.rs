@@ -120,17 +120,20 @@ fn verbs_after(words: &[&str]) -> Vec<String> {
     vec![String::new()]
 }
 
-/// The backticked spans of `text`, each with whether the text before it ends on `·`.
-fn spans(text: &str) -> Vec<(String, bool)> {
+/// The backticked spans of `text`, each with whether the text before it ends on `·` and
+/// whether it sits inside parentheses (an aside about the verb before it, not a form).
+fn spans(text: &str) -> Vec<(String, bool, bool)> {
     let mut out = Vec::new();
     let mut rest = text;
     let mut before = String::new();
+    let mut depth = 0i32;
     while let Some(open) = rest.find('`') {
         before.push_str(&rest[..open]);
+        depth = (depth + before.matches('(').count() as i32 - before.matches(')').count() as i32).max(0);
         let after = &rest[open + 1..];
         let Some(close) = after.find('`') else { break };
         let chained = before.trim_end().ends_with('·');
-        out.push((after[..close].replace("\\|", "|"), chained));
+        out.push((after[..close].replace("\\|", "|"), chained, depth > 0));
         before.clear();
         rest = &after[close + 1..];
     }
@@ -144,7 +147,10 @@ impl Rfc {
     /// **The Decision** is paragraphs, each a run of spans. The first span heads it: of two
     /// words or more (`drive create <name>`), its first is the paragraph's noun, and a span
     /// after a `·` is that noun's verb (`· `list``), or a noun of its own when it has a verb
-    /// of its own (`· `message send <contact>``); of one word (`ls`), the spans after a `·`
+    /// of its own (`· `message send <contact>``), unless that second word is an alternation
+    /// (`· `session list|end``, `· `receive off|10m|always``): then it is the noun's verb with
+    /// its own arguments. A span inside parentheses that no `·` chains is an aside (`` `default`
+    /// follows the one above``), not a name; of one word (`ls`), the spans after a `·`
     /// are names of their own (the files' verbs). A span anywhere else is a whole form
     /// (`` `identity rotate` ``). **A Today cell** is spans of whole forms, `/` and `|`
     /// between verbs (`sync add/list/remove`).
@@ -154,7 +160,7 @@ impl Rfc {
         for paragraph in decision.split("\n\n") {
             let joined = paragraph.split_whitespace().collect::<Vec<_>>().join(" ");
             let mut noun: Option<String> = None;
-            for (i, (span, chained)) in spans(&joined).into_iter().enumerate() {
+            for (i, (span, chained, aside)) in spans(&joined).into_iter().enumerate() {
                 let words: Vec<&str> = span.split_whitespace().collect();
                 let Some(first) = words.first().copied() else { continue };
                 let whole = |rfc: &mut Rfc, words: &[&str]| {
@@ -168,10 +174,18 @@ impl Rfc {
                     whole(&mut rfc, &words);
                     continue;
                 }
+                if aside && !chained {
+                    continue;
+                }
                 match (&noun, chained) {
                     (Some(n), true) if first == n => whole(&mut rfc, &words),
-                    (Some(_), true) if words.len() > 1 && !words[1].starts_with(['<', '[', '-']) => {
+                    (Some(_), true)
+                        if words.len() > 1 && !words[1].starts_with(['<', '[', '-']) && !words[1].contains('|') =>
+                    {
                         whole(&mut rfc, &words)
+                    }
+                    (Some(n), true) if words.len() > 1 && words[1].contains('|') => {
+                        rfc.decision_verbs.entry(n.clone()).or_default().insert(first.to_string());
                     }
                     (Some(n), true) => {
                         let n = n.clone();
@@ -198,7 +212,7 @@ impl Rfc {
             if today.trim_start().starts_with("---") {
                 continue;
             }
-            for (span, _) in spans(today) {
+            for (span, ..) in spans(today) {
                 let words: Vec<&str> = span.split_whitespace().collect();
                 let Some(first) = words.first() else { continue };
                 if !first.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
@@ -517,6 +531,39 @@ whole` is \"collect all my things\". `sync` syncs this device's drives, now.
 
 - after the table.
 ";
+
+    /// The Identity and Devices paragraphs, as the decision writes them: `session list|end`
+    /// and `receive off|10m|always` are verbs of their paragraph's noun, and the words in
+    /// parentheses are not names.
+    #[test]
+    fn an_alternation_after_a_chained_word_is_that_nouns_verb() {
+        let text = "\
+### What a person can do
+
+**Identity.** `identity create <name>` (a passphrase, once) · `list` · `use` · `rotate` (new keys under the same
+identity) · `session list|end` (the sessions the daemon holds, and ending one) · `rm` · `whoami`. `id` is the short form.
+
+**Devices.** `device add` (pair another device by the six digits) · `join <name> <code>` (the other side) · `rm
+<device>` · `receive off|10m|always` (whether this device has a listener; `always` is said back at every `status`, and
+is refused where the platform has no announcement) · `reset` (start this device fresh).
+
+**What this device holds.** `pin default whole|on-demand` (this device's default) · `pin <drive>[:/<folder>]
+whole|on-demand|default` (`default` follows the one above) · `pin list`. A calendar (`.ics`) is a file (`mint` is
+a Today word).
+
+### Where it runs
+";
+        let rfc = Rfc::parse(text);
+        assert!(rfc.decision("device").contains("receive"), "{:?}", rfc.decision("device"));
+        assert!(rfc.decision("identity").contains("session"), "{:?}", rfc.decision("identity"));
+        for noun in ["receive", "session"] {
+            assert!(!rfc.decision_names.contains(noun), "{noun} read as a noun: {:?}", rfc.decision_names);
+        }
+        for aside in ["default", "always", ".ics", "mint", "status"] {
+            assert!(!rfc.decision_names.contains(aside), "{aside} read as a name: {:?}", rfc.decision_names);
+        }
+        assert_eq!(rfc.decision("pin"), set(&["default", "<drive>", "list"]));
+    }
 
     fn set(words: &[&str]) -> BTreeSet<String> {
         words.iter().map(|w| w.to_string()).collect()
