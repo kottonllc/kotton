@@ -243,7 +243,8 @@ mod tests {
     use crate::provider::sqlite_record_store::StoreClock;
     use serde_json::json;
     use std::path::Path;
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     /// A mount that carries a record log and nothing else.
     #[derive(Default)]
@@ -399,6 +400,106 @@ mod tests {
         peer.merge_changeset(logged[1..].to_vec()).await.unwrap();
         let held = peer.query(&notes(), Default::default()).await.unwrap();
         assert_eq!(held[0].body["title"], "second");
+    }
+
+    /// A store whose clock a test sets, in milliseconds, between its writes.
+    async fn store_on(clock: Arc<AtomicI64>) -> SqliteRecordStore {
+        let store = SqliteRecordStore::in_memory()
+            .unwrap()
+            .with_clock(StoreClock::new(move || clock.load(Ordering::SeqCst)));
+        store.create_table(&CoreSchema::Notes.definition()).await.unwrap();
+        store
+    }
+
+    const T: i64 = 1_700_000_000_500;
+
+    /// **A delete is never older than the write it replaces** (kotton #172).
+    /// The clock steps back three seconds between a record's write and its
+    /// delete; the delete still lands at the write's second, one revision on,
+    /// so a peer that merged the write takes the delete.
+    #[tokio::test]
+    async fn a_delete_after_the_clock_steps_back_still_replaces_the_write() {
+        let clock = Arc::new(AtomicI64::new(T));
+        let store = store_on(Arc::clone(&clock)).await;
+        let mount = LogOnly::default();
+
+        let id = store.insert(&notes(), json!({ "title": "brief" })).await.unwrap();
+        assert!(log_records(&store, &mount).await.unwrap().is_some());
+        clock.store(T - 3_000, Ordering::SeqCst);
+        store.delete(&notes(), &id).await.unwrap();
+        assert!(log_records(&store, &mount).await.unwrap().is_some());
+
+        let logged = mount.rows();
+        assert_eq!(logged.len(), 2, "the write and its delete: {logged:?}");
+        let (write, delete) = (&logged[0], &logged[1]);
+        assert_eq!(write.updated_at, T / 1000);
+        assert_eq!(delete.updated_at, write.updated_at, "the delete was stamped older");
+        assert_eq!(delete.deleted_at, Some(write.updated_at));
+        assert!(delete.revision > write.revision);
+
+        let peer = store_with(std::slice::from_ref(write)).await;
+        peer.merge_changeset(vec![delete.clone()]).await.unwrap();
+        assert!(
+            peer.query(&notes(), Default::default()).await.unwrap().is_empty(),
+            "the peer kept the write"
+        );
+    }
+
+    /// The same for a rewrite: written at `t`, rewritten after the clock steps
+    /// back, and a peer holding the first version takes the second.
+    #[tokio::test]
+    async fn a_rewrite_after_the_clock_steps_back_still_replaces_the_write() {
+        let clock = Arc::new(AtomicI64::new(T));
+        let store = store_on(Arc::clone(&clock)).await;
+        let mount = LogOnly::default();
+
+        let id = store.insert(&notes(), json!({ "title": "first" })).await.unwrap();
+        assert!(log_records(&store, &mount).await.unwrap().is_some());
+        clock.store(T - 3_000, Ordering::SeqCst);
+        store
+            .insert(&notes(), json!({ "id": id, "title": "second" }))
+            .await
+            .unwrap();
+        assert!(log_records(&store, &mount).await.unwrap().is_some());
+
+        let logged = mount.rows();
+        assert_eq!(logged.len(), 2);
+        assert_eq!(logged[1].updated_at, logged[0].updated_at, "the rewrite was stamped older");
+        assert!(logged[1].revision > logged[0].revision);
+
+        let peer = store_with(&logged[..1]).await;
+        peer.merge_changeset(logged[1..].to_vec()).await.unwrap();
+        let held = peer.query(&notes(), Default::default()).await.unwrap();
+        assert_eq!(held[0].body["title"], "second");
+    }
+
+    /// A row merged from a device whose clock runs ahead, then rewritten here:
+    /// the rewrite lands at the merged row's future second, one revision on,
+    /// and a peer that holds the future-stamped row takes it. The merge itself
+    /// keeps the time the row arrived with.
+    #[tokio::test]
+    async fn a_rewrite_of_a_future_stamped_merged_row_lands_at_its_stamp() {
+        let ahead = store_on(Arc::new(AtomicI64::new(T + 60_000))).await;
+        let id = ahead.insert(&notes(), json!({ "title": "ahead" })).await.unwrap();
+        let future = ahead.export_changeset(0).await.unwrap();
+        assert_eq!(future[0].updated_at, T / 1000 + 60);
+
+        let store = store_on(Arc::new(AtomicI64::new(T))).await;
+        store.merge_changeset(future.clone()).await.unwrap();
+        let merged = store.export_changeset(0).await.unwrap();
+        assert_eq!(merged[0].updated_at, future[0].updated_at, "the merge re-stamped the row");
+
+        store
+            .insert(&notes(), json!({ "id": id, "title": "here" }))
+            .await
+            .unwrap();
+        let rewrite = store.export_changeset(0).await.unwrap();
+        assert_eq!(rewrite[0].updated_at, future[0].updated_at, "the rewrite was stamped older");
+        assert_eq!(rewrite[0].revision, future[0].revision + 1);
+
+        ahead.merge_changeset(rewrite).await.unwrap();
+        let held = ahead.query(&notes(), Default::default()).await.unwrap();
+        assert_eq!(held[0].body["title"], "here", "the peer kept the future-stamped row");
     }
 
     async fn store_with(rows: &[ChangesetRow]) -> SqliteRecordStore {

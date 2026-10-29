@@ -51,10 +51,10 @@
 //! `revision` counts the row's writes. Every write here — an insert, a rewrite,
 //! a delete — sets `revision` to the one it replaces plus one, read inside the
 //! statement that writes it. An insert does read the row first (`SELECT root,
-//! filed_at`, for its root and its place in the filing order), but that read and
-//! the write both run under the store's held `conn` mutex, which serialises the
-//! pair: no other write of the row lands between them, so two writes of a row can
-//! never share a version. A merge keeps the revision the row arrived with, so the
+//! filed_at, updated_at`, for its root, its place in the filing order and the
+//! version it replaces), but that read and the write both run under the
+//! store's held `conn` mutex, which serialises the pair: no other write of the
+//! row lands between them, so two writes of a row can never share a version. A merge keeps the revision the row arrived with, so the
 //! next write here counts on from it.
 //!
 //! The seconds alone could not do this: a record written and deleted inside one
@@ -63,6 +63,19 @@
 //! shrunk that second; a count cannot tie. A table written before the column is
 //! given it on open, every row at `0`, the version an earlier device logged it
 //! at, so nothing already logged is logged again.
+//!
+//! **A local write is never older than the row it replaces.** An insert, a
+//! rewrite or a delete takes `updated_at` = the later of this store's clock and
+//! the `updated_at` the row already holds (kotton #172), and its revision still
+//! counts on, so its version is strictly newer. Without the floor, two things
+//! stamp a write below what it replaces: this device's clock stepped back
+//! between a write and the next, or a row merged from a device whose clock runs
+//! ahead. Either way a peer that already took the earlier version would keep it
+//! and never take the later one — a delete that does not reach the person's
+//! other devices. A row's `updated_at` can therefore run ahead of this store's
+//! clock, and stays there across further writes until the clock catches up: it
+//! is a version, and the clock is only its usual source. A merge does not take
+//! the floor; an arriving row keeps the times it was written with.
 //!
 //! ## One clock
 //!
@@ -73,7 +86,8 @@
 //! [`SqliteRecordStore::with_clock`], which is how a test holds a second instead
 //! of racing the wall clock for one (kotton #177). It is read under the held
 //! `conn` mutex, so the writes of one store take their times in the order they
-//! are written. The column defaults in the DDL above are for rows written
+//! are written. A write's `updated_at` is the clock's second or the row's own,
+//! whichever is later ("Every write is a new version"), so it can lead the clock. The column defaults in the DDL above are for rows written
 //! without the store; the store itself always binds its stamps.
 //!
 //! ## Sync
@@ -425,41 +439,54 @@ impl RecordStore for SqliteRecordStore {
             // A record does not change root by being rewritten: the replace
             // below would delete a row that may be in a root this writer cannot
             // read. Tombstones included — a deleted row is still that root's.
-            let existing: Option<(Option<String>, Option<i64>)> = conn
+            let existing: Option<(Option<String>, Option<i64>, i64)> = conn
                 .query_row(
-                    &format!("SELECT root, filed_at FROM {table} WHERE id = ?1"),
+                    &format!("SELECT root, filed_at, updated_at FROM {table} WHERE id = ?1"),
                     params![id_clone],
-                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<i64>>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
                 )
                 .map(Some)
                 .or_else(|e| match e {
                     rusqlite::Error::QueryReturnedNoRows => Ok(None),
                     other => Err(other),
                 })?;
-            if let Some((held, _)) = &existing {
+            if let Some((held, _, _)) = &existing {
                 if *held != root {
                     return Err(RecordStoreError::InAnotherRoot(id_clone));
                 }
             }
+            // Never older than the row it replaces: a clock stepped back, or a
+            // row merged from a clock running ahead, would otherwise stamp this
+            // write below the version a peer already holds, and the peer would
+            // keep that one (module doc, "Every write is a new version").
+            let updated_at = existing
+                .as_ref()
+                .map_or(seconds(now), |(_, _, held)| seconds(now).max(*held));
             // Filed once: a rewrite keeps the place the record already had.
-            let filed_at = match existing.and_then(|(_, filed)| filed) {
+            let filed_at = match existing.and_then(|(_, filed, _)| filed) {
                 Some(filed) => filed,
                 None => next_filing_stamp(&conn, &table, now)?,
             };
             // A new version: the revision this write replaces, tombstone
-            // included, plus one, read inside the statement that writes it. The
-            // `SELECT root, filed_at` above ran first, and the held `conn`
-            // mutex serialises it with this INSERT, so no other write of the
-            // row comes between them (module doc, "Every write is a new
-            // version").
+            // included, plus one, read inside the statement that writes it.
+            // The `SELECT root, filed_at, updated_at` above ran first, and the
+            // held `conn` mutex serialises it with this INSERT, so no other
+            // write of the row comes between them (module doc, "Every write is
+            // a new version").
             conn.execute(
                 &format!(
                     "INSERT OR REPLACE INTO {table} \
                     (id, schema_nsid, body, created_at, updated_at, root, filed_at, revision) \
-                    VALUES (?1, ?2, ?3, ?6, ?6, ?4, ?5, \
+                    VALUES (?1, ?2, ?3, ?6, ?7, ?4, ?5, \
                     COALESCE((SELECT revision FROM {table} WHERE id = ?1), 0) + 1)"
                 ),
-                params![id_clone, nsid_str, body, root, filed_at, seconds(now)],
+                params![id_clone, nsid_str, body, root, filed_at, seconds(now), updated_at],
             )?;
             Ok::<(), RecordStoreError>(())
         })
@@ -584,6 +611,9 @@ impl RecordStore for SqliteRecordStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
             let now = seconds(clock.millis());
+            // Never older than the row it replaces (module doc, "Every write is
+            // a new version"): `MAX(?, updated_at)` reads the row's version
+            // before this statement writes it, so both stamps take it.
             let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> =
                 vec![Box::new(now), Box::new(now), Box::new(id.clone())];
             for r in root_ids {
@@ -593,8 +623,8 @@ impl RecordStore for SqliteRecordStore {
                 bound.iter().map(|b| b.as_ref()).collect();
             let affected = conn.execute(
                 &format!(
-                    "UPDATE {table} SET deleted_at = ?, \
-                     updated_at = ?, \
+                    "UPDATE {table} SET deleted_at = MAX(?, updated_at), \
+                     updated_at = MAX(?, updated_at), \
                      revision = revision + 1 \
                      WHERE id = ? AND deleted_at IS NULL AND {in_roots}"
                 ),
