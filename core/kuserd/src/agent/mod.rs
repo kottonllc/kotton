@@ -1877,8 +1877,9 @@ impl DeviceDaemon {
         // The peer-serving path no longer binds the user registry. It reached it
         // only to build a `file_host`, and that takes the seam now — so the whole
         // path stopped needing the daemon's residency map, rather than passing it
-        // through three frames to one call.
-        let record_stores = self.record_stores.clone();
+        // through three frames to one call. Nor does it hold the record stores:
+        // no peer verb writes a record (records arrive as sealed log segments the
+        // sync engine merges), so the path has no store to reach for.
         let sync_resources = Arc::clone(&self.sync_resources);
         let db = Arc::clone(&self.db);
         let user_dbs = Arc::clone(&self.user_dbs);
@@ -1903,7 +1904,6 @@ impl DeviceDaemon {
         let ctx = Arc::new(self.agent_context());
         Arc::new(move |peer_did: String, req_bytes: Vec<u8>| {
             let runtime = Arc::clone(&runtime);
-            let record_stores = record_stores.clone();
             let sync_resources = Arc::clone(&sync_resources);
             let db = Arc::clone(&db);
             let user_dbs = Arc::clone(&user_dbs);
@@ -1925,7 +1925,6 @@ impl DeviceDaemon {
                 };
                 let response = handle_peer_request(
                     &runtime,
-                    &record_stores,
                     &sync_resources,
                     &db,
                     &user_dbs,
@@ -2081,7 +2080,6 @@ async fn handle_peer_request(
     runtime: &Arc<DeviceRuntime>,
     // No `users` here any more: every arm that resolved residency did it through
     // `file_host`, which now takes the seam below instead of the two locators.
-    record_stores: &crate::residency::RecordStores,
     sync_resources: &Arc<dyn kotton_sync::SyncHost>,
     db: &Arc<SqlitePool>,
     user_dbs: &crate::db::user_db::UserDbMap,

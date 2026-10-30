@@ -4316,6 +4316,7 @@ mod trust_origin_tests {
     /// kuserd's and kvaultd's peer acceptors decode, nor as a `RemoteRequest`.
     #[test]
     fn plaintext_record_rows_are_not_a_request() {
+        use crate::ipc::remote_request::RemoteRequest;
         let pushed = serde_json::json!({ "ApplyRecordChangeset": {
             "user_id": "alice",
             "nsid": "com.test.notes",
