@@ -348,7 +348,7 @@ mod tests {
     /// a door; they have their own door now — a per-pair mailbox whose verifier
     /// admits one key and whose vocabulary is one verb (`DEC-0055`) — and the
     /// device allowlist gates RFC-0004 peer mTLS, which serves `ReadFile`,
-    /// `ReadSealed`, `ListSealed`, `ApplyRecordChangeset` and `RecoveryFetch`.
+    /// `ReadSealed`, `ListSealed` and `RecoveryFetch`.
     /// Admitting a contact there to deliver a message hands them all of that and
     /// leaves a runtime check as the only thing in the way.
     ///

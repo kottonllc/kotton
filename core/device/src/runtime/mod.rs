@@ -383,7 +383,7 @@ impl DeviceRuntime {
     /// Connect to a peer and return the non-erased [`KottonPeerObjectStorage`].
     ///
     /// Use this when the caller needs to send IPC-level notifications
-    /// (e.g. `SyncAvailable`, `ApplyRecordChangeset`) in addition to
+    /// (e.g. `SyncAvailable`, `RecordSyncAvailable`) in addition to
     /// regular object-storage operations.
     /// What this machine needs in order to dial a peer, as one value.
     ///

@@ -2,7 +2,7 @@
 # Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
 # Variants sorted by name; fields in declaration order, which is the order
 # serde writes them. See xtask/src/wire_check.rs for why this file exists.
-# variants: 192
+# variants: 191
 ActiveSession
     user_id: String
 AppBundlePath
@@ -69,7 +69,6 @@ CallerInfoResponse
     has_active_session: bool
     session_user_id: Option<String>
     transport: String
-ChangesetApplied
 ChannelCreated
     channel_did: String
 ChannelKeyGrantCreated
