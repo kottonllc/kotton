@@ -293,6 +293,35 @@ fn printed(src: &str) -> Vec<Printed> {
     out
 }
 
+/// The `\u{..}` or `\xNN` escape whose backslash is at `k`, as the char it prints and its
+/// length in source chars; `None` when it is malformed (no closing brace within the literal, a
+/// non-hex digit, more than six digits, a value that is no char, a `\x` above 0x7F), which
+/// then prints as the default does and never reads past the digits.
+fn escape(c: &[char], k: usize) -> Option<(char, usize)> {
+    match c.get(k + 1)? {
+        'u' => {
+            if c.get(k + 2) != Some(&'{') {
+                return None;
+            }
+            let close = (k + 3..(k + 3 + 11).min(c.len())).find(|&e| c[e] == '}')?;
+            let hex: String = c[k + 3..close].iter().filter(|h| **h != '_').collect();
+            if hex.is_empty() || hex.len() > 6 || !c[k + 3..close].iter().all(|h| h.is_ascii_hexdigit() || *h == '_') {
+                return None;
+            }
+            Some((char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?, close + 1 - k))
+        }
+        'x' => {
+            let hex: String = c.get(k + 2..k + 4)?.iter().collect();
+            if !hex.chars().all(|h| h.is_ascii_hexdigit()) {
+                return None;
+            }
+            let v = u8::from_str_radix(&hex, 16).ok().filter(|v| *v <= 0x7f)?;
+            Some((char::from(v), 4))
+        }
+        _ => None,
+    }
+}
+
 /// The literal opening at `at` (its `"`, or a raw string's `r`), on source line `line`, as the
 /// lines it prints.
 fn printed_literal(c: &[char], at: usize, mut line: usize) -> Vec<Printed> {
@@ -339,17 +368,16 @@ fn printed_literal(c: &[char], at: usize, mut line: usize) -> Vec<Printed> {
                     continue;
                 }
                 Some('n') => out.push((Vec::new(), Vec::new())),
-                Some('u') if c.get(k + 2) == Some(&'{') => {
-                    let end = (k + 3..c.len()).find(|&e| c[e] == '}').unwrap_or(k + 2);
-                    let hex: String = c[k + 3..end].iter().filter(|h| **h != '_').collect();
-                    push(&mut out, u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32).unwrap_or(' '), line);
-                    k = end + 1;
+                Some('u') if escape(c, k).is_some() => {
+                    let (ch, len) = escape(c, k).expect("guarded");
+                    push(&mut out, ch, line);
+                    k += len;
                     continue;
                 }
-                Some('x') if c.get(k + 3).is_some() => {
-                    let hex: String = c[k + 2..k + 4].iter().collect();
-                    push(&mut out, u8::from_str_radix(&hex, 16).ok().map_or(' ', char::from), line);
-                    k += 4;
+                Some('x') if escape(c, k).is_some() => {
+                    let (ch, len) = escape(c, k).expect("guarded");
+                    push(&mut out, ch, line);
+                    k += len;
                     continue;
                 }
                 Some(e @ ('"' | '\\' | '\'')) => push(&mut out, *e, line),
@@ -595,6 +623,44 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
         assert_eq!(ok("`sync list` is `pin`\n").len(), 1);
         assert_eq!(ok("`device admit` is `drive`\n").len(), 1);
         assert_eq!(ok("`device admit` is `drive enrol <invite>`\n").len(), 0);
+    }
+
+    /// **A malformed escape never panics**: an unclosed `\u{`, a non-hex `\u{zz}`, a short or
+/// out-of-range `\x`, at the end of a file or not; a word beside one is still read.
+    #[test]
+    fn a_malformed_escape_is_text_and_never_a_panic() {
+        for src in ["const A: &str = \"x \\u{", "const A: &str = \"\\u{zz}\"", "const A: &str = \"\\x", "const A: &str = \"\\xff\\u{110000}\\u{1234567}\\u{\"\n"] {
+            let _ = found(&[("client/cli/src/x.rs", src)]);
+        }
+        let got = found(&[("client/cli/src/x.rs", "const A: &str = \"\\u{zz} sync now \\xg1 \\u{\";\nconst B: &str = \"sync\\xff now\";\nconst C: &str = \"x\\u{\";\n// }\n")]);
+        assert_eq!(got.len(), 1, "{got:#?}");
+        assert!(got[0].starts_with("client/cli/src/x.rs:1: says `sync now`"), "{got:#?}");
+    }
+
+    /// **The pointer rule holds for every retired word, not only `pin`'s**: `<replacement>
+    /// <arg>` points (a bare other noun needs the argument; a verbed one is itself whole);
+    /// `<noun> <verb>` and a flag after a bare other noun do not.
+    #[test]
+    fn the_pointer_rule_holds_for_every_retired_word() {
+        let t = tables();
+        for r in retired(&t) {
+            let line = |cmd: &str| found_with(&t, &format!("`{}` is `{cmd}`\n", r.was()));
+            let target = r.now.split_whitespace().next().unwrap();
+            let bare_other = r.now.split_whitespace().count() == 1 && target != r.noun;
+            assert_eq!(line(&r.now).is_empty(), !bare_other, "{}: the replacement alone", r.was());
+            assert!(line(&format!("{} <arg>", r.now)).is_empty(), "{}: with an argument", r.was());
+            assert!(line(&format!("kotton {} <arg>", r.now.to_uppercase())).is_empty(), "{}: kotton, any case", r.was());
+            if bare_other {
+                assert!(!line(&format!("{} --help", r.now)).is_empty(), "{}: a flag is no argument", r.was());
+                for v in &r.now_verbs {
+                    assert!(!line(&format!("{} {v}", r.now)).is_empty(), "{}: `{v}` is a verb", r.was());
+                }
+            }
+        }
+    }
+
+    fn found_with(t: &BTreeMap<String, Vec<(String, Is)>>, page: &str) -> Vec<String> {
+        findings(tree(&[("README.md", page)]).path(), &retired(t))
     }
 
     /// **Every path and helper named here is one the tree holds**: a moved file would read as
