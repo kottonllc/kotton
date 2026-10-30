@@ -764,17 +764,38 @@ async fn a_vault_answers_its_verbs_and_nothing_else() {
         }
         other => panic!("a vault answered a plaintext verb: {other:?}"),
     }
-    match ask(UserRequest::ApplyRecordChangeset {
-        user_id: "alice".into(),
-        nsid: "com.test.notes".into(),
-        rows: vec![],
-    })
-    .await
-    {
-        UserResponse::Error { message } => {
-            assert!(message.contains("not a vault's verb"), "{message}")
+    // Plaintext record rows have no verb on the peer wire at all (kotton #173):
+    // records move as sealed segments of the record log, and the verb that once
+    // pushed rows for a device to merge is gone, so a vault cannot be asked to
+    // take them and a paired peer cannot push them into a device. The request
+    // is written as the bytes such a peer would send, because the type no longer
+    // has the variant to build it from. Both daemons decode a peer's request as
+    // `UserRequest`, so the refusal is the decoder's, before any standing is read
+    // — and were the verb back, the vault would answer "not a vault's verb"
+    // instead, which this does not accept.
+    let pushed = serde_json::json!({
+        "ApplyRecordChangeset": {
+            "user_id": "alice",
+            "nsid": "com.test.notes",
+            "rows": [{
+                "id": "00000000-0000-4000-8000-000000000000",
+                "schema_nsid": "com.test.notes",
+                "body": { "text": "planted" },
+                "updated_at": 1,
+                "deleted_at": null
+            }]
         }
-        other => panic!("a vault applied a plaintext changeset: {other:?}"),
+    });
+    let raw = channel
+        .request(&serde_json::to_vec(&pushed).unwrap())
+        .await
+        .expect("the vault answers");
+    match serde_json::from_slice::<UserResponse>(&raw).unwrap() {
+        UserResponse::Error { message } => assert!(
+            message.contains("invalid peer request") && message.contains("unknown variant `ApplyRecordChangeset`"),
+            "plaintext record rows are no request on the peer wire: {message}"
+        ),
+        other => panic!("a peer request carrying plaintext record rows was taken: {other:?}"),
     }
     // And the meter answers over the same connection.
     match ask(UserRequest::VaultCapacity {

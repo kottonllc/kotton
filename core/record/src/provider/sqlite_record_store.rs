@@ -98,6 +98,12 @@
 //! last-write-wins semantics via a SQLite upsert: a row is taken when its
 //! version is strictly newer than the one held.
 //!
+//! Neither is a wire verb. The rows another device's store exported reach this
+//! one only through the sealed record log (`crate::replication`:
+//! `log_records` on the sender, `apply_record_segments` here), which is the one
+//! replication path; the peer verb that once carried plaintext rows straight
+//! to `merge_changeset` is retired (kotton #173).
+//!
 //! ## Threading
 //!
 //! `rusqlite::Connection` is `Send` but not `Sync`.  All operations are
