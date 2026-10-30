@@ -100,6 +100,17 @@ const CHANNELS: &[Channel] = &[
         sources: &[("core/wire/src/ipc/vault_request.rs", "OperatorVerb")],
         golden: "core/wire/operator-verb-surface.txt",
     },
+    // What a paired peer may ask a device's daemon on its own standing: the
+    // type `kuserd`'s peer acceptor decodes (kotton #231). A channel of its own
+    // because its names repeat `UserRequest`'s byte for byte, which is the
+    // point: a device's client and a gateway send the door's spelling, and
+    // `PeerRequest`'s tests hold the mirror against `wire-surface.txt`. A verb
+    // joining this file is a verb a peer can newly say.
+    Channel {
+        what: "peer request",
+        sources: &[("core/wire/src/ipc/peer_request.rs", "PeerRequest")],
+        golden: "core/wire/peer-request-surface.txt",
+    },
     // What the daemon answers on the user channel. Its bytes reach the CLI,
     // the shell and the gateways, and its fields are held to the same rule as
     // the requests' by `secret_debug_tests` (`core/wire/src/ipc/request.rs`):

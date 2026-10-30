@@ -18,23 +18,17 @@ use kotton_wire::ipc::UserResponse;
 // What these handlers need from the node
 // ---------------------------------------------------------------------------
 
-/// The whole of what the file and mount handlers ask of the machine.
+/// What the handlers that read and write a resident person's objects ask of
+/// the machine: an event bus, a mount's key domain, the node's key domain for
+/// a user, and the user's store.
 ///
-/// Enumerated rather than assumed: every `runtime.*` call in this file was
-/// counted, and it is four things — an event bus, two uses of the keychain, the
-/// node's key domain for a user, and dialing a peer for its store.
-///
-/// **The keychain is not handed over, and that is the point.** `&dyn
-/// SecretsStore` would have been two fewer methods and would let these handlers
-/// read *any* secret, identity signing keys included. The four named operations
-/// below are what they actually do: pin and read a mount's key domain,
-/// and hold a remote's credentials. A capability named for its
-/// purpose can be audited; a provider handed over cannot.
-///
-/// This is the [`kotton_peer::membership::MemberStore`] inversion — domain logic naming what it needs, not who supplies it — applied
-/// where it narrows a reach rather than merely relocating one.
-#[async_trait::async_trait]
-pub trait FileHost: Send + Sync {
+/// **The half a peer's request is served with** (kotton #222). The file verbs
+/// at a path and the sealed-replication verbs take this and nothing more, so
+/// the daemon serves them to a peer with a host that has no sync engine
+/// behind it — no `sync_mount`, no record stores, no dialer — and the
+/// compiler holds that, not an arm. [`FileHost`] is this plus what the local
+/// door's mount verbs need besides.
+pub trait StoreHost: Send + Sync {
     /// Where file and mount events are published.
     fn events(&self) -> &Arc<kotton_diag::service::EventBus>;
 
@@ -61,13 +55,6 @@ pub trait FileHost: Send + Sync {
         store: Option<&kotton_store::runtime::user::UserStore>,
     ) -> Option<String>;
 
-    /// Store a remote's credentials.
-    fn set_remote_credentials(&self, user_id: &str, name: &str, value: &str) -> io::Result<()>;
-
-    /// Forget a remote's credentials. Absence is not an error — a remote may
-    /// never have had any.
-    fn forget_remote_credentials(&self, user_id: &str, name: &str);
-
     /// This user's store, if they are resident on this node.
     ///
     /// The one thing these handlers ever wanted from a `UserRuntime`: production
@@ -79,6 +66,36 @@ pub trait FileHost: Send + Sync {
         &self,
         user_id: &str,
     ) -> Option<Arc<kotton_store::runtime::user::UserStore>>;
+}
+
+/// The whole of what the file and mount handlers ask of the machine, with
+/// [`StoreHost`].
+///
+/// Enumerated rather than assumed: every `runtime.*` call in this file was
+/// counted, and it is four things — an event bus, two uses of the keychain, the
+/// node's key domain for a user, and dialing a peer for its store.
+///
+/// **The keychain is not handed over, and that is the point.** `&dyn
+/// SecretsStore` would have been two fewer methods and would let these handlers
+/// read *any* secret, identity signing keys included. The four named operations
+/// below are what they actually do: pin and read a mount's key domain,
+/// and hold a remote's credentials. A capability named for its
+/// purpose can be audited; a provider handed over cannot.
+///
+/// This is the [`kotton_peer::membership::MemberStore`] inversion — domain logic naming what it needs, not who supplies it — applied
+/// where it narrows a reach rather than merely relocating one.
+///
+/// [`StoreHost`], plus what the mount and remote verbs of the local door need:
+/// a remote's credentials, a replication pass, and a dial to a paired node.
+/// Never handed to the peer path.
+#[async_trait::async_trait]
+pub trait FileHost: StoreHost {
+    /// Store a remote's credentials.
+    fn set_remote_credentials(&self, user_id: &str, name: &str, value: &str) -> io::Result<()>;
+
+    /// Forget a remote's credentials. Absence is not an error — a remote may
+    /// never have had any.
+    fn forget_remote_credentials(&self, user_id: &str, name: &str);
 
     /// Replicate a mount, records included.
     ///
@@ -109,7 +126,7 @@ pub trait FileHost: Send + Sync {
 // ---------------------------------------------------------------------------
 
 pub async fn read_file(
-    host: &dyn FileHost,
+    host: &dyn StoreHost,
     user_id: String,
     path: String,
     offset: u64,
@@ -148,7 +165,7 @@ pub async fn read_file(
 
 /// The key domain a blind mount was pinned to by its first sealed write, or
 /// the store's error naming the mount — never `None` for *could not read*.
-fn blind_mount_domain(host: &dyn FileHost, user_id: &str, mount: &str) -> io::Result<Option<String>> {
+fn blind_mount_domain(host: &dyn StoreHost, user_id: &str, mount: &str) -> io::Result<Option<String>> {
     host.mount_domain(user_id, mount).map_err(|e| {
         io::Error::new(e.kind(), format!("the key domain mount '{mount}' is pinned to could not be read: {e}"))
     })
@@ -160,7 +177,7 @@ fn blind_mount_domain(host: &dyn FileHost, user_id: &str, mount: &str) -> io::Re
 /// Delegates to the runtime so the daemon and the peer client cannot disagree
 /// about which domain this node's objects belong to.
 fn effective_domain(
-    host: &dyn FileHost,
+    host: &dyn StoreHost,
     // Takes the store rather than the runtime: everything this needs is the
     // store's, and the VFS is `core/store`'s. With this,
     // `files.rs` names nothing from the runtime crate but the machine itself.
@@ -184,7 +201,7 @@ fn effective_domain(
 /// floor. Putting the check here as well would duplicate a decision that belongs
 /// where the caller's identity is actually known.
 pub async fn read_sealed(
-    host: &dyn FileHost,
+    host: &dyn StoreHost,
     user_id: String,
     mount: String,
     path: String,
@@ -319,7 +336,7 @@ const REASSEMBLY_TTL: Duration = Duration::from_secs(120);
 /// caller-narrowing gap that applies here too.
 #[allow(clippy::too_many_arguments)]
 pub async fn write_sealed(
-    host: &dyn FileHost,
+    host: &dyn StoreHost,
     user_id: String,
     mount: String,
     path: String,
@@ -551,7 +568,7 @@ pub(super) async fn accept_chunk(
 /// List a mount in storage-key space — the opaque keys replication
 /// addresses. See [`read_sealed`] on why authorisation lives in the dispatcher.
 pub async fn list_sealed(
-    host: &dyn FileHost,
+    host: &dyn StoreHost,
     user_id: String,
     mount: String,
     prefix: String,
@@ -585,7 +602,7 @@ pub async fn list_sealed(
 /// the common small-file case and commits immediately.
 #[allow(clippy::too_many_arguments)]
 pub async fn write_file(
-    host: &dyn FileHost,
+    host: &dyn StoreHost,
     user_id: String,
     path: String,
     data: Vec<u8>,
@@ -742,7 +759,7 @@ pub async fn write_file(
 }
 
 pub async fn list_files(
-    host: &dyn FileHost,
+    host: &dyn StoreHost,
     user_id: String,
     prefix: String,
 ) -> io::Result<UserResponse> {
@@ -763,7 +780,7 @@ pub async fn list_files(
 }
 
 pub async fn delete_file(
-    host: &dyn FileHost,
+    host: &dyn StoreHost,
     user_id: String,
     path: String,
 ) -> io::Result<UserResponse> {

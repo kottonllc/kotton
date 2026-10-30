@@ -16,6 +16,7 @@
 
 pub mod browser_inner;
 pub mod contact_request;
+pub mod peer_request;
 pub mod types;
 pub mod remote_request;
 pub mod request;
@@ -30,4 +31,5 @@ pub use contact_request::{
     MemberDelivery, PendingDelivery, SealedDm,
 };
 pub use browser_inner::{ChannelCall, ChannelFrame};
+pub use peer_request::PeerRequest;
 pub use vault_request::{LineCame, LineEnrolled, LineToEnrol, MintWaiting, OperatedService, OperatorVerb, SecretBytes, SecretText, SecretValue, Unstood, UnstoodRelay, UnstoodRelayState, UnstoodWhy, VaultRequest, VaultTenant};

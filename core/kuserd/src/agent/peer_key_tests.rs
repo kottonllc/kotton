@@ -8,7 +8,7 @@
 
 use super::browser_channel::gateway_key;
 use super::{asks_as_own_device, peer_ask, PeerAsk};
-use kotton_wire::UserRequest;
+use kotton_wire::ipc::PeerRequest;
 use kotton_peer::daemon::db as network_db;
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -25,8 +25,8 @@ fn key_and_did(seed: u8) -> ([u8; 32], String) {
     (key, did)
 }
 
-fn frame_for(user: Option<&str>) -> UserRequest {
-    UserRequest::BrowserFrame {
+fn frame_for(user: Option<&str>) -> PeerRequest {
+    PeerRequest::BrowserFrame {
         bytes: vec![1, 2, 3],
         channel: Some("tab".to_string()),
         user_id: user.map(str::to_string),
@@ -34,8 +34,8 @@ fn frame_for(user: Option<&str>) -> UserRequest {
 }
 
 /// A verb that is not a gateway's: a recovery fetch for `user`.
-fn other_for(user: &str) -> UserRequest {
-    UserRequest::RecoveryFetch { user_id: user.to_string() }
+fn other_for(user: &str) -> PeerRequest {
+    PeerRequest::RecoveryFetch { user_id: user.to_string() }
 }
 
 /// **One key, paired as a gateway by two people: each frame reaches the
