@@ -782,18 +782,16 @@ pub(crate) const ENROL_POSTURES: [(&str, Posture); 3] = [
     ("--full", Posture::Full),
 ];
 
-/// The one vocabulary of `device add`'s posture flags, the sibling of [`ENROL_POSTURES`]
-/// and separate from it because the two doors differ: no flag is [`ADD_DEFAULT_POSTURE`]
-/// (full, a device of your own) here and blind there, and `--full` is not a word here (it is
-/// the default). `parse_add` reads it. Like the other it is grammar and a map: the daemon
-/// decides what each posture may do, and remains the only guard on it.
-const ADD_POSTURES: [(&str, Posture); 2] = [
-    ("--blind", Posture::BlindStorage),
-    ("--cosigner", Posture::Cosigner),
-];
-
-/// The posture `device add` asks for when the line names none.
-const ADD_DEFAULT_POSTURE: Posture = Posture::Full;
+/// The one vocabulary of `device add`'s posture flags is `DEVICE_ADD_POSTURE_FLAGS`, in
+/// `kotton-schemas` beside [`Posture`] and not here, so the hints the daemon prints
+/// (`adds_instead`) read the same words `parse_add` does. It is the sibling of
+/// [`ENROL_POSTURES`] and separate from it because the two doors differ: no flag is
+/// [`ADD_DEFAULT_POSTURE`] (full, a device of your own) here and blind there, and `--full`
+/// is not a word here (it is the default). Like the other it is grammar and a map: the
+/// daemon decides what each posture may do, and remains the only guard on it.
+use kotton_schemas::membership::{
+    DEVICE_ADD_DEFAULT_POSTURE as ADD_DEFAULT_POSTURE, DEVICE_ADD_POSTURE_FLAGS as ADD_POSTURES,
+};
 
 /// What a `device add` line asks for.
 #[derive(Debug, PartialEq)]
@@ -933,6 +931,20 @@ mod tests {
         ] {
             let refused = parse_add(&args(line)).expect_err(&format!("{line:?}"));
             assert_eq!(refused.exit_code, ExitCode::Code(2), "{line:?}");
+        }
+    }
+
+    /// The tables `parse_add` and the daemon's hints share: each flag parses to its own
+    /// posture alone, and every pair of them is the usage refusal, whichever way round.
+    #[test]
+    fn parse_add_and_the_shared_table_agree_on_every_flag_and_every_pair() {
+        use kotton_schemas::membership::DEVICE_ADD_POSTURE_FLAGS;
+        for (flag, posture) in DEVICE_ADD_POSTURE_FLAGS {
+            let parsed = parse_add(&args(&[flag])).unwrap();
+            assert_eq!(parsed, Add::Device { as_name: None, posture: Some(posture) }, "{flag}");
+            for (other, _) in DEVICE_ADD_POSTURE_FLAGS {
+                assert!(parse_add(&args(&[flag, other])).is_err(), "{flag} {other}");
+            }
         }
     }
 

@@ -77,6 +77,20 @@ pub enum Posture {
     Gateway,
 }
 
+/// The words `device add` has for a posture, each with the posture it asks for: the grammar
+/// the shell parses (`parse_add`, `client/shell/src/commands/device.rs`) and the hints this
+/// workspace prints (`adds_instead`, `kotton-device`) both read, so they cannot spell it
+/// differently. A gateway is not here: it is `--gateway <code>`, a word with a value.
+///
+/// `drive enrol` has a table of its own in the shell, since its default (blind) and its set
+/// (it has `--full`) differ. Neither table is a judgement: the daemon remains the only guard
+/// on posture, and these are grammar.
+pub const DEVICE_ADD_POSTURE_FLAGS: [(&str, Posture); 2] =
+    [("--blind", Posture::BlindStorage), ("--cosigner", Posture::Cosigner)];
+
+/// The posture `device add` asks for when the line names none.
+pub const DEVICE_ADD_DEFAULT_POSTURE: Posture = Posture::Full;
+
 impl Posture {
     /// The kebab-case name this serialises as, for the one column that stores it as text.
     pub fn as_str(&self) -> &'static str {
