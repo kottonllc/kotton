@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use anyhow::Result;
 use async_trait::async_trait;
+use kotton_schemas::membership::Posture;
 use kotton_wire::ipc::DriveDescriptor;
 
 use super::device::ENROL_POSTURES;
@@ -50,32 +51,33 @@ enum Line<'a> {
     List { json: bool },
     Show { name: &'a str, json: bool },
     Move { name: &'a str, to: &'a str, from: Option<&'a str> },
-    Enrol { invite: String, flags: Vec<String> },
+    Enrol { invite: String, posture: Option<Posture> },
 }
 
 /// What `drive enrol` says when no invite is among the words.
 pub(super) const ENROL_USAGE: &str = "usage: drive enrol <invite>";
 
-/// The invite among the words after `enrol` and the flags that remain. The one place the
-/// invite is found: exactly one word that is not a flag (not empty, not starting with `-`),
-/// and at most one flag, which must be a key of [`ENROL_POSTURES`](super::device::ENROL_POSTURES),
-/// the table that owns the vocabulary. A repeated flag is a second flag. `None` (no invite,
-/// a second word, an odd invite, an unknown or a second flag) is the usage refusal. This is
-/// grammar; the daemon remains the only guard on posture.
-pub(super) fn split_invite(words: impl IntoIterator<Item = String>) -> Option<(String, Vec<String>)> {
+/// The invite among the words after `enrol` and the posture the one flag asked for, if any.
+/// The one place the invite is found: exactly one word that is not a flag (not empty, not
+/// starting with `-`), and at most one flag, which must be a key of
+/// [`ENROL_POSTURES`](super::device::ENROL_POSTURES), the table that owns the vocabulary;
+/// the posture is that key's value, so there is no second reader to disagree. A repeated flag
+/// is a second flag. `None` (no invite, a second word, an odd invite, an unknown or a second
+/// flag) is the usage refusal. This is grammar; the daemon remains the only guard on posture.
+pub(super) fn split_invite(words: impl IntoIterator<Item = String>) -> Option<(String, Option<Posture>)> {
     let mut invite = None;
-    let mut flags = Vec::new();
+    let mut posture = None;
     for w in words {
         if w.starts_with("--") {
-            if !flags.is_empty() || !ENROL_POSTURES.iter().any(|(word, _)| *word == w) {
+            let (_, p) = ENROL_POSTURES.iter().find(|(word, _)| *word == w)?;
+            if posture.replace(*p).is_some() {
                 return None;
             }
-            flags.push(w);
         } else if w.is_empty() || w.starts_with('-') || invite.replace(w).is_some() {
             return None;
         }
     }
-    invite.map(|i| (i, flags))
+    invite.map(|i| (i, posture))
 }
 
 /// The words after `drive`, as a [`Line`], or the usage refusal (exit 2).
@@ -98,7 +100,7 @@ fn parse(args: &[String]) -> Result<Line<'_>, CommandOutput> {
         }
         ["move", ..] => usage("drive move: needs --to <vault>"),
         ["enrol", rest @ ..] => match split_invite(rest.iter().map(|w| w.to_string())) {
-            Some((invite, flags)) => Ok(Line::Enrol { invite, flags }),
+            Some((invite, posture)) => Ok(Line::Enrol { invite, posture }),
             None => usage(ENROL_USAGE),
         },
         _ => usage("drive: unknown form"),
@@ -217,7 +219,7 @@ async fn run(line: Line<'_>, state: &mut ShellState) -> Result<CommandOutput> {
             }]))
         }
         // The ceremony takes the lock for itself.
-        Line::Enrol { invite, flags } => super::device::enrol_vault(&invite, &flags, state).await,
+        Line::Enrol { invite, posture } => super::device::enrol_vault(&invite, posture, state).await,
     }
 }
 
@@ -371,16 +373,20 @@ mod tests {
         for line in ["enrol CODE --blind", "enrol --blind CODE"] {
             assert_eq!(
                 parse(&words(line)).ok(),
-                Some(Line::Enrol { invite: "CODE".into(), flags: words("--blind") }),
+                Some(Line::Enrol { invite: "CODE".into(), posture: Some(Posture::BlindStorage) }),
                 "{line}"
             );
         }
+        assert_eq!(
+            parse(&words("enrol CODE")).ok(),
+            Some(Line::Enrol { invite: "CODE".into(), posture: None })
+        );
         // Posture flags that would hold keys still reach the ceremony: the daemon refuses them.
-        for flag in ["--cosigner", "--full"] {
+        for (flag, posture) in [("--cosigner", Posture::Cosigner), ("--full", Posture::Full)] {
             for line in [format!("enrol CODE {flag}"), format!("enrol {flag} CODE")] {
                 assert_eq!(
                     parse(&words(&line)).ok(),
-                    Some(Line::Enrol { invite: "CODE".into(), flags: words(flag) }),
+                    Some(Line::Enrol { invite: "CODE".into(), posture: Some(posture) }),
                     "{line}"
                 );
             }
@@ -390,8 +396,8 @@ mod tests {
     /// The grammar is the table's keys: each is accepted, and a word outside it is not.
     #[test]
     fn split_invite_accepts_exactly_the_tables_flags() {
-        for (flag, _) in ENROL_POSTURES {
-            assert_eq!(split_invite(words(&format!("CODE {flag}"))), Some(("CODE".into(), words(flag))), "{flag}");
+        for (flag, posture) in ENROL_POSTURES {
+            assert_eq!(split_invite(words(&format!("CODE {flag}"))), Some(("CODE".into(), Some(posture))), "{flag}");
         }
         for flag in ["--frob", "--Blind", "--", "--blind=1"] {
             assert_eq!(split_invite(words(&format!("CODE {flag}"))), None, "{flag}");

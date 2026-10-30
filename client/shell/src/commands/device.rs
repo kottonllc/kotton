@@ -156,6 +156,9 @@ impl Command for DeviceCommand {
             // refuse theirs: the usage line asks the daemon nothing. A known verb falls
             // through to its session, whose authority is the daemon's and unchanged.
             Some(word) if !known_verb(word) => return Some(Ok(usage())),
+            // A known verb whose words do not parse is the same refusal, before any
+            // session: `parse_add` is the one reader of `add`'s words, here and in `execute`.
+            Some("add") => return parse_add(&args[1..]).err().map(Ok),
             _ => return None,
         }
         let Some(user) = named else {
@@ -181,19 +184,11 @@ impl DeviceCommand {
     /// `device add` — issuer side. Prints a connection code, waits for the new
     /// device, then shows six digits to confirm against its screen.
     async fn add(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
-        if args.iter().any(|a| a == "--browser") {
-            return self.add_browser(state).await;
-        }
-        if let Some(code) = flag_value(args, "--gateway") {
-            return self.add_gateway(&code, state).await;
-        }
-        let as_name = flag_value(args, "--as");
-        let posture = if args.iter().any(|a| a == "--blind") {
-            Posture::BlindStorage
-        } else if args.iter().any(|a| a == "--cosigner") {
-            Posture::Cosigner
-        } else {
-            Posture::Full
+        let (as_name, posture) = match parse_add(args) {
+            Ok(Add::Browser) => return self.add_browser(state).await,
+            Ok(Add::Gateway(code)) => return self.add_gateway(&code, state).await,
+            Ok(Add::Device { as_name, posture }) => (as_name, posture.unwrap_or(ADD_DEFAULT_POSTURE)),
+            Err(refused) => return Ok(refused),
         };
         let user_id = state.user_id.clone();
         let client = state.client.lock().await;
@@ -744,10 +739,14 @@ fn human_since(unix_secs: i64) -> String {
 /// `drive enrol <invite>` — take in a vault by the invite it minted (`kvaultd
 /// invite`, RFC-0084 V8): this node meets it at the invite's relay, taking that
 /// relay as its own if it has none, and the six digits are typed here. Blind is
-/// the only posture this door has, so it is the default and needs no flag
-/// ([`admit_args`]).
-pub(crate) async fn enrol_vault(code: &str, flags: &[String], state: &mut ShellState) -> Result<CommandOutput> {
-    let posture = admit_args(flags);
+/// the only posture this door has, so it is the default and needs no flag: `None`, the
+/// line named none (`drive::split_invite`), is blind.
+pub(crate) async fn enrol_vault(
+    code: &str,
+    posture: Option<Posture>,
+    state: &mut ShellState,
+) -> Result<CommandOutput> {
+    let posture = posture.unwrap_or(Posture::BlindStorage);
     let user_id = state.user_id.clone();
     let client = state.client.lock().await;
     let mut rx = client
@@ -765,13 +764,17 @@ pub(crate) async fn enrol_vault(code: &str, flags: &[String], state: &mut ShellS
 }
 
 /// The one vocabulary of `drive enrol`'s posture flags: each word and the posture it asks
-/// for. `drive::split_invite` reads the keys as its grammar and [`admit_args`] reads the
-/// values as the posture, so the two cannot disagree; no other place spells these words.
+/// for. `drive::split_invite` reads the table, keys as its grammar and the matching value as
+/// the posture it hands the ceremony, so the two cannot disagree; no other place spells
+/// these words. `device add` has a table of its own, [`ADD_POSTURES`]: the two differ in
+/// default (blind here, [`ADD_DEFAULT_POSTURE`] full there) and in set (`--full` is a word
+/// only here), so one table would have to carry both and say which door is asking.
 ///
 /// The table is grammar and a map, not a judgement. `--cosigner` and `--full` are *sent*
 /// for the daemon to refuse (`handle_device_admit`); there is no client-side posture check,
 /// because a second copy of that refusal in the client would be a guard with nothing behind
-/// it that the first does not hold. `--blind` is the default and is still read so a line
+/// it that the first does not hold. The daemon remains the only guard on posture; the
+/// client's tables are grammar. `--blind` is the default and is still read so a line
 /// typed from an older guide works.
 pub(crate) const ENROL_POSTURES: [(&str, Posture); 3] = [
     ("--blind", Posture::BlindStorage),
@@ -779,14 +782,69 @@ pub(crate) const ENROL_POSTURES: [(&str, Posture); 3] = [
     ("--full", Posture::Full),
 ];
 
-/// The posture `drive enrol` was asked for, from the flags alone (the invite and the
-/// grammar, including at most one posture flag, are `drive::split_invite`'s, once). No flag
-/// is blind, the one posture admit-by-invite has.
-fn admit_args(flags: &[String]) -> Posture {
-    flags
-        .iter()
-        .find_map(|f| ENROL_POSTURES.iter().find(|(word, _)| word == f).map(|(_, p)| *p))
-        .unwrap_or(Posture::BlindStorage)
+/// The one vocabulary of `device add`'s posture flags, the sibling of [`ENROL_POSTURES`]
+/// and separate from it because the two doors differ: no flag is [`ADD_DEFAULT_POSTURE`]
+/// (full, a device of your own) here and blind there, and `--full` is not a word here (it is
+/// the default). `parse_add` reads it. Like the other it is grammar and a map: the daemon
+/// decides what each posture may do, and remains the only guard on it.
+const ADD_POSTURES: [(&str, Posture); 2] = [
+    ("--blind", Posture::BlindStorage),
+    ("--cosigner", Posture::Cosigner),
+];
+
+/// The posture `device add` asks for when the line names none.
+const ADD_DEFAULT_POSTURE: Posture = Posture::Full;
+
+/// What a `device add` line asks for.
+#[derive(Debug, PartialEq)]
+enum Add {
+    /// `add --browser`: open the desk a phone's browser pairs at.
+    Browser,
+    /// `add --gateway <code>`: admit a gateway elsewhere.
+    Gateway(String),
+    /// `add [--as NAME] [--blind|--cosigner]`: the line named at most one posture.
+    Device { as_name: Option<String>, posture: Option<Posture> },
+}
+
+/// The words after `device add` as an [`Add`], or the usage refusal (exit 2). The one reader
+/// of these words, for `execute` and for `execute_without_session`, so the refusal comes
+/// before any session. Grammar only: at most one posture flag, no flag twice, no flag
+/// outside [`ADD_POSTURES`], `--as`, `--browser` and `--gateway` (the last two alone, with
+/// no other word), and a value after `--as` and `--gateway`. Nothing here judges a posture.
+fn parse_add(words: &[String]) -> Result<Add, CommandOutput> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut as_name = None;
+    let mut gateway = None;
+    let mut posture = None;
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i].as_str();
+        i += 1;
+        if seen.contains(&w) {
+            return Err(usage());
+        }
+        if w == "--as" || w == "--gateway" {
+            let Some(v) = words.get(i).filter(|v| !v.is_empty() && !v.starts_with('-')) else {
+                return Err(usage());
+            };
+            i += 1;
+            if w == "--as" { as_name = Some(v.clone()) } else { gateway = Some(v.clone()) }
+        } else if w != "--browser" {
+            let Some((_, p)) = ADD_POSTURES.iter().find(|(flag, _)| *flag == w) else {
+                return Err(usage());
+            };
+            if posture.replace(*p).is_some() {
+                return Err(usage());
+            }
+        }
+        seen.push(w);
+    }
+    match (seen.contains(&"--browser"), gateway) {
+        (false, None) => Ok(Add::Device { as_name, posture }),
+        (true, None) if seen.len() == 1 => Ok(Add::Browser),
+        (false, Some(code)) if seen.len() == 1 => Ok(Add::Gateway(code)),
+        _ => Err(usage()),
+    }
 }
 
 /// The value following `flag` in `args` (e.g. `--as phone` → `Some("phone")`).
@@ -810,10 +868,11 @@ fn prompt_line(label: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        admit_args, digits_only, format_sas, human_since, is_yes, issuer_complete_line, join_args,
+        digits_only, format_sas, human_since, is_yes, issuer_complete_line, join_args,
         relay_offer_lines, short_did, vault_complete_lines, DeviceCommand, Role, ADMIT_ROLE,
         VAULT_POSTURE_LINE,
     };
+    use super::{parse_add, Add};
     use crate::commands::{Command, ExitCode};
     use kotton_schemas::membership::Posture;
 
@@ -838,21 +897,59 @@ mod tests {
         assert!(DeviceCommand.execute_without_session(&args(&["list"]), None).await.is_none());
     }
 
-    /// Blind is the default posture, whatever blind flag is or is not typed; `--blind`
-    /// (from an older guide) changes nothing.
+    /// `device add`'s grammar: each single flag and `--as NAME` parses, with the default
+    /// posture when none is named.
     #[test]
-    fn admit_with_no_flag_or_with_blind_asks_for_the_blind_posture() {
-        assert_eq!(admit_args(&args(&[])), Posture::BlindStorage);
-        assert_eq!(admit_args(&args(&["--blind"])), Posture::BlindStorage);
+    fn parse_add_accepts_each_single_flag_and_as() {
+        let device = |as_name: Option<&str>, posture| Add::Device { as_name: as_name.map(String::from), posture };
+        assert_eq!(parse_add(&args(&[])).unwrap(), device(None, None));
+        assert_eq!(parse_add(&args(&["--blind"])).unwrap(), device(None, Some(Posture::BlindStorage)));
+        assert_eq!(parse_add(&args(&["--cosigner"])).unwrap(), device(None, Some(Posture::Cosigner)));
+        assert_eq!(parse_add(&args(&["--as", "phone"])).unwrap(), device(Some("phone"), None));
+        assert_eq!(
+            parse_add(&args(&["--as", "phone", "--cosigner"])).unwrap(),
+            device(Some("phone"), Some(Posture::Cosigner))
+        );
+        assert_eq!(parse_add(&args(&["--browser"])).unwrap(), Add::Browser);
+        assert_eq!(parse_add(&args(&["--gateway", "CODE"])).unwrap(), Add::Gateway("CODE".into()));
     }
 
-    /// A posture that would hold keys is not refused here: it is sent, and the
-    /// daemon's refusal is the one that answers (`handle_device_admit`), so the
-    /// guard stays where the keys are.
+    /// Two posture flags, a flag twice, a flag the verb does not have, and a flag missing its
+    /// value are usage, exit 2.
     #[test]
-    fn admit_with_cosigner_is_sent_for_the_daemon_to_refuse() {
-        assert_eq!(admit_args(&args(&["--cosigner"])), Posture::Cosigner);
-        assert_eq!(admit_args(&args(&["--full"])), Posture::Full);
+    fn parse_add_refuses_two_posture_flags_a_repeat_and_an_unknown_flag() {
+        for line in [
+            &["--blind", "--cosigner"][..],
+            &["--cosigner", "--as", "x", "--blind"],
+            &["--blind", "--blind"],
+            &["--as", "a", "--as", "b"],
+            &["--full"],
+            &["--frob"],
+            &["phone"],
+            &["--as"],
+            &["--gateway"],
+            &["--browser", "--blind"],
+            &["--gateway", "CODE", "--as", "x"],
+        ] {
+            let refused = parse_add(&args(line)).expect_err(&format!("{line:?}"));
+            assert_eq!(refused.exit_code, ExitCode::Code(2), "{line:?}");
+        }
+    }
+
+    /// The same refusal before any session: a known verb whose words do not parse is answered
+    /// by `execute_without_session`, and one that parses is left to its session.
+    #[tokio::test]
+    async fn a_device_add_line_that_does_not_parse_is_refused_before_a_session() {
+        let refused = DeviceCommand
+            .execute_without_session(&args(&["add", "--blind", "--cosigner"]), Some("nobody"))
+            .await
+            .expect("answered without a session")
+            .unwrap();
+        assert_eq!(refused.exit_code, ExitCode::Code(2));
+        assert!(DeviceCommand
+            .execute_without_session(&args(&["add", "--as", "x", "--blind"]), None)
+            .await
+            .is_none());
     }
 
     /// The admit ends by saying what the flag used to: the vault keeps what it
