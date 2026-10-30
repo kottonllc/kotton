@@ -59,13 +59,15 @@ pub(crate) enum Role {
 
 pub struct DeviceCommand;
 
-/// The words `execute` answers by name; anything else is the usage line. One list, so the
-/// refusal before a session (`execute_without_session`) and the one inside it cannot
-/// disagree about what `device` has.
+/// The words `device` has. Both doors read it: `execute` refuses a word outside it with
+/// the usage line before dispatching, and `execute_without_session` does the same before
+/// any session. An arm in `execute` with no entry here is therefore unreachable, and an
+/// entry with no arm falls to the usage line, so a mismatch shows as a refusal rather than
+/// as two lists quietly disagreeing.
 const KNOWN_VERBS: &[&str] = &["add", "admit", "join", "name", "list", "revoke", "reset"];
 
-/// Whether `word` is a `device` verb `execute` has an arm for.
-pub(crate) fn known_verb(word: &str) -> bool {
+/// Whether `word` is a `device` verb.
+fn known_verb(word: &str) -> bool {
     KNOWN_VERBS.contains(&word)
 }
 
@@ -109,6 +111,9 @@ impl Command for DeviceCommand {
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
+        if !args.first().is_some_and(|w| known_verb(w)) {
+            return Ok(usage());
+        }
         match args.first().map(String::as_str) {
             Some("add") => self.add(&args[1..], state).await,
             Some("admit") => Ok(retired_admit()),
