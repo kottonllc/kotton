@@ -22,9 +22,10 @@ use crate::state::ShellState;
 /// The command-tree decision's "Drives" line, but `export`, which waits on the vault's cut. The
 /// daemon asks the vaults (`kotton_device::users::drive_verbs`); this says what
 /// they answered. `enrol` is the tenant's side of a vault's invite, the ceremony `device admit`
-/// was the name of until the command-tree decision's table retired it: `device admit` is now
-/// refused with a line naming this one (exit 2, before any session), so the one request has
-/// one door.
+/// named until the command-tree decision's table retired that word: `device admit` is now
+/// refused with a line naming this one (exit 2, before any session, in both doors). `drive
+/// enrol` sends the same request (`DeviceAdmit`), so the retirement moved no reach; the tree
+/// has one word for it.
 ///
 /// [`parse`] is the one parser for these words: `kotton drive …` hands it the
 /// words after the noun (`kotton_cli::bridge`), and the REPL hands it the same.
