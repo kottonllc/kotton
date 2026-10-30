@@ -1877,9 +1877,13 @@ impl DeviceDaemon {
         // The peer-serving path no longer binds the user registry. It reached it
         // only to build a `file_host`, and that takes the seam now — so the whole
         // path stopped needing the daemon's residency map, rather than passing it
-        // through three frames to one call. Nor does it hold the record stores:
-        // no peer verb writes a record (records arrive as sealed log segments the
-        // sync engine merges), so the path has no store to reach for.
+        // through three frames to one call. No peer verb writes a record either
+        // (records arrive as sealed log segments the sync engine merges), so the
+        // separate `RecordStores` handle this path was passed is gone: it was a
+        // name nothing used. That removed a name, not reach: `handle_peer_request`
+        // still takes the whole `AgentContext`, record stores and sync host
+        // included, and passes it on to the gateway's `BrowserFrame` arm.
+        // Narrowing what the peer path receives is kotton #222.
         let sync_resources = Arc::clone(&self.sync_resources);
         let db = Arc::clone(&self.db);
         let user_dbs = Arc::clone(&self.user_dbs);
