@@ -16,7 +16,7 @@
 //!
 //! | verb | request | the CLI that sends it |
 //! |---|---|---|
-//! | `admit`, a vault's invite | `DeviceAdmit`'s handler, blind | `kotton device admit <invite> --blind` |
+//! | `admit`, a vault's invite | `DeviceAdmit`'s handler, blind | `kotton drive enrol <invite> --blind` |
 //! | `admit`, a relay's invite | `RelayStand`'s handler | `relay set <invite>` |
 //! | `take_relay` | `RelayStand`'s, with the line the admit offered | `relay set <line>` |
 //!
@@ -52,7 +52,7 @@
 //! contact ceremony.** Admitting a vault makes this device the *issuer*, and
 //! the ceremony's confirm is asymmetric — the issuer does not display the code:
 //! the person types what the vault printed on its `sas=` line, and this daemon
-//! compares that with the SAS it holds — the comparison `kotton device admit`
+//! compares that with the SAS it holds — the comparison `kotton drive enrol`
 //! makes in the terminal (`prompt_code_match`). A guest that was shown the
 //! digits could offer a yes/no, and a yes/no is blindly approvable, so the
 //! person types the six digits rather than being asked whether they match.
@@ -66,7 +66,7 @@ use super::ceremony::Ceremonies;
 
 /// How long a join waits for the other end of the invite.
 ///
-/// The same minute `kotton device admit` defaults to. A person who has just
+/// The same minute `kotton drive enrol` defaults to. A person who has just
 /// been handed an invite is looking at the screen; a window measured in
 /// minutes would leave them looking at it long after the answer was *nobody
 /// is there*.

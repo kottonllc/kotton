@@ -1132,7 +1132,7 @@ pub async fn sync_mount(
     // enrolment records the drive; the remote — the peer storage opened to the
     // vault — is derivable from that record and nothing else, so naming a
     // drive's node here opens it, and no client has to know that a `remote add`
-    // stands between `device admit` and `sync`: the line the product prints
+    // stands between `drive enrol` and `sync`: the line the product prints
     // after admitting a vault — "run `sync <id>`" — works as typed.
     //
     // Only a drive. A paired node that is not one — another of the person's

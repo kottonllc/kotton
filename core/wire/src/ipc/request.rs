@@ -328,7 +328,7 @@ pub enum UserRequest {
     /// stream the invite (`PairAdvertising { code }` — `kotton-invite:vault:…`), and run
     /// the joiner half when a device dials the relay. Nothing listens on a
     /// public port. The vault's door speaks this (`kvaultd invite`); a device
-    /// admits it with `device admit <invite> --blind`.
+    /// admits it with `drive enrol <invite> --blind`.
     DeviceInvite {
         user_id: String,
         ttl_seconds: u64,

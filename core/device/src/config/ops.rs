@@ -121,7 +121,7 @@ async fn write_relay(
 }
 
 /// Name the device's relay: `config relay set`, a relay paired by name, an
-/// invite's relay at `device admit`. The relay at `url` is asked who it is and
+/// invite's relay at `drive enrol`. The relay at `url` is asked who it is and
 /// the answer recorded beside the URL.
 ///
 /// A relay the device already holds — `url` is the one being `leaving` — is
@@ -179,7 +179,7 @@ pub async fn stand_at(db: &SqlitePool, leaving: Option<&str>, url: &str, key: [u
 }
 
 /// Ask the relay at `url` who it is, at the moment a device learns it — `config
-/// relay set`, a relay paired by name, an invite's relay at `device admit`, `relay
+/// relay set`, a relay paired by name, an invite's relay at `drive enrol`, `relay
 /// enrol` — and answer the key to record beside the URL, hex.
 ///
 /// First sight, so no key is expected: a relay that shows none, or does not

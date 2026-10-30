@@ -21,9 +21,10 @@ use crate::state::ShellState;
 ///
 /// The command-tree decision's "Drives" line, but `export`, which waits on the vault's cut. The
 /// daemon asks the vaults (`kotton_device::users::drive_verbs`); this says what
-/// they answered. `enrol` is the tenant's side of a vault's invite, the ceremony
-/// `device admit` ran and still runs under that name with a line naming this one:
-/// the same request, so the rename reaches nothing it did not.
+/// they answered. `enrol` is the tenant's side of a vault's invite, the ceremony `device admit`
+/// was the name of until the command-tree decision's table retired it: `device admit` is now
+/// refused with a line naming this one (exit 2, before any session), so the one request has
+/// one door.
 ///
 /// [`parse`] is the one parser for these words: `kotton drive …` hands it the
 /// words after the noun (`kotton_cli::bridge`), and the REPL hands it the same.
@@ -51,7 +52,7 @@ enum Line<'a> {
     Enrol { invite: String, flags: Vec<String> },
 }
 
-/// What `drive enrol` (and `device admit`, its retired name) says when no invite is among the words.
+/// What `drive enrol` says when no invite is among the words.
 pub(super) const ENROL_USAGE: &str = "usage: drive enrol <invite>";
 
 /// The invite among the words after `enrol` and the flags that remain. The one place the
