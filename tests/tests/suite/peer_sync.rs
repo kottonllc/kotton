@@ -454,3 +454,81 @@ async fn a_drive_serving_another_key_domain_is_refused() {
         assert_eq!(&client_a.read_file("alice", name).await.expect("A reads its own"), body);
     }
 }
+
+// ── The device's peer acceptor decodes a peer's bytes, and only `UserRequest` ─
+
+/// **A retired verb is refused at kuserd's decoder.** Both peer acceptors
+/// decode a peer's bytes as `UserRequest` with no fallback, so a verb that
+/// left the type (`ApplyRecordChangeset`, kotton #173/#219) is an unknown
+/// variant on the device as on the vault. `vault::a_vault_answers_its_verbs_and_nothing_else`
+/// holds the vault's half; this holds the device's: B, paired with A, dials A's
+/// peer acceptor under its own operational key and sends the bytes of the
+/// retired verb with a plausible row. The type no longer has the variant, so
+/// the request is written as the bytes such a peer would send. A `RemoteRequest`
+/// fallback or an alias table in the acceptor would answer something other than
+/// the decoder's refusal, and fail here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paired_device_sending_a_retired_verb_is_refused_at_kuserds_decoder() {
+    use crate::common::{enroll_streamed_as, init_crypto, peer_port};
+    use crate::vault::spawn_device;
+    use kotton_net::transport::quic::tls::CertOffer;
+    use kotton_peer::nat::{nat_connect, NatConfig, NatResult};
+    use kotton_peer::{PeerChannel as _, QuicPeerChannel};
+    use kotton_schemas::membership::Posture;
+    use kotton_wire::ipc::UserResponse;
+
+    init_crypto();
+    let a = spawn_device("device A").await;
+    let b = spawn_device("device B").await;
+    // A's peer acceptor, on a port the OS gives it, as the other two-device
+    // cases start theirs (`enroll_threshold_sign`).
+    a.daemon.start_peer_listener_background(0).await.expect("start A's peer listener");
+    let mut client_a = connect_when_ready(&a.ipc, "client A").await;
+    let client_b = connect_when_ready(&b.ipc, "client B").await;
+    client_a
+        .create_user("alice", crate::common::TEST_PASSPHRASE)
+        .await
+        .expect("create_user on A");
+    let (mut client_a, _client_b, _node_b) =
+        enroll_streamed_as(client_a, client_b, "alice", "device-a", "device-b", Posture::Full).await;
+    let (_, a_key_hex) = client_a.get_node_identity().await.expect("A's identity");
+    let a_pub: [u8; 32] = hex::decode(a_key_hex).unwrap().try_into().unwrap();
+    let a_addr: std::net::SocketAddr = format!("127.0.0.1:{}", peer_port(&a.daemon.runtime())).parse().unwrap();
+
+    // B dials as itself: its operational key, A's direct address.
+    let b_key = kotton_peer::daemon::nodes::load_device_operational_key(&*b.secrets).expect("B's device key");
+    let offer = CertOffer {
+        admission: vec![],
+        claim: None,
+    };
+    let conn = match nat_connect(&b_key, &offer, a_pub, Some(a_addr), &NatConfig::default(), None).await {
+        NatResult::Direct(c) | NatResult::Punched(c) => c,
+        other => panic!("the paired device's key opens A's peer acceptor directly: {other:?}"),
+    };
+    let channel = QuicPeerChannel::new(conn);
+
+    let retired = serde_json::json!({
+        "ApplyRecordChangeset": {
+            "user_id": "alice",
+            "nsid": "com.test.notes",
+            "rows": [{
+                "id": "00000000-0000-4000-8000-000000000000",
+                "schema_nsid": "com.test.notes",
+                "body": { "text": "planted" },
+                "updated_at": 1,
+                "deleted_at": null
+            }]
+        }
+    });
+    let raw = channel
+        .request(&serde_json::to_vec(&retired).unwrap())
+        .await
+        .expect("A's peer acceptor answers");
+    match serde_json::from_slice::<UserResponse>(&raw).unwrap() {
+        UserResponse::Error { message } => assert!(
+            message.contains("invalid peer request") && message.contains("unknown variant `ApplyRecordChangeset`"),
+            "a retired verb is no request on the device's peer wire: {message}"
+        ),
+        other => panic!("a peer request carrying a retired verb was taken: {other:?}"),
+    }
+}
