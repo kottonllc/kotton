@@ -40,6 +40,17 @@
 //! (kotton #158), so a device flipping whole, on demand and whole again in one
 //! second still says each. The cost is bounded: one small record per keeping
 //! device per drive, written only when the claim changes, never a walk.
+//! **What a claim weighs on a pass.** A claim is one changeset row — the
+//! device's DID and the drive's id — sealed into the history log by the pass
+//! that made it (`kotton_record::replication::log_records`). A pass whose only
+//! new record is a claim, as the first device's first pass is, commits it as
+//! one index pack (`kotton_store::pack::INDEX_PACK_SIZE`, fixed whatever it
+//! holds) and one superblock generation, and a push moves those two beside the
+//! person's files, to any remote, the person's own directory as well as a
+//! drive (kotton #229). A holder that cannot open them learns that a pass wrote
+//! the log, which every record write already showed it, and nothing of what
+//! the claim says. How many index packs a drive's claims and records add up
+//! to is kotton #144's.
 //!
 //! **The telling reads the claims, and nothing else** ([`Read`], [`whole_on`],
 //! [`notices`]): `drive list`'s and `status`'s *which devices keep it whole*,

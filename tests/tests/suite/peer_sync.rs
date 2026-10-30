@@ -12,6 +12,7 @@
 use crate::common::{connect_when_ready, TestEnv};
 use kotton_wire::remote::RemoteBackend;
 use kotton::SyncDirection;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 // ── Protocol serde ────────────────────────────────────────────────────────────
@@ -80,6 +81,80 @@ async fn remote_add_kotton_unknown_peer_returns_error() {
     );
 }
 
+// ── What a pass pushes ────────────────────────────────────────────────────────
+
+/// The objects a pass pushed, by what each one is.
+///
+/// A pass carries more than the person's files. Before it moves anything it
+/// makes this device's whole-keeper claims say what the device keeps
+/// (`kotton_device::users::pins::claim`, kotton #189; #155 wrote a default pin
+/// record at the same point), and the first device's default is whole, so its
+/// first pass writes one claim: an `sh.kotton.keeps-whole` record naming this
+/// device and the first drive. `log_records` then seals that record into the
+/// history log, which commits one **index pack** (`_pack/…`, not a content pack)
+/// and one **superblock** generation. Both are in the person's local mount by
+/// the time the transfer loop lists it, so a push to a remote that does not hold
+/// them moves them beside the files. A pass whose claim is already logged writes
+/// no new segment.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Pushed {
+    /// The person's files, as the loose objects that hold them.
+    files: usize,
+    /// Index packs: the history log's segments, here the one carrying the claim.
+    index_packs: BTreeSet<String>,
+    /// Content packs: none here, since nothing ran a packing pass over the files.
+    content_packs: usize,
+    /// Superblock generations committed with the index packs.
+    superblocks: BTreeSet<String>,
+}
+
+fn pushed(result: &kotton_wire::remote::SyncResult) -> Pushed {
+    use kotton_store::packed::{is_content_pack, PACK_PREFIX};
+    use kotton_store::superblock::SUPERBLOCK_PREFIX;
+    let mut out = Pushed::default();
+    for (dir, key, _) in &result.transfers {
+        if !matches!(dir, SyncDirection::Push) {
+            continue;
+        }
+        if key.starts_with(SUPERBLOCK_PREFIX) {
+            out.superblocks.insert(key.clone());
+        } else if is_content_pack(key) {
+            out.content_packs += 1;
+        } else if key.starts_with(PACK_PREFIX) {
+            out.index_packs.insert(key.clone());
+        } else {
+            out.files += 1;
+        }
+    }
+    assert_eq!(
+        out.files + out.index_packs.len() + out.content_packs + out.superblocks.len(),
+        result.pushed as usize,
+        "`pushed` counts the transfers it lists: {result:?}"
+    );
+    out
+}
+
+/// The whole-keeper claims in alice's record store.
+async fn claims(env: &mut TestEnv) -> Vec<serde_json::Value> {
+    env.client
+        .record_query("alice", kotton_common::namespace::NSID_KEEPS_WHOLE, vec![], None, None)
+        .await
+        .expect("query whole-keeper claims")
+}
+
+/// A first pass pushed `files` files, and beside them exactly the history log
+/// segment that carries this device's claim: one index pack, one superblock, no
+/// content pack; and alice's store holds that one claim.
+async fn assert_first_pass(env: &mut TestEnv, result: &kotton_wire::remote::SyncResult, files: usize) {
+    let p = pushed(result);
+    assert_eq!(p.files, files, "the files pushed: {result:?}");
+    assert_eq!(p.index_packs.len(), 1, "one index pack, the segment carrying the claim: {result:?}");
+    assert_eq!(p.superblocks.len(), 1, "one superblock, the generation that committed it: {result:?}");
+    assert_eq!(p.content_packs, 0, "no content pack: nothing packed the files: {result:?}");
+    let claims = claims(env).await;
+    assert_eq!(claims.len(), 1, "the pass wrote this device's one claim: {claims:?}");
+}
+
 // ── SyncMount over a local remote ─────────────────────────────────────────────
 
 /// Validate `SyncMount` end-to-end using a local-directory remote so the test
@@ -92,7 +167,9 @@ async fn remote_add_kotton_unknown_peer_returns_error() {
 /// 4. Push local → backup.
 /// 5. Verify the objects are readable from the "backup" mount (not yet
 ///    mounted, so we use the SDK write/read APIs against the raw path once
-///    synced). We verify `SyncResult.pushed == 3`.
+///    synced). We verify the push moved the three files and, beside them, the
+///    history log segment carrying this device's whole-keeper claim (one index
+///    pack, one superblock) — five objects, named in [`assert_first_pass`].
 #[tokio::test]
 async fn sync_mount_push_to_local_remote() {
     let backup_dir = tempfile::tempdir().expect("backup tempdir");
@@ -122,6 +199,8 @@ async fn sync_mount_push_to_local_remote() {
         .await
         .expect("remote_add backup");
 
+    assert!(claims(&mut env).await.is_empty(), "no claim before the first pass");
+
     // Push local → backup.
     let result = env
         .client
@@ -129,11 +208,7 @@ async fn sync_mount_push_to_local_remote() {
         .await
         .expect("sync_mount push");
 
-    assert_eq!(
-        result.pushed, 3,
-        "expected 3 objects pushed, got {}",
-        result.pushed
-    );
+    assert_first_pass(&mut env, &result, 3).await;
     assert_eq!(result.pulled, 0, "push-only: pulled should be 0");
 }
 
@@ -141,6 +216,10 @@ async fn sync_mount_push_to_local_remote() {
 /// listing silently dropped. `list_sealed` on a filesystem backend returns one
 /// level with `is_dir` entries, so `notes/2026/trip.md` was invisible to sync
 /// until it learned to recurse.
+///
+/// The pass also pushes the history log segment carrying this device's
+/// whole-keeper claim ([`assert_first_pass`]), so five objects move: the three
+/// files, one index pack, one superblock.
 #[tokio::test]
 async fn sync_pushes_files_in_subdirectories() {
     let backup_dir = tempfile::tempdir().expect("backup tempdir");
@@ -179,11 +258,8 @@ async fn sync_pushes_files_in_subdirectories() {
         .sync_mount("alice", "local", "backup", Some(SyncDirection::Push))
         .await
         .expect("sync_mount push");
-    assert_eq!(
-        result.pushed, 3,
-        "all three files, nested included, should push; got {}",
-        result.pushed
-    );
+    // All three files, nested included, beside the claim's segment.
+    assert_first_pass(&mut env, &result, files.len()).await;
 
     // Each reads back from the backup *store* — nested paths intact.
     //
@@ -203,9 +279,14 @@ async fn sync_pushes_files_in_subdirectories() {
     }
 }
 
-/// Push twice: both syncs push the object because the current push implementation
-/// does not compare content (it always overwrites remote with local). The
-/// `skipped` count is 0 because every key is locally present.
+/// Push twice: both syncs push every object because the current push
+/// implementation does not compare content (it always overwrites remote with
+/// local). The `skipped` count is 0 because every key is locally present.
+///
+/// What is pushed is the file and, from the first pass on, the history log
+/// segment carrying this device's whole-keeper claim (one index pack, one
+/// superblock; [`assert_first_pass`]). The claim is written once, so the second
+/// pass writes no new segment and pushes exactly the set the first did.
 ///
 /// Note: content-equality deduplication (ETags / SHA-256) is a performance
 /// optimisation deferred to a later sprint. M28 uses simple LWW by key presence.
@@ -238,7 +319,7 @@ async fn sync_mount_push_is_repeatable() {
         .sync_mount("alice", "local", "backup", Some(SyncDirection::Push))
         .await
         .expect("first sync");
-    assert_eq!(r1.pushed, 1);
+    assert_first_pass(&mut env, &r1, 1).await;
 
     // Second push — current implementation re-pushes (no content-equality check).
     let r2 = env
@@ -247,8 +328,9 @@ async fn sync_mount_push_is_repeatable() {
         .await
         .expect("second sync");
     assert_eq!(
-        r2.pushed, 1,
-        "second sync re-pushes (no dedup optimisation yet)"
+        pushed(&r2),
+        pushed(&r1),
+        "second sync re-pushes what the first did and no new segment (no dedup optimisation yet)"
     );
     assert_eq!(r2.pulled, 0, "push-only: no pulls");
 }
@@ -327,6 +409,10 @@ async fn sync_lww_local_newer_wins() {
 /// The local side is written first, then we sleep 1.1 s to ensure a different
 /// filesystem second, then write to backup.  LWW picks backup (remote) because
 /// `remote_ts > local_ts`, and the backing store is updated on both sides.
+///
+/// No file is pushed. The pass does push the history log segment carrying this
+/// device's whole-keeper claim (one index pack, one superblock;
+/// [`assert_first_pass`]), which the backup does not hold.
 #[tokio::test]
 async fn sync_lww_remote_newer_wins() {
     let backup_dir = tempfile::tempdir().expect("backup tempdir");
@@ -374,10 +460,8 @@ async fn sync_lww_remote_newer_wins() {
         "remote (backup) should have been pulled to local (pulled={})",
         result.pulled
     );
-    assert_eq!(
-        result.pushed, 0,
-        "remote is newer: nothing should be pushed"
-    );
+    // Remote is newer: no file is pushed, only the claim's segment.
+    assert_first_pass(&mut env, &result, 0).await;
 
     // Verify local now holds the remote version.
     let content = env
