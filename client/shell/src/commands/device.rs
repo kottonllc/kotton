@@ -59,6 +59,30 @@ pub(crate) enum Role {
 
 pub struct DeviceCommand;
 
+/// The words `device` has. Both doors read it: `execute` refuses a word outside it with
+/// the usage line before dispatching, and `execute_without_session` does the same before
+/// any session. An arm in `execute` with no entry here is therefore unreachable, and an
+/// entry with no arm falls to the usage line, so a mismatch shows as a refusal rather than
+/// as two lists quietly disagreeing.
+const KNOWN_VERBS: &[&str] = &["add", "admit", "join", "name", "list", "revoke", "reset"];
+
+/// Whether `word` is a `device` verb.
+fn known_verb(word: &str) -> bool {
+    KNOWN_VERBS.contains(&word)
+}
+
+/// The usage refusal, exit 2: what `device` prints for a word it does not have.
+fn usage() -> CommandOutput {
+    CommandOutput::usage(
+        "usage: device add [--as NAME] [--blind|--cosigner] | device add --browser | \
+         device add --gateway <code> | \
+         device join [code] [--as NAME] | device list | \
+         device revoke <id> | device revoke --browser <name> | \
+         device name [NAME]   (`kotton device reset` starts this device fresh)",
+        None,
+    )
+}
+
 /// `device admit`, whatever follows it: the word the command-tree decision's table retired
 /// for `drive enrol <invite>`. Refused, exit 2, in both doors and before any session; the
 /// words after it are not read, since nothing here runs them.
@@ -87,6 +111,9 @@ impl Command for DeviceCommand {
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
+        if !args.first().is_some_and(|w| known_verb(w)) {
+            return Ok(usage());
+        }
         match args.first().map(String::as_str) {
             Some("add") => self.add(&args[1..], state).await,
             Some("admit") => Ok(retired_admit()),
@@ -106,14 +133,7 @@ impl Command for DeviceCommand {
                  a daemon is running. Leave the runtime, then run it.",
                 None,
             )),
-            _ => Ok(CommandOutput::fail(
-                "usage: device add [--as NAME] [--blind|--cosigner] | device add --browser | \
-                 device add --gateway <code> | \
-                 device join [code] [--as NAME] | device list | \
-                 device revoke <id> | device revoke --browser <name> | \
-                 device name [NAME]   (`kotton device reset` starts this device fresh)",
-                None,
-            )),
+            _ => Ok(usage()),
         }
     }
 
@@ -132,6 +152,10 @@ impl Command for DeviceCommand {
             // Retired, so refused here: the refusal asks the daemon nothing, and
             // `drive enrol` is where the ceremony is.
             Some("admit") => return Some(Ok(retired_admit())),
+            // A word `device` does not have is refused here, as `drive`, `pin` and `sync`
+            // refuse theirs: the usage line asks the daemon nothing. A known verb falls
+            // through to its session, whose authority is the daemon's and unchanged.
+            Some(word) if !known_verb(word) => return Some(Ok(usage())),
             _ => return None,
         }
         let Some(user) = named else {
@@ -795,6 +819,23 @@ mod tests {
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()
+    }
+
+    /// An unknown verb is the usage refusal, exit 2, before any session; a known verb is
+    /// left to its session (`None`).
+    #[tokio::test]
+    async fn an_unknown_verb_is_refused_before_a_session_and_a_known_one_is_not() {
+        let refused = DeviceCommand
+            .execute_without_session(&args(&["admitx"]), Some("nobody"))
+            .await
+            .expect("an unknown verb is answered without a session")
+            .unwrap();
+        assert_eq!(refused.exit_code, ExitCode::Code(2));
+        let [crate::out::Out::Fail { what, .. }] = refused.out.as_slice() else {
+            panic!("not one failure: {:?}", refused.out)
+        };
+        assert!(what.starts_with("usage: device add"), "{what}");
+        assert!(DeviceCommand.execute_without_session(&args(&["list"]), None).await.is_none());
     }
 
     /// Blind is the default posture, whatever blind flag is or is not typed; `--blind`

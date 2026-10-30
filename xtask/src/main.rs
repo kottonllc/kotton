@@ -2977,7 +2977,7 @@ fn verb_check_run(root: &Path, args: &[String]) {
             "  no line a person reads names a retired word ({}) but to point to what replaced it",
             retired.iter().map(|r| format!("`{}`", r.was())).collect::<Vec<_>>().join(", ")
         );
-        for (path, word, why) in retired_words::STILL_RUNS {
+        for (path, word, _, why) in retired_words::STILL_RUNS {
             println!("  still runs: `{word}` in {path} — {why}");
         }
         for (noun, verb, why) in verb_check::DEFERRED {
