@@ -740,22 +740,29 @@ pub(crate) async fn enrol_vault(code: &str, flags: &[String], state: &mut ShellS
     .await
 }
 
-/// The posture `drive enrol` was asked for, from the flags alone (the invite is found by
-/// `drive::split_invite`, once).
+/// The one vocabulary of `drive enrol`'s posture flags: each word and the posture it asks
+/// for. `drive::split_invite` reads the keys as its grammar and [`admit_args`] reads the
+/// values as the posture, so the two cannot disagree; no other place spells these words.
 ///
-/// Blind is the default because it is the one posture admit-by-invite has; `--blind`
-/// is still read so a line typed from an older guide works, and changes nothing. A
-/// posture that would hold keys (`--cosigner`, `--full`) is *sent*, not refused here:
-/// the refusal is `handle_device_admit`'s, in the daemon, and a second copy of it in
-/// the client would be a guard with nothing behind it that the first does not hold.
+/// The table is grammar and a map, not a judgement. `--cosigner` and `--full` are *sent*
+/// for the daemon to refuse (`handle_device_admit`); there is no client-side posture check,
+/// because a second copy of that refusal in the client would be a guard with nothing behind
+/// it that the first does not hold. `--blind` is the default and is still read so a line
+/// typed from an older guide works.
+pub(crate) const ENROL_POSTURES: [(&str, Posture); 3] = [
+    ("--blind", Posture::BlindStorage),
+    ("--cosigner", Posture::Cosigner),
+    ("--full", Posture::Full),
+];
+
+/// The posture `drive enrol` was asked for, from the flags alone (the invite and the
+/// grammar, including at most one posture flag, are `drive::split_invite`'s, once). No flag
+/// is blind, the one posture admit-by-invite has.
 fn admit_args(flags: &[String]) -> Posture {
-    if flags.iter().any(|a| a == "--cosigner") {
-        Posture::Cosigner
-    } else if flags.iter().any(|a| a == "--full") {
-        Posture::Full
-    } else {
-        Posture::BlindStorage
-    }
+    flags
+        .iter()
+        .find_map(|f| ENROL_POSTURES.iter().find(|(word, _)| word == f).map(|(_, p)| *p))
+        .unwrap_or(Posture::BlindStorage)
 }
 
 /// The value following `flag` in `args` (e.g. `--as phone` → `Some("phone")`).
