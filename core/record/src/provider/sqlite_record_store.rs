@@ -52,10 +52,11 @@
 //! a delete — sets `revision` to the one it replaces plus one, read inside the
 //! statement that writes it. An insert does read the row first (`SELECT root,
 //! filed_at, updated_at`, for its root, its place in the filing order and the
-//! version it replaces), but that read and the write both run under the
-//! store's held `conn` mutex, which serialises the pair: no other write of the
-//! row lands between them, so two writes of a row can never share a version. A merge keeps the revision the row arrived with, so the
-//! next write here counts on from it.
+//! version it replaces), but that read and the write run in one `BEGIN
+//! IMMEDIATE` transaction on the file ("One writer per file", below): no other
+//! write of the row lands between them, from this handle or any other on the
+//! same file, so two writes of a row can never share a version. A merge keeps
+//! the revision the row arrived with, so the next write here counts on from it.
 //!
 //! The seconds alone could not do this: a record written and deleted inside one
 //! second had one version, so the delete was never logged and a peer holding the
@@ -84,11 +85,38 @@
 //! bound into the statement, never taken from SQL's `now`. The clock is the
 //! system clock unless a caller gives the store another with
 //! [`SqliteRecordStore::with_clock`], which is how a test holds a second instead
-//! of racing the wall clock for one (kotton #177). It is read under the held
-//! `conn` mutex, so the writes of one store take their times in the order they
-//! are written. A write's `updated_at` is the clock's second or the row's own,
-//! whichever is later ("Every write is a new version"), so it can lead the clock. The column defaults in the DDL above are for rows written
+//! of racing the wall clock for one (kotton #177). It is read inside the
+//! write's `BEGIN IMMEDIATE` transaction ("One writer per file", below), so the
+//! writes to one file take their times in the order they are written, whichever
+//! handle writes them. A write's `updated_at` is the clock's second or the
+//! row's own, whichever is later ("Every write is a new version"), so it can
+//! lead the clock. The column defaults in the DDL above are for rows written
 //! without the store; the store itself always binds its stamps.
+//!
+//! These are the times *this store* writes. A merged row keeps the times it
+//! arrived with — `created_at`, `updated_at`, `deleted_at` and, when it has
+//! one, `filed_at` are the writing device's — and the clock stamps only a
+//! `filed_at` the row arrives without ("Sync", below).
+//!
+//! ## One writer per file
+//!
+//! Every write that reads before it writes, or reads the clock, runs in a
+//! `BEGIN IMMEDIATE` transaction on the store's connection: `insert_in` (its
+//! `SELECT root, filed_at, updated_at`, the filing stamp's `SELECT MAX`, and
+//! the `INSERT`), `delete_in`, and each row of `merge_changeset`. `IMMEDIATE`
+//! takes the file's write lock before the first read, so the read, the clock
+//! and the write are one step against every other connection to the file, and
+//! a second writer waits out the connection's busy timeout (rusqlite's default)
+//! rather than reading a state the first is about to change. So the claims
+//! above hold **per database file**, not per open handle: two
+//! `SqliteRecordStore::open` on one path, as the device tests make, still file
+//! in order and never share a filing stamp or a version.
+//!
+//! The `conn` mutex still serialises the clones of one handle, which share a
+//! connection and so could not take a lock from each other. A process
+//! normally holds one handle per `records.db` anyway, because kuserd opens a
+//! user's store once and keeps it (`residency::get_or_open`); the transaction
+//! is what makes that a convenience rather than the guarantee.
 //!
 //! ## Sync
 //!
@@ -114,7 +142,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use kotton_schemas::{definition::SchemaDefinition, nsid::Nsid};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -246,8 +274,31 @@ fn adopt_write_revision(conn: &Connection, table: &str) -> rusqlite::Result<()> 
     Ok(())
 }
 
+/// Refuse a record table whose `updated_at` may be NULL (kotton #213).
+///
+/// Every table this store ever wrote declares `updated_at INTEGER NOT NULL`, and
+/// a write reads it as a version: `insert_in` floors on it, `delete_in` takes
+/// `MAX(?, updated_at)`, export and merge carry it as an integer. A table from
+/// elsewhere that lets it be NULL is not one of ours to adopt, so it is refused
+/// by name rather than met mid-write.
+fn require_updated_at_not_null(conn: &Connection, table: &str) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let not_null = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, bool>(3)?)))?
+        .filter_map(|r| r.ok())
+        .any(|(name, not_null)| name == "updated_at" && not_null);
+    if not_null {
+        return Ok(());
+    }
+    Err(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
+        Some(format!("record table {table}: column updated_at must be NOT NULL to be adopted")),
+    ))
+}
+
 /// Everything a table written by an earlier version is given on open.
 fn adopt(conn: &Connection, table: &str) -> rusqlite::Result<()> {
+    require_updated_at_not_null(conn, table)?;
     adopt_into_roots(conn, table)?;
     adopt_filing_order(conn, table)?;
     adopt_write_revision(conn, table)
@@ -314,12 +365,22 @@ fn seconds(millis: i64) -> i64 {
 /// **The `+ 1` is the whole of the ordering guarantee.** A clock alone ties
 /// inside one tick and runs backwards when it is corrected; the table's own
 /// newest stamp does neither, so a record filed after another always sorts
-/// after it. It is read under the same connection lock the insert holds, so no
-/// second writer can take the same stamp between the read and the write.
+/// after it. It is read inside the `BEGIN IMMEDIATE` transaction the insert
+/// runs in (module doc, "One writer per file"), so no second writer, on this
+/// handle or another on the file, can take the same stamp between the read and
+/// the write.
 fn next_filing_stamp(conn: &Connection, table: &str, now: i64) -> rusqlite::Result<i64> {
     let newest: Option<i64> =
         conn.query_row(&format!("SELECT MAX(filed_at) FROM {table}"), [], |row| row.get(0))?;
     Ok(newest.map_or(now, |n| now.max(n + 1)))
+}
+
+/// Take the file's write lock for a read-then-write, waiting out another
+/// writer for the connection's busy timeout (module doc, "One writer per
+/// file"). The transaction rolls back if it is dropped without `commit` — an
+/// early return or a panic — so the lock is never left held.
+fn begin_immediate(conn: &mut Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    conn.transaction_with_behavior(TransactionBehavior::Immediate)
 }
 
 // ── SqliteRecordStore ────────────────────────────────────────────────────────
@@ -374,8 +435,12 @@ impl SqliteRecordStore {
 
     /// Stamp this store's writes from `clock` instead of the system clock.
     ///
-    /// Set it where the store is opened, before the store is cloned: a clone
-    /// shares the connection but carries its own clock.
+    /// Set it where the store is opened, before the store is cloned. The clock
+    /// is held beside the shared connection, not inside it, so a clone shares
+    /// the connection but carries its own clock: a clone made *before*
+    /// `with_clock` keeps the system clock. Only tests set one today; a
+    /// non-test caller that wants a clock should have it fixed at open (an
+    /// `open_with(path, key, clock)`), so no clone can predate it.
     pub fn with_clock(mut self, clock: StoreClock) -> Self {
         self.clock = clock;
         self
@@ -438,9 +503,11 @@ impl RecordStore for SqliteRecordStore {
         let clock = self.clock.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
-            // Read under the lock, so this store's writes take their times in
-            // the order they are written (module doc, "One clock").
+            let mut conn = conn.lock().unwrap();
+            // The read, the stamp and the write are one step on the file
+            // (module doc, "One writer per file"); the clock is read inside it,
+            // so writes take their times in the order they are written.
+            let conn = begin_immediate(&mut conn)?;
             let now = clock.millis();
             // A record does not change root by being rewritten: the replace
             // below would delete a row that may be in a root this writer cannot
@@ -481,10 +548,10 @@ impl RecordStore for SqliteRecordStore {
             };
             // A new version: the revision this write replaces, tombstone
             // included, plus one, read inside the statement that writes it.
-            // The `SELECT root, filed_at, updated_at` above ran first, and the
-            // held `conn` mutex serialises it with this INSERT, so no other
-            // write of the row comes between them (module doc, "Every write is
-            // a new version").
+            // The `SELECT root, filed_at, updated_at` above ran first, in the
+            // same `BEGIN IMMEDIATE` transaction as this INSERT, so no other
+            // write of the row, from any handle on the file, comes between
+            // them (module doc, "Every write is a new version").
             conn.execute(
                 &format!(
                     "INSERT OR REPLACE INTO {table} \
@@ -494,6 +561,7 @@ impl RecordStore for SqliteRecordStore {
                 ),
                 params![id_clone, nsid_str, body, root, filed_at, seconds(now), updated_at],
             )?;
+            conn.commit()?;
             Ok::<(), RecordStoreError>(())
         })
         .await??;
@@ -615,7 +683,11 @@ impl RecordStore for SqliteRecordStore {
         let clock = self.clock.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
+            let mut conn = conn.lock().unwrap();
+            // One statement, but the clock is read before it: inside the
+            // transaction, so the delete takes its time in write order on the
+            // file (module doc, "One writer per file").
+            let conn = begin_immediate(&mut conn)?;
             let now = seconds(clock.millis());
             // Never older than the row it replaces (module doc, "Every write is
             // a new version"): `MAX(?, updated_at)` reads the row's version
@@ -639,6 +711,7 @@ impl RecordStore for SqliteRecordStore {
             if affected == 0 {
                 return Err(RecordStoreError::RecordNotFound(id));
             }
+            conn.commit()?;
             Ok::<(), RecordStoreError>(())
         })
         .await?
@@ -709,9 +782,15 @@ impl RecordStore for SqliteRecordStore {
         let conn = Arc::clone(&self.conn);
         let clock = self.clock.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
+            let mut conn = conn.lock().unwrap();
             for row in &changeset {
                 let table = nsid_to_table(&row.schema_nsid);
+                // One transaction per row, as each row was its own statement
+                // before: a stamp taken for a row that arrives without one is
+                // read and written as one step on the file (module doc, "One
+                // writer per file"), and a row that fails leaves the rows
+                // before it applied, as it always has.
+                let conn = begin_immediate(&mut conn)?;
 
                 // Require the table to exist; the sync layer registers schemas
                 // before sending records.
@@ -778,6 +857,7 @@ impl RecordStore for SqliteRecordStore {
                         row.revision
                     ],
                 )?;
+                conn.commit()?;
             }
             Ok::<(), RecordStoreError>(())
         })
@@ -1918,5 +1998,220 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.export_changeset(0).await.unwrap()[0].revision, 2);
+    }
+
+    // ── one writer per file (kotton #210) ──────────────────────────────────
+
+    /// Set by [`hold_until_the_other_handle_writes`] when it first runs: the
+    /// handle it is installed on is waiting for the file's write lock.
+    static HELD_HANDLE_WAITING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    /// Set by the test once the other handle's write has returned.
+    static OTHER_HANDLE_WROTE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    /// Serialises the tests that use the two flags above.
+    static ONE_RACE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A busy handler that holds its connection at the first lock it cannot
+    /// take until the other handle has written, then lets it retry. It is how
+    /// a test puts another handle's whole write *inside* this handle's write,
+    /// deterministically: wherever this handle first meets the lock, the other
+    /// one writes there.
+    fn hold_until_the_other_handle_writes(_attempt: i32) -> bool {
+        use std::sync::atomic::Ordering;
+        HELD_HANDLE_WAITING.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !OTHER_HANDLE_WROTE.load(Ordering::SeqCst) {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        true
+    }
+
+    /// Run `held`'s write and `other`'s write so that `other`'s lands at the
+    /// first point `held` has to wait for the file's write lock.
+    ///
+    /// A third connection takes the write lock first, so `held` meets it at its
+    /// first locking statement, and its busy handler holds it there; the third
+    /// connection lets go, `other` writes the whole of its write, and `held`
+    /// carries on. With the read and the write in one `BEGIN IMMEDIATE`, that
+    /// point is before `held` has read anything, so `other`'s write is simply
+    /// earlier. Without it, the point is `held`'s `INSERT`, after its reads:
+    /// `other` writes between them.
+    async fn interleave<H, O>(
+        path: &std::path::Path,
+        held: &SqliteRecordStore,
+        write_held: H,
+        write_other: O,
+    ) where
+        H: std::future::Future<Output = ()> + Send + 'static,
+        O: std::future::Future<Output = ()>,
+    {
+        use std::sync::atomic::Ordering;
+        HELD_HANDLE_WAITING.store(false, Ordering::SeqCst);
+        OTHER_HANDLE_WROTE.store(false, Ordering::SeqCst);
+        held.conn
+            .lock()
+            .unwrap()
+            .busy_handler(Some(hold_until_the_other_handle_writes))
+            .unwrap();
+
+        let lock = Connection::open(path).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let held_write = tokio::spawn(write_held);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !HELD_HANDLE_WAITING.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline, "the held write never met the lock");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        lock.execute_batch("ROLLBACK").unwrap();
+        write_other.await;
+        OTHER_HANDLE_WROTE.store(true, Ordering::SeqCst);
+        held_write.await.unwrap();
+
+        held.conn.lock().unwrap().busy_handler(None).unwrap();
+    }
+
+    /// **Two handles on one file never share a filing stamp** (kotton #210).
+    ///
+    /// The claims in the module doc are per database file, not per open
+    /// `SqliteRecordStore`. Two handles on one path, both held at one
+    /// millisecond, each file a record, the second's whole write landing
+    /// between the first's `SELECT MAX(filed_at)` and its `INSERT` wherever
+    /// those are not one step. Without `BEGIN IMMEDIATE` both read no stamp,
+    /// both take the held millisecond, and the two records tie in the order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_handles_on_one_file_never_share_a_filing_stamp() {
+        const HELD: i64 = 1_700_000_000_500;
+        let _one = ONE_RACE_AT_A_TIME.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.db");
+        let first = SqliteRecordStore::open(&path, None)
+            .unwrap()
+            .with_clock(StoreClock::fixed(HELD));
+        first.create_table(&CoreSchema::Notes.definition()).await.unwrap();
+        let second = SqliteRecordStore::open(&path, None)
+            .unwrap()
+            .with_clock(StoreClock::fixed(HELD));
+
+        let held = first.clone();
+        let other = second.clone();
+        interleave(
+            &path,
+            &first,
+            async move {
+                held.insert(&notes_nsid(), json!({ "id": "first", "title": "first" }))
+                    .await
+                    .unwrap();
+            },
+            async move {
+                other
+                    .insert(&notes_nsid(), json!({ "id": "second", "title": "second" }))
+                    .await
+                    .unwrap();
+            },
+        )
+        .await;
+
+        let rows = first.export_changeset(0).await.unwrap();
+        let stamp = |id: &str| rows.iter().find(|r| r.id == id).unwrap().filed_at.unwrap();
+        assert_ne!(
+            stamp("first"),
+            stamp("second"),
+            "two handles on one file took one filing stamp"
+        );
+        // The second handle wrote first, so it filed first.
+        assert_eq!(stamp("second"), HELD);
+        assert_eq!(stamp("first"), HELD + 1);
+    }
+
+    /// **Two handles on one file rewrite a row to strictly newer versions**
+    /// (kotton #210): each write of the row, from either handle, has a version
+    /// `(updated_at, revision)` above the one before, and the row keeps the
+    /// filing stamp it was filed with — including when one handle's rewrite
+    /// lands inside the other's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_handles_on_one_file_write_a_row_to_strictly_newer_versions() {
+        const HELD: i64 = 1_700_000_000_500;
+        let _one = ONE_RACE_AT_A_TIME.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.db");
+        let first = SqliteRecordStore::open(&path, None)
+            .unwrap()
+            .with_clock(StoreClock::fixed(HELD));
+        first.create_table(&CoreSchema::Notes.definition()).await.unwrap();
+        let second = SqliteRecordStore::open(&path, None)
+            .unwrap()
+            .with_clock(StoreClock::fixed(HELD));
+        let nsid = notes_nsid();
+
+        let version = |s: &SqliteRecordStore| {
+            let s = s.clone();
+            async move {
+                let row = s.export_changeset(0).await.unwrap().remove(0);
+                ((row.updated_at, row.revision), row.filed_at)
+            }
+        };
+
+        let mut versions = Vec::new();
+        for (n, store) in [&first, &second, &first, &second].into_iter().enumerate() {
+            store.insert(&nsid, json!({ "id": "r", "title": n.to_string() })).await.unwrap();
+            versions.push(version(&first).await);
+        }
+        let held = first.clone();
+        let other = second.clone();
+        interleave(
+            &path,
+            &first,
+            async move {
+                held.insert(&notes_nsid(), json!({ "id": "r", "title": "held" }))
+                    .await
+                    .unwrap();
+            },
+            async move {
+                other
+                    .insert(&notes_nsid(), json!({ "id": "r", "title": "other" }))
+                    .await
+                    .unwrap();
+            },
+        )
+        .await;
+        versions.push(version(&second).await);
+
+        for pair in versions.windows(2) {
+            assert!(pair[1].0 > pair[0].0, "a write was not newer: {versions:?}");
+            assert_eq!(pair[1].1, Some(HELD), "a rewrite moved the filing stamp");
+        }
+        // The race wrote twice: the revision counts both.
+        assert_eq!(versions.last().unwrap().0, (HELD / 1000, 6));
+    }
+
+    /// **A table whose `updated_at` may be NULL is refused, by name** (kotton
+    /// #213). Adoption takes any table with an `updated_at`; every one this
+    /// store wrote declares it `NOT NULL`, and the store's writes rest on it.
+    #[tokio::test]
+    async fn a_table_with_a_nullable_updated_at_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE sh_kotton_notes (
+                    id TEXT NOT NULL PRIMARY KEY, schema_nsid TEXT NOT NULL,
+                    body TEXT NOT NULL, created_at INTEGER NOT NULL,
+                    updated_at INTEGER, deleted_at INTEGER
+                );",
+            )
+            .unwrap();
+        let refused = match SqliteRecordStore::open(&path, None) {
+            Ok(_) => panic!("a table with a nullable updated_at was adopted"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            refused.contains("sh_kotton_notes") && refused.contains("updated_at"),
+            "the refusal does not name the table and column: {refused}"
+        );
     }
 }
