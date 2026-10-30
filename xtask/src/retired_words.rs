@@ -55,7 +55,8 @@
 //! themselves. And [`STILL_RUNS`]: a printed line that names a retired word because the
 //! code beside it still runs it, each with the issue that moves it. An entry is the line's exact
 //! text, not its file, so a new literal saying the word in the same file is read; an entry whose
-//! line is gone is refused, so the list only shrinks.
+//! line is gone or edited is refused, naming the text it looked for: re-key it or drop it, so the
+//! list only shrinks.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -100,6 +101,19 @@ impl Retired {
     /// The noun and the word, as a person types them: `sync now`.
     pub fn was(&self) -> String {
         format!("{} {}", self.noun, self.word)
+    }
+
+    /// Whether the replacement is another noun, bare (`sync add` -> `pin`): the noun whose verb
+    /// the reader must still pick, so a command naming it needs an argument.
+    fn bare_other(&self) -> bool {
+        let mut now = self.now.split_whitespace();
+        now.next().is_some_and(|n| !n.eq_ignore_ascii_case(&self.noun)) && now.next().is_none()
+    }
+
+    /// The command a finding tells a person to say: a line the rule accepts. A bare other noun
+    /// is said with an argument (`pin <argument>`), since the noun alone is refused.
+    pub fn suggestion(&self) -> String {
+        if self.bare_other() { format!("{} <argument>", self.now) } else { self.now.clone() }
     }
 }
 
@@ -159,14 +173,17 @@ pub fn findings(root: &Path, retired: &[Retired]) -> Vec<String> {
                 out.push(format!(
                     "{rel}:{}: says `{was}`, a word `{}`'s verb table retired for `{}` (the tree {kept}): \
                      say `{}`, or name it beside the old word",
-                    at[i], r.noun, r.now, r.now
+                    at[i], r.noun, r.now, r.suggestion()
                 ));
             }
         }
     }
-    for (k, (path, word, _, why)) in STILL_RUNS.iter().enumerate() {
+    for (k, (path, word, text, why)) in STILL_RUNS.iter().enumerate() {
         if !used[k] {
-            out.push(format!("{path}: listed as still running `{word}` ({why}), and it no longer says it: drop the entry"));
+            out.push(format!(
+                "{path}: listed as still running `{word}` ({why}), but no printed line there reads `{text}` with it: \
+                 re-key the entry to the line's new text, or drop it"
+            ));
         }
     }
     out
@@ -241,15 +258,15 @@ fn unpointed<'a>(chars: &[char], retired: &'a [Retired]) -> Vec<(usize, &'a Reti
         .map(|(at, k)| (at, &retired[k]))
         .filter(|(_, r)| {
             let now: Vec<String> = r.now.split_whitespace().map(str::to_lowercase).collect();
+            let bare_other = r.bare_other();
             // A replacement that is another noun, bare (`sync add` -> `pin`), is the noun
             // whose verb the reader must still pick: the command names it with an argument,
             // which is neither one of that noun's verbs (`pin list` is another answer) nor a
-            // flag (`pin --help`).
-            let bare_other = now.len() == 1 && now[0] != r.noun.to_lowercase();
+            // flag (`pin --help`, `pin -h`).
             commands.iter().all(|c| {
                 let named = c.len() >= now.len() && c.iter().zip(&now).all(|(a, b)| a.to_lowercase() == *b);
                 let argument = !bare_other
-                    || c.get(1).is_some_and(|a| !a.starts_with("--") && !r.now_verbs.contains(&a.to_lowercase()));
+                    || c.get(1).is_some_and(|a| !a.starts_with('-') && !r.now_verbs.contains(&a.to_lowercase()));
                 !(named && argument)
             })
         })
@@ -568,6 +585,33 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
         assert!(got[0].starts_with("xtask/src/main.rs: listed as still running `sync add`"), "{got:#?}");
     }
 
+    /// **A finding's own suggestion is a line the sweep accepts**, for every retired word, and
+    /// for a bare other noun it is the noun with an argument, not the noun alone.
+    #[test]
+    fn a_findings_suggestion_is_a_line_the_rule_accepts() {
+        let t = tables();
+        for r in retired(&t) {
+            let got = found_with(&t, &format!("type `{}`\n", r.was()));
+            assert_eq!(got.len(), 1, "{got:#?}");
+            let say = got[0].split("say `").nth(1).and_then(|s| s.split('`').next()).expect("a suggestion");
+            let composed = found_with(&t, &format!("`{}` is `{say}`\n", r.was()));
+            assert!(composed.is_empty(), "{}: the suggestion `{say}` is refused: {composed:#?}", r.was());
+        }
+        let got = found_with(&t, "type `sync add`\n");
+        assert!(got[0].contains("say `pin <argument>`"), "{got:#?}");
+    }
+
+    /// **A STILL_RUNS entry whose line was edited names the text it looked for**, and says to
+    /// re-key or drop it; the edited line is itself refused.
+    #[test]
+    fn an_edited_still_runs_line_names_the_text_looked_for() {
+        let main = "fn d() { bail!(\"sync add failed again:\\n x\"); bail!(\"sync now failed:\\n x\"); }\n";
+        let got = found(&[("xtask/src/main.rs", main)]);
+        assert_eq!(got.len(), 2, "{got:#?}");
+        assert!(got[0].starts_with("xtask/src/main.rs:1: says `sync add`"), "{got:#?}");
+        assert!(got[1].contains("`sync add failed:`") && got[1].contains("re-key"), "{got:#?}");
+    }
+
     /// **Case and whitespace are not a way round**: a sentence-start capital, a no-break space
     /// and a tab between noun and word are the words, and are refused.
     #[test]
@@ -617,6 +661,7 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
         assert_eq!(ok("`sync add` is `pin`\n").len(), 1);
         assert_eq!(ok("`sync add` is gone: use `pin list`\n").len(), 1);
         assert_eq!(ok("`sync add` is gone, see `pin --help`\n").len(), 1);
+        assert_eq!(ok("`sync add` is gone, see `pin -h`\n").len(), 1);
         assert_eq!(ok("`sync add` is `Kotton pin <drive>`\n").len(), 0);
         assert_eq!(ok("`sync add` is `Pin`\n").len(), 1);
         // `sync list` -> `pin list`; `drive enrol` for `device admit`.
@@ -652,6 +697,7 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
             assert!(line(&format!("kotton {} <arg>", r.now.to_uppercase())).is_empty(), "{}: kotton, any case", r.was());
             if bare_other {
                 assert!(!line(&format!("{} --help", r.now)).is_empty(), "{}: a flag is no argument", r.was());
+                assert!(!line(&format!("{} -h", r.now)).is_empty(), "{}: a short flag is no argument", r.was());
                 for v in &r.now_verbs {
                     assert!(!line(&format!("{} {v}", r.now)).is_empty(), "{}: `{v}` is a verb", r.was());
                 }
