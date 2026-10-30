@@ -1363,7 +1363,7 @@ impl<W, R> Transport<W, R> {
 
 /// The issuer half over the relay: dial the invite's handle at its relay as a
 /// one-time key, run the ceremony inside the circuit, and return the vault as
-/// a paired node reachable through that relay. What `device admit <invite>
+/// a paired node reachable through that relay. What `drive enrol <invite>
 /// --blind` runs; the six digits are shown and confirmed
 /// on this device, as today.
 ///

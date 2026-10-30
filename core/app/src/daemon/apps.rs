@@ -442,7 +442,7 @@ pub trait OccupantHost: Send + Sync {
     /// Admit a vault's invite (`kotton-invite:vault:…`) under the blind
     /// posture, or stand at a relay by its invite (`kotton-invite:relay:…`).
     ///
-    /// `UserRequest::DeviceAdmit`, which `kotton device admit <invite> --blind`
+    /// `UserRequest::DeviceAdmit`, which `kotton drive enrol <invite> --blind`
     /// already sends. The posture is not an argument: only the blind posture is
     /// admitted this way, because a vault holds no key and this door cannot
     /// make one that does (`DEC-0068`).
