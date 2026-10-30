@@ -462,7 +462,7 @@ async fn an_unknown_device_word_at_the_repl_is_the_usage_line_with_exit_two() {
     let mut state = ShellState::new(USER.to_string(), Arc::new(Mutex::new(client)));
 
     let executor = kotton_cli::bridge::repl_executor();
-    for line in [&["admitx"][..], &["frob", "--as", "x"], &[]] {
+    for line in [&["admitx"][..], &["frob", "--as", "x"], &[], &["add", "--blind", "--cosigner"], &["add", "--blind", "--blind"]] {
         let words: Vec<String> = line.iter().map(|w| w.to_string()).collect();
         let out = executor
             .registry()
