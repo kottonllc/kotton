@@ -1,0 +1,77 @@
+# The JSON surface of the peer request channel. Generated — do not hand-edit.
+# Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
+# Variants sorted by name; fields in declaration order, which is the order
+# serde writes them. See xtask/src/wire_check.rs for why this file exists.
+# variants: 15
+BrowserFrame
+    #[serde(with = "crate::base64_bytes")]
+    bytes: Vec<u8>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_id: Option<String>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    channel: Option<String>
+DeleteFile
+    user_id: String
+    path: String
+FrostSignRound
+    user_id: String
+    payload: String
+Introduce
+    user_id: String
+    addr: String
+    token: crate::ipc::SecretText
+    #[serde(default)]
+    router: Option<String>
+ListFiles
+    user_id: String
+    prefix: String
+ListSealed
+    user_id: String
+    mount: String
+    prefix: String
+NodeRelay
+    user_id: String
+ReadFile
+    user_id: String
+    path: String
+    offset: u64
+    length: u32
+ReadSealed
+    user_id: String
+    mount: String
+    path: String
+    offset: u64
+    length: u32
+RecordSyncAvailable
+    user_id: String
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    nsids: Vec<String>
+RecoveryFetch
+    user_id: String
+RecoveryStore
+    user_id: String
+    bundle: String
+    #[serde(default)]
+    kel: Vec<crate::kel::KelEvent>
+SyncAvailable
+    user_id: String
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<String>
+WriteFile
+    user_id: String
+    path: String
+    #[serde(with = "crate::base64_bytes")]
+    data: Vec<u8>
+    offset: u64
+    total_size: u64
+    content_hash: String
+WriteSealed
+    user_id: String
+    mount: String
+    path: String
+    #[serde(with = "crate::base64_bytes")]
+    blob: Vec<u8>
+    domain_id: String
+    offset: u64
+    total_size: u64
+    content_hash: String
