@@ -106,6 +106,10 @@ struct Pushed {
     content_packs: usize,
     /// Superblock generations committed with the index packs.
     superblocks: BTreeSet<String>,
+    /// Any other `_`-prefixed key (e.g. the tombstone set, `_tombstones`).
+    /// Blinded keys are base32 and never carry `_`, so a key here is a sealed
+    /// object kind this accounting does not know, not a person's file.
+    reserved: BTreeSet<String>,
 }
 
 fn pushed(result: &kotton_wire::remote::SyncResult) -> Pushed {
@@ -122,12 +126,14 @@ fn pushed(result: &kotton_wire::remote::SyncResult) -> Pushed {
             out.content_packs += 1;
         } else if key.starts_with(PACK_PREFIX) {
             out.index_packs.insert(key.clone());
+        } else if key.starts_with('_') {
+            out.reserved.insert(key.clone());
         } else {
             out.files += 1;
         }
     }
     assert_eq!(
-        out.files + out.index_packs.len() + out.content_packs + out.superblocks.len(),
+        out.files + out.index_packs.len() + out.content_packs + out.superblocks.len() + out.reserved.len(),
         result.pushed as usize,
         "`pushed` counts the transfers it lists: {result:?}"
     );
@@ -151,6 +157,7 @@ async fn assert_first_pass(env: &mut TestEnv, result: &kotton_wire::remote::Sync
     assert_eq!(p.index_packs.len(), 1, "one index pack, the segment carrying the claim: {result:?}");
     assert_eq!(p.superblocks.len(), 1, "one superblock, the generation that committed it: {result:?}");
     assert_eq!(p.content_packs, 0, "no content pack: nothing packed the files: {result:?}");
+    assert!(p.reserved.is_empty(), "no reserved object (e.g. the tombstone set): {:?}: {result:?}", p.reserved);
     let claims = claims(env).await;
     assert_eq!(claims.len(), 1, "the pass wrote this device's one claim: {claims:?}");
 }
@@ -385,11 +392,7 @@ async fn sync_lww_local_newer_wins() {
         .await
         .expect("sync_mount bidirectional");
 
-    assert!(
-        result.pushed >= 1,
-        "local should have been pushed to backup (pushed={})",
-        result.pushed
-    );
+    assert_first_pass(&mut env, &result, 1).await;
     assert_eq!(result.pulled, 0, "local is newer: nothing should be pulled");
 
     // Verify backup now holds the local version.
@@ -414,7 +417,8 @@ async fn sync_lww_local_newer_wins() {
 ///
 /// No file is pushed. The pass does push the history log segment carrying this
 /// device's whole-keeper claim (one index pack, one superblock;
-/// [`assert_first_pass`]), which the backup does not hold.
+/// [`assert_first_pass`]), which the backup does not hold: a 1 MiB index pack
+/// carrying one row to a remote where no file moves is #144's concession.
 #[tokio::test]
 async fn sync_lww_remote_newer_wins() {
     let backup_dir = tempfile::tempdir().expect("backup tempdir");
