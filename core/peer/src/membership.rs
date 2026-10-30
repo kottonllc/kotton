@@ -183,7 +183,7 @@ pub trait Membership: MemberStore {
     /// The vault view: an [`Role::OwnDevice`] admitted under
     /// [`Posture::BlindStorage`](kotton_schemas::membership::Posture::BlindStorage),
     /// which is what `finalize_enrolled_node` writes when a vault is admitted —
-    /// by `kotton device admit … --blind` and by an invite pasted at Settings'
+    /// by `kotton drive enrol … --blind` and by an invite pasted at Settings'
     /// door alike, since both run `handle_device_admit`. A projection, like the
     /// contact view beside it, and never a separately edited collection.
     ///

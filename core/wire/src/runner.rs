@@ -871,7 +871,7 @@ pub enum RunnerNetworkVerb {
 ///
 /// **One request behind three verbs, and it is the CLI's.** [`Self::Admit`] is
 /// `UserRequest::DeviceAdmit` under the blind posture, which
-/// `kotton device admit <invite> --blind` sends; [`Self::Confirm`] delivers the
+/// `kotton drive enrol <invite> --blind` sends; [`Self::Confirm`] delivers the
 /// ceremony's verdict the way `UserRequest::PairConfirmCode` does, and
 /// [`Self::Cancel`] drops the stream. Nothing new crosses the IPC wire, which
 /// is why `wire-surface.txt` is unchanged by this interface existing.

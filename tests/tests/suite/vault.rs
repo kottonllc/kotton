@@ -3494,7 +3494,7 @@ async fn the_operators_own_admit(rx: &mut tokio::sync::mpsc::Receiver<UserRespon
 /// vault's. `vault invite kotton --me` — the SDK's `vault_invite_me_stream`, which
 /// the shell's verb calls — mints an invite over the operator channel for a
 /// pool named by the desktop's own user, and admits it on this desktop blind,
-/// as `device admit … --blind` does. No invite words are typed and no six
+/// as `drive enrol … --blind` does. No invite words are typed and no six
 /// digits are asked: in their place the vault that answers the admit proved
 /// the key the credential pins. The vault then keeps for `lee` with this one
 /// device, and a push lands there.
@@ -4899,7 +4899,7 @@ async fn the_digits_the_desktop_shows(
     None
 }
 
-/// The device's side: `device admit <invite> --blind` as `user`, typing the
+/// The device's side: `drive enrol <invite> --blind` as `user`, typing the
 /// digits `shown` says were shown — the comparison the shell's prompt makes
 /// (`client/shell`'s `prompt_code_match`): the typed digits confirm only when
 /// they are the ones this device derived. Returns the frame the admit ended
@@ -6166,7 +6166,7 @@ async fn vault_mints_an_invite(
 ///
 /// A person on no network at all pastes one invite into *Join…*. That is
 /// `joining.admit`, which is `UserRequest::DeviceAdmit` under the blind
-/// posture — the request `kotton device admit <invite> --blind` already sends.
+/// posture — the request `kotton drive enrol <invite> --blind` already sends.
 /// It admits the vault through the relay the invite names, held to that
 /// relay's key; and because this device had none, the relay is offered, and
 /// taken on the door's yes (`joining.take-relay`) — never by the admit.
@@ -6427,11 +6427,11 @@ async fn enrolling_a_vault_goes_through_the_relay_already_paired() {
         .expect("cancel is idempotent");
 }
 
-/// **`kotton device admit <invite> --blind`** — the terminal's door, read back
+/// **`kotton drive enrol <invite> --blind`** — the terminal's door, read back
 /// through the pane's readout with nothing typed in between.
 ///
 /// The request is the CLI's own: `device_admit_stream` under the blind posture
-/// is what `client/shell`'s `device admit` sends, through the same client
+/// is what `client/shell`'s `drive enrol` sends, through the same client
 /// library, to the same handler Settings' *Join…* and *Enrol…* call. The
 /// assertion is on `network::enrolled_vaults` — the verb the Networking pane
 /// calls — and there is no `remote add`, no `sync` and no other command between
@@ -6476,7 +6476,7 @@ async fn a_vault_admitted_at_the_terminal_is_in_the_readout_with_nothing_more_ty
         );
     }
 
-    // The terminal answers from the frame it is sent, as `kotton device admit`
+    // The terminal answers from the frame it is sent, as `kotton drive enrol`
     // does; the vault's printed digits are not needed here.
     let (invite, vault_side, _printed) = within_for(
         WHOLE,
@@ -6485,7 +6485,7 @@ async fn a_vault_admitted_at_the_terminal_is_in_the_readout_with_nothing_more_ty
     )
     .await;
 
-    // What `kotton device admit <invite> --blind` sends, and what it does with
+    // What `kotton drive enrol <invite> --blind` sends, and what it does with
     // the frames: confirm the digits, stop at the end.
     let mut rx = within(
         "sending the terminal's admit",

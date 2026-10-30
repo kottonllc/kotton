@@ -187,7 +187,7 @@ impl Cli {
     /// caller holds, and return without waiting for it.
     ///
     /// For a command whose answer does not exist when it starts: the six
-    /// digits a `device admit` asks for are derived only once its ceremony
+    /// digits a `drive enrol` asks for are derived only once its ceremony
     /// meets the other side, and are shown to someone else, who reads them
     /// out. [`Cli::run_on_a_terminal`] types answers prepared beforehand, so
     /// it cannot type these; this lets the caller write them when they have
