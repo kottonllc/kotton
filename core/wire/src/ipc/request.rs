@@ -4574,6 +4574,9 @@ mod secret_debug_tests {
             ("request", include_str!("../../wire-surface.txt"), 22),
             ("response", include_str!("../../response-surface.txt"), 12),
             ("peer request", include_str!("../../peer-request-surface.txt"), 1),
+            // No field of the vault's peer wire is named for a secret today;
+            // the rule still holds for one written tomorrow.
+            ("vault peer request", include_str!("../../vault-peer-request-surface.txt"), 0),
         ];
         let mut plain = Vec::new();
         for (which, surface, at_least) in surfaces {
