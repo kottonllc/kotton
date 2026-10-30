@@ -541,12 +541,13 @@ async fn a_drive_serving_another_key_domain_is_refused() {
     }
 }
 
-// ── The device's peer acceptor decodes a peer's bytes, and only `UserRequest` ─
+// ── The device's peer acceptor decodes a peer's bytes as `PeerRequest`, and only that
 
-/// **A retired verb is refused at kuserd's decoder.** Both peer acceptors
-/// decode a peer's bytes as `UserRequest` with no fallback, so a verb that
-/// left the type (`ApplyRecordChangeset`, kotton #173/#219) is an unknown
-/// variant on the device as on the vault. `vault::a_vault_answers_its_verbs_and_nothing_else`
+/// **A retired verb is refused at kuserd's decoder.** kuserd's peer acceptor
+/// decodes a peer's bytes as `PeerRequest` (kotton #231) and kvaultd's as
+/// `UserRequest`, each with no fallback, so a verb that left the door's type
+/// (`ApplyRecordChangeset`, kotton #173/#219) is an unknown variant on the
+/// device as on the vault. `vault::a_vault_answers_its_verbs_and_nothing_else`
 /// holds the vault's half; this holds the device's: B, paired with A, dials A's
 /// peer acceptor under its own operational key and sends the bytes of the
 /// retired verb with a plausible row. The type no longer has the variant, so
@@ -617,4 +618,86 @@ async fn a_paired_device_sending_a_retired_verb_is_refused_at_kuserds_decoder() 
         ),
         other => panic!("a peer request carrying a retired verb was taken: {other:?}"),
     }
+}
+
+/// **A live write verb from a paired peer leaves no state on the device**
+/// (kotton #230). The retired name above is unknown to every request type, so
+/// a fallback in the acceptor (`UserRequest`, then `RemoteRequest`) would
+/// refuse it with the same words; a *live* `RecordInsert` — the shape the
+/// door's `UserRequest` and the gateway's `RemoteRequest` share — is what such a
+/// fallback would take. B, paired with A as a full device, sends A's peer
+/// acceptor the raw bytes of one. A answers the decoder's refusal by name,
+/// nothing comes back `RecordInserted`, and A's own door then reads only the
+/// note A wrote itself: the planted one is not on the device. The property is
+/// the last assertion; the wording before it says where the refusal happened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_live_record_insert_from_a_paired_peer_leaves_no_record_on_the_device() {
+    use crate::common::{enroll_streamed_as, init_crypto, peer_port};
+    use crate::vault::spawn_device;
+    use kotton_net::transport::quic::tls::CertOffer;
+    use kotton_peer::nat::{nat_connect, NatConfig, NatResult};
+    use kotton_peer::{PeerChannel as _, QuicPeerChannel};
+    use kotton_schemas::membership::Posture;
+    use kotton_wire::ipc::{UserRequest, UserResponse};
+
+    const NOTES: &str = "sh.kotton.notes";
+    init_crypto();
+    let a = spawn_device("device A").await;
+    let b = spawn_device("device B").await;
+    a.daemon.start_peer_listener_background(0).await.expect("start A's peer listener");
+    let mut client_a = connect_when_ready(&a.ipc, "client A").await;
+    let client_b = connect_when_ready(&b.ipc, "client B").await;
+    client_a
+        .create_user("alice", crate::common::TEST_PASSPHRASE)
+        .await
+        .expect("create_user on A");
+    let (mut client_a, _client_b, _node_b) =
+        enroll_streamed_as(client_a, client_b, "alice", "device-a", "device-b", Posture::Full).await;
+    // A writes one note through its own door, so the read at the end is a
+    // read that sees records, not one that would read empty whatever happened.
+    client_a
+        .record_insert("alice", NOTES, serde_json::json!({ "title": "A's own", "body": "written at A's door" }))
+        .await
+        .expect("A writes its own note");
+    let (_, a_key_hex) = client_a.get_node_identity().await.expect("A's identity");
+    let a_pub: [u8; 32] = hex::decode(a_key_hex).unwrap().try_into().unwrap();
+    let a_addr: std::net::SocketAddr = format!("127.0.0.1:{}", peer_port(&a.daemon.runtime())).parse().unwrap();
+
+    let b_key = kotton_peer::daemon::nodes::load_device_operational_key(&*b.secrets).expect("B's device key");
+    let offer = CertOffer {
+        admission: vec![],
+        claim: None,
+    };
+    let conn = match nat_connect(&b_key, &offer, a_pub, Some(a_addr), &NatConfig::default(), None).await {
+        NatResult::Direct(c) | NatResult::Punched(c) => c,
+        other => panic!("the paired device's key opens A's peer acceptor directly: {other:?}"),
+    };
+    let channel = QuicPeerChannel::new(conn);
+
+    // The door's own spelling of the verb, every field filled.
+    let insert = UserRequest::RecordInsert {
+        user_id: "alice".into(),
+        schema_nsid: NOTES.into(),
+        record: serde_json::json!({ "title": "planted", "body": "sent over the peer wire" }),
+        root: None,
+        app_id: None,
+    };
+    let raw = channel
+        .request(&serde_json::to_vec(&insert).unwrap())
+        .await
+        .expect("A's peer acceptor answers");
+    match serde_json::from_slice::<UserResponse>(&raw).unwrap() {
+        UserResponse::Error { message } => assert!(
+            message.contains("invalid peer request") && message.contains("unknown variant `RecordInsert`"),
+            "a record insert is no request on the device's peer wire: {message}"
+        ),
+        other => panic!("a record insert over the peer wire was taken: {other:?}"),
+    }
+
+    let notes = client_a
+        .record_query("alice", NOTES, vec![], None, None)
+        .await
+        .expect("A reads its notes at its own door");
+    let titles: Vec<&str> = notes.iter().filter_map(|n| n["title"].as_str()).collect();
+    assert_eq!(titles, ["A's own"], "the device holds only the note written at its door: {notes:?}");
 }

@@ -4573,6 +4573,7 @@ mod secret_debug_tests {
         let surfaces = [
             ("request", include_str!("../../wire-surface.txt"), 22),
             ("response", include_str!("../../response-surface.txt"), 12),
+            ("peer request", include_str!("../../peer-request-surface.txt"), 1),
         ];
         let mut plain = Vec::new();
         for (which, surface, at_least) in surfaces {
