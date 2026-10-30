@@ -3,20 +3,20 @@
 //!
 //! The same seam the full daemon implements, answered by a keeper: it can name
 //! the domain a mount was pinned to and pin one, it can find a pool, and that is
-//! all. Everything a device does that a vault does not — hold a remote's
-//! credentials, replicate a mount, dial a peer — is answered with a refusal
-//! rather than left unimplemented, so a handler that reaches for it gets a
-//! sentence instead of a panic.
+//! all. It implements [`StoreHost`], the half of the seam the sealed handlers
+//! take, and not `FileHost`: everything a device does that a vault does not —
+//! hold a remote's credentials, replicate a mount, dial a peer — is no method
+//! of this type, so no handler the vault calls can reach for it. Until the seam
+//! was split (kotton #222) those three were answered here with refusals.
 
 use crate::residency::Pools;
 use kotton_common::crypto::kdf_labels;
-use kotton_device::users::files::FileHost;
+use kotton_device::users::files::StoreHost;
 use kotton_device::users::residency::Residency as _;
 use kotton_device::users::DeviceUsers as _;
 use kotton_device::DeviceRuntime;
 use kotton_diag::service::EventBus;
 use kotton_store::runtime::user::UserStore;
-use kotton_sys::store::SyncableStore;
 use std::io;
 use std::sync::Arc;
 
@@ -25,8 +25,7 @@ pub struct VaultHost<'a> {
     pub pools: &'a Pools,
 }
 
-#[async_trait::async_trait]
-impl FileHost for VaultHost<'_> {
+impl StoreHost for VaultHost<'_> {
     fn events(&self) -> &Arc<EventBus> {
         self.runtime.event_bus()
     }
@@ -51,33 +50,8 @@ impl FileHost for VaultHost<'_> {
         self.runtime.user_cek_domain_id(user_id, store)
     }
 
-    fn set_remote_credentials(&self, _user_id: &str, _name: &str, _value: &str) -> io::Result<()> {
-        Err(io::Error::other("a vault holds no remote; its devices do"))
-    }
-
-    fn forget_remote_credentials(&self, _user_id: &str, _name: &str) {}
-
     fn user_store(&self, user_id: &str) -> Option<Arc<UserStore>> {
         self.pools.get(user_id)
-    }
-
-    async fn sync_mount(
-        &self,
-        _user_id: &str,
-        _mount: &str,
-        _remote: &str,
-        _direction: Option<kotton_wire::ipc::SyncDirection>,
-    ) -> anyhow::Result<kotton_wire::remote::SyncResult> {
-        anyhow::bail!("a vault does not replicate; the devices that can read do")
-    }
-
-    async fn open_peer_storage(
-        &self,
-        _node: kotton_wire::peer::PairedNode,
-        _user_id: &str,
-        _store: Option<&UserStore>,
-    ) -> anyhow::Result<Arc<dyn SyncableStore>> {
-        anyhow::bail!("a vault dials no peer; it is dialled")
     }
 }
 

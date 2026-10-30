@@ -188,6 +188,21 @@ fn active_user(
 // SyncEngine
 // ---------------------------------------------------------------------------
 
+/// The one thing a peer's notice may do to this engine: wake its background
+/// loop. A handle on the loop's [`Notify`] and nothing else — no pass, no
+/// store, no host — so a caller holding it can ask for a pass to run sooner
+/// and cannot reach what a pass reaches (kotton #222: the peer path held the
+/// whole engine, and with it the host's record stores, to call one method).
+#[derive(Clone)]
+pub struct SyncWake(Arc<Notify>);
+
+impl SyncWake {
+    /// Wake the background loop, as [`SyncEngine::wake_background`] does.
+    pub fn wake(&self) {
+        self.0.notify_waiters();
+    }
+}
+
 /// Central sync scheduler.  Wrap in `Arc` and share across the daemon.
 pub struct SyncEngine {
     db: Arc<SqlitePool>,
@@ -292,6 +307,12 @@ impl SyncEngine {
     /// Wake the background loop.  Cheap; safe to call from blocking threads.
     pub fn wake_background(&self) {
         self.notify.notify_waiters();
+    }
+
+    /// A handle that wakes the background loop and reaches nothing else
+    /// ([`SyncWake`]).
+    pub fn waker(&self) -> SyncWake {
+        SyncWake(Arc::clone(&self.notify))
     }
 
     /// A hand-over to a device of `user_id`'s has been written into their tree,

@@ -18,7 +18,7 @@
 //! Stays in `kuserd` when `files.rs` becomes `core/fs`: the trait travels with
 //! the domain, the implementation stays with whoever can satisfy it.
 use kotton_common::crypto::kdf_labels;
-use kotton_device::users::files::FileHost;
+use kotton_device::users::files::{FileHost, StoreHost};
 use kotton_device::users::DeviceUsers as _;
 use kotton_device::DeviceRuntime;
 use kotton_diag::service::EventBus;
@@ -29,16 +29,43 @@ use std::io;
 use std::sync::Arc;
 
 /// The machine, presented as the four things the file handlers need.
-pub struct DaemonFileHost<'a> {
+///
+/// Generic over where a resident person's store is found, because that is what
+/// decides its reach. Over the sync host (`R = dyn SyncHost`, the default) it
+/// is a [`FileHost`]: the local door's mount verbs replicate, and replication
+/// reaches the record stores. Over the residency registry alone
+/// (`R = UserRegistry`, [`peer_store_host`]) it is a [`StoreHost`] and nothing
+/// more — what a peer's file and sealed verbs are served with, and why the
+/// peer path holds no sync host (kotton #222).
+pub struct DaemonFileHost<'a, R: ?Sized = dyn kotton_sync::SyncHost> {
     pub runtime: &'a DeviceRuntime,
-    /// The host's live per-user resources — which users are resident, and which
-    /// record stores are open. The daemon's own bookkeeping, and the reason
+    /// Where a resident person's store is found. For the full host, the host's
+    /// live per-user resources — which users are resident, and which record
+    /// stores are open: the daemon's own bookkeeping, and the reason
     /// `user_store` can be answered here and not in the domain.
     ///
     /// One seam rather than the two locator types it used to name, for the same
     /// reason the sync engine stopped naming them: this file is the daemon's side
     /// of the boundary, and `sync_mount_with_records` is on the domain's.
-    pub resources: &'a dyn kotton_sync::SyncHost,
+    pub resources: &'a R,
+}
+
+/// Where a resident person's store is found: the one question [`StoreHost`]
+/// asks of the daemon's bookkeeping.
+pub trait Residents: Send + Sync {
+    fn store_of(&self, user_id: &str) -> Option<Arc<UserStore>>;
+}
+
+impl Residents for dyn kotton_sync::SyncHost {
+    fn store_of(&self, user_id: &str) -> Option<Arc<UserStore>> {
+        self.user_store(user_id)
+    }
+}
+
+impl Residents for crate::residency::UserRegistry {
+    fn store_of(&self, user_id: &str) -> Option<Arc<UserStore>> {
+        self.get(user_id)
+    }
 }
 
 /// Where a remote's credentials live in the keychain.
@@ -49,8 +76,7 @@ fn credentials_key(user_id: &str, name: &str) -> String {
     prefix_key(&format!("remote.{user_id}.{name}"))
 }
 
-#[async_trait::async_trait]
-impl FileHost for DaemonFileHost<'_> {
+impl<R: Residents + ?Sized> StoreHost for DaemonFileHost<'_, R> {
     fn events(&self) -> &Arc<EventBus> {
         self.runtime.event_bus()
     }
@@ -73,6 +99,13 @@ impl FileHost for DaemonFileHost<'_> {
         self.runtime.user_cek_domain_id(user_id, store)
     }
 
+    fn user_store(&self, user_id: &str) -> Option<Arc<UserStore>> {
+        self.resources.store_of(user_id)
+    }
+}
+
+#[async_trait::async_trait]
+impl FileHost for DaemonFileHost<'_> {
     fn set_remote_credentials(&self, user_id: &str, name: &str, value: &str) -> io::Result<()> {
         self.runtime
             .secrets()
@@ -87,10 +120,6 @@ impl FileHost for DaemonFileHost<'_> {
             .runtime
             .secrets()
             .delete_secret(&credentials_key(user_id, name));
-    }
-
-    fn user_store(&self, user_id: &str) -> Option<Arc<UserStore>> {
-        self.resources.user_store(user_id)
     }
 
     async fn sync_mount(
@@ -127,4 +156,14 @@ pub fn file_host<'a>(
     resources: &'a dyn kotton_sync::SyncHost,
 ) -> DaemonFileHost<'a> {
     DaemonFileHost { runtime, resources }
+}
+
+/// Build the host a peer's file and sealed verbs are served with: the person's
+/// resident store and the mount's key domain, and no sync host behind it
+/// ([`DaemonFileHost`]'s doc).
+pub fn peer_store_host<'a>(
+    runtime: &'a DeviceRuntime,
+    users: &'a crate::residency::UserRegistry,
+) -> DaemonFileHost<'a, crate::residency::UserRegistry> {
+    DaemonFileHost { runtime, resources: users }
 }
