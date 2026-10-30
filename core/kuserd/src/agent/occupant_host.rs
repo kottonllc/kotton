@@ -1560,7 +1560,7 @@ impl DaemonOccupantHost<'_> {
 /// The vaults this person has admitted, as the network readout lists them.
 ///
 /// **The readout's source, and nothing else's.** A vault admitted by
-/// `kotton device admit <invite> --blind` or by an invite pasted at Settings' door
+/// `kotton drive enrol <invite> --blind` or by an invite pasted at Settings' door
 /// runs `handle_device_admit`, whose completion records it as an own-device
 /// member under the blind posture, and revoking it removes that member. So the
 /// list is [`Membership::list_vaults`] — a view over the membership set, which

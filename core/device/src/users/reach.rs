@@ -278,7 +278,7 @@ mod tests {
 
     /// Clause 3: what every learning point does — ask the relay, record the key
     /// it proved beside the URL (`config relay set`, a relay paired by name, an
-    /// invite's relay at `device admit` each call exactly these two). Leaving it
+    /// invite's relay at `drive enrol` each call exactly these two). Leaving it
     /// moves its key beside it into the forwarding slot; a relay that showed no
     /// key is recorded with none, never with the key of the relay before it.
     #[tokio::test]

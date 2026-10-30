@@ -62,8 +62,8 @@
 //! node a drive:
 //!
 //! - **enrolment** — [`super::nodes::finalize_enrolled_node`], for a node
-//!   admitted under `Posture::BlindStorage` (`device add --blind`, `device
-//!   admit`, an invite pasted at Settings' door);
+//!   admitted under `Posture::BlindStorage` (`device add --blind`, `drive
+//!   enrol <invite>`, an invite pasted at Settings' door);
 //! - **recovery** — the daemon's `Recover` (`kotton_device::users::recover`),
 //!   which takes the line the person's recovery card printed, a vault's
 //!   (`OperatedService::Vault`) and saying so, adds that vault as the node to
