@@ -141,8 +141,8 @@ pub enum Commands {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        /// Arguments: none, or `--no-wait`. `sync now` is `sync`; what `sync add|list|remove` did is `pin <drive>`'s, and
-        /// `sync <remote>` is gone (see the help below)
+        /// Arguments: none, or `--no-wait`. `sync now` is `sync`; `sync add` and `sync remove` are `pin <drive>`,
+        /// `sync list` is `pin list`, and `sync <remote>` is gone (see the help below)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },

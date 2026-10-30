@@ -42,7 +42,9 @@
 //! the replacement is a bare noun the retired word's own (`sync now` is `sync`), any command of
 //! that noun counts, since the noun alone is the answer (`sync <remote>` is one). Where it is a
 //! different bare noun (`sync add` is `pin`), the command must carry an argument
-//! (`pin <drive>`): the noun alone leaves the reader to find its verb. That is the only
+//! (`pin <drive>`): the noun alone leaves the reader to find its verb. The argument is a
+//! word that is neither a flag nor one of that noun's current verbs, which the tables hold
+//! (`pin list` and `pin --help` are other answers, not the one `sync add` got). That is the only
 //! reason to say a retired word, and it is how the help and the reference say it. And the
 //! first argument of the shell's two helpers that answer a retired word ([`HELPERS`]:
 //! `deprecated(was, now)` and `retired(was, now)`), which print the replacement beside it.
@@ -89,6 +91,9 @@ pub struct Retired {
     pub word: String,
     pub now: String,
     pub gone: bool,
+    /// The current verbs of the noun `now` names (not placeholders): a word after that noun
+    /// that is one of these is a verb, not the argument a bare replacement needs.
+    pub now_verbs: Vec<String>,
 }
 
 impl Retired {
@@ -111,7 +116,17 @@ pub fn retired(tables: &BTreeMap<String, Vec<(String, Is)>>) -> Vec<Retired> {
                 Is::Alias(now) => (now, false),
                 Is::Gone(now) => (now, true),
             };
-            out.push(Retired { noun: noun.clone(), word: word.clone(), now: now.clone(), gone });
+            let target = now.split_whitespace().next().unwrap_or_default();
+            let now_verbs = tables
+                .get(target)
+                .map(|t| {
+                    t.iter()
+                        .filter(|(w, is)| matches!(is, Is::Current) && !w.is_empty() && !w.starts_with('<'))
+                        .map(|(w, _)| w.to_lowercase())
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.push(Retired { noun: noun.clone(), word: word.clone(), now: now.clone(), gone, now_verbs });
         }
     }
     out
@@ -211,10 +226,10 @@ fn unpointed<'a>(chars: &[char], retired: &'a [Retired]) -> Vec<(usize, &'a Reti
     while let Some(open) = chars[i..].iter().position(|c| *c == '`').map(|p| p + i) {
         let Some(close) = chars[open + 1..].iter().position(|c| *c == '`').map(|p| p + open + 1) else { break };
         let span = &chars[open + 1..close];
-        if !named(span, retired).iter().any(|(at, _)| *at == 0 || span[..*at].iter().collect::<String>().trim() == "kotton") {
+        if !named(span, retired).iter().any(|(at, _)| *at == 0 || span[..*at].iter().collect::<String>().trim().eq_ignore_ascii_case("kotton")) {
             let text: String = span.iter().collect();
             let mut words: Vec<String> = text.split_whitespace().map(str::to_string).collect();
-            if words.first().is_some_and(|w| w == "kotton") {
+            if words.first().is_some_and(|w| w.eq_ignore_ascii_case("kotton")) {
                 words.remove(0);
             }
             commands.push(words);
@@ -227,9 +242,16 @@ fn unpointed<'a>(chars: &[char], retired: &'a [Retired]) -> Vec<(usize, &'a Reti
         .filter(|(_, r)| {
             let now: Vec<String> = r.now.split_whitespace().map(str::to_lowercase).collect();
             // A replacement that is another noun, bare (`sync add` -> `pin`), is the noun
-            // whose verb the reader must still pick: the command names it with an argument.
-            let need = if now.len() == 1 && now[0] != r.noun.to_lowercase() { 2 } else { now.len() };
-            !commands.iter().any(|c| c.len() >= need && c.iter().zip(&now).all(|(a, b)| a.to_lowercase() == *b))
+            // whose verb the reader must still pick: the command names it with an argument,
+            // which is neither one of that noun's verbs (`pin list` is another answer) nor a
+            // flag (`pin --help`).
+            let bare_other = now.len() == 1 && now[0] != r.noun.to_lowercase();
+            commands.iter().all(|c| {
+                let named = c.len() >= now.len() && c.iter().zip(&now).all(|(a, b)| a.to_lowercase() == *b);
+                let argument = !bare_other
+                    || c.get(1).is_some_and(|a| !a.starts_with("--") && !r.now_verbs.contains(&a.to_lowercase()));
+                !(named && argument)
+            })
         })
         .collect();
     out.sort_by_key(|(at, _)| *at);
@@ -317,6 +339,19 @@ fn printed_literal(c: &[char], at: usize, mut line: usize) -> Vec<Printed> {
                     continue;
                 }
                 Some('n') => out.push((Vec::new(), Vec::new())),
+                Some('u') if c.get(k + 2) == Some(&'{') => {
+                    let end = (k + 3..c.len()).find(|&e| c[e] == '}').unwrap_or(k + 2);
+                    let hex: String = c[k + 3..end].iter().filter(|h| **h != '_').collect();
+                    push(&mut out, u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32).unwrap_or(' '), line);
+                    k = end + 1;
+                    continue;
+                }
+                Some('x') if c.get(k + 3).is_some() => {
+                    let hex: String = c[k + 2..k + 4].iter().collect();
+                    push(&mut out, u8::from_str_radix(&hex, 16).ok().map_or(' ', char::from), line);
+                    k += 4;
+                    continue;
+                }
                 Some(e @ ('"' | '\\' | '\'')) => push(&mut out, *e, line),
                 _ => push(&mut out, ' ', line),
             }
@@ -434,7 +469,8 @@ fn f() {
         let src = "\
 const H: &str = \"\\
   sync now                 is `sync`, and still runs it
-  sync add|list|remove     gone: what this device keeps of a drive is `pin <drive>`
+  sync add|remove          gone: what this device keeps of a drive is `pin <drive>`
+  sync list                gone: what it keeps is listed by `pin list`
 \";
 const D: &str = \"A vault's invite is `drive enrol \\
      <invite>` (`device admit` was its name, and still runs it).\";
@@ -508,9 +544,10 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
     /// and a tab between noun and word are the words, and are refused.
     #[test]
     fn case_and_any_whitespace_gap_are_the_word() {
-        let src = "const A: &[&str] = &[\"Device admit <invite>\", \"sync\u{a0}now\", \"SYNC\\u{2003}Add\", \"sync\tremove\"];\n";
+        let src = "const A: &[&str] = &[\"Device admit <invite>\", \"sync\u{a0}now\", \"SYNC\\u{2003}Add\", \"sync\tremove\", \"device\\u{2003}admit\", \"sync\\x20now\"];\n";
         let got = found(&[("client/cli/src/x.rs", src)]);
-        assert_eq!(got.len(), 3, "{got:#?}");
+        let said: Vec<&str> = got.iter().map(|g| g.split('`').nth(1).unwrap()).collect();
+        assert_eq!(said, ["device admit", "sync now", "sync add", "sync remove", "device admit", "sync now"], "{got:#?}");
         let page = found(&[("README.md", "Sync\tnow, then\nDevice admit it.\nSync  Now\n")]);
         assert_eq!(page.len(), 3, "{page:#?}");
         assert!(page[0].starts_with("README.md:1: says `sync now`"), "{page:#?}");
@@ -550,6 +587,9 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
         assert_eq!(ok("`sync add` is `pin <drive>`\n"), Vec::<String>::new());
         assert_eq!(ok("`sync add` is `kotton pin <drive> on-demand`\n").len(), 0);
         assert_eq!(ok("`sync add` is `pin`\n").len(), 1);
+        assert_eq!(ok("`sync add` is gone: use `pin list`\n").len(), 1);
+        assert_eq!(ok("`sync add` is gone, see `pin --help`\n").len(), 1);
+        assert_eq!(ok("`sync add` is `Kotton pin <drive>`\n").len(), 0);
         assert_eq!(ok("`sync add` is `Pin`\n").len(), 1);
         // `sync list` -> `pin list`; `drive enrol` for `device admit`.
         assert_eq!(ok("`sync list` is `pin`\n").len(), 1);
