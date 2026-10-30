@@ -621,13 +621,14 @@ mod tests {
         ]
     }
 
-    /// The standing table, row by row (the module note's, and the record's):
-    /// the operator reaches the five and not one verb a tenant's standing
+    /// The standing table, row by row (the module note's): the operator
+    /// reaches the landlord's six and not one verb a tenant's standing
     /// reaches — no sealed read, no write, no recovery packet; a tenant's
-    /// device reaches its ten and none of the five; a claim reaches the
+    /// device reaches its fifteen and none of the six; a claim reaches the
     /// recovery fetch alone; a stranger reaches nothing. The sets are the
     /// module's own predicates, and they are checked disjoint here too, so a
-    /// verb added to both is caught by this test rather than by review.
+    /// verb added to both is caught by this test rather than by review; and
+    /// together they are the whole of the vault's peer wire.
     #[test]
     fn each_standing_reaches_exactly_its_row_of_the_table() {
         let claim = PeerStanding::Claim { aid: "did:kel:x".into() };
