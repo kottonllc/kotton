@@ -227,7 +227,6 @@ const DOMAINS: &[(&str, &[&str])] = &[
             "SchemaGet",
             "RecordSyncAvailable",
             "Import",
-            "ApplyRecordChangeset",
             // A model is a manifest record and the sealed object it names
             // (RFC-0085). Not `device`, where `InferenceSet` sits: whether this
             // machine runs a model is the machine's configuration, and which

@@ -25,7 +25,7 @@ pub mod sys_ipc;
 
 // Convenience re-exports for the most commonly used schema types
 pub use grant::{GrantEnvelope, GrantLifetime, MembershipGrant};
-pub use ipc::{SyncChangesetRow, SyncDirection, SyncWatermark, UserRequest, UserResponse};
+pub use ipc::{SyncDirection, UserRequest, UserResponse};
 pub use ipc::remote_request::RemoteRequest;
 pub use ipc::request::{ConnTrustOrigin, REMOTE_ELIGIBLE};
 pub use peer::{

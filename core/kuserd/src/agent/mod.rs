@@ -1877,8 +1877,13 @@ impl DeviceDaemon {
         // The peer-serving path no longer binds the user registry. It reached it
         // only to build a `file_host`, and that takes the seam now — so the whole
         // path stopped needing the daemon's residency map, rather than passing it
-        // through three frames to one call.
-        let record_stores = self.record_stores.clone();
+        // through three frames to one call. No peer verb writes a record either
+        // (records arrive as sealed log segments the sync engine merges), so the
+        // separate `RecordStores` handle this path was passed is gone: it was a
+        // name nothing used. That removed a name, not reach: `handle_peer_request`
+        // still takes the whole `AgentContext`, record stores and sync host
+        // included, and passes it on to the gateway's `BrowserFrame` arm.
+        // Narrowing what the peer path receives is kotton #222.
         let sync_resources = Arc::clone(&self.sync_resources);
         let db = Arc::clone(&self.db);
         let user_dbs = Arc::clone(&self.user_dbs);
@@ -1903,7 +1908,6 @@ impl DeviceDaemon {
         let ctx = Arc::new(self.agent_context());
         Arc::new(move |peer_did: String, req_bytes: Vec<u8>| {
             let runtime = Arc::clone(&runtime);
-            let record_stores = record_stores.clone();
             let sync_resources = Arc::clone(&sync_resources);
             let db = Arc::clone(&db);
             let user_dbs = Arc::clone(&user_dbs);
@@ -1925,7 +1929,6 @@ impl DeviceDaemon {
                 };
                 let response = handle_peer_request(
                     &runtime,
-                    &record_stores,
                     &sync_resources,
                     &db,
                     &user_dbs,
@@ -2008,7 +2011,6 @@ async fn peer_ask(
         | UserRequest::SyncAvailable { user_id, .. }
         | UserRequest::RecordSyncAvailable { user_id, .. }
         | UserRequest::FrostSignRound { user_id, .. }
-        | UserRequest::ApplyRecordChangeset { user_id, .. }
         | UserRequest::ReadSealed { user_id, .. }
         | UserRequest::ListSealed { user_id, .. }
         | UserRequest::WriteSealed { user_id, .. }
@@ -2067,12 +2069,21 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 /// either permanently paired with the `user_id` named in the request, or holds
 /// an active (non-revoked, non-expired) `EphemeralSession` scoped to that user.
 /// For ephemeral sessions, path-level grant enforcement is also applied.
+///
+/// **Records do not arrive here as rows.** The record log over sealed segments
+/// is the one path a record takes between devices: the sync engine seals
+/// changes with `kotton_record::replication::log_records`, the pack moves like
+/// any other, and `apply_record_segments` merges what it carries on the far
+/// side. A peer's only record verb here is `RecordSyncAvailable`, which wakes
+/// that pass and carries no record. The verb that let a paired peer hand this
+/// device plaintext rows to merge (`ApplyRecordChangeset`) is retired
+/// (kotton #173): nothing sent it, and its rows lacked the `revision` the merge
+/// keys on.
 #[allow(clippy::too_many_arguments)]
 async fn handle_peer_request(
     runtime: &Arc<DeviceRuntime>,
     // No `users` here any more: every arm that resolved residency did it through
     // `file_host`, which now takes the seam below instead of the two locators.
-    record_stores: &crate::residency::RecordStores,
     sync_resources: &Arc<dyn kotton_sync::SyncHost>,
     db: &Arc<SqlitePool>,
     user_dbs: &crate::db::user_db::UserDbMap,
@@ -2587,47 +2598,6 @@ async fn handle_peer_request(
             );
             sync_engine.wake_background();
             Ok(UserResponse::SyncAck)
-        }
-
-        UserRequest::ApplyRecordChangeset {
-            user_id,
-            nsid: _,
-            rows,
-        } => {
-            use kotton_record::{ChangesetRow, RecordStore};
-            let store =
-                match record_stores.get_or_open(runtime.base_dir(), &user_id, runtime.secrets()) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return UserResponse::Error {
-                            message: format!("record store unavailable: {e}"),
-                        };
-                    }
-                };
-            let changeset: Vec<ChangesetRow> = rows
-                .into_iter()
-                .map(|r| ChangesetRow {
-                    id: r.id,
-                    schema_nsid: r.schema_nsid,
-                    body: r.body,
-                    updated_at: r.updated_at,
-                    // The wire row does not carry a revision, so a row
-                    // arriving here is the version an earlier writer
-                    // means by its seconds alone.
-                    revision: 0,
-                    deleted_at: r.deleted_at,
-                    // A row arrives in the root it left, and
-                    // keeps the place it was filed in.
-                    root: r.root,
-                    filed_at: r.filed_at,
-                })
-                .collect();
-            match store.merge_changeset(changeset).await {
-                Ok(()) => Ok(UserResponse::ChangesetApplied),
-                Err(e) => Ok(UserResponse::Error {
-                    message: format!("merge_changeset failed: {e}"),
-                }),
-            }
         }
 
         // -- Distributed FROST signing — co-signer side -----------------------

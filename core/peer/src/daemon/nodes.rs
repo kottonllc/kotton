@@ -1039,7 +1039,7 @@ pub async fn project_membership_into_allowlist(
         //
         // **Own devices only.** `paired_nodes` is what `peer_standing` reads to
         // answer `PeerStanding::Paired`, and that standing serves `ReadFile`,
-        // `ReadSealed`, `ListSealed`, `ApplyRecordChangeset` and `RecoveryFetch`.
+        // `ReadSealed`, `ListSealed` and `RecoveryFetch`.
         // Caching a contact here hands another person's node a device's reach over
         // the user's data, which contact pairing forbids in as many words:
         // *pairing exchanges authenticated public keys and nothing else.*

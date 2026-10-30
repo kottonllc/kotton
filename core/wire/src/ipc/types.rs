@@ -39,41 +39,6 @@ pub struct SyncOutcome {
     pub duration_ms: u64,
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ Record sync wire types Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-
-/// Unix timestamp (seconds) used as a sync watermark.
-///
-/// `export_changeset(since)` returns rows with `updated_at > since`.
-pub type SyncWatermark = i64;
-
-/// Wire representation of a single record snapshot transmitted during record sync.
-///
-/// Mirrors `kotton_record::ChangesetRow`; defined here so
-/// `wire` stays free of `03_providers` dependencies.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncChangesetRow {
-    /// Stable record identifier (UUID v4 string).
-    pub id: String,
-    /// NSID of the schema this record belongs to.
-    pub schema_nsid: String,
-    /// JSON body of the record fields at the time of export.
-    pub body: serde_json::Value,
-    /// Unix timestamp (seconds) of the last write.
-    pub updated_at: SyncWatermark,
-    /// Unix timestamp when the record was deleted, or `None` if alive.
-    pub deleted_at: Option<SyncWatermark>,
-    /// The root the record belongs to (RFC-0071 R17), `None` for Personal.
-    /// Records travel with their root; a Personal row travels unmarked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root: Option<String>,
-    /// When the device that first held the record filed it, in milliseconds on
-    /// that device's clock (`kotton_record::ChangesetRow::filed_at`). Travels so
-    /// a read mark written on one of the person's devices names the same place
-    /// on the next; `None` for a row filed before the stamp existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filed_at: Option<i64>,
-}
-
 /// Serializable snapshot of a single open WASM app window.
 ///
 /// Mirror of `kotton_surface::WindowState`; duplicated here so that

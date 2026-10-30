@@ -62,11 +62,6 @@ pub enum RemoteRequest {
     AppVerify {
         app_id: String,
     },
-    ApplyRecordChangeset {
-        user_id: String,
-        nsid: String,
-        rows: Vec<SyncChangesetRow>,
-    },
     Authenticate {
         token: crate::ipc::SecretText,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -558,7 +553,6 @@ impl From<RemoteRequest> for UserRequest {
             RemoteRequest::AppMessage { app_id, msg } => UserRequest::AppMessage { app_id, msg },
             RemoteRequest::AppUninstall { app_id } => UserRequest::AppUninstall { app_id },
             RemoteRequest::AppVerify { app_id } => UserRequest::AppVerify { app_id },
-            RemoteRequest::ApplyRecordChangeset { user_id, nsid, rows } => UserRequest::ApplyRecordChangeset { user_id, nsid, rows },
             RemoteRequest::Authenticate { token, scope } => UserRequest::Authenticate { token, scope },
             RemoteRequest::BrowserFrame { bytes, user_id, channel } => UserRequest::BrowserFrame { bytes, user_id, channel },
             RemoteRequest::BrowserOutbound { channel } => UserRequest::BrowserOutbound { channel },
