@@ -42,7 +42,9 @@
 //! the replacement is a bare noun the retired word's own (`sync now` is `sync`), any command of
 //! that noun counts, since the noun alone is the answer (`sync <remote>` is one). Where it is a
 //! different bare noun (`sync add` is `pin`), the command must carry an argument
-//! (`pin <drive>`): the noun alone leaves the reader to find its verb. The argument is a
+//! (`pin <drive>`): the noun alone leaves the reader to find its verb. The advice
+//! says it with the placeholder of that noun's table (`pin <drive>`), or `<argument>` for a noun
+//! whose table has none. The argument is a
 //! word that is neither a flag nor one of that noun's current verbs, which the tables hold
 //! (`pin list` and `pin --help` are other answers, not the one `sync add` got). That is the only
 //! reason to say a retired word, and it is how the help and the reference say it. And the
@@ -95,6 +97,9 @@ pub struct Retired {
     /// The current verbs of the noun `now` names (not placeholders): a word after that noun
     /// that is one of these is a verb, not the argument a bare replacement needs.
     pub now_verbs: Vec<String>,
+    /// The placeholder entry of that noun's table (`<drive>` for `pin`), what a bare
+    /// replacement is said with; `None` when the noun has none.
+    pub now_placeholder: Option<String>,
 }
 
 impl Retired {
@@ -111,9 +116,14 @@ impl Retired {
     }
 
     /// The command a finding tells a person to say: a line the rule accepts. A bare other noun
-    /// is said with an argument (`pin <argument>`), since the noun alone is refused.
+    /// is said with an argument, the placeholder of that noun's table (`pin <drive>`), or `<argument>`
+    /// when the table holds none, since the noun alone is refused.
     pub fn suggestion(&self) -> String {
-        if self.bare_other() { format!("{} <argument>", self.now) } else { self.now.clone() }
+        if self.bare_other() {
+            format!("{} {}", self.now, self.now_placeholder.as_deref().unwrap_or("<argument>"))
+        } else {
+            self.now.clone()
+        }
     }
 }
 
@@ -140,7 +150,11 @@ pub fn retired(tables: &BTreeMap<String, Vec<(String, Is)>>) -> Vec<Retired> {
                         .collect()
                 })
                 .unwrap_or_default();
-            out.push(Retired { noun: noun.clone(), word: word.clone(), now: now.clone(), gone, now_verbs });
+            let now_placeholder = tables
+                .get(target)
+                .and_then(|t| t.iter().find(|(w, _)| w.starts_with('<')))
+                .map(|(w, _)| w.clone());
+            out.push(Retired { noun: noun.clone(), word: word.clone(), now: now.clone(), gone, now_verbs, now_placeholder });
         }
     }
     out
@@ -434,7 +448,11 @@ mod tests {
             ],
         );
         t.insert("device".to_string(), vec![("admit".to_string(), Is::Alias("drive enrol".into()))]);
-        t.insert("pin".to_string(), vec![("list".to_string(), Is::Current)]);
+        // `pin`'s table as the shell declares it (`client/shell/src/commands/pin.rs`).
+        t.insert(
+            "pin".to_string(),
+            vec![("default".to_string(), Is::Current), ("<drive>".to_string(), Is::Current), ("list".to_string(), Is::Current)],
+        );
         t
     }
 
@@ -598,6 +616,11 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
             assert!(composed.is_empty(), "{}: the suggestion `{say}` is refused: {composed:#?}", r.was());
         }
         let got = found_with(&t, "type `sync add`\n");
+        assert!(got[0].contains("say `pin <drive>`"), "{got:#?}");
+        // A noun whose table holds no placeholder falls back to `<argument>`.
+        let mut bare = tables();
+        bare.get_mut("pin").unwrap().retain(|(w, _)| !w.starts_with('<'));
+        let got = found_with(&bare, "type `sync add`\n");
         assert!(got[0].contains("say `pin <argument>`"), "{got:#?}");
     }
 
