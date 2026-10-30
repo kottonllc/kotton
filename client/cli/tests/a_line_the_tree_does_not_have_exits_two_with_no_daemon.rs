@@ -48,6 +48,8 @@ const REFUSED: &[(&[&str], &str)] = &[
     (&["drive", "--user", "nobody", "enrol", "--blind"], "usage: drive enrol <invite>"),
     (&["drive", "--user", "nobody", "enrol", "CODE", "extra"], "usage: drive enrol <invite>"),
     (&["drive", "--user", "nobody", "enrol", "CODE", "--frob"], "usage: drive enrol <invite>"),
+    (&["drive", "--user", "nobody", "enrol", "CODE", "--blind", "--cosigner"], "usage: drive enrol <invite>"),
+    (&["drive", "--user", "nobody", "enrol", "-x"], "usage: drive enrol <invite>"),
     (&["device", "--user", "nobody", "admit", "--blind"], "drive enrol <invite>"),
     (&["device", "--user", "nobody", "admit", "CODE"], "drive enrol <invite>"),
     (&["device", "--user", "nobody", "admit", "CODE", "extra"], "drive enrol <invite>"),

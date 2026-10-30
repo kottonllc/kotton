@@ -3,6 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use kotton_wire::ipc::DriveDescriptor;
 
+use super::device::ENROL_POSTURES;
 use super::{Command, CommandOutput, Verb};
 use crate::out::Out;
 use crate::state::ShellState;
@@ -53,26 +54,22 @@ enum Line<'a> {
 /// What `drive enrol` (and `device admit`, its retired name) says when no invite is among the words.
 pub(super) const ENROL_USAGE: &str = "usage: drive enrol <invite>";
 
-/// The flags `drive enrol` knows. They are grammar, not posture: `--cosigner` and `--full`
-/// are still *sent*, and the daemon refuses them. The parser holds the vocabulary the
-/// daemon knows so that a word outside it is usage; the daemon remains the only guard on
-/// posture, and nothing here judges one.
-const ENROL_FLAGS: [&str; 3] = ["--blind", "--cosigner", "--full"];
-
 /// The invite among the words after `enrol` and the flags that remain. The one place the
-/// invite is found, and the one grammar of both doors (`drive enrol`, `device admit`):
-/// exactly one word that is not a `--` flag, and no flag outside [`ENROL_FLAGS`]. `None`
-/// (none, a second word, or an unknown flag) is the usage refusal.
+/// invite is found: exactly one word that is not a flag (not empty, not starting with `-`),
+/// and at most one flag, which must be a key of [`ENROL_POSTURES`](super::device::ENROL_POSTURES),
+/// the table that owns the vocabulary. A repeated flag is a second flag. `None` (no invite,
+/// a second word, an odd invite, an unknown or a second flag) is the usage refusal. This is
+/// grammar; the daemon remains the only guard on posture.
 pub(super) fn split_invite(words: impl IntoIterator<Item = String>) -> Option<(String, Vec<String>)> {
     let mut invite = None;
     let mut flags = Vec::new();
     for w in words {
         if w.starts_with("--") {
-            if !ENROL_FLAGS.contains(&w.as_str()) {
+            if !flags.is_empty() || !ENROL_POSTURES.iter().any(|(word, _)| *word == w) {
                 return None;
             }
             flags.push(w);
-        } else if invite.replace(w).is_some() {
+        } else if w.is_empty() || w.starts_with('-') || invite.replace(w).is_some() {
             return None;
         }
     }
@@ -376,6 +373,43 @@ mod tests {
                 "{line}"
             );
         }
+        // Posture flags that would hold keys still reach the ceremony: the daemon refuses them.
+        for flag in ["--cosigner", "--full"] {
+            for line in [format!("enrol CODE {flag}"), format!("enrol {flag} CODE")] {
+                assert_eq!(
+                    parse(&words(&line)).ok(),
+                    Some(Line::Enrol { invite: "CODE".into(), flags: words(flag) }),
+                    "{line}"
+                );
+            }
+        }
+    }
+
+    /// The grammar is the table's keys: each is accepted, and a word outside it is not.
+    #[test]
+    fn split_invite_accepts_exactly_the_tables_flags() {
+        for (flag, _) in ENROL_POSTURES {
+            assert_eq!(split_invite(words(&format!("CODE {flag}"))), Some(("CODE".into(), words(flag))), "{flag}");
+        }
+        for flag in ["--frob", "--Blind", "--", "--blind=1"] {
+            assert_eq!(split_invite(words(&format!("CODE {flag}"))), None, "{flag}");
+        }
+    }
+
+    /// One posture flag at most: two, or the same one twice, is usage, exit 2, before any session.
+    #[test]
+    fn enrol_with_two_posture_flags_is_usage_exit_two() {
+        for line in ["enrol CODE --blind --cosigner", "enrol --full CODE --blind", "enrol CODE --blind --blind"] {
+            let refused = parse(&words(line)).expect_err(line);
+            assert_eq!(refused.exit_code, ExitCode::Code(2), "{line}");
+        }
+    }
+
+    /// An invite that is empty or starts with `-` is not an invite.
+    #[test]
+    fn enrol_with_a_dash_word_or_an_empty_word_for_an_invite_is_usage() {
+        assert!(split_invite(vec!["-x".to_string()]).is_none());
+        assert!(split_invite(vec![String::new()]).is_none());
     }
 
     /// An `enrol` line with only flags has no invite: usage, exit 2, before any session.
