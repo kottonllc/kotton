@@ -27,7 +27,7 @@
 //! address does not carry.
 
 use crate::DeviceRuntime;
-use kotton_wire::ipc::{TenantDeviceAct, TenantDeviceChange, UserRequest, UserResponse};
+use kotton_wire::ipc::{TenantDeviceAct, TenantDeviceChange, UserResponse, VaultPeerRequest};
 use kotton_wire::peer::PairedNode;
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -126,14 +126,14 @@ async fn tell(
     };
     for drive in drives {
         let id = drive.id.clone();
-        let request = UserRequest::TenantDevice {
+        let request = VaultPeerRequest::TenantDevice {
             user_id: user_id.to_string(),
             change: change.clone(),
             signature: signature.clone(),
         };
         let outcome = tokio::time::timeout(EACH_DRIVE, async {
             let client = runtime.dialer().connect(drive, user_id).await.map_err(|e| e.to_string())?;
-            match client.send(&request).await.map_err(|e| e.to_string())? {
+            match client.send_to_vault(&request).await.map_err(|e| e.to_string())? {
                 UserResponse::Ok => Ok(()),
                 UserResponse::Error { message } => Err(message),
                 other => Err(format!("unexpected reply {other:?}")),
