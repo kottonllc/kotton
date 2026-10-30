@@ -834,9 +834,11 @@ pub async fn handle_device_join(
                 // handed, and the issuer is told why in its answer.
                 tracing::warn!(user_id = %user_id, "a vault refused a payload carrying keys");
                 let refused = UserResponse::PairFailed {
-                    reason: "this node is a vault: it keeps sealed bytes and holds no key, so \
-                             enrol it blind (`device add --blind`)"
-                        .to_string(),
+                    reason: format!(
+                        "this node is a vault: it keeps sealed bytes and holds no key, so \
+                         enrol it blind (`device add {}`)",
+                        device_add_flag(Posture::BlindStorage)
+                    ),
                 };
                 answer_the_issuer(answer, &sessions, refused).await
             }
@@ -950,28 +952,32 @@ fn not_blind_refusal(posture: Posture) -> String {
 /// that counts them. Exhaustive for the same reason as [`not_blind_refusal`].
 ///
 /// A posture `device add` names with a flag takes the flag from
-/// `DEVICE_ADD_POSTURE_FLAGS`, the table the shell's `parse_add` reads, looked up
-/// by posture: the hint has no spelling of its own to drift. The default posture
-/// is the bare line, and a gateway is `--gateway <code>`, a word with a value the
-/// table does not carry; `cargo xtask device-add-check` holds that this arm is the
-/// only `"device add --` literal outside tests under `core/`.
+/// [`device_add_flag`]: the hint has no spelling of its own to drift. The default
+/// posture is the bare line, and a gateway is `--gateway <code>`, a word with a
+/// value the table does not carry; `cargo xtask device-add-check` holds that this
+/// arm is the only `device add --` under `core/` outside tests and comments.
 fn adds_instead(posture: Posture) -> String {
-    use kotton_schemas::membership::DEVICE_ADD_POSTURE_FLAGS;
-    let flagged = |posture: Posture| {
-        let (flag, _) = DEVICE_ADD_POSTURE_FLAGS
-            .iter()
-            .find(|(_, p)| *p == posture)
-            .expect("`device add` names this posture with a flag of DEVICE_ADD_POSTURE_FLAGS");
-        format!("device add {flag}")
-    };
     match posture {
         Posture::Full => "device add".to_owned(),
-        Posture::Cosigner => flagged(posture),
+        Posture::Cosigner => format!("device add {}", device_add_flag(posture)),
         Posture::Gateway => "device add --gateway <code>".to_owned(),
         Posture::BlindStorage => {
             unreachable!("admits_by_code admits the blind posture before asking for a refusal")
         }
     }
+}
+
+/// The flag `device add` names `posture` with, from `DEVICE_ADD_POSTURE_FLAGS`, the
+/// table the shell's `parse_add` reads, looked up by posture: what every hint here
+/// that names a `device add` posture flag prints. Called only for a posture the
+/// table has a flag for (blind, cosigner); the default and the gateway are not flags.
+fn device_add_flag(posture: Posture) -> &'static str {
+    use kotton_schemas::membership::DEVICE_ADD_POSTURE_FLAGS;
+    DEVICE_ADD_POSTURE_FLAGS
+        .iter()
+        .find(|(_, p)| *p == posture)
+        .map(|(flag, _)| *flag)
+        .expect("`device add` names this posture with a flag of DEVICE_ADD_POSTURE_FLAGS")
 }
 
 /// A vault's invite as its code names it: where the ceremony
@@ -2113,6 +2119,18 @@ mod admit_tests {
         assert_eq!(device_add_parses("device add --blind --blind"), None);
         assert_eq!(device_add_parses("device add --browser"), None);
         assert_eq!(device_add_parses("device add --cosigner"), Some(Posture::Cosigner));
+    }
+
+    /// Every posture the table has a flag for gives, through `device_add_flag` (what the
+    /// vault's refusal and `adds_instead` print), a `device add` that asks for that posture.
+    #[test]
+    fn every_table_posture_is_printed_with_a_flag_the_hint_reader_reads_back() {
+        use kotton_schemas::membership::DEVICE_ADD_POSTURE_FLAGS;
+        for (_, posture) in DEVICE_ADD_POSTURE_FLAGS {
+            let line = format!("device add {}", super::device_add_flag(posture));
+            assert_eq!(device_add_parses(&line), Some(posture), "{line}");
+        }
+        assert_eq!(super::device_add_flag(Posture::BlindStorage), "--blind");
     }
 
     /// Every posture the admit refuses is handed a `device add` that adds a

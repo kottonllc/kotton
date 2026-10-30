@@ -783,8 +783,8 @@ pub(crate) const ENROL_POSTURES: [(&str, Posture); 3] = [
 ];
 
 // The one vocabulary of `device add`'s posture flags is `DEVICE_ADD_POSTURE_FLAGS`, in
-// `kotton-schemas` beside `Posture` and not here, so the hints the daemon prints
-// (`adds_instead`, `kotton-device`) look up the same words `parse_add` reads. It is the
+// `kotton-schemas` beside `Posture` and not here, so the daemon's hints that name a posture
+// flag (`device_add_flag`, `kotton-device`) look up the same words `parse_add` reads. It is the
 // sibling of `ENROL_POSTURES` and separate from it because the two doors differ: no flag is
 // `ADD_DEFAULT_POSTURE` (full, a device of your own) here and blind there, and `--full` is
 // not a word here (it is the default). Like the other it is grammar and a map: the daemon
