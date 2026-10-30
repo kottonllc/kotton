@@ -11,7 +11,7 @@
 //! `device` is here for two kinds of word: `device admit`, which the command-tree decision's
 //! table retires for `drive enrol`, and a word `device` never had (`admitx`), both of which
 //! needed a daemon to be refused (exit 1 with "connect"). The rest of `device` is not the
-//! tree's yet.
+//! tree's yet, but `device add`'s words are parsed before any session (`parse_add`).
 
 use std::process::{Command, Output};
 
@@ -55,6 +55,8 @@ const REFUSED: &[(&[&str], &str)] = &[
     (&["device", "--user", "nobody", "admit", "CODE"], "drive enrol <invite>"),
     (&["device", "--user", "nobody", "admit", "CODE", "extra"], "drive enrol <invite>"),
     (&["device", "--user", "nobody", "admitx"], "usage: device add [--as NAME] [--blind|--cosigner]"),
+    (&["device", "--user", "nobody", "add", "--blind", "--cosigner"], "usage: device add [--as NAME] [--blind|--cosigner]"),
+    (&["device", "--user", "nobody", "add", "--blind", "--blind"], "usage: device add [--as NAME] [--blind|--cosigner]"),
     (&["pin", "--user", "nobody", "personal", "sometimes"], "usage: pin default"),
     (&["pin", "--user", "nobody", "frob"], "usage: pin default"),
 ];
