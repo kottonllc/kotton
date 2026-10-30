@@ -152,7 +152,8 @@ not the one above.
 
 RETIRED:
   sync now                 is `sync`, and still runs it
-  sync add|list|remove     gone: what this device keeps of a drive is `pin`
+  sync add|remove          gone: what this device keeps of a drive is `pin <drive>`
+  sync list                gone: what it keeps is listed by `pin list`
   sync [--push|--pull] <remote>
                            gone: `sync` syncs this device's drives
   sync --node <id>         gone: a device is not a sync target";
