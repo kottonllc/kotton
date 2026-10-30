@@ -97,7 +97,7 @@ pub struct Retired {
     /// The current verbs of the noun `now` names (not placeholders): a word after that noun
     /// that is one of these is a verb, not the argument a bare replacement needs.
     pub now_verbs: Vec<String>,
-    /// The placeholder entry of that noun's table (`<drive>` for `pin`), what a bare
+    /// The first current placeholder entry of that noun's table (`<drive>` for `pin`), what a bare
     /// replacement is said with; `None` when the noun has none.
     pub now_placeholder: Option<String>,
 }
@@ -152,7 +152,7 @@ pub fn retired(tables: &BTreeMap<String, Vec<(String, Is)>>) -> Vec<Retired> {
                 .unwrap_or_default();
             let now_placeholder = tables
                 .get(target)
-                .and_then(|t| t.iter().find(|(w, _)| w.starts_with('<')))
+                .and_then(|t| t.iter().find(|(w, is)| matches!(is, Is::Current) && w.starts_with('<')))
                 .map(|(w, _)| w.clone());
             out.push(Retired { noun: noun.clone(), word: word.clone(), now: now.clone(), gone, now_verbs, now_placeholder });
         }
@@ -622,6 +622,14 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
         bare.get_mut("pin").unwrap().retain(|(w, _)| !w.starts_with('<'));
         let got = found_with(&bare, "type `sync add`\n");
         assert!(got[0].contains("say `pin <argument>`"), "{got:#?}");
+        // A retired placeholder listed first (`sync`'s `<remote>` is gone) is not the advice: the
+        // first current one is.
+        let mut t = tables();
+        t.insert("vault".to_string(), vec![("<old>".to_string(), Is::Gone("pin".into())), ("<name>".to_string(), Is::Current)]);
+        t.insert("drive".to_string(), vec![("open".to_string(), Is::Gone("vault".into()))]);
+        let got = found_with(&t, "type `drive open`\n");
+        assert!(got[0].contains("say `vault <name>`"), "{got:#?}");
+        assert!(found_with(&t, "`drive open` is `vault <name>`\n").is_empty());
     }
 
     /// **A STILL_RUNS entry whose line was edited names the text it looked for**, and says to
@@ -714,6 +722,7 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
         for r in retired(&t) {
             let line = |cmd: &str| found_with(&t, &format!("`{}` is `{cmd}`\n", r.was()));
             let target = r.now.split_whitespace().next().unwrap();
+            // Independent of `Retired::bare_other`, on purpose: a second statement of the rule.
             let bare_other = r.now.split_whitespace().count() == 1 && target != r.noun;
             assert_eq!(line(&r.now).is_empty(), !bare_other, "{}: the replacement alone", r.was());
             assert!(line(&format!("{} <arg>", r.now)).is_empty(), "{}: with an argument", r.was());
