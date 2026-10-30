@@ -948,11 +948,26 @@ fn not_blind_refusal(posture: Posture) -> String {
 /// interpolates and the test holds — so no test has to pick a command out of
 /// prose, and a sentence that named a second `device add` would fail the test
 /// that counts them. Exhaustive for the same reason as [`not_blind_refusal`].
-fn adds_instead(posture: Posture) -> &'static str {
+///
+/// A posture `device add` names with a flag takes the flag from
+/// `DEVICE_ADD_POSTURE_FLAGS`, the table the shell's `parse_add` reads, looked up
+/// by posture: the hint has no spelling of its own to drift. The default posture
+/// is the bare line, and a gateway is `--gateway <code>`, a word with a value the
+/// table does not carry; `cargo xtask device-add-check` holds that this arm is the
+/// only `"device add --` literal outside tests under `core/`.
+fn adds_instead(posture: Posture) -> String {
+    use kotton_schemas::membership::DEVICE_ADD_POSTURE_FLAGS;
+    let flagged = |posture: Posture| {
+        let (flag, _) = DEVICE_ADD_POSTURE_FLAGS
+            .iter()
+            .find(|(_, p)| *p == posture)
+            .expect("`device add` names this posture with a flag of DEVICE_ADD_POSTURE_FLAGS");
+        format!("device add {flag}")
+    };
     match posture {
-        Posture::Full => "device add",
-        Posture::Cosigner => "device add --cosigner",
-        Posture::Gateway => "device add --gateway <code>",
+        Posture::Full => "device add".to_owned(),
+        Posture::Cosigner => flagged(posture),
+        Posture::Gateway => "device add --gateway <code>".to_owned(),
         Posture::BlindStorage => {
             unreachable!("admits_by_code admits the blind posture before asking for a refusal")
         }
@@ -2111,7 +2126,7 @@ mod admit_tests {
             let said = refused.to_string();
             // The command is data, held directly: it adds a device of this posture.
             let add = adds_instead(posture);
-            assert_eq!(device_add_parses(add), Some(posture), "{posture:?} adds by `{add}`");
+            assert_eq!(device_add_parses(&add), Some(posture), "{posture:?} adds by `{add}`");
             // And the sentence carries that command, backticked, and no other
             // `device add` — a second one would be a wider hint slipped in after
             // the right one, which is what this test exists to refuse.
@@ -2121,7 +2136,7 @@ mod admit_tests {
                 .step_by(2)
                 .filter(|quoted| quoted.starts_with("device add"))
                 .collect();
-            assert_eq!(adds, vec![add], "{posture:?} names exactly one `device add`: {said}");
+            assert_eq!(adds, vec![add.as_str()], "{posture:?} names exactly one `device add`: {said}");
             if posture == Posture::Gateway {
                 assert!(!said.contains("device join"), "a gateway does not join: {said}");
                 assert!(said.contains("prints the code"), "{said}");
