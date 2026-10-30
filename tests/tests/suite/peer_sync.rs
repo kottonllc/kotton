@@ -287,6 +287,8 @@ async fn sync_pushes_files_in_subdirectories() {
 /// segment carrying this device's whole-keeper claim (one index pack, one
 /// superblock; [`assert_first_pass`]). The claim is written once, so the second
 /// pass writes no new segment and pushes exactly the set the first did.
+/// Equal sets prove no new segment because pack ids and superblock suffixes are
+/// random (`kotton_store::packed`), so a new segment could not reuse a key.
 ///
 /// Note: content-equality deduplication (ETags / SHA-256) is a performance
 /// optimisation deferred to a later sprint. M28 uses simple LWW by key presence.

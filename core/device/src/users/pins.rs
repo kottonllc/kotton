@@ -40,6 +40,7 @@
 //! (kotton #158), so a device flipping whole, on demand and whole again in one
 //! second still says each. The cost is bounded: one small record per keeping
 //! device per drive, written only when the claim changes, never a walk.
+//!
 //! **What a claim weighs on a pass.** A claim is one changeset row — the
 //! device's DID and the drive's id — sealed into the history log by the pass
 //! that made it (`kotton_record::replication::log_records`). A pass whose only
