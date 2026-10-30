@@ -41,7 +41,7 @@
 //! [`crate::ipc::remote_request::RemoteRequest`] — the remote-eligible half — and
 //! forward, so a `Local`-tier variant is not something they can construct.
 
-use super::{ImportFormat, LockMode, SyncChangesetRow, SyncDirection};
+use super::{ImportFormat, LockMode, SyncDirection};
 use kotton_schemas::CapabilityGrant;
 use crate::peer::SessionPermissions;
 use crate::remote::RemoteBackend;
@@ -2646,19 +2646,6 @@ pub enum UserRequest {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         nsids: Vec<String>,
     },
-
-    /// Push a record changeset from a peer.
-    ///
-    /// The daemon applies the changeset via `merge_changeset` with LWW
-    /// semantics.  Only paired devices may send this request.
-    ApplyRecordChangeset {
-        /// Owner of the records.
-        user_id: String,
-        /// NSID of the schema all rows belong to.
-        nsid: String,
-        /// Rows to merge.
-        rows: Vec<SyncChangesetRow>,
-    },
 }
 
 impl UserRequest {
@@ -3126,7 +3113,6 @@ impl UserRequest {
             Self::WindowList => "WindowList",
             Self::SyncAvailable { .. } => "SyncAvailable",
             Self::RecordSyncAvailable { .. } => "RecordSyncAvailable",
-            Self::ApplyRecordChangeset { .. } => "ApplyRecordChangeset",
             Self::VfsWatch { .. } => "VfsWatch",
             Self::DaemonSidecars => "DaemonSidecars",
             Self::IpcSessions => "IpcSessions",
@@ -3164,7 +3150,6 @@ pub const REMOTE_ELIGIBLE: &[&str] = &[
     "AppMessage",
     "AppUninstall",
     "AppVerify",
-    "ApplyRecordChangeset",
     "Authenticate",
     "BrowserFrame",
     "BrowserOutbound",
@@ -3895,7 +3880,6 @@ impl UserRequest {
             | Self::WindowList { .. }
             | Self::SyncAvailable { .. }
             | Self::RecordSyncAvailable { .. }
-            | Self::ApplyRecordChangeset { .. }
             | Self::VfsWatch { .. }
             | Self::SyncStatus { .. } => Remote,
         }
@@ -4322,6 +4306,32 @@ mod trust_origin_tests {
         let now = UserRequest::SyncDrives { user_id: "alice".into() };
         let bytes = serde_json::to_value(&now).unwrap();
         assert_eq!(bytes, serde_json::json!({ "SyncDrives": { "user_id": "alice" } }));
+    }
+
+    /// **No request carries plaintext record rows for a peer to merge** (#173).
+    /// Records move between devices as sealed segments of the record log; the
+    /// verb that pushed rows in the clear for a device to merge
+    /// (`ApplyRecordChangeset`) is retired, so a paired peer's or a vault's
+    /// request by that name does not decode — as a `UserRequest`, which is what
+    /// kuserd's and kvaultd's peer acceptors decode, nor as a `RemoteRequest`.
+    #[test]
+    fn plaintext_record_rows_are_not_a_request() {
+        use crate::ipc::remote_request::RemoteRequest;
+        let pushed = serde_json::json!({ "ApplyRecordChangeset": {
+            "user_id": "alice",
+            "nsid": "com.test.notes",
+            "rows": [{
+                "id": "00000000-0000-4000-8000-000000000000",
+                "schema_nsid": "com.test.notes",
+                "body": { "text": "planted" },
+                "updated_at": 1,
+                "deleted_at": null,
+            }],
+        } });
+        let refused = serde_json::from_value::<UserRequest>(pushed.clone()).expect_err("rows still decode as a request");
+        assert!(refused.to_string().contains("unknown variant `ApplyRecordChangeset`"), "{refused}");
+        assert!(serde_json::from_value::<RemoteRequest>(pushed.clone()).is_err(), "{pushed} still decodes remotely");
+        assert!(!REMOTE_ELIGIBLE.contains(&"ApplyRecordChangeset"));
     }
 
     /// **No request makes a node a drive on the caller's word** (#80). `PeerAdd`

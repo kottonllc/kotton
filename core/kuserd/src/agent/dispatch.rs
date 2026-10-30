@@ -3267,7 +3267,6 @@ pub(super) async fn handle_request(
         // cannot send them.
         UserRequest::SyncAvailable { .. }
         | UserRequest::RecordSyncAvailable { .. }
-        | UserRequest::ApplyRecordChangeset { .. }
         | UserRequest::FrostSignRound { .. } => Ok(UserResponse::Error {
             message: "sync notifications are only accepted over peer connections".to_string(),
         }),

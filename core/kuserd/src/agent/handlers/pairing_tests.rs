@@ -411,7 +411,7 @@ mod enrollment_tests {
     ///
     /// `paired_nodes` is what `peer_standing` reads to answer
     /// `PeerStanding::Paired`, and that standing serves `ReadFile`,
-    /// `ReadSealed`, `ListSealed`, `ApplyRecordChangeset` and `RecoveryFetch`.
+    /// `ReadSealed`, `ListSealed` and `RecoveryFetch`.
     /// A contact holding it would contradict *pairing exchanges authenticated
     /// public keys and nothing else* — for a party who is, by construction, on
     /// another machine.

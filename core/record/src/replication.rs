@@ -11,6 +11,18 @@
 //! hand them to the mount as opaque payloads, and read back what the log
 //! carries — which is what lets replication reach a blind node that can never
 //! read a byte of it.
+//!
+//! **This is the one path a record takes between devices.** `kotton_sync`'s
+//! engine calls [`log_records`] before a push and [`apply_record_segments`]
+//! after a pull; nothing else hands one device's rows to another's
+//! `merge_changeset`. There was a second path, a peer verb that carried
+//! plaintext rows to a paired device for it to merge (`ApplyRecordChangeset`),
+//! and it was retired (kotton #173): nothing in the tree sent it, its rows had
+//! no `revision`, so a same-second delete through it lost to the write, and a
+//! verb that lets a peer write into the person's records in the clear is reach
+//! nobody used. Carrying `revision` on it would have extended that reach
+//! rather than removed it. A new way for records to move is a change to this
+//! module, sealed like the rest of the log, not a verb beside it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;

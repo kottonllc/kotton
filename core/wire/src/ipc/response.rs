@@ -1265,9 +1265,6 @@ pub enum UserResponse {
     /// notification and has woken its sync engine.
     SyncAck,
 
-    /// The daemon has successfully applied an `ApplyRecordChangeset`.
-    ChangesetApplied,
-
     /// Reply to a [`crate::UserRequest::FrostSignRound`] — one round of a
     /// distributed FROST signing ceremony. `payload` is the JSON-serialised
     /// runtime `FrostRoundReply` (a commitment for round 1, a signature share for
