@@ -314,6 +314,30 @@ pub trait DeviceUsers {
     async fn rebuild_storage_mounts(&self, user_rt: &UserStore) -> anyhow::Result<()>;
 }
 
+/// [`DeviceUsers::user_cek_domain_id`] with the keychain as an argument rather
+/// than the machine, for a caller lent only what it reads ([`files::StoreHost`]):
+/// the live store's CEK when one is loaded, and the keychain's only when none is.
+pub fn cek_domain_id(
+    secrets: &(dyn kotton_sys::secret::SecretsStore + Send + Sync),
+    user_id: &str,
+    loaded: Option<&kotton_store::runtime::user::UserStore>,
+) -> Option<String> {
+    let cek = match loaded {
+        Some(store) => store.sealing_keys().map(|k| *k.cek),
+        // A CEK the store could not read advertises no domain, the same
+        // answer as none: this only names a domain to a peer, and writes
+        // nothing. Logged so the unreadable store is not silent.
+        None => match kotton_identity::provisioning::resolve_operational_cek(secrets, user_id) {
+            Ok(cek) => cek,
+            Err(e) => {
+                tracing::warn!(%user_id, "no CEK domain advertised: {e:#}");
+                None
+            }
+        },
+    }?;
+    Some(hex::encode(kotton_crypto::kdf::derive_cek_domain_id(&cek)))
+}
+
 #[async_trait::async_trait]
 impl DeviceUsers for DeviceRuntime {
     /// Provision a user that this device **joined** rather than created:
@@ -471,12 +495,7 @@ impl DeviceUsers for DeviceRuntime {
     /// across key rotation: rotation changes the authoritative key, never the
     /// AID.
     fn user_aid(&self, user_id: &str) -> Option<String> {
-        let registry = storage::load_users(&self.base_dir().join("system")).ok()?;
-        registry
-            .users
-            .iter()
-            .find(|u| u.user_id == user_id)
-            .map(|u| u.did.clone())
+        admission::aid_for_user(self.base_dir(), user_id)
     }
 
     /// The user's current authoritative Ed25519 key, by replaying their KEL.
@@ -738,22 +757,7 @@ impl DeviceUsers for DeviceRuntime {
         // is likewise authoritative: it has no domain, whatever a stale
         // keychain entry claims. The keychain is consulted only when no
         // runtime is loaded at all.
-        let cek = match loaded {
-            Some(store) => store.sealing_keys().map(|k| *k.cek),
-            // A CEK the store could not read advertises no domain, the same
-            // answer as none: this only names a domain to a peer, and writes
-            // nothing. Logged so the unreadable store is not silent.
-            None => match kotton_identity::provisioning::resolve_operational_cek(self.secrets(), user_id) {
-                Ok(cek) => cek,
-                Err(e) => {
-                    tracing::warn!(%user_id, "no CEK domain advertised: {e:#}");
-                    None
-                }
-            },
-        }?;
-        Some(hex::encode(
-            kotton_crypto::kdf::derive_cek_domain_id(&cek),
-        ))
+        cek_domain_id(self.secrets(), user_id, loaded)
     }
 
 

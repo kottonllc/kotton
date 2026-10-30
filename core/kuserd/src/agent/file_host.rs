@@ -23,49 +23,26 @@ use kotton_device::users::DeviceUsers as _;
 use kotton_device::DeviceRuntime;
 use kotton_diag::service::EventBus;
 use kotton_store::runtime::user::UserStore;
-use kotton_sys::secret::prefix_key;
+use kotton_sys::secret::{prefix_key, SecretsStore};
 use kotton_sys::store::SyncableStore;
 use std::io;
 use std::sync::Arc;
 
-/// The machine, presented as the four things the file handlers need.
-///
-/// Generic over where a resident person's store is found, because that is what
-/// decides its reach. Over the sync host (`R = dyn SyncHost`, the default) it
-/// is a [`FileHost`]: the local door's mount verbs replicate, and replication
-/// reaches the record stores. Over the residency registry alone
-/// (`R = UserRegistry`, [`peer_store_host`]) it is a [`StoreHost`] and nothing
-/// more — what a peer's file and sealed verbs are served with, and why the
-/// peer path holds no sync host (kotton #222).
-pub struct DaemonFileHost<'a, R: ?Sized = dyn kotton_sync::SyncHost> {
+/// The machine, presented as the four things the file handlers need: the
+/// local door's host, over the sync host, so its mount verbs replicate — and
+/// replication reaches the record stores. A peer's file and sealed verbs are
+/// served with [`PeerStoreHost`] instead, which has neither the machine nor a
+/// sync host behind it (kotton #222, #242).
+pub struct DaemonFileHost<'a> {
     pub runtime: &'a DeviceRuntime,
-    /// Where a resident person's store is found. For the full host, the host's
-    /// live per-user resources — which users are resident, and which record
-    /// stores are open: the daemon's own bookkeeping, and the reason
+    /// The host's live per-user resources — which users are resident, and which
+    /// record stores are open. The daemon's own bookkeeping, and the reason
     /// `user_store` can be answered here and not in the domain.
     ///
     /// One seam rather than the two locator types it used to name, for the same
     /// reason the sync engine stopped naming them: this file is the daemon's side
     /// of the boundary, and `sync_mount_with_records` is on the domain's.
-    pub resources: &'a R,
-}
-
-/// Where a resident person's store is found: the one question [`StoreHost`]
-/// asks of the daemon's bookkeeping.
-pub trait Residents: Send + Sync {
-    fn store_of(&self, user_id: &str) -> Option<Arc<UserStore>>;
-}
-
-impl Residents for dyn kotton_sync::SyncHost {
-    fn store_of(&self, user_id: &str) -> Option<Arc<UserStore>> {
-        self.user_store(user_id)
-    }
-}
-
-impl Residents for crate::residency::UserRegistry {
-    fn store_of(&self, user_id: &str) -> Option<Arc<UserStore>> {
-        self.get(user_id)
-    }
+    pub resources: &'a dyn kotton_sync::SyncHost,
 }
 
 /// Where a remote's credentials live in the keychain.
@@ -76,7 +53,7 @@ fn credentials_key(user_id: &str, name: &str) -> String {
     prefix_key(&format!("remote.{user_id}.{name}"))
 }
 
-impl<R: Residents + ?Sized> StoreHost for DaemonFileHost<'_, R> {
+impl StoreHost for DaemonFileHost<'_> {
     fn events(&self) -> &Arc<EventBus> {
         self.runtime.event_bus()
     }
@@ -100,7 +77,7 @@ impl<R: Residents + ?Sized> StoreHost for DaemonFileHost<'_, R> {
     }
 
     fn user_store(&self, user_id: &str) -> Option<Arc<UserStore>> {
-        self.resources.store_of(user_id)
+        self.resources.user_store(user_id)
     }
 }
 
@@ -158,12 +135,56 @@ pub fn file_host<'a>(
     DaemonFileHost { runtime, resources }
 }
 
-/// Build the host a peer's file and sealed verbs are served with: the person's
-/// resident store and the mount's key domain, and no sync host behind it
-/// ([`DaemonFileHost`]'s doc).
-pub fn peer_store_host<'a>(
-    runtime: &'a DeviceRuntime,
-    users: &'a crate::residency::UserRegistry,
-) -> DaemonFileHost<'a, crate::residency::UserRegistry> {
-    DaemonFileHost { runtime, resources: users }
+/// The host a peer's file and sealed verbs are served with: the event bus, a
+/// mount's key domain and the node's, and the person's resident store — a
+/// [`StoreHost`] and nothing more (kotton #222, #242).
+///
+/// Not the machine: it holds the event bus, the keychain, and the residency
+/// registry, each private, and reads the keychain only under the two labels a
+/// [`StoreHost`] names — a mount's pinned key domain, and the operational CEK
+/// whose domain this node advertises when the person's store is not resident.
+/// The resident store fetches a pack it does not keep through the
+/// `PackSource` the registry lent it (`residency::UserRegistry::lend_packs`),
+/// whose one verb is fetching a sealed pack by key; no sync host is behind
+/// this, so no record store is reachable through it.
+pub struct PeerStoreHost {
+    events: Arc<EventBus>,
+    secrets: Arc<dyn SecretsStore + Send + Sync>,
+    users: crate::residency::UserRegistry,
+}
+
+impl PeerStoreHost {
+    pub fn new(
+        events: Arc<EventBus>,
+        secrets: Arc<dyn SecretsStore + Send + Sync>,
+        users: crate::residency::UserRegistry,
+    ) -> Self {
+        Self { events, secrets, users }
+    }
+}
+
+impl StoreHost for PeerStoreHost {
+    fn events(&self) -> &Arc<EventBus> {
+        &self.events
+    }
+
+    fn mount_domain(&self, user_id: &str, mount: &str) -> io::Result<Option<String>> {
+        self.secrets
+            .get_secret(&kdf_labels::sealed_mount_domain(user_id, mount))
+            .map_err(io::Error::other)
+    }
+
+    fn pin_mount_domain(&self, user_id: &str, mount: &str, domain: &str) -> io::Result<()> {
+        self.secrets
+            .set_secret(&kdf_labels::sealed_mount_domain(user_id, mount), domain)
+            .map_err(io::Error::other)
+    }
+
+    fn cek_domain_id(&self, user_id: &str, store: Option<&UserStore>) -> Option<String> {
+        kotton_device::users::cek_domain_id(self.secrets.as_ref(), user_id, store)
+    }
+
+    fn user_store(&self, user_id: &str) -> Option<Arc<UserStore>> {
+        self.users.get(user_id)
+    }
 }
