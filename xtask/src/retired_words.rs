@@ -3,8 +3,8 @@
 //! point from it to the word that replaced it.
 //!
 //! A noun's verb table (`kotton_shell::Command::verbs`) is where a word is retired: `sync now`
-//! is kept as an alias of `sync`, `sync add` is gone for `pin`, `device admit` is kept as an
-//! alias of `drive enrol`. The tree then runs or refuses the old word by name, and
+//! is kept as an alias of `sync`, `sync add` is gone for `pin`, `device admit` is gone for
+//! `drive enrol`. The tree then runs or refuses the old word by name, and
 //! `verb-check` holds that. What the table cannot hold is the copy written before the
 //! retirement: a hint, a help line, an error that still tells a person to type the old word.
 //! That copy runs (an alias answers it, with a line saying it is deprecated) or exits 2 (a
