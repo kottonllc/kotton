@@ -31,11 +31,18 @@
 //!
 //! **What it names.** A retired word is the noun and the word, whole (`sync now`, `kotton sync
 //! now`, `sync add|list|remove`; not `async now`, `sync nowhere` or `sync now-ish`). A
-//! placeholder (`sync <remote>`) and the bare noun are not words a sentence can name.
+//! placeholder (`sync <remote>`) and the bare noun are not words a sentence can name. Case does
+//! not matter (`Device admit` opens a sentence), and the gap between noun and word is any run
+//! of Unicode whitespace (a no-break space, a tab), as a person reads it.
 //!
 //! **What may name one.** A line that points from it to its replacement: the line also holds a
 //! backticked command that starts with the word the table names in its place (`` `sync now`
-//! is `sync` ``, `` `device admit` was the name of `drive enrol <invite>` ``). That is the only
+//! is `sync` ``, `` `device admit` was the name of `drive enrol <invite>` ``). The command must be
+//! the replacement whole: `drive enrol` for `device admit`, `pin list` for `sync list`. Where
+//! the replacement is a bare noun the retired word's own (`sync now` is `sync`), any command of
+//! that noun counts, since the noun alone is the answer (`sync <remote>` is one). Where it is a
+//! different bare noun (`sync add` is `pin`), the command must carry an argument
+//! (`pin <drive>`): the noun alone leaves the reader to find its verb. That is the only
 //! reason to say a retired word, and it is how the help and the reference say it. And the
 //! first argument of the shell's two helpers that answer a retired word ([`HELPERS`]:
 //! `deprecated(was, now)` and `retired(was, now)`), which print the replacement beside it.
@@ -43,9 +50,10 @@
 //! a word, so it is not read as one.
 //!
 //! **What it does not read.** [`NOT_READ`]: the files whose subject is the retired words
-//! themselves. And [`STILL_RUNS`]: a file that names a retired word because it still runs it,
-//! each with the issue that moves it; an entry whose file no longer names its word is refused,
-//! so the list only shrinks.
+//! themselves. And [`STILL_RUNS`]: a printed line that names a retired word because the
+//! code beside it still runs it, each with the issue that moves it. An entry is the line's exact
+//! text, not its file, so a new literal saying the word in the same file is read; an entry whose
+//! line is gone is refused, so the list only shrinks.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -65,11 +73,13 @@ pub const NOT_READ: &[(&str, &str)] = &[
     ("xtask/src/retired_words.rs", "its tests plant the words"),
 ];
 
-/// A file that names a retired word because it still runs it, the word, and the issue that
-/// moves it off the word.
-pub const STILL_RUNS: &[(&str, &str, &str)] = &[
-    ("xtask/src/main.rs", "sync add", "#178: `demo::sync` still drives `sync add <path> --to <node>`"),
-    ("xtask/src/main.rs", "sync now", "#178: `demo::sync` still drives `sync now`"),
+/// A printed line that names a retired word because the code beside it still runs it: the file,
+/// the word, the line's exact text (what the literal prints, trimmed), and the issue that moves
+/// it off the word. Keyed on the line and not the file, so a new literal saying the word in the
+/// same file is read.
+pub const STILL_RUNS: &[(&str, &str, &str, &str)] = &[
+    ("xtask/src/main.rs", "sync add", "sync add failed:", "#178: `demo::sync` still drives `sync add <path> --to <node>`"),
+    ("xtask/src/main.rs", "sync now", "sync now failed:", "#178: `demo::sync` still drives `sync now`"),
 ];
 
 /// A word a table retired: the noun, the word after it, what replaced it, and how it is kept.
@@ -123,9 +133,10 @@ pub fn findings(root: &Path, retired: &[Retired]) -> Vec<String> {
             text.lines().enumerate().map(|(i, l)| (l.chars().collect(), vec![i + 1; l.chars().count()])).collect()
         };
         for (chars, at) in lines {
+            let line_text: String = chars.iter().collect();
             for (i, r) in unpointed(&chars, retired) {
                 let was = r.was();
-                if let Some(k) = STILL_RUNS.iter().position(|(p, w, _)| *p == rel && *w == was) {
+                if let Some(k) = STILL_RUNS.iter().position(|(p, w, l, _)| *p == rel && *w == was && *l == line_text.trim()) {
                     used[k] = true;
                     continue;
                 }
@@ -138,7 +149,7 @@ pub fn findings(root: &Path, retired: &[Retired]) -> Vec<String> {
             }
         }
     }
-    for (k, (path, word, why)) in STILL_RUNS.iter().enumerate() {
+    for (k, (path, word, _, why)) in STILL_RUNS.iter().enumerate() {
         if !used[k] {
             out.push(format!("{path}: listed as still running `{word}` ({why}), and it no longer says it: drop the entry"));
         }
@@ -150,22 +161,32 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-'
 }
 
+/// `c` lower-cased, one char to one char (a char whose lower case is longer keeps its first).
+fn lower(c: &[char]) -> Vec<char> {
+    c.iter().map(|c| c.to_lowercase().next().unwrap_or(*c)).collect()
+}
+
+/// Whether `chars` holds `needle` (already lower-cased) at `at`, in any case.
+fn matches_at(chars: &[char], at: usize, needle: &[char]) -> bool {
+    chars.get(at..at + needle.len()).is_some_and(|w| lower(w) == needle)
+}
+
 /// Each retired word `chars` names whole, as the index it starts at.
 fn named(chars: &[char], retired: &[Retired]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     for (k, r) in retired.iter().enumerate() {
-        let noun: Vec<char> = r.noun.chars().collect();
-        let word: Vec<char> = r.word.chars().collect();
+        let noun = lower(&r.noun.chars().collect::<Vec<_>>());
+        let word = lower(&r.word.chars().collect::<Vec<_>>());
         for i in 0..chars.len() {
-            if (i > 0 && is_word(chars[i - 1])) || chars.get(i..i + noun.len()) != Some(&noun[..]) {
+            if (i > 0 && is_word(chars[i - 1])) || !matches_at(chars, i, &noun) {
                 continue;
             }
             let mut j = i + noun.len();
             let gap = j;
-            while chars.get(j) == Some(&' ') {
+            while chars.get(j).is_some_and(|c| c.is_whitespace()) {
                 j += 1;
             }
-            if j == gap || chars.get(j..j + word.len()) != Some(&word[..]) {
+            if j == gap || !matches_at(chars, j, &word) {
                 continue;
             }
             if chars.get(j + word.len()).copied().is_some_and(is_word) {
@@ -204,8 +225,11 @@ fn unpointed<'a>(chars: &[char], retired: &'a [Retired]) -> Vec<(usize, &'a Reti
         .into_iter()
         .map(|(at, k)| (at, &retired[k]))
         .filter(|(_, r)| {
-            let now: Vec<&str> = r.now.split_whitespace().collect();
-            !commands.iter().any(|c| c.len() >= now.len() && c.iter().zip(&now).all(|(a, b)| a == b))
+            let now: Vec<String> = r.now.split_whitespace().map(str::to_lowercase).collect();
+            // A replacement that is another noun, bare (`sync add` -> `pin`), is the noun
+            // whose verb the reader must still pick: the command names it with an argument.
+            let need = if now.len() == 1 && now[0] != r.noun.to_lowercase() { 2 } else { now.len() };
+            !commands.iter().any(|c| c.len() >= need && c.iter().zip(&now).all(|(a, b)| a.to_lowercase() == *b))
         })
         .collect();
     out.sort_by_key(|(at, _)| *at);
@@ -282,7 +306,7 @@ fn printed_literal(c: &[char], at: usize, mut line: usize) -> Vec<Printed> {
         if c[k] == '\\' {
             match c.get(k + 1) {
                 // A line continuation: the newline and the next line's leading space print nothing.
-                Some('\n') => {
+                Some('\n') | Some('\r') if c.get(k + 1) == Some(&'\n') || c.get(k + 2) == Some(&'\n') => {
                     k += 1;
                     while k < c.len() && c[k].is_whitespace() {
                         if c[k] == '\n' {
@@ -345,7 +369,7 @@ mod tests {
         let main = dir.path().join("xtask/src/main.rs");
         if !main.exists() {
             std::fs::create_dir_all(main.parent().unwrap()).unwrap();
-            std::fs::write(main, "fn d() { bail!(\"sync add failed\"); bail!(\"sync now failed\"); }\n").unwrap();
+            std::fs::write(main, "fn d() { bail!(\"sync add failed:\\n x\"); bail!(\"sync now failed:\\n x\"); }\n").unwrap();
         }
         dir
     }
@@ -410,7 +434,7 @@ fn f() {
         let src = "\
 const H: &str = \"\\
   sync now                 is `sync`, and still runs it
-  sync add|list|remove     gone: what this device keeps of a drive is `pin`
+  sync add|list|remove     gone: what this device keeps of a drive is `pin <drive>`
 \";
 const D: &str = \"A vault's invite is `drive enrol \\
      <invite>` (`device admit` was its name, and still runs it).\";
@@ -475,9 +499,62 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
     #[test]
     fn the_files_not_read_and_a_stale_still_runs_entry() {
         assert_eq!(found(&[("xtask/src/verb_check.rs", "const T: &str = \"| `sync now` | `sync` |\";\n")]), Vec::<String>::new());
-        let got = found(&[("xtask/src/main.rs", "fn d() { bail!(\"sync now failed\"); }\n")]);
+        let got = found(&[("xtask/src/main.rs", "fn d() { bail!(\"sync now failed:\\n x\"); }\n")]);
         assert_eq!(got.len(), 1, "{got:#?}");
         assert!(got[0].starts_with("xtask/src/main.rs: listed as still running `sync add`"), "{got:#?}");
+    }
+
+    /// **Case and whitespace are not a way round**: a sentence-start capital, a no-break space
+    /// and a tab between noun and word are the words, and are refused.
+    #[test]
+    fn case_and_any_whitespace_gap_are_the_word() {
+        let src = "const A: &[&str] = &[\"Device admit <invite>\", \"sync\u{a0}now\", \"SYNC\\u{2003}Add\", \"sync\tremove\"];\n";
+        let got = found(&[("client/cli/src/x.rs", src)]);
+        assert_eq!(got.len(), 3, "{got:#?}");
+        let page = found(&[("README.md", "Sync\tnow, then\nDevice admit it.\nSync  Now\n")]);
+        assert_eq!(page.len(), 3, "{page:#?}");
+        assert!(page[0].starts_with("README.md:1: says `sync now`"), "{page:#?}");
+        // Whole-word still holds in any case.
+        assert_eq!(found(&[("README.md", "Async now, SYNC NOWHERE\n")]), Vec::<String>::new());
+    }
+
+    /// **A CRLF file prints as an LF one**: `\` before `\r\n` joins the lines, so noun and word
+    /// across the continuation are one line.
+    #[test]
+    fn a_crlf_continuation_joins_the_lines() {
+        let src = "const A: &str = \"type `sync \\\r\n     now`\";\nconst B: &str = \"`sync \\\r\n  now` is `sync`\";\n";
+        assert!(src.contains("\\\r\n"));
+        let got = found(&[("client/cli/src/x.rs", src)]);
+        assert_eq!(got.len(), 1, "{got:#?}");
+        assert!(got[0].starts_with("client/cli/src/x.rs:1: says `sync now`"), "{got:#?}");
+    }
+
+    /// **STILL_RUNS exempts a line, not a file**: the two `demo::sync` lines pass; a new
+    /// literal in the same file saying either word is refused.
+    #[test]
+    fn still_runs_is_the_line_not_the_file() {
+        let main = "fn d() { bail!(\"sync add failed:\\n x\"); bail!(\"sync now failed:\\n x\"); }\nfn n() { hint(\"run sync add first\"); hint(\"then `sync now`\"); }\n";
+        let got = found(&[("xtask/src/main.rs", main)]);
+        assert_eq!(got.len(), 2, "{got:#?}");
+        assert!(got.iter().all(|g| g.starts_with("xtask/src/main.rs:2: says")), "{got:#?}");
+    }
+
+    /// **The pointer is the replacement whole.** "run `sync now` or `sync <remote>`" passes
+    /// (the replacement is the bare noun); a `sync add` line naming only `pin` is refused, and
+    /// one naming `pin <drive>` passes; a verbed replacement needs its verb.
+    #[test]
+    fn the_pointer_is_the_replacement_whole() {
+        let ok = |s: &str| found(&[("README.md", s)]);
+        assert_eq!(ok("run `sync now` or `sync <remote>`\n"), Vec::<String>::new());
+        assert_eq!(ok("`sync add` is `pin <drive> whole`\n"), Vec::<String>::new());
+        assert_eq!(ok("`sync add` is `pin <drive>`\n"), Vec::<String>::new());
+        assert_eq!(ok("`sync add` is `kotton pin <drive> on-demand`\n").len(), 0);
+        assert_eq!(ok("`sync add` is `pin`\n").len(), 1);
+        assert_eq!(ok("`sync add` is `Pin`\n").len(), 1);
+        // `sync list` -> `pin list`; `drive enrol` for `device admit`.
+        assert_eq!(ok("`sync list` is `pin`\n").len(), 1);
+        assert_eq!(ok("`device admit` is `drive`\n").len(), 1);
+        assert_eq!(ok("`device admit` is `drive enrol <invite>`\n").len(), 0);
     }
 
     /// **Every path and helper named here is one the tree holds**: a moved file would read as
@@ -485,7 +562,7 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
     #[test]
     fn every_named_path_and_helper_exists() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask has a parent");
-        for path in NOT_READ.iter().map(|(p, _)| *p).chain(STILL_RUNS.iter().map(|(p, _, _)| *p)) {
+        for path in NOT_READ.iter().map(|(p, _)| *p).chain(STILL_RUNS.iter().map(|(p, _, _, _)| *p)) {
             assert!(root.join(path).is_file(), "{path} is not in this tree");
         }
         let shell = std::fs::read_to_string(root.join("client/shell/src/commands/mod.rs")).unwrap();
