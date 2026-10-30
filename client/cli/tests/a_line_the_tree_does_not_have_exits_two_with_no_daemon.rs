@@ -8,9 +8,10 @@
 //! no daemon, no session and no active identity of the machine it runs on; `--user nobody`
 //! names an identity nothing here holds.
 //!
-//! `device` is here for one word: `device admit`, which the command-tree decision's table
-//! retires for `drive enrol`, and which was the one retired word that still needed a
-//! daemon to say so (it exited 1 with "connect"). The rest of `device` is not the tree's yet.
+//! `device` is here for two kinds of word: `device admit`, which the command-tree decision's
+//! table retires for `drive enrol`, and a word `device` never had (`admitx`), both of which
+//! needed a daemon to be refused (exit 1 with "connect"). The rest of `device` is not the
+//! tree's yet.
 
 use std::process::{Command, Output};
 
@@ -53,6 +54,7 @@ const REFUSED: &[(&[&str], &str)] = &[
     (&["device", "--user", "nobody", "admit", "--blind"], "drive enrol <invite>"),
     (&["device", "--user", "nobody", "admit", "CODE"], "drive enrol <invite>"),
     (&["device", "--user", "nobody", "admit", "CODE", "extra"], "drive enrol <invite>"),
+    (&["device", "--user", "nobody", "admitx"], "usage: device add [--as NAME] [--blind|--cosigner]"),
     (&["pin", "--user", "nobody", "personal", "sometimes"], "usage: pin default"),
     (&["pin", "--user", "nobody", "frob"], "usage: pin default"),
 ];

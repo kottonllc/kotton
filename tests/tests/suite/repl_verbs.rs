@@ -448,3 +448,31 @@ async fn device_admit_at_the_repl_is_refused_naming_drive_enrol_with_exit_two() 
         );
     }
 }
+
+/// A `device` word the noun does not have, typed at the REPL, is the usage line with exit 2
+/// through the registry's `execute` (the REPL's door; the clap door's sessionless one is held
+/// by the kotton-cli door test): the same refusal, the same code.
+#[tokio::test]
+async fn an_unknown_device_word_at_the_repl_is_the_usage_line_with_exit_two() {
+    let mut env = TestEnv::spawn().await;
+    env.client.create_user(USER, TEST_PASSPHRASE).await.expect("create_user");
+    let token = env.client.session_token.clone().expect("create_user binds a session");
+    let mut client = KottonClient::connect_to(env.endpoint.clone()).await.expect("connect");
+    client.authenticate(&token).await.expect("authenticate as the REPL's identity");
+    let mut state = ShellState::new(USER.to_string(), Arc::new(Mutex::new(client)));
+
+    let executor = kotton_cli::bridge::repl_executor();
+    for line in [&["admitx"][..], &["frob", "--as", "x"], &[]] {
+        let words: Vec<String> = line.iter().map(|w| w.to_string()).collect();
+        let out = executor
+            .registry()
+            .execute("device", &words, &mut state)
+            .await
+            .unwrap_or_else(|e| panic!("device {line:?}: {e:#}"));
+        assert!(matches!(out.exit_code, ExitCode::Code(2)), "`device {line:?}` did not exit 2");
+        let [Out::Fail { what, .. }] = out.out.as_slice() else {
+            panic!("`device {line:?}`: not one failure: {:?}", out.out)
+        };
+        assert!(what.starts_with("usage: device add [--as NAME] [--blind|--cosigner]"), "{line:?}: {what}");
+    }
+}
