@@ -2072,28 +2072,32 @@ mod admit_tests {
         }
     }
 
-    /// The posture `device add` gives a device for these words, read the way
-    /// `DeviceCommand::add` (`client/shell/src/commands/device.rs`) reads them:
-    /// `--browser` is not a device at all, `--gateway` with a value admits a
-    /// gateway, then `--blind`, then `--cosigner`, and otherwise Full. Anything
-    /// that is not `device add` parses as no posture. A mirror, since this crate
-    /// cannot reach the shell's; it is kept to the four lines that decide.
+    /// The posture a hint's `device add` words give, by the shape this crate owns: `device
+    /// add` and then nothing (the default posture), exactly one flag of
+    /// `DEVICE_ADD_POSTURE_FLAGS` (the shell's table, read from `kotton-schemas`, not copied), or
+    /// `--gateway <value>` (a gateway). Anything else, including two posture flags, which the
+    /// shell's `parse_add` refuses, is `None`. This holds the shape of the hints, not the
+    /// shell's full grammar (`--as`, `--browser`, ordering): this crate cannot reach the shell
+    /// and a second copy of that grammar would be a second reader to drift.
     fn device_add_parses(command: &str) -> Option<Posture> {
+        use kotton_schemas::membership::{DEVICE_ADD_DEFAULT_POSTURE, DEVICE_ADD_POSTURE_FLAGS};
         let words: Vec<&str> = command.split_whitespace().collect();
-        let args = words.strip_prefix(&["device", "add"])?;
-        if args.contains(&"--browser") {
-            return None;
+        match words.strip_prefix(&["device", "add"])? {
+            [] => Some(DEVICE_ADD_DEFAULT_POSTURE),
+            ["--gateway", _code] => Some(Posture::Gateway),
+            [flag] => DEVICE_ADD_POSTURE_FLAGS.iter().find(|(f, _)| f == flag).map(|(_, p)| *p),
+            _ => None,
         }
-        if let Some(at) = args.iter().position(|a| *a == "--gateway") {
-            return args.get(at + 1).map(|_| Posture::Gateway);
-        }
-        Some(if args.contains(&"--blind") {
-            Posture::BlindStorage
-        } else if args.contains(&"--cosigner") {
-            Posture::Cosigner
-        } else {
-            Posture::Full
-        })
+    }
+
+    /// The hints' reader refuses what the shell's refuses: two posture flags are no posture.
+    #[test]
+    fn two_posture_flags_are_no_posture_to_the_hint_reader() {
+        assert_eq!(device_add_parses("device add --blind --cosigner"), None);
+        assert_eq!(device_add_parses("device add --cosigner --blind"), None);
+        assert_eq!(device_add_parses("device add --blind --blind"), None);
+        assert_eq!(device_add_parses("device add --browser"), None);
+        assert_eq!(device_add_parses("device add --cosigner"), Some(Posture::Cosigner));
     }
 
     /// Every posture the admit refuses is handed a `device add` that adds a
