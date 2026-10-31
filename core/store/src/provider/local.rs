@@ -42,12 +42,22 @@ impl LocalObjectStorage {
     /// **A key resolves under the mount root or not at all.** A `..`
     /// component, or a host prefix such as a Windows drive, is refused: it
     /// would name a path outside the root, and no key the store writes has
-    /// one. Keys from outside are admitted before they get here
-    /// ([`crate::StorageKey`], kotton #265); this is the last line under every
-    /// caller, including those that build a key from something a peer wrote
-    /// (a pack id in a manifest). A leading `/` and a `.` component name
-    /// nothing outside the root and are read past, as the logical paths the
-    /// VFS hands this store may carry them.
+    /// one. Keys from outside are admitted before they get here: a sync
+    /// pass's listings ([`crate::StorageKey`], kotton #265), and a pack id a
+    /// manifest or superblock names, at decode ([`crate::packed::PackId`],
+    /// kotton #273), so neither reaches this refusal any more.
+    ///
+    /// What it still stands in for: `UserStore::read_raw_local_object`, which
+    /// reads the path a guest re-wrap names on a store of its own, past a
+    /// trimmed leading `/` and admitted by nothing else. That is the reach to
+    /// close before this refusal can go. Drive move (kotton #274) writes
+    /// through a vault's `write_sealed`, which admits, and `Sealed::list`
+    /// (kotton #275) collapses `..` before it lists, so neither reaches here
+    /// with one; each is a rewrite or a silence to close at its own door.
+    ///
+    /// A leading `/` and a `.` component name nothing outside the root and
+    /// are read past, as the logical paths the VFS hands this store may carry
+    /// them.
     fn resolve_key(&self, key: &Path) -> ObjectStorageResult<PathBuf> {
         use std::path::Component;
         let mut path = self.base_path.clone();

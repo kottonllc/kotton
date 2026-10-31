@@ -29,6 +29,35 @@
 //! base32, an alphabet with no `_`, so collision with a blinded object key is
 //! structurally impossible.
 //!
+//! The reserved names have one grammar (kotton #276, written down here
+//! because this is where a reserved name is first held as a value,
+//! [`PackId`]):
+//!
+//! ```text
+//! reserved     := pack | superblock | tombstones
+//! pack         := "_pack/" index-id | "_pack/" content-id
+//! index-id     := hex32
+//! content-id   := "c-" hex32
+//! superblock   := "_superblock/" gen "-" hex16
+//! tombstones   := "_tombstones"
+//! gen          := 20 decimal digits, zero-padded
+//! hexN         := N characters of 0-9a-f
+//! ```
+//!
+//! A pack id is 128 random bits in lowercase hex (`PackWriter::fresh_id`), a
+//! content pack's prefixed `c-`, which no hex id begins with. A superblock's
+//! name is its generation, zero-padded so text order is generation order, and
+//! 64 random bits (`crate::superblock`).
+//!
+//! Of these, only a pack id is *named by something the store reads*: a
+//! manifest and a superblock name packs, and another device may have written
+//! them. So a pack id is the reserved name admitted as a value, [`PackId`],
+//! where it is decoded, and where a pass that reads, rewrites or deletes packs
+//! lists them. A superblock's name is read from a listing by
+//! `crate::superblock`'s loader, and the tombstone set's is a constant.
+//! [`crate::StorageKey`] does not yet hold this grammar for every key
+//! (kotton #276).
+//!
 //! # Deletes and tombstones
 //!
 //! Deleting a packed file cannot rewrite bytes (packs are immutable) and must
@@ -143,12 +172,18 @@ pub enum ObjectKind {
 ///   `_packets` is not a pack, and neither is `_pack` itself (a directory
 ///   entry a listing returns); both are [`ObjectKind::Reserved`], as is `_`.
 /// - **A key is read as it is.** A key from outside the store is admitted
-///   before anything reads it ([`crate::StorageKey`], kotton #265), so none
-///   carries a leading `/`, a `.` or a `..` for this rule to read past, and
-///   no key the store writes carries one either. `/_pack/i-1` is therefore
-///   not a pack: it starts with no `_`, and is [`ObjectKind::File`] like any
-///   other key outside the reserved namespace. Such a key never reaches a
-///   store: it is refused where it enters.
+///   before anything reads it, so none carries a leading `/`, a `.` or a
+///   `..` for this rule to read past, and no key the store writes carries one
+///   either. `/_pack/i-1` is therefore not a pack: it starts with no `_`, and
+///   is [`ObjectKind::File`] like any other key outside the reserved
+///   namespace. The admissions: a sync pass's listings, on both sides
+///   ([`crate::StorageKey`], kotton #265); a pack id a manifest or superblock
+///   names, where it is decoded, and the pack listing compaction and scan
+///   recovery act on ([`PackId`], kotton #273). Keys that still reach a store
+///   unadmitted come through other doors, each tracked where it is: a guest
+///   re-wrap's raw read (`LocalObjectStorage::resolve_key`'s doc),
+///   drive move's copy (kotton #274) and `Sealed::list`'s prefix
+///   (kotton #275).
 /// - **The rest of the `_` namespace** is [`ObjectKind::Reserved`].
 ///   Blinded components are base32, an alphabet with no `_`, so only a key
 ///   in the reserved namespace starts with one, and every other key is
@@ -170,6 +205,99 @@ pub fn kind(key: &str) -> ObjectKind {
 
 /// Storage key of the sealed tombstone set (pending deletes of packed files).
 pub const TOMBSTONES_KEY: &str = "_tombstones";
+
+/// How many lowercase hex digits name a pack, after `_pack/` and a content
+/// pack's `c-` (the reserved grammar, module doc).
+pub const PACK_ID_HEX_LEN: usize = 32;
+
+/// A pack's storage key, admitted: `_pack/<hex32>` for an index pack,
+/// `_pack/c-<hex32>` for a content pack (the reserved grammar, module doc),
+/// and nothing else (kotton #273).
+///
+/// A manifest names a pack for every chunk it maps, and a superblock names
+/// the pack its manifest is in. Both were written by a device that may not
+/// be this one, and every read, every fetch on open ([`crate::fetch`]) and
+/// every compaction builds a storage key from the id they name. So the id is
+/// admitted where it is decoded: a [`crate::manifest::PackChunkRef`] holds a
+/// `PackId`, and deserializing one parses it, so a manifest or superblock
+/// that names `_pack/../x`, an id that is not hex, or an empty one does not
+/// decode at all. Nothing reads such an id afterwards, because there is none
+/// to read.
+///
+/// Every `PackId` is a [`crate::StorageKey`] and reads as a pack by the
+/// namespace rule ([`kind`]); serialized, it is the key as text, as it
+/// always was.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct PackId(crate::StorageKey);
+
+impl PackId {
+    /// Admit `id`, or say why it is not a pack id in the reserved grammar.
+    pub fn parse(id: &str) -> Result<Self, crate::NotCanonical> {
+        let refuse = |why| Err(crate::NotCanonical { key: id.to_string(), why });
+        let key = crate::StorageKey::parse(id)?;
+        let Some(name) = id.strip_prefix(PACK_PREFIX).and_then(|rest| rest.strip_prefix('/')) else {
+            return refuse("it is not under `_pack/`");
+        };
+        let hex = name.strip_prefix("c-").unwrap_or(name);
+        if hex.len() != PACK_ID_HEX_LEN || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return refuse("a pack's name is not 32 lowercase hex digits, or `c-` and 32");
+        }
+        Ok(Self(key))
+    }
+
+    /// The id as text: the pack's storage key.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// The id as the path a store is addressed by.
+    pub fn as_path(&self) -> &Path {
+        self.0.as_path()
+    }
+
+    /// The id as an admitted storage key.
+    pub fn as_key(&self) -> &crate::StorageKey {
+        &self.0
+    }
+
+    /// Whether this is a content pack ([`CONTENT_PACK_PREFIX`]).
+    pub fn is_content(&self) -> bool {
+        self.as_str().starts_with(CONTENT_PACK_PREFIX)
+    }
+}
+
+impl TryFrom<String> for PackId {
+    type Error = crate::NotCanonical;
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        Self::parse(&id)
+    }
+}
+
+impl From<PackId> for String {
+    fn from(id: PackId) -> Self {
+        id.0.as_str().to_string()
+    }
+}
+
+impl std::fmt::Display for PackId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl AsRef<Path> for PackId {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
+    }
+}
+
+/// Lets a set or map of ids be asked by `&str`; the order is the string's.
+impl std::borrow::Borrow<str> for PackId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
 
 /// One loose object as the packer sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +410,30 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         unix.trim_start_matches('/').to_string()
     }
 
+    /// The packs this store's shelf lists, each name admitted as a [`PackId`]
+    /// (kotton #273), for a pass that reads, rewrites or deletes what it
+    /// lists: compaction and scan recovery.
+    ///
+    /// A shelf lists what is on it, and a bucket or a directory may hold a
+    /// name the store never wrote. One outside the reserved grammar is named
+    /// in the log and left where it is: never read, rewritten or deleted,
+    /// since nothing the store wrote is under that name.
+    async fn listed_packs(&self, pass: &str) -> ObjectStorageResult<BTreeSet<PackId>> {
+        let mut packs = BTreeSet::new();
+        for m in self.inner.list_sealed(Path::new(PACK_PREFIX)).await? {
+            if m.is_dir {
+                continue;
+            }
+            match PackId::parse(&m.key) {
+                Ok(id) => {
+                    packs.insert(id);
+                }
+                Err(refused) => tracing::warn!(pass, "{refused}; left as it is"),
+            }
+        }
+        Ok(packs)
+    }
+
     // ── manifest state ──────────────────────────────────────────────────────
 
     /// Read the manifest the superblock points at, straight from disk.
@@ -316,7 +468,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
     /// live in the sealed manifest, so a replica that relocates or swaps pack
     /// bytes cannot make this return the wrong chunk — the read fails instead.
     async fn read_framed_chunk(&self, r: &PackChunkRef) -> ObjectStorageResult<Vec<u8>> {
-        let blob = self.inner.get_sealed(Path::new(&r.pack_id)).await?;
+        let blob = self.inner.get_sealed(r.pack_id.as_path()).await?;
         let plaintext = open_pack(&self.k_pack, &blob)?;
         Self::framed_from_plaintext(&plaintext, r)
     }
@@ -358,7 +510,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             return Ok(Bytes::new());
         }
         let mut out: Vec<u8> = Vec::with_capacity((end - offset) as usize);
-        let mut open: Option<(String, Vec<u8>)> = None;
+        let mut open: Option<(PackId, Vec<u8>)> = None;
         let mut pos: u64 = 0;
         for r in &entry.chunks {
             // A chunk's framed length carries the one-byte kind tag, so the
@@ -383,7 +535,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             }
 
             if open.as_ref().map(|(id, _)| id.as_str()) != Some(r.pack_id.as_str()) {
-                let blob = self.inner.get_sealed(Path::new(&r.pack_id)).await?;
+                let blob = self.inner.get_sealed(r.pack_id.as_path()).await?;
                 open = Some((r.pack_id.clone(), open_pack(&self.k_pack, &blob)?));
             }
             let (_, plaintext) = open.as_ref().unwrap();
@@ -425,10 +577,10 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
     /// spans, not per chunk.
     async fn read_packed_file(&self, entry: &FileEntry) -> ObjectStorageResult<Bytes> {
         let mut out: Vec<u8> = Vec::with_capacity(entry.size as usize);
-        let mut open: Option<(String, Vec<u8>)> = None;
+        let mut open: Option<(PackId, Vec<u8>)> = None;
         for r in &entry.chunks {
             if open.as_ref().map(|(id, _)| id.as_str()) != Some(r.pack_id.as_str()) {
-                let blob = self.inner.get_sealed(Path::new(&r.pack_id)).await?;
+                let blob = self.inner.get_sealed(r.pack_id.as_path()).await?;
                 open = Some((r.pack_id.clone(), open_pack(&self.k_pack, &blob)?));
             }
             let (_, plaintext) = open.as_ref().unwrap();
@@ -680,14 +832,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         // Packs are fixed-size, so capacity is the denominator for every live
         // fraction and no pack has to be opened to be measured.
         let capacity = crate::pack::max_payload();
-        let on_disk: BTreeSet<String> = self
-            .inner
-            .list_sealed(Path::new(PACK_PREFIX))
-            .await?
-            .into_iter()
-            .filter(|m| !m.is_dir)
-            .map(|m| m.key)
-            .collect();
+        let on_disk = self.listed_packs("compaction").await?;
 
         // History segments are live too, and the manifest names them: `log` is
         // the liveness set. A segment chunk *not* listed there is collectable —
@@ -697,7 +842,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             live.entry(r.digest.clone()).or_insert_with(|| r.clone());
         }
 
-        let mut live_bytes: HashMap<String, usize> = HashMap::new();
+        let mut live_bytes: HashMap<PackId, usize> = HashMap::new();
         for r in live.values() {
             *live_bytes.entry(r.pack_id.clone()).or_default() +=
                 CHUNK_LEN_BYTES + r.length as usize;
@@ -714,7 +859,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         // bytes and must never be swept on that basis — it is the store's root
         // pointer. It becomes collectable only once a newer manifest is
         // committed, which the rewrite path below handles explicitly.
-        let dead: BTreeSet<String> = on_disk
+        let dead: BTreeSet<PackId> = on_disk
             .iter()
             .filter(|id| live_bytes.get(*id).copied().unwrap_or(0) == 0)
             .filter(|id| *id != &sb.manifest.pack_id)
@@ -723,7 +868,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
 
         // *Sparse* — partly live, below the threshold. These need the full
         // four-step dance because their live chunks must survive.
-        let sparse: BTreeSet<String> = on_disk
+        let sparse: BTreeSet<PackId> = on_disk
             .iter()
             .filter(|id| {
                 let b = live_bytes.get(*id).copied().unwrap_or(0);
@@ -755,7 +900,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         let mut packs_retired = 0usize;
         if !rewrite {
             for pack_id in &dead {
-                self.inner.delete_sealed(Path::new(pack_id)).await?;
+                self.inner.delete_sealed(pack_id.as_path()).await?;
                 packs_retired += 1;
             }
         }
@@ -784,7 +929,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
                 continue;
             }
             refs.sort_by_key(|r| r.offset);
-            let blob = self.inner.get_sealed(Path::new(pack_id)).await?;
+            let blob = self.inner.get_sealed(pack_id.as_path()).await?;
             let plaintext = open_pack(&self.k_pack, &blob)?;
             for r in refs {
                 let framed = Self::framed_from_plaintext(&plaintext, r)?;
@@ -890,7 +1035,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         }
 
         // 2. Verify — read the fresh packs back before anything is unlinked.
-        let mut by_pack: BTreeMap<String, Vec<PackChunkRef>> = BTreeMap::new();
+        let mut by_pack: BTreeMap<PackId, Vec<PackChunkRef>> = BTreeMap::new();
         for r in moved.values() {
             by_pack.entry(r.pack_id.clone()).or_default().push(r.clone());
         }
@@ -899,7 +1044,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             .or_default()
             .push(manifest_ref.clone());
         for (pack_id, refs) in &by_pack {
-            let blob = self.inner.get_sealed(Path::new(pack_id)).await?;
+            let blob = self.inner.get_sealed(pack_id.as_path()).await?;
             let plaintext = open_pack(&self.k_pack, &blob)?;
             for r in refs {
                 Self::framed_from_plaintext(&plaintext, r).map_err(|e| {
@@ -933,14 +1078,14 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         //    was spared the sweep above only because it was the root pointer,
         //    and the commit just replaced it.
         for pack_id in to_retire.iter().chain(&dead) {
-            self.inner.delete_sealed(Path::new(pack_id)).await?;
+            self.inner.delete_sealed(pack_id.as_path()).await?;
             packs_retired += 1;
         }
         let old_manifest_pack = &sb.manifest.pack_id;
         if live_bytes.get(old_manifest_pack).copied().unwrap_or(0) == 0
             && !to_retire.contains(old_manifest_pack)
         {
-            self.inner.delete_sealed(Path::new(old_manifest_pack)).await?;
+            self.inner.delete_sealed(old_manifest_pack.as_path()).await?;
             packs_retired += 1;
         }
         if let Err(e) = retire_old_superblocks(&*self.inner).await {
@@ -1221,13 +1366,13 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
     ) -> ObjectStorageResult<(Vec<(PackChunkRef, Segment)>, Vec<Manifest>)> {
         let mut segments = Vec::new();
         let mut manifests = Vec::new();
-        for m in self.inner.list_sealed(Path::new(PACK_PREFIX)).await? {
+        for pack_id in self.listed_packs("scan").await? {
             // A content pack holds neither a segment nor a manifest
             // (`CONTENT_PACK_PREFIX`), so it is not opened to look.
-            if m.is_dir || is_content_pack(&m.key) {
+            if pack_id.is_content() {
                 continue;
             }
-            let Ok(blob) = self.inner.get_sealed(Path::new(&m.key)).await else {
+            let Ok(blob) = self.inner.get_sealed(pack_id.as_path()).await else {
                 continue;
             };
             let Ok(plaintext) = open_pack(&self.k_pack, &blob) else {
@@ -1239,7 +1384,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
                         if let Ok(seg) = Segment::from_chunk(k_log, framed) {
                             segments.push((
                                 PackChunkRef {
-                                    pack_id: m.key.clone(),
+                                    pack_id: pack_id.clone(),
                                     offset: cref.offset,
                                     length: cref.length,
                                     digest: chunk_digest(framed),
@@ -1550,19 +1695,12 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             return Ok(None);
         }
 
-        let pack_ids: BTreeSet<String> = self
-            .inner
-            .list_sealed(Path::new(PACK_PREFIX))
-            .await?
-            .into_iter()
-            .filter(|m| !m.is_dir)
-            .map(|m| m.key)
-            .collect();
+        let pack_ids = self.listed_packs("scan recovery").await?;
 
         let mut packs_scanned = 0usize;
         let mut candidates: Vec<(Manifest, PackChunkRef)> = Vec::new();
         for pack_id in &pack_ids {
-            let Ok(blob) = self.inner.get_sealed(Path::new(pack_id)).await else {
+            let Ok(blob) = self.inner.get_sealed(pack_id.as_path()).await else {
                 continue;
             };
             let Ok(plaintext) = open_pack(&self.k_pack, &blob) else {
@@ -1649,14 +1787,14 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
     /// Whether every chunk this manifest depends on opens and matches its
     /// recorded digest — the gate on adopting it.
     async fn manifest_fully_resolves(&self, manifest: &Manifest) -> bool {
-        let mut by_pack: BTreeMap<String, Vec<PackChunkRef>> = BTreeMap::new();
+        let mut by_pack: BTreeMap<PackId, Vec<PackChunkRef>> = BTreeMap::new();
         for entry in manifest.files.values() {
             for r in &entry.chunks {
                 by_pack.entry(r.pack_id.clone()).or_default().push(r.clone());
             }
         }
         for (pack_id, refs) in &by_pack {
-            let Ok(blob) = self.inner.get_sealed(Path::new(pack_id)).await else {
+            let Ok(blob) = self.inner.get_sealed(pack_id.as_path()).await else {
                 return false;
             };
             let Ok(plaintext) = open_pack(&self.k_pack, &blob) else {
@@ -1799,7 +1937,7 @@ async fn read_framed_chunk_from<S: SealedObjectAccess + ?Sized>(
     k_pack: &[u8; 32],
     r: &PackChunkRef,
 ) -> ObjectStorageResult<Vec<u8>> {
-    let blob = store.get_sealed(Path::new(&r.pack_id)).await?;
+    let blob = store.get_sealed(r.pack_id.as_path()).await?;
     let plaintext = open_pack(k_pack, &blob)?;
     framed_from_plaintext(&plaintext, r)
 }
@@ -1916,7 +2054,7 @@ async fn commit_new_state<S: SealedObjectAccess + ?Sized>(
     // Verify every chunk this change's files now depend on — including
     // reused ones, because retiring what they replace stakes those files on
     // them — plus the manifest chunk, before anything is deleted.
-    let mut to_verify: BTreeMap<String, Vec<PackChunkRef>> = BTreeMap::new();
+    let mut to_verify: BTreeMap<PackId, Vec<PackChunkRef>> = BTreeMap::new();
     for path in written {
         for r in &new_manifest.files[path].chunks {
             to_verify.entry(r.pack_id.clone()).or_default().push(r.clone());
@@ -1932,7 +2070,7 @@ async fn commit_new_state<S: SealedObjectAccess + ?Sized>(
         to_verify.entry(r.pack_id.clone()).or_default().push(r.clone());
     }
     for (pack_id, refs) in &to_verify {
-        let blob = store.get_sealed(Path::new(pack_id)).await?;
+        let blob = store.get_sealed(pack_id.as_path()).await?;
         let plaintext = open_pack(k_pack, &blob)?;
         for r in refs {
             framed_from_plaintext(&plaintext, r).map_err(|e| {
@@ -2150,11 +2288,11 @@ struct PackWriter<S: SealedObjectAccess + ?Sized> {
     /// else — named under [`CONTENT_PACK_PREFIX`] — or may hold the index
     /// (a history segment, a manifest), named as every pack was before.
     content: bool,
-    pack_id: String,
+    pack_id: PackId,
     group: Vec<Vec<u8>>,
     /// Σ (4-byte length prefix + framed chunk) for the open pack.
     payload: usize,
-    written: Vec<String>,
+    written: Vec<PackId>,
 }
 
 /// Per-chunk length prefix width inside a pack (mirrors `pack.rs`).
@@ -2187,11 +2325,11 @@ impl<S: SealedObjectAccess + ?Sized> PackWriter<S> {
     /// immutable; a key collision would pit two contents against each other).
     /// A content pack's id carries [`CONTENT_PACK_PREFIX`]'s `c-`, which no
     /// index pack's hex id can begin with.
-    fn fresh_id(content: bool) -> String {
+    fn fresh_id(content: bool) -> PackId {
         let mut id = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut id);
         use std::fmt::Write as _;
-        let mut s = String::with_capacity(PACK_PREFIX.len() + 2 + 32);
+        let mut s = String::with_capacity(PACK_PREFIX.len() + 2 + 2 * id.len());
         s.push_str(PACK_PREFIX);
         s.push('/');
         if content {
@@ -2200,7 +2338,7 @@ impl<S: SealedObjectAccess + ?Sized> PackWriter<S> {
         for b in id {
             let _ = write!(s, "{b:02x}");
         }
-        s
+        PackId::parse(&s).expect("a fresh pack id is in the reserved grammar by construction")
     }
 
     /// Append a framed chunk, sealing the open pack first if it would not
@@ -2261,7 +2399,7 @@ impl<S: SealedObjectAccess + ?Sized> PackWriter<S> {
             expect += (CHUNK_LEN_BYTES + chunk.len()) as u32;
         }
 
-        self.store.put_sealed(Path::new(&self.pack_id), &blob).await?;
+        self.store.put_sealed(self.pack_id.as_path(), &blob).await?;
         self.written
             .push(std::mem::replace(&mut self.pack_id, Self::fresh_id(self.content)));
         self.group.clear();
@@ -2450,21 +2588,11 @@ fn keep_what_was_superseded(base: &Manifest, next: &mut Manifest) {
 /// file lists leave out the one it currently holds, and while a write is loose
 /// the only way to know which that is, is to ask the bytes.
 fn content_id_of(bytes: &[u8]) -> String {
-    FileEntry {
-        size: bytes.len() as u64,
-        modified: None,
-        chunks: chunk_boundaries(bytes)
-            .into_iter()
-            .map(|(off, len)| PackChunkRef {
-                pack_id: String::new(),
-                offset: 0,
-                length: 0,
-                digest: chunk_digest(&frame_chunk(ChunkKind::Data, &bytes[off..off + len])),
-            })
-            .collect(),
-        keep_versions: false,
-    }
-    .content_id()
+    let digests: Vec<String> = chunk_boundaries(bytes)
+        .into_iter()
+        .map(|(off, len)| chunk_digest(&frame_chunk(ChunkKind::Data, &bytes[off..off + len])))
+        .collect();
+    crate::manifest::content_id_of_digests(digests.iter().map(String::as_str))
 }
 
 /// A file's versions.
@@ -2603,13 +2731,13 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         // share packs once compaction has merged them, and opening a 16 MiB pack
         // per segment would make listing a file's versions cost the log's length
         // in whole-pack decryptions.
-        let mut by_pack: BTreeMap<&str, Vec<&PackChunkRef>> = BTreeMap::new();
+        let mut by_pack: BTreeMap<&PackId, Vec<&PackChunkRef>> = BTreeMap::new();
         for r in &manifest.log {
-            by_pack.entry(r.pack_id.as_str()).or_default().push(r);
+            by_pack.entry(&r.pack_id).or_default().push(r);
         }
         let mut segments: Vec<Segment> = Vec::with_capacity(manifest.log.len());
         for (pack_id, refs) in by_pack {
-            let blob = self.inner.get_sealed(Path::new(pack_id)).await?;
+            let blob = self.inner.get_sealed(pack_id.as_path()).await?;
             let plaintext = open_pack(&self.k_pack, &blob)?;
             for r in refs {
                 segments.push(Segment::from_chunk(
@@ -3080,7 +3208,7 @@ impl<S: LooseObjectSource + 'static> SealedObjectAccess for PackedObjectStorage<
                 continue;
             }
             for r in &entry.chunks {
-                let paths = packs.entry(r.pack_id.clone()).or_default();
+                let paths = packs.entry(r.pack_id.to_string()).or_default();
                 if paths.last() != Some(path) {
                     paths.push(path.clone());
                 }
@@ -3200,6 +3328,42 @@ mod tests {
             assert_eq!(kind(key), want, "{key}");
         }
         assert!(is_content_pack("_pack/c-1") && !is_content_pack("_pack/i-1"));
+    }
+
+    /// The reserved grammar for a pack id, held by [`PackId::parse`]: the two
+    /// forms the store writes are admitted, and every other spelling is
+    /// refused with its reason. Every admitted id reads as a pack by the
+    /// namespace rule.
+    #[test]
+    fn a_pack_id_is_admitted_only_in_the_reserved_grammar() {
+        let hex = "0123456789abcdef".repeat(2);
+        for (id, content) in [(format!("_pack/{hex}"), false), (format!("_pack/c-{hex}"), true)] {
+            let admitted = PackId::parse(&id).unwrap();
+            assert_eq!((admitted.as_str(), admitted.is_content()), (id.as_str(), content));
+            assert_eq!(kind(admitted.as_str()), if content { ObjectKind::ContentPack } else { ObjectKind::IndexPack });
+        }
+        let fresh = [PackWriter::<MemoryObjectStorage>::fresh_id(false), PackWriter::<MemoryObjectStorage>::fresh_id(true)];
+        assert_eq!(fresh.map(|id| id.is_content()), [false, true]);
+        let name = "a pack's name is not 32 lowercase hex digits, or `c-` and 32";
+        for (id, why) in [
+            (String::new(), "it is empty"),
+            ("_pack/../x".to_string(), "a component is `.` or `..`"),
+            (format!("/_pack/{hex}"), "it starts with `/`"),
+            (format!("_pack//{hex}"), "a component is empty"),
+            (format!("_superblock/{hex}"), "it is not under `_pack/`"),
+            (format!("_packs/{hex}"), "it is not under `_pack/`"),
+            ("_pack/i-1".to_string(), name),
+            ("_pack/c-1".to_string(), name),
+            (format!("_pack/{}", &hex[1..]), name),
+            (format!("_pack/{hex}0"), name),
+            (format!("_pack/{}", hex.to_uppercase()), name),
+            (format!("_pack/C-{hex}"), name),
+            (format!("_pack/c-c-{}", &hex[2..]), name),
+            (format!("_pack/{hex}/x"), name),
+            (format!("_pack/c-{}", "zz".repeat(16)), name),
+        ] {
+            assert_eq!(PackId::parse(&id), Err(crate::NotCanonical { key: id.clone(), why }), "{id:?}");
+        }
     }
 
     type TestStore =
@@ -4621,13 +4785,13 @@ mod tests {
         let (_, manifest) = s.manifest().await.unwrap().unwrap();
         let victim_pack = manifest.files["first.bin"].chunks[0].pack_id.clone();
         let mut blob = backing
-            .get_sealed(Path::new(&victim_pack))
+            .get_sealed(victim_pack.as_path())
             .await
             .unwrap()
             .to_vec();
         blob[1000] ^= 0xff;
         backing
-            .put_sealed(Path::new(&victim_pack), &blob)
+            .put_sealed(victim_pack.as_path(), &blob)
             .await
             .unwrap();
 
@@ -5379,7 +5543,7 @@ mod tests {
         for m in packs.iter().filter(|m| !m.is_dir) {
             assert!(has_its_fixed_size(&m.key, m.size), "pack {} is shaped differently: {}", m.key, m.size);
         }
-        let held_in = |r: &PackChunkRef| packs.iter().find(|m| m.key == r.pack_id).map(|m| (is_content_pack(&m.key), m.size));
+        let held_in = |r: &PackChunkRef| packs.iter().find(|m| m.key == r.pack_id.as_str()).map(|m| (is_content_pack(&m.key), m.size));
         let (_, manifest) = a.manifest().await.unwrap().unwrap();
         let kept = manifest.versions.get(NOTE).expect("the version is kept");
         for r in kept.iter().flat_map(|e| &e.chunks) {
@@ -5458,5 +5622,87 @@ mod tests {
             s.read_version(Path::new("big.bin"), &oldest.content_id).await.unwrap().as_ref(),
             original.as_slice()
         );
+    }
+
+    /// **A pack id is admitted where the manifest is decoded** (kotton #273).
+    ///
+    /// The manifest names the packs every read and every compaction builds a
+    /// key from, and the device that wrote it may not be this one. So a
+    /// manifest naming a pack id outside the reserved grammar ([`PackId`]) is
+    /// refused when it is decoded, before a key is built from it: the read
+    /// fails, compaction fails, nothing is asked of a drive and nothing is
+    /// written. The shelf here is a memory store, which takes a key's
+    /// characters as they are, as a bucket does: refused at decode, `..`
+    /// never reaches a shelf of either kind.
+    #[tokio::test]
+    async fn a_manifest_naming_a_pack_outside_the_grammar_is_refused_and_nothing_is_fetched_or_written() {
+        use crate::fetch::{FetchOnMiss, PackSlot, PackSource};
+        use crate::manifest::chunk_digest;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// A drive that answers every fetch, as a hostile one would.
+        struct Drive {
+            asked: AtomicUsize,
+        }
+        #[async_trait]
+        impl PackSource for Drive {
+            async fn fetch(&self, _user_id: &str, _key: &str) -> anyhow::Result<Option<Bytes>> {
+                self.asked.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(Bytes::from_static(b"whatever the drive serves")))
+            }
+        }
+        fn fetching(
+            backing: &MemoryObjectStorage,
+            slot: &PackSlot,
+        ) -> PackedObjectStorage<BlindedObjectStorage<EncryptedObjectStorage<FetchOnMiss>>> {
+            let shelf = FetchOnMiss::new(Arc::new(backing.clone()), "alice", slot.clone());
+            let enc = EncryptedObjectStorage::new(shelf, CEK);
+            PackedObjectStorage::new(BlindedObjectStorage::new(enc, derive_path_blind_key(&CEK)), derive_pack_key(&CEK))
+        }
+        async fn keys(backing: &MemoryObjectStorage) -> BTreeSet<String> {
+            backing.list(Path::new("")).await.unwrap().into_iter().map(|m| m.key).collect()
+        }
+
+        for bad in ["_pack/../x", &format!("{CONTENT_PACK_PREFIX}{}", "zz".repeat(16)), ""] {
+            let backing = MemoryObjectStorage::new();
+            let slot = PackSlot::default();
+            let s = fetching(&backing, &slot);
+            s.put(Path::new("notes/a.md"), b"hello").await.unwrap();
+            s.pack_loose().await.unwrap();
+
+            // A manifest that names `bad` where the file's pack was, committed
+            // as the current generation the way any device's commit is.
+            let (generation, manifest) = s.manifest().await.unwrap().unwrap();
+            let real = manifest.files["notes/a.md"].chunks[0].pack_id.to_string();
+            let json = serde_json::to_string(&*manifest)
+                .unwrap()
+                .replace(&format!("\"{real}\""), &format!("\"{bad}\""));
+            assert!(json.contains(&format!("\"pack_id\":\"{bad}\"")), "{json}");
+            let framed = frame_chunk(ChunkKind::Manifest, json.as_bytes());
+            let (blob, refs) = crate::pack::seal_pack(&derive_pack_key(&CEK), &[framed.as_slice()]).unwrap();
+            let holder = format!("{PACK_PREFIX}/{}", "ab".repeat(16));
+            s.inner.put_sealed(Path::new(&holder), &blob).await.unwrap();
+            let manifest_ref: PackChunkRef = serde_json::from_value(serde_json::json!({
+                "pack_id": holder,
+                "offset": refs[0].offset,
+                "length": refs[0].length,
+                "digest": chunk_digest(&framed),
+            }))
+            .unwrap();
+            let sb = Superblock { version: 1, generation: generation + 1, manifest: manifest_ref };
+            commit_superblock(&*s.inner, &derive_pack_key(&CEK), &sb).await.unwrap();
+
+            let drive = Arc::new(Drive { asked: AtomicUsize::new(0) });
+            slot.lend(drive.clone());
+            let before = keys(&backing).await;
+            let fresh = fetching(&backing, &slot);
+            match fresh.get(Path::new("notes/a.md")).await {
+                Err(e) => assert!(e.to_string().contains("refused"), "{bad:?}: {e}"),
+                Ok(b) => panic!("{bad:?}: a manifest naming it was read: {b:?}"),
+            }
+            assert!(fresh.compact().await.is_err(), "{bad:?}: compaction ran on a manifest naming it");
+            assert_eq!(drive.asked.load(Ordering::SeqCst), 0, "{bad:?}: a drive was asked for it");
+            assert_eq!(keys(&backing).await, before, "{bad:?}: something was written");
+        }
     }
 }

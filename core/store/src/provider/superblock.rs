@@ -301,7 +301,7 @@ mod tests {
             version: 1,
             generation: gen,
             manifest: PackChunkRef {
-                pack_id: format!("_pack/{gen:032x}"),
+                pack_id: crate::packed::PackId::parse(&format!("_pack/{gen:032x}")).unwrap(),
                 offset: 0,
                 length: 42,
                 digest: "ab".repeat(32),
@@ -423,7 +423,9 @@ mod tests {
         let store = MemoryObjectStorage::new();
         let small = sb(1);
         let mut big = sb(2);
-        big.manifest.pack_id = "_pack/".to_string() + &"f".repeat(200);
+        // A pack id has one length (`crate::packed::PackId`), so the body is
+        // grown by its digest.
+        big.manifest.digest = "f".repeat(200);
         let key_small = commit_superblock(&store, &K_PACK, &small).await.unwrap();
         let key_big = commit_superblock(&store, &K_PACK, &big).await.unwrap();
 
