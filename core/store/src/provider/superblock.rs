@@ -25,6 +25,16 @@
 //! retirement completes, and the immediately-previous generation is always
 //! kept, so there is no moment with a single copy in flight.
 //!
+//! A generation whose superblock opens but whose **state does not decode** is
+//! passed over the same way ([`load_adopted_superblock`]): the pack layer's
+//! manifest naming a pack outside the reserved grammar (kotton #273) is
+//! authentic bytes a device of the person's wrote wrongly, and the generation
+//! before it is the last state anyone can read. Both cases are reported on the
+//! same channel, a `warn` naming the superblock's key and why. A failure to
+//! *fetch* that state is not passed over: it is not a property of the
+//! generation, and adopting an older one on a transient error would build on
+//! a stale base.
+//!
 //! The `_superblock/` prefix cannot collide with a blinded object key: blinded
 //! components are base32, an alphabet with no `_`.
 //!
@@ -200,21 +210,37 @@ fn open_superblock(k_pack: &[u8; 32], key: &str, blob: &[u8]) -> ObjectStorageRe
     Ok(sb)
 }
 
-/// Load the current superblock: the **highest generation that opens**.
+/// What [`load_adopted_superblock`] found: the newest generation whose
+/// superblock opens and whose state was adopted, and the keys of the newer
+/// generations whose superblock opened but whose state was refused.
+#[derive(Debug)]
+pub struct Adopted<T> {
+    /// The superblock adopted.
+    pub superblock: Superblock,
+    /// What `adopt` made of it.
+    pub state: T,
+    /// Each generation passed over because its state was refused, newest
+    /// first, as `"<key>: <why>"`. Empty in a store no device wrote wrongly.
+    pub passed_over: Vec<String>,
+}
+
+/// Load the **highest generation that opens and whose state is adopted**.
 ///
-/// A generation that fails to open — torn by a crash mid-write, corrupted at
-/// rest, or relocated — is skipped and the next-highest tried, which is exactly
-/// what makes the commit protocol crash-atomic: an interrupted commit resolves
-/// to the previous committed state. `Ok(None)` means a store with no superblock
-/// at all (never packed). Present-but-none-open is an error, not `None` — the
-/// caller should surface it and fall back to scan recovery, not silently
-/// treat a damaged store as empty.
-pub async fn load_current_superblock<S>(
+/// [`load_current_superblock`] with one more reason to pass a generation
+/// over: `adopt` reads the state the superblock names and returns `Ok(Ok(t))`
+/// to adopt it, `Ok(Err(why))` when that state does not decode (the generation
+/// is passed over, as a superblock that does not open is, and reported the
+/// same way), or `Err` when it could not be read at all, which ends the walk:
+/// a read that failed says nothing about the generation.
+pub async fn load_adopted_superblock<S, T, F, Fut>(
     store: &S,
     k_pack: &[u8; 32],
-) -> ObjectStorageResult<Option<Superblock>>
+    mut adopt: F,
+) -> ObjectStorageResult<Option<Adopted<T>>>
 where
     S: SealedObjectAccess + ?Sized,
+    F: FnMut(Superblock) -> Fut,
+    Fut: std::future::Future<Output = ObjectStorageResult<Result<T, ObjectStorageError>>>,
 {
     let entries = store.list_sealed(Path::new(SUPERBLOCK_PREFIX)).await?;
     let mut candidates: Vec<(u64, String)> = entries
@@ -231,6 +257,7 @@ where
     candidates.sort_unstable_by(|a, b| b.cmp(a));
 
     let mut last_err = None;
+    let mut passed_over = Vec::new();
     for (_gen, key) in candidates {
         let blob = match store.get_sealed(Path::new(&key)).await {
             Ok(b) => b,
@@ -239,10 +266,25 @@ where
                 continue;
             }
         };
-        match open_superblock(k_pack, &key, &blob) {
-            Ok(sb) => return Ok(Some(sb)),
+        let sb = match open_superblock(k_pack, &key, &blob) {
+            Ok(sb) => sb,
             Err(e) => {
                 tracing::warn!(%key, error = %e, "skipping unreadable superblock generation");
+                last_err = Some(e);
+                continue;
+            }
+        };
+        match adopt(sb.clone()).await? {
+            Ok(state) => {
+                return Ok(Some(Adopted {
+                    superblock: sb,
+                    state,
+                    passed_over,
+                }))
+            }
+            Err(e) => {
+                tracing::warn!(%key, error = %e, "skipping superblock generation whose state does not decode");
+                passed_over.push(format!("{key}: {e}"));
                 last_err = Some(e);
             }
         }
@@ -251,6 +293,27 @@ where
         "superblocks exist but none open — store is damaged, scan recovery required: {}",
         last_err.map(|e| e.to_string()).unwrap_or_default()
     )))
+}
+
+/// Load the current superblock: the **highest generation that opens**.
+///
+/// A generation that fails to open — torn by a crash mid-write, corrupted at
+/// rest, or relocated — is skipped and the next-highest tried, which is exactly
+/// what makes the commit protocol crash-atomic: an interrupted commit resolves
+/// to the previous committed state. `Ok(None)` means a store with no superblock
+/// at all (never packed). Present-but-none-open is an error, not `None` — the
+/// caller should surface it and fall back to scan recovery, not silently
+/// treat a damaged store as empty.
+pub async fn load_current_superblock<S>(
+    store: &S,
+    k_pack: &[u8; 32],
+) -> ObjectStorageResult<Option<Superblock>>
+where
+    S: SealedObjectAccess + ?Sized,
+{
+    Ok(load_adopted_superblock(store, k_pack, |_| async { Ok(Ok(())) })
+        .await?
+        .map(|adopted| adopted.superblock))
 }
 
 /// Retire superblocks older than the previous generation, returning how many

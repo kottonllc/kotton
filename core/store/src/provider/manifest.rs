@@ -430,7 +430,7 @@ mod tests {
                 assert!(json.contains(&format!("\"pack_id\":\"{bad}\"")), "{json}");
                 let err = Manifest::from_chunk(&frame_chunk(ChunkKind::Manifest, json.as_bytes()))
                     .expect_err(&format!("a manifest naming {bad:?} decoded"));
-                assert!(err.to_string().contains("refused"), "{bad:?}: {err}");
+                assert!(err.to_string().contains(&format!("storage key {bad:?} refused")), "{bad:?}: {err}");
             }
         }
         // The ids the store writes decode as they are.
