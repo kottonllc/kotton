@@ -43,8 +43,9 @@
 //! that noun counts, since the noun alone is the answer (`sync <remote>` is one). Where it is a
 //! different bare noun (`sync add` is `pin`), the command must carry an argument
 //! (`pin <drive>`): the noun alone leaves the reader to find its verb. The advice
-//! says it with the placeholder of that noun's table (`pin <drive>`), or `<argument>` for a noun
-//! whose table has none. The argument is a
+//! says it with the placeholder of that noun's table (`pin <drive>`), as the help's `RETIRED:`
+//! block does; `verb-check` refuses a table that retires a word for a noun with none (rule 4 of
+//! [`crate::verb_check`]), and this sweep does not run over one ([`retired`]). The argument is a
 //! word that is neither a flag nor one of that noun's current verbs, which the tables hold
 //! (`pin list` and `pin --help` are other answers, not the one `sync add` got). That is the only
 //! reason to say a retired word, and it is how the help and the reference say it. And the
@@ -118,9 +119,9 @@ pub struct Retired {
     /// The current verbs of the noun `now` names (not placeholders): a word after that noun
     /// that is one of these is a verb, not the argument a bare replacement needs.
     pub now_verbs: Vec<String>,
-    /// The first current placeholder entry of that noun's table (`<drive>` for `pin`), what a bare
-    /// replacement is said with; `None` when the noun has none.
-    pub now_placeholder: Option<String>,
+    /// The command a finding tells a person to say: `now`, or for another noun alone that
+    /// noun with its table's first current placeholder (`pin <drive>`).
+    pub say: String,
 }
 
 impl Retired {
@@ -132,25 +133,22 @@ impl Retired {
     /// Whether the replacement is another noun, bare (`sync add` -> `pin`): the noun whose verb
     /// the reader must still pick, so a command naming it needs an argument.
     fn bare_other(&self) -> bool {
-        let mut now = self.now.split_whitespace();
-        now.next().is_some_and(|n| !n.eq_ignore_ascii_case(&self.noun)) && now.next().is_none()
+        crate::verb_check::bare_other(&self.noun, &self.now).is_some()
     }
 
-    /// The command a finding tells a person to say: a line the rule accepts. A bare other noun
-    /// is said with an argument, the placeholder of that noun's table (`pin <drive>`), or `<argument>`
-    /// when the table holds none, since the noun alone is refused.
-    pub fn suggestion(&self) -> String {
-        if self.bare_other() {
-            format!("{} {}", self.now, self.now_placeholder.as_deref().unwrap_or("<argument>"))
-        } else {
-            self.now.clone()
-        }
+    /// The command a finding tells a person to say: a line the rule accepts.
+    pub fn suggestion(&self) -> &str {
+        &self.say
     }
 }
 
-/// Every word the tables retire, but placeholders and the bare noun, in table order.
-pub fn retired(tables: &BTreeMap<String, Vec<(String, Is)>>) -> Vec<Retired> {
+/// Every word the tables retire, but placeholders and the bare noun, in table order. `Err`
+/// names each word retired for another noun alone whose table holds no current placeholder:
+/// there is no command to tell a person to say for it, and `verb-check` refuses the table
+/// (rule 4 of [`crate::verb_check`]), so the sweep has nothing to run with until it is fixed.
+pub fn retired(tables: &BTreeMap<String, Vec<(String, Is)>>) -> Result<Vec<Retired>, Vec<String>> {
     let mut out = Vec::new();
+    let mut unsaid = Vec::new();
     for (noun, table) in tables {
         for (word, is) in table {
             if word.is_empty() || word.starts_with('<') {
@@ -171,14 +169,24 @@ pub fn retired(tables: &BTreeMap<String, Vec<(String, Is)>>) -> Vec<Retired> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let now_placeholder = tables
-                .get(target)
-                .and_then(|t| t.iter().find(|(w, is)| matches!(is, Is::Current) && w.starts_with('<')))
-                .map(|(w, _)| w.clone());
-            out.push(Retired { noun: noun.clone(), word: word.clone(), now: now.clone(), gone, now_verbs, now_placeholder });
+            let say = match crate::verb_check::bare_other(noun, now) {
+                None => now.clone(),
+                Some(target) => match crate::verb_check::placeholder(tables, target) {
+                    Some(p) => format!("{now} {p}"),
+                    None => {
+                        unsaid.push(format!("{noun} {word}"));
+                        continue;
+                    }
+                },
+            };
+            out.push(Retired { noun: noun.clone(), word: word.clone(), now: now.clone(), gone, now_verbs, say });
         }
     }
-    out
+    if unsaid.is_empty() {
+        Ok(out)
+    } else {
+        Err(unsaid)
+    }
 }
 
 /// `file:line: what` for every line a person reads that names a retired word and not its
@@ -497,29 +505,9 @@ fn printed_literal(c: &[char], at: usize, mut line: usize) -> Vec<Printed> {
 mod tests {
     use super::*;
 
-    /// The tables as the tree declares them: `sync`'s retired words, a placeholder among them,
-    /// and `device`'s.
+    /// The tables as the shell declares them ([`crate::verb_tables`]).
     fn tables() -> BTreeMap<String, Vec<(String, Is)>> {
-        let mut t = BTreeMap::new();
-        t.insert(
-            "sync".to_string(),
-            vec![
-                ("".to_string(), Is::Current),
-                ("now".to_string(), Is::Alias("sync".into())),
-                ("add".to_string(), Is::Gone("pin".into())),
-                ("list".to_string(), Is::Gone("pin list".into())),
-                ("remove".to_string(), Is::Gone("pin".into())),
-                ("<remote>".to_string(), Is::Gone("sync".into())),
-            ],
-        );
-        // `device admit` is gone, as `client/shell/src/commands/device.rs` declares it.
-        t.insert("device".to_string(), vec![("admit".to_string(), Is::Gone("drive enrol".into()))]);
-        // `pin`'s table as the shell declares it (`client/shell/src/commands/pin.rs`).
-        t.insert(
-            "pin".to_string(),
-            vec![("default".to_string(), Is::Current), ("<drive>".to_string(), Is::Current), ("list".to_string(), Is::Current)],
-        );
-        t
+        crate::verb_tables::tables()
     }
 
     fn tree(files: &[(&str, &str)]) -> tempfile::TempDir {
@@ -539,12 +527,12 @@ mod tests {
     }
 
     fn found(files: &[(&str, &str)]) -> Vec<String> {
-        findings(tree(files).path(), &retired(&tables()))
+        findings(tree(files).path(), &retired(&tables()).expect("every bare replacement has a placeholder"))
     }
 
     #[test]
     fn the_retired_words_are_the_tables_alias_and_gone_entries_but_placeholders() {
-        let words: Vec<String> = retired(&tables()).iter().map(Retired::was).collect();
+        let words: Vec<String> = retired(&tables()).expect("every bare replacement has a placeholder").iter().map(Retired::was).collect();
         assert_eq!(words, ["device admit", "sync now", "sync add", "sync list", "sync remove"]);
     }
 
@@ -674,7 +662,7 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
     #[test]
     fn a_findings_suggestion_is_a_line_the_rule_accepts() {
         let t = tables();
-        for r in retired(&t) {
+        for r in retired(&t).expect("every bare replacement has a placeholder") {
             let got = found_with(&t, &format!("type `{}`\n", r.was()));
             assert_eq!(got.len(), 1, "{got:#?}");
             let say = got[0].split("say `").nth(1).and_then(|s| s.split('`').next()).expect("a suggestion");
@@ -683,11 +671,11 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
         }
         let got = found_with(&t, "type `sync add`\n");
         assert!(got[0].contains("say `pin <drive>`"), "{got:#?}");
-        // A noun whose table holds no placeholder falls back to `<argument>`.
+        // A noun whose table holds no placeholder leaves nothing to say: the sweep does not run,
+        // and names each word it could not advise on (`verb-check` refuses the table).
         let mut bare = tables();
         bare.get_mut("pin").unwrap().retain(|(w, _)| !w.starts_with('<'));
-        let got = found_with(&bare, "type `sync add`\n");
-        assert!(got[0].contains("say `pin <argument>`"), "{got:#?}");
+        assert_eq!(retired(&bare), Err(vec!["sync add".to_string(), "sync remove".to_string()]));
         // A retired placeholder listed first (`sync`'s `<remote>` is gone) is not the advice: the
         // first current one is.
         let mut t = tables();
@@ -815,7 +803,7 @@ It syncs, now. `list` it.
     #[test]
     fn the_pointer_rule_holds_for_every_retired_word() {
         let t = tables();
-        for r in retired(&t) {
+        for r in retired(&t).expect("every bare replacement has a placeholder") {
             let line = |cmd: &str| found_with(&t, &format!("`{}` is `{cmd}`\n", r.was()));
             let target = r.now.split_whitespace().next().unwrap();
             // Independent of `Retired::bare_other`, on purpose: a second statement of the rule.
@@ -834,7 +822,7 @@ It syncs, now. `list` it.
     }
 
     fn found_with(t: &BTreeMap<String, Vec<(String, Is)>>, page: &str) -> Vec<String> {
-        findings(tree(&[("README.md", page)]).path(), &retired(t))
+        findings(tree(&[("README.md", page)]).path(), &retired(t).expect("every bare replacement has a placeholder"))
     }
 
     /// **Every path and helper named here is one the tree holds**: a moved file would read as
