@@ -17,7 +17,7 @@ use kotton_sys::store::{
     ObjectMetadata, ObjectStorage, ObjectStorageError, ObjectStorageResult, SealedObjectAccess,
 };
 use kotton_wire::{
-    ipc::{UserRequest, UserResponse, VaultPeerRequest},
+    ipc::{SealedVerb, UserRequest, UserResponse, VaultPeerRequest},
     peer::PairedNode,
 };
 use std::net::SocketAddr;
@@ -151,9 +151,29 @@ impl KottonPeerObjectStorage {
         self.learned_relay.as_deref()
     }
 
-    /// Send a `DeviceRequest` to the peer and deserialize the `DeviceResponse`.
+    /// Send a door verb to the peer and deserialize its answer.
+    ///
+    /// **Not for a verb a vault answers.** The six a device says alike to a
+    /// device and a vault go through [`Self::send_sealed`], and a vault's own
+    /// verbs through [`Self::send_to_vault`]. What is left here is the device
+    /// peer's own verbs (the plaintext file verbs below, a cosigner's round)
+    /// and one sealed caller this change could not move: `RecoveryStore` in
+    /// kuserd's recovery-copy delivery. Retiring this, so no peer client can
+    /// send an arbitrary `UserRequest`, takes a device-side `send_to_device`
+    /// for `PeerRequest` and that caller moved to [`Self::send_sealed`]
+    /// (kotton #254, left open there).
     pub async fn send(&self, req: &UserRequest) -> anyhow::Result<UserResponse> {
         self.exchange(req).await
+    }
+
+    /// Send one of the six verbs a device says alike to a device and to a
+    /// vault: the sealed read, write and list, the recovery copy fetched and
+    /// kept, and where the peer reserves. The verb is a [`SealedVerb`], so
+    /// nothing outside the six can be sent here, and its bytes are the
+    /// spelling both peer wires record (`SealedVerb::to_wire`).
+    pub async fn send_sealed(&self, verb: SealedVerb) -> anyhow::Result<UserResponse> {
+        let bytes = verb.to_wire()?;
+        self.exchange_bytes(bytes).await
     }
 
     /// Send one of a vault's own verbs — a tenant's or the landlord's — to a
@@ -163,16 +183,18 @@ impl KottonPeerObjectStorage {
     /// so a verb only a vault answers is built as that type here rather than as
     /// the device's `UserRequest`. The sealed verbs the [`SealedObjectAccess`]
     /// impl sends, and the `NodeRelay` asked on connect, go through
-    /// [`Self::send`]: they are said alike to a device and a vault, and both
-    /// peer wires mirror the door's spelling of them.
+    /// [`Self::send_sealed`]: they are said alike to a device and a vault.
     pub async fn send_to_vault(&self, req: &VaultPeerRequest) -> anyhow::Result<UserResponse> {
         self.exchange(req).await
     }
 
     /// One request and its answer. Private, so what may be sent is what the
-    /// two typed doors above name.
+    /// typed doors above name.
     async fn exchange(&self, req: &impl serde::Serialize) -> anyhow::Result<UserResponse> {
-        let bytes = serde_json::to_vec(req)?;
+        self.exchange_bytes(serde_json::to_vec(req)?).await
+    }
+
+    async fn exchange_bytes(&self, bytes: Vec<u8>) -> anyhow::Result<UserResponse> {
         let resp_bytes = self.channel.request(&bytes).await?;
         let resp = serde_json::from_slice::<UserResponse>(&resp_bytes)?;
         Ok(resp)
@@ -377,14 +399,14 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
         const RANGE_LEN: u32 = 4 * 1024 * 1024;
         let mut out: Vec<u8> = Vec::new();
         loop {
-            let req = UserRequest::ReadSealed {
+            let req = SealedVerb::ReadSealed {
                 user_id: self.user_id.clone(),
                 mount: self.remote_mount.clone(),
                 path: path.clone(),
                 offset: out.len() as u64,
                 length: RANGE_LEN,
             };
-            match self.send(&req).await.map_err(Self::io_err)? {
+            match self.send_sealed(req).await.map_err(Self::io_err)? {
                 UserResponse::SealedObject {
                     blob,
                     domain_id,
@@ -433,12 +455,12 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
     /// `SealedListEntry` carries no `is_dir` for this side to recurse on. That
     /// contract is what makes `is_dir: false` below correct rather than a guess.
     async fn list_sealed(&self, prefix: &Path) -> ObjectStorageResult<Vec<ObjectMetadata>> {
-        let req = UserRequest::ListSealed {
+        let req = SealedVerb::ListSealed {
             user_id: self.user_id.clone(),
             mount: self.remote_mount.clone(),
             prefix: Self::path_str(prefix),
         };
-        match self.send(&req).await.map_err(Self::io_err)? {
+        match self.send_sealed(req).await.map_err(Self::io_err)? {
             UserResponse::SealedList { entries } => Ok(entries
                 .into_iter()
                 .map(|e| ObjectMetadata {
@@ -470,7 +492,7 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
         let mut offset: usize = 0;
         loop {
             let end = (offset + CHUNK).min(blob.len());
-            let req = UserRequest::WriteSealed {
+            let req = SealedVerb::WriteSealed {
                 user_id: self.user_id.clone(),
                 mount: self.remote_mount.clone(),
                 path: path.clone(),
@@ -480,7 +502,7 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                 total_size,
                 content_hash: content_hash.clone(),
             };
-            match self.send(&req).await.map_err(Self::io_err)? {
+            match self.send_sealed(req).await.map_err(Self::io_err)? {
                 UserResponse::Ok => {}
                 UserResponse::SealedDomainMismatch { expected, got } => {
                     return Err(ObjectStorageError::BackendError(format!(
