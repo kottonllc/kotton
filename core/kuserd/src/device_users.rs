@@ -133,6 +133,37 @@ pub fn validate_user_id(user_id: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// A user id that [`validate_user_id`] accepts, and nothing else: built only by
+/// [`UserId::parse`], so a value of this type is one a path under `users/` or a
+/// keychain label may be built from.
+///
+/// The peer path parses the `user_id` a request names into one before it does
+/// anything with it — before a row is read, a chain is looked up or a database
+/// is found — so a name that would climb out of `users/` (`..`, `/`), name
+/// nobody (empty) or overrun the rule never reaches a path (kotton #262). The
+/// request type itself still carries a `String` (`kotton_wire::ipc::PeerRequest`);
+/// whether the wire should carry this type is kotton #283.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UserId(String);
+
+impl UserId {
+    /// `s`, if [`validate_user_id`] accepts it.
+    pub fn parse(s: &str) -> io::Result<Self> {
+        validate_user_id(s)?;
+        Ok(Self(s.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for UserId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The most characters a display name may hold. Generous for a name and short
 /// enough that a menubar cannot be pushed off the screen by one.
 pub const MAX_DISPLAY_NAME_CHARS: usize = 64;
@@ -270,6 +301,38 @@ pub fn user_exists(base: &Path, user_id: &str) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the peer path refuses before a path or a label is built from it
+    /// (kotton #262): a climb, a separator, nothing, too much, and anything
+    /// that is not an identifier.
+    #[test]
+    fn user_id_parse_refuses_what_is_not_an_identifier() {
+        let over_long = format!("a{}", "b".repeat(64));
+        for bad in [
+            "..",
+            "../../x",
+            "a/b",
+            "/",
+            "/tmp/abs",
+            "",
+            over_long.as_str(),
+            "Alice",
+            "1alice",
+            "a.b",
+            "a b",
+            "a\\b",
+            "con",
+            "ali\u{0}ce",
+        ] {
+            assert!(UserId::parse(bad).is_err(), "{bad:?} is refused at the parse");
+        }
+        let longest = format!("a{}", "b".repeat(63));
+        for good in ["alice", "a", "a-b_c9", longest.as_str()] {
+            assert_eq!(UserId::parse(good).expect(good).as_str(), good);
+        }
+        let minted = mint_user_id();
+        assert_eq!(UserId::parse(&minted).expect("a minted id parses").as_str(), minted);
+    }
 
     /// The minted id is one the registry's own rule accepts, and two mints are
     /// two ids — a fixed value here would be `owner` under another name.

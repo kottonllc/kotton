@@ -15,22 +15,31 @@
 //! The introductions are the device's own lent handle,
 //! `kotton_device::Introducer`: the listeners open now and the key they present.
 //!
-//! Two of these hold the whole keychain, `Arc<dyn SecretsStore>`, because what
-//! they answer is kept there (a third, `file_host::PeerStoreHost`, holds it for
-//! a mount's key domain): [`FrostSigner`] reads this node's FROST share for a
-//! person and answers one signing round with it, and [`GuestSessions`] opens the
-//! person's own database to find the guest session a stranger's key may hold.
-//! Neither hands the keychain, a key or a database back, and each reads only
-//! what its question needs — but that is true of their methods, not their
-//! types. What they read, for the label-scoped reader #256 designs from:
-//! [`FrostSigner`] reads `frost_share`; [`GuestSessions`], when it opens a
-//! database not yet open, reads `master_secret` — or the person's **root
-//! seed**, `seed32`, when none is stored — and `identity_signing_key`;
-//! `PeerStoreHost` reads and writes `sealed_mount_domain` and reads
-//! `operational_cek` — or, again, the **root seed** `seed32` when no CEK is
-//! stored. [`GuestSessions`] holds the keychain beside the base directory, which
-//! is what a record store opens from; a method added here could open one.
-//! Lending each only its labels, and no handle both, is kotton #256.
+//! One of these holds the whole keychain, `Arc<dyn SecretsStore>`, because
+//! what it answers is kept there (a second, `file_host::PeerStoreHost`, holds
+//! it for a mount's key domain): [`FrostSigner`] reads this node's FROST share
+//! for a person and answers one signing round with it. It hands neither the
+//! keychain nor the share back, and reads only `frost_share` — but that is true
+//! of its method, not its type. `PeerStoreHost` reads and writes
+//! `sealed_mount_domain` and reads `operational_cek` — or the person's **root
+//! seed** `seed32` when no CEK is stored — and it holds the keychain beside
+//! the resident stores, each of which answers its base directory
+//! (`UserStore::base_dir`), so the inputs a record store opens from still sit
+//! together there, kept apart by its methods. Lending each only its labels,
+//! and no handle a base directory beside them, is kotton #256.
+//!
+//! [`GuestSessions`] holds no keychain and no base directory (kotton #262): it
+//! holds a read-only view of the agent databases the daemon has already opened
+//! (`user_db::OpenAgentDbs`), and answers
+//! from a database only when the daemon opened it on its own account — at boot,
+//! sign-in or unlock — never because a peer named its person. It cannot open,
+//! create or migrate one, because it does not hold what opening takes, and
+//! cannot add a slot to the map, because its view has no method that writes —
+//! both held by its field types, not its method.
+//! Every `user_id` these handles are asked about is a
+//! [`crate::device_users::UserId`], parsed from the request before any of
+//! them is reached.
+use crate::device_users::UserId;
 use kotton_device::users::admission::{Chains, PeerStanding};
 use kotton_sys::secret::SecretsStore;
 use kotton_wire::ipc::UserResponse;
@@ -64,7 +73,7 @@ impl Standing {
         &self,
         peer_did: &str,
         peer_pubkey: Option<[u8; 32]>,
-        user_id: &str,
+        user_id: &UserId,
     ) -> io::Result<PeerStanding> {
         kotton_device::users::admission::peer_standing_in(
             &self.chains,
@@ -72,76 +81,54 @@ impl Standing {
             &self.paired_keys,
             peer_did,
             peer_pubkey,
-            Some(user_id),
+            Some(user_id.as_str()),
         )
         .await
     }
 
     /// The identity `user_id` is registered as, which a recovery claim must name.
-    pub(super) fn aid_of(&self, user_id: &str) -> Option<String> {
-        self.chains.aid_of(user_id)
+    pub(super) fn aid_of(&self, user_id: &UserId) -> Option<String> {
+        self.chains.aid_of(user_id.as_str())
     }
 }
 
 /// The guest sessions a stranger's key may hold: found in the person's own
 /// database, and checked against the ones revoked since they were read.
 ///
-/// Holds what opening that database takes — the open map, the base directory,
-/// the whole keychain, and the schema registry — and answers one question with
-/// them. The pool is not handed out.
-///
-/// A database already open in the map is used as it is. One not yet open is
-/// opened (`user_db::open_user_agent_db`), and that reads three things from the
-/// keychain: `master_secret`, falling back to the person's **root seed**
-/// `seed32` when no master secret is stored, to derive the database's key; and
-/// `identity_signing_key`, to name the database's owner. That it reads these
-/// and no other is the open path's discipline, not this type's (kotton #256).
+/// Holds a read-only view of the agent databases the daemon has open
+/// (`user_db::OpenAgentDbs`) and the revoked set, and nothing a database opens
+/// from: no base directory, no keychain, no schema registry (kotton #262). A database the daemon has not opened — the
+/// person is not taken up here, or their keys did not resolve — reads as no
+/// session, and the lookup leaves the map as it found it
+/// (`OpenAgentDbs::get`, the view's one method). So a peer naming a person it has no standing
+/// with makes this node open, create, migrate or remember nothing for that
+/// name, and reads no secret for it. The pool is not handed out.
 pub(super) struct GuestSessions {
-    user_dbs: crate::db::user_db::UserDbMap,
-    base: PathBuf,
-    secrets: Arc<dyn SecretsStore + Send + Sync>,
-    schema_registry: Arc<RwLock<kotton_record::registry::SchemaRegistry>>,
+    user_dbs: crate::db::user_db::OpenAgentDbs,
     revoked: Arc<RwLock<HashSet<String>>>,
 }
 
 impl GuestSessions {
     pub(super) fn new(
-        user_dbs: crate::db::user_db::UserDbMap,
-        base: PathBuf,
-        secrets: Arc<dyn SecretsStore + Send + Sync>,
-        schema_registry: Arc<RwLock<kotton_record::registry::SchemaRegistry>>,
+        user_dbs: crate::db::user_db::OpenAgentDbs,
         revoked: Arc<RwLock<HashSet<String>>>,
     ) -> Self {
-        Self { user_dbs, base, secrets, schema_registry, revoked }
+        Self { user_dbs, revoked }
     }
 
-    /// The guest session `guest_did` holds for `user_id`. An unopenable
-    /// database reads as no session — the same refusal shape.
+    /// The guest session `guest_did` holds for `user_id`, read from the
+    /// person's database if the daemon already has it open; `None` otherwise —
+    /// the same refusal shape as no session.
     pub(super) async fn find(
         &self,
         guest_did: &str,
-        user_id: &str,
+        user_id: &UserId,
     ) -> io::Result<Option<EphemeralSession>> {
-        match crate::db::user_db::user_agent_db(
-            &self.user_dbs,
-            &self.base,
-            self.secrets.as_ref(),
-            user_id,
-            &self.schema_registry,
-        )
-        .await
-        {
-            Ok(user_db) => {
-                kotton_peer::daemon::db::find_ephemeral_session_by_guest_did(
-                    &user_db, guest_did, user_id,
-                )
-                .await
-            }
-            Err(e) => {
-                tracing::warn!(user_id = %user_id, error = %e, "peer guest lookup: user db unavailable");
-                Ok(None)
-            }
-        }
+        let Some(user_db) = self.user_dbs.get(user_id) else {
+            return Ok(None);
+        };
+        kotton_peer::daemon::db::find_ephemeral_session_by_guest_did(&user_db, guest_did, user_id.as_str())
+            .await
     }
 
     /// Whether `session_id` was revoked since it was read.
@@ -162,7 +149,7 @@ impl NodeRelay {
 
     /// The relay this node reserves at, and — when `own_device` — the key it
     /// presents there for `user_id`.
-    pub(super) fn answer(&self, user_id: &str, own_device: bool) -> UserResponse {
+    pub(super) fn answer(&self, user_id: &UserId, own_device: bool) -> UserResponse {
         let nat = self.reachability.nat();
         let relay_url = nat.relay_url;
         // The keys are held under what the relay *is*, its key, and the asker
@@ -171,7 +158,7 @@ impl NodeRelay {
         let admission = own_device
             .then(|| kotton_peer::relay_keys::relay_id(relay_key.as_deref()))
             .flatten()
-            .and_then(|id| self.reachability.relay_keys().for_own_device(user_id, &id));
+            .and_then(|id| self.reachability.relay_keys().for_own_device(user_id.as_str(), &id));
         UserResponse::NodeRelayResult {
             relay_url: Some(relay_url).filter(|u| !u.is_empty()),
             relay_key,
@@ -193,9 +180,9 @@ impl Recovery {
     }
 
     /// The chain and the sealed copy, verbatim; empty when absent.
-    pub(super) fn fetch(&self, user_id: &str) -> UserResponse {
-        let kel = self.chains.chain(user_id);
-        let bundle = kotton_identity::provisioning::read_recovery_bundle_raw(&self.base, user_id)
+    pub(super) fn fetch(&self, user_id: &UserId) -> UserResponse {
+        let kel = self.chains.chain(user_id.as_str());
+        let bundle = kotton_identity::provisioning::read_recovery_bundle_raw(&self.base, user_id.as_str())
             .unwrap_or_default();
         UserResponse::RecoveryMaterial { kel, bundle }
     }
@@ -204,19 +191,19 @@ impl Recovery {
     pub(super) fn store(
         &self,
         peer_did: &str,
-        user_id: &str,
+        user_id: &UserId,
         bundle: &str,
         kel: &[kotton_wire::kel::KelEvent],
     ) -> UserResponse {
         // The events that authorize the copy, before the copy. A chain this
         // node cannot extend is a copy it will refuse to serve, so the
         // failure belongs here rather than at the recovery six months later.
-        if let Err(e) = self.chains.adopt(user_id, kel) {
+        if let Err(e) = self.chains.adopt(user_id.as_str(), kel) {
             return UserResponse::Error {
                 message: format!("the key events offered with the recovery copy do not replay: {e}"),
             };
         }
-        match kotton_identity::provisioning::write_recovery_bundle_raw(&self.base, user_id, bundle) {
+        match kotton_identity::provisioning::write_recovery_bundle_raw(&self.base, user_id.as_str(), bundle) {
             Ok(()) => {
                 tracing::info!(peer_did = %peer_did, user_id = %user_id, events = kel.len(), "kept a delivered recovery copy");
                 UserResponse::Ok
@@ -250,7 +237,7 @@ impl FrostSigner {
 
     /// Answer one round of `user_id`'s signing, `payload` a serialized
     /// `FrostRound`.
-    pub(super) fn answer(&self, user_id: &str, payload: &str) -> UserResponse {
+    pub(super) fn answer(&self, user_id: &UserId, payload: &str) -> UserResponse {
         use kotton_org::frost_signing::FrostRound;
         let round: FrostRound = match serde_json::from_str(payload) {
             Ok(r) => r,
@@ -262,7 +249,7 @@ impl FrostSigner {
         };
         let share = match self
             .secrets
-            .get_secret(&kotton_common::crypto::kdf_labels::frost_share(user_id))
+            .get_secret(&kotton_common::crypto::kdf_labels::frost_share(user_id.as_str()))
         {
             Ok(Some(s)) => s,
             Ok(None) => {

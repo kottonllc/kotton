@@ -231,7 +231,7 @@ impl KottonClient {
 impl KottonClient {
     async fn drives(&mut self, request: UserRequest) -> io::Result<Vec<kotton_wire::ipc::DriveDescriptor>> {
         match self.client.send(&request).await? {
-            UserResponse::Drives { drives } => Ok(drives),
+            UserResponse::Drives { drives, .. } => Ok(drives),
             UserResponse::Error { message } => Err(io::Error::other(message)),
             got => Err(crate::protocol::unexpected(got)),
         }
@@ -253,17 +253,28 @@ impl KottonClient {
         self.drives(UserRequest::DriveShow { user_id: user_id.into(), name: name.into() }).await
     }
 
-    /// `drive move <name> --to <vault> [--from <vault>]`: the drive where it now lives.
-    pub async fn drive_move(
-        &mut self,
-        user_id: &str,
-        name: &str,
-        to: &str,
-        from: Option<&str>,
-    ) -> io::Result<Vec<kotton_wire::ipc::DriveDescriptor>> {
-        self.drives(UserRequest::DriveMove { user_id: user_id.into(), name: name.into(), to: to.into(), from: from.map(Into::into) })
-            .await
+    /// `drive move <name> --to <vault> [--from <vault>]`: the drive where it
+    /// now lives, and how many keys the vault it left listed that the move
+    /// refused and did not carry.
+    pub async fn drive_move(&mut self, user_id: &str, name: &str, to: &str, from: Option<&str>) -> io::Result<DriveMoved> {
+        let request = UserRequest::DriveMove { user_id: user_id.into(), name: name.into(), to: to.into(), from: from.map(Into::into) };
+        match self.client.send(&request).await? {
+            UserResponse::Drives { drives, keys_refused } => Ok(DriveMoved { drives, keys_refused }),
+            UserResponse::Error { message } => Err(io::Error::other(message)),
+            got => Err(crate::protocol::unexpected(got)),
+        }
     }
+}
+
+/// What `drive move` answered: the drive where it now lives, and the keys the
+/// vault it left listed that are not storage keys, refused and not carried
+/// (kotton #274).
+#[derive(Debug, Clone)]
+pub struct DriveMoved {
+    /// The drive, as its descriptor at the vault it moved to.
+    pub drives: Vec<kotton_wire::ipc::DriveDescriptor>,
+    /// How many keys the move refused at the source's listing.
+    pub keys_refused: u32,
 }
 
 /// What this device keeps (RFC 0003, "What this device holds"; kotton #55),
