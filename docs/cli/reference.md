@@ -464,6 +464,9 @@ Manage the devices on your identity — add, join, list, revoke, name (six-digit
 
 ```text
 device add|join|list|name|revoke — pair another of your machines to this identity (six-digit confirmation); `--browser` admits a phone's browser, `--gateway <code>` a gateway elsewhere. A vault's invite is `drive enrol <invite>`. `kotton device reset` starts this whole device fresh and is the CLI's, not this shell's — it deletes the directory this runtime is using
+
+RETIRED:
+  device admit             gone: type `drive enrol`
 ```
 
 ###### **Arguments:**
@@ -775,22 +778,23 @@ drive is `pin`'s: `pin list` says it.
 
 FLAGS:
   --no-wait   start the sync and return; `status` says when it last synced
+  --push, --pull, --node
+              gone, exit 2: a device is not a sync target
 
 Exit 0 when done, 1 when refused (the reason on stderr), 2 for a line that is
 not the one above.
 
 RETIRED:
   sync now                 is `sync`, and still runs it
-  sync add|remove          gone: what this device keeps of a drive is `pin <drive>`
-  sync list                gone: what it keeps is listed by `pin list`
-  sync [--push|--pull] <remote>
-                           gone: `sync` syncs this device's drives
-  sync --node <id>         gone: a device is not a sync target
+  sync add                 gone: type `pin <drive>`
+  sync list                gone: type `pin list`
+  sync remove              gone: type `pin <drive>`
+  sync <remote>            gone: type `sync`
 ```
 
 ###### **Arguments:**
 
-* `<ARGS>` — Arguments: none, or `--no-wait`. `sync now` is `sync`; `sync add` and `sync remove` are `pin <drive>`, `sync list` is `pin list`, and `sync <remote>` is gone (see the help below)
+* `<ARGS>` — Arguments: none, or `--no-wait` (the words this verb retired are listed below, from its table)
 
 ###### **Options:**
 

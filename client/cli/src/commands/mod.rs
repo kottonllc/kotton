@@ -68,11 +68,15 @@ fn verb_word(word: &str) -> Result<String, String> {
     Ok(word.to_string())
 }
 
-/// The help a shared verb's `--help` ends on: the shell verb's own, read from the one
-/// implementation the terminal and the shell both run (`bridge::run_verb`), so the words
-/// `kotton <verb> --help` documents are the words the verb takes, and never a copy of them.
-fn shell_help(verb: &impl kotton_shell::Command) -> &'static str {
-    verb.help_text()
+/// The help a shared verb's `--help` ends on: the shell verb's own page, read from the one
+/// registry the terminal's door runs (`bridge::run_verb`), so the words `kotton <verb>
+/// --help` documents are the words the verb takes, and never a copy of them. The page's
+/// `RETIRED:` block is generated from the noun's verb table
+/// (`kotton_shell::CommandRegistry::help_of`), so this door's help cannot say of a retired
+/// word what the table does not; nothing here writes a sentence about one.
+fn shell_help(name: &str) -> String {
+    static DOOR: std::sync::OnceLock<std::sync::Arc<kotton_shell::CommandRegistry>> = std::sync::OnceLock::new();
+    DOOR.get_or_init(|| kotton_shell::ShellExecutor::new().registry()).help_of(name).unwrap_or_default()
 }
 
 #[derive(Subcommand)]
@@ -80,7 +84,7 @@ pub enum Commands {
     /// Authenticate and cache a session token for a user
     Login(LoginCommand),
     /// App lifecycle (list, launch, new, sideload, build, rm, …) — shares the REPL's `app` verb
-    #[command(after_help = shell_help(&kotton_shell::commands::AppCommand))]
+    #[command(after_help = shell_help("app"))]
     App {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -100,7 +104,7 @@ pub enum Commands {
     #[command(hide = true)]
     Shell(ReplCommand),
     /// Peer node management (identity, list, show, add, revoke, mount) — shares the REPL's `peer` verb
-    #[command(after_help = shell_help(&kotton_shell::commands::PeerCommand))]
+    #[command(after_help = shell_help("peer"))]
     Peer {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -112,7 +116,7 @@ pub enum Commands {
     /// Manage the devices on your identity — add, join, list, revoke, name
     /// (six-digit pairing) — shares the REPL's `device` verb. `reset` is
     /// the exception: it starts this whole device fresh and needs no daemon.
-    #[command(after_help = shell_help(&kotton_shell::commands::DeviceCommand))]
+    #[command(after_help = shell_help("device"))]
     Device {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -136,18 +140,17 @@ pub enum Commands {
     /// Bring your history with you — read an export (.ics) into your own records
     Import(ImportCommand),
     /// Sync this device's drives, now — the REPL's `sync`, one parser for both
-    #[command(after_help = shell_help(&kotton_shell::commands::SyncCommand))]
+    #[command(after_help = shell_help("sync"))]
     Sync {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        /// Arguments: none, or `--no-wait`. `sync now` is `sync`; `sync add` and `sync remove` are `pin <drive>`,
-        /// `sync list` is `pin list`, and `sync <remote>` is gone (see the help below)
+        /// Arguments: none, or `--no-wait` (the words this verb retired are listed below, from its table)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },
     /// Your drives — create, list, show, move, enrol — the REPL's `drive`, one parser for both
-    #[command(after_help = shell_help(&kotton_shell::commands::DriveCommand))]
+    #[command(after_help = shell_help("drive"))]
     Drive {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -157,7 +160,7 @@ pub enum Commands {
         args: Vec<String>,
     },
     /// What this device keeps of your drives — default, a drive or folder, list — the REPL's `pin`, one parser for both
-    #[command(after_help = shell_help(&kotton_shell::commands::PinCommand))]
+    #[command(after_help = shell_help("pin"))]
     Pin {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -167,7 +170,7 @@ pub enum Commands {
         args: Vec<String>,
     },
     /// When this device last synced, what it keeps of each drive, and the notices — shares the REPL's `status` verb
-    #[command(after_help = shell_help(&kotton_shell::commands::StatusCommand))]
+    #[command(after_help = shell_help("status"))]
     Status {
         /// Identity to act as (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -176,7 +179,7 @@ pub enum Commands {
         args: Vec<String>,
     },
     /// Trusted-issuer registry (add, remove, list) — shares the REPL's `issuer` verb
-    #[command(after_help = shell_help(&kotton_shell::commands::IssuerCommand))]
+    #[command(after_help = shell_help("issuer"))]
     Issuer {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -187,7 +190,7 @@ pub enum Commands {
     },
     /// Copy files into and out of your tree — shares the REPL's `cp` verb. `host:` names this
     /// computer's own files, a relative one from the directory the command is run in
-    #[command(after_help = shell_help(&kotton_shell::commands::CpCommand))]
+    #[command(after_help = shell_help("cp"))]
     Cp {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -199,7 +202,7 @@ pub enum Commands {
     /// Keep a folder of yours in your tree, and copy only what changed when run again —
     /// shares the REPL's `keep` verb. The folder is on this computer, a relative one from the
     /// directory the command is run in; with no arguments it lists what is kept
-    #[command(after_help = shell_help(&kotton_shell::commands::KeepCommand))]
+    #[command(after_help = shell_help("keep"))]
     Keep {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -209,7 +212,7 @@ pub enum Commands {
         args: Vec<String>,
     },
     /// Print a file in your tree — shares the REPL's `cat` verb
-    #[command(after_help = shell_help(&kotton_shell::commands::CatCommand))]
+    #[command(after_help = shell_help("cat"))]
     Cat {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -220,7 +223,7 @@ pub enum Commands {
     },
     /// Make the key a relay or a vault of your own is created for, and print the command its
     /// host runs — shares the REPL's `mint` verb
-    #[command(after_help = shell_help(&kotton_shell::commands::MintCommand))]
+    #[command(after_help = shell_help("mint"))]
     Mint {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -231,7 +234,7 @@ pub enum Commands {
     },
     /// Complete a key `mint` made, from the line its relay or vault printed when it was
     /// created — shares the REPL's `enrol` verb
-    #[command(after_help = shell_help(&kotton_shell::commands::EnrolCommand))]
+    #[command(after_help = shell_help("enrol"))]
     Enrol {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -242,7 +245,7 @@ pub enum Commands {
     },
     /// This device's relay (set, clear, status), and a relay of your own (rule, invite,
     /// forget) — shares the REPL's `relay` verb
-    #[command(after_help = shell_help(&kotton_shell::commands::RelayCommand))]
+    #[command(after_help = shell_help("relay"))]
     Relay {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
@@ -253,7 +256,7 @@ pub enum Commands {
     },
     /// A vault of your own (people, invite, digits, space, drop, stand, move, forget) —
     /// shares the REPL's `vault` verb
-    #[command(after_help = shell_help(&kotton_shell::commands::VaultCommand))]
+    #[command(after_help = shell_help("vault"))]
     Vault {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
