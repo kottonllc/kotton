@@ -39,31 +39,6 @@ pub enum Ceremony {
     RelayInvite,
 }
 
-/// Declares an enum and, beside it, `ALL`: every variant in declaration order, emitted from
-/// the same list the enum is, so it cannot leave one out and no reader has to hand-list them.
-/// Stable Rust has no way to enumerate an enum's variants, and a derive crate for one enum is
-/// more than this needs.
-macro_rules! enum_with_all {
-    (
-        $(#[$meta:meta])*
-        $vis:vis enum $name:ident {
-            $( $(#[$vmeta:meta])* $variant:ident, )*
-        }
-    ) => {
-        $(#[$meta])*
-        $vis enum $name {
-            $( $(#[$vmeta])* $variant, )*
-        }
-
-        impl $name {
-            /// Every variant, in declaration order. Emitted with the enum by
-            /// `enum_with_all!`, so a new variant is in it by construction.
-            pub const ALL: &'static [$name] = &[$($name::$variant),*];
-        }
-    };
-}
-
-enum_with_all! {
 /// For an [`Role::OwnDevice`] member, whether it holds identity or is a blind
 /// replica (RFC-0025).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -101,7 +76,71 @@ pub enum Posture {
     /// the node admits it; postured so pairing gives it no reach.
     Gateway,
 }
+
+impl Posture {
+    /// Every posture, in declaration order. Written by hand, beside the enum and not emitted
+    /// with it, so the enum is an ordinary item that rustfmt reads and `rg 'pub enum Posture'`
+    /// finds. What keeps the list whole is `ordinal`, an exhaustive match beside it, and a
+    /// constant after that: a posture left out of it, listed twice, or listed out of order fails
+    /// the build.
+    pub const ALL: &'static [Posture] = &[
+        Posture::Full,
+        Posture::Cosigner,
+        Posture::BlindStorage,
+        Posture::Gateway,
+    ];
 }
+
+/// Where `posture` stands in [`Posture::ALL`]: its place in declaration order, at which `ALL`
+/// must hold it, or a build error when read in a constant.
+const fn place(posture: Posture) -> usize {
+    let at = posture as usize;
+    assert!(
+        at < Posture::ALL.len() && Posture::ALL[at] as usize == at,
+        "a posture is not in `Posture::ALL` at its place in declaration order"
+    );
+    at
+}
+
+/// A posture's place in [`Posture::ALL`]. An exhaustive match, so a new posture does not
+/// compile until it has an arm here, and each arm is a constant the build evaluates: a posture
+/// with an arm and no place in `ALL` fails the build at its arm. With the constant below, which
+/// holds that `ALL` has nothing else, `ALL` has exactly this match's arms. A new arm is written
+/// as the others are: one that returns a number of its own is not read against `ALL`.
+const fn ordinal(posture: Posture) -> usize {
+    match posture {
+        Posture::Full => {
+            const AT: usize = place(Posture::Full);
+            AT
+        }
+        Posture::Cosigner => {
+            const AT: usize = place(Posture::Cosigner);
+            AT
+        }
+        Posture::BlindStorage => {
+            const AT: usize = place(Posture::BlindStorage);
+            AT
+        }
+        Posture::Gateway => {
+            const AT: usize = place(Posture::Gateway);
+            AT
+        }
+    }
+}
+
+/// `ALL` holds nothing but each posture once, at its place: entry `i` is the posture whose
+/// [`ordinal`] is `i`, so no posture is in it twice or out of order. With every arm of `ordinal`
+/// placed, `ALL.len()` is the arm count.
+const _: () = {
+    let mut i = 0;
+    while i < Posture::ALL.len() {
+        assert!(
+            ordinal(Posture::ALL[i]) == i,
+            "`Posture::ALL` lists a posture twice or out of order"
+        );
+        i += 1;
+    }
+};
 
 /// What a `device add` line says to ask for a posture: the words after `device add`. Every
 /// posture has one, because [`device_add_word`] is an exhaustive match: a new posture fails to
@@ -113,13 +152,33 @@ pub enum DeviceAddWord {
     /// A flag alone, as `--blind`.
     Flag(&'static str),
     /// A flag followed by a value, as a gateway's `--gateway <code>`: the line names nothing
-    /// else, and `value` is the placeholder the usage line and the hints print for it.
+    /// else, and `value` is what kind of value it is, which says what the line starts and
+    /// prints as the placeholder the usage line and the hints show.
     FlagWithValue {
         /// The flag, as typed.
         flag: &'static str,
-        /// What the person types after it, as the grammar names it.
-        value: &'static str,
+        /// What the person types after it.
+        value: DeviceAddValue,
     },
+}
+
+/// The kind of value a [`DeviceAddWord::FlagWithValue`] takes. A reader matches on the kind,
+/// not on the posture that has the word, to know what the value is and what it starts: a new
+/// kind fails to compile in each reader until it is given a path, rather than reaching one
+/// that refuses it as usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceAddValue {
+    /// A gateway's enrol code: the line dials the gateway that printed it.
+    GatewayCode,
+}
+
+impl DeviceAddValue {
+    /// The placeholder the grammar prints for the value.
+    pub const fn placeholder(self) -> &'static str {
+        match self {
+            DeviceAddValue::GatewayCode => "<code>",
+        }
+    }
 }
 
 /// The one vocabulary of `device add`: the words that ask for `posture`. A total map over
@@ -137,7 +196,10 @@ pub const fn device_add_word(posture: Posture) -> DeviceAddWord {
         Posture::Full => DeviceAddWord::Bare,
         Posture::Cosigner => DeviceAddWord::Flag("--cosigner"),
         Posture::BlindStorage => DeviceAddWord::Flag("--blind"),
-        Posture::Gateway => DeviceAddWord::FlagWithValue { flag: "--gateway", value: "<code>" },
+        Posture::Gateway => DeviceAddWord::FlagWithValue {
+            flag: "--gateway",
+            value: DeviceAddValue::GatewayCode,
+        },
     }
 }
 
@@ -167,7 +229,9 @@ impl std::fmt::Display for DeviceAddWord {
         match self {
             DeviceAddWord::Bare => Ok(()),
             DeviceAddWord::Flag(flag) => f.write_str(flag),
-            DeviceAddWord::FlagWithValue { flag, value } => write!(f, "{flag} {value}"),
+            DeviceAddWord::FlagWithValue { flag, value } => {
+                write!(f, "{flag} {}", value.placeholder())
+            }
         }
     }
 }
