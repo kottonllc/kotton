@@ -91,6 +91,8 @@ mod ship_check;
 mod verb_check;
 #[cfg_attr(not(feature = "cli-docs"), allow(dead_code))]
 mod retired_words;
+#[cfg(test)]
+mod verb_tables;
 fn main() {
     let mut args = std::env::args().skip(1); // skip binary name
     // The checkout this runs in, asked of git — never `env!("CARGO_MANIFEST_DIR")`, which
@@ -2908,8 +2910,8 @@ fn docs_check() {
 #[cfg(feature = "cli-docs")]
 fn verb_check_run(root: &Path, args: &[String]) {
     use clap::CommandFactory;
-    use kotton_cli::shell::{VerbIs, ShellExecutor};
-    use verb_check::{Is, Trees};
+    use kotton_cli::shell::ShellExecutor;
+    use verb_check::{table_of, Trees};
 
     if args.iter().any(|a| a == "--pinned") {
         match verb_check::protocol_rfc(root) {
@@ -2924,20 +2926,6 @@ fn verb_check_run(root: &Path, args: &[String]) {
             }
         }
     }
-    let table = |registry: &kotton_cli::shell::CommandRegistry, name: &str| -> Vec<(String, Is)> {
-        registry
-            .verbs_of(name)
-            .iter()
-            .map(|v| {
-                let is = match v.is {
-                    VerbIs::Current => Is::Current,
-                    VerbIs::Alias { now } => Is::Alias(now.to_string()),
-                    VerbIs::Gone { now } => Is::Gone(now.to_string()),
-                };
-                (v.word.to_string(), is)
-            })
-            .collect()
-    };
     let repl = kotton_cli::bridge::repl_executor().registry();
     let door = ShellExecutor::new().registry();
     let mut trees = Trees::default();
@@ -2950,25 +2938,31 @@ fn verb_check_run(root: &Path, args: &[String]) {
         for name in std::iter::once(c.get_name()).chain(c.get_all_aliases()) {
             trees.clap.insert(name.to_string(), is_door);
             if is_door {
-                let t = table(&door, c.get_name());
+                let t = table_of(&door, c.get_name());
                 if !t.is_empty() {
                     trees.clap_tables.insert(name.to_string(), t);
                 }
             }
         }
     }
-    for name in repl.command_names() {
-        let t = table(&repl, &name);
-        if !t.is_empty() {
-            trees.repl_tables.insert(name.clone(), t);
-        }
-        trees.repl.insert(name);
-    }
+    trees.repl_tables = verb_check::tables_of(&repl);
+    trees.repl.extend(repl.command_names());
     let (rfc, mut found) = verb_check::the_rfc(root);
     found.extend(verb_check::findings(&rfc, &trees));
     // The tables' other direction: what they retired, no line a person reads still teaches.
-    let retired = retired_words::retired(&trees.repl_tables);
-    found.extend(retired_words::findings(root, &retired));
+    let retired = match retired_words::retired(&trees.repl_tables) {
+        Ok(retired) => {
+            found.extend(retired_words::findings(root, &retired));
+            retired
+        }
+        Err(unsaid) => {
+            found.push(format!(
+                "the retired-words sweep did not run: it has nothing to tell a person to type for {}, each named above",
+                unsaid.iter().map(|w| format!("`{w}`")).collect::<Vec<_>>().join(", ")
+            ));
+            Vec::new()
+        }
+    };
     if found.is_empty() {
         println!(
             "verb-check: OK — {} clap names and {} REPL names have a place in the command-tree decision; {} are one tree, held to its verbs.",
