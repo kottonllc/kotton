@@ -66,12 +66,11 @@ impl Outbound {
         match self {
             Outbound::Everything => true,
             Outbound::PacksOnly => {
-                let key = key.trim_start_matches('/');
-                [crate::packed::PACK_PREFIX, crate::superblock::SUPERBLOCK_PREFIX]
-                    .iter()
-                    .any(|prefix| {
-                        key.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
-                    })
+                use crate::packed::ObjectKind;
+                matches!(
+                    crate::packed::kind(key),
+                    ObjectKind::Superblock | ObjectKind::ContentPack | ObjectKind::IndexPack
+                )
             }
         }
     }

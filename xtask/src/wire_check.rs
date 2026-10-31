@@ -111,6 +111,17 @@ const CHANNELS: &[Channel] = &[
         sources: &[("core/wire/src/ipc/peer_request.rs", "PeerRequest")],
         golden: "core/wire/peer-request-surface.txt",
     },
+    // What a tenant's device, or the vault's operator key, may ask a vault on
+    // the peer transport: the type `kvaultd`'s peer acceptor decodes (kotton
+    // #239). A channel of its own for the reason the peer request has one:
+    // its names repeat `UserRequest`'s byte for byte, and
+    // `VaultPeerRequest`'s tests hold the mirror against `wire-surface.txt`.
+    // A verb joining this file is a verb a vault can newly be asked.
+    Channel {
+        what: "vault peer request",
+        sources: &[("core/wire/src/ipc/vault_peer_request.rs", "VaultPeerRequest")],
+        golden: "core/wire/vault-peer-request-surface.txt",
+    },
     // What the daemon answers on the user channel. Its bytes reach the CLI,
     // the shell and the gateways, and its fields are held to the same rule as
     // the requests' by `secret_debug_tests` (`core/wire/src/ipc/request.rs`):
