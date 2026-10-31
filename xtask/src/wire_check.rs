@@ -37,6 +37,29 @@
 //! `SOURCES` grows from one entry to fifteen — the per-domain enums — and the
 //! golden file does not change at all. That is the whole point: this file is the
 //! evidence that the move was a move.
+//!
+//! ## The twin rule, between the recordings
+//!
+//! Two peer wires mirror the door. A device sends the sealed, recovery and relay
+//! verbs as `UserRequest` to both kuserd's `PeerRequest` decoder and kvaultd's
+//! `VaultPeerRequest` decoder, and that works only because each peer wire spells
+//! those verbs byte for byte as the door does. Pinning each surface to its own
+//! recording does not hold that: a field renamed on `UserRequest::ReadSealed`
+//! fails this check once, passes after `cargo xtask wire-surface` re-records
+//! `wire-surface.txt`, and is then refused at every vault and every device.
+//!
+//! So [`twin_findings`] reads the three recorded files as text, with no
+//! compile, beside each channel's own comparison, and every variant named in
+//! `peer-request-surface.txt` or `vault-peer-request-surface.txt` must have a
+//! block in `wire-surface.txt` identical to its own, line for line. Re-recording
+//! one side of a twin alone is a finding naming the variant and both files.
+//!
+//! The type-level proof stays where the types are: `kotton-wire`'s
+//! `each_peer_verb_records_the_fields_of_its_door_twin` and
+//! `each_vault_verb_records_the_fields_of_its_door_twin` hold the same fact,
+//! and the mirror tests beside them hold that the door's bytes decode and
+//! re-encode on each peer wire. This rule holds the same fact in the gate
+//! `just lint` runs, which does not run those tests.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -155,9 +178,118 @@ pub fn parse_enum_public(src: &str, enum_name: &str) -> Vec<Variant> {
 }
 
 pub fn wire_check(bless: bool) {
-    for channel in CHANNELS {
-        check_channel(channel, bless);
+    if bless {
+        for channel in CHANNELS {
+            check_channel(channel, true);
+        }
+        return;
     }
+    // The twin rule reads only the recordings, so it runs first: a recording
+    // edited by hand fails its channel below and is named here as well.
+    let findings = twin_findings(Path::new("."));
+    if !findings.is_empty() {
+        eprintln!("wire-check: a peer wire no longer mirrors the door.\n");
+        for finding in &findings {
+            eprintln!("{finding}\n");
+        }
+        eprintln!(
+            "A device sends these verbs as `UserRequest` to both peer decoders, so each peer wire \
+             must spell them as the door does. Change the peer type and the door's variant \
+             together and re-record both with `cargo xtask wire-surface` in the same commit; \
+             otherwise every vault or device refuses what the sync pass sends.\n"
+        );
+    }
+    for channel in CHANNELS {
+        check_channel(channel, false);
+    }
+    if !findings.is_empty() {
+        std::process::exit(1);
+    }
+    println!(
+        "wire-check: OK — every verb in {} and {} records its door twin's block in {DOOR_RECORDING}.",
+        TWIN_RECORDINGS[0], TWIN_RECORDINGS[1]
+    );
+}
+
+/// The recording every peer wire's verbs must match: the door's.
+const DOOR_RECORDING: &str = "core/wire/wire-surface.txt";
+
+/// The recordings whose every variant mirrors its door twin.
+const TWIN_RECORDINGS: [&str; 2] = [
+    "core/wire/peer-request-surface.txt",
+    "core/wire/vault-peer-request-surface.txt",
+];
+
+/// The variants of a recorded surface, each with its indented lines (field
+/// attributes and fields) as written. Header lines start with `#`.
+fn recorded_blocks(text: &str) -> Vec<(&str, Vec<&str>)> {
+    let mut out: Vec<(&str, Vec<&str>)> = Vec::new();
+    for line in text.lines() {
+        if line.starts_with(' ') {
+            if let Some((_, block)) = out.last_mut() {
+                block.push(line);
+            }
+        } else if !line.starts_with('#') && !line.trim().is_empty() {
+            out.push((line.trim_end(), Vec::new()));
+        }
+    }
+    out
+}
+
+/// The twin rule over the recorded files under `root`, as text: one finding
+/// per variant of a peer recording whose block differs from, or is missing
+/// in, the door's recording. Empty when they agree.
+pub fn twin_findings(root: &Path) -> Vec<String> {
+    let read = |rel: &str| std::fs::read_to_string(root.join(rel));
+    let door_text = match read(DOOR_RECORDING) {
+        Ok(t) => t,
+        Err(e) => return vec![format!("  {DOOR_RECORDING} could not be read: {e}")],
+    };
+    let door: BTreeMap<&str, Vec<&str>> = recorded_blocks(&door_text).into_iter().collect();
+    if door.is_empty() {
+        return vec![format!("  {DOOR_RECORDING} records no variant, so it mirrors nothing.")];
+    }
+    let mut findings = Vec::new();
+    for twin in TWIN_RECORDINGS {
+        let text = match read(twin) {
+            Ok(t) => t,
+            Err(e) => {
+                findings.push(format!("  {twin} could not be read: {e}"));
+                continue;
+            }
+        };
+        let blocks = recorded_blocks(&text);
+        if blocks.is_empty() {
+            findings.push(format!("  {twin} records no variant, so the twin rule holds nothing."));
+        }
+        for (name, block) in blocks {
+            match door.get(name) {
+                None => findings.push(format!(
+                    "  `{name}` is in {twin} and not in {DOOR_RECORDING}: the door no longer \
+                     has the verb the peer wire mirrors."
+                )),
+                Some(door_block) if *door_block != block => {
+                    let mut f = format!(
+                        "  `{name}` in {twin} differs from its block in {DOOR_RECORDING}:\n"
+                    );
+                    for line in block.iter().filter(|l| !door_block.contains(l)) {
+                        f.push_str(&format!("    {twin}: {}\n", line.trim()));
+                    }
+                    for line in door_block.iter().filter(|l| !block.contains(l)) {
+                        f.push_str(&format!("    {DOOR_RECORDING}: {}\n", line.trim()));
+                    }
+                    if block.iter().all(|l| door_block.contains(l))
+                        && door_block.iter().all(|l| block.contains(l))
+                    {
+                        f.push_str("    the same lines in another order, which is another order on the wire\n");
+                    }
+                    findings.push(f.trim_end().to_string());
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    findings
 }
 
 fn check_channel(channel: &Channel, bless: bool) {
@@ -461,4 +593,116 @@ fn is_field_ident(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in files {
+            let p = dir.path().join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        dir
+    }
+
+    const HEADER: &str = "# The JSON surface. Generated — do not hand-edit.\n# variants: 3\n";
+
+    fn door(read_sealed_path: &str) -> String {
+        format!(
+            "{HEADER}NodeRelay\n    user_id: String\nReadFile\n    user_id: String\n    path: String\n\
+             ReadSealed\n    user_id: String\n    mount: String\n    {read_sealed_path}\n    offset: u64\n\
+             Tenants\nWriteSealed\n    user_id: String\n    #[serde(with = \"crate::base64_bytes\")]\n    blob: Vec<u8>\n"
+        )
+    }
+
+    fn peer() -> String {
+        format!(
+            "{HEADER}NodeRelay\n    user_id: String\nReadFile\n    user_id: String\n    path: String\n\
+             ReadSealed\n    user_id: String\n    mount: String\n    path: String\n    offset: u64\n"
+        )
+    }
+
+    fn vault() -> String {
+        format!(
+            "{HEADER}ReadSealed\n    user_id: String\n    mount: String\n    path: String\n    offset: u64\n\
+             Tenants\nWriteSealed\n    user_id: String\n    #[serde(with = \"crate::base64_bytes\")]\n    blob: Vec<u8>\n"
+        )
+    }
+
+    /// The three recordings agreeing, a fieldless variant among them, is no finding.
+    #[test]
+    fn three_recordings_that_agree_are_no_finding() {
+        let dir = tree(&[
+            (DOOR_RECORDING, &door("path: String")),
+            (TWIN_RECORDINGS[0], &peer()),
+            (TWIN_RECORDINGS[1], &vault()),
+        ]);
+        assert_eq!(twin_findings(dir.path()), Vec::<String>::new());
+    }
+
+    /// A door field re-recorded on its own — the twins left as they were — is a
+    /// finding in each peer recording that mirrors it, naming the variant, both
+    /// files and the line on each side.
+    #[test]
+    fn a_door_block_edited_alone_is_a_finding_naming_the_variant_and_both_files() {
+        let dir = tree(&[
+            (DOOR_RECORDING, &door("object_path: String")),
+            (TWIN_RECORDINGS[0], &peer()),
+            (TWIN_RECORDINGS[1], &vault()),
+        ]);
+        let findings = twin_findings(dir.path());
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        for (finding, twin) in findings.iter().zip(TWIN_RECORDINGS) {
+            assert!(finding.contains("`ReadSealed`"), "{finding}");
+            assert!(finding.contains(&format!("in {twin} differs from its block in {DOOR_RECORDING}")), "{finding}");
+            assert!(finding.contains(&format!("{twin}: path: String")), "{finding}");
+            assert!(finding.contains(&format!("{DOOR_RECORDING}: object_path: String")), "{finding}");
+        }
+    }
+
+    /// A field attribute is part of the block: dropping one on the twin's side is a finding.
+    #[test]
+    fn an_attribute_dropped_on_one_side_is_a_finding() {
+        let edited = vault().replace("    #[serde(with = \"crate::base64_bytes\")]\n", "");
+        let dir = tree(&[
+            (DOOR_RECORDING, &door("path: String")),
+            (TWIN_RECORDINGS[0], &peer()),
+            (TWIN_RECORDINGS[1], &edited),
+        ]);
+        let findings = twin_findings(dir.path());
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert!(findings[0].contains("`WriteSealed`"), "{}", findings[0]);
+        assert!(findings[0].contains("base64_bytes"), "{}", findings[0]);
+    }
+
+    /// A door variant renamed and re-recorded leaves its twin naming a verb the
+    /// door no longer has, and the field order is the wire's order.
+    #[test]
+    fn a_renamed_door_variant_and_a_reordered_block_are_findings() {
+        let renamed = door("path: String").replace("NodeRelay\n", "NodeRelayOpen\n");
+        let reordered = peer().replace(
+            "ReadFile\n    user_id: String\n    path: String\n",
+            "ReadFile\n    path: String\n    user_id: String\n",
+        );
+        let dir = tree(&[
+            (DOOR_RECORDING, &renamed),
+            (TWIN_RECORDINGS[0], &reordered),
+            (TWIN_RECORDINGS[1], &vault()),
+        ]);
+        let findings = twin_findings(dir.path());
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        assert!(findings[0].contains("`NodeRelay` is in core/wire/peer-request-surface.txt and not in"), "{}", findings[0]);
+        assert!(findings[1].contains("`ReadFile`") && findings[1].contains("another order"), "{}", findings[1]);
+    }
+
+    /// The real recordings in this tree agree, so the gate starts green.
+    #[test]
+    fn the_recordings_in_this_tree_agree() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        assert_eq!(twin_findings(&root), Vec::<String>::new());
+    }
 }

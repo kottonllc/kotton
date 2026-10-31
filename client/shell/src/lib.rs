@@ -42,6 +42,11 @@ pub use utils::{expand_vars, normalize_path, parse_command};
 #[cfg(feature = "cli")]
 pub use commands::{scaffold_files, typed_lines, TypedLines, SDK_FROM_REPOSITORY};
 
+/// `device add`'s posture flags as the shell's usage line brackets them, for the CLI door's
+/// argument help of `device`, so both doors print the one vocabulary and neither spells it.
+#[cfg(feature = "cli")]
+pub use commands::device_add_posture_bracket;
+
 /// Return `(name, help page)` for every shell command, sorted alphabetically.
 pub fn shell_command_docs() -> Vec<(String, String)> {
     ShellExecutor::new().command_docs()

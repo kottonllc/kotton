@@ -27,7 +27,11 @@
 //!    a Decision noun as its replacement, every verb the Decision names is current in the
 //!    table but those [`DEFERRED`], and every verb a Today cell names is in the table;
 //! 3. for any other noun with a table (`device`, for the word the table moved to `drive`):
-//!    every retired verb is in a Today cell and names a Decision noun.
+//!    every retired verb is in a Today cell and names a Decision noun;
+//! 4. for every noun: a word retired for another noun alone (`sync add` is `pin`) points at a
+//!    noun whose table holds a current `<…>` entry (`pin <drive>`), since that is what a person
+//!    is told to type after the noun; a replacement whose noun has none names the verb itself
+//!    (`sync list` is `pin list`) ([`bare_other`], [`placeholder`]).
 //!
 //! **Where the decision is read from.** kotton-protocol's checkout, at
 //! `$KOTTON_PROTOCOL_DIR` or beside this one (`../kotton-protocol`), when there is one. kotton-protocol is not
@@ -303,6 +307,55 @@ impl Pinned {
 
 include!("verb_check_pinned.rs");
 
+/// The other noun a replacement names alone, if it does: `pin` for `sync add`, gone for `pin`.
+/// `None` for a replacement that names its verb (`pin list`) or is the word's own noun
+/// (`sync now` is `sync`). After that noun, a person still has to pick what to type.
+pub fn bare_other<'a>(noun: &str, now: &'a str) -> Option<&'a str> {
+    let mut words = now.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some(target), None) if target != noun => Some(target),
+        _ => None,
+    }
+}
+
+/// The first current `<…>` entry of `noun`'s table (`<drive>` for `pin`): what a replacement
+/// naming `noun` alone is said with, in the help's `RETIRED:` block and in the retired-words
+/// sweep's advice. `None` when the noun has no table or its table has none.
+pub fn placeholder<'a>(tables: &'a BTreeMap<String, Vec<(String, Is)>>, noun: &str) -> Option<&'a str> {
+    tables.get(noun)?.iter().find(|(w, is)| *is == Is::Current && w.starts_with('<')).map(|(w, _)| w.as_str())
+}
+
+/// The verb table of the command `registry` registers as `name`, as the check reads it.
+#[cfg(feature = "cli-docs")]
+pub fn table_of(registry: &kotton_cli::shell::CommandRegistry, name: &str) -> Vec<(String, Is)> {
+    use kotton_cli::shell::VerbIs;
+    registry
+        .verbs_of(name)
+        .iter()
+        .map(|v| {
+            let is = match v.is {
+                VerbIs::Current => Is::Current,
+                VerbIs::Alias { now } => Is::Alias(now.to_string()),
+                VerbIs::Gone { now } => Is::Gone(now.to_string()),
+            };
+            (v.word.to_string(), is)
+        })
+        .collect()
+}
+
+/// Every table `registry` holds, by the name it is registered as; a name with no verbs has none.
+#[cfg(feature = "cli-docs")]
+pub fn tables_of(registry: &kotton_cli::shell::CommandRegistry) -> BTreeMap<String, Vec<(String, Is)>> {
+    registry
+        .command_names()
+        .into_iter()
+        .filter_map(|name| {
+            let t = table_of(registry, &name);
+            (!t.is_empty()).then_some((name, t))
+        })
+        .collect()
+}
+
 /// A verb as a person types it: `drive create`, and the bare noun as `sync`.
 fn form(noun: &str, verb: &str) -> String {
     if verb.is_empty() {
@@ -395,6 +448,18 @@ pub fn findings(rfc: &Rfc, trees: &Trees) -> Vec<String> {
                             "{} names `{now}` as what replaced it, and the command-tree decision's Decision has no `{replacement}`",
                             form(noun, word)
                         ));
+                    }
+                    // 4. A replacement naming another noun alone is said with that noun's
+                    // placeholder; one whose noun has none must name the verb.
+                    if let Some(target) = bare_other(noun, now) {
+                        if placeholder(&trees.repl_tables, target).is_none() {
+                            out.push(format!(
+                                "{} names `{now}` alone as what replaced it, and `{target}`'s table holds no current `<…>` entry, \
+                                 so nothing after `{target}` says what to type: name the verb (as `sync list` names `pin list`), \
+                                 or give `{target}` a placeholder",
+                                form(noun, word)
+                            ));
+                        }
                     }
                 }
             }
@@ -550,28 +615,10 @@ whole` is \"collect all my things\". `sync` syncs this device's drives, now.
         assert!(!rfc.today_names.contains("identity"), "read the second column: {:?}", rfc.today_names);
     }
 
-    /// The trees as this PR leaves them, small: the three nouns, `device`'s retired word, and
-    /// a name from each door.
+    /// The trees, small: the shell's tables ([`crate::verb_tables`]) in both doors, and a name
+    /// from each door.
     fn trees() -> Trees {
-        let table = |rows: &[(&str, Is)]| rows.iter().map(|(w, is)| (w.to_string(), is.clone())).collect::<Vec<_>>();
-        let mut tables = BTreeMap::new();
-        tables.insert(
-            "drive".to_string(),
-            table(&[("create", Is::Current), ("list", Is::Current), ("show", Is::Current), ("move", Is::Current), ("enrol", Is::Current)]),
-        );
-        tables.insert("pin".to_string(), table(&[("default", Is::Current), ("<drive>", Is::Current), ("list", Is::Current)]));
-        tables.insert(
-            "sync".to_string(),
-            table(&[
-                ("", Is::Current),
-                ("now", Is::Alias("sync".into())),
-                ("add", Is::Gone("pin".into())),
-                ("list", Is::Gone("pin list".into())),
-                ("remove", Is::Gone("pin".into())),
-                ("<remote>", Is::Gone("sync".into())),
-            ]),
-        );
-        tables.insert("device".to_string(), table(&[("admit", Is::Gone("drive enrol".into()))]));
+        let tables = crate::verb_tables::tables();
         let mut clap: BTreeMap<String, bool> = ["drive", "pin", "sync", "device", "keep"].iter().map(|n| (n.to_string(), true)).collect();
         for (name, _) in UNPLACED {
             clap.insert(name.to_string(), false);
@@ -677,6 +724,37 @@ whole` is \"collect all my things\". `sync` syncs this device's drives, now.
         let found = findings(&Rfc::parse(DECISION), &t);
         assert_eq!(found.len(), 1, "{found:#?}");
         assert!(found[0].starts_with("`vfs` is listed as unplaced"), "{found:#?}");
+    }
+
+    /// **A word retired for another noun alone needs a placeholder there.** `sync add` is gone
+    /// for `pin`, which is a full answer only because `pin`'s table holds a current `<drive>`:
+    /// without it, `sync add` and `sync remove` are refused by name, and `sync list` (gone for
+    /// `pin list`, which names its verb) and `sync now` (its own noun) are not. A retired
+    /// placeholder does not count, and the rule reads every noun's table, not only the held.
+    #[test]
+    fn a_word_retired_to_a_bare_noun_needs_a_current_placeholder_there() {
+        let mut t = trees();
+        for tables in [&mut t.repl_tables, &mut t.clap_tables] {
+            tables.get_mut("pin").unwrap().retain(|(w, _)| w != "<drive>");
+        }
+        let found = findings(&Rfc::parse(DECISION), &t);
+        let bare: Vec<&String> = found.iter().filter(|f| f.contains("alone as what replaced it")).collect();
+        assert_eq!(bare.len(), 2, "{found:#?}");
+        assert!(bare[0].starts_with("`sync add` names `pin` alone as what replaced it, and `pin`'s table holds no current `<…>` entry"), "{found:#?}");
+        assert!(bare[0].contains("name the verb (as `sync list` names `pin list`)"), "{found:#?}");
+        assert!(bare[1].starts_with("`sync remove` names `pin` alone"), "{found:#?}");
+        // A retired placeholder is not one a person can type; a noun with no table has none.
+        let mut t = trees();
+        for tables in [&mut t.repl_tables, &mut t.clap_tables] {
+            let pin = tables.get_mut("pin").unwrap();
+            pin.retain(|(w, _)| w != "<drive>");
+            pin.push(("<old>".into(), Is::Gone("pin list".into())));
+            tables.get_mut("device").unwrap().push(("keep".into(), Is::Alias("drive".into())));
+        }
+        let found = findings(&Rfc::parse(DECISION), &t);
+        let bare: Vec<&String> = found.iter().filter(|f| f.contains("alone as what replaced it")).collect();
+        assert_eq!(bare.len(), 3, "{found:#?}");
+        assert!(bare[0].starts_with("`device keep` names `drive` alone"), "{found:#?}");
     }
 
     /// The table held here reads back as itself, so what is pasted from a mismatch is what
