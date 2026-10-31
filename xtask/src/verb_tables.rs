@@ -8,7 +8,7 @@
 //! (under the `cli-docs` feature, which builds them) holds it equal to what
 //! `kotton_cli::bridge::repl_executor`'s registry declares, read the way `verb-check` reads it
 //! ([`crate::verb_check::tables_of`]). So a shell edit to a table fails that test, not only the
-//! gate.
+//! gate, which holds it too ([`drift`], the first finding of `verb-check`).
 
 use std::collections::BTreeMap;
 
@@ -42,6 +42,34 @@ pub fn tables() -> BTreeMap<String, Vec<(String, Is)>> {
     );
     t.insert("device".to_string(), table(&[("admit", Is::Gone("drive enrol".into()))]));
     t
+}
+
+/// Where the fixture is not `live`, the registry's tables: the first noun that differs and its
+/// first differing entry (or the noun held by one side only). `None` when they are equal,
+/// entry for entry, in order.
+#[cfg(feature = "cli-docs")]
+pub fn drift(live: &BTreeMap<String, Vec<(String, Is)>>) -> Option<String> {
+    let fixture = tables();
+    let fix = "xtask/src/verb_tables.rs";
+    for noun in fixture.keys().chain(live.keys()).collect::<std::collections::BTreeSet<_>>() {
+        let (f, l) = (fixture.get(noun), live.get(noun));
+        if f == l {
+            continue;
+        }
+        let (Some(f), Some(l)) = (f, l) else {
+            let (who, other) = if f.is_some() { (fix, "the shell's registry") } else { ("the shell's registry", fix) };
+            return Some(format!("`{noun}` has a verb table in {who} and none in {other}: make {fix} what `client/shell/src/commands/` declares"));
+        };
+        let i = (0..f.len().max(l.len())).find(|&i| f.get(i) != l.get(i)).unwrap_or(0);
+        let show = |e: Option<&(String, Is)>| e.map_or("no entry".to_string(), |(w, is)| format!("`{w}` ({is:?})"));
+        return Some(format!(
+            "`{noun}` entry {} differs: {fix} has {}, the shell's registry has {}: make {fix} what `client/shell/src/commands/` declares",
+            i + 1,
+            show(f.get(i)),
+            show(l.get(i))
+        ));
+    }
+    None
 }
 
 #[cfg(test)]

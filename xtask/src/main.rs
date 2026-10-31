@@ -91,7 +91,7 @@ mod ship_check;
 mod verb_check;
 #[cfg_attr(not(feature = "cli-docs"), allow(dead_code))]
 mod retired_words;
-#[cfg(test)]
+#[cfg(any(test, feature = "cli-docs"))]
 mod verb_tables;
 fn main() {
     let mut args = std::env::args().skip(1); // skip binary name
@@ -2947,7 +2947,10 @@ fn verb_check_run(root: &Path, args: &[String]) {
     }
     trees.repl_tables = verb_check::tables_of(&repl);
     trees.repl.extend(repl.command_names());
-    let (rfc, mut found) = verb_check::the_rfc(root);
+    let (rfc, rfc_found) = verb_check::the_rfc(root);
+    // First: the fixture the unit tests read is the registry's tables, so they test what ships.
+    let mut found: Vec<String> = verb_tables::drift(&trees.repl_tables).into_iter().collect();
+    found.extend(rfc_found);
     found.extend(verb_check::findings(&rfc, &trees));
     // The tables' other direction: what they retired, no line a person reads still teaches.
     let retired = match retired_words::retired(&trees.repl_tables) {
