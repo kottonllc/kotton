@@ -322,7 +322,7 @@ impl DeviceRuntime {
                     here.lan_ip = lan_ip_here();
                 }
                 let day = kotton_crypto::door_day(kotton_peer::rendezvous::unix_now());
-                this.reconcile_local_door(now, day, here, Arc::clone(&handler)).await;
+                this.reconcile_local_door(now, day, here, handler.clone()).await;
                 let wait = this
                     .local_door
                     .door
@@ -482,7 +482,7 @@ impl DeviceRuntime {
                 );
                 match (keys, knock) {
                     (Ok(keys), Ok(knock)) => {
-                        wanted.insert(knock, (keys.handle.signing_key, keys.admit, Arc::clone(&inbox.handler)));
+                        wanted.insert(knock, (keys.handle.signing_key, keys.admit, inbox.handler.clone()));
                     }
                     _ => tracing::warn!("a contact's door could not be derived"),
                 }
@@ -624,7 +624,7 @@ mod tests {
     const DAY: u64 = 20_000;
 
     fn handler() -> PeerHandler {
-        Arc::new(|_, _| Box::pin(async { Vec::new() }))
+        kotton_peer::door::PeerDoor::<(), ()>::serving(|_, ()| async {}, |_| ())
     }
 
     /// A network this device can name, with no address to announce on — so the tests

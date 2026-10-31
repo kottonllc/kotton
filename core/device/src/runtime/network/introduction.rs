@@ -257,9 +257,9 @@ type OneRequest = Box<
 async fn serve(conn: Box<dyn Connection>, handler: PeerHandler, served: &AtomicU64) {
     let peer = conn.peer_id().to_owned();
     loop {
-        let h = Arc::clone(&handler);
+        let h = handler.clone();
         let pf = peer.clone();
-        let one: OneRequest = Box::new(move |req: Vec<u8>| Box::pin(async move { h(pf, req).await }));
+        let one: OneRequest = Box::new(move |req: Vec<u8>| Box::pin(async move { h.serve(pf, req).await }));
         match conn.serve_one_request(one).await {
             Ok(true) => {
                 served.fetch_add(1, Ordering::Relaxed);
@@ -293,8 +293,12 @@ mod tests {
         )
     }
 
+    /// A door that answers a string with the string after `echo:`.
     fn echo() -> PeerHandler {
-        Arc::new(|_, req| Box::pin(async move { [b"echo:".as_slice(), &req].concat() }))
+        kotton_peer::door::PeerDoor::<String, String>::serving(
+            |_, said| async move { format!("echo:{said}") },
+            |e| e,
+        )
     }
 
     fn device_key() -> ed25519_dalek::SigningKey {
@@ -391,11 +395,13 @@ mod tests {
         .await
         .expect("the introduced device dials the listener");
         let (mut send, mut recv) = conn.open_bi().await.unwrap();
-        send.write_all(&2u32.to_be_bytes()).await.unwrap();
-        send.write_all(b"hi").await.unwrap();
+        // A door decodes what it is sent, so the request is the string `"hi"`
+        // as JSON and the answer is `"echo:hi"` the same way.
+        send.write_all(&4u32.to_be_bytes()).await.unwrap();
+        send.write_all(br#""hi""#).await.unwrap();
         send.finish().unwrap();
         let reply = recv.read_to_end(1024).await.unwrap();
-        assert_eq!(&reply[4..], b"echo:hi");
+        assert_eq!(&reply[4..], br#""echo:hi""#);
         assert_eq!(rt.introduced_sessions(), 1);
         assert_eq!(rt.introduced_requests(), 1);
         assert_eq!(rt.introductions_open(), vec![at], "open while the session is");

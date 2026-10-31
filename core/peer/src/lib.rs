@@ -67,5 +67,6 @@ pub mod rendezvous;
 pub mod scope;
 
 pub use provider::*;
-pub use reachability::{PeerHandler, Reachability};
+pub use door::PeerHandler;
+pub use reachability::Reachability;
 pub use scope::local_only;
