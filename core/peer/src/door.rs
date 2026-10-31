@@ -76,6 +76,13 @@ use std::sync::Arc;
 ///     Box::pin(async move { b })
 /// }));
 /// ```
+///
+/// The error codes on these two are documentation: stable rustdoc runs a
+/// `compile_fail` block and checks only that it fails, not why. The reasons
+/// were confirmed by hand by compiling each snippet: `E0308` (mismatched
+/// types) at the `Arc::new(..)` bound to a `PeerHandler`, and `E0423` (a tuple
+/// struct with private fields) at `PeerHandler(..)`. A snippet that stopped
+/// compiling for some other reason would still pass here.
 #[derive(Clone)]
 pub struct PeerHandler(Arc<dyn Fn(String, Vec<u8>) -> Answer + Send + Sync>);
 
