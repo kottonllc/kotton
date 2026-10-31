@@ -81,8 +81,9 @@ impl Posture {
     /// Every posture, in declaration order. Written by hand, beside the enum and not emitted
     /// with it, so the enum is an ordinary item that rustfmt reads and `rg 'pub enum Posture'`
     /// finds. What keeps the list whole is `ordinal`, an exhaustive match beside it, and a
-    /// constant after that: a posture left out of it, listed twice, or listed out of order fails
-    /// the build.
+    /// constant after that: a posture listed twice or out of order fails the build, and so does
+    /// one left out of it, whenever its `ordinal` arm's constant is `place` of its own variant
+    /// (see `ordinal` for the one case that is left to discipline).
     pub const ALL: &'static [Posture] = &[
         Posture::Full,
         Posture::Cosigner,
@@ -104,9 +105,16 @@ const fn place(posture: Posture) -> usize {
 
 /// A posture's place in [`Posture::ALL`]. An exhaustive match, so a new posture does not
 /// compile until it has an arm here, and each arm is a constant the build evaluates: a posture
-/// with an arm and no place in `ALL` fails the build at its arm. With the constant below, which
-/// holds that `ALL` has nothing else, `ALL` has exactly this match's arms. A new arm is written
-/// as the others are: one that returns a number of its own is not read against `ALL`.
+/// whose arm is `place` of its own variant and that has no place in `ALL` fails the build at
+/// its arm. With the constant below, which holds that `ALL` has nothing else, `ALL.len()`
+/// equals this match's arm count whenever every arm's constant is `place` of its own variant.
+///
+/// That is the one thing left to discipline, and it is inherent on stable Rust, which cannot
+/// enumerate an enum's variants without a macro or a derive: an arm whose constant is not
+/// `place(<that arm's own variant>)` (a bare number, or `place` of another variant copied from
+/// a neighbouring arm), for a variant that is also left out of `ALL`, compiles, and that
+/// posture is silently missing from `ALL`. For a variant that is in `ALL`, a wrong arm fails
+/// the constant below.
 const fn ordinal(posture: Posture) -> usize {
     match posture {
         Posture::Full => {
@@ -129,8 +137,9 @@ const fn ordinal(posture: Posture) -> usize {
 }
 
 /// `ALL` holds nothing but each posture once, at its place: entry `i` is the posture whose
-/// [`ordinal`] is `i`, so no posture is in it twice or out of order. With every arm of `ordinal`
-/// placed, `ALL.len()` is the arm count.
+/// [`ordinal`] is `i`, so no posture is in it twice or out of order, and an entry whose arm is
+/// wrong fails here. `ALL.len()` is the arm count whenever every arm's constant is `place` of
+/// its own variant.
 const _: () = {
     let mut i = 0;
     while i < Posture::ALL.len() {
