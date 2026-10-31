@@ -77,6 +77,30 @@ pub enum Posture {
     Gateway,
 }
 
+/// The words `device add` has for a posture, each with the posture it asks for. The grammar
+/// the shell parses (`parse_add`, `client/shell/src/commands/device.rs`) reads it, the shell's
+/// usage line is assembled from it, and the daemon's hints that name a `device add` line
+/// (`adds_instead` in `kotton-device`) walk it by posture. A gateway is not here: it is
+/// [`DEVICE_ADD_GATEWAY_FLAG`] and a code, a word with a value. What holds the rest: `cargo
+/// xtask device-add-check` finds no `device add --` in code under `core/` outside tests and
+/// comments (its module doc says what a text check cannot see). Prose outside `core/` is not
+/// held.
+///
+/// `drive enrol` has a table of its own in the shell, since its default (blind) and its set
+/// (it has `--full`) differ. Neither table is a judgement: the daemon remains the only guard
+/// on posture, and these are grammar.
+pub const DEVICE_ADD_POSTURE_FLAGS: [(&str, Posture); 2] =
+    [("--blind", Posture::BlindStorage), ("--cosigner", Posture::Cosigner)];
+
+/// The word `device add` admits a gateway elsewhere with, followed by the code the gateway
+/// printed. Not a posture flag of [`DEVICE_ADD_POSTURE_FLAGS`], since it carries a value and
+/// stands alone on its line; read by the shell's `parse_add` and usage line and by the
+/// daemon's `adds_instead`, so no reader spells it.
+pub const DEVICE_ADD_GATEWAY_FLAG: &str = "--gateway";
+
+/// The posture `device add` asks for when the line names none.
+pub const DEVICE_ADD_DEFAULT_POSTURE: Posture = Posture::Full;
+
 impl Posture {
     /// The kebab-case name this serialises as, for the one column that stores it as text.
     pub fn as_str(&self) -> &'static str {

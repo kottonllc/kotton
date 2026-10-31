@@ -50,8 +50,8 @@
 //! person's files, to any remote, the person's own directory as well as a
 //! drive (kotton #229). A holder that cannot open them learns that a pass wrote
 //! the log, which every record write already showed it, and nothing of what
-//! the claim says. How many index packs a drive's claims and records add up
-//! to is kotton #144's.
+//! the claim says. Each pack's size is fixed; how *many* index packs a drive's
+//! claims and records add up to is kotton #144's.
 //!
 //! **The telling reads the claims, and nothing else** ([`Read`], [`whole_on`],
 //! [`notices`]): `drive list`'s and `status`'s *which devices keep it whole*,

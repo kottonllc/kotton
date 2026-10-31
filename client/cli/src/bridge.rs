@@ -331,7 +331,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("`kotton {name}` passes through to no shell verb of that name"));
             assert_eq!(
                 verb.get_after_help().map(|h| h.to_string()).as_deref(),
-                Some(*help),
+                Some(help.as_str()),
                 "`kotton {name} --help` does not end on the shell's `{name}` help"
             );
             seen.push(name.to_string());
@@ -339,6 +339,45 @@ mod tests {
         for verb in ["mint", "enrol", "cp", "cat", "keep", "relay", "vault", "sync", "drive", "pin"] {
             assert!(seen.iter().any(|s| s == verb), "`kotton {verb}` is not a pass-through: {seen:?}");
         }
+    }
+
+    /// **A noun that declares retired verbs says nothing of them in its clap `about` or its
+    /// arguments' help**: its `--help` ends on the shell's page, whose `RETIRED:` block is
+    /// generated from the table, and a hand-written sentence beside it is a second account
+    /// that drifted once (`device`'s about said a gone word still ran). Read as
+    /// `verb-check`'s sweep reads the reference: the noun and the word, or the bare word
+    /// opening a backticked span, since the noun is the page's subject.
+    #[test]
+    fn a_nouns_clap_help_says_nothing_of_its_retired_verbs() {
+        let registry = ShellExecutor::new().registry();
+        let mut held = 0;
+        for verb in crate::Cli::command().get_subcommands() {
+            let name = verb.get_name();
+            let retired: Vec<&str> = registry
+                .verbs_of(name)
+                .iter()
+                .filter(|v| !matches!(v.is, kotton_shell::VerbIs::Current) && !v.word.starts_with('<'))
+                .map(|v| v.word)
+                .collect();
+            if retired.is_empty() {
+                continue;
+            }
+            held += 1;
+            let mut texts: Vec<String> = [verb.get_about(), verb.get_long_about()].into_iter().flatten().map(|t| t.to_string()).collect();
+            texts.extend(verb.get_arguments().flat_map(|a| [a.get_help(), a.get_long_help()]).flatten().map(|t| t.to_string()));
+            for text in &texts {
+                let lower = text.to_lowercase();
+                for word in &retired {
+                    for needle in [format!("{name} {word}"), format!("`{word}")] {
+                        let said = lower.match_indices(&needle).any(|(at, m)| {
+                            !lower[at + m.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_')
+                        });
+                        assert!(!said, "`kotton {name} --help` says `{needle}` in a hand-written line: {text}");
+                    }
+                }
+            }
+        }
+        assert!(held >= 2, "`sync` and `device` declare retired verbs; held {held}");
     }
 
     /// **The one command the recovery card names parses, and it needs no name.** The

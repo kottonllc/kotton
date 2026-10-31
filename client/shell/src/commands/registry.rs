@@ -5,7 +5,7 @@ use anyhow::Result;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use super::{Command, CommandOutput};
+use super::{Command, CommandOutput, Verb, VerbIs};
 use crate::state::ShellState;
 
 /// Registry for shell commands
@@ -90,8 +90,8 @@ impl CommandRegistry {
     fn render_help(&self, args: &[String]) -> String {
         if let Some(name) = args.first() {
             // Commands win over topics, so `help device` shows the verb's help.
-            if let Some(cmd) = self.commands.get(name) {
-                return cmd.help_text().to_string();
+            if let Some(page) = self.help_of(name) {
+                return page;
             }
             if let Some(guide) = help_topic(name) {
                 return guide.to_string();
@@ -132,6 +132,57 @@ impl CommandRegistry {
         self.commands.get(name).map_or(&[], |cmd| cmd.verbs())
     }
 
+    /// The help page of the command registered as `name`, as both doors print it (`help
+    /// <name>` here, `kotton <name> --help` and the generated reference there): its
+    /// `help_text`, then the words its verb table retired, generated from the table
+    /// ([`Self::retired_block`]). A noun's `help_text` says nothing of its retired words, so
+    /// no page can say of one what the table does not. `None` for a name nothing answers.
+    pub fn help_of(&self, name: &str) -> Option<String> {
+        let cmd = self.commands.get(name)?;
+        Some(format!("{}{}", cmd.help_text(), self.retired_block(name, cmd.verbs())))
+    }
+
+    /// `RETIRED:` and a line for each word `noun`'s table retired, in table order, saying
+    /// what the table says of it: an alias is the verb it names and still runs it; a gone
+    /// word is refused, and the line names what to type instead. Empty for a table that
+    /// retired nothing.
+    fn retired_block(&self, noun: &str, verbs: &[Verb]) -> String {
+        let mut out = String::new();
+        for v in verbs {
+            let fate = match v.is {
+                VerbIs::Current => continue,
+                VerbIs::Alias { now } => format!("is `{now}`, and still runs it"),
+                VerbIs::Gone { now } => format!("gone: type `{}`", self.typed_for(noun, now)),
+            };
+            let was = if v.word.is_empty() { noun.to_string() } else { format!("{noun} {}", v.word) };
+            if out.is_empty() {
+                out.push_str("\n\nRETIRED:");
+            }
+            if was.chars().count() < 24 {
+                out.push_str(&format!("\n  {was:<24} {fate}"));
+            } else {
+                out.push_str(&format!("\n  {was}\n{:27}{fate}", ""));
+            }
+        }
+        out
+    }
+
+    /// What a person types for `now`, the replacement a table names for a word of `noun`:
+    /// `now` itself, but a bare other noun (`sync add` is `pin`) is said with the first
+    /// current placeholder of that noun's table (`pin <drive>`), since the noun alone leaves
+    /// the reader to find its verb.
+    fn typed_for(&self, noun: &str, now: &str) -> String {
+        let mut words = now.split_whitespace();
+        let (Some(target), None) = (words.next(), words.next()) else { return now.to_string() };
+        if target == noun {
+            return now.to_string();
+        }
+        match self.verbs_of(target).iter().find(|v| matches!(v.is, VerbIs::Current) && v.word.starts_with('<')) {
+            Some(v) => format!("{now} {}", v.word),
+            None => now.to_string(),
+        }
+    }
+
     /// Whether the command registered as `name` reads `--json` among its own words.
     pub fn answers_json(&self, name: &str) -> bool {
         self.commands.get(name).is_some_and(|cmd| cmd.answers_json())
@@ -155,15 +206,15 @@ impl CommandRegistry {
             .unwrap_or_default()
     }
 
-    /// Return (name, help_text) pairs for every registered command, sorted by name.
-    /// Hidden commands (unfinished/dead stubs) are omitted — they stay runnable but
-    /// out of the `help` listing and generated docs.
-    pub fn command_docs(&self) -> Vec<(String, &'static str)> {
-        let mut docs: Vec<(String, &'static str)> = self
+    /// Return (name, help page) pairs for every registered command, sorted by name: the
+    /// page is [`help_of`](Self::help_of)'s. Hidden commands (unfinished/dead stubs) are
+    /// omitted — they stay runnable but out of the `help` listing and generated docs.
+    pub fn command_docs(&self) -> Vec<(String, String)> {
+        let mut docs: Vec<(String, String)> = self
             .commands
             .iter()
             .filter(|(_, cmd)| !cmd.hidden())
-            .map(|(name, cmd)| (name.clone(), cmd.help_text()))
+            .filter_map(|(name, _)| Some((name.clone(), self.help_of(name)?)))
             .collect();
         docs.sort_by(|a, b| a.0.cmp(&b.0));
         docs
@@ -284,5 +335,111 @@ mod tests {
     fn help_unknown_names_command_or_topic() {
         let out = CommandRegistry::new().render_help(&["frobnicate".to_string()]);
         assert!(out.contains("no such command or topic"));
+    }
+
+    /// **A help page's `RETIRED:` block is its table's**: `sync`'s and `device`'s, as the
+    /// tables declare them, an alias said to run and a gone word said to be gone with what to
+    /// type, a bare other noun said with its table's placeholder (`pin <drive>`). `help sync`
+    /// prints the same page.
+    #[cfg(feature = "cli")]
+    #[test]
+    fn a_help_pages_retired_block_is_generated_from_its_table() {
+        let registry = crate::ShellExecutor::new().registry();
+        let sync = registry.help_of("sync").expect("sync is registered");
+        assert!(
+            sync.ends_with(
+                "\n\nRETIRED:\
+                 \n  sync now                 is `sync`, and still runs it\
+                 \n  sync add                 gone: type `pin <drive>`\
+                 \n  sync list                gone: type `pin list`\
+                 \n  sync remove              gone: type `pin <drive>`\
+                 \n  sync <remote>            gone: type `sync`"
+            ),
+            "{sync}"
+        );
+        let device = registry.help_of("device").expect("device is registered");
+        assert!(device.ends_with("\n\nRETIRED:\n  device admit             gone: type `drive enrol`"), "{device}");
+        assert_eq!(registry.render_help(&["sync".to_string()]), sync);
+        // A table that retired nothing has no block.
+        let pin = registry.help_of("pin").expect("pin is registered");
+        assert!(!pin.contains("RETIRED:"), "{pin}");
+    }
+
+    /// **The fate a RETIRED line states is the table's, by construction** (#207's clause (a),
+    /// held where the fate is stated rather than read back from prose): over a table holding
+    /// both fates, a `Gone` word's line never says it runs and an `Alias`'s never says it is
+    /// gone; and a retired word too long for the column puts its fate on the next line, at the
+    /// column the others use.
+    #[test]
+    fn a_retired_lines_fate_is_the_tables_and_a_long_word_wraps() {
+        let verbs = [
+            Verb::current(""),
+            Verb::alias("old", "noun"),
+            Verb::gone("dropped", "other thing"),
+            Verb::alias("an-alias-past-the-column", "noun new"),
+            Verb::gone("a-gone-word-past-the-column", "noun"),
+            Verb::gone("<place>", "noun"),
+        ];
+        let block = CommandRegistry::new().retired_block("noun", &verbs);
+        let mut lines = block.lines().skip_while(|l| *l != "RETIRED:").skip(1);
+        let mut seen = 0;
+        while let Some(line) = lines.next() {
+            let was = line.trim_start().split("  ").next().unwrap().trim();
+            let verb = verbs.iter().find(|v| format!("noun {}", v.word) == was).unwrap_or_else(|| panic!("`{was}`: {block}"));
+            let fate = if line.trim() == was {
+                assert!(was.len() >= 24, "a short word wrapped: {block}");
+                let next = lines.next().expect("a wrapped line has its fate below");
+                assert!(next.starts_with(&" ".repeat(27)) && !next[27..].starts_with(' '), "fate not at column 27: {block}");
+                next[27..].to_string()
+            } else {
+                assert!(line.starts_with(&format!("  {was:<24} ")), "fate not at column 27: {block}");
+                line[27..].to_string()
+            };
+            match verb.is {
+                VerbIs::Alias { now } => {
+                    assert_eq!(fate, format!("is `{now}`, and still runs it"), "{block}");
+                    assert!(!fate.contains("gone"), "{block}");
+                }
+                VerbIs::Gone { now } => {
+                    assert_eq!(fate, format!("gone: type `{now}`"), "{block}");
+                    assert!(!fate.contains("runs") && !fate.contains("is run"), "{block}");
+                }
+                VerbIs::Current => panic!("a current verb is not retired: {block}"),
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, 5, "{block}");
+        assert!(block.contains("\n  noun a-gone-word-past-the-column\n                           gone: type `noun`"), "{block}");
+    }
+
+    /// **No noun's own help text says anything of the words its table retired**: the block
+    /// is generated, so a hand-written line about one, in either form (`sync now`, or the
+    /// bare word in backticks on the noun's own page), is a second account of the table that
+    /// can drift from it.
+    #[cfg(feature = "cli")]
+    #[test]
+    fn no_help_text_names_a_word_its_table_retired() {
+        let registry = crate::ShellExecutor::new().registry();
+        let mut seen = 0;
+        for name in registry.command_names() {
+            let cmd = registry.commands.get(&name).expect("listed");
+            let text = cmd.help_text();
+            for v in cmd.verbs().iter().filter(|v| !matches!(v.is, VerbIs::Current) && !v.word.starts_with('<')) {
+                seen += 1;
+                assert!(!text.contains("RETIRED"), "`{name}`'s help_text writes its own RETIRED block");
+                let whole = |at: usize, len: usize| {
+                    !text[at + len..].starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_')
+                };
+                let named = format!("{name} {}", v.word);
+                let bare = format!("`{}", v.word);
+                for needle in [&named, &bare] {
+                    assert!(
+                        !text.match_indices(needle.as_str()).any(|(at, m)| whole(at, m.len())),
+                        "`{name}`'s help_text says `{needle}`, a word its table retired: the table's block says it"
+                    );
+                }
+            }
+        }
+        assert!(seen >= 5, "the tables retired fewer words than this test was written against: {seen}");
     }
 }

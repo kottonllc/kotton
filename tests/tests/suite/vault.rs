@@ -570,19 +570,19 @@ fn pool_of(vault: &RunningVault, user: &str) -> Vec<(String, u64)> {
 /// superblock is one length, and there is at least one pack — so no object
 /// there says how large anything was.
 pub(crate) fn the_pool_holds_only_packs(vault: &RunningVault, user: &str) {
-    use kotton_store::packed::{has_its_fixed_size, PACK_PREFIX};
-    use kotton_store::superblock::SUPERBLOCK_PREFIX;
+    use kotton_store::packed::{has_its_fixed_size, kind, ObjectKind};
+    let is_pack = |key: &str| matches!(kind(key), ObjectKind::ContentPack | ObjectKind::IndexPack);
 
     let held = pool_of(vault, user);
     assert!(
-        held.iter().any(|(k, _)| k.starts_with(&format!("{PACK_PREFIX}/"))),
+        held.iter().any(|(k, _)| is_pack(k)),
         "the vault holds at least one pack: {held:?}"
     );
     let mut superblock_lengths = std::collections::BTreeSet::new();
     for (key, len) in &held {
-        if key.starts_with(&format!("{PACK_PREFIX}/")) {
+        if is_pack(key) {
             assert!(has_its_fixed_size(key, *len), "pack {key} is {len} bytes, not its class's fixed size");
-        } else if key.starts_with(&format!("{SUPERBLOCK_PREFIX}/")) {
+        } else if kind(key) == ObjectKind::Superblock {
             superblock_lengths.insert(*len);
         } else {
             panic!("the vault holds {key} at {len} bytes, which is neither a pack nor a superblock: {held:?}");
