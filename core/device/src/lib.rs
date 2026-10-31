@@ -31,6 +31,7 @@ pub mod registry;
 pub mod runtime;
 
 pub use runtime::DeviceRuntime;
+pub use runtime::network::introduction::Introducer;
 pub use runtime::network::local_door::{DoorReading, LocalWay};
 
 pub use config::{

@@ -35,6 +35,7 @@ mod device_operator;
 pub mod custody_window;
 mod dispatch;
 mod file_host;
+mod peer_reach;
 mod handlers;
 mod infer_host;
 mod liveness;
@@ -1876,24 +1877,44 @@ impl DeviceDaemon {
     /// `UserResponse`. A door verb fails at the decoder: it is no request on
     /// this wire (kotton #231).
     fn build_peer_handler(self: &Arc<Self>) -> PeerHandler {
-        // What a peer's request is served with on its own standing: the
-        // machine, the person's resident stores, the guest-session and recovery
-        // bookkeeping, a wake for the sync loop, and the two buffers that span
-        // requests. No record store, no sync host, no sync engine — the
-        // compiler holds that, through `PeerContext`'s fields (kotton #222).
+        // What a peer's request is served with on its own standing: one handle
+        // per thing a peer verb does, and not the machine. No record store, no
+        // sync host, no sync engine, no `DeviceRuntime` among `PeerContext`'s
+        // field types (kotton #222, #242); three handles hold the keychain, and
+        // what keeps them to their labels is their methods (`PeerContext`'s doc,
+        // kotton #256).
+        let chains = kotton_device::users::admission::Chains::of(&self.runtime);
         let peer = Arc::new(PeerContext {
-            runtime: Arc::clone(&self.runtime),
-            users: self.users.clone(),
+            standing: peer_reach::Standing::new(
+                Arc::clone(&self.db),
+                self.runtime.paired_keys(),
+                chains.clone(),
+            ),
+            guests: peer_reach::GuestSessions::new(
+                Arc::clone(&self.user_dbs),
+                self.base.clone(),
+                self.runtime.secrets_arc(),
+                Arc::clone(&self.runtime.schema_registry),
+                Arc::clone(&self.revoked_sessions),
+            ),
+            stores: file_host::PeerStoreHost::new(
+                Arc::clone(self.runtime.event_bus()),
+                self.runtime.secrets_arc(),
+                self.users.clone(),
+            ),
+            relay: peer_reach::NodeRelay::new(Arc::clone(self.runtime.reachability())),
+            introducer: self.runtime.introducer(),
+            recovery: peer_reach::Recovery::new(self.base.clone(), chains),
             db: Arc::clone(&self.db),
-            user_dbs: Arc::clone(&self.user_dbs),
-            base: self.base.clone(),
-            revoked_sessions: Arc::clone(&self.revoked_sessions),
             sync_wake: self.sync_engine.waker(),
             // One shared participant for the lifetime of this handler: a
             // distributed-signing round-1 stashes its secret nonces here and
             // the matching round-2 (a later, separate peer request) consumes
             // them. Every listener that clones this handler's Arc shares it.
-            frost_participant: Arc::new(kotton_org::frost_signing::FrostParticipant::new()),
+            signer: peer_reach::FrostSigner::new(
+                self.runtime.secrets_arc(),
+                Arc::new(kotton_org::frost_signing::FrostParticipant::new()),
+            ),
             // Reassembly buffers for chunked sealed writes, shared for the
             // handler's lifetime — a large object's chunks arrive as separate
             // peer requests and accumulate here until complete, the same shape
@@ -1928,8 +1949,8 @@ impl DeviceDaemon {
     ///
     /// The TLS allowlist is the runtime's own — `self.paired_keys` is a handle to
     /// the same set, seeded from the DB at startup and kept live as nodes are
-    /// added and revoked.  Builds the request-handler closure capturing
-    /// `Arc<DeviceRuntime>` and delegates to
+    /// added and revoked.  Builds the request-handler closure capturing the
+    /// [`PeerContext`] (and, for a gateway's frames, the agent) and delegates to
     /// [`DeviceRuntime::start_peer_listener`].  The daemon holds the `db` handle;
     /// the runtime crate stays free of a direct SQLite dep.
     pub async fn start_peer_listener_background(self: &Arc<Self>, port: u16) -> anyhow::Result<()> {
@@ -1940,37 +1961,61 @@ impl DeviceDaemon {
 
 // â”€â”€ Peer request handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// What a peer's request is served with on its own standing (kotton #222).
+/// What a peer's request is served with on its own standing (kotton #222, #242).
 ///
-/// Every field is something a peer verb uses, and nothing else is here:
+/// Every field is something a peer verb uses, and nothing else is here. None is
+/// the machine (`DeviceRuntime`): each is a handle with private fields and the
+/// methods its verbs ask ([`peer_reach`], [`file_host::PeerStoreHost`]).
 ///
-/// - `runtime` — the machine: who the peer is to a person (`peer_standing`),
-///   where this node reserves (`NodeRelay`), introductions, a person's
-///   recovery chain, and the keychain read that finds this node's FROST share.
-/// - `users` — the resident object stores, which the file verbs at a path and
-///   the sealed-replication verbs read and write ([`file_host::peer_store_host`]).
-/// - `db`, `user_dbs`, `base` — the paired-node rows a posture is read from,
-///   the person's database a guest session is found in, and where the
-///   recovery copy is kept.
-/// - `revoked_sessions` — the guest sessions revoked since they were read.
+/// Three things hold three different claims, and they are not the same
+/// strength. **The field types** hold that no record store, sync host, sync
+/// engine or `DeviceRuntime` is here. **Module privacy** holds that this
+/// function's module cannot read a handle's fields. **Method discipline** —
+/// what the methods in `peer_reach.rs` and `file_host.rs` choose to do with
+/// those fields — holds the rest: three handles (`guests`, `stores`,
+/// `signer`) each hold the whole keychain, `Arc<dyn SecretsStore>`, and one
+/// of them (`guests`) holds it beside the base directory, which are exactly
+/// the inputs a record store opens from (`kotton_record::open`). That they
+/// read only their labels and open only the agent database is true of their
+/// methods, not of their types (kotton #256).
+///
+/// - `standing` — who the peer is to a person: the paired-node rows, the live
+///   allowlist, and the identity chains a proof-admitted peer is replayed
+///   against (`Chains`: the base directory's chains and the admission table,
+///   no keychain).
+/// - `guests` — the guest session a stranger's key may hold, found in the
+///   person's own database, and the sessions revoked since they were read.
+/// - `stores` — the resident object stores, which the file verbs at a path and
+///   the sealed-replication verbs read and write, a mount's key domain, and
+///   the event bus; each store fetches a pack it does not keep through the
+///   `PackSource` the registry lent it.
+/// - `relay` — where this node reserves, and what it presents there.
+/// - `introducer` — the device's lent handle that opens an introduced
+///   listener (`kotton_device::Introducer`).
+/// - `recovery` — a person's public chain and phrase-sealed copy.
+/// - `db` — the paired-node rows a posture is read from.
 /// - `sync_wake` — the two wakes: it starts a pass sooner, and reaches nothing
 ///   a pass reaches.
-/// - `frost_participant`, `sealed_reassembly` — the state a FROST round and a
-///   chunked sealed write keep between requests.
+/// - `signer` — this node's FROST share for a person, answering one round, and
+///   the nonces a round keeps between requests.
+/// - `sealed_reassembly` — the state a chunked sealed write keeps between
+///   requests.
 ///
-/// **What is not here, and so not reachable from [`handle_peer_request`]:**
-/// the record stores, the sync host that opens them, the sync engine, the
-/// sessions and every other field of [`AgentContext`]. Until this type, the
-/// path held the whole agent for its gateway arm and so reached all of it.
+/// **What is not here, by type:** the machine; the record stores, the sync
+/// host that opens them, the sync engine, the sessions and every other field
+/// of [`AgentContext`]. The keychain and the base directory a record store
+/// opens from are *not* absent: they are inside `guests`, private, and a
+/// method added there could open one (kotton #256).
 pub(super) struct PeerContext {
-    runtime: Arc<DeviceRuntime>,
-    users: crate::residency::UserRegistry,
+    standing: peer_reach::Standing,
+    guests: peer_reach::GuestSessions,
+    stores: file_host::PeerStoreHost,
+    relay: peer_reach::NodeRelay,
+    introducer: kotton_device::Introducer,
+    recovery: peer_reach::Recovery,
     db: Arc<SqlitePool>,
-    user_dbs: crate::db::user_db::UserDbMap,
-    base: PathBuf,
-    revoked_sessions: Arc<RwLock<HashSet<String>>>,
     sync_wake: kotton_sync::engine::SyncWake,
-    frost_participant: Arc<kotton_org::frost_signing::FrostParticipant>,
+    signer: peer_reach::FrostSigner,
     sealed_reassembly: kotton_device::users::files::SealedReassembly,
 }
 
@@ -2161,25 +2206,57 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 /// For ephemeral sessions, path-level grant enforcement is also applied.
 ///
 /// **What a request can reach from here is [`PeerContext`], and that is all.**
-/// The request is a [`PeerRequest`], so no door verb arrives (kotton #231); and
-/// the context holds no record store, no sync host and no sync engine, so no
-/// arm can reach one (kotton #222). What remains, and why:
+/// The request is a [`PeerRequest`], so no door verb arrives (kotton #231); the
+/// context holds no record store, no sync host and no sync engine (kotton
+/// #222); and it holds no `DeviceRuntime` (kotton #242). Those three are held
+/// by [`PeerContext`]'s field types.
+///
+/// **Reach to a record store is not yet absent; it is held by method
+/// discipline.** No arm here opens one, and this module cannot read a
+/// handle's private fields, but [`peer_reach::GuestSessions`] holds the base
+/// directory and the whole keychain together — exactly what
+/// `kotton_record::open` takes — to open the person's agent database, and its
+/// methods are what keep it to that. The keychain itself is in three handles
+/// (`GuestSessions`, [`file_host::PeerStoreHost`],
+/// [`peer_reach::FrostSigner`]), each holding all of it and reading only its
+/// labels because its methods do. Making the type hold this — no handle that
+/// holds the keychain beside the base directory, and each keychain reader lent
+/// only its labels — is kotton #256. What remains, and what holds each:
 ///
 /// - the person's resident **object stores**, at a path for a paired device or
 ///   a guest within its grant, and as sealed objects for a paired device —
-///   through [`file_host::peer_store_host`], a `StoreHost` with no sync host
-///   behind it. A resident store fetches a pack it does not keep from the
-///   person's drives when it is read (kotton #55): that source is lent to the
-///   store by the sync engine, and its one verb is fetching a sealed pack by
-///   key;
-/// - the **machine**, `DeviceRuntime`: the posture rows, the relay, an
-///   introduction's listener, the recovery chain, and the keychain this node's
-///   FROST share is read from. The machine also holds the base directory and
-///   the keychain a record store is opened from (`kotton_record::open`); no
-///   function here opens one, and narrowing the machine handle a peer verb is
-///   lent is wider than this path;
-/// - the person's **database**, for the guest session a stranger's key may
-///   hold, and the paired-node rows.
+///   through [`file_host::PeerStoreHost`], a `StoreHost` with no sync host and
+///   no machine behind it. A resident store fetches a pack it does not keep
+///   from the person's drives when it is read (kotton #55) through the
+///   `PackSource` the registry lent it, whose one verb is fetching a sealed
+///   pack by key (the sync host's absence is held by type). The host holds the
+///   whole keychain, and its methods read and write `sealed_mount_domain` (a
+///   mount's pinned key domain) and read `operational_cek` (the CEK whose
+///   domain this node advertises when the person's store is not resident) —
+///   and, when no CEK is stored, **the person's root seed** (`seed32`), which
+///   `resolve_operational_cek` falls back to and derives the CEK from. So a
+///   peer's file or sealed request can make this host read a root secret
+///   (method discipline);
+/// - this node's **FROST share** for the person, read by
+///   [`peer_reach::FrostSigner`] under its one label to answer a round, and
+///   never handed out — the signer holds the whole keychain, and its method is
+///   what reads one label (method discipline);
+/// - the person's **database**, opened by [`peer_reach::GuestSessions`] (which
+///   holds the base directory and the whole keychain) for the one question of
+///   which guest session a stranger's key holds; the pool is not handed out.
+///   When the database is not open yet, opening it reads `master_secret`, or
+///   **the root seed** (`seed32`) when no master secret is stored, to derive
+///   its key, and `identity_signing_key` to name its owner
+///   (`user_db::open_user_agent_db`) — on a stranger's request (method
+///   discipline);
+/// - the **identity chains** and the admission table (`Chains`), to classify
+///   the peer and to keep a delivered recovery copy's events, and the
+///   phrase-sealed copy itself ([`peer_reach::Recovery`]);
+/// - the machine's **relay** configuration and keyring
+///   ([`peer_reach::NodeRelay`]), and its **introductions**
+///   (`kotton_device::Introducer`): the listeners open now and the device key
+///   they present;
+/// - the paired-node rows.
 ///
 /// **Records do not arrive here as rows.** The record log over sealed segments
 /// is the one path a record takes between devices: the sync engine seals
@@ -2199,14 +2276,15 @@ async fn handle_peer_request(
     request: PeerRequest,
 ) -> UserResponse {
     let PeerContext {
-        runtime,
-        users,
+        standing: standing_of,
+        guests,
+        stores,
+        relay,
+        introducer,
+        recovery,
         db,
-        user_dbs,
-        base,
-        revoked_sessions,
         sync_wake,
-        frost_participant,
+        signer,
         sealed_reassembly,
     } = peer;
 
@@ -2215,16 +2293,7 @@ async fn handle_peer_request(
     // of those. The classification is the device crate's — a vault makes the
     // same call — and what follows a `Stranger` is this daemon's alone: a
     // guest session, which a vault never grants.
-    let standing = match kotton_device::users::admission::peer_standing(
-        runtime,
-        db,
-        &runtime.paired_keys(),
-        peer_did,
-        peer_pubkey_bytes,
-        Some(&user_id),
-    )
-    .await
-    {
+    let standing = match standing_of.of(peer_did, peer_pubkey_bytes, &user_id).await {
         Ok(s) => s,
         Err(e) => {
             return UserResponse::Error {
@@ -2240,7 +2309,7 @@ async fn handle_peer_request(
     };
     if let (Some(aid), false) = (&claim_for, paired) {
         if !matches!(request, PeerRequest::RecoveryFetch { .. })
-            || runtime.user_aid(&user_id).as_deref() != Some(aid.as_str())
+            || standing_of.aid_of(&user_id).as_deref() != Some(aid.as_str())
         {
             return UserResponse::Error {
                 message: "a device admitted on a recovery claim may only fetch the identity \
@@ -2261,31 +2330,12 @@ async fn handle_peer_request(
 
         // Guest sessions live in the target user's database (3b-v); an
         // unopenable user db reads as "no session", the same refusal shape.
-        let session_lookup = match crate::db::user_db::user_agent_db(
-            user_dbs,
-            base,
-            runtime.secrets(),
-            &user_id,
-            &runtime.schema_registry,
-        )
-        .await
-        {
-            Ok(user_db) => {
-                kotton_peer::daemon::db::find_ephemeral_session_by_guest_did(
-                    &user_db, peer_did, &user_id,
-                )
-                .await
-            }
-            Err(e) => {
-                tracing::warn!(user_id = %user_id, error = %e, "peer guest lookup: user db unavailable");
-                Ok(None)
-            }
-        };
+        let session_lookup = guests.find(peer_did, &user_id).await;
         match session_lookup {
             Ok(Some(session)) => {
                 // In-memory revocation check (fast path â€” DB query already filters revoked=0,
                 // but the in-memory set avoids a second DB lookup race).
-                if revoked_sessions.read().unwrap().contains(&session.id) {
+                if guests.revoked(&session.id) {
                     tracing::warn!(
                         peer_did = %peer_did,
                         session_id = %session.id,
@@ -2423,7 +2473,7 @@ async fn handle_peer_request(
             length,
         } => {
             kotton_device::users::files::read_file(
-                &file_host::peer_store_host(runtime, users),
+                stores,
                 user_id,
                 path,
                 offset,
@@ -2440,7 +2490,7 @@ async fn handle_peer_request(
             content_hash,
         } => {
             kotton_device::users::files::write_file(
-                &file_host::peer_store_host(runtime, users),
+                stores,
                 user_id,
                 path,
                 data,
@@ -2453,7 +2503,7 @@ async fn handle_peer_request(
         }
         PeerRequest::ListFiles { user_id, prefix } => {
             kotton_device::users::files::list_files(
-                &file_host::peer_store_host(runtime, users),
+                stores,
                 user_id,
                 prefix,
             )
@@ -2461,7 +2511,7 @@ async fn handle_peer_request(
         }
         PeerRequest::DeleteFile { user_id, path } => {
             kotton_device::users::files::delete_file(
-                &file_host::peer_store_host(runtime, users),
+                stores,
                 user_id,
                 path,
             )
@@ -2484,24 +2534,11 @@ async fn handle_peer_request(
         // is paired to this person and may be a host's machine, so it is told
         // where this node reserves and handed no key of the person's.
         PeerRequest::NodeRelay { .. } => {
-            let nat = runtime.reachability().nat();
-            let relay_url = nat.relay_url;
-            // The keys are held under what the relay *is*, its key, and the
-            // asker is told that key beside the address.
-            let relay_key = nat.relay_key;
             let own_device = match peer_pubkey_bytes {
                 Some(pk) => asks_as_own_device(db, &pk, &user_id).await,
                 None => false,
             };
-            let admission = own_device
-                .then(|| kotton_peer::relay_keys::relay_id(relay_key.as_deref()))
-                .flatten()
-                .and_then(|id| runtime.reachability().relay_keys().for_own_device(&user_id, &id));
-            Ok(UserResponse::NodeRelayResult {
-                relay_url: Some(relay_url).filter(|u| !u.is_empty()),
-                relay_key,
-                admission,
-            })
+            Ok(relay.answer(&user_id, own_device))
         }
 
         // -- A relay introduces your devices ---------------------------------
@@ -2521,8 +2558,8 @@ async fn handle_peer_request(
                     message: "an introduction names an ip:port and a 16-byte token".to_string(),
                 };
             };
-            match runtime
-                .open_introduction(
+            match introducer
+                .open(
                     peer_key,
                     kotton_net::transport::quic::introduced::IntroducedPeer { addr, token },
                     router.as_deref().and_then(kotton_peer::local_door::RouterKey::from_hex),
@@ -2543,12 +2580,7 @@ async fn handle_peer_request(
         // Reached by a paired device, or by one admitted on a recovery claim for
         // exactly this identity (checked above). Serves the public chain and the
         // phrase-sealed copy verbatim; this node can open neither.
-        PeerRequest::RecoveryFetch { user_id } => {
-            let kel = kotton_identity::kel_store::load_chain(base, &user_id).unwrap_or_default();
-            let bundle = kotton_identity::provisioning::read_recovery_bundle_raw(base, &user_id)
-                .unwrap_or_default();
-            Ok(UserResponse::RecoveryMaterial { kel, bundle })
-        }
+        PeerRequest::RecoveryFetch { user_id } => Ok(recovery.fetch(&user_id)),
         // A paired device delivers the phrase-sealed copy after the fact. Only a
         // *paired* device reaches here (a claim-admitted one is refused above),
         // and the node keeps the bytes it cannot open, exactly as at enrolment.
@@ -2563,28 +2595,7 @@ async fn handle_peer_request(
                         .to_string(),
                 };
             }
-            // The events that authorize the copy, before the copy. A chain this
-            // node cannot extend is a copy it will refuse to serve, so the
-            // failure belongs here rather than at the recovery six months later.
-            if let Err(e) =
-                kotton_device::users::admission::adopt_chain_extension(runtime, &user_id, &kel)
-            {
-                return UserResponse::Error {
-                    message: format!(
-                        "the key events offered with the recovery copy do not replay: {e}"
-                    ),
-                };
-            }
-            match kotton_identity::provisioning::write_recovery_bundle_raw(base, &user_id, &bundle)
-            {
-                Ok(()) => {
-                    tracing::info!(peer_did = %peer_did, user_id = %user_id, events = kel.len(), "kept a delivered recovery copy");
-                    Ok(UserResponse::Ok)
-                }
-                Err(e) => Ok(UserResponse::Error {
-                    message: format!("keep recovery copy: {e}"),
-                }),
-            }
+            Ok(recovery.store(peer_did, &user_id, &bundle, &kel))
         }
 
         // -- Sealed replication -----------------------------------------------
@@ -2596,7 +2607,7 @@ async fn handle_peer_request(
             length,
         } => {
             kotton_device::users::files::read_sealed(
-                &file_host::peer_store_host(runtime, users),
+                stores,
                 user_id,
                 mount,
                 path,
@@ -2611,7 +2622,7 @@ async fn handle_peer_request(
             prefix,
         } => {
             kotton_device::users::files::list_sealed(
-                &file_host::peer_store_host(runtime, users),
+                stores,
                 user_id,
                 mount,
                 prefix,
@@ -2629,7 +2640,7 @@ async fn handle_peer_request(
             content_hash,
         } => {
             kotton_device::users::files::write_sealed(
-                &file_host::peer_store_host(runtime, users),
+                stores,
                 user_id,
                 mount,
                 path,
@@ -2668,52 +2679,11 @@ async fn handle_peer_request(
 
         // -- Distributed FROST signing — co-signer side -----------------------
         // Only reachable when the caller is a permanently paired node (the
-        // ephemeral path above rejects non-file ops). Loads this node's FROST
-        // share and answers one round; the participant holds the round-1 nonces
-        // between this request and the next. The share never leaves this process.
-        PeerRequest::FrostSignRound { user_id, payload } => {
-            use kotton_org::frost_signing::FrostRound;
-            let round: FrostRound = match serde_json::from_str(&payload) {
-                Ok(r) => r,
-                Err(e) => {
-                    return UserResponse::Error {
-                        message: format!("invalid FrostSignRound payload: {e}"),
-                    };
-                }
-            };
-            let share = match runtime
-                .secrets()
-                .get_secret(&kotton_common::crypto::kdf_labels::frost_share(&user_id))
-            {
-                Ok(Some(s)) => s,
-                Ok(None) => {
-                    return UserResponse::Error {
-                        message: "no FROST share on this node — not enrolled in the threshold"
-                            .to_string(),
-                    };
-                }
-                Err(e) => {
-                    return UserResponse::Error {
-                        message: format!("keychain read failed: {e}"),
-                    };
-                }
-            };
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            match frost_participant.handle(&share, round, now_secs) {
-                Ok(reply) => match serde_json::to_string(&reply) {
-                    Ok(payload) => Ok(UserResponse::FrostSignReply { payload }),
-                    Err(e) => Ok(UserResponse::Error {
-                        message: format!("serialize FrostSignReply: {e}"),
-                    }),
-                },
-                Err(e) => Ok(UserResponse::Error {
-                    message: format!("frost signing round failed: {e}"),
-                }),
-            }
-        }
+        // ephemeral path above rejects non-file ops). The signer loads this
+        // node's FROST share and answers one round; its participant holds the
+        // round-1 nonces between this request and the next. The share never
+        // leaves the signer.
+        PeerRequest::FrostSignRound { user_id, payload } => Ok(signer.answer(&user_id, &payload)),
 
         // A frame is a gateway's verb: `peer_ask` sent each one to the
         // gateway's path or back refused, before this function was entered.
