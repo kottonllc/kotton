@@ -42,7 +42,7 @@ pub use utils::{expand_vars, normalize_path, parse_command};
 #[cfg(feature = "cli")]
 pub use commands::{scaffold_files, typed_lines, TypedLines, SDK_FROM_REPOSITORY};
 
-/// Return `(name, help_text)` for every shell command, sorted alphabetically.
-pub fn shell_command_docs() -> Vec<(String, &'static str)> {
+/// Return `(name, help page)` for every shell command, sorted alphabetically.
+pub fn shell_command_docs() -> Vec<(String, String)> {
     ShellExecutor::new().command_docs()
 }
