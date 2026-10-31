@@ -11,8 +11,9 @@
 //! evidence the door's verbs were reachable at the peer's decoder. Now they
 //! are not on this wire at all: a door verb arriving here fails to
 //! deserialize, unconstructible rather than refused (kotton #231). The same
-//! rule [`super::vault_request::VaultRequest`] holds for a vault's door: one
-//! acceptor, one request type.
+//! rule [`super::vault_request::VaultRequest`] holds for a vault's door, and
+//! [`super::vault_peer_request::VaultPeerRequest`] for a vault's peer acceptor,
+//! whose verbs are not these: one acceptor, one request type.
 //!
 //! **What a peer may ask, by kind:**
 //!

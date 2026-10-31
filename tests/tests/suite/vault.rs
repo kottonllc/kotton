@@ -11,7 +11,7 @@ use serial_test::serial;
 use kotton_schemas::membership::Posture;
 use kotton_secret::MemorySecrets;
 use kotton_sys::secret::SecretsStore;
-use kotton_wire::ipc::{UserRequest, UserResponse, VaultRequest};
+use kotton_wire::ipc::{UserRequest, UserResponse, VaultPeerRequest, VaultRequest};
 use kotton_wire::remote::RemoteBackend;
 use kuserd::DeviceDaemon;
 use kvaultd::Vault;
@@ -685,8 +685,9 @@ async fn files_the_engine_syncs_rest_at_the_vault_only_in_packs() {
 
 /// A vault answers its verbs and nothing else — at its door, and over the
 /// authenticated peer transport a paired device dials. The plaintext verbs are
-/// not refused by a check; they are absent, and the refusal names the verbs
-/// that exist.
+/// not refused by a check; they are absent: the door decodes `VaultRequest` and
+/// the peer acceptor `VaultPeerRequest`, so a device's verb is an unknown
+/// variant at either decoder (kotton #239).
 #[tokio::test]
 async fn a_vault_answers_its_verbs_and_nothing_else() {
     use ed25519_dalek::SigningKey;
@@ -741,27 +742,27 @@ async fn a_vault_answers_its_verbs_and_nothing_else() {
         other => panic!("the paired device's key opens the vault directly: {other:?}"),
     };
     let channel = QuicPeerChannel::new(conn);
-    let ask = |req: UserRequest| {
+    let ask = |bytes: Vec<u8>| {
         let channel = &channel;
         async move {
-            let raw = channel
-                .request(&serde_json::to_vec(&req).unwrap())
-                .await
-                .expect("the vault answers");
+            let raw = channel.request(&bytes).await.expect("the vault answers");
             serde_json::from_slice::<UserResponse>(&raw).unwrap()
         }
     };
-    match ask(UserRequest::ReadFile {
+    // A device's door spells a plaintext read this way; on the vault's peer
+    // wire it is no request at all, refused by the decoder before any
+    // standing is read.
+    let read = UserRequest::ReadFile {
         user_id: "alice".into(),
         path: "notes.txt".into(),
         offset: 0,
         length: 0,
-    })
-    .await
-    {
-        UserResponse::Error { message } => {
-            assert!(message.contains("not a vault's verb"), "{message}")
-        }
+    };
+    match ask(serde_json::to_vec(&read).unwrap()).await {
+        UserResponse::Error { message } => assert!(
+            message.contains("invalid peer request") && message.contains("unknown variant `ReadFile`"),
+            "a plaintext read is no request on the vault's peer wire: {message}"
+        ),
         other => panic!("a vault answered a plaintext verb: {other:?}"),
     }
     // Plaintext record rows have no verb on the peer wire at all (kotton #173):
@@ -769,10 +770,9 @@ async fn a_vault_answers_its_verbs_and_nothing_else() {
     // pushed rows for a device to merge is gone, so a vault cannot be asked to
     // take them and a paired peer cannot push them into a device. The request
     // is written as the bytes such a peer would send, because the type no longer
-    // has the variant to build it from. Both daemons decode a peer's request as
-    // `UserRequest`, so the refusal is the decoder's, before any standing is read
-    // — and were the verb back, the vault would answer "not a vault's verb"
-    // instead, which this does not accept.
+    // has the variant to build it from. The vault decodes a peer's request as
+    // `VaultPeerRequest`, so the refusal is the decoder's, before any standing
+    // is read.
     let pushed = serde_json::json!({
         "ApplyRecordChangeset": {
             "user_id": "alice",
@@ -798,14 +798,83 @@ async fn a_vault_answers_its_verbs_and_nothing_else() {
         other => panic!("a peer request carrying plaintext record rows was taken: {other:?}"),
     }
     // And the meter answers over the same connection.
-    match ask(UserRequest::VaultCapacity {
+    let capacity = VaultPeerRequest::VaultCapacity {
         user_id: "alice".into(),
-    })
-    .await
-    {
+    };
+    match ask(serde_json::to_vec(&capacity).unwrap()).await {
         UserResponse::VaultCapacityResult { quota, .. } => assert_eq!(quota, None),
         other => panic!("no capacity readout: {other:?}"),
     }
+}
+
+/// **A live write verb from a paired device leaves no state at the vault**
+/// (kotton #230, the vault's half). The retired name the case above sends is
+/// unknown to every request type, so it cannot tell a decoder that holds only
+/// the vault's verbs from one that falls back to a wider type; a *live*
+/// `RecordInsert` — the shape the door's `UserRequest` and the gateway's
+/// `RemoteRequest` share — is what such a fallback would take. The person's
+/// device, paired with the vault for alice and having pushed to it, sends the
+/// vault's peer acceptor the raw bytes of one. The vault answers the decoder's
+/// refusal by name, nothing comes back `RecordInserted`, and nothing the vault
+/// keeps for alice moved: the pool on disk, the meter, the doors, what arrived
+/// at them and what is carried read as they did before. The property is that
+/// last comparison; the wording says where the refusal happened.
+#[tokio::test]
+async fn a_live_record_insert_from_a_paired_device_leaves_no_state_at_the_vault() {
+    init_crypto();
+    let vault = spawn_vault("vault").await;
+    let device = spawn_device("device").await;
+    let mut client = connect_when_ready(&device.ipc, "client").await;
+    let _phrase = a_person_with_things(&mut client, "alice", NOTE).await;
+    let (mut client, identity) = enrol_vault(client, &vault, "alice", "vault").await;
+    // Something kept, so the comparison at the end reads a pool that holds
+    // things, not one that would read empty whatever happened.
+    let pushed = client
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
+        .await
+        .expect("push by hand to the vault");
+    assert!(pushed.pushed >= 1, "something was pushed: {pushed:?}");
+
+    let kept = |vault: &RunningVault| {
+        let mut pool = pool_of(vault, "alice");
+        pool.sort();
+        pool
+    };
+    let pool_before = kept(&vault);
+    assert!(!pool_before.is_empty(), "the vault keeps alice's push");
+    let held_before = vault.vault.meter().held("alice");
+    let doors_before = vault.vault.doors_held("alice").await;
+    let arrived_before = vault.vault.deliveries_held("alice").await;
+    let carried_before = vault.vault.carried("alice").await;
+
+    // The door's own spelling of the verb, every field filled, from the
+    // paired device under its own key.
+    let insert = UserRequest::RecordInsert {
+        user_id: "alice".into(),
+        schema_nsid: "sh.kotton.notes".into(),
+        record: serde_json::json!({ "title": "planted", "body": "sent over the vault's peer wire" }),
+        root: None,
+        app_id: None,
+    };
+    match ask_the_vault_as(&device, &identity, serde_json::to_vec(&insert).unwrap()).await {
+        UserResponse::Error { message } => assert!(
+            message.contains("invalid peer request") && message.contains("unknown variant `RecordInsert`"),
+            "a record insert is no request on the vault's peer wire: {message}"
+        ),
+        other => panic!("a record insert over the vault's peer wire was taken: {other:?}"),
+    }
+
+    assert_eq!(kept(&vault), pool_before, "the pool on disk is as it was");
+    assert_eq!(vault.vault.meter().held("alice"), held_before, "the meter is as it was");
+    assert_eq!(vault.vault.doors_held("alice").await, doors_before, "no door was held");
+    assert_eq!(vault.vault.deliveries_held("alice").await, arrived_before, "nothing arrived");
+    assert_eq!(vault.vault.carried("alice").await, carried_before, "nothing is carried");
+    // And the same device is still a tenant the vault answers.
+    let capacity = serde_json::to_vec(&VaultPeerRequest::VaultCapacity { user_id: "alice".into() }).unwrap();
+    assert!(
+        matches!(ask_the_vault_as(&device, &identity, capacity).await, UserResponse::VaultCapacityResult { .. }),
+        "the paired device is still answered"
+    );
 }
 
 /// A pool fills to its quota and no further, the refusal carries the two
@@ -1029,7 +1098,7 @@ async fn two_tenants_are_each_held_to_the_quota_set_aside_for_them() {
 
     // The numbers are the landlord's and each tenant's own. Bob's device,
     // paired with bob's pool, asks for alice's: a stranger to her pool.
-    let asked = serde_json::to_vec(&UserRequest::VaultCapacity {
+    let asked = serde_json::to_vec(&VaultPeerRequest::VaultCapacity {
         user_id: "alice".into(),
     })
     .unwrap();
@@ -1045,7 +1114,7 @@ async fn two_tenants_are_each_held_to_the_quota_set_aside_for_them() {
         other => panic!("bob read alice's capacity: {other:?}"),
     }
     // And his own is his to read.
-    let own = serde_json::to_vec(&UserRequest::VaultCapacity { user_id: "bob".into() }).unwrap();
+    let own = serde_json::to_vec(&VaultPeerRequest::VaultCapacity { user_id: "bob".into() }).unwrap();
     match within("bob asks for his own", ask_the_vault_as(&bob_device, &bob_vault, own)).await {
         UserResponse::VaultCapacityResult { quota, .. } => assert_eq!(quota, Some(BOB)),
         other => panic!("bob could not read his own capacity: {other:?}"),
@@ -2192,17 +2261,17 @@ async fn a_desktop_holding_the_operator_credential_invites_and_sets_a_quota_and_
     // And from the tenant's own device, paired with this vault: each of the
     // four, built and sent, and refused by standing.
     for verb in [
-        UserRequest::DeviceInvite {
+        VaultPeerRequest::DeviceInvite {
             user_id: "mallory".into(),
             ttl_seconds: 60,
             as_name: None,
         },
-        UserRequest::Tenants,
-        UserRequest::SetQuota {
+        VaultPeerRequest::Tenants,
+        VaultPeerRequest::SetQuota {
             user_id: "alice".into(),
             quota: u64::MAX,
         },
-        UserRequest::DropTenant { user_id: "sam".into() },
+        VaultPeerRequest::DropTenant { user_id: "sam".into() },
     ] {
         let name = verb.variant_name();
         match within(
@@ -2214,9 +2283,8 @@ async fn a_desktop_holding_the_operator_credential_invites_and_sets_a_quota_and_
             // Refused by standing, in the sentence for the standing the device
             // has to the pool the verb names: paired to its own (`SetQuota`
             // for alice), a stranger to anyone else's, and not the operator
-            // for the vault as a whole (`Tenants`). Never "not a vault's verb"
-            // and never undecodable: the verb exists here, and this key does
-            // not reach it.
+            // for the vault as a whole (`Tenants`). Never undecodable: the
+            // verb is on the vault's peer wire, and this key does not reach it.
             UserResponse::Error { message } => assert!(
                 message.contains("a tenant's device does not say it")
                     || message.contains("is not paired with user")
@@ -2723,7 +2791,7 @@ async fn tell_as_operator(
         admission: vec![],
         claim: None,
     };
-    let request = serde_json::to_vec(&UserRequest::StandAt { relays }).unwrap();
+    let request = serde_json::to_vec(&VaultPeerRequest::StandAt { relays }).unwrap();
     try_ask_the_vault_with(key, &offer, vault, request)
         .await
         .unwrap_or_else(|e| panic!("the operator's key reaches the vault: {e}"))
@@ -2916,7 +2984,7 @@ async fn a_vault_told_a_new_relay_stands_there_and_its_tenant_follows_with_nothi
         &sams_key,
         &offer,
         &vault,
-        serde_json::to_vec(&UserRequest::StandAt { relays: vec![stand(second_id)] }).unwrap(),
+        serde_json::to_vec(&VaultPeerRequest::StandAt { relays: vec![stand(second_id)] }).unwrap(),
     )
     .await;
     assert!(
@@ -3675,7 +3743,7 @@ async fn revoking_the_operator_credential_ends_the_desktops_standing_at_once() {
         other => panic!("the credential's key is admitted at the handshake: {other:?}"),
     };
     let channel = QuicPeerChannel::new(conn);
-    let tenants = serde_json::to_vec(&UserRequest::Tenants).unwrap();
+    let tenants = serde_json::to_vec(&VaultPeerRequest::Tenants).unwrap();
     let ask = |channel: &QuicPeerChannel| {
         let tenants = tenants.clone();
         let channel = channel.clone();
@@ -3923,7 +3991,7 @@ async fn a_desktop_that_drops_a_pool_keeps_its_standing_across_the_rebuild_the_d
     }
     // And the credential's key, dialling the vault itself on a connection of
     // its own, completes the handshake and is answered as the operator.
-    let tenants = serde_json::to_vec(&UserRequest::Tenants).unwrap();
+    let tenants = serde_json::to_vec(&VaultPeerRequest::Tenants).unwrap();
     let no_offer = kotton_net::transport::quic::tls::CertOffer {
         admission: vec![],
         claim: None,
@@ -4125,7 +4193,7 @@ async fn a_landlord_drops_one_of_two_tenants(
 
     // Her device is refused — at the handshake, its key off the allowlist —
     // and her own push does not land.
-    let asked = serde_json::to_vec(&UserRequest::VaultCapacity { user_id: "alice".into() }).unwrap();
+    let asked = serde_json::to_vec(&VaultPeerRequest::VaultCapacity { user_id: "alice".into() }).unwrap();
     match within("alice's device asks", try_ask_the_vault_as(&alice_device, &alice_vault, asked)).await {
         Err(_) => {}
         Ok(UserResponse::Error { message }) if message.contains("not paired") => {}
@@ -4191,7 +4259,7 @@ async fn a_landlord_drops_one_of_two_tenants(
     );
     assert_eq!(vault.vault.meter().quota("alicex"), Some(ALICEX), "alicex's number stands");
     // ... his pairing admits him and his number is his ...
-    let own = serde_json::to_vec(&UserRequest::VaultCapacity { user_id: "alicex".into() }).unwrap();
+    let own = serde_json::to_vec(&VaultPeerRequest::VaultCapacity { user_id: "alicex".into() }).unwrap();
     match within("alicex asks for their own", ask_the_vault_as(&alicex_device, &alicex_vault, own)).await {
         UserResponse::VaultCapacityResult { held, quota } => {
             assert_eq!((held, quota), (alicex_listed.held, Some(ALICEX)))
@@ -5636,7 +5704,7 @@ async fn a_relays_enrol_takes_the_vaults_word_that_it_keeps_a_person_with_no_dev
     let identity = kotton_peer::daemon::nodes::load_signing_key("lee", secrets).expect("lee's identity is held here");
     let signature = identity.sign(&change.signed_bytes("lee")).to_bytes().to_vec();
     let device_key = kotton_peer::daemon::nodes::load_device_operational_key(secrets).expect("the desktop's key");
-    let request = serde_json::to_vec(&UserRequest::TenantDevice { user_id: "lee".into(), change, signature }).unwrap();
+    let request = serde_json::to_vec(&VaultPeerRequest::TenantDevice { user_id: "lee".into(), change, signature }).unwrap();
     let offer = kotton_net::transport::quic::tls::CertOffer { admission: vec![], claim: None };
     let withdrawn = try_ask_the_vault_with(&device_key, &offer, &identity_of(&vault).await, request).await;
     assert!(matches!(withdrawn, Ok(UserResponse::Ok)), "the withdrawal was not taken: {withdrawn:?}");
@@ -6538,7 +6606,7 @@ async fn dialled(vault: &RunningVault) -> VaultIdentity {
 async fn a_service_started_with_its_operators_key_admits_that_key_and_no_other() {
     init_crypto();
     let offer = kotton_net::transport::quic::tls::CertOffer::default();
-    let tenants = serde_json::to_vec(&UserRequest::Tenants).unwrap();
+    let tenants = serde_json::to_vec(&VaultPeerRequest::Tenants).unwrap();
     let stranger = ed25519_dalek::SigningKey::from_bytes(&rand::random());
 
     let vault = within("starting the vault", spawn_vault("vault")).await;
@@ -6587,7 +6655,7 @@ async fn a_service_started_with_its_operators_key_admits_that_key_and_no_other()
 async fn a_strangers_handshake_is_refused_at_a_vault_and_no_claim_is_ever_open() {
     init_crypto();
     let offer = kotton_net::transport::quic::tls::CertOffer::default();
-    let tenants = serde_json::to_vec(&UserRequest::Tenants).unwrap();
+    let tenants = serde_json::to_vec(&VaultPeerRequest::Tenants).unwrap();
     let vault = within("starting the vault", spawn_vault("vault")).await;
     let id = dialled(&vault).await;
     let refused_at_the_handshake = |when: &'static str| {

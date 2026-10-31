@@ -28,7 +28,7 @@ use kotton_ipc::{ChannelAcceptor, HandlerOutput};
 use kotton_peer::daemon::nodes::PendingConfirms;
 use kotton_session::service::tokens::SessionMap;
 use kotton_sys::ipc::IpcEndpoint;
-use kotton_wire::ipc::{UserRequest, UserResponse, VaultRequest};
+use kotton_wire::ipc::{UserResponse, VaultPeerRequest, VaultRequest};
 use sqlx::SqlitePool;
 use std::io;
 use std::sync::Arc;
@@ -199,7 +199,7 @@ async fn dispatch(ctx: &ControlContext, request: VaultRequest) -> io::Result<Han
             Ok(HandlerOutput::Single(drop_tenant(ctx, &user_id).await))
         }
         // Who holds the operator credential. Only this socket decodes these:
-        // they have no `UserRequest` twin, so no key on the peer transport —
+        // they have no `VaultPeerRequest` twin, so no key on the peer transport —
         // the operator's own included — can enrol one or revoke one.
         VaultRequest::OperatorAdmit { key } => Ok(HandlerOutput::Single(
             match crate::operator::admit(peer, &key).await {
@@ -286,19 +286,19 @@ async fn drop_tenant(ctx: &ControlContext, user_id: &str) -> UserResponse {
 ///
 /// `key` is the operator key the connection authenticated as: the invite's
 /// digits are kept under it, and `InviteDigits` answers with those alone.
-pub async fn landlord(ctx: &ControlContext, key: &[u8; 32], request: UserRequest) -> UserResponse {
+pub async fn landlord(ctx: &ControlContext, key: &[u8; 32], request: VaultPeerRequest) -> UserResponse {
     let peer = &ctx.peer;
     match request {
-        UserRequest::SetQuota { user_id, quota } => set_quota(peer, &user_id, quota).await,
-        UserRequest::Tenants => tenants(peer).await,
-        UserRequest::DropTenant { user_id } => drop_tenant(ctx, &user_id).await,
-        UserRequest::StandAt { relays } => {
+        VaultPeerRequest::SetQuota { user_id, quota } => set_quota(peer, &user_id, quota).await,
+        VaultPeerRequest::Tenants => tenants(peer).await,
+        VaultPeerRequest::DropTenant { user_id } => drop_tenant(ctx, &user_id).await,
+        VaultPeerRequest::StandAt { relays } => {
             match crate::reach::stand_at(&peer.runtime, &peer.db, &ctx.device_db, relays).await {
                 Ok(()) => UserResponse::Ok,
                 Err(message) => UserResponse::Error { message },
             }
         }
-        UserRequest::DeviceInvite {
+        VaultPeerRequest::DeviceInvite {
             user_id,
             ttl_seconds,
             as_name,
@@ -311,9 +311,12 @@ pub async fn landlord(ctx: &ControlContext, key: &[u8; 32], request: UserRequest
                 Err(message) => UserResponse::Error { message },
             }
         }
-        UserRequest::InviteDigits { user_id } => UserResponse::InviteDigits {
+        VaultPeerRequest::InviteDigits { user_id } => UserResponse::InviteDigits {
             digits: ctx.shown.for_pool(key, &user_id),
         },
+        // A tenant's verb: `peer::handle` sends the landlord's six here and
+        // nothing else, and refuses a tenant's to the operator by standing
+        // first. Should that ever widen, the verb is refused, never run.
         other => UserResponse::Error {
             message: format!("{} is not one of the landlord's verbs", other.variant_name()),
         },
@@ -589,7 +592,7 @@ pub(crate) mod tests {
         let ctx = &vault.control;
         ctx.shown.show("a-ceremony", &A, "sam", 47_291);
         let digits = |key: [u8; 32]| async move {
-            match landlord(ctx, &key, UserRequest::InviteDigits { user_id: "sam".into() }).await {
+            match landlord(ctx, &key, VaultPeerRequest::InviteDigits { user_id: "sam".into() }).await {
                 UserResponse::InviteDigits { digits } => digits,
                 other => panic!("InviteDigits answered {other:?}"),
             }
@@ -647,7 +650,7 @@ pub(crate) mod tests {
             .provision_joined_user("alice", "did:kel:alice")
             .expect("alice is kept here");
         let ctx = &vault.control;
-        let invite = |user_id: &str| UserRequest::DeviceInvite {
+        let invite = |user_id: &str| VaultPeerRequest::DeviceInvite {
             user_id: user_id.to_string(),
             ttl_seconds: 60,
             as_name: None,

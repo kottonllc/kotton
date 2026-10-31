@@ -94,7 +94,7 @@ pub struct DeviceRuntime {
 
     /// The listeners introductions opened (`network::introduction`): one per
     /// session one of the person's devices asked for, none otherwise.
-    pub(crate) introductions: network::introduction::Introductions,
+    pub(crate) introductions: Arc<network::introduction::Introductions>,
 
     // Multi-user support
     pub(crate) device_routing: Arc<RwLock<HashMap<String, String>>>, // device_fingerprint → user_id
@@ -280,6 +280,10 @@ impl DeviceRuntime {
             device_signing_key.clone(),
         ));
 
+        let introductions = Arc::new(network::introduction::Introductions::new(
+            device_signing_key.clone(),
+        ));
+
         let runtime = Self {
             base_dir,
             config,
@@ -294,7 +298,7 @@ impl DeviceRuntime {
             accept_tasks: Arc::new(Mutex::new(Vec::new())),
             reachability,
             local_door: Default::default(),
-            introductions: Default::default(),
+            introductions,
             device_routing: Arc::new(RwLock::new(HashMap::new())),
             mount_locks: Arc::new(RwLock::new(HashMap::new())),
             schema_registry: Arc::new(RwLock::new(SchemaRegistry::new())),

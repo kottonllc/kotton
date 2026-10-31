@@ -553,7 +553,7 @@ async fn a_drive_serving_another_key_domain_is_refused() {
 
 /// **A retired verb is refused at kuserd's decoder.** kuserd's peer acceptor
 /// decodes a peer's bytes as `PeerRequest` (kotton #231) and kvaultd's as
-/// `UserRequest`, each with no fallback, so a verb that left the door's type
+/// `VaultPeerRequest` (kotton #239), each with no fallback, so a verb that left the door's type
 /// (`ApplyRecordChangeset`, kotton #173/#219) is an unknown variant on the
 /// device as on the vault. `vault::a_vault_answers_its_verbs_and_nothing_else`
 /// holds the vault's half; this holds the device's: B, paired with A, dials A's

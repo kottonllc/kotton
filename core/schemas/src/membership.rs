@@ -39,6 +39,31 @@ pub enum Ceremony {
     RelayInvite,
 }
 
+/// Declares an enum and, beside it, `ALL`: every variant in declaration order, emitted from
+/// the same list the enum is, so it cannot leave one out and no reader has to hand-list them.
+/// Stable Rust has no way to enumerate an enum's variants, and a derive crate for one enum is
+/// more than this needs.
+macro_rules! enum_with_all {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $( $(#[$vmeta:meta])* $variant:ident, )*
+        }
+    ) => {
+        $(#[$meta])*
+        $vis enum $name {
+            $( $(#[$vmeta])* $variant, )*
+        }
+
+        impl $name {
+            /// Every variant, in declaration order. Emitted with the enum by
+            /// `enum_with_all!`, so a new variant is in it by construction.
+            pub const ALL: &'static [$name] = &[$($name::$variant),*];
+        }
+    };
+}
+
+enum_with_all! {
 /// For an [`Role::OwnDevice`] member, whether it holds identity or is a blind
 /// replica (RFC-0025).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -76,30 +101,76 @@ pub enum Posture {
     /// the node admits it; postured so pairing gives it no reach.
     Gateway,
 }
+}
 
-/// The words `device add` has for a posture, each with the posture it asks for. The grammar
-/// the shell parses (`parse_add`, `client/shell/src/commands/device.rs`) reads it, the shell's
-/// usage line is assembled from it, and the daemon's hints that name a `device add` line
-/// (`adds_instead` in `kotton-device`) walk it by posture. A gateway is not here: it is
-/// [`DEVICE_ADD_GATEWAY_FLAG`] and a code, a word with a value. What holds the rest: `cargo
-/// xtask device-add-check` finds no `device add --` in code under `core/` outside tests and
-/// comments (its module doc says what a text check cannot see). Prose outside `core/` is not
-/// held.
+/// What a `device add` line says to ask for a posture: the words after `device add`. Every
+/// posture has one, because [`device_add_word`] is an exhaustive match: a new posture fails to
+/// compile there until it is given a word, and no reader has a `None` to fall into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceAddWord {
+    /// No word: the posture a line that names none asks for, [`DEVICE_ADD_DEFAULT_POSTURE`].
+    Bare,
+    /// A flag alone, as `--blind`.
+    Flag(&'static str),
+    /// A flag followed by a value, as a gateway's `--gateway <code>`: the line names nothing
+    /// else, and `value` is the placeholder the usage line and the hints print for it.
+    FlagWithValue {
+        /// The flag, as typed.
+        flag: &'static str,
+        /// What the person types after it, as the grammar names it.
+        value: &'static str,
+    },
+}
+
+/// The one vocabulary of `device add`: the words that ask for `posture`. A total map over
+/// [`Posture`], walked over [`Posture::ALL`] by every reader: the shell's `parse_add` and
+/// usage line (`client/shell/src/commands/device.rs`), and the daemon's hints that name a
+/// `device add` line (`adds_instead` in `kotton-device`). What holds the rest: `cargo xtask
+/// device-add-check` finds no `device add --` in code under `core/` outside tests and comments
+/// (its module doc says what a text check cannot see). Prose outside `core/` is not held.
 ///
 /// `drive enrol` has a table of its own in the shell, since its default (blind) and its set
-/// (it has `--full`) differ. Neither table is a judgement: the daemon remains the only guard
-/// on posture, and these are grammar.
-pub const DEVICE_ADD_POSTURE_FLAGS: [(&str, Posture); 2] =
-    [("--blind", Posture::BlindStorage), ("--cosigner", Posture::Cosigner)];
+/// (it has `--full`) differ. Neither is a judgement: the daemon remains the only guard on
+/// posture, and these are grammar.
+pub const fn device_add_word(posture: Posture) -> DeviceAddWord {
+    match posture {
+        Posture::Full => DeviceAddWord::Bare,
+        Posture::Cosigner => DeviceAddWord::Flag("--cosigner"),
+        Posture::BlindStorage => DeviceAddWord::Flag("--blind"),
+        Posture::Gateway => DeviceAddWord::FlagWithValue { flag: "--gateway", value: "<code>" },
+    }
+}
 
-/// The word `device add` admits a gateway elsewhere with, followed by the code the gateway
-/// printed. Not a posture flag of [`DEVICE_ADD_POSTURE_FLAGS`], since it carries a value and
-/// stands alone on its line; read by the shell's `parse_add` and usage line and by the
-/// daemon's `adds_instead`, so no reader spells it.
-pub const DEVICE_ADD_GATEWAY_FLAG: &str = "--gateway";
+/// The posture `device add` asks for when the line names none: the one posture whose word is
+/// [`DeviceAddWord::Bare`], read off [`device_add_word`] at compile time. None, or two, is a
+/// build error, not a line that means two things.
+pub const DEVICE_ADD_DEFAULT_POSTURE: Posture = {
+    let mut bare = None;
+    let mut i = 0;
+    while i < Posture::ALL.len() {
+        if matches!(device_add_word(Posture::ALL[i]), DeviceAddWord::Bare) {
+            assert!(bare.is_none(), "two postures are `device add` with no word");
+            bare = Some(Posture::ALL[i]);
+        }
+        i += 1;
+    }
+    match bare {
+        Some(posture) => posture,
+        None => panic!("no posture is `device add` with no word"),
+    }
+};
 
-/// The posture `device add` asks for when the line names none.
-pub const DEVICE_ADD_DEFAULT_POSTURE: Posture = Posture::Full;
+impl std::fmt::Display for DeviceAddWord {
+    /// The words as a person types them after `device add`: nothing, the flag, or the flag and
+    /// its value's placeholder.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeviceAddWord::Bare => Ok(()),
+            DeviceAddWord::Flag(flag) => f.write_str(flag),
+            DeviceAddWord::FlagWithValue { flag, value } => write!(f, "{flag} {value}"),
+        }
+    }
+}
 
 impl Posture {
     /// The kebab-case name this serialises as, for the one column that stores it as text.
@@ -326,6 +397,21 @@ pub fn member_path(did: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No two postures share a `device add` word, so a line the shell reads names one posture;
+    /// the bare word is the default's alone, which the constant's own evaluation holds.
+    #[test]
+    fn no_two_postures_share_a_device_add_word() {
+        // The first word is what the shell matches on; a value after it does not tell two apart.
+        let words: Vec<String> = Posture::ALL
+            .iter()
+            .map(|p| device_add_word(*p).to_string().split(' ').next().unwrap_or_default().to_owned())
+            .collect();
+        for (i, w) in words.iter().enumerate() {
+            assert!(!words[i + 1..].contains(w), "{w:?} names two postures");
+        }
+        assert_eq!(device_add_word(DEVICE_ADD_DEFAULT_POSTURE), DeviceAddWord::Bare);
+    }
 
     fn sample(role: Role, posture: Option<Posture>) -> Member {
         Member {

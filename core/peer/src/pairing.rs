@@ -1142,12 +1142,18 @@ impl Invite {
     /// derive the handle from them.
     pub fn of(code: &kotton_wire::line::InviteCode) -> Option<Self> {
         match code {
-            kotton_wire::line::InviteCode::Vault { words, relay_hint, .. } => Some(Self {
-                relay_url: relay_hint.trim().trim_end_matches('/').to_string(),
-                code: normalize_code(words),
-            }),
+            kotton_wire::line::InviteCode::Vault { words, relay_hint, .. } => {
+                Some(Self::meeting(relay_hint, words))
+            }
             kotton_wire::line::InviteCode::Relay { .. } => None,
         }
+    }
+
+    /// Where a vault's invite meets, from the two fields of
+    /// `InviteCode::Vault` it reads: for a reader that has already matched the
+    /// vault's arm, so it has no `None` to answer.
+    pub fn meeting(relay_hint: &str, words: &str) -> Self {
+        Self { relay_url: relay_hint.trim().trim_end_matches('/').to_string(), code: normalize_code(words) }
     }
 
     /// The code a person is handed for this invite: the vault's `key`, the
