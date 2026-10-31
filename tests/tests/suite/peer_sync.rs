@@ -709,3 +709,94 @@ async fn a_live_record_insert_from_a_paired_peer_leaves_no_record_on_the_device(
     let titles: Vec<&str> = notes.iter().filter_map(|n| n["title"].as_str()).collect();
     assert_eq!(titles, ["A's own"], "the device holds only the note written at its door: {notes:?}");
 }
+
+// ── A served key is admitted before any path is built from it ────────────────
+
+/// Every entry under `dir`, as paths relative to it, leaving out `skip` and
+/// everything beneath it.
+fn names_under(dir: &std::path::Path, skip: &std::path::Path) -> BTreeSet<PathBuf> {
+    fn walk(base: &std::path::Path, dir: &std::path::Path, skip: &std::path::Path, out: &mut BTreeSet<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read a directory of the puller's tree") {
+            let path = entry.expect("a directory entry").path();
+            if path == skip {
+                continue;
+            }
+            out.insert(path.strip_prefix(base).unwrap().to_path_buf());
+            if path.is_dir() {
+                walk(base, &path, skip, out);
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(dir, dir, skip, &mut out);
+    out
+}
+
+/// **A key the serving side lists that is not canonical is refused, and no
+/// path is built from it** (kotton #265). A sync pass takes the remote's
+/// listing as the keys it reads and writes, so the listing is what a hostile
+/// drive controls. Here the serving side lists `../x`, `./_pack/i-1`,
+/// `/_pack/i-1` and `_pack/`: a local-directory remote stands in for the
+/// drive, holding files whose names percent-decode to those keys (a listing
+/// rebuilds each key from a file's name, decoding `%2F` to `/`), and a file
+/// beside its tree at `x`, so a read of `../x` finds bytes to hand over. The
+/// puller's code is the same whatever the remote is: it lists, then moves
+/// what was listed.
+///
+/// Before the admission, `../x` was written to the puller's `data/../x`,
+/// beside its mount; `./_pack/i-1` and `/_pack/i-1` named the pack directory
+/// under names the namespace rule reads as files. Now each is refused at the
+/// listing: nothing appears in the puller's tree outside its mount, nothing
+/// lands in its pack directory, nothing is pulled, and the pass completes,
+/// counting each refused key among those it did not move.
+#[tokio::test]
+async fn a_served_key_that_is_not_canonical_is_refused_before_any_path_is_built() {
+    let served = tempfile::tempdir().expect("served tempdir");
+    let backup_path: PathBuf = served.path().join("backup");
+    std::fs::create_dir_all(&backup_path).expect("the served tree");
+    std::fs::write(served.path().join("x"), b"beside the served tree").expect("the bytes ../x reads");
+
+    let mut env = TestEnv::spawn().await;
+    env.client.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user");
+    env.client
+        .remote_add("alice", "backup", RemoteBackend::Local { path: backup_path.clone() }, None)
+        .await
+        .expect("remote_add backup");
+    // A first pass over the empty tree, so what any pass makes of the
+    // puller's own (its record database) is there before the one measured.
+    env.client
+        .sync_mount("alice", "local", "backup", Some(SyncDirection::Pull))
+        .await
+        .expect("a pass over an empty tree");
+    let hostile = ["../x", "./_pack/i-1", "/_pack/i-1", "_pack/"];
+    for key in hostile {
+        std::fs::write(backup_path.join(key.replace('/', "%2F")), b"served").expect("plant a served key");
+    }
+
+    let rt = env.users.get("alice").expect("alice runtime");
+    let (_, local) = rt
+        .shelf_mounts()
+        .into_iter()
+        .find(|(name, _)| name == "local")
+        .expect("the local mount rests on a directory");
+    let outside = local.parent().expect("the mount has a parent").to_path_buf();
+    let before = names_under(&outside, &local);
+
+    let result = env.client.sync_mount("alice", "local", "backup", Some(SyncDirection::Pull)).await;
+
+    assert!(!outside.join("x").exists(), "`../x` was written beside the puller's mount: {result:?}");
+    let after = names_under(&outside, &local);
+    let new: Vec<&PathBuf> = after.difference(&before).collect();
+    assert!(new.is_empty(), "the pass changed the puller's tree outside its mount: {new:?}");
+    assert!(!local.join("_pack").join("i-1").exists(), "a served key aliased onto the pack directory");
+
+    let result = result.expect("a pass that refuses keys still completes");
+    assert_eq!(result.pulled, 0, "nothing the drive listed was canonical: {result:?}");
+    assert!(result.transfers.is_empty(), "{result:?}");
+    let held = rt.list_sealed("local", "").await.expect("list the local mount").len();
+    assert_eq!(
+        result.skipped as usize,
+        held + hostile.len(),
+        "each refused key is counted among those the pass did not move: {result:?}"
+    );
+}

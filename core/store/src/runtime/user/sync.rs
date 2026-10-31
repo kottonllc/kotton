@@ -33,6 +33,7 @@
 //! [`put`]: kotton_sys::store::ObjectStorage::put
 
 use super::UserStore;
+use crate::StorageKey;
 use anyhow::{anyhow, Result};
 use kotton_sys::store::SyncableStore;
 use kotton_wire::ipc::SyncDirection;
@@ -62,13 +63,13 @@ pub enum Outbound {
 
 impl Outbound {
     /// Whether an object at `key` may cross under this scope.
-    fn admits(self, key: &str) -> bool {
+    fn admits(self, key: &StorageKey) -> bool {
         match self {
             Outbound::Everything => true,
             Outbound::PacksOnly => {
                 use crate::packed::ObjectKind;
                 matches!(
-                    crate::packed::kind(key),
+                    crate::packed::kind(key.as_str()),
                     ObjectKind::Superblock | ObjectKind::ContentPack | ObjectKind::IndexPack
                 )
             }
@@ -176,24 +177,24 @@ impl UserStore {
 
         // Every leaf key on each side, recursing subdirectories — a filesystem
         // backend's `list` is one level deep, so a flat listing would silently
-        // skip anything nested (e.g. `notes/2026/trip.md`).
-        let local_map: BTreeMap<String, Option<u64>> =
-            list_sealed_recursive(local.as_ref()).await?;
-        let remote_map: BTreeMap<String, Option<u64>> =
-            list_sealed_recursive(remote.as_ref()).await?;
+        // skip anything nested (e.g. `notes/2026/trip.md`). Each key is
+        // admitted as it is listed ([`list_sealed_recursive`]); one that is
+        // not canonical is refused there, and counted among the skipped.
+        let (local_map, local_refused) = list_sealed_recursive(local.as_ref(), local_mount).await?;
+        let (remote_map, remote_refused) = list_sealed_recursive(remote.as_ref(), remote_name).await?;
 
         // Union of all object keys across both sides.
-        let all_keys: BTreeSet<String> =
+        let all_keys: BTreeSet<StorageKey> =
             local_map.keys().chain(remote_map.keys()).cloned().collect();
 
         let mut pushed: u32 = 0;
         let mut pulled: u32 = 0;
-        let mut skipped: u32 = 0;
+        let mut skipped: u32 = local_refused + remote_refused;
         let mut withheld: u32 = 0;
         let mut transfers: Vec<(SyncDirection, String, u64)> = Vec::new();
+        let mut on_remote: BTreeSet<StorageKey> = remote_map.keys().cloned().collect();
 
         for key in &all_keys {
-            let key_path = Path::new(key.as_str());
             let local_ts = local_map.get(key).copied();
             let remote_ts = remote_map.get(key).copied();
 
@@ -226,16 +227,17 @@ impl UserStore {
             // device keeps whole, which is the second step's to decide. A pack
             // is immutable and uniquely named, so one this device holds is
             // never pulled again either way.
-            let pull = pull && !(keep.is_some() && crate::packed::is_content_pack(key));
+            let pull = pull && !(keep.is_some() && crate::packed::is_content_pack(key.as_str()));
 
             if push {
-                let bytes = transfer_sealed(local.as_ref(), remote.as_ref(), key_path).await?;
+                let bytes = transfer_sealed(local.as_ref(), remote.as_ref(), key).await?;
                 pushed += 1;
-                transfers.push((SyncDirection::Push, key.clone(), bytes));
+                transfers.push((SyncDirection::Push, key.to_string(), bytes));
+                on_remote.insert(key.clone());
             } else if pull {
-                let bytes = transfer_sealed(remote.as_ref(), local.as_ref(), key_path).await?;
+                let bytes = transfer_sealed(remote.as_ref(), local.as_ref(), key).await?;
                 pulled += 1;
-                transfers.push((SyncDirection::Pull, key.clone(), bytes));
+                transfers.push((SyncDirection::Pull, key.to_string(), bytes));
             } else {
                 skipped += 1;
             }
@@ -292,11 +294,6 @@ impl UserStore {
 
         let report = match keep {
             Some(keep) if !matches!(direction, Some(SyncDirection::Push)) => {
-                let on_remote: BTreeSet<String> = remote_map
-                    .keys()
-                    .chain(transfers.iter().filter(|(d, _, _)| matches!(d, SyncDirection::Push)).map(|(_, k, _)| k))
-                    .cloned()
-                    .collect();
                 let kept_paths = |path: &str| (keep.whole)(path).is_some();
                 let holding = local.packs_holding(&kept_paths).await?;
                 let r = keep_whole(local.as_ref(), remote.as_ref(), keep, holding, &on_remote, &mut transfers).await?;
@@ -346,35 +343,37 @@ impl UserStore {
 /// ([`UserStore::sync_mount_keeping`]): fetch the content packs `holding` names
 /// that this device lacks, within the room, and let go of content packs no
 /// whole pin keeps when it is over the room.
+///
+/// The packs it fetches are named by the reconciled index, which other
+/// devices wrote, so each id is admitted ([`StorageKey`]) before it is read or
+/// written; one that is not canonical is refused and fetched by no one.
 async fn keep_whole(
     local: &dyn SyncableStore,
     remote: &dyn SyncableStore,
     keep: &Keep,
     holding: Option<BTreeMap<String, Vec<String>>>,
-    on_remote: &BTreeSet<String>,
+    on_remote: &BTreeSet<StorageKey>,
     transfers: &mut Vec<(SyncDirection, String, u64)>,
 ) -> Result<KeepReport> {
     let pack = crate::pack::PACK_SIZE as u64;
-    let canon = |k: &str| k.trim_start_matches('/').to_string();
     // What this device holds of the drive: its packs, each its fixed size —
     // one listing of the pack directory, never a walk of what is in them.
-    let mut held: BTreeMap<String, u64> = local
+    let mut held: BTreeMap<StorageKey, u64> = local
         .list_sealed(Path::new(crate::packed::PACK_PREFIX))
         .await?
         .into_iter()
         .filter(|m| !m.is_dir)
-        .map(|m| (canon(&m.key), m.size))
+        .filter_map(|m| Some((admit(&m.key, "local")?, m.size)))
         .collect();
-    let bytes = |held: &BTreeMap<String, u64>| held.values().sum::<u64>();
-    let on_remote: BTreeSet<String> = on_remote.iter().map(|k| canon(k)).collect();
+    let bytes = |held: &BTreeMap<StorageKey, u64>| held.values().sum::<u64>();
     let holding = holding.unwrap_or_default();
-    let wanted: BTreeMap<String, &Vec<String>> = holding
+    let wanted: BTreeMap<StorageKey, &Vec<String>> = holding
         .iter()
         .filter(|(id, _)| crate::packed::is_content_pack(id))
-        .map(|(id, paths)| (canon(id), paths))
+        .filter_map(|(id, paths)| Some((admit(id, "the index")?, paths)))
         .collect();
     let mut report = KeepReport { budget: keep.budget, wanted: wanted.len() as u64 * pack, ..Default::default() };
-    let fits = |held: &BTreeMap<String, u64>| keep.budget.is_none_or(|b| bytes(held) + pack <= b);
+    let fits = |held: &BTreeMap<StorageKey, u64>| keep.budget.is_none_or(|b| bytes(held) + pack <= b);
     let mut short: BTreeSet<String> = BTreeSet::new();
     for (id, paths) in &wanted {
         if held.contains_key(id) {
@@ -389,22 +388,22 @@ async fn keep_whole(
             short.extend(paths.iter().filter_map(|p| (keep.whole)(p)));
             continue;
         }
-        let got = transfer_sealed(remote, local, Path::new(id.as_str())).await?;
-        transfers.push((SyncDirection::Pull, id.clone(), got));
+        let got = transfer_sealed(remote, local, id).await?;
+        transfers.push((SyncDirection::Pull, id.to_string(), got));
         held.insert(id.clone(), got);
         report.fetched += 1;
     }
     if let Some(budget) = keep.budget {
-        let spare: Vec<String> = held
+        let spare: Vec<StorageKey> = held
             .keys()
-            .filter(|k| crate::packed::is_content_pack(k) && !wanted.contains_key(*k) && on_remote.contains(*k))
+            .filter(|k| crate::packed::is_content_pack(k.as_str()) && !wanted.contains_key(*k) && on_remote.contains(*k))
             .cloned()
             .collect();
         for key in spare {
             if bytes(&held) <= budget {
                 break;
             }
-            local.delete_sealed(Path::new(&key)).await?;
+            local.delete_sealed(key.as_path()).await?;
             held.remove(&key);
             report.evicted += 1;
         }
@@ -429,33 +428,56 @@ async fn keep_whole(
 }
 
 /// Every leaf `(key, modified)` on a store, recursing into the directory entries
-/// its `list_sealed` reports.
+/// its `list_sealed` reports, and how many keys it listed were refused.
 ///
 /// A filesystem backend lists one level and returns `is_dir` entries, so a flat
 /// `list_sealed("")` misses everything nested. This walks the tree in
 /// storage-key space, one `list_sealed` per directory. A peer store never
 /// reports `is_dir` — the serving side walks its own tree and answers with
-/// every leaf in one round trip (see `UserRuntime::list_sealed`), so for a peer
-/// the loop below runs exactly once. Directory-marker keys (trailing `/`) are
-/// skipped: they are never readable objects.
+/// every leaf in one round trip (see `UserStore::list_sealed`), so for a peer
+/// the loop below runs exactly once.
+///
+/// **The admission of a pass** (kotton #265). A listing is what the other
+/// side chose to answer, and every key in it becomes a read on one side and
+/// a write on the other, so each key, a directory's as well as a leaf's, is
+/// parsed into a [`StorageKey`] here, before anything is built from it. A key
+/// that is not canonical (`../x`, `./_pack/i-1`, `/_pack/i-1`, a directory
+/// marker such as `_pack/`) is refused: named in the log, counted, and never
+/// read, written or descended into. Nothing after this point reads a key
+/// past a leading `/` or a `.`: there is none to read past.
 async fn list_sealed_recursive(
     store: &dyn SyncableStore,
-) -> Result<BTreeMap<String, Option<u64>>> {
+    side: &str,
+) -> Result<(BTreeMap<StorageKey, Option<u64>>, u32)> {
     let mut out = BTreeMap::new();
+    let mut refused: u32 = 0;
     let mut queue: Vec<String> = vec![String::new()];
     while let Some(prefix) = queue.pop() {
         for entry in store.list_sealed(Path::new(&prefix)).await? {
-            if entry.key.ends_with('/') {
+            let Some(key) = admit(&entry.key, side) else {
+                refused += 1;
                 continue;
-            }
+            };
             if entry.is_dir {
-                queue.push(entry.key);
+                queue.push(key.to_string());
             } else {
-                out.insert(entry.key, entry.modified);
+                out.insert(key, entry.modified);
             }
         }
     }
-    Ok(out)
+    Ok((out, refused))
+}
+
+/// `key`, admitted, or `None` with the refusal in the log, naming where the
+/// key came from.
+fn admit(key: &str, side: &str) -> Option<StorageKey> {
+    match StorageKey::parse(key) {
+        Ok(key) => Some(key),
+        Err(refused) => {
+            tracing::warn!(from = side, "sync: {refused}; nothing is read or written under it");
+            None
+        }
+    }
 }
 
 /// Move one object between stores as a **sealed blob**, returning its size.
@@ -467,14 +489,17 @@ async fn list_sealed_recursive(
 ///
 /// The reported size is the sealed length (plaintext plus the per-object DEK
 /// header and AEAD tag) — what actually crossed the link.
+///
+/// It takes a [`StorageKey`], so the key it reads and writes was admitted
+/// where it entered the pass.
 async fn transfer_sealed(
     from: &dyn SyncableStore,
     to: &dyn SyncableStore,
-    key: &Path,
+    key: &StorageKey,
 ) -> Result<u64> {
-    let blob = from.get_sealed(key).await?;
+    let blob = from.get_sealed(key.as_path()).await?;
     let bytes = blob.len() as u64;
-    to.put_sealed(key, &blob).await?;
+    to.put_sealed(key.as_path(), &blob).await?;
     Ok(bytes)
 }
 
@@ -543,6 +568,59 @@ mod keep_tests {
         async fn fetch(&self, _user_id: &str, key: &str) -> anyhow::Result<Option<bytes::Bytes>> {
             Ok(self.0.get_sealed(Path::new(key)).await.ok())
         }
+    }
+
+    /// **A key a remote lists that is not canonical is refused before any
+    /// path is built from it** (kotton #265). The remote here is a memory
+    /// store, which lists keys exactly as they were put, so it serves
+    /// `../x`, `./_pack/i-1`, `/_pack/i-1` and `_pack/` as a hostile drive
+    /// would. Before the admission the pull wrote `../x` beside the device's
+    /// mount. Now the pass completes, pulls nothing, writes nothing outside
+    /// the mount or into its pack directory, and counts each refused key
+    /// among those it skipped; and the serving verbs refuse the same keys.
+    #[tokio::test]
+    async fn a_listed_key_that_is_not_canonical_is_refused_and_lands_nowhere() {
+        let outer = tempfile::tempdir().unwrap();
+        let home = outer.path().join("alice");
+        std::fs::create_dir_all(&home).unwrap();
+        let a = UserStore::create(
+            "alice",
+            "did:key:zAlice",
+            home.clone(),
+            UserKeys::new(Some(derive_cek(&[42u8; 32]))).with_log("did:key:zA", &[7u8; 32]),
+            &crate::LocalShelves(kotton_fs::OsFilesystem),
+        )
+        .unwrap();
+        let hostile = ["../x", "./_pack/i-1", "/_pack/i-1", "_pack/"];
+        use kotton_sys::store::SealedObjectAccess as _;
+        let served = crate::MemoryObjectStorage::new();
+        for key in hostile {
+            served.put_sealed(Path::new(key), b"served").await.unwrap();
+        }
+        a.add_remote(
+            "drive".into(),
+            Arc::new(served),
+            RemoteConfig { backend: RemoteBackend::Local { path: outer.path().join("unused") }, cache_dir: None, key_format: KeyFormat::Blinded },
+        )
+        .unwrap();
+        let before: BTreeSet<_> = std::fs::read_dir(&home).unwrap().map(|e| e.unwrap().file_name()).collect();
+
+        let result = a.sync_mount("local", "drive", Some(SyncDirection::Pull), Outbound::Everything).await;
+
+        assert!(!home.join("x").exists(), "`../x` was written beside the mount: {result:?}");
+        let after: BTreeSet<_> = std::fs::read_dir(&home).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(after, before, "the pass changed the tree outside the mount");
+        assert!(!home.join("data").join("_pack").join("i-1").exists(), "a served key aliased onto the pack directory");
+        let result = result.expect("a pass that refuses keys still completes");
+        assert_eq!((result.pulled, result.transfers.len()), (0, 0), "{result:?}");
+        let held = a.list_sealed("local", "").await.unwrap().len();
+        assert_eq!(result.skipped as usize, held + hostile.len(), "each refused key is counted: {result:?}");
+
+        for key in hostile {
+            assert!(a.write_sealed("local", key, b"sealed").await.is_err(), "write_sealed admitted {key:?}");
+            assert!(a.read_sealed("local", key).await.is_err(), "read_sealed admitted {key:?}");
+        }
+        assert!(!home.join("x").exists(), "write_sealed wrote `../x` beside the mount");
     }
 
     /// **Nothing a setting says withholds the index** (kotton #171's rule: a
