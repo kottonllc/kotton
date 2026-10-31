@@ -83,10 +83,21 @@
 //!   after its opening, comments aside, indented no deeper than the line that
 //!   opened it — rustfmt's layout, not the parser's. A line of a multi-line
 //!   string literal written at that indent ends it early.
+//! - **A decode in a helper the door's closure calls, of a type the table
+//!   does not name.** The door decodes `Req`; a closure that hands a field of
+//!   it to a function defined elsewhere (`fn inner(r: &PeerRequest)` that
+//!   decodes `r.blob` as `Settings`) decodes outside any region, and a type
+//!   with no row in [`CHANNELS`] is no channel this check knows. It is neither
+//!   counted nor refused. A text check cannot follow the call, and the type
+//!   change cannot close it: what the door's `Req` carries is the request
+//!   type's own design. A helper decoding a `CHANNELS` type by name is
+//!   refused wherever it is.
 //! - **A `#[cfg(test)]` item outside a module**, and a `#[cfg(test)]` module
 //!   whose closing brace is not at its own indent, are read as code. Files
-//!   under a `tests/` directory are integration tests, in no binary that
-//!   serves anyone, and a request type decoded by name there is not refused.
+//!   under the suite directory at the repository root, `tests/`, are
+//!   integration tests, in no binary that serves anyone, and a request type
+//!   decoded by name there is not refused. A `tests/` directory anywhere else
+//!   (`core/kuserd/src/tests/`) is code like any other.
 //! - **One crate, one transport, one acceptor.** Two sites of the same form
 //!   in one crate on one type are counted as one acceptor, so two doors of the
 //!   same transport inside one daemon are not told apart.
@@ -192,7 +203,7 @@ pub fn channel_check() {
         std::process::exit(1);
     }
 
-    let survey = survey(&files);
+    let survey = survey(Path::new(""), &files);
     if survey.found.is_empty() {
         eprintln!(
             "channel-check: found no acceptor call site in {} file(s). \
@@ -252,28 +263,32 @@ struct Survey {
     /// Each `serde_json` decode inside a `PeerHandler` region: `path:line`, and
     /// the type argument as written (empty when there is none).
     inside: Vec<(String, String)>,
-    /// Each decode outside a region that names its type, outside test code:
+    /// Each decode outside a region that names its type, outside test modules
+    /// and the root `tests/` suite:
     /// `path:line`, and the type. The table says which of them is a channel's
     /// request type.
     named: Vec<(String, String)>,
 }
 
-fn survey(files: &[PathBuf]) -> Survey {
+/// Read `files`, each named by its path under `root`, the workspace root the
+/// check walks.
+fn survey(root: &Path, files: &[PathBuf]) -> Survey {
     let mut survey = Survey::default();
     for path in files {
+        let rel = path.strip_prefix(root).unwrap_or(path);
         // The transports' own source defines these entry points and exercises
         // them on throwaway types in its tests. Those are not channels, and
         // counting them would have this check reporting on itself. `PeerDoor`
         // decodes its type parameter inside the `PeerHandler` it builds; its
         // callers name the type, and are read as `PeerDoor` sites.
-        let p = display(path);
+        let p = display(rel);
         if p.contains("core/ipc/src/provider/") || p.ends_with("core/peer/src/door.rs") {
             continue;
         }
         let Ok(src) = std::fs::read_to_string(path) else {
             continue;
         };
-        survey_file(path, &src, &mut survey);
+        survey_file(rel, &src, &mut survey);
     }
     survey
 }
@@ -281,7 +296,8 @@ fn survey(files: &[PathBuf]) -> Survey {
 fn survey_file(path: &Path, src: &str, survey: &mut Survey) {
     let krate = acceptor_of(path);
     let p = display(path);
-    let integration = p.starts_with("tests/") || p.contains("/tests/");
+    // The integration suite at the repository root; not any `tests/` below it.
+    let integration = p.starts_with("tests/");
     let tests = crate::docs_present_check::test_modules(src);
     let lines: Vec<&str> = src.lines().collect();
     let regions = handler_regions(&lines);
@@ -829,7 +845,7 @@ mod tests {
             std::fs::write(&p, src).unwrap();
             paths.push(p);
         }
-        let survey = survey(&paths);
+        let survey = survey(dir.path(), &paths);
         (dir, survey)
     }
 
@@ -1215,6 +1231,45 @@ mod tests {
         let files = with(as_it_stands(), "tests/tests/suite/kx.rs", src);
         let (_dir, survey) = tree(&files);
         assert_eq!(judge(&survey, CHANNELS), Vec::<String>::new());
+    }
+
+    /// A `tests/` directory inside a crate's `src/` is code in the crate, not
+    /// the integration suite: a request type decoded by name there is refused.
+    #[test]
+    fn a_request_type_decoded_under_a_crates_src_tests_is_refused() {
+        let src = format!("fn replay(b: &[u8]) {{\n    let r = {DECODE}::<UserRequest>(b);\n}}\n");
+        let files = with(as_it_stands(), "core/kuserd/src/tests/replay.rs", src);
+        let (_dir, survey) = tree(&files);
+        let problems = judge(&survey, CHANNELS);
+        assert!(
+            problems.iter().any(|p| p.contains(
+                "core/kuserd/src/tests/replay.rs:2 decodes `UserRequest`, a channel's request type"
+            )),
+            "{problems:#?}"
+        );
+    }
+
+    /// A stated limit, held so that it stays stated: a helper the door's
+    /// closure calls, decoding a field of the request as a type the table does
+    /// not name, is outside every region and is no channel this check knows.
+    /// It is neither counted nor refused. The module doc lists it under "What
+    /// a text check cannot see"; a `CHANNELS` type in the same place is
+    /// refused (`a_request_type_decoded_in_a_helper_is_refused`).
+    #[test]
+    fn a_decode_in_a_helper_called_from_a_door_is_not_seen() {
+        let src = format!(
+            "fn h() -> {HANDLER} {{ {DOOR}::<PeerRequest, UserResponse>::serving(|_, r| async move {{ inner(&r) }}, refuse) }}\n\
+             fn inner(r: &PeerRequest) -> UserResponse {{\n    let s = {DECODE}::<Settings>(&r.blob);\n    answer(s)\n}}\n"
+        );
+        let files = with(as_it_stands(), "core/kx/src/lib.rs", src);
+        let (_dir, survey) = tree(&files);
+        assert!(survey.inside.is_empty(), "{:?}", survey.inside);
+        assert!(!survey.found.contains_key("Settings"), "{:?}", survey.found);
+        let problems = judge(&survey, CHANNELS);
+        assert!(
+            !problems.iter().any(|p| p.contains("core/kx/src/lib.rs:3")),
+            "{problems:#?}"
+        );
     }
 
     /// A test module's door is in no binary that serves anyone.

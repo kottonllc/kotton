@@ -41,6 +41,41 @@ use std::sync::Arc;
 /// Built only by [`PeerDoor::serving`]: the field is private to this module and
 /// there is no other constructor, so every handler decodes its door's `Req`
 /// before anything of the node's runs.
+///
+/// A door is how one is made:
+///
+/// ```
+/// use kotton_peer::door::PeerDoor;
+/// use kotton_peer::PeerHandler;
+///
+/// let door: PeerHandler =
+///     PeerDoor::<String, String>::serving(|_, said| async move { said }, |e| e);
+/// ```
+///
+/// A closure is not one, wherever it is put — a binding, a struct field, an
+/// argument, a `Result` — because it does not coerce to a struct (kotton #279):
+///
+/// ```compile_fail,E0308
+/// use kotton_peer::door::Answer;
+/// use kotton_peer::PeerHandler;
+/// use std::sync::Arc;
+///
+/// let raw: PeerHandler = Arc::new(|_: String, b: Vec<u8>| -> Answer {
+///     Box::pin(async move { b })
+/// });
+/// ```
+///
+/// and the field is private, so it cannot be wrapped by hand either:
+///
+/// ```compile_fail,E0423
+/// use kotton_peer::door::Answer;
+/// use kotton_peer::PeerHandler;
+/// use std::sync::Arc;
+///
+/// let raw = PeerHandler(Arc::new(|_: String, b: Vec<u8>| -> Answer {
+///     Box::pin(async move { b })
+/// }));
+/// ```
 #[derive(Clone)]
 pub struct PeerHandler(Arc<dyn Fn(String, Vec<u8>) -> Answer + Send + Sync>);
 
