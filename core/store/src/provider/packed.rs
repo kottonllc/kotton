@@ -142,21 +142,18 @@ pub enum ObjectKind {
 ///   a pack only under `_pack/`, a superblock only under `_superblock/`. So
 ///   `_packets` is not a pack, and neither is `_pack` itself (a directory
 ///   entry a listing returns); both are [`ObjectKind::Reserved`], as is `_`.
-/// - **A leading `/`** is not part of the name and is read past: `/_pack/i-1`
-///   is an index pack. That was the answer of each site that sorted keys
-///   before this one — the sync scope, the content-pack test, the pack
-///   fetch — but one: the listing walk of the blinded store asked whether a
-///   key *starts with* `_`, and so read `/_x` as a file. No key the store
-///   produces carries a leading `/` (a listing rebuilds its keys from path
-///   components, and blinded keys and reserved keys are written without
-///   one), so the two answers never met a key on which they differ; this
-///   one is kept.
+/// - **A key is read as it is.** A key from outside the store is admitted
+///   before anything reads it ([`crate::StorageKey`], kotton #265), so none
+///   carries a leading `/`, a `.` or a `..` for this rule to read past, and
+///   no key the store writes carries one either. `/_pack/i-1` is therefore
+///   not a pack: it starts with no `_`, and is [`ObjectKind::File`] like any
+///   other key outside the reserved namespace. Such a key never reaches a
+///   store: it is refused where it enters.
 /// - **The rest of the `_` namespace** is [`ObjectKind::Reserved`].
 ///   Blinded components are base32, an alphabet with no `_`, so only a key
 ///   in the reserved namespace starts with one, and every other key is
 ///   [`ObjectKind::File`].
 pub fn kind(key: &str) -> ObjectKind {
-    let key = key.trim_start_matches('/');
     let under = |prefix: &str| key.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'));
     if under(SUPERBLOCK_PREFIX) {
         ObjectKind::Superblock
@@ -3186,10 +3183,11 @@ mod tests {
             ("_pack/i-1", ObjectKind::IndexPack),
             // A pack written before the split carries no mark.
             ("_pack/0123", ObjectKind::IndexPack),
-            // A leading `/` is read past.
-            ("/_pack/i-1", ObjectKind::IndexPack),
-            ("/_pack/c-1", ObjectKind::ContentPack),
-            ("/_superblock/7", ObjectKind::Superblock),
+            // Nothing is read past: a leading `/` is refused where a key
+            // enters (`crate::StorageKey`), so here it is just not a `_`.
+            ("/_pack/i-1", ObjectKind::File),
+            ("/_pack/c-1", ObjectKind::File),
+            ("/_superblock/7", ObjectKind::File),
             // The `/` boundary: a prefix names its directory, not a stem.
             ("_packets", ObjectKind::Reserved),
             ("_superblocks/7", ObjectKind::Reserved),

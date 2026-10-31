@@ -38,19 +38,32 @@ impl LocalObjectStorage {
     /// [`list`](Self::list) decodes on the way back, so the logical key is
     /// host-independent. Separators are preserved as directory structure; only
     /// `Normal` components are encoded.
-    fn resolve_key(&self, key: &Path) -> PathBuf {
+    ///
+    /// **A key resolves under the mount root or not at all.** A `..`
+    /// component, or a host prefix such as a Windows drive, is refused: it
+    /// would name a path outside the root, and no key the store writes has
+    /// one. Keys from outside are admitted before they get here
+    /// ([`crate::StorageKey`], kotton #265); this is the last line under every
+    /// caller, including those that build a key from something a peer wrote
+    /// (a pack id in a manifest). A leading `/` and a `.` component name
+    /// nothing outside the root and are read past, as the logical paths the
+    /// VFS hands this store may carry them.
+    fn resolve_key(&self, key: &Path) -> ObjectStorageResult<PathBuf> {
         use std::path::Component;
         let mut path = self.base_path.clone();
         for comp in key.components() {
             match comp {
                 Component::Normal(seg) => path.push(encode_segment(&seg.to_string_lossy())),
-                Component::ParentDir => path.push(".."),
-                // VFS keys resolve *under* the mount root; root/cur/prefix
-                // components carry no meaning here and are skipped.
-                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+                Component::ParentDir | Component::Prefix(_) => {
+                    return Err(ObjectStorageError::InvalidKey(format!(
+                        "{}: names a path outside the mount root",
+                        key.display()
+                    )))
+                }
+                Component::CurDir | Component::RootDir => {}
             }
         }
-        path
+        Ok(path)
     }
 
     /// Convert filesystem error to object storage error
@@ -168,7 +181,7 @@ fn decode_segment(seg: &str) -> String {
 #[async_trait]
 impl ObjectStorage for LocalObjectStorage {
     async fn get(&self, key: &Path) -> ObjectStorageResult<Bytes> {
-        let abs_path = self.resolve_key(key);
+        let abs_path = self.resolve_key(key)?;
         let bytes = self
             .filesystem
             .read_file(&abs_path)
@@ -178,7 +191,7 @@ impl ObjectStorage for LocalObjectStorage {
     }
 
     async fn put(&self, key: &Path, data: &[u8]) -> ObjectStorageResult<()> {
-        let abs_path = self.resolve_key(key);
+        let abs_path = self.resolve_key(key)?;
 
         // Ensure parent directory exists
         if let Some(parent) = abs_path.parent() {
@@ -210,7 +223,7 @@ impl ObjectStorage for LocalObjectStorage {
     }
 
     async fn delete(&self, key: &Path) -> ObjectStorageResult<()> {
-        let abs_path = self.resolve_key(key);
+        let abs_path = self.resolve_key(key)?;
         self.filesystem
             .delete_file(&abs_path)
             .await
@@ -219,7 +232,7 @@ impl ObjectStorage for LocalObjectStorage {
     }
 
     async fn list(&self, prefix: &Path) -> ObjectStorageResult<Vec<ObjectMetadata>> {
-        let abs_path = self.resolve_key(prefix);
+        let abs_path = self.resolve_key(prefix)?;
         let entries = match self.filesystem.list_dir(&abs_path).await {
             Ok(entries) => entries,
             Err(e) => match Self::map_error(e, prefix.to_str().unwrap_or("")) {
@@ -276,7 +289,7 @@ impl ObjectStorage for LocalObjectStorage {
     }
 
     async fn metadata(&self, key: &Path) -> ObjectStorageResult<ObjectMetadata> {
-        let abs_path = self.resolve_key(key);
+        let abs_path = self.resolve_key(key)?;
         let metadata = self
             .filesystem
             .file_metadata(&abs_path)
@@ -424,6 +437,31 @@ mod tests {
 
         storage.delete(key).await.unwrap();
         assert!(!storage.exists(key).await.unwrap());
+    }
+
+    /// A key that would resolve outside the mount root is refused by every
+    /// verb, and nothing is written or read beside the root (kotton #265).
+    #[tokio::test]
+    async fn a_key_naming_a_path_outside_the_root_is_refused() {
+        let outer = TempDir::new().unwrap();
+        let root = outer.path().join("mount");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(outer.path().join("beside"), b"outside the root").unwrap();
+        let storage = LocalObjectStorage::new(root.clone(), OsFilesystem);
+        for key in ["../x", "_pack/../../x", "a/../../x"] {
+            let refused = storage.put_sealed(Path::new(key), b"sealed").await;
+            assert!(matches!(refused, Err(ObjectStorageError::InvalidKey(_))), "{key}: {refused:?}");
+        }
+        assert!(!outer.path().join("x").exists(), "a put landed outside the root");
+        for refused in [
+            storage.get(Path::new("../beside")).await.map(|_| ()),
+            storage.metadata(Path::new("../beside")).await.map(|_| ()),
+            storage.delete(Path::new("../beside")).await,
+            storage.list(Path::new("../")).await.map(|_| ()),
+        ] {
+            assert!(matches!(refused, Err(ObjectStorageError::InvalidKey(_))), "{refused:?}");
+        }
+        assert!(outer.path().join("beside").exists(), "a delete reached outside the root");
     }
 
     #[test]
