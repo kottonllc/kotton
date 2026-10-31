@@ -33,13 +33,19 @@ struct Open {
     task: tokio::task::JoinHandle<()>,
 }
 
-/// The device's introductions: the handler that serves them, and the listeners open
-/// now. Empty on a fresh device — nothing is bound until one of the person's devices
-/// asks.
-#[derive(Default)]
+/// The device's introductions: the handler that serves them, the key an introduced
+/// listener presents, and the listeners open now. Empty on a fresh device — nothing
+/// is bound until one of the person's devices asks.
+///
+/// Held behind its own `Arc`, apart from the runtime, so the one verb that opens a
+/// listener can be lent without the machine ([`Introducer`]).
 pub(crate) struct Introductions {
+    /// The device's operational key, which an introduced listener's handshake
+    /// presents — the same key the peer listener presents.
+    signing_key: ed25519_dalek::SigningKey,
     /// Set at boot by the daemon ([`DeviceRuntime::serve_introductions`]); cleared at
-    /// shutdown, which is what breaks the runtime → handler → runtime cycle.
+    /// shutdown, which is what breaks the introductions → handler → introductions
+    /// cycle (the peer handler holds an [`Introducer`]).
     handler: std::sync::Mutex<Option<PeerHandler>>,
     open: std::sync::Mutex<HashMap<u64, Open>>,
     next: AtomicU64,
@@ -49,7 +55,118 @@ pub(crate) struct Introductions {
     requests: Arc<AtomicU64>,
 }
 
+impl Introductions {
+    pub(crate) fn new(signing_key: ed25519_dalek::SigningKey) -> Self {
+        Self {
+            signing_key,
+            handler: Default::default(),
+            open: Default::default(),
+            next: Default::default(),
+            sessions: Default::default(),
+            requests: Default::default(),
+        }
+    }
+
+    /// [`DeviceRuntime::open_introduction_on`]'s work, on the introductions alone.
+    async fn open_on(
+        self: &Arc<Self>,
+        peer_key: [u8; 32],
+        expect: IntroducedPeer,
+        their_router: Option<kotton_peer::local_door::RouterKey>,
+        here: Option<kotton_peer::local_door::RouterKey>,
+        local_only: bool,
+        token_lifetime: Duration,
+    ) -> anyhow::Result<SocketAddr> {
+        if !kotton_peer::introduction::on_one_network(their_router, here, local_only) {
+            anyhow::bail!("not on the network the asking device is on");
+        }
+        // One critical section from the count to the insert, so two asks served at once
+        // cannot both find room: nothing between here and the insert awaits, and the
+        // task that removes an entry waits on this lock.
+        let mut open = self.open.lock().unwrap();
+        if open.len() >= MAX_OPEN {
+            anyhow::bail!("{MAX_OPEN} introductions already wait");
+        }
+        let handler = self
+            .handler
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("this device answers no introductions"))?;
+        let ip = kotton_peer::introduction::introduced_bind_ip()
+            .ok_or_else(|| anyhow::anyhow!("this device is on no local network it can name"))?;
+        let (listener, _counts) = listen_introduced(
+            &self.signing_key,
+            peer_key,
+            SocketAddr::new(ip, 0),
+            expect,
+        )
+        .map_err(|e| anyhow::anyhow!("the introduced listener could not open: {e}"))?;
+        let listener = Arc::new(listener);
+        let addr = listener
+            .socket_addr()
+            .ok_or_else(|| anyhow::anyhow!("the introduced listener is not on a socket"))?;
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+
+        let this = Arc::clone(self);
+        let held = Arc::clone(&listener);
+        // Registered before the task can finish and remove it: the task waits for
+        // the map's lock, which is held across the insert.
+        let task = tokio::spawn(async move {
+            match tokio::time::timeout(token_lifetime, held.accept()).await {
+                Ok(Ok(conn)) => {
+                    this.sessions.fetch_add(1, Ordering::Relaxed);
+                    tracing::info!(%addr, "introduced session open");
+                    serve(conn, handler, &this.requests).await;
+                    tracing::info!(%addr, "introduced session ended");
+                }
+                Ok(Err(e)) => tracing::debug!(%addr, error = %e, "introduction not taken"),
+                Err(_) => tracing::debug!(%addr, "introduction token expired unused"),
+            }
+            let _ = held.close().await;
+            this.open.lock().unwrap().remove(&id);
+        });
+        open.insert(id, Open { addr, listener, task });
+        Ok(addr)
+    }
+}
+
+/// The one verb of introductions a peer request may ask: open a listener for one of
+/// the person's devices ([`DeviceRuntime::open_introduction`]). Lent by
+/// [`DeviceRuntime::introducer`] so a peer's path is handed this and not the machine:
+/// it holds the introductions and the key their listeners present, and nothing else
+/// of the runtime's.
+#[derive(Clone)]
+pub struct Introducer(Arc<Introductions>);
+
+impl Introducer {
+    /// [`DeviceRuntime::open_introduction`], through the lent handle.
+    pub async fn open(
+        &self,
+        peer_key: [u8; 32],
+        expect: IntroducedPeer,
+        their_router: Option<kotton_peer::local_door::RouterKey>,
+        token_lifetime: Duration,
+    ) -> anyhow::Result<SocketAddr> {
+        self.0
+            .open_on(
+                peer_key,
+                expect,
+                their_router,
+                kotton_peer::local_door::network_here().router,
+                kotton_peer::local_only(),
+                token_lifetime,
+            )
+            .await
+    }
+}
+
 impl DeviceRuntime {
+    /// Lend the one verb that opens an introduced listener ([`Introducer`]).
+    pub fn introducer(&self) -> Introducer {
+        Introducer(Arc::clone(&self.introductions))
+    }
+
     /// Serve introductions with `handler` — the same handler the peer listener serves,
     /// so an introduced session answers exactly what a relayed one would.
     pub fn serve_introductions(&self, handler: PeerHandler) {
@@ -72,21 +189,14 @@ impl DeviceRuntime {
         their_router: Option<kotton_peer::local_door::RouterKey>,
         token_lifetime: Duration,
     ) -> anyhow::Result<SocketAddr> {
-        self.open_introduction_on(
-            peer_key,
-            expect,
-            their_router,
-            kotton_peer::local_door::network_here().router,
-            kotton_peer::local_only(),
-            token_lifetime,
-        )
-        .await
+        self.introducer().open(peer_key, expect, their_router, token_lifetime).await
     }
 
     /// [`Self::open_introduction`] with the network and the scope as arguments, so a
     /// test can put the two devices on two networks.
+    #[cfg(test)]
     pub(crate) async fn open_introduction_on(
-        self: &Arc<Self>,
+        &self,
         peer_key: [u8; 32],
         expect: IntroducedPeer,
         their_router: Option<kotton_peer::local_door::RouterKey>,
@@ -94,58 +204,9 @@ impl DeviceRuntime {
         local_only: bool,
         token_lifetime: Duration,
     ) -> anyhow::Result<SocketAddr> {
-        if !kotton_peer::introduction::on_one_network(their_router, here, local_only) {
-            anyhow::bail!("not on the network the asking device is on");
-        }
-        // One critical section from the count to the insert, so two asks served at once
-        // cannot both find room: nothing between here and the insert awaits, and the
-        // task that removes an entry waits on this lock.
-        let mut open = self.introductions.open.lock().unwrap();
-        if open.len() >= MAX_OPEN {
-            anyhow::bail!("{MAX_OPEN} introductions already wait");
-        }
-        let handler = self
-            .introductions
-            .handler
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("this device answers no introductions"))?;
-        let ip = kotton_peer::introduction::introduced_bind_ip()
-            .ok_or_else(|| anyhow::anyhow!("this device is on no local network it can name"))?;
-        let (listener, _counts) = listen_introduced(
-            &self.device_signing_key,
-            peer_key,
-            SocketAddr::new(ip, 0),
-            expect,
-        )
-        .map_err(|e| anyhow::anyhow!("the introduced listener could not open: {e}"))?;
-        let listener = Arc::new(listener);
-        let addr = listener
-            .socket_addr()
-            .ok_or_else(|| anyhow::anyhow!("the introduced listener is not on a socket"))?;
-        let id = self.introductions.next.fetch_add(1, Ordering::Relaxed);
-
-        let this = Arc::clone(self);
-        let held = Arc::clone(&listener);
-        // Registered before the task can finish and remove it: the task waits for
-        // the map's lock, which is held across the insert.
-        let task = tokio::spawn(async move {
-            match tokio::time::timeout(token_lifetime, held.accept()).await {
-                Ok(Ok(conn)) => {
-                    this.introductions.sessions.fetch_add(1, Ordering::Relaxed);
-                    tracing::info!(%addr, "introduced session open");
-                    serve(conn, handler, &this.introductions.requests).await;
-                    tracing::info!(%addr, "introduced session ended");
-                }
-                Ok(Err(e)) => tracing::debug!(%addr, error = %e, "introduction not taken"),
-                Err(_) => tracing::debug!(%addr, "introduction token expired unused"),
-            }
-            let _ = held.close().await;
-            this.introductions.open.lock().unwrap().remove(&id);
-        });
-        open.insert(id, Open { addr, listener, task });
-        Ok(addr)
+        self.introductions
+            .open_on(peer_key, expect, their_router, here, local_only, token_lifetime)
+            .await
     }
 
     /// Where the introduced listeners open now are bound. Empty is the property a
