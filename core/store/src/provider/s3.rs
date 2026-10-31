@@ -120,6 +120,18 @@ impl S3Shelf {
     /// The bucket key for a logical path: the prefix, then the path's normal
     /// components joined by `/`. Host-independent, like the local shelf's
     /// segment encoding, without needing one — a bucket key takes any segment.
+    ///
+    /// A `.`, `..` or root component is dropped, not refused, so a key that
+    /// carries one lands under another name: `_pack/../x` would be written as
+    /// `_pack/x`, which a listing then reads as a pack this store never
+    /// named. No key the store builds carries one: a sync pass admits its
+    /// listings ([`crate::StorageKey`], kotton #265), and a pack id is
+    /// admitted where the manifest or superblock naming it is decoded
+    /// ([`crate::packed::PackId`], kotton #273), so a manifest naming
+    /// `_pack/../x` is refused before any shelf is addressed
+    /// (`packed`'s test
+    /// `a_manifest_naming_a_pack_outside_the_grammar_is_refused_and_nothing_is_fetched_or_written`,
+    /// on a shelf that takes a key's characters as they are, as a bucket does).
     fn key(&self, path: &Path) -> String {
         let rel = path
             .components()

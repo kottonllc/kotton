@@ -345,8 +345,13 @@ impl UserStore {
 /// whole pin keeps when it is over the room.
 ///
 /// The packs it fetches are named by the reconciled index, which other
-/// devices wrote, so each id is admitted ([`StorageKey`]) before it is read or
-/// written; one that is not canonical is refused and fetched by no one.
+/// devices wrote. Each id was admitted where the manifest naming it was
+/// decoded ([`crate::packed::PackId`], kotton #273), so a manifest naming
+/// `_pack/../x` never reaches here. The ids cross
+/// `SealedObjectAccess::packs_holding` as text, because `kotton-sys` cannot name
+/// this crate's key types, so each is parsed again into a [`StorageKey`]
+/// before it is read or written: a refusal there cannot come from a manifest
+/// this crate decoded, and stands in only for that trait carrying `String`.
 async fn keep_whole(
     local: &dyn SyncableStore,
     remote: &dyn SyncableStore,
