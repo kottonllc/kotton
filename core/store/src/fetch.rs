@@ -121,7 +121,7 @@ impl FetchOnMiss {
                 let Some(source) = self.slot.source() else {
                     return Err(ObjectStorageError::NotFound(missing));
                 };
-                let wanted = key.to_string_lossy().trim_start_matches('/').to_string();
+                let wanted = key.to_string_lossy().into_owned();
                 match source.fetch(&self.user_id, &wanted).await {
                     Ok(Some(blob)) => {
                         self.inner.put_sealed(key, &blob).await?;
