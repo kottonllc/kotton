@@ -135,8 +135,8 @@ impl ShellExecutor {
         Arc::clone(&self.registry)
     }
 
-    /// Return (name, help_text) for every registered command, sorted by name.
-    pub fn command_docs(&self) -> Vec<(String, &'static str)> {
+    /// Return (name, help page) for every registered command, sorted by name.
+    pub fn command_docs(&self) -> Vec<(String, String)> {
         self.registry.command_docs()
     }
 

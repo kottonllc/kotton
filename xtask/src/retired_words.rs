@@ -53,6 +53,27 @@
 //! A verb table names a retired word alone (`Verb::alias("now", "sync")`), not as a noun and
 //! a word, so it is not read as one.
 //!
+//! **On a help page, the bare word names it.** A page's section headed by the noun's own
+//! command (`` ## `Kotton device` ``, as the generated reference heads each `--help`) is that
+//! noun's page: its `about`, its arguments and its shell help all speak of the noun, so a
+//! backticked span opening on a word the noun's table retired (`` `admit <invite>` ``) names
+//! that word as surely as `device admit` does. Only a backticked span counts, since the words
+//! retired are ordinary ones (`now`, `list`) that prose uses for other things.
+//!
+//! **What a line says of a retired word's fate is not read here.** Whether a word still runs
+//! (`Alias`) or is refused (`Gone`) is the table's, and the one place that states it for every
+//! word, a noun's help, is generated from the table: `kotton_shell::CommandRegistry::help_of`
+//! prints the noun's `help_text` and then a `RETIRED:` block built from its verbs, in both doors
+//! and in the generated reference, and two tests hold that no `help_text` and no clap `about` or
+//! argument help writes a sentence about a retired word of its own noun. #207 asked this sweep to
+//! also read the fate a sentence gives a word; a phrase list read up to the next retired word
+//! refused true lines (`` `sync now` is `sync`; `sync <remote>` is gone ``, `` `device admit` is
+//! gone (`drive enrol <invite>` is run instead) ``), since it charged the word with what the
+//! sentence said of its replacement, a placeholder form or a negation. That is the lesson from the
+//! closed verb-check prose heuristic: a prose reading moves the misread rather than removing it.
+//! So the fate is held by construction where it is stated, and prose outside the help is read
+//! only for whether it points to the replacement.
+//!
 //! **What it does not read.** [`NOT_READ`]: the files whose subject is the retired words
 //! themselves. And [`STILL_RUNS`]: a printed line that names a retired word because the
 //! code beside it still runs it, each with the issue that moves it. An entry is the line's exact
@@ -170,14 +191,23 @@ pub fn findings(root: &Path, retired: &[Retired]) -> Vec<String> {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(root.join(&rel)) else { continue };
-        let lines = if rel.ends_with(".rs") {
-            printed(&text)
+        let lines: Vec<(Printed, Option<String>)> = if rel.ends_with(".rs") {
+            printed(&text).into_iter().map(|p| (p, None)).collect()
         } else {
-            text.lines().enumerate().map(|(i, l)| (l.chars().collect(), vec![i + 1; l.chars().count()])).collect()
+            let mut subject = None;
+            text.lines()
+                .enumerate()
+                .map(|(i, l)| {
+                    if let Some(heading) = section_heading(l) {
+                        subject = heading;
+                    }
+                    ((l.chars().collect(), vec![i + 1; l.chars().count()]), subject.clone())
+                })
+                .collect()
         };
-        for (chars, at) in lines {
+        for ((chars, at), subject) in lines {
             let line_text: String = chars.iter().collect();
-            for (i, r) in unpointed(&chars, retired) {
+            for (i, r) in unpointed(&chars, retired, subject.as_deref()) {
                 let was = r.was();
                 if let Some(k) = STILL_RUNS.iter().position(|(p, w, l, _)| *p == rel && *w == was && *l == line_text.trim()) {
                     used[k] = true;
@@ -217,10 +247,48 @@ fn matches_at(chars: &[char], at: usize, needle: &[char]) -> bool {
     chars.get(at..at + needle.len()).is_some_and(|w| lower(w) == needle)
 }
 
-/// Each retired word `chars` names whole, as the index it starts at.
-fn named(chars: &[char], retired: &[Retired]) -> Vec<(usize, usize)> {
+/// The subject a page's heading line opens, when it is one of level one or two: `Some(noun)`
+/// for a heading that is the noun's own command (`` ## `Kotton device` ``), `Some(None)` for any
+/// other, which ends the section before it; `None` for a line that is no such heading.
+fn section_heading(line: &str) -> Option<Option<String>> {
+    let level = line.chars().take_while(|c| *c == '#').count();
+    if !(1..=2).contains(&level) || !line[level..].starts_with(' ') {
+        return None;
+    }
+    let title = line[level..].trim();
+    let words: Vec<&str> = title.strip_prefix('`').and_then(|t| t.strip_suffix('`')).unwrap_or("").split_whitespace().collect();
+    Some(match words.as_slice() {
+        [kotton, noun] if kotton.eq_ignore_ascii_case("kotton") => Some(noun.to_lowercase()),
+        _ => None,
+    })
+}
+
+/// The backticked spans of `chars`, each as the index after its opening tick and of its
+/// closing one.
+fn backticked(chars: &[char]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(open) = chars[i..].iter().position(|c| *c == '`').map(|p| p + i) {
+        let Some(close) = chars[open + 1..].iter().position(|c| *c == '`').map(|p| p + open + 1) else { break };
+        out.push((open + 1, close));
+        i = close + 1;
+    }
+    out
+}
+
+/// Each retired word `chars` names whole, as the index it starts at: the noun and the word,
+/// and, on the page whose subject is the noun, the bare word opening a backticked span.
+fn named(chars: &[char], retired: &[Retired], subject: Option<&str>) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     for (k, r) in retired.iter().enumerate() {
+        if subject.is_some_and(|s| s.eq_ignore_ascii_case(&r.noun)) {
+            let word = lower(&r.word.chars().collect::<Vec<_>>());
+            for (open, _) in backticked(chars) {
+                if matches_at(chars, open, &word) && !chars.get(open + word.len()).copied().is_some_and(is_word) {
+                    out.push((open, k));
+                }
+            }
+        }
         let noun = lower(&r.noun.chars().collect::<Vec<_>>());
         let word = lower(&r.word.chars().collect::<Vec<_>>());
         for i in 0..chars.len() {
@@ -246,18 +314,16 @@ fn named(chars: &[char], retired: &[Retired]) -> Vec<(usize, usize)> {
 
 /// The retired words `chars` names without pointing to their replacement: each as the index
 /// it starts at and the word.
-fn unpointed<'a>(chars: &[char], retired: &'a [Retired]) -> Vec<(usize, &'a Retired)> {
-    let found = named(chars, retired);
+fn unpointed<'a>(chars: &[char], retired: &'a [Retired], subject: Option<&str>) -> Vec<(usize, &'a Retired)> {
+    let found = named(chars, retired, subject);
     if found.is_empty() {
         return Vec::new();
     }
     // The backticked commands of the line that are not themselves a retired word.
     let mut commands: Vec<Vec<String>> = Vec::new();
-    let mut i = 0;
-    while let Some(open) = chars[i..].iter().position(|c| *c == '`').map(|p| p + i) {
-        let Some(close) = chars[open + 1..].iter().position(|c| *c == '`').map(|p| p + open + 1) else { break };
-        let span = &chars[open + 1..close];
-        if !named(span, retired).iter().any(|(at, _)| *at == 0 || span[..*at].iter().collect::<String>().trim().eq_ignore_ascii_case("kotton")) {
+    for (open, close) in backticked(chars) {
+        let span = &chars[open..close];
+        if !named(span, retired, None).iter().any(|(at, _)| *at == 0 || span[..*at].iter().collect::<String>().trim().eq_ignore_ascii_case("kotton")) {
             let text: String = span.iter().collect();
             let mut words: Vec<String> = text.split_whitespace().map(str::to_string).collect();
             if words.first().is_some_and(|w| w.eq_ignore_ascii_case("kotton")) {
@@ -265,7 +331,6 @@ fn unpointed<'a>(chars: &[char], retired: &'a [Retired]) -> Vec<(usize, &'a Reti
             }
             commands.push(words);
         }
-        i = close + 1;
     }
     let mut out: Vec<(usize, &Retired)> = found
         .into_iter()
@@ -447,7 +512,8 @@ mod tests {
                 ("<remote>".to_string(), Is::Gone("sync".into())),
             ],
         );
-        t.insert("device".to_string(), vec![("admit".to_string(), Is::Alias("drive enrol".into()))]);
+        // `device admit` is gone, as `client/shell/src/commands/device.rs` declares it.
+        t.insert("device".to_string(), vec![("admit".to_string(), Is::Gone("drive enrol".into()))]);
         // `pin`'s table as the shell declares it (`client/shell/src/commands/pin.rs`).
         t.insert(
             "pin".to_string(),
@@ -491,7 +557,7 @@ mod tests {
             found(&[("core/kuserd/src/agent/handlers/device_config.rs", before)]),
             vec![
                 "core/kuserd/src/agent/handlers/device_config.rs:3: says `device admit`, a word `device`'s verb table \
-                 retired for `drive enrol` (the tree still runs it as an alias): say `drive enrol`, or name it beside the old word"
+                 retired for `drive enrol` (the tree refuses it, exit 2): say `drive enrol`, or name it beside the old word"
                     .to_string()
             ]
         );
@@ -536,7 +602,7 @@ const H: &str = \"\\
   sync list                gone: what it keeps is listed by `pin list`
 \";
 const D: &str = \"A vault's invite is `drive enrol \\
-     <invite>` (`device admit` was its name, and still runs it).\";
+     <invite>` (`device admit` was its name).\";
 const K: &str = \"`kotton sync list` is `kotton pin list --json` now\";
 ";
         assert_eq!(found(&[("client/shell/src/commands/sync.rs", src)]), Vec::<String>::new());
@@ -699,6 +765,36 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
         assert_eq!(ok("`sync list` is `pin`\n").len(), 1);
         assert_eq!(ok("`device admit` is `drive`\n").len(), 1);
         assert_eq!(ok("`device admit` is `drive enrol <invite>`\n").len(), 0);
+    }
+
+    /// **On the noun's own page, the bare word in backticks names it**: under the heading
+    /// the reference gives `kotton device --help`, `` `admit` `` is `device admit`; under
+    /// another noun's heading, after the next heading, and in prose (`now`), it is not.
+    #[test]
+    fn the_bare_word_names_it_on_the_nouns_own_page() {
+        let page = "\
+## `Kotton device`
+
+Pair with `device add`. `admit <invite>` was the vault's word.
+###### **Arguments:**
+* `<ARGS>` — `Admit` it
+## `Kotton sync`
+
+It syncs, now. `list` it.
+## `Kotton pin`
+
+`admit` and `now` and `list`
+";
+        let got = found(&[("docs/cli/reference.md", page)]);
+        let said: Vec<(&str, &str)> = got.iter().map(|g| (g.split(": says").next().unwrap(), g.split('`').nth(1).unwrap())).collect();
+        assert_eq!(
+            said,
+            [("docs/cli/reference.md:3", "device admit"), ("docs/cli/reference.md:5", "device admit"), ("docs/cli/reference.md:8", "sync list")],
+            "{got:#?}"
+        );
+        // A Rust literal has no page, and a heading that is not the noun's command alone opens none.
+        assert_eq!(found(&[("client/cli/src/x.rs", "const A: &str = \"`admit <invite>`\";\n")]), Vec::<String>::new());
+        assert_eq!(found(&[("README.md", "# `kotton device admit`\n`admit`\n### `Kotton device`\n`admit`\n")]).len(), 1);
     }
 
     /// **A malformed escape never panics**: an unclosed `\u{`, a non-hex `\u{zz}`, a short or
