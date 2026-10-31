@@ -114,6 +114,8 @@ DoorsHeld
     through_epoch: u64
 Drives
     drives: Vec<crate::ipc::DriveDescriptor>
+    #[serde(default)]
+    keys_refused: u32
 Error
     message: String
 EventList
