@@ -22,7 +22,13 @@
 //! person's own database to find the guest session a stranger's key may hold.
 //! Neither hands the keychain, a key or a database back, and each reads only
 //! what its question needs — but that is true of their methods, not their
-//! types. [`GuestSessions`] holds the keychain beside the base directory, which
+//! types. What they read, for the label-scoped reader #256 designs from:
+//! [`FrostSigner`] reads `frost_share`; [`GuestSessions`], when it opens a
+//! database not yet open, reads `master_secret` — or the person's **root
+//! seed**, `seed32`, when none is stored — and `identity_signing_key`;
+//! `PeerStoreHost` reads and writes `sealed_mount_domain` and reads
+//! `operational_cek` — or, again, the **root seed** `seed32` when no CEK is
+//! stored. [`GuestSessions`] holds the keychain beside the base directory, which
 //! is what a record store opens from; a method added here could open one.
 //! Lending each only its labels, and no handle both, is kotton #256.
 use kotton_device::users::admission::{Chains, PeerStanding};
@@ -81,8 +87,15 @@ impl Standing {
 /// database, and checked against the ones revoked since they were read.
 ///
 /// Holds what opening that database takes — the open map, the base directory,
-/// the keychain its key is derived from, and the schema registry — and answers
-/// one question with them. The pool is not handed out.
+/// the whole keychain, and the schema registry — and answers one question with
+/// them. The pool is not handed out.
+///
+/// A database already open in the map is used as it is. One not yet open is
+/// opened (`user_db::open_user_agent_db`), and that reads three things from the
+/// keychain: `master_secret`, falling back to the person's **root seed**
+/// `seed32` when no master secret is stored, to derive the database's key; and
+/// `identity_signing_key`, to name the database's owner. That it reads these
+/// and no other is the open path's discipline, not this type's (kotton #256).
 pub(super) struct GuestSessions {
     user_dbs: crate::db::user_db::UserDbMap,
     base: PathBuf,

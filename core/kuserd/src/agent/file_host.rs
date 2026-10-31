@@ -140,11 +140,14 @@ pub fn file_host<'a>(
 /// [`StoreHost`] and nothing more (kotton #222, #242).
 ///
 /// Not the machine: it holds the event bus, the whole keychain, and the
-/// residency registry, each private. Its methods read the keychain under the
-/// two labels a [`StoreHost`] names — a mount's pinned key domain, and the
-/// operational CEK whose domain this node advertises when the person's store
-/// is not resident; that it reads no other is those methods' discipline, not
-/// its type's (kotton #256). The resident store fetches a pack it does not
+/// residency registry, each private. Its methods read and write
+/// `sealed_mount_domain` (a mount's pinned key domain) and read
+/// `operational_cek` (the CEK whose domain this node advertises when the
+/// person's store is not resident). When no CEK is stored,
+/// `resolve_operational_cek` falls back to **the person's root seed**,
+/// `seed32`, and derives the CEK from it: so a peer's file or sealed request
+/// can make this host read a root secret, not only a label of its own. That it
+/// reads no other is those methods' discipline, not its type's (kotton #256). The resident store fetches a pack it does not
 /// keep through the `PackSource` the registry lent it
 /// (`residency::UserRegistry::lend_packs`), whose one verb is fetching a
 /// sealed pack by key. No sync host is behind this, by type.

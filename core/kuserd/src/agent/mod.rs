@@ -2230,17 +2230,25 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 ///   from the person's drives when it is read (kotton #55) through the
 ///   `PackSource` the registry lent it, whose one verb is fetching a sealed
 ///   pack by key (the sync host's absence is held by type). The host holds the
-///   whole keychain and its methods read two labels: a mount's pinned key
-///   domain, and the CEK whose domain this node advertises when the person's
-///   store is not resident (method discipline);
+///   whole keychain, and its methods read and write `sealed_mount_domain` (a
+///   mount's pinned key domain) and read `operational_cek` (the CEK whose
+///   domain this node advertises when the person's store is not resident) —
+///   and, when no CEK is stored, **the person's root seed** (`seed32`), which
+///   `resolve_operational_cek` falls back to and derives the CEK from. So a
+///   peer's file or sealed request can make this host read a root secret
+///   (method discipline);
 /// - this node's **FROST share** for the person, read by
 ///   [`peer_reach::FrostSigner`] under its one label to answer a round, and
 ///   never handed out — the signer holds the whole keychain, and its method is
 ///   what reads one label (method discipline);
 /// - the person's **database**, opened by [`peer_reach::GuestSessions`] (which
-///   holds the base directory and the whole keychain, and derives the
-///   database's key from it) for the one question of which guest session a
-///   stranger's key holds; the pool is not handed out (method discipline);
+///   holds the base directory and the whole keychain) for the one question of
+///   which guest session a stranger's key holds; the pool is not handed out.
+///   When the database is not open yet, opening it reads `master_secret`, or
+///   **the root seed** (`seed32`) when no master secret is stored, to derive
+///   its key, and `identity_signing_key` to name its owner
+///   (`user_db::open_user_agent_db`) — on a stranger's request (method
+///   discipline);
 /// - the **identity chains** and the admission table (`Chains`), to classify
 ///   the peer and to keep a delivered recovery copy's events, and the
 ///   phrase-sealed copy itself ([`peer_reach::Recovery`]);
