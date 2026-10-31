@@ -4,6 +4,11 @@
 //! Usage: `cargo xtask <subcommand>`; with no subcommand, or an unknown one, it prints every
 //! subcommand and what it does. `just lint` runs the checks among them.
 
+// With `cli-docs` on, a rustc warning in the gated code is an error. `cargo xtask-docs`, which
+// `just lint` already runs, builds that code under plain rustc, where a warning would print and
+// be ignored; this makes it fatal there at no extra compile. Rustc warnings only, not clippy lints.
+#![cfg_attr(feature = "cli-docs", deny(warnings))]
+
 mod seed;
 
 #[cfg(feature = "cli-docs")]
