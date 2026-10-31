@@ -161,6 +161,35 @@ pub(crate) async fn user_agent_db(
     Ok(pool)
 }
 
+/// The agent databases this daemon already holds open, read and never written:
+/// a view of a [`UserDbMap`] whose one method answers whether `user_id`'s
+/// database is open, and returns it if so.
+///
+/// It never opens, creates or migrates a database and never adds or removes a
+/// slot — not by its method's restraint but because it has no method that
+/// could, and its map is private to this module. The daemon opens a person's
+/// database when it takes them up (boot, sign-in, unlock: [`user_agent_db`]);
+/// this answers from what that left. A holder of this view — the peer path's
+/// guest lookup (kotton #262) — holds no base directory or keychain to open one
+/// with, and no way to write the map.
+#[derive(Clone)]
+pub(crate) struct OpenAgentDbs(UserDbMap);
+
+impl OpenAgentDbs {
+    /// A read-only view of `map`.
+    pub(crate) fn of(map: &UserDbMap) -> Self {
+        Self(Arc::clone(map))
+    }
+
+    /// `user_id`'s agent database if it is open now; `None` otherwise.
+    pub(crate) fn get(&self, user_id: &crate::device_users::UserId) -> Option<Arc<SqlitePool>> {
+        match self.0.read().unwrap().get(user_id.as_str()) {
+            Some(UserDbSlot::Live(cell)) => cell.get().cloned(),
+            _ => None,
+        }
+    }
+}
+
 /// Open (or create) `users/{user_id}/agent.db`, run the per-user migrations,
 /// and drain legacy rows from the machine-wide database on first contact.
 async fn open_user_agent_db(

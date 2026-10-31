@@ -710,6 +710,98 @@ async fn a_live_record_insert_from_a_paired_peer_leaves_no_record_on_the_device(
     assert_eq!(titles, ["A's own"], "the device holds only the note written at its door: {notes:?}");
 }
 
+/// **A peer naming a user it has no standing with makes the device open,
+/// create or remember nothing for that name** (kotton #262). B is paired to
+/// alice on A; it sends A's peer acceptor a file request naming a `user_id`
+/// that climbs out of `users/` (`../../…`), and another naming an unknown but
+/// well-formed id. Each is refused, and afterwards no directory exists where
+/// either name would have put one (outside `users/` for the first, at
+/// `users/<id>` for the second), and A's agent-database map holds no slot it
+/// did not hold before. The guest lookup reads only a database the daemon
+/// already has open; a peer's request is not a reason to open one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_naming_a_user_it_has_no_standing_with_leaves_no_directory_and_no_slot() {
+    use crate::common::{enroll_streamed_as, init_crypto, peer_port};
+    use crate::vault::spawn_device;
+    use kotton_net::transport::quic::tls::CertOffer;
+    use kotton_peer::nat::{nat_connect, NatConfig, NatResult};
+    use kotton_peer::{PeerChannel as _, QuicPeerChannel};
+    use kotton_schemas::membership::Posture;
+    use kotton_wire::ipc::{PeerRequest, UserResponse};
+
+    init_crypto();
+    let a = spawn_device("device A").await;
+    let b = spawn_device("device B").await;
+    a.daemon.start_peer_listener_background(0).await.expect("start A's peer listener");
+    let mut client_a = connect_when_ready(&a.ipc, "client A").await;
+    let client_b = connect_when_ready(&b.ipc, "client B").await;
+    client_a
+        .create_user("alice", crate::common::TEST_PASSPHRASE)
+        .await
+        .expect("create_user on A");
+    let (mut client_a, _client_b, _node_b) =
+        enroll_streamed_as(client_a, client_b, "alice", "device-a", "device-b", Posture::Full).await;
+    let (_, a_key_hex) = client_a.get_node_identity().await.expect("A's identity");
+    let a_pub: [u8; 32] = hex::decode(a_key_hex).unwrap().try_into().unwrap();
+    let a_addr: std::net::SocketAddr = format!("127.0.0.1:{}", peer_port(&a.daemon.runtime())).parse().unwrap();
+
+    let b_key = kotton_peer::daemon::nodes::load_device_operational_key(&*b.secrets).expect("B's device key");
+    let offer = CertOffer {
+        admission: vec![],
+        claim: None,
+    };
+    let conn = match nat_connect(&b_key, &offer, a_pub, Some(a_addr), &NatConfig::default(), None).await {
+        NatResult::Direct(c) | NatResult::Punched(c) => c,
+        other => panic!("the paired device's key opens A's peer acceptor directly: {other:?}"),
+    };
+    let channel = QuicPeerChannel::new(conn);
+
+    let base = a.daemon.runtime().base_dir().to_path_buf();
+    let users = base.join("users");
+    // Unique per run, so a directory an earlier run left cannot pass or fail
+    // this one; `../../` from `users/` is the base directory's parent.
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let escaping = format!("../../x-{unique}");
+    let escaped_to = base.parent().expect("the base has a parent").join(format!("x-{unique}"));
+    let unknown = format!("nobody{}", &unique[..8]);
+    let slots_before = a.daemon.agent_db_slots();
+    assert!(!escaped_to.exists(), "nothing at {} before the request", escaped_to.display());
+
+    for named in [escaping.as_str(), unknown.as_str()] {
+        let ask = PeerRequest::ListFiles {
+            user_id: named.to_string(),
+            prefix: "/".to_string(),
+        };
+        let raw = channel
+            .request(&serde_json::to_vec(&ask).unwrap())
+            .await
+            .expect("A's peer acceptor answers");
+        match serde_json::from_slice::<UserResponse>(&raw).unwrap() {
+            UserResponse::Error { .. } => {}
+            other => panic!("a request naming '{named}', for whom B has no standing, was served: {other:?}"),
+        }
+    }
+
+    // Every effect is gathered before one assertion, so a failure names all
+    // that happened, not only the first.
+    let mut left = Vec::new();
+    if escaped_to.exists() {
+        left.push(format!("a request naming '{escaping}' created {} outside users/", escaped_to.display()));
+        // Ours to remove: the test's own unique name, outside its tempdir.
+        let _ = std::fs::remove_dir_all(&escaped_to);
+    }
+    if users.join(&unknown).exists() {
+        left.push(format!("a request naming '{unknown}' created users/{unknown}"));
+    }
+    let slots_after = a.daemon.agent_db_slots();
+    if slots_after != slots_before {
+        left.push(format!("the agent-database map went from {slots_before:?} to {slots_after:?}"));
+    }
+    assert!(left.is_empty(), "a peer's request with no standing left state behind: {left:#?}");
+    // A leaves the user it does serve as it was.
+    assert!(slots_before.iter().any(|id| id == "alice"), "alice's database is open: {slots_before:?}");
+}
+
 // ── A served key is admitted before any path is built from it ────────────────
 
 /// Every entry under `dir`, as paths relative to it, leaving out `skip` and

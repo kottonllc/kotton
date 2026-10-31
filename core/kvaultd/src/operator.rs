@@ -23,7 +23,7 @@
 //! and admits it at the peer listener's handshake
 //! by putting it in the allowlist every paired key is in. What it may say once
 //! admitted is not decided here: it is its standing, `PeerStanding::Operator`,
-//! and the table in `peer::reaches` gives that standing the landlord's four
+//! and the table in `peer::reaches` gives that standing the landlord's six
 //! verbs and nothing a tenant's standing reaches.
 //!
 //! **Both acts write the row and the allowlist in one step.** Revoking deletes
