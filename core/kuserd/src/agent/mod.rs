@@ -3,6 +3,7 @@ use crate::bundled::bundled_apps;
 use crate::event_log::SqliteEventLog;
 use crate::infer_proxy::InferProxy;
 use crate::surface_proxy::SurfaceProxy;
+use crate::device_users::UserId;
 use handlers::CallerContext;
 use kotton_app::daemon::db::app_registry_db;
 use kotton_common::base_dir;
@@ -1869,6 +1870,16 @@ impl DeviceDaemon {
         store.kept_here(path).await.map_err(|e| io::Error::other(format!("{e:#}")))
     }
 
+    /// The user ids this daemon holds an agent-database slot for
+    /// (`user_db::UserDbMap`), sorted. For a caller that holds the daemon — an
+    /// integration test asking whether a peer's request added one (kotton
+    /// #262). Reads the map; opens nothing.
+    pub fn agent_db_slots(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.user_dbs.read().unwrap().keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
     /// Build the peer-request handler closure.
     ///
     /// The closure decodes each inbound request as a [`PeerRequest`] — the
@@ -1880,9 +1891,10 @@ impl DeviceDaemon {
         // What a peer's request is served with on its own standing: one handle
         // per thing a peer verb does, and not the machine. No record store, no
         // sync host, no sync engine, no `DeviceRuntime` among `PeerContext`'s
-        // field types (kotton #222, #242); three handles hold the keychain, and
+        // field types (kotton #222, #242); two handles hold the keychain, and
         // what keeps them to their labels is their methods (`PeerContext`'s doc,
-        // kotton #256).
+        // kotton #256). The guest lookup holds neither it nor the base
+        // directory (kotton #262).
         let chains = kotton_device::users::admission::Chains::of(&self.runtime);
         let peer = Arc::new(PeerContext {
             standing: peer_reach::Standing::new(
@@ -1890,11 +1902,10 @@ impl DeviceDaemon {
                 self.runtime.paired_keys(),
                 chains.clone(),
             ),
+            // The open map only: a guest lookup reads a database the daemon
+            // already opened, and holds nothing one opens from (kotton #262).
             guests: peer_reach::GuestSessions::new(
                 Arc::clone(&self.user_dbs),
-                self.base.clone(),
-                self.runtime.secrets_arc(),
-                Arc::clone(&self.runtime.schema_registry),
                 Arc::clone(&self.revoked_sessions),
             ),
             stores: file_host::PeerStoreHost::new(
@@ -1972,19 +1983,25 @@ impl DeviceDaemon {
 /// engine or `DeviceRuntime` is here. **Module privacy** holds that this
 /// function's module cannot read a handle's fields. **Method discipline** —
 /// what the methods in `peer_reach.rs` and `file_host.rs` choose to do with
-/// those fields — holds the rest: three handles (`guests`, `stores`,
-/// `signer`) each hold the whole keychain, `Arc<dyn SecretsStore>`, and one
-/// of them (`guests`) holds it beside the base directory, which are exactly
-/// the inputs a record store opens from (`kotton_record::open`). That they
-/// read only their labels and open only the agent database is true of their
-/// methods, not of their types (kotton #256).
+/// those fields — holds the rest: two handles (`stores`, `signer`) each hold
+/// the whole keychain, `Arc<dyn SecretsStore>`, and that they read only their
+/// labels is true of their methods, not of their types (kotton #256).
+/// `guests` holds the map of agent databases the daemon already opened and
+/// nothing one opens from, so it cannot open, create or migrate a database on
+/// a peer's request — held by its field types (kotton #262). The keychain and
+/// a base directory, the inputs a record store opens from
+/// (`kotton_record::open`), still sit together in one handle: `stores` holds
+/// the keychain beside the resident stores, and a resident store answers its
+/// base directory (`UserStore::base_dir`). That `stores` opens no record store
+/// is its methods' discipline (kotton #256).
 ///
 /// - `standing` — who the peer is to a person: the paired-node rows, the live
 ///   allowlist, and the identity chains a proof-admitted peer is replayed
 ///   against (`Chains`: the base directory's chains and the admission table,
 ///   no keychain).
 /// - `guests` — the guest session a stranger's key may hold, found in the
-///   person's own database, and the sessions revoked since they were read.
+///   person's own database when the daemon already has it open, and the
+///   sessions revoked since they were read.
 /// - `stores` — the resident object stores, which the file verbs at a path and
 ///   the sealed-replication verbs read and write, a mount's key domain, and
 ///   the event bus; each store fetches a pack it does not keep through the
@@ -2003,9 +2020,10 @@ impl DeviceDaemon {
 ///
 /// **What is not here, by type:** the machine; the record stores, the sync
 /// host that opens them, the sync engine, the sessions and every other field
-/// of [`AgentContext`]. The keychain and the base directory a record store
-/// opens from are *not* absent: they are inside `guests`, private, and a
-/// method added there could open one (kotton #256).
+/// of [`AgentContext`]; and, in `guests`, anything an agent database opens
+/// from (kotton #262). The keychain is still whole inside `stores` and
+/// `signer`, and `stores` reaches a base directory through the resident stores
+/// (kotton #256).
 pub(super) struct PeerContext {
     standing: peer_reach::Standing,
     guests: peer_reach::GuestSessions,
@@ -2050,7 +2068,7 @@ async fn serve_peer_request(
             handle_peer_request(peer, peer_did, peer_pubkey_bytes, user_id, request).await
         }
         Ok(PeerAsk::Gateway(gateway_user)) => {
-            handle_gateway_request(gateway, peer_did, &gateway_user, request).await
+            handle_gateway_request(gateway, peer_did, gateway_user.as_str(), request).await
         }
         Err(message) => UserResponse::Error { message },
     }
@@ -2107,10 +2125,10 @@ enum PeerAsk {
     /// The person's row pairs the key as their gateway (`Posture::Gateway`):
     /// for them it speaks a gateway's one verb, `BrowserFrame`, and may ask
     /// `NodeRelay`, and the frames it carries are their browser's.
-    Gateway(String),
+    Gateway(UserId),
     /// Anything else the key is to the person — their device, a vault, a
     /// stranger — which `peer_standing` classifies next.
-    Person(String),
+    Person(UserId),
 }
 
 /// The person a peer's request names, and whether the key that sent it is
@@ -2154,15 +2172,20 @@ async fn peer_ask(
         | PeerRequest::RecoveryStore { user_id, .. }
         | PeerRequest::NodeRelay { user_id }
         | PeerRequest::Introduce { user_id, .. }
-        | PeerRequest::BrowserFrame { user_id: Some(user_id), .. } => user_id.clone(),
+        | PeerRequest::BrowserFrame { user_id: Some(user_id), .. } => user_id.as_str(),
         PeerRequest::BrowserFrame { user_id: None, .. } => {
             return Err("a gateway's BrowserFrame over a peer connection names the person it is for \
                         (`user_id`); this one names no one"
                 .to_string())
         }
     };
+    // The one parse of the name the request carries: everything below — a
+    // row, a chain, a database, a keychain label, a path — is reached with a
+    // `UserId`, never the wire's string (kotton #262).
+    let user_id = UserId::parse(user_id)
+        .map_err(|e| format!("the request names {user_id:?}, which is not a user id: {e}"))?;
     let gateway = match pk {
-        Some(pk) => kotton_peer::daemon::db::paired_posture_for_user(db, pk, &user_id)
+        Some(pk) => kotton_peer::daemon::db::paired_posture_for_user(db, pk, user_id.as_str())
             .await
             .map_err(|e| format!("authorization check failed: {e}"))?
             .flatten()
@@ -2211,17 +2234,30 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 /// #222); and it holds no `DeviceRuntime` (kotton #242). Those three are held
 /// by [`PeerContext`]'s field types.
 ///
+/// The person the request names arrives as a [`UserId`], parsed once in
+/// [`peer_ask`]: a name that is not a user id (`..`, `/`, empty, over-long) is
+/// refused there, before any row, chain, path or keychain label is built from
+/// it, and every arm below uses the parsed id, not the variant's own string
+/// (kotton #262). The request type still carries a `String`; whether the wire
+/// should carry the parsed type is #262's open half.
+///
+/// **The guest lookup cannot open a database, and that is held by type.**
+/// [`peer_reach::GuestSessions`] holds only the map of agent databases the
+/// daemon already opened and the revoked set — no base directory, no keychain
+/// — so on a stranger's request this node opens, creates, migrates and
+/// remembers nothing for the name it gives, and reads no secret for it
+/// (kotton #262). [`peer_reach::Recovery`] holds the base directory and no
+/// keychain.
+///
 /// **Reach to a record store is not yet absent; it is held by method
-/// discipline.** No arm here opens one, and this module cannot read a
-/// handle's private fields, but [`peer_reach::GuestSessions`] holds the base
-/// directory and the whole keychain together — exactly what
-/// `kotton_record::open` takes — to open the person's agent database, and its
-/// methods are what keep it to that. The keychain itself is in three handles
-/// (`GuestSessions`, [`file_host::PeerStoreHost`],
-/// [`peer_reach::FrostSigner`]), each holding all of it and reading only its
-/// labels because its methods do. Making the type hold this — no handle that
-/// holds the keychain beside the base directory, and each keychain reader lent
-/// only its labels — is kotton #256. What remains, and what holds each:
+/// discipline**, in one handle now rather than two: [`file_host::PeerStoreHost`]
+/// holds the whole keychain beside the resident stores, and a resident store
+/// answers its base directory (`UserStore::base_dir`) — together, what
+/// `kotton_record::open` takes. The keychain itself is whole in two handles
+/// (`PeerStoreHost`, [`peer_reach::FrostSigner`]), each reading only its
+/// labels because its methods do. Lending each only its labels, and no handle
+/// a base directory beside them, is kotton #256. What remains, and what holds
+/// each:
 ///
 /// - the person's resident **object stores**, at a path for a paired device or
 ///   a guest within its grant, and as sealed objects for a paired device —
@@ -2241,14 +2277,11 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 ///   [`peer_reach::FrostSigner`] under its one label to answer a round, and
 ///   never handed out — the signer holds the whole keychain, and its method is
 ///   what reads one label (method discipline);
-/// - the person's **database**, opened by [`peer_reach::GuestSessions`] (which
-///   holds the base directory and the whole keychain) for the one question of
-///   which guest session a stranger's key holds; the pool is not handed out.
-///   When the database is not open yet, opening it reads `master_secret`, or
-///   **the root seed** (`seed32`) when no master secret is stored, to derive
-///   its key, and `identity_signing_key` to name its owner
-///   (`user_db::open_user_agent_db`) — on a stranger's request (method
-///   discipline);
+/// - the person's **database**, when the daemon already has it open, for the
+///   one question of which guest session a stranger's key holds — read by
+///   [`peer_reach::GuestSessions`] from the open map, never opened by it; a
+///   database not open reads as no session, and the pool is not handed out
+///   (held by type: the handle holds nothing a database opens from);
 /// - the **identity chains** and the admission table (`Chains`), to classify
 ///   the peer and to keep a delivered recovery copy's events, and the
 ///   phrase-sealed copy itself ([`peer_reach::Recovery`]);
@@ -2272,7 +2305,7 @@ async fn handle_peer_request(
     peer: &PeerContext,
     peer_did: &str,
     peer_pubkey_bytes: Option<[u8; 32]>,
-    user_id: String,
+    user_id: UserId,
     request: PeerRequest,
 ) -> UserResponse {
     let PeerContext {
@@ -2328,8 +2361,10 @@ async fn handle_peer_request(
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        // Guest sessions live in the target user's database (3b-v); an
-        // unopenable user db reads as "no session", the same refusal shape.
+        // Guest sessions live in the target user's database (3b-v), read only
+        // when the daemon already has it open: a database not open reads as
+        // "no session", the same refusal shape, and nothing is opened, created
+        // or remembered for the name on this peer's standing (kotton #262).
         let session_lookup = guests.find(peer_did, &user_id).await;
         match session_lookup {
             Ok(Some(session)) => {
@@ -2465,16 +2500,18 @@ async fn handle_peer_request(
         }
     };
 
+    // Each variant's own `user_id` is the string `peer_ask` parsed; the arms
+    // use the parsed `user_id` and bind the string to nothing (kotton #262).
     let result: io::Result<UserResponse> = match request {
         PeerRequest::ReadFile {
-            user_id,
+            user_id: _,
             path,
             offset,
             length,
         } => {
             kotton_device::users::files::read_file(
                 stores,
-                user_id,
+                user_id.to_string(),
                 path,
                 offset,
                 length,
@@ -2482,7 +2519,7 @@ async fn handle_peer_request(
             .await
         }
         PeerRequest::WriteFile {
-            user_id,
+            user_id: _,
             path,
             data,
             offset,
@@ -2491,7 +2528,7 @@ async fn handle_peer_request(
         } => {
             kotton_device::users::files::write_file(
                 stores,
-                user_id,
+                user_id.to_string(),
                 path,
                 data,
                 offset,
@@ -2501,18 +2538,18 @@ async fn handle_peer_request(
             )
             .await
         }
-        PeerRequest::ListFiles { user_id, prefix } => {
+        PeerRequest::ListFiles { user_id: _, prefix } => {
             kotton_device::users::files::list_files(
                 stores,
-                user_id,
+                user_id.to_string(),
                 prefix,
             )
             .await
         }
-        PeerRequest::DeleteFile { user_id, path } => {
+        PeerRequest::DeleteFile { user_id: _, path } => {
             kotton_device::users::files::delete_file(
                 stores,
-                user_id,
+                user_id.to_string(),
                 path,
             )
             .await
@@ -2535,7 +2572,7 @@ async fn handle_peer_request(
         // where this node reserves and handed no key of the person's.
         PeerRequest::NodeRelay { .. } => {
             let own_device = match peer_pubkey_bytes {
-                Some(pk) => asks_as_own_device(db, &pk, &user_id).await,
+                Some(pk) => asks_as_own_device(db, &pk, user_id.as_str()).await,
                 None => false,
             };
             Ok(relay.answer(&user_id, own_device))
@@ -2580,12 +2617,12 @@ async fn handle_peer_request(
         // Reached by a paired device, or by one admitted on a recovery claim for
         // exactly this identity (checked above). Serves the public chain and the
         // phrase-sealed copy verbatim; this node can open neither.
-        PeerRequest::RecoveryFetch { user_id } => Ok(recovery.fetch(&user_id)),
+        PeerRequest::RecoveryFetch { .. } => Ok(recovery.fetch(&user_id)),
         // A paired device delivers the phrase-sealed copy after the fact. Only a
         // *paired* device reaches here (a claim-admitted one is refused above),
         // and the node keeps the bytes it cannot open, exactly as at enrolment.
         PeerRequest::RecoveryStore {
-            user_id,
+            user_id: _,
             bundle,
             kel,
         } => {
@@ -2600,7 +2637,7 @@ async fn handle_peer_request(
 
         // -- Sealed replication -----------------------------------------------
         PeerRequest::ReadSealed {
-            user_id,
+            user_id: _,
             mount,
             path,
             offset,
@@ -2608,7 +2645,7 @@ async fn handle_peer_request(
         } => {
             kotton_device::users::files::read_sealed(
                 stores,
-                user_id,
+                user_id.to_string(),
                 mount,
                 path,
                 offset,
@@ -2617,20 +2654,20 @@ async fn handle_peer_request(
             .await
         }
         PeerRequest::ListSealed {
-            user_id,
+            user_id: _,
             mount,
             prefix,
         } => {
             kotton_device::users::files::list_sealed(
                 stores,
-                user_id,
+                user_id.to_string(),
                 mount,
                 prefix,
             )
             .await
         }
         PeerRequest::WriteSealed {
-            user_id,
+            user_id: _,
             mount,
             path,
             blob,
@@ -2641,7 +2678,7 @@ async fn handle_peer_request(
         } => {
             kotton_device::users::files::write_sealed(
                 stores,
-                user_id,
+                user_id.to_string(),
                 mount,
                 path,
                 blob,
@@ -2655,7 +2692,7 @@ async fn handle_peer_request(
         }
 
         // -- Device sync notifications ----------------------------------------
-        PeerRequest::SyncAvailable { user_id, paths } => {
+        PeerRequest::SyncAvailable { paths, .. } => {
             tracing::debug!(
                 peer_did = %peer_did,
                 user_id = %user_id,
@@ -2666,7 +2703,7 @@ async fn handle_peer_request(
             Ok(UserResponse::SyncAck)
         }
 
-        PeerRequest::RecordSyncAvailable { user_id, nsids } => {
+        PeerRequest::RecordSyncAvailable { nsids, .. } => {
             tracing::debug!(
                 peer_did = %peer_did,
                 user_id = %user_id,
@@ -2683,7 +2720,7 @@ async fn handle_peer_request(
         // node's FROST share and answers one round; its participant holds the
         // round-1 nonces between this request and the next. The share never
         // leaves the signer.
-        PeerRequest::FrostSignRound { user_id, payload } => Ok(signer.answer(&user_id, &payload)),
+        PeerRequest::FrostSignRound { payload, .. } => Ok(signer.answer(&user_id, &payload)),
 
         // A frame is a gateway's verb: `peer_ask` sent each one to the
         // gateway's path or back refused, before this function was entered.

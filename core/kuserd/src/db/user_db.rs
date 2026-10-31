@@ -161,6 +161,21 @@ pub(crate) async fn user_agent_db(
     Ok(pool)
 }
 
+/// `user_id`'s agent database if this daemon already holds it open, and `None`
+/// otherwise — never opening, creating or migrating it, and never adding a slot
+/// to `map`.
+///
+/// The daemon opens a person's database when it takes them up (boot, sign-in,
+/// unlock: [`user_agent_db`]); this answers from what that left. It takes no
+/// base directory and no keychain, so a caller holding only the map — the peer
+/// path's guest lookup (kotton #262) — cannot open one through it.
+pub(crate) fn already_open(map: &UserDbMap, user_id: &crate::device_users::UserId) -> Option<Arc<SqlitePool>> {
+    match map.read().unwrap().get(user_id.as_str()) {
+        Some(UserDbSlot::Live(cell)) => cell.get().cloned(),
+        _ => None,
+    }
+}
+
 /// Open (or create) `users/{user_id}/agent.db`, run the per-user migrations,
 /// and drain legacy rows from the machine-wide database on first contact.
 async fn open_user_agent_db(
