@@ -79,6 +79,16 @@ fn shell_help(name: &str) -> String {
     DOOR.get_or_init(|| kotton_shell::ShellExecutor::new().registry()).help_of(name).unwrap_or_default()
 }
 
+/// The `<ARGS>` help of `device`. `add`'s posture bracket is the one the REPL's usage line
+/// prints ([`kotton_shell::device_add_posture_bracket`]), walked from `device_add_word`, so
+/// this line names the flags `parse_add` reads and spells none of them.
+fn device_args_help() -> String {
+    format!(
+        "Arguments: `add [--as N] [{}]` | `join [code] [--as N]` | `list` | `revoke <id>` | `name [N]` | `reset [--yes]`",
+        kotton_shell::device_add_posture_bracket()
+    )
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Authenticate and cache a session token for a user
@@ -121,8 +131,9 @@ pub enum Commands {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        /// Arguments: `add [--as N] [--blind|--cosigner]` | `join [code] [--as N]` | `list` | `revoke <id>` | `name [N]` | `reset [--yes]`
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
+        // Its help is `device_args_help()`: the posture bracket is the shell's, read from the
+        // vocabulary, so it is not written here.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word, help = device_args_help())]
         args: Vec<String>,
     },
     /// Schema management (list, show, register)
