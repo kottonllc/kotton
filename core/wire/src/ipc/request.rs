@@ -338,9 +338,10 @@ pub enum UserRequest {
 
     // -- The landlord's verbs, over the wire (RFC-0084; the operator credential) --
     // `SetQuota`, `Tenants` and `DropTenant` mirror `VaultRequest`'s variants of
-    // the same name byte for byte, and with `DeviceInvite` above they are the
-    // four verbs a vault answers on its peer transport for **one** connection:
-    // one whose key is the vault's operator credential (`PeerStanding::Operator`).
+    // the same name byte for byte, and with `DeviceInvite` above they are four
+    // of the six verbs (`InviteDigits` and `StandAt` the other two) a vault
+    // answers on its peer transport for **one** connection: one whose key is
+    // the vault's operator credential (`PeerStanding::Operator`).
     // A tenant's device can build every one of them and is refused by standing,
     // not by an arm (`kvaultd::peer::reaches`). A device answers none of them.
     /// Set one pool's quota, in bytes, at a vault: the space its landlord sets

@@ -346,6 +346,9 @@ lint:
     # to its verbs both ways. And no line a person reads (the files host-word-check reads) names
     # a verb a table retired, but to point from it to what replaced it.
     # Reads kotton-protocol's checkout when there is one, and the words held here otherwise.
+    # The fixture the xtask tests read is held to the live registry inside verb-check, because that run
+    # already links the CLI; a `cargo test --features cli-docs` line here would cost about five cold
+    # minutes per pull request.
     cargo xtask-docs verb-check
     # Every `kotton` command README.md gives is one the binary has (held through the reference
     # above), and every script it runs from a checkout is in this tree. A page added later is

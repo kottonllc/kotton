@@ -17,10 +17,10 @@
 //! reason a vault can say "absent" rather than "refused".
 //!
 //! **The door is also where the operator credential is decided** — enrolled by
-//! its public half and revoked (`crate::operator`) — and the landlord's four
-//! verbs it answers here are the four the operator's key reaches on the peer
-//! transport ([`landlord`]): one body, two doors, so the desktop and the
-//! terminal cannot come to mean different things by the same verb.
+//! its public half and revoked (`crate::operator`) — and the four landlord
+//! verbs it answers here are four of the six the operator's key reaches on
+//! the peer transport ([`landlord`]): one body, two doors, so the desktop and
+//! the terminal cannot come to mean different things by the same verb.
 
 use crate::peer::{capacity, PeerContext};
 use kotton_device::users::pairing::JoinPolicy;
@@ -28,7 +28,7 @@ use kotton_ipc::{ChannelAcceptor, HandlerOutput};
 use kotton_peer::daemon::nodes::PendingConfirms;
 use kotton_session::service::tokens::SessionMap;
 use kotton_sys::ipc::IpcEndpoint;
-use kotton_wire::ipc::{UserResponse, VaultPeerRequest, VaultRequest};
+use kotton_wire::ipc::{LandlordVerb, UserResponse, VaultRequest};
 use sqlx::SqlitePool;
 use std::io;
 use std::sync::Arc;
@@ -267,9 +267,11 @@ async fn drop_tenant(ctx: &ControlContext, user_id: &str) -> UserResponse {
     }
 }
 
-/// The landlord's verbs as the operator's key says them on the peer
+/// The landlord's six as the operator's key says them on the peer
 /// transport — called by `peer::handle` only after `peer::reaches` has found
-/// the connection's standing to be `Operator`, and for nothing else.
+/// the connection's standing to be `Operator`, and for nothing else. It takes
+/// the landlord's set by type ([`LandlordVerb`], kotton #254), so a tenant's
+/// verb cannot be handed to it and there is no arm here refusing one.
 ///
 /// The four over pools are the door's own bodies — the invite's is
 /// [`mint_invite`], so an invite the door refuses is refused here in the same
@@ -286,19 +288,19 @@ async fn drop_tenant(ctx: &ControlContext, user_id: &str) -> UserResponse {
 ///
 /// `key` is the operator key the connection authenticated as: the invite's
 /// digits are kept under it, and `InviteDigits` answers with those alone.
-pub async fn landlord(ctx: &ControlContext, key: &[u8; 32], request: VaultPeerRequest) -> UserResponse {
+pub async fn landlord(ctx: &ControlContext, key: &[u8; 32], request: LandlordVerb) -> UserResponse {
     let peer = &ctx.peer;
     match request {
-        VaultPeerRequest::SetQuota { user_id, quota } => set_quota(peer, &user_id, quota).await,
-        VaultPeerRequest::Tenants => tenants(peer).await,
-        VaultPeerRequest::DropTenant { user_id } => drop_tenant(ctx, &user_id).await,
-        VaultPeerRequest::StandAt { relays } => {
+        LandlordVerb::SetQuota { user_id, quota } => set_quota(peer, &user_id, quota).await,
+        LandlordVerb::Tenants => tenants(peer).await,
+        LandlordVerb::DropTenant { user_id } => drop_tenant(ctx, &user_id).await,
+        LandlordVerb::StandAt { relays } => {
             match crate::reach::stand_at(&peer.runtime, &peer.db, &ctx.device_db, relays).await {
                 Ok(()) => UserResponse::Ok,
                 Err(message) => UserResponse::Error { message },
             }
         }
-        VaultPeerRequest::DeviceInvite {
+        LandlordVerb::DeviceInvite {
             user_id,
             ttl_seconds,
             as_name,
@@ -311,14 +313,8 @@ pub async fn landlord(ctx: &ControlContext, key: &[u8; 32], request: VaultPeerRe
                 Err(message) => UserResponse::Error { message },
             }
         }
-        VaultPeerRequest::InviteDigits { user_id } => UserResponse::InviteDigits {
+        LandlordVerb::InviteDigits { user_id } => UserResponse::InviteDigits {
             digits: ctx.shown.for_pool(key, &user_id),
-        },
-        // A tenant's verb: `peer::handle` sends the landlord's six here and
-        // nothing else, and refuses a tenant's to the operator by standing
-        // first. Should that ever widen, the verb is refused, never run.
-        other => UserResponse::Error {
-            message: format!("{} is not one of the landlord's verbs", other.variant_name()),
         },
     }
 }
@@ -592,7 +588,7 @@ pub(crate) mod tests {
         let ctx = &vault.control;
         ctx.shown.show("a-ceremony", &A, "sam", 47_291);
         let digits = |key: [u8; 32]| async move {
-            match landlord(ctx, &key, VaultPeerRequest::InviteDigits { user_id: "sam".into() }).await {
+            match landlord(ctx, &key, LandlordVerb::InviteDigits { user_id: "sam".into() }).await {
                 UserResponse::InviteDigits { digits } => digits,
                 other => panic!("InviteDigits answered {other:?}"),
             }
@@ -650,7 +646,7 @@ pub(crate) mod tests {
             .provision_joined_user("alice", "did:kel:alice")
             .expect("alice is kept here");
         let ctx = &vault.control;
-        let invite = |user_id: &str| VaultPeerRequest::DeviceInvite {
+        let invite = |user_id: &str| LandlordVerb::DeviceInvite {
             user_id: user_id.to_string(),
             ttl_seconds: 60,
             as_name: None,

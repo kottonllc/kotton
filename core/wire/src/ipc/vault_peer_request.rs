@@ -38,6 +38,28 @@
 //! | `TenantDriveMake`, `TenantDrives`, `TenantDriveName`, `TenantDriveRetire` | a tenant's device | the person's drives kept here (the drive decision) |
 //! | `DeviceInvite`, `InviteDigits`, `Tenants`, `SetQuota`, `DropTenant`, `StandAt` | the vault's operator key | the landlord's acts over pools, and where the vault stands |
 //!
+//! **Two sets, split after the decode** (kotton #254). The last row is the
+//! landlord's and every other row is a tenant's, and which set a verb is in is
+//! a fact about the verb, so it is a type: [`VaultPeerRequest::split`] turns a
+//! decoded request into a [`VaultVerb`], either a [`TenantVerb`] or a
+//! [`LandlordVerb`], by an exhaustive match with no catch-all. The vault's
+//! landlord body takes `LandlordVerb` and its tenant body `TenantVerb`, so
+//! neither holds an arm refusing the other's verbs. A connection's standing
+//! chooses which set it may say. Standing cannot be a type, because the same
+//! key is a tenant to one pool and a stranger to the next.
+//!
+//! The split is made *after* the decode, not on the wire. The two sets could
+//! have been two inner enums inside this one, but serde would keep these bytes
+//! for that shape only under `#[serde(untagged)]`. An untagged wrapper changes
+//! the decoder's refusal of a verb that is not the vault's from "unknown
+//! variant `RecordInsert`" to "data did not match any variant". That loses the
+//! verb's name, and the refusal tests below and the suite's assert on the
+//! name. So the wire stays one flat enum, externally tagged by the same
+//! variant names, and `core/wire/vault-peer-request-surface.txt` does not
+//! move. The cost is that each split variant restates its fields. The
+//! compiler holds the restatement, because `split` moves every field by name
+//! from one to the other.
+//!
 //! **No verb here is plaintext, and none writes or reads a record.** A vault
 //! holds no key; records reach it as sealed segments of the record log, which
 //! `WriteSealed` carries like any other object. The tests at the bottom hold
@@ -217,6 +239,228 @@ impl VaultPeerRequest {
     }
 }
 
+/// A vault's peer verb, sorted by whose it is: what
+/// [`VaultPeerRequest::split`] gives the acceptor once the bytes have decoded.
+///
+/// The wire stays one flat, externally tagged enum, [`VaultPeerRequest`]; this
+/// is the same verb with its set made a type, so a body that serves one set
+/// takes that set and cannot be handed the other (see the module note).
+#[derive(Debug, Clone)]
+pub enum VaultVerb {
+    /// One of the fifteen a tenant's device says to its own pool.
+    Tenant(TenantVerb),
+    /// One of the six the vault's operator key says.
+    Landlord(LandlordVerb),
+}
+
+/// The fifteen verbs a tenant's device says to its own pool, field for field
+/// the [`VaultPeerRequest`] variant of the same name.
+#[derive(Debug, Clone)]
+pub enum TenantVerb {
+    ReadSealed {
+        user_id: String,
+        mount: String,
+        path: String,
+        offset: u64,
+        length: u32,
+    },
+    WriteSealed {
+        user_id: String,
+        mount: String,
+        path: String,
+        blob: Vec<u8>,
+        domain_id: String,
+        offset: u64,
+        total_size: u64,
+        content_hash: String,
+    },
+    ListSealed {
+        user_id: String,
+        mount: String,
+        prefix: String,
+    },
+    RecoveryFetch {
+        user_id: String,
+    },
+    RecoveryStore {
+        user_id: String,
+        bundle: String,
+        kel: Vec<crate::kel::KelEvent>,
+    },
+    NodeRelay {
+        user_id: String,
+    },
+    VaultCapacity {
+        user_id: String,
+    },
+    HoldDoors {
+        user_id: String,
+        doors: Vec<crate::ipc::HeldDoor>,
+    },
+    TakeDeliveries {
+        user_id: String,
+        ack: Vec<String>,
+    },
+    CarryFrame {
+        user_id: String,
+        messages: Vec<crate::ipc::CarriedMessage>,
+        drop: Vec<String>,
+    },
+    TenantDevice {
+        user_id: String,
+        change: crate::ipc::TenantDeviceChange,
+        signature: Vec<u8>,
+    },
+    TenantDriveMake {
+        user_id: String,
+        drive: crate::ipc::MadeDrive,
+        sealed_name: Vec<u8>,
+    },
+    TenantDrives {
+        user_id: String,
+    },
+    TenantDriveName {
+        user_id: String,
+        drive: crate::ipc::MadeDrive,
+        sealed_name: Vec<u8>,
+    },
+    TenantDriveRetire {
+        user_id: String,
+        drive: crate::ipc::MadeDrive,
+    },
+}
+
+/// The six verbs the vault's operator key says — the landlord's acts over
+/// pools, and where the vault stands — field for field the
+/// [`VaultPeerRequest`] variant of the same name.
+#[derive(Debug, Clone)]
+pub enum LandlordVerb {
+    DeviceInvite {
+        user_id: String,
+        ttl_seconds: u64,
+        as_name: Option<String>,
+    },
+    InviteDigits {
+        user_id: String,
+    },
+    Tenants,
+    SetQuota {
+        user_id: String,
+        quota: u64,
+    },
+    DropTenant {
+        user_id: String,
+    },
+    StandAt {
+        relays: Vec<crate::rendezvous::Stand>,
+    },
+}
+
+impl VaultPeerRequest {
+    /// The verb, in the set it belongs to. Total and exhaustive: every
+    /// variant is named once, on one side, with no catch-all, so a verb added
+    /// to the wire does not compile until it is given to a tenant or to the
+    /// landlord.
+    pub fn split(self) -> VaultVerb {
+        use LandlordVerb as L;
+        use TenantVerb as T;
+        use VaultVerb::{Landlord, Tenant};
+        match self {
+            Self::ReadSealed {
+                user_id,
+                mount,
+                path,
+                offset,
+                length,
+            } => Tenant(T::ReadSealed {
+                user_id,
+                mount,
+                path,
+                offset,
+                length,
+            }),
+            Self::WriteSealed {
+                user_id,
+                mount,
+                path,
+                blob,
+                domain_id,
+                offset,
+                total_size,
+                content_hash,
+            } => Tenant(T::WriteSealed {
+                user_id,
+                mount,
+                path,
+                blob,
+                domain_id,
+                offset,
+                total_size,
+                content_hash,
+            }),
+            Self::ListSealed { user_id, mount, prefix } => Tenant(T::ListSealed { user_id, mount, prefix }),
+            Self::RecoveryFetch { user_id } => Tenant(T::RecoveryFetch { user_id }),
+            Self::RecoveryStore { user_id, bundle, kel } => Tenant(T::RecoveryStore { user_id, bundle, kel }),
+            Self::NodeRelay { user_id } => Tenant(T::NodeRelay { user_id }),
+            Self::VaultCapacity { user_id } => Tenant(T::VaultCapacity { user_id }),
+            Self::HoldDoors { user_id, doors } => Tenant(T::HoldDoors { user_id, doors }),
+            Self::TakeDeliveries { user_id, ack } => Tenant(T::TakeDeliveries { user_id, ack }),
+            Self::CarryFrame {
+                user_id,
+                messages,
+                drop,
+            } => Tenant(T::CarryFrame {
+                user_id,
+                messages,
+                drop,
+            }),
+            Self::TenantDevice {
+                user_id,
+                change,
+                signature,
+            } => Tenant(T::TenantDevice {
+                user_id,
+                change,
+                signature,
+            }),
+            Self::TenantDriveMake {
+                user_id,
+                drive,
+                sealed_name,
+            } => Tenant(T::TenantDriveMake {
+                user_id,
+                drive,
+                sealed_name,
+            }),
+            Self::TenantDrives { user_id } => Tenant(T::TenantDrives { user_id }),
+            Self::TenantDriveName {
+                user_id,
+                drive,
+                sealed_name,
+            } => Tenant(T::TenantDriveName {
+                user_id,
+                drive,
+                sealed_name,
+            }),
+            Self::TenantDriveRetire { user_id, drive } => Tenant(T::TenantDriveRetire { user_id, drive }),
+            Self::DeviceInvite {
+                user_id,
+                ttl_seconds,
+                as_name,
+            } => Landlord(L::DeviceInvite {
+                user_id,
+                ttl_seconds,
+                as_name,
+            }),
+            Self::InviteDigits { user_id } => Landlord(L::InviteDigits { user_id }),
+            Self::Tenants => Landlord(L::Tenants),
+            Self::SetQuota { user_id, quota } => Landlord(L::SetQuota { user_id, quota }),
+            Self::DropTenant { user_id } => Landlord(L::DropTenant { user_id }),
+            Self::StandAt { relays } => Landlord(L::StandAt { relays }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +613,40 @@ mod tests {
             shared,
             ["ListSealed", "NodeRelay", "ReadSealed", "RecoveryFetch", "RecoveryStore", "WriteSealed"],
             "the vault's and a device's peer wires share these and nothing else"
+        );
+    }
+
+    /// **Every recorded vault verb splits to exactly one side, and the
+    /// landlord's side is the six.** Counted from the recorded surface, which
+    /// `wire-check` holds to the enum, and not from a list in this test: every
+    /// verb the surface names is exercised (`the_vault_peer_wire_mirrors_the_door_for_its_verbs`
+    /// holds that), and `split` is total by its match.
+    #[test]
+    fn every_vault_verb_splits_to_a_tenant_or_the_landlord() {
+        let mut tenant: Vec<&str> = Vec::new();
+        let mut landlord: Vec<&str> = Vec::new();
+        for req in every_vault_verb_as_the_door_spells_it() {
+            let vault: VaultPeerRequest = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+            let name = vault.variant_name();
+            match vault.split() {
+                VaultVerb::Tenant(_) => tenant.push(name),
+                VaultVerb::Landlord(_) => landlord.push(name),
+            }
+        }
+        for side in [&mut tenant, &mut landlord] {
+            side.sort_unstable();
+            side.dedup();
+        }
+        assert_eq!(
+            landlord,
+            ["DeviceInvite", "DropTenant", "InviteDigits", "SetQuota", "StandAt", "Tenants"],
+            "the landlord's set"
+        );
+        assert!(tenant.iter().all(|n| !landlord.contains(n)), "a verb on both sides");
+        assert_eq!(
+            tenant.len() + landlord.len(),
+            variants(VAULT_PEER_SURFACE).len(),
+            "every recorded verb is on one side: {tenant:?} {landlord:?}"
         );
     }
 

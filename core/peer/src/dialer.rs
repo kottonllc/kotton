@@ -20,6 +20,7 @@
 
 use crate::nat::{nat_connect, NatConfig, NatResult};
 use kotton_wire::peer::PairedNode;
+use kotton_wire::ipc::SealedVerb;
 use kotton_wire::{UserRequest, UserResponse};
 use kotton_net::transport::quic::tls::{
     self, Ed25519DeviceCert, PairedDeviceVerifier,
@@ -128,7 +129,7 @@ async fn connect_peer(
     // without any public identity→relay record. A peer that does not answer
     // (older, or refusing) teaches nothing, and the row keeps what it had.
     let learned = match storage
-        .send(&UserRequest::NodeRelay {
+        .send_sealed(SealedVerb::NodeRelay {
             user_id: user_id.to_owned(),
         })
         .await

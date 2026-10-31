@@ -154,6 +154,18 @@ fn table(drives: &[DriveDescriptor]) -> Out {
     }
 }
 
+/// What `drive move` says when the vault the drive left listed keys that are
+/// not storage keys: the move refused them and carried everything else
+/// (kotton #274).
+fn refused_said(n: u32) -> String {
+    let (keys, are) = if n == 1 { ("key", "is") } else { ("keys", "are") };
+    format!(
+        "the vault the drive left listed {n} {keys} that {are} not a storage key; the move refused {} and carried \
+         everything else",
+        if n == 1 { "it" } else { "them" }
+    )
+}
+
 /// What `--json` prints: the descriptors the daemon answered, as they cross, a
 /// payload on stdout.
 fn json(drives: &[DriveDescriptor]) -> Result<CommandOutput> {
@@ -211,12 +223,16 @@ async fn run(line: Line<'_>, state: &mut ShellState) -> Result<CommandOutput> {
             ))
         }
         Line::Move { name, to, from } => {
-            let drives = client.lock().await.drive_move(&user_id, name, to, from).await.map_err(|e| said("move", e))?;
-            let vault = drives.first().map(|d| d.vault.clone()).unwrap_or_else(|| to.to_string());
-            Ok(CommandOutput::shapes(vec![Out::Confirm {
+            let moved = client.lock().await.drive_move(&user_id, name, to, from).await.map_err(|e| said("move", e))?;
+            let vault = moved.drives.first().map(|d| d.vault.clone()).unwrap_or_else(|| to.to_string());
+            let mut out = vec![Out::Confirm {
                 action: format!("drive moved to '{vault}'; your other devices follow it there at their next sync"),
                 subject: name.to_string(),
-            }]))
+            }];
+            if moved.keys_refused > 0 {
+                out.push(Out::Note(refused_said(moved.keys_refused)));
+            }
+            Ok(CommandOutput::shapes(out))
         }
         // The ceremony takes the lock for itself.
         Line::Enrol { invite, posture } => super::device::enrol_vault(&invite, posture, state).await,
