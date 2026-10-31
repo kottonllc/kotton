@@ -333,9 +333,9 @@ impl UserStore {
             .list_sealed(Path::new(crate::packed::PACK_PREFIX))
             .await?
             .into_iter()
-            .map(|m| m.key.trim_start_matches('/').to_string())
+            .map(|m| m.key)
             .collect();
-        Ok(holding.keys().all(|id| here.contains(id.trim_start_matches('/'))))
+        Ok(holding.keys().all(|id| here.contains(id)))
     }
 }
 
