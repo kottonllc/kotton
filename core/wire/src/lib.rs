@@ -17,6 +17,10 @@ pub mod kel;
 pub mod kuid_ipc;
 pub mod line;
 pub mod peer;
+/// The one reader of the recorded wire surfaces, for the tests that read them; xtask
+/// compiles the same file by `#[path]` (see its module doc).
+#[cfg(test)]
+mod recorded_surface;
 pub mod remote;
 pub mod rendezvous;
 pub mod runner;
