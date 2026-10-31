@@ -207,11 +207,12 @@ pub enum ObjectKind {
 ///   namespace. The admissions: a sync pass's listings, on both sides
 ///   ([`crate::StorageKey`], kotton #265); a pack id a manifest or superblock
 ///   names, where it is decoded, and the pack listing compaction and scan
-///   recovery act on ([`PackId`], kotton #273). Keys that still reach a store
-///   unadmitted come through other doors, each tracked where it is: a guest
-///   re-wrap's raw read (`LocalObjectStorage::resolve_key`'s doc),
-///   drive move's copy (kotton #274) and `Sealed::list`'s prefix
-///   (kotton #275).
+///   recovery act on ([`PackId`], kotton #273); and every key and prefix the
+///   sealed view (`kotton_sealed::Sealed`) is handed, which it takes typed
+///   (kotton #275, #320). Keys that still reach a store unadmitted come
+///   through other doors, each tracked where it is: a guest re-wrap's raw
+///   read (`LocalObjectStorage::resolve_key`'s doc) and drive move's copy
+///   (kotton #274).
 /// - **The rest of the `_` namespace** is [`ObjectKind::Reserved`].
 ///   Blinded components are base32, an alphabet with no `_`, so only a key
 ///   in the reserved namespace starts with one, and every other key is
@@ -3339,8 +3340,8 @@ impl<S: LooseObjectSource + 'static> SealedObjectAccess for PackedObjectStorage<
     async fn packs_holding(
         &self,
         kept: &(dyn for<'p> Fn(&'p str) -> bool + Send + Sync),
-    ) -> ObjectStorageResult<Option<BTreeMap<String, Vec<String>>>> {
-        let mut packs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    ) -> ObjectStorageResult<Option<BTreeMap<crate::StorageKey, Vec<String>>>> {
+        let mut packs: BTreeMap<crate::StorageKey, Vec<String>> = BTreeMap::new();
         let Some((_, manifest)) = self.manifest().await? else {
             return Ok(Some(packs));
         };
@@ -3352,7 +3353,7 @@ impl<S: LooseObjectSource + 'static> SealedObjectAccess for PackedObjectStorage<
                 continue;
             }
             for r in &entry.chunks {
-                let paths = packs.entry(r.pack_id.to_string()).or_default();
+                let paths = packs.entry(r.pack_id.as_key().clone()).or_default();
                 if paths.last() != Some(path) {
                     paths.push(path.clone());
                 }
@@ -3904,7 +3905,7 @@ mod tests {
         let holding = s.packs_holding(&survivor).await.unwrap().unwrap();
         let victim = holding.keys().next().unwrap().clone();
         s.inner
-            .put_sealed(Path::new(&victim), &vec![0u8; PACK_SIZE])
+            .put_sealed(victim.as_path(), &vec![0u8; PACK_SIZE])
             .await
             .unwrap();
 
@@ -4768,7 +4769,7 @@ mod tests {
         let holding = a.packs_holding(&photo).await.unwrap().unwrap();
         assert_eq!(holding.len(), 1);
         let (id, paths) = holding.iter().next().unwrap();
-        assert!(is_content_pack(id), "{id}");
+        assert!(is_content_pack(id.as_str()), "{id}");
         assert_eq!(paths, &["photo.jpg".to_string()]);
         assert!(!is_content_pack("_pack/c0ffee00c0ffee00c0ffee00c0ffee00"), "an index pack whose hex begins with c");
     }

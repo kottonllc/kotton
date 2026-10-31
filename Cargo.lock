@@ -3550,8 +3550,10 @@ name = "kotton-sealed"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "bytes",
+ "futures",
  "kotton-fs",
- "kotton-schemas",
  "kotton-sys",
  "workspace-hack",
 ]

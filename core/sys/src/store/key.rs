@@ -3,12 +3,12 @@
 //!
 //! A sync pass takes the keys it moves from listings: its own, and the
 //! remote's, which is whatever a drive or another device chose to answer. A
-//! serving device answers `ReadSealed` and `WriteSealed` with keys a peer
-//! named. Every one of those keys becomes a path when a filesystem store
-//! resolves it, and a path follows `..`: before this type, a listed key such
-//! as `../x` was written beside the puller's mount, and `./_pack/i-1` landed
-//! in the pack directory under a name the namespace rule
-//! ([`crate::packed::kind`]) read as a file.
+//! serving device answers `ReadSealed`, `WriteSealed` and `ListSealed` with
+//! keys and prefixes a peer named. Every one of those keys becomes a path when
+//! a filesystem store resolves it, and a path follows `..`: before this type,
+//! a listed key such as `../x` was written beside the puller's mount, and
+//! `./_pack/i-1` landed in the pack directory under a name the namespace rule
+//! (`kotton_store::packed::kind`) read as a file.
 //!
 //! So a key from outside is parsed into a [`StorageKey`] before anything is
 //! built from it, and refused when it is not in the one form the store writes:
@@ -28,6 +28,27 @@
 //! to be base32 or one of the reserved names. Stores hold keys outside it
 //! today (a mount not yet migrated to blinded keys, and objects a test or a
 //! tenant writes under a plain name), so that tightening is its own change.
+//!
+//! ## Who reads it, and why it lives here
+//!
+//! - `kotton-store` admits a sync pass's listings, a peer's `ReadSealed` and
+//!   `WriteSealed` keys, and builds its pack ids on it
+//!   (`kotton_store::packed::PackId`); it re-exports both types, so
+//!   `kotton_store::StorageKey` is the same type as this one.
+//! - `kotton-sealed` takes it in `Sealed::{read, write, list}`, so the sealed
+//!   view of a store has no `&str` door that rewrites a key it was handed
+//!   (kotton #275, #320).
+//! - This crate's store trait names it, so `packs_holding` hands back keys
+//!   already admitted rather than text a caller must parse again
+//!   (kotton #301).
+//! - `kotton-device` parses a peer's `ListSealed` prefix into one before it
+//!   asks a store anything.
+//!
+//! It is here, not in `kotton-store`, because `kotton-store` depends on
+//! `kotton-sealed`: `Sealed` cannot name a type `kotton-store` owns, and
+//! neither can this crate's trait. This crate is the layer every
+//! store-facing crate can name, so the one parser sits here and nothing
+//! keeps a second spelling of it.
 
 use std::borrow::Borrow;
 use std::fmt;
@@ -121,26 +142,6 @@ impl Borrow<str> for StorageKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The keys the store writes are admitted as they are.
-    #[test]
-    fn the_keys_the_store_writes_are_admitted() {
-        let blinded = kotton_crypto::path_blind::blind_object_key(
-            &kotton_crypto::path_blind::derive_path_blind_key(&[0x42; 32]),
-            "files/notes/a.txt",
-        );
-        for key in [
-            blinded.as_str(),
-            "_pack/c-00ff",
-            "_pack/00ff",
-            "_superblock/00000000000000000007-00ff",
-            crate::packed::TOMBSTONES_KEY,
-            // A key outside the blinded alphabet is not refused here (module doc).
-            "a/big.bin",
-        ] {
-            assert_eq!(StorageKey::parse(key).map(|k| k.to_string()), Ok(key.to_string()));
-        }
-    }
 
     /// Every spelling that is not the one form is refused, each with its reason.
     #[test]

@@ -335,7 +335,7 @@ impl UserStore {
             .into_iter()
             .map(|m| m.key)
             .collect();
-        Ok(holding.keys().all(|id| here.contains(id)))
+        Ok(holding.keys().all(|id| here.contains(id.as_str())))
     }
 }
 
@@ -347,16 +347,15 @@ impl UserStore {
 /// The packs it fetches are named by the reconciled index, which other
 /// devices wrote. Each id was admitted where the manifest naming it was
 /// decoded ([`crate::packed::PackId`], kotton #273), so a manifest naming
-/// `_pack/../x` never reaches here. The ids cross
-/// `SealedObjectAccess::packs_holding` as text, because `kotton-sys` cannot name
-/// this crate's key types, so each is parsed again into a [`StorageKey`]
-/// before it is read or written: a refusal there cannot come from a manifest
-/// this crate decoded, and stands in only for that trait carrying `String`.
+/// `_pack/../x` never reaches here, and crosses
+/// `SealedObjectAccess::packs_holding` as the [`StorageKey`] that admission
+/// made (kotton #301): it is read and written as it comes, with no second
+/// parse to stand in for a trait that carried text.
 async fn keep_whole(
     local: &dyn SyncableStore,
     remote: &dyn SyncableStore,
     keep: &Keep,
-    holding: Option<BTreeMap<String, Vec<String>>>,
+    holding: Option<BTreeMap<StorageKey, Vec<String>>>,
     on_remote: &BTreeSet<StorageKey>,
     transfers: &mut Vec<(SyncDirection, String, u64)>,
 ) -> Result<KeepReport> {
@@ -374,8 +373,8 @@ async fn keep_whole(
     let holding = holding.unwrap_or_default();
     let wanted: BTreeMap<StorageKey, &Vec<String>> = holding
         .iter()
-        .filter(|(id, _)| crate::packed::is_content_pack(id))
-        .filter_map(|(id, paths)| Some((admit(id, "the index")?, paths)))
+        .filter(|(id, _)| crate::packed::is_content_pack(id.as_str()))
+        .map(|(id, paths)| (id.clone(), paths))
         .collect();
     let mut report = KeepReport { budget: keep.budget, wanted: wanted.len() as u64 * pack, ..Default::default() };
     let fits = |held: &BTreeMap<StorageKey, u64>| keep.budget.is_none_or(|b| bytes(held) + pack <= b);
@@ -618,7 +617,7 @@ mod keep_tests {
         assert!(!home.join("data").join("_pack").join("i-1").exists(), "a served key aliased onto the pack directory");
         let result = result.expect("a pass that refuses keys still completes");
         assert_eq!((result.pulled, result.transfers.len()), (0, 0), "{result:?}");
-        let held = a.list_sealed("local", "").await.unwrap().len();
+        let held = a.list_sealed("local", None).await.unwrap().len();
         assert_eq!(result.skipped as usize, held + hostile.len(), "each refused key is counted: {result:?}");
 
         for key in hostile {

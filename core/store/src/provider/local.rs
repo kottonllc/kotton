@@ -51,9 +51,9 @@ impl LocalObjectStorage {
     /// reads the path a guest re-wrap names on a store of its own, past a
     /// trimmed leading `/` and admitted by nothing else. That is the reach to
     /// close before this refusal can go. Drive move (kotton #274) writes
-    /// through a vault's `write_sealed`, which admits, and `Sealed::list`
-    /// (kotton #275) collapses `..` before it lists, so neither reaches here
-    /// with one; each is a rewrite or a silence to close at its own door.
+    /// through a vault's `write_sealed`, which admits, and `kotton_sealed::Sealed`
+    /// takes only admitted keys and prefixes (kotton #275, #320), so neither
+    /// reaches here with one.
     ///
     /// A leading `/` and a `.` component name nothing outside the root and
     /// are read past, as the logical paths the VFS hands this store may carry
