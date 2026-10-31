@@ -833,12 +833,13 @@ pub async fn handle_device_join(
                 // Dropped here, unwritten: the vault never holds what it was
                 // handed, and the issuer is told why in its answer.
                 tracing::warn!(user_id = %user_id, "a vault refused a payload carrying keys");
+                const VAULT: &str =
+                    "this node is a vault: it keeps sealed bytes and holds no key, so enrol it blind";
                 let refused = UserResponse::PairFailed {
-                    reason: format!(
-                        "this node is a vault: it keeps sealed bytes and holds no key, so \
-                         enrol it blind (`device add {}`)",
-                        device_add_flag(Posture::BlindStorage)
-                    ),
+                    reason: match adds_instead(Posture::BlindStorage) {
+                        Some(add) => format!("{VAULT} (`{add}`)"),
+                        None => VAULT.to_owned(),
+                    },
                 };
                 answer_the_issuer(answer, &sessions, refused).await
             }
@@ -926,19 +927,22 @@ fn not_the_pinned_vault(vault: &str, refused: &kotton_peer::pairing::NotThePinne
 /// two functions on purpose, so the refusal names a command for every posture
 /// it refuses.
 fn not_blind_refusal(posture: Posture) -> String {
-    let add = adds_instead(posture);
-    let instead = match posture {
-        Posture::BlindStorage => {
+    let instead = match (posture, adds_instead(posture)) {
+        (Posture::BlindStorage, _) => {
             unreachable!("admits_by_code admits the blind posture before asking for a refusal")
         }
-        Posture::Full | Posture::Cosigner => format!(
+        (Posture::Full | Posture::Cosigner, Some(add)) => format!(
             "A device that would hold keys joins the other way round: run `{add}` here and \
              `device join <code>` on it"
         ),
-        Posture::Gateway => format!(
+        (Posture::Gateway, Some(add)) => format!(
             "A gateway is admitted by its own code: the gateway prints the code, and this \
              node admits it with `{add}`"
         ),
+        // A posture the grammar has no word for: no command is named rather than a wider one.
+        (Posture::Full | Posture::Cosigner | Posture::Gateway, None) => {
+            "No line of device add asks for this posture, so this node cannot add it".to_owned()
+        }
     };
     format!(
         "an invite admits a vault, and a vault keeps what it cannot read — so this \
@@ -949,35 +953,28 @@ fn not_blind_refusal(posture: Posture) -> String {
 /// The one `device add` that adds a device of `posture`, as data the refusal
 /// interpolates and the test holds — so no test has to pick a command out of
 /// prose, and a sentence that named a second `device add` would fail the test
-/// that counts them. Exhaustive for the same reason as [`not_blind_refusal`].
+/// that counts them.
 ///
-/// A posture `device add` names with a flag takes the flag from
-/// [`device_add_flag`]: the hint has no spelling of its own to drift. The default
-/// posture is the bare line, and a gateway is `--gateway <code>`, a word with a
-/// value the table does not carry; `cargo xtask device-add-check` holds that this
-/// arm is the only `device add --` under `core/` outside tests and comments.
-fn adds_instead(posture: Posture) -> String {
-    match posture {
-        Posture::Full => "device add".to_owned(),
-        Posture::Cosigner => format!("device add {}", device_add_flag(posture)),
-        Posture::Gateway => "device add --gateway <code>".to_owned(),
-        Posture::BlindStorage => {
-            unreachable!("admits_by_code admits the blind posture before asking for a refusal")
-        }
+/// It has no spelling of its own: a posture with a flag takes it from
+/// `DEVICE_ADD_POSTURE_FLAGS`, walked here by posture; the default posture
+/// (`DEVICE_ADD_DEFAULT_POSTURE`) is the bare line; a gateway is
+/// `DEVICE_ADD_GATEWAY_FLAG` and its code. Every posture is answered, so no call
+/// can reach a panic: `None` is a posture the grammar has no word for, and a
+/// caller names no command rather than a wider one. Its last arm lists the
+/// postures by name, so a new one fails to compile here rather than falling
+/// through. `cargo xtask device-add-check` holds that no `device add --` is
+/// spelled under `core/` outside tests and comments.
+fn adds_instead(posture: Posture) -> Option<String> {
+    use kotton_schemas::membership::{
+        DEVICE_ADD_DEFAULT_POSTURE, DEVICE_ADD_GATEWAY_FLAG, DEVICE_ADD_POSTURE_FLAGS,
+    };
+    let flag = DEVICE_ADD_POSTURE_FLAGS.iter().find(|(_, p)| *p == posture).map(|(f, _)| *f);
+    match (flag, posture) {
+        (Some(flag), _) => Some(format!("device add {flag}")),
+        (None, p) if p == DEVICE_ADD_DEFAULT_POSTURE => Some("device add".to_owned()),
+        (None, Posture::Gateway) => Some(format!("device add {DEVICE_ADD_GATEWAY_FLAG} <code>")),
+        (None, Posture::Full | Posture::Cosigner | Posture::BlindStorage) => None,
     }
-}
-
-/// The flag `device add` names `posture` with, from `DEVICE_ADD_POSTURE_FLAGS`, the
-/// table the shell's `parse_add` reads, looked up by posture: what every hint here
-/// that names a `device add` posture flag prints. Called only for a posture the
-/// table has a flag for (blind, cosigner); the default and the gateway are not flags.
-fn device_add_flag(posture: Posture) -> &'static str {
-    use kotton_schemas::membership::DEVICE_ADD_POSTURE_FLAGS;
-    DEVICE_ADD_POSTURE_FLAGS
-        .iter()
-        .find(|(_, p)| *p == posture)
-        .map(|(flag, _)| *flag)
-        .expect("`device add` names this posture with a flag of DEVICE_ADD_POSTURE_FLAGS")
 }
 
 /// A vault's invite as its code names it: where the ceremony
@@ -2105,7 +2102,9 @@ mod admit_tests {
         let words: Vec<&str> = command.split_whitespace().collect();
         match words.strip_prefix(&["device", "add"])? {
             [] => Some(DEVICE_ADD_DEFAULT_POSTURE),
-            ["--gateway", _code] => Some(Posture::Gateway),
+            [flag, _code] if *flag == kotton_schemas::membership::DEVICE_ADD_GATEWAY_FLAG => {
+                Some(Posture::Gateway)
+            }
             [flag] => DEVICE_ADD_POSTURE_FLAGS.iter().find(|(f, _)| f == flag).map(|(_, p)| *p),
             _ => None,
         }
@@ -2121,16 +2120,16 @@ mod admit_tests {
         assert_eq!(device_add_parses("device add --cosigner"), Some(Posture::Cosigner));
     }
 
-    /// Every posture the table has a flag for gives, through `device_add_flag` (what the
-    /// vault's refusal and `adds_instead` print), a `device add` that asks for that posture.
+    /// Every posture has, through `adds_instead` (what the vault's refusal and the invite's
+    /// refusal print), a `device add` that asks for that posture: the table's postures with
+    /// their flag, the default bare, and a gateway with its code.
     #[test]
-    fn every_table_posture_is_printed_with_a_flag_the_hint_reader_reads_back() {
-        use kotton_schemas::membership::DEVICE_ADD_POSTURE_FLAGS;
-        for (_, posture) in DEVICE_ADD_POSTURE_FLAGS {
-            let line = format!("device add {}", super::device_add_flag(posture));
+    fn every_posture_is_printed_a_device_add_the_hint_reader_reads_back() {
+        for posture in [Posture::Full, Posture::Cosigner, Posture::Gateway, Posture::BlindStorage] {
+            let line = adds_instead(posture).unwrap_or_else(|| panic!("{posture:?} has no `device add`"));
             assert_eq!(device_add_parses(&line), Some(posture), "{line}");
         }
-        assert_eq!(super::device_add_flag(Posture::BlindStorage), "--blind");
+        assert_eq!(adds_instead(Posture::BlindStorage).as_deref(), Some("device add --blind"));
     }
 
     /// Every posture the admit refuses is handed a `device add` that adds a
@@ -2143,7 +2142,7 @@ mod admit_tests {
             let Err(refused) = admits_by_code(posture) else { continue };
             let said = refused.to_string();
             // The command is data, held directly: it adds a device of this posture.
-            let add = adds_instead(posture);
+            let add = adds_instead(posture).unwrap_or_else(|| panic!("{posture:?} has no `device add`"));
             assert_eq!(device_add_parses(&add), Some(posture), "{posture:?} adds by `{add}`");
             // And the sentence carries that command, backticked, and no other
             // `device add` — a second one would be a wider hint slipped in after
