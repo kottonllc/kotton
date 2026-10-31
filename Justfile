@@ -299,6 +299,16 @@ lint:
     # `-D warnings`, as the relay below: a new warning fails the gate instead of joining a
     # pile nobody reads. The workspace was swept to none to make this hold (#91).
     cargo clippy --all-targets -- -D warnings
+    # xtask's `cli-docs` feature is off in the line above, so `verb_check_run`,
+    # `verb_check::tables_of`, `verb_tables::drift` and the gen-docs/docs-check path were
+    # compiled only by `cargo xtask-docs` under plain rustc, where a warning prints and is
+    # ignored. This holds them to `-D warnings` too, in the workspace target dir, where the
+    # kotton-cli check artifacts above are reused. Cost: a local
+    # measurement, not a run on `lint.yml`, which could not be made here: after `cargo clean -p xtask`
+    # only xtask itself recompiled (6.5s wall), every dependency, kotton-cli's among them, being
+    # reused from the line above, so no second graph builds. The cold figure on `lint.yml` is
+    # unmeasured and is owed from the first pull request's run.
+    cargo clippy -p xtask --features cli-docs --all-targets -- -D warnings
     # infra/relay declares its own `[workspace]`, so the `cargo clippy` above never reaches
     # it. It is held to `-D warnings` the same way.
     cargo clippy --manifest-path infra/relay/Cargo.toml --target-dir {{relay_target}} --all-targets -- -D warnings
@@ -348,7 +358,9 @@ lint:
     # Reads kotton-protocol's checkout when there is one, and the words held here otherwise.
     # The fixture the xtask tests read is held to the live registry inside verb-check, because that run
     # already links the CLI; a `cargo test --features cli-docs` line here would cost about five cold
-    # minutes per pull request.
+    # minutes per pull request. The unit test that holds the same property,
+    # `verb_tables::tests::the_fixture_is_the_live_registrys_tables`, is behind that feature:
+    # run it by hand with `cargo test -p xtask --features cli-docs`.
     cargo xtask-docs verb-check
     # Every `kotton` command README.md gives is one the binary has (held through the reference
     # above), and every script it runs from a checkout is in this tree. A page added later is
