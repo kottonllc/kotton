@@ -49,6 +49,14 @@
 //! neither can this crate's trait. This crate is the layer every
 //! store-facing crate can name, so the one parser sits here and nothing
 //! keeps a second spelling of it.
+//!
+//! Three other homes were weighed and rejected (kotton #275). A copy of the
+//! parser in `kotton-sealed` would be two spellings of one admission, free
+//! to drift apart. The type in `kotton-sealed` alone would serve `Sealed`
+//! but not this crate's store trait, which names it too (kotton #301), so it
+//! would have to move again. Folding `Sealed` into `kotton-store` would undo
+//! the tier `kotton-sealed`'s crate doc defends: the sealed view sits below
+//! the store, not inside it.
 
 use std::borrow::Borrow;
 use std::fmt;

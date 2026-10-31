@@ -49,12 +49,15 @@ impl LocalObjectStorage {
     ///
     /// What it still stands in for: `UserStore::read_raw_local_object`, which
     /// reads the path a guest re-wrap names on a store of its own, past a
-    /// trimmed leading `/` and admitted by nothing else. That is the reach to
-    /// close before this refusal can go. Drive move (kotton #274) admits each
-    /// key where the source vault's listing enters it and writes through a
-    /// vault's `write_sealed`, which admits again, and `kotton_sealed::Sealed`
-    /// takes only admitted keys and prefixes (kotton #275, #320), so neither
-    /// reaches here with one.
+    /// trimmed leading `/` and admitted by nothing else (kotton #299). That is
+    /// the reach to close before this refusal can go. Drive move (kotton #274)
+    /// admits each key where the source vault's listing enters it and writes
+    /// through a vault's `write_sealed`, which admits again, and
+    /// `kotton_sealed::Sealed` takes only admitted keys and prefixes
+    /// (kotton #275, #320), so neither reaches here with one from a caller.
+    /// `Sealed::list`'s descent into the directory keys a store itself listed
+    /// is not yet admitted (kotton #336), and this refusal still stands in for
+    /// it.
     ///
     /// A leading `/` and a `.` component name nothing outside the root and
     /// are read past, as the logical paths the VFS hands this store may carry
