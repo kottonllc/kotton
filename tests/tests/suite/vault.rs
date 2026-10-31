@@ -2328,7 +2328,7 @@ async fn a_desktop_holding_the_operator_credential_invites_and_sets_a_quota_and_
         .await
         {
             Ok(UserResponse::Error { message }) => assert!(
-                message.contains("the landlord's four verbs and nothing else"),
+                message.contains("the landlord's six verbs and nothing else"),
                 "{name}: {message}"
             ),
             other => panic!("the operator credential read alice's {name}: {other:?}"),
@@ -3156,7 +3156,7 @@ async fn the_operator_dials_their_own_vault_relayed_at_their_own_relay_under_onl
     let conn = within_for(WHOLE, "the tenant's relayed dial", tenant.connect(as_tenant, "lee"))
         .await
         .unwrap_or_else(|e| panic!("the tenant's dial at its own relay was refused: {e:#}"));
-    let answer = within("the vault answers the tenant", conn.send(&UserRequest::NodeRelay { user_id: "lee".into() }))
+    let answer = within("the vault answers the tenant", conn.send_sealed(kotton_wire::ipc::SealedVerb::NodeRelay { user_id: "lee".into() }))
         .await
         .expect("the relayed connection carries a request");
     assert!(matches!(answer, UserResponse::NodeRelayResult { .. }), "{answer:?}");
@@ -3169,7 +3169,7 @@ async fn the_operator_dials_their_own_vault_relayed_at_their_own_relay_under_onl
     let conn = within_for(WHOLE, "the operator's relayed dial", operator.connect(as_operator, ""))
         .await
         .unwrap_or_else(|e| panic!("the operator's dial at their own relay was refused: {e:#}"));
-    within("the vault answers its operator", conn.send(&UserRequest::NodeRelay { user_id: String::new() }))
+    within("the vault answers its operator", conn.send_sealed(kotton_wire::ipc::SealedVerb::NodeRelay { user_id: String::new() }))
         .await
         .expect("the relayed connection carries a request");
     assert_eq!(bx.rule_at_the_relay().await, AdmissionRule::OnlyMyDevices, "both dials ran with the rule in place");

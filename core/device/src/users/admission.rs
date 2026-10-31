@@ -219,7 +219,7 @@ pub enum PeerStanding {
     /// The vault's operator credential (`operator_key`): the key its landlord's
     /// desktop speaks under. It is nobody's device and no user's member, so it
     /// is decided before any user is asked about, and it stands to the node
-    /// rather than to a pool. What it may say — the landlord's four verbs and
+    /// rather than to a pool. What it may say — the landlord's six verbs and
     /// nothing a tenant's standing reaches — is the vault's table
     /// (`kvaultd::peer::reaches`); a device enrols no operator, so on a device
     /// no connection is ever this.

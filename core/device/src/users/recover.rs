@@ -81,7 +81,7 @@ use kotton_identity::provisioning::{
     write_recovery_bundle_raw,
 };
 use kotton_net::transport::quic::tls::{CertOffer, RecoveryClaim};
-use kotton_wire::ipc::{UserRequest, UserResponse};
+use kotton_wire::ipc::{SealedVerb, UserResponse};
 use kotton_wire::kel::KelEvent;
 use kotton_wire::peer::PairedNode;
 use sqlx::SqlitePool;
@@ -432,10 +432,10 @@ async fn fetch_material(
                     continue;
                 }
             };
-            let req = UserRequest::RecoveryFetch {
+            let req = SealedVerb::RecoveryFetch {
                 user_id: user_id.to_string(),
             };
-            match client.send(&req).await {
+            match client.send_sealed(req).await {
                 Ok(UserResponse::RecoveryMaterial { kel, bundle }) if !kel.is_empty() => {
                     return Ok((kel, bundle, node.id.clone()));
                 }
@@ -469,10 +469,10 @@ async fn admit_at(
         .dialer()
         .with_offer(CertOffer::events(vec![rotation.clone()]));
     let client = dialer.connect(node, user_id).await?;
-    let req = UserRequest::RecoveryFetch {
+    let req = SealedVerb::RecoveryFetch {
         user_id: user_id.to_string(),
     };
-    match client.send(&req).await? {
+    match client.send_sealed(req).await? {
         UserResponse::RecoveryMaterial { kel, .. } => {
             if kel.last() != Some(rotation) {
                 return Err(anyhow!(
