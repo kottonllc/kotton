@@ -341,17 +341,14 @@ lint:
     # docs/cli/reference.md is generated from the CLI's command tree; checked, never
     # rewritten, so a dirty copy cannot go green.
     cargo xtask-docs docs-check
-    # Every xtask test behind the `cli-docs` feature: they link the CLI, so plain
-    # `cargo test -p xtask` skips them. No name filter, so a gated test added later is in the
-    # gate by default. Among them, `verb_tables` holds the fixture `verb-check` and the
-    # retired-words sweep read equal to the live registry's tables, so a shell table edit
-    # fails that unit test, by name, before `verb-check` runs.
-    cargo test --manifest-path xtask/Cargo.toml --target-dir out/xtask --features cli-docs
     # The clap tree and the REPL's registry are kotton-protocol's command-tree decision's: every
     # name either registers has a place in it, and `drive`, `pin` and `sync` are one tree, held
     # to its verbs both ways. And no line a person reads (the files host-word-check reads) names
     # a verb a table retired, but to point from it to what replaced it.
     # Reads kotton-protocol's checkout when there is one, and the words held here otherwise.
+    # The fixture the xtask tests read is held to the live registry inside verb-check, because that run
+    # already links the CLI; a `cargo test --features cli-docs` line here would cost about five cold
+    # minutes per pull request.
     cargo xtask-docs verb-check
     # Every `kotton` command README.md gives is one the binary has (held through the reference
     # above), and every script it runs from a checkout is in this tree. A page added later is
