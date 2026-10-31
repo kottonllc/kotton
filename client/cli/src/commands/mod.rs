@@ -145,7 +145,7 @@ pub enum Commands {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        /// Arguments: none, or `--no-wait` (the words this verb retired are listed below, from its table)
+        /// Arguments: none, or `--no-wait` (the words this verb retired are in the RETIRED block, from its table)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },

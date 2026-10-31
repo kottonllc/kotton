@@ -794,7 +794,7 @@ RETIRED:
 
 ###### **Arguments:**
 
-* `<ARGS>` — Arguments: none, or `--no-wait` (the words this verb retired are listed below, from its table)
+* `<ARGS>` — Arguments: none, or `--no-wait` (the words this verb retired are in the RETIRED block, from its table)
 
 ###### **Options:**
 

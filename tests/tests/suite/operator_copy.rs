@@ -58,7 +58,7 @@ struct Verbs(Vec<(String, String)>);
 
 impl Verbs {
     fn of(registry: &CommandRegistry) -> Self {
-        Self(registry.command_docs().into_iter().map(|(name, help)| (name, help.to_string())).collect())
+        Self(registry.command_docs())
     }
 
     fn help(&self, verb: &str) -> Option<&str> {

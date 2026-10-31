@@ -60,19 +60,19 @@
 //! that word as surely as `device admit` does. Only a backticked span counts, since the words
 //! retired are ordinary ones (`now`, `list`) that prose uses for other things.
 //!
-//! **What it says of one must be what the table says.** A line naming a retired word may not
-//! give it the other fate: a word the table marks `Gone` (refused, exit 2) may not be said to
-//! run ([`SAYS_RUNS`]), and one it marks `Alias` (still run as its replacement) may not be
-//! said to be gone ([`SAYS_GONE`]). The fate is read against `Is::Gone`/`Is::Alias` from the
-//! tables `verb-check` reads, not judged from the prose alone: the phrases only ask which of two
-//! fates the sentence states, and the table answers which is true. A line pointing to the
-//! replacement does not excuse it (`` `admit <invite>` is `drive enrol <invite>` now, and still
-//! runs it `` pointed, and was false). What a sentence says of a word is read from the word to
-//! the next retired word the line names, or the line's end, so a row saying one word runs and
-//! the next is gone reads each with its own; a fate said before the word is not read. The
-//! phrases are few on purpose, and whole: a line saying the wrong fate in other words passes, and
-//! the help, the one place that states fates for every word, is generated from the tables
-//! (`kotton_shell::CommandRegistry::help_of`), so it cannot say one.
+//! **What a line says of a retired word's fate is not read here.** Whether a word still runs
+//! (`Alias`) or is refused (`Gone`) is the table's, and the one place that states it for every
+//! word, a noun's help, is generated from the table: `kotton_shell::CommandRegistry::help_of`
+//! prints the noun's `help_text` and then a `RETIRED:` block built from its verbs, in both doors
+//! and in the generated reference, and two tests hold that no `help_text` and no clap `about` or
+//! argument help writes a sentence about a retired word of its own noun. #207 asked this sweep to
+//! also read the fate a sentence gives a word; a phrase list read up to the next retired word
+//! refused true lines (`` `sync now` is `sync`; `sync <remote>` is gone ``, `` `device admit` is
+//! gone (`drive enrol <invite>` is run instead) ``), since it charged the word with what the
+//! sentence said of its replacement, a placeholder form or a negation. That is the lesson from the
+//! closed verb-check prose heuristic: a prose reading moves the misread rather than removing it.
+//! So the fate is held by construction where it is stated, and prose outside the help is read
+//! only for whether it points to the replacement.
 //!
 //! **What it does not read.** [`NOT_READ`]: the files whose subject is the retired words
 //! themselves. And [`STILL_RUNS`]: a printed line that names a retired word because the
@@ -89,13 +89,6 @@ use crate::verb_check::Is;
 /// The shell's helpers that answer a retired word: the literal that is their first argument is
 /// the word typed, printed beside its replacement (`client/shell/src/commands/mod.rs`).
 pub const HELPERS: &[&str] = &["deprecated", "retired"];
-
-/// What a line says of a word that still runs: refused of a word the table marks `Gone`.
-/// Matched whole and in any case, from the word to the next retired word the line names.
-pub const SAYS_RUNS: &[&str] = &["still runs", "runs it", "is run"];
-
-/// What a line says of a word that is gone: refused of a word the table marks `Alias`.
-pub const SAYS_GONE: &[&str] = &["gone", "no longer runs"];
 
 /// Files whose subject is the retired words, each with why.
 pub const NOT_READ: &[(&str, &str)] = &[
@@ -214,16 +207,10 @@ pub fn findings(root: &Path, retired: &[Retired]) -> Vec<String> {
         };
         for ((chars, at), subject) in lines {
             let line_text: String = chars.iter().collect();
-            let mut still_runs = |was: &str| match STILL_RUNS.iter().position(|(p, w, l, _)| *p == rel && *w == was && *l == line_text.trim()) {
-                Some(k) => {
-                    used[k] = true;
-                    true
-                }
-                None => false,
-            };
             for (i, r) in unpointed(&chars, retired, subject.as_deref()) {
                 let was = r.was();
-                if still_runs(&was) {
+                if let Some(k) = STILL_RUNS.iter().position(|(p, w, l, _)| *p == rel && *w == was && *l == line_text.trim()) {
+                    used[k] = true;
                     continue;
                 }
                 let kept = if r.gone { "refuses it, exit 2" } else { "still runs it as an alias" };
@@ -232,25 +219,6 @@ pub fn findings(root: &Path, retired: &[Retired]) -> Vec<String> {
                      say `{}`, or name it beside the old word",
                     at[i], r.noun, r.now, r.suggestion()
                 ));
-            }
-            for (i, r) in misfated(&chars, retired, subject.as_deref()) {
-                let was = r.was();
-                if still_runs(&was) {
-                    continue;
-                }
-                out.push(if r.gone {
-                    format!(
-                        "{rel}:{}: says `{was}` runs, but `{}`'s verb table has it gone for `{}` (the tree refuses it, exit 2): \
-                         say it is gone, and `{}`",
-                        at[i], r.noun, r.now, r.suggestion()
-                    )
-                } else {
-                    format!(
-                        "{rel}:{}: says `{was}` is gone, but `{}`'s verb table keeps it as an alias of `{}` (the tree still runs it): \
-                         say it runs `{}`",
-                        at[i], r.noun, r.now, r.now
-                    )
-                });
             }
         }
     }
@@ -384,52 +352,6 @@ fn unpointed<'a>(chars: &[char], retired: &'a [Retired], subject: Option<&str>) 
         .collect();
     out.sort_by_key(|(at, _)| *at);
     out
-}
-
-/// The retired words `chars` names and gives the fate the table does not: a `Gone` word said
-/// to run ([`SAYS_RUNS`]), an `Alias` said to be gone ([`SAYS_GONE`]). What the line says of a
-/// word is read from it to the next retired word the line names, or the line's end.
-fn misfated<'a>(chars: &[char], retired: &'a [Retired], subject: Option<&str>) -> Vec<(usize, &'a Retired)> {
-    let mut found = named(chars, retired, subject);
-    found.sort();
-    let mut out = Vec::new();
-    for (n, (at, k)) in found.iter().enumerate() {
-        let end = found[n + 1..].iter().map(|(a, _)| *a).find(|a| a > at).unwrap_or(chars.len());
-        let r = &retired[*k];
-        let phrases = if r.gone { SAYS_RUNS } else { SAYS_GONE };
-        if phrases.iter().any(|p| says(&chars[*at..end], p)) {
-            out.push((*at, r));
-        }
-    }
-    out
-}
-
-/// Whether `chars` says `phrase` whole, in any case, any run of whitespace between its words.
-fn says(chars: &[char], phrase: &str) -> bool {
-    let text: Vec<char> = lower(chars);
-    let words: Vec<Vec<char>> = phrase.split_whitespace().map(|w| w.chars().collect()).collect();
-    (0..text.len()).any(|i| {
-        if i > 0 && is_word(text[i - 1]) {
-            return false;
-        }
-        let mut j = i;
-        for (n, w) in words.iter().enumerate() {
-            if n > 0 {
-                let gap = j;
-                while text.get(j).is_some_and(|c| c.is_whitespace()) {
-                    j += 1;
-                }
-                if j == gap {
-                    return false;
-                }
-            }
-            if !matches_at(&text, j, w) {
-                return false;
-            }
-            j += w.len();
-        }
-        !text.get(j).copied().is_some_and(is_word)
-    })
 }
 
 /// Whether the literal opening at `at` is the first argument of a call to one of [`HELPERS`].
@@ -843,55 +765,6 @@ fn sync_now() { run(&[\"sync\", \"now\", \"--user\", \"demo\"]); let _ = \"sync 
         assert_eq!(ok("`sync list` is `pin`\n").len(), 1);
         assert_eq!(ok("`device admit` is `drive`\n").len(), 1);
         assert_eq!(ok("`device admit` is `drive enrol <invite>`\n").len(), 0);
-    }
-
-    /// **#207's line: a `Gone` word said to still run is refused, though it points.** The
-    /// clap `about` of `device` said it, and the reference printed it under `device`'s own
-    /// heading, where the bare word names `device admit`; the same sentence with the noun,
-    /// in a Rust literal, is refused too. Said as the table says it, it passes.
-    #[test]
-    fn a_gone_word_said_to_still_run_is_refused() {
-        let page = "## `Kotton device`\n\nManage the devices on your identity. `admit <invite>` is `drive enrol <invite>` now, and still runs it\n";
-        let got = found(&[("docs/cli/reference.md", page)]);
-        assert_eq!(
-            got,
-            vec![
-                "docs/cli/reference.md:3: says `device admit` runs, but `device`'s verb table has it gone for `drive enrol` \
-                 (the tree refuses it, exit 2): say it is gone, and `drive enrol`"
-                    .to_string()
-            ]
-        );
-        for runs in ["still runs it", "runs it as `drive enrol`", "is run as `drive enrol`", "STILL\u{a0}RUNS"] {
-            let line = format!("const A: &str = \"`device admit` is `drive enrol <invite>`, and {runs}\";\n");
-            let got = found(&[("client/cli/src/x.rs", &line)]);
-            assert_eq!(got.len(), 1, "{runs}: {got:#?}");
-            assert!(got[0].contains("says `device admit` runs"), "{got:#?}");
-        }
-        let said = "## `Kotton device`\n\n`admit <invite>` is gone: it is `drive enrol <invite>` now\n";
-        assert_eq!(found(&[("docs/cli/reference.md", said)]), Vec::<String>::new());
-        // Whole: "reruns it", "is running" and "runs items" are not the phrases.
-        let near = "`device admit` is gone (`drive enrol` reruns it; the enrolment is running; it runs items)\n";
-        assert_eq!(found(&[("README.md", near)]), Vec::<String>::new());
-    }
-
-    /// **An `Alias` said to be gone is refused**; said to run, it passes. A row saying one word
-    /// runs and the next is gone reads each with its own words.
-    #[test]
-    fn an_alias_said_to_be_gone_is_refused() {
-        let got = found(&[("README.md", "`sync now` is gone: type `sync`\n")]);
-        assert_eq!(got.len(), 1, "{got:#?}");
-        assert!(
-            got[0].starts_with("README.md:1: says `sync now` is gone, but `sync`'s verb table keeps it as an alias of `sync`"),
-            "{got:#?}"
-        );
-        assert!(found(&[("README.md", "`sync now` no longer runs; use `sync`\n")]).len() == 1);
-        assert_eq!(found(&[("README.md", "`sync now` is `sync`, and still runs it\n")]), Vec::<String>::new());
-        let row = "`sync now` still runs `sync`; `sync add` is gone, for `pin <drive>`\n";
-        assert_eq!(found(&[("README.md", row)]), Vec::<String>::new());
-        let row = "`sync add` is `pin <drive>`, and `sync now` is gone for `sync`\n";
-        let got = found(&[("README.md", row)]);
-        assert_eq!(got.len(), 1, "{got:#?}");
-        assert!(got[0].contains("says `sync now` is gone"), "{got:#?}");
     }
 
     /// **On the noun's own page, the bare word in backticks names it**: under the heading

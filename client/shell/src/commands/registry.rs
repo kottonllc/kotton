@@ -365,6 +365,53 @@ mod tests {
         assert!(!pin.contains("RETIRED:"), "{pin}");
     }
 
+    /// **The fate a RETIRED line states is the table's, by construction** (#207's clause (a),
+    /// held where the fate is stated rather than read back from prose): over a table holding
+    /// both fates, a `Gone` word's line never says it runs and an `Alias`'s never says it is
+    /// gone; and a retired word too long for the column puts its fate on the next line, at the
+    /// column the others use.
+    #[test]
+    fn a_retired_lines_fate_is_the_tables_and_a_long_word_wraps() {
+        let verbs = [
+            Verb::current(""),
+            Verb::alias("old", "noun"),
+            Verb::gone("dropped", "other thing"),
+            Verb::alias("an-alias-past-the-column", "noun new"),
+            Verb::gone("a-gone-word-past-the-column", "noun"),
+            Verb::gone("<place>", "noun"),
+        ];
+        let block = CommandRegistry::new().retired_block("noun", &verbs);
+        let mut lines = block.lines().skip_while(|l| *l != "RETIRED:").skip(1);
+        let mut seen = 0;
+        while let Some(line) = lines.next() {
+            let was = line.trim_start().split("  ").next().unwrap().trim();
+            let verb = verbs.iter().find(|v| format!("noun {}", v.word) == was).unwrap_or_else(|| panic!("`{was}`: {block}"));
+            let fate = if line.trim() == was {
+                assert!(was.len() >= 24, "a short word wrapped: {block}");
+                let next = lines.next().expect("a wrapped line has its fate below");
+                assert!(next.starts_with(&" ".repeat(27)) && !next[27..].starts_with(' '), "fate not at column 27: {block}");
+                next[27..].to_string()
+            } else {
+                assert!(line.starts_with(&format!("  {was:<24} ")), "fate not at column 27: {block}");
+                line[27..].to_string()
+            };
+            match verb.is {
+                VerbIs::Alias { now } => {
+                    assert_eq!(fate, format!("is `{now}`, and still runs it"), "{block}");
+                    assert!(!fate.contains("gone"), "{block}");
+                }
+                VerbIs::Gone { now } => {
+                    assert_eq!(fate, format!("gone: type `{now}`"), "{block}");
+                    assert!(!fate.contains("runs") && !fate.contains("is run"), "{block}");
+                }
+                VerbIs::Current => panic!("a current verb is not retired: {block}"),
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, 5, "{block}");
+        assert!(block.contains("\n  noun a-gone-word-past-the-column\n                           gone: type `noun`"), "{block}");
+    }
+
     /// **No noun's own help text says anything of the words its table retired**: the block
     /// is generated, so a hand-written line about one, in either form (`sync now`, or the
     /// bare word in backticks on the noun's own page), is a second account of the table that
