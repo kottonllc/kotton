@@ -71,7 +71,7 @@ use kotton_peer::relay_keys::{relay_id, RelayId};
 use kotton_store::runtime::user::UserStore;
 use kotton_net::rendezvous::AdmissionKey;
 use kotton_wire::ipc::{
-    OperatedService, OperatorVerb, UnstoodRelayState, SecretText, Unstood, UnstoodRelay, UnstoodWhy, UserRequest, UserResponse,
+    OperatedService, OperatorVerb, UnstoodRelayState, SecretText, Unstood, UnstoodRelay, UnstoodWhy, UserResponse, VaultPeerRequest,
 };
 use kotton_wire::rendezvous::{AdmissionRule, RelayOperatorRequest, RelayOperatorResponse};
 use serde::{Deserialize, Serialize};
@@ -677,7 +677,7 @@ async fn ask_as_operator(runtime: &DeviceRuntime, store: &UserStore, credential:
             };
             // The dial proved the vault's key. Whether it stands this one is its
             // answer to the operator's read.
-            vault_said(tokio::time::timeout(WITHIN, conn.send(&UserRequest::Tenants)).await.ok())
+            vault_said(tokio::time::timeout(WITHIN, conn.send_to_vault(&VaultPeerRequest::Tenants)).await.ok())
         }
     }
 }
@@ -1278,7 +1278,7 @@ async fn held_to_the_line(
             // asked the operator's own read, `vault people`, and what its
             // answer says of the key is [`held_by_the_vaults_answer`]'s to
             // say. Nothing is said to a vault that does not stand it.
-            let said = tokio::time::timeout(WITHIN, conn.send(&UserRequest::Tenants)).await;
+            let said = tokio::time::timeout(WITHIN, conn.send_to_vault(&VaultPeerRequest::Tenants)).await;
             held_by_the_vaults_answer(credential, line, said.ok())
         }
     }
@@ -1593,7 +1593,7 @@ async fn tell(runtime: &DeviceRuntime, store: &UserStore, vault: &OperatorCreden
     }
     let before = stands_of(store, &v);
     let reach = before.as_ref().and_then(|b| b.relays.first()).map(|r| r.hint.as_str());
-    let request = vec![UserRequest::StandAt { relays: set }];
+    let request = vec![VaultPeerRequest::StandAt { relays: set }];
     match tokio::time::timeout(WITHIN, say(runtime, vault, reach, request)).await {
         Ok(Ok(UserResponse::Ok)) => {}
         Ok(Ok(UserResponse::Error { message })) => return Err(not_told(format!("the vault '{}' refused: {message}", vault.name))),
@@ -1783,7 +1783,7 @@ pub(crate) async fn set_pending_rule(
 /// landlord's number: the number is set on the same connection before the
 /// invite's text is handed back, and nobody can take an invite they have not
 /// been given.
-pub(crate) fn requests_for(verb: OperatorVerb) -> Vec<UserRequest> {
+pub(crate) fn requests_for(verb: OperatorVerb) -> Vec<VaultPeerRequest> {
     match verb {
         OperatorVerb::Invite {
             pool,
@@ -1791,20 +1791,20 @@ pub(crate) fn requests_for(verb: OperatorVerb) -> Vec<UserRequest> {
             ttl_seconds,
         } => {
             let mut out = Vec::with_capacity(2);
-            out.push(UserRequest::DeviceInvite {
+            out.push(VaultPeerRequest::DeviceInvite {
                 user_id: pool.clone(),
                 ttl_seconds,
                 as_name: None,
             });
             if let Some(quota) = quota {
-                out.push(UserRequest::SetQuota { user_id: pool, quota });
+                out.push(VaultPeerRequest::SetQuota { user_id: pool, quota });
             }
             out
         }
-        OperatorVerb::Digits { pool } => vec![UserRequest::InviteDigits { user_id: pool }],
-        OperatorVerb::Pools => vec![UserRequest::Tenants],
-        OperatorVerb::SetQuota { pool, quota } => vec![UserRequest::SetQuota { user_id: pool, quota }],
-        OperatorVerb::Drop { pool } => vec![UserRequest::DropTenant { user_id: pool }],
+        OperatorVerb::Digits { pool } => vec![VaultPeerRequest::InviteDigits { user_id: pool }],
+        OperatorVerb::Pools => vec![VaultPeerRequest::Tenants],
+        OperatorVerb::SetQuota { pool, quota } => vec![VaultPeerRequest::SetQuota { user_id: pool, quota }],
+        OperatorVerb::Drop { pool } => vec![VaultPeerRequest::DropTenant { user_id: pool }],
         // Said to the relay, not the vault; and `Stand` and `Move` are said as
         // `StandAt`, from this desktop's record and credentials: see [`speak`].
         OperatorVerb::ReadRule
@@ -2307,7 +2307,7 @@ async fn say(
     runtime: &DeviceRuntime,
     credential: &OperatorCredential,
     stands_at: Option<&str>,
-    requests: Vec<UserRequest>,
+    requests: Vec<VaultPeerRequest>,
 ) -> anyhow::Result<UserResponse> {
     let dialer = credential.dialer(
         Arc::clone(runtime.reachability()),
@@ -2319,7 +2319,7 @@ async fn say(
     // it to stand at.
     let conn = dialer.connect(credential.vault_node(stands_at)?, "").await?;
     let conn = &conn;
-    in_order(requests, |request| async move { conn.send(&request).await }).await
+    in_order(requests, |request| async move { conn.send_to_vault(&request).await }).await
 }
 
 /// Send `requests` one after another, each only once the one before it was
@@ -2335,9 +2335,9 @@ async fn say(
 /// [`requests_for`]'s order exists to prevent. Read this way there is no list
 /// to miss: an answer this desktop does not know is not the invite, so
 /// nothing follows it, and its reader says it.
-async fn in_order<F, Fut>(requests: Vec<UserRequest>, mut send: F) -> anyhow::Result<UserResponse>
+async fn in_order<F, Fut>(requests: Vec<VaultPeerRequest>, mut send: F) -> anyhow::Result<UserResponse>
 where
-    F: FnMut(UserRequest) -> Fut,
+    F: FnMut(VaultPeerRequest) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<UserResponse>>,
 {
     let mut answer = None;
@@ -2355,11 +2355,11 @@ where
 /// it in [`requests_for`] may follow: an invite's answer is the invite, a
 /// number's is the pool's readout. Every other answer is not, and nor is any
 /// answer to a request no other follows — [`in_order`] hands it back as it is.
-fn as_asked(request: &UserRequest, said: &UserResponse) -> bool {
+fn as_asked(request: &VaultPeerRequest, said: &UserResponse) -> bool {
     matches!(
         (request, said),
-        (UserRequest::DeviceInvite { .. }, UserResponse::PairAdvertising { .. })
-            | (UserRequest::SetQuota { .. }, UserResponse::VaultCapacityResult { .. })
+        (VaultPeerRequest::DeviceInvite { .. }, UserResponse::PairAdvertising { .. })
+            | (VaultPeerRequest::SetQuota { .. }, UserResponse::VaultCapacityResult { .. })
     )
 }
 
@@ -3409,7 +3409,7 @@ mod tests {
         });
         assert!(matches!(
             with.as_slice(),
-            [UserRequest::DeviceInvite { user_id: a, ttl_seconds: 60, as_name: None }, UserRequest::SetQuota { user_id: b, quota: 5 }]
+            [VaultPeerRequest::DeviceInvite { user_id: a, ttl_seconds: 60, as_name: None }, VaultPeerRequest::SetQuota { user_id: b, quota: 5 }]
                 if a == "sam" && b == "sam"
         ));
         let without = requests_for(OperatorVerb::Invite {
@@ -3417,22 +3417,22 @@ mod tests {
             quota: None,
             ttl_seconds: 60,
         });
-        assert!(matches!(without.as_slice(), [UserRequest::DeviceInvite { .. }]));
-        assert!(matches!(requests_for(OperatorVerb::Pools).as_slice(), [UserRequest::Tenants]));
+        assert!(matches!(without.as_slice(), [VaultPeerRequest::DeviceInvite { .. }]));
+        assert!(matches!(requests_for(OperatorVerb::Pools).as_slice(), [VaultPeerRequest::Tenants]));
         assert!(
             matches!(
                 requests_for(OperatorVerb::Digits { pool: "sam".into() }).as_slice(),
-                [UserRequest::InviteDigits { user_id }] if user_id == "sam"
+                [VaultPeerRequest::InviteDigits { user_id }] if user_id == "sam"
             ),
             "the digits are asked of the vault for the pool named, and nothing else is said"
         );
         assert!(matches!(
             requests_for(OperatorVerb::SetQuota { pool: "sam".into(), quota: 9 }).as_slice(),
-            [UserRequest::SetQuota { quota: 9, .. }]
+            [VaultPeerRequest::SetQuota { quota: 9, .. }]
         ));
         assert!(matches!(
             requests_for(OperatorVerb::Drop { pool: "sam".into() }).as_slice(),
-            [UserRequest::DropTenant { .. }]
+            [VaultPeerRequest::DropTenant { .. }]
         ));
     }
 
@@ -3449,8 +3449,8 @@ mod tests {
         let answer = in_order(requests, |request| {
             sent.lock().unwrap().push(request.variant_name());
             let said = match &request {
-                UserRequest::DeviceInvite { .. } => invite.clone(),
-                UserRequest::SetQuota { .. } => quota.clone(),
+                VaultPeerRequest::DeviceInvite { .. } => invite.clone(),
+                VaultPeerRequest::SetQuota { .. } => quota.clone(),
                 other => panic!("an invite sent {}", other.variant_name()),
             };
             async move { Ok(said) }

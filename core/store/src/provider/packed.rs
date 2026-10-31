@@ -114,7 +114,61 @@ pub fn has_its_fixed_size(key: &str, len: u64) -> bool {
 
 /// Whether the storage key `key` names a content pack ([`CONTENT_PACK_PREFIX`]).
 pub fn is_content_pack(key: &str) -> bool {
-    key.trim_start_matches('/').starts_with(CONTENT_PACK_PREFIX)
+    kind(key) == ObjectKind::ContentPack
+}
+
+/// What a storage key names, by the namespace rule of the store: the one
+/// reading of a key, which every site that sorts keys calls ([`kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectKind {
+    /// A superblock: a key under [`SUPERBLOCK_PREFIX`]`/`.
+    Superblock,
+    /// A content pack: a key under [`CONTENT_PACK_PREFIX`].
+    ContentPack,
+    /// An index pack: any other key under [`PACK_PREFIX`]`/`, packs written
+    /// before the split among them.
+    IndexPack,
+    /// Any other key in the reserved `_` namespace: the tombstone set
+    /// ([`TOMBSTONES_KEY`]), a directory entry such as `_pack` itself, or a
+    /// name this rule does not know. Never a person's file.
+    Reserved,
+    /// A blinded object: one file of the person's, loose.
+    File,
+}
+
+/// The kind of object the storage key `key` names.
+///
+/// - **The `/` boundary.** A prefix names its directory, not a stem: a key is
+///   a pack only under `_pack/`, a superblock only under `_superblock/`. So
+///   `_packets` is not a pack, and neither is `_pack` itself (a directory
+///   entry a listing returns); both are [`ObjectKind::Reserved`], as is `_`.
+/// - **A leading `/`** is not part of the name and is read past: `/_pack/i-1`
+///   is an index pack. That was the answer of each site that sorted keys
+///   before this one — the sync scope, the content-pack test, the pack
+///   fetch — but one: the listing walk of the blinded store asked whether a
+///   key *starts with* `_`, and so read `/_x` as a file. No key the store
+///   produces carries a leading `/` (a listing rebuilds its keys from path
+///   components, and blinded keys and reserved keys are written without
+///   one), so the two answers never met a key on which they differ; this
+///   one is kept.
+/// - **The rest of the `_` namespace** is [`ObjectKind::Reserved`].
+///   Blinded components are base32, an alphabet with no `_`, so only a key
+///   in the reserved namespace starts with one, and every other key is
+///   [`ObjectKind::File`].
+pub fn kind(key: &str) -> ObjectKind {
+    let key = key.trim_start_matches('/');
+    let under = |prefix: &str| key.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'));
+    if under(SUPERBLOCK_PREFIX) {
+        ObjectKind::Superblock
+    } else if key.starts_with(CONTENT_PACK_PREFIX) {
+        ObjectKind::ContentPack
+    } else if under(PACK_PREFIX) {
+        ObjectKind::IndexPack
+    } else if key.starts_with('_') {
+        ObjectKind::Reserved
+    } else {
+        ObjectKind::File
+    }
 }
 
 /// Storage key of the sealed tombstone set (pending deletes of packed files).
@@ -2961,7 +3015,7 @@ impl<S: LooseObjectSource + 'static> SealedObjectAccess for PackedObjectStorage<
     async fn put_sealed(&self, key: &Path, blob: &[u8]) -> ObjectStorageResult<()> {
         self.inner.put_sealed(key, blob).await?;
         let key_str = key.to_string_lossy();
-        if key_str.starts_with(SUPERBLOCK_PREFIX) {
+        if kind(&key_str) == ObjectKind::Superblock {
             self.invalidate_manifest_cache();
         } else if key_str == TOMBSTONES_KEY {
             *self.tombstone_cache.lock().unwrap() = None;
@@ -3118,6 +3172,38 @@ mod tests {
 
     const CEK: [u8; 32] = [0x42; 32];
 
+    /// The namespace rule's boundary cases, read once (`kind`).
+    #[test]
+    fn kind_reads_each_key_by_the_one_namespace_rule() {
+        let blinded = kotton_crypto::path_blind::blind_object_key(
+            &derive_path_blind_key(&CEK),
+            "files/notes/a.txt",
+        );
+        assert!(!blinded.starts_with('_') && blinded.contains('/'), "a blinded key: {blinded}");
+        for (key, want) in [
+            ("_superblock/7", ObjectKind::Superblock),
+            ("_pack/c-1", ObjectKind::ContentPack),
+            ("_pack/i-1", ObjectKind::IndexPack),
+            // A pack written before the split carries no mark.
+            ("_pack/0123", ObjectKind::IndexPack),
+            // A leading `/` is read past.
+            ("/_pack/i-1", ObjectKind::IndexPack),
+            ("/_pack/c-1", ObjectKind::ContentPack),
+            ("/_superblock/7", ObjectKind::Superblock),
+            // The `/` boundary: a prefix names its directory, not a stem.
+            ("_packets", ObjectKind::Reserved),
+            ("_superblocks/7", ObjectKind::Reserved),
+            ("_pack", ObjectKind::Reserved),
+            ("_superblock", ObjectKind::Reserved),
+            ("_", ObjectKind::Reserved),
+            (TOMBSTONES_KEY, ObjectKind::Reserved),
+            (blinded.as_str(), ObjectKind::File),
+        ] {
+            assert_eq!(kind(key), want, "{key}");
+        }
+        assert!(is_content_pack("_pack/c-1") && !is_content_pack("_pack/i-1"));
+    }
+
     type TestStore =
         PackedObjectStorage<BlindedObjectStorage<EncryptedObjectStorage<MemoryObjectStorage>>>;
 
@@ -3211,9 +3297,9 @@ mod tests {
 
         let mut superblock_sizes = Vec::new();
         for m in backing.list(Path::new("")).await.unwrap() {
-            if m.key.starts_with(PACK_PREFIX) {
+            if matches!(kind(&m.key), ObjectKind::ContentPack | ObjectKind::IndexPack) {
                 assert!(has_its_fixed_size(&m.key, m.size), "pack {} is {} bytes, not its class's fixed size", m.key, m.size);
-            } else if m.key.starts_with(SUPERBLOCK_PREFIX) {
+            } else if kind(&m.key) == ObjectKind::Superblock {
                 superblock_sizes.push(m.size);
             } else {
                 panic!("unexpected replica-visible object after packing: {}", m.key);

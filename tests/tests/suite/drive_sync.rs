@@ -17,7 +17,7 @@ use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto};
 use crate::vault::{enrol_vault_from, recover_from, spawn_device, spawn_vault, tenants_at_the_door, try_ask_the_vault_as, RunningDevice, RunningVault, VaultIdentity};
 use kotton::SyncDirection;
 use kotton_schemas::membership::Posture;
-use kotton_wire::ipc::{TenantDeviceAct, TenantDeviceChange, UserRequest, UserResponse};
+use kotton_wire::ipc::{TenantDeviceAct, TenantDeviceChange, UserRequest, UserResponse, VaultPeerRequest};
 use kotton_wire::remote::RemoteBackend;
 
 const USER: &str = "alice";
@@ -34,7 +34,7 @@ async fn devices_at(vault: &RunningVault, user: &str) -> u32 {
 
 /// What the vault answers `device`, dialling it under its own key, for `alice`'s capacity.
 async fn capacity_as(device: &RunningDevice, vault: &VaultIdentity) -> Result<UserResponse, String> {
-    let request = serde_json::to_vec(&UserRequest::VaultCapacity { user_id: USER.into() }).unwrap();
+    let request = serde_json::to_vec(&VaultPeerRequest::VaultCapacity { user_id: USER.into() }).unwrap();
     try_ask_the_vault_as(device, vault, request).await
 }
 
@@ -124,7 +124,7 @@ async fn a_key_not_introduced_under_the_identity_is_refused_at_the_drive() {
     };
     let not_the_identity = kotton_peer::daemon::nodes::load_device_operational_key(&*a.secrets).expect("A's device key");
     let signature = not_the_identity.sign(&change.signed_bytes(USER)).to_bytes().to_vec();
-    let request = serde_json::to_vec(&UserRequest::TenantDevice { user_id: USER.into(), change, signature }).unwrap();
+    let request = serde_json::to_vec(&VaultPeerRequest::TenantDevice { user_id: USER.into(), change, signature }).unwrap();
     let answer = try_ask_the_vault_as(&a, &drive, request).await.expect("A reaches the drive");
     match answer {
         UserResponse::Error { message } => assert!(message.contains("not signed under the tenant's identity"), "{message}"),

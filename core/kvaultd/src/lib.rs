@@ -326,12 +326,16 @@ impl Vault {
     /// landlord's door's context because the operator's key reaches the
     /// door's four landlord verbs (`control::landlord`); what reaches what is
     /// `peer::reaches`.
+    ///
+    /// A peer's bytes decode as `VaultPeerRequest` and as nothing else: a verb
+    /// that is not the vault's — a plaintext read, a record insert — is an
+    /// unknown variant here, answered before any standing is read (`peer`).
     fn peer_handler(&self) -> kotton_peer::PeerHandler {
         let ctx = Arc::clone(&self.control);
         Arc::new(move |peer_did: String, req_bytes: Vec<u8>| {
             let ctx = Arc::clone(&ctx);
             Box::pin(async move {
-                let request = match serde_json::from_slice::<kotton_wire::ipc::UserRequest>(&req_bytes) {
+                let request = match serde_json::from_slice::<kotton_wire::ipc::VaultPeerRequest>(&req_bytes) {
                     Ok(r) => r,
                     Err(e) => {
                         return serde_json::to_vec(&kotton_wire::ipc::UserResponse::Error {

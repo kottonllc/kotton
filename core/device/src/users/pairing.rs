@@ -1337,7 +1337,7 @@ async fn refused_as(runtime: &DeviceRuntime, node: kotton_wire::peer::PairedNode
         let attempt = async {
             let client = runtime.open_peer_client(node.clone(), user_id, None).await.ok()?;
             client
-                .send(&kotton_wire::ipc::UserRequest::VaultCapacity {
+                .send_to_vault(&kotton_wire::ipc::VaultPeerRequest::VaultCapacity {
                     user_id: user_id.to_string(),
                 })
                 .await
