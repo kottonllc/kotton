@@ -171,6 +171,12 @@ impl CommandRegistry {
     /// `now` itself, but a bare other noun (`sync add` is `pin`) is said with the first
     /// current placeholder of that noun's table (`pin <drive>`), since the noun alone leaves
     /// the reader to find its verb.
+    ///
+    /// A bare other noun with no placeholder is printed alone, an answer that names nothing
+    /// to type after it. No table the binary ships reaches that: `verb-check` refuses a table
+    /// that retires a word for a noun with none, so the entry names the verb instead (`sync
+    /// list` is `pin list`). It stays here, not as a panic, because a help page is rendered
+    /// for any registry, a guest shell's or a test's, that the check never reads.
     fn typed_for(&self, noun: &str, now: &str) -> String {
         let mut words = now.split_whitespace();
         let (Some(target), None) = (words.next(), words.next()) else { return now.to_string() };
