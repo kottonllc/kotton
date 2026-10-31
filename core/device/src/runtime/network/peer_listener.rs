@@ -38,7 +38,7 @@ impl DeviceRuntime {
         let handle = self.spawn_accept_loop(
             Arc::from(listener),
             format!("QUIC peer (port {port})"),
-            Arc::clone(&handler),
+            handler,
         );
         self.accept_tasks.lock().await.push(handle);
 
