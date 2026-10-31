@@ -4580,18 +4580,18 @@ mod secret_debug_tests {
         ];
         let mut plain = Vec::new();
         for (which, surface, at_least) in surfaces {
-            let mut variant = "";
+            // The one reader of the format, held to the recording's own header.
+            let blocks = crate::recorded_surface::read(surface)
+                .unwrap_or_else(|e| panic!("the {which} surface cannot be read as a recording: {e}"));
             let mut seen = 0;
-            for line in surface.lines() {
-                if !line.starts_with(' ') && !line.starts_with('#') {
-                    variant = line.trim();
-                    continue;
-                }
-                let Some((name, ty)) = line.trim().split_once(": ") else { continue };
-                if SECRET_NAMES.contains(&name) {
-                    seen += 1;
-                    if ty != "bool" && !SECRET_TYPES.iter().any(|secret| ty.contains(secret)) {
-                        plain.push(format!("{which} {variant}.{name}: {ty}"));
+            for block in &blocks {
+                for line in &block.lines {
+                    let Some((name, ty)) = line.text.trim().split_once(": ") else { continue };
+                    if SECRET_NAMES.contains(&name) {
+                        seen += 1;
+                        if ty != "bool" && !SECRET_TYPES.iter().any(|secret| ty.contains(secret)) {
+                            plain.push(format!("{which} {}.{name}: {ty} (line {})", block.name, line.at));
+                        }
                     }
                 }
             }
