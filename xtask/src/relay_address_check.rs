@@ -89,7 +89,7 @@ const BASELINE: &[(&str, &str, usize)] = &[
     // A probe's dial address, and an invite's relay as written and as read back.
     ("core/peer/src/pairing.rs", "relay_answers", 1),
     ("core/peer/src/pairing.rs", "new", 1),
-    ("core/peer/src/pairing.rs", "of", 1),
+    ("core/peer/src/pairing.rs", "meeting", 1),
 ];
 
 /// One finding, already worded.
