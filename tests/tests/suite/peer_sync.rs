@@ -106,30 +106,32 @@ struct Pushed {
     content_packs: usize,
     /// Superblock generations committed with the index packs.
     superblocks: BTreeSet<String>,
-    /// Any other `_`-prefixed key (e.g. the tombstone set, `_tombstones`).
+    /// Any other `_`-prefixed key (e.g. the tombstone set, `_tombstones`), as
+    /// `kotton_store::packed::kind` reads it.
     /// Blinded keys are base32 and never carry `_`, so a key here is a sealed
     /// object kind this accounting does not know, not a person's file.
     reserved: BTreeSet<String>,
 }
 
 fn pushed(result: &kotton_wire::remote::SyncResult) -> Pushed {
-    use kotton_store::packed::{is_content_pack, PACK_PREFIX};
-    use kotton_store::superblock::SUPERBLOCK_PREFIX;
+    use kotton_store::packed::{kind, ObjectKind};
     let mut out = Pushed::default();
     for (dir, key, _) in &result.transfers {
         if !matches!(dir, SyncDirection::Push) {
             continue;
         }
-        if key.starts_with(SUPERBLOCK_PREFIX) {
-            out.superblocks.insert(key.clone());
-        } else if is_content_pack(key) {
-            out.content_packs += 1;
-        } else if key.starts_with(PACK_PREFIX) {
-            out.index_packs.insert(key.clone());
-        } else if key.starts_with('_') {
-            out.reserved.insert(key.clone());
-        } else {
-            out.files += 1;
+        match kind(key) {
+            ObjectKind::Superblock => {
+                out.superblocks.insert(key.clone());
+            }
+            ObjectKind::ContentPack => out.content_packs += 1,
+            ObjectKind::IndexPack => {
+                out.index_packs.insert(key.clone());
+            }
+            ObjectKind::Reserved => {
+                out.reserved.insert(key.clone());
+            }
+            ObjectKind::File => out.files += 1,
         }
     }
     assert_eq!(
@@ -417,8 +419,10 @@ async fn sync_lww_local_newer_wins() {
 ///
 /// No file is pushed. The pass does push the history log segment carrying this
 /// device's whole-keeper claim (one index pack, one superblock;
-/// [`assert_first_pass`]), which the backup does not hold: a 1 MiB index pack
-/// carrying one row to a remote where no file moves is #144's concession.
+/// [`assert_first_pass`]), which the backup does not hold: one index pack,
+/// carrying one row to a remote where no file moves. Its fixed 1 MiB is
+/// `INDEX_PACK_SIZE`'s design; how many such packs a drive's records add up to
+/// is #144's concession.
 #[tokio::test]
 async fn sync_lww_remote_newer_wins() {
     let backup_dir = tempfile::tempdir().expect("backup tempdir");

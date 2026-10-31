@@ -537,7 +537,12 @@ mod packing_tests {
         assert!(result.pushed >= 2, "the pack and its superblock cross: {result:?}");
         for (_, key, bytes) in &result.transfers {
             assert!(
-                key.starts_with("_pack/") || key.starts_with("_superblock/"),
+                matches!(
+                    crate::packed::kind(key),
+                    crate::packed::ObjectKind::Superblock
+                        | crate::packed::ObjectKind::ContentPack
+                        | crate::packed::ObjectKind::IndexPack
+                ),
                 "{key} crossed at {bytes} bytes, and is neither a pack nor a superblock"
             );
         }
@@ -687,12 +692,13 @@ mod packing_tests {
         assert!(!files.is_empty());
         let mut superblock_sizes = Vec::new();
         for (path, size) in &files {
-            if path.starts_with("_pack/") {
+            use crate::packed::{kind, ObjectKind};
+            if matches!(kind(path), ObjectKind::ContentPack | ObjectKind::IndexPack) {
                 assert!(
                     crate::packed::has_its_fixed_size(path, *size),
                     "pack {path} is {size} bytes, not its class's fixed size"
                 );
-            } else if path.starts_with("_superblock/") {
+            } else if kind(path) == ObjectKind::Superblock {
                 superblock_sizes.push(*size);
             } else {
                 panic!("unexpected file on disk after packing: {path}");
