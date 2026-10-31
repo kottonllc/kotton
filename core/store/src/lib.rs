@@ -10,7 +10,9 @@ pub mod provider;
 pub mod runtime;
 pub mod shelf;
 pub mod stack;
+pub mod storage_key;
 
 pub use provider::*;
 pub use fs_view::Fs;
 pub use shelf::LocalShelves;
+pub use storage_key::{NotCanonical, StorageKey};
