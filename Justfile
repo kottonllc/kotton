@@ -340,6 +340,13 @@ lint:
     cargo xtask docs-present-check
     # docs/cli/reference.md is generated from the CLI's command tree; checked, never
     # rewritten, so a dirty copy cannot go green.
+    # This build is also what holds the `cli-docs`-gated xtask code (`verb_check_run`,
+    # `verb_check::tables_of`, `verb_tables::drift`, gen-docs/docs-check) to no rustc warnings:
+    # xtask's crate root denies warnings under that feature, at no extra compile. Clippy-only
+    # lints on that code are not held. A `cargo clippy -p xtask --features cli-docs --all-targets
+    # -- -D warnings` line was tried and cost more: on `lint.yml`, uncached, single-run step
+    # comparison, the `just lint` step took 10m56s with it against 8m43s on the base head (other
+    # base runs 8m26s to 9m21s, one 12m34s); with the deny instead it took 8m55s.
     cargo xtask-docs docs-check
     # The clap tree and the REPL's registry are kotton-protocol's command-tree decision's: every
     # name either registers has a place in it, and `drive`, `pin` and `sync` are one tree, held
