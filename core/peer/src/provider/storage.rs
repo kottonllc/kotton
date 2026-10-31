@@ -17,7 +17,7 @@ use kotton_sys::store::{
     ObjectMetadata, ObjectStorage, ObjectStorageError, ObjectStorageResult, SealedObjectAccess,
 };
 use kotton_wire::{
-    ipc::{UserRequest, UserResponse},
+    ipc::{UserRequest, UserResponse, VaultPeerRequest},
     peer::PairedNode,
 };
 use std::net::SocketAddr;
@@ -153,6 +153,25 @@ impl KottonPeerObjectStorage {
 
     /// Send a `DeviceRequest` to the peer and deserialize the `DeviceResponse`.
     pub async fn send(&self, req: &UserRequest) -> anyhow::Result<UserResponse> {
+        self.exchange(req).await
+    }
+
+    /// Send one of a vault's own verbs — a tenant's or the landlord's — to a
+    /// peer that is a vault, and deserialize its answer.
+    ///
+    /// The vault's peer acceptor decodes `VaultPeerRequest` and nothing else,
+    /// so a verb only a vault answers is built as that type here rather than as
+    /// the device's `UserRequest`. The sealed verbs the [`SealedObjectAccess`]
+    /// impl sends, and the `NodeRelay` asked on connect, go through
+    /// [`Self::send`]: they are said alike to a device and a vault, and both
+    /// peer wires mirror the door's spelling of them.
+    pub async fn send_to_vault(&self, req: &VaultPeerRequest) -> anyhow::Result<UserResponse> {
+        self.exchange(req).await
+    }
+
+    /// One request and its answer. Private, so what may be sent is what the
+    /// two typed doors above name.
+    async fn exchange(&self, req: &impl serde::Serialize) -> anyhow::Result<UserResponse> {
         let bytes = serde_json::to_vec(req)?;
         let resp_bytes = self.channel.request(&bytes).await?;
         let resp = serde_json::from_slice::<UserResponse>(&resp_bytes)?;

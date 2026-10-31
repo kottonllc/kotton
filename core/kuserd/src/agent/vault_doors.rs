@@ -35,7 +35,7 @@ use kotton_peer::daemon::nodes::load_signing_key;
 use kotton_peer::membership::Membership as _;
 use kotton_peer::rendezvous;
 use kotton_schemas::membership::Role;
-use kotton_wire::ipc::{CarriedMessage, Carrying, HeldDoor, UserRequest, UserResponse};
+use kotton_wire::ipc::{CarriedMessage, Carrying, HeldDoor, UserResponse, VaultPeerRequest};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -208,7 +208,7 @@ pub async fn sync_once(
                 }
             };
             match conn
-                .send(&UserRequest::HoldDoors {
+                .send_to_vault(&VaultPeerRequest::HoldDoors {
                     user_id: user_id.clone(),
                     doors: doors.clone(),
                 })
@@ -240,7 +240,7 @@ pub async fn sync_once(
             let mut ack: Vec<String> = Vec::new();
             for _round in 0..8 {
                 let items = match conn
-                    .send(&UserRequest::TakeDeliveries {
+                    .send_to_vault(&VaultPeerRequest::TakeDeliveries {
                         user_id: user_id.clone(),
                         ack: std::mem::take(&mut ack),
                     })
@@ -283,7 +283,7 @@ pub async fn sync_once(
             }
             if !ack.is_empty() {
                 let _ = conn
-                    .send(&UserRequest::TakeDeliveries {
+                    .send_to_vault(&VaultPeerRequest::TakeDeliveries {
                         user_id: user_id.clone(),
                         ack,
                     })
@@ -304,7 +304,7 @@ pub async fn sync_once(
             // it is signed for or its doors have passed, and only it knows.
             // Handing nothing and naming nothing is the readout.
             let (carrying, mut room) = match conn
-                .send(&UserRequest::CarryFrame {
+                .send_to_vault(&VaultPeerRequest::CarryFrame {
                     user_id: user_id.clone(),
                     messages: vec![],
                     drop: vec![],
@@ -344,7 +344,7 @@ pub async fn sync_once(
                 }
                 let handed = messages.len();
                 match conn
-                    .send(&UserRequest::CarryFrame {
+                    .send_to_vault(&VaultPeerRequest::CarryFrame {
                         user_id: user_id.clone(),
                         messages,
                         drop: std::mem::take(&mut drop),
@@ -364,7 +364,7 @@ pub async fn sync_once(
                     Ok(other) => {
                         tracing::warn!(user_id, vault = %label, handed, ?other, "vault refused to carry a frame of the outbox");
                         match conn
-                            .send(&UserRequest::CarryFrame { user_id: user_id.clone(), messages: vec![], drop: vec![] })
+                            .send_to_vault(&VaultPeerRequest::CarryFrame { user_id: user_id.clone(), messages: vec![], drop: vec![] })
                             .await
                         {
                             Ok(UserResponse::FrameCarried { room: left, .. }) => room = left as usize,
@@ -698,7 +698,7 @@ mod tests {
         let mut handed: Vec<String> = Vec::new();
         for (i, frame) in frames.iter().enumerate() {
             handed.extend(frame.iter().map(|m| m.sealed.ephemeral_pub.clone()));
-            let request = UserRequest::CarryFrame {
+            let request = VaultPeerRequest::CarryFrame {
                 user_id: "alice".into(),
                 messages: frame.clone(),
                 drop: if i == 0 { gone.clone() } else { vec![] },
@@ -845,7 +845,7 @@ mod tests {
         let mut in_frames = Vec::new();
         for (i, frame) in frames.iter().enumerate() {
             in_frames.extend(frame.iter().map(|m| m.sealed.ephemeral_pub.clone()));
-            let request = UserRequest::CarryFrame { user_id: "alice".into(), messages: frame.clone(), drop: vec![] };
+            let request = VaultPeerRequest::CarryFrame { user_id: "alice".into(), messages: frame.clone(), drop: vec![] };
             let bytes = serde_json::to_vec(&request).unwrap().len();
             assert!(bytes < FRAME_CAP, "frame {i} is {bytes} bytes in a {FRAME_CAP} byte frame");
         }

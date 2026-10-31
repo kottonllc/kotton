@@ -152,7 +152,7 @@ use kotton_peer::daemon::drives::{self as record, Drive};
 use kotton_peer::KottonPeerObjectStorage;
 use kotton_store::runtime::user::UserStore;
 use kotton_sys::store::SealedObjectAccess as _;
-use kotton_wire::ipc::{DriveDescriptor, MadeDrive, TenantDrive, UserRequest, UserResponse, FIRST_DRIVE_ID, FIRST_DRIVE_TREE};
+use kotton_wire::ipc::{DriveDescriptor, MadeDrive, TenantDrive, UserResponse, VaultPeerRequest, FIRST_DRIVE_ID, FIRST_DRIVE_TREE};
 use kotton_wire::peer::PairedNode;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -284,7 +284,7 @@ pub async fn follow(
     vault_key: &[u8; 32],
     client: &KottonPeerObjectStorage,
 ) -> io::Result<Vec<Copy>> {
-    let listed = match ask(client, UserRequest::TenantDrives { user_id: user_id.to_string() }).await? {
+    let listed = match ask(client, VaultPeerRequest::TenantDrives { user_id: user_id.to_string() }).await? {
         UserResponse::TenantDrivesResult { drives } => drives,
         UserResponse::Error { message } => return Err(io::Error::other(message)),
         other => return Err(io::Error::other(format!("the vault answered {other:?} to TenantDrives"))),
@@ -319,7 +319,7 @@ pub async fn follow(
 async fn seal_with_id(store: &UserStore, user_id: &str, client: &KottonPeerObjectStorage, copy: &Copy) -> io::Result<()> {
     let Some(drive) = copy.made() else { return Ok(()) };
     let sealed_name = SealedName { name: copy.name.clone(), id: copy.id.clone() }.seal(store, &copy.tree, true)?;
-    match ask(client, UserRequest::TenantDriveName { user_id: user_id.to_string(), drive, sealed_name }).await? {
+    match ask(client, VaultPeerRequest::TenantDriveName { user_id: user_id.to_string(), drive, sealed_name }).await? {
         UserResponse::Ok => Ok(()),
         UserResponse::Error { message } => Err(io::Error::other(message)),
         other => Err(io::Error::other(format!("the vault answered {other:?} to TenantDriveName"))),
@@ -371,8 +371,8 @@ fn read_listing(
     copies
 }
 
-async fn ask(client: &KottonPeerObjectStorage, request: UserRequest) -> io::Result<UserResponse> {
-    tokio::time::timeout(EACH_VAULT, client.send(&request))
+async fn ask(client: &KottonPeerObjectStorage, request: VaultPeerRequest) -> io::Result<UserResponse> {
+    tokio::time::timeout(EACH_VAULT, client.send_to_vault(&request))
         .await
         .map_err(|_| io::Error::other("the vault did not answer in time"))?
         .map_err(|e| io::Error::other(e.to_string()))
@@ -550,7 +550,7 @@ pub async fn create(
     // The drive's id, minted once, here, and sealed with every copy a move
     // makes; the tree's id is the vault's and is minted fresh at each.
     let sealed_name = SealedName { name: name.clone(), id: mint_id() }.seal(store, &tree, true)?;
-    match ask(&client, UserRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
+    match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
         UserResponse::Ok => {}
         UserResponse::Error { message } => return refused(format!("drive create: the vault '{}' refused: {message}", vault.node.id)),
         other => return refused(format!("drive create: the vault answered {other:?}")),
@@ -628,7 +628,7 @@ pub trait VaultEnd: Send + Sync {
     /// Write one sealed object, as it rests.
     async fn write(&self, key: &str, blob: &[u8]) -> Result<(), String>;
     /// A tenant verb the vault answers `Ok` to, or why not.
-    async fn tell(&self, request: UserRequest) -> Result<(), String>;
+    async fn tell(&self, request: VaultPeerRequest) -> Result<(), String>;
 }
 
 /// A vault reached over the peer link, its sealed verbs pointed at one tree.
@@ -646,7 +646,7 @@ impl VaultEnd for PeerEnd {
     async fn write(&self, key: &str, blob: &[u8]) -> Result<(), String> {
         self.0.put_sealed(Path::new(key), blob).await.map_err(|e| e.to_string())
     }
-    async fn tell(&self, request: UserRequest) -> Result<(), String> {
+    async fn tell(&self, request: VaultPeerRequest) -> Result<(), String> {
         match ask(&self.0, request).await.map_err(|e| e.to_string())? {
             UserResponse::Ok => Ok(()),
             UserResponse::Error { message } => Err(message),
@@ -660,7 +660,7 @@ impl VaultEnd for PeerEnd {
 /// ask that acted and whose answer was lost is answered `Ok` the second time;
 /// an `Err` from the second is the vault saying it still keeps the tree.
 pub async fn retire(end: &dyn VaultEnd, user_id: &str, drive: MadeDrive) -> Result<(), String> {
-    let ask = || end.tell(UserRequest::TenantDriveRetire { user_id: user_id.to_string(), drive });
+    let ask = || end.tell(VaultPeerRequest::TenantDriveRetire { user_id: user_id.to_string(), drive });
     match ask().await {
         Ok(()) => Ok(()),
         Err(_) => ask().await,
@@ -711,7 +711,7 @@ pub async fn carry_and_settle(
                 wanted.len()
             ));
         }
-        to.tell(UserRequest::TenantDriveName { user_id: user_id.to_string(), drive: to_id, sealed_name: finished_name })
+        to.tell(VaultPeerRequest::TenantDriveName { user_id: user_id.to_string(), drive: to_id, sealed_name: finished_name })
             .await
             .map_err(|e| format!("the other vault did not name the drive: {e}"))
     }
@@ -885,7 +885,7 @@ pub async fn move_to(
     let carried_name = SealedName { name: name.to_string(), id: source.id.clone() };
     let unfinished_name = carried_name.seal(store, &to_tree, false)?;
     let finished_name = carried_name.seal(store, &to_tree, true)?;
-    match ask(&dest_client, UserRequest::TenantDriveMake { user_id: user_id.to_string(), drive: to_id, sealed_name: unfinished_name }).await? {
+    match ask(&dest_client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive: to_id, sealed_name: unfinished_name }).await? {
         UserResponse::Ok => {}
         UserResponse::Error { message } => return refused(format!("drive move: '{}' refused the drive: {message}", dest.node.id)),
         other => return refused(format!("drive move: '{}' answered {other:?}", dest.node.id)),
@@ -1042,11 +1042,11 @@ mod tests {
             self.objects.lock().unwrap().push((key.to_string(), blob.to_vec()));
             Ok(())
         }
-        async fn tell(&self, request: UserRequest) -> Result<(), String> {
+        async fn tell(&self, request: VaultPeerRequest) -> Result<(), String> {
             self.told.lock().unwrap().push(request.variant_name());
             match request {
-                UserRequest::TenantDriveRetire { .. } if self.refuse_retire.load(Ordering::SeqCst) => Err("the vault would not".into()),
-                UserRequest::TenantDriveRetire { .. } => {
+                VaultPeerRequest::TenantDriveRetire { .. } if self.refuse_retire.load(Ordering::SeqCst) => Err("the vault would not".into()),
+                VaultPeerRequest::TenantDriveRetire { .. } => {
                     self.objects.lock().unwrap().clear();
                     if self.lose_retire_answer.swap(false, Ordering::SeqCst) {
                         return Err("the answer did not arrive".into());

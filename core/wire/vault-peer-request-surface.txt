@@ -1,0 +1,80 @@
+# The JSON surface of the vault peer request channel. Generated — do not hand-edit.
+# Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
+# Variants sorted by name; fields in declaration order, which is the order
+# serde writes them. See xtask/src/wire_check.rs for why this file exists.
+# variants: 21
+CarryFrame
+    user_id: String
+    messages: Vec<crate::ipc::CarriedMessage>
+    drop: Vec<String>
+DeviceInvite
+    user_id: String
+    ttl_seconds: u64
+    #[serde(default)]
+    as_name: Option<String>
+DropTenant
+    user_id: String
+HoldDoors
+    user_id: String
+    doors: Vec<crate::ipc::HeldDoor>
+InviteDigits
+    user_id: String
+ListSealed
+    user_id: String
+    mount: String
+    prefix: String
+NodeRelay
+    user_id: String
+ReadSealed
+    user_id: String
+    mount: String
+    path: String
+    offset: u64
+    length: u32
+RecoveryFetch
+    user_id: String
+RecoveryStore
+    user_id: String
+    bundle: String
+    #[serde(default)]
+    kel: Vec<crate::kel::KelEvent>
+SetQuota
+    user_id: String
+    quota: u64
+StandAt
+    relays: Vec<crate::rendezvous::Stand>
+TakeDeliveries
+    user_id: String
+    ack: Vec<String>
+TenantDevice
+    user_id: String
+    change: crate::ipc::TenantDeviceChange
+    signature: Vec<u8>
+TenantDriveMake
+    user_id: String
+    drive: crate::ipc::MadeDrive
+    #[serde(with = "crate::base64_bytes")]
+    sealed_name: Vec<u8>
+TenantDriveName
+    user_id: String
+    drive: crate::ipc::MadeDrive
+    #[serde(with = "crate::base64_bytes")]
+    sealed_name: Vec<u8>
+TenantDriveRetire
+    user_id: String
+    drive: crate::ipc::MadeDrive
+TenantDrives
+    user_id: String
+Tenants
+VaultCapacity
+    user_id: String
+WriteSealed
+    user_id: String
+    mount: String
+    path: String
+    #[serde(with = "crate::base64_bytes")]
+    blob: Vec<u8>
+    domain_id: String
+    offset: u64
+    total_size: u64
+    content_hash: String
