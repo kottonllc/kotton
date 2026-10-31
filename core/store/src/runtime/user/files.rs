@@ -7,7 +7,7 @@
 use super::UserStore;
 use anyhow::{anyhow, Result};
 use crate::fs_view::rooted_key;
-use crate::Fs;
+use crate::{Fs, StorageKey};
 use kotton_sealed::Sealed;
 
 /// The key prefix a person's own tree lives under in their store.
@@ -178,11 +178,16 @@ impl UserStore {
     /// person's path first; this one does not — which is what lets the
     /// `path_aad` binding survive a transfer: the same key on the far side still
     /// opens, and a relocated one does not.
+    ///
+    /// `path` is a peer's word, so it is admitted ([`StorageKey`]) before any
+    /// store is addressed: a key that is not canonical is refused, never
+    /// rewritten into one that is (kotton #265).
     pub async fn read_sealed(&self, mount_name: &str, path: &str) -> Result<Vec<u8>> {
+        let key = StorageKey::parse(path)?;
         let storage = self
             .get_remote(mount_name)
             .ok_or_else(|| anyhow!("Remote '{mount_name}' not found"))?;
-        Sealed::new(storage.as_ref(), mount_name).read(path).await
+        Sealed::new(storage.as_ref(), mount_name).read(key.as_str()).await
     }
 
     /// Write a **sealed blob** verbatim — no sealing is applied.
@@ -192,12 +197,15 @@ impl UserStore {
     /// corrupt anything else: the object simply fails to open on read, because
     /// the DEK unwrap and the AEAD open both fail closed.
     ///
-    /// [`read_sealed`]: UserRuntime::read_sealed
+    /// `path` is admitted as [`read_sealed`]'s is.
+    ///
+    /// [`read_sealed`]: UserStore::read_sealed
     pub async fn write_sealed(&self, mount_name: &str, path: &str, blob: &[u8]) -> Result<()> {
+        let key = StorageKey::parse(path)?;
         let storage = self
             .get_remote(mount_name)
             .ok_or_else(|| anyhow!("Remote '{mount_name}' not found"))?;
-        Sealed::new(storage.as_ref(), mount_name).write(path, blob).await
+        Sealed::new(storage.as_ref(), mount_name).write(key.as_str(), blob).await
     }
 
     /// Read a file from a specific storage mount
