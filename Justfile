@@ -378,8 +378,8 @@ lint:
     cargo xtask caller-check
     # A relay's address is compared in one place.
     cargo xtask relay-address-check
-    # No code under core/ but the gateway arm spells `device add --`, outside tests and comments:
-    # the posture flags come from DEVICE_ADD_POSTURE_FLAGS. A text check; its doc says what it misses.
+    # No code under core/ spells `device add --`, outside tests and comments: the flags come from
+    # DEVICE_ADD_POSTURE_FLAGS and DEVICE_ADD_GATEWAY_FLAG. A text check; its doc says what it misses.
     cargo xtask device-add-check
     # Every file under tests/tests/suite/ is compiled into the one integration binary.
     cargo xtask suite-check
