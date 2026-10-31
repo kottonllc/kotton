@@ -50,8 +50,9 @@ impl LocalObjectStorage {
     /// What it still stands in for: `UserStore::read_raw_local_object`, which
     /// reads the path a guest re-wrap names on a store of its own, past a
     /// trimmed leading `/` and admitted by nothing else. That is the reach to
-    /// close before this refusal can go. Drive move (kotton #274) writes
-    /// through a vault's `write_sealed`, which admits, and `kotton_sealed::Sealed`
+    /// close before this refusal can go. Drive move (kotton #274) admits each
+    /// key where the source vault's listing enters it and writes through a
+    /// vault's `write_sealed`, which admits again, and `kotton_sealed::Sealed`
     /// takes only admitted keys and prefixes (kotton #275, #320), so neither
     /// reaches here with one.
     ///

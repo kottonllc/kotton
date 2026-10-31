@@ -7,7 +7,7 @@
 //! the data keys hold bytes it cannot open.
 //!
 //! That is also why this handle addresses a **named store** while
-//! [`kotton_fs::Fs`] does not: replication legitimately says *which* store, and
+//! `kotton_fs::Fs` does not: replication legitimately says *which* store, and
 //! RFC-0058 exempts it for exactly that reason. The invariant it preserves is
 //! that anything naming a store sees only ciphertext, and anything seeing
 //! plaintext names only paths.

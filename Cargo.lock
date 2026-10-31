@@ -3553,7 +3553,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
- "kotton-fs",
  "kotton-sys",
  "workspace-hack",
 ]

@@ -207,12 +207,12 @@ pub enum ObjectKind {
 ///   namespace. The admissions: a sync pass's listings, on both sides
 ///   ([`crate::StorageKey`], kotton #265); a pack id a manifest or superblock
 ///   names, where it is decoded, and the pack listing compaction and scan
-///   recovery act on ([`PackId`], kotton #273); and every key and prefix the
-///   sealed view (`kotton_sealed::Sealed`) is handed, which it takes typed
-///   (kotton #275, #320). Keys that still reach a store unadmitted come
-///   through other doors, each tracked where it is: a guest re-wrap's raw
-///   read (`LocalObjectStorage::resolve_key`'s doc) and drive move's copy
-///   (kotton #274).
+///   recovery act on ([`PackId`], kotton #273); a drive move's listing of
+///   the vault it leaves (kotton #274); and every key and prefix the sealed
+///   view (`kotton_sealed::Sealed`) is handed, which it takes typed
+///   (kotton #275, #320). The door a key still reaches a store through
+///   unadmitted is a guest re-wrap's raw read, tracked where it is
+///   (`LocalObjectStorage::resolve_key`'s doc).
 /// - **The rest of the `_` namespace** is [`ObjectKind::Reserved`].
 ///   Blinded components are base32, an alphabet with no `_`, so only a key
 ///   in the reserved namespace starts with one, and every other key is

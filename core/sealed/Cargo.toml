@@ -9,7 +9,6 @@ authors.workspace = true
 # `kotton-sys` also carries the admitted key, `StorageKey`, every verb here
 # takes: nothing in this crate rewrites a key (kotton #275, #320).
 kotton-sys = { path = "../sys" }
-kotton-fs = { path = "../fs" }
 anyhow = "1.0"
 
 [lints]
