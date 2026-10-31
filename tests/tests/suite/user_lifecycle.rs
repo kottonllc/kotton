@@ -217,3 +217,37 @@ async fn logout_unknown_user_errors() {
     let result = env.client.logout_user("nobody").await;
     assert!(result.is_err(), "logout of unknown user should fail");
 }
+
+/// **A recovery login naming what is not a user id is refused before anything
+/// is read or written under it** (kotton #262). A name given to
+/// `LoginWithRecoveryKey` can become a user on this device — a cold device's
+/// locked claim, which `Recover` then acts for — so it is held to the rule
+/// `CreateUser` holds, and every user id this device registers is one the peer
+/// path's `UserId::parse` accepts. A name that climbs out of `users/` is
+/// refused with the rule's words, leaves no directory where it points, and
+/// lists no user.
+#[tokio::test]
+async fn a_recovery_login_naming_no_valid_user_id_is_refused_and_leaves_nothing() {
+    use kotton_sys::crypto::MnemonicProvider as _;
+    let mut env = TestEnv::spawn().await;
+    let phrase = kotton_crypto::Bip39MnemonicProvider.generate().expect("a phrase");
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let escaping = format!("../x-{unique}");
+    for named in [escaping.as_str(), "Alice", ""] {
+        let refused = env
+            .client
+            .login_with_recovery_key(&phrase, Some(named.to_string()), None)
+            .await;
+        let err = refused.expect_err("a recovery login under a name that is not a user id was taken");
+        assert!(
+            err.to_string().contains("user_id"),
+            "the refusal for {named:?} names the rule: {err}"
+        );
+    }
+    assert!(
+        !env.base_dir.join("users").join(&escaping).exists(),
+        "a refused recovery login created a directory at users/{escaping}"
+    );
+    let users = env.client.list_users().await.expect("list_users");
+    assert!(users.is_empty(), "a refused recovery login left a user: {users:?}");
+}

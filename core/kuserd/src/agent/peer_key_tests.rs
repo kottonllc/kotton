@@ -19,6 +19,10 @@ async fn machine_db(dir: &std::path::Path) -> Arc<SqlitePool> {
     Arc::new(pool)
 }
 
+fn uid(s: &str) -> crate::device_users::UserId {
+    crate::device_users::UserId::parse(s).unwrap()
+}
+
 fn key_and_did(seed: u8) -> ([u8; 32], String) {
     let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
     let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key).unwrap().to_string();
@@ -53,8 +57,8 @@ async fn one_gateway_two_people_each_frame_reaches_the_person_it_names() {
     network_db::insert_paired_node(&db, "front-door", "bob", &did, &key, "[]", 0, Some("gateway")).await.unwrap();
     network_db::insert_paired_node(&db, "front-door", "alice", &did, &key, "[]", 0, Some("gateway")).await.unwrap();
 
-    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("bob"))).await, Ok(PeerAsk::Gateway("bob".into())));
-    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("alice"))).await, Ok(PeerAsk::Gateway("alice".into())));
+    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("bob"))).await, Ok(PeerAsk::Gateway(uid("bob"))));
+    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("alice"))).await, Ok(PeerAsk::Gateway(uid("alice"))));
     assert_ne!(
         gateway_key(&did, "alice", Some("tab")),
         gateway_key(&did, "bob", Some("tab")),
@@ -67,7 +71,7 @@ async fn one_gateway_two_people_each_frame_reaches_the_person_it_names() {
     // Bob revokes his gateway: his frames stop, alice's still reach her.
     sqlx::query("DELETE FROM paired_nodes WHERE user_id = 'bob'").execute(db.as_ref()).await.unwrap();
     assert!(peer_ask(&db, Some(&key), &frame_for(Some("bob"))).await.is_err());
-    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("alice"))).await, Ok(PeerAsk::Gateway("alice".into())));
+    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("alice"))).await, Ok(PeerAsk::Gateway(uid("alice"))));
 }
 
 /// **A key is held to the gateway's verbs for the person who pairs it as
@@ -85,16 +89,64 @@ async fn a_key_is_held_to_the_gateway_verb_for_the_person_who_pairs_it_as_one() 
     network_db::insert_paired_node(&db, "laptop", "alice", &did, &key, "[]", 0, Some("full")).await.unwrap();
     network_db::insert_paired_node(&db, "front-door", "bob", &did, &key, "[]", 0, Some("gateway")).await.unwrap();
 
-    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("bob"))).await, Ok(PeerAsk::Gateway("bob".into())));
-    assert_eq!(peer_ask(&db, Some(&key), &other_for("bob")).await, Ok(PeerAsk::Gateway("bob".into())));
-    assert_eq!(peer_ask(&db, Some(&key), &other_for("alice")).await, Ok(PeerAsk::Person("alice".into())));
+    assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("bob"))).await, Ok(PeerAsk::Gateway(uid("bob"))));
+    assert_eq!(peer_ask(&db, Some(&key), &other_for("bob")).await, Ok(PeerAsk::Gateway(uid("bob"))));
+    assert_eq!(peer_ask(&db, Some(&key), &other_for("alice")).await, Ok(PeerAsk::Person(uid("alice"))));
     assert!(peer_ask(&db, Some(&key), &frame_for(Some("alice"))).await.is_err(), "alice's full device carried a frame as her gateway");
 
     let (unpaired, _) = key_and_did(22);
     assert!(peer_ask(&db, Some(&unpaired), &frame_for(Some("bob"))).await.is_err());
-    assert_eq!(peer_ask(&db, Some(&unpaired), &other_for("bob")).await, Ok(PeerAsk::Person("bob".into())));
+    assert_eq!(peer_ask(&db, Some(&unpaired), &other_for("bob")).await, Ok(PeerAsk::Person(uid("bob"))));
     // A peer whose DID names no key is no one's gateway.
     assert!(peer_ask(&db, None, &frame_for(Some("bob"))).await.is_err());
+}
+
+/// **A name that is not a user id is refused before anything is read for
+/// it** (kotton #262). `peer_ask` is where the peer path first holds the
+/// person a request names; a climb out of `users/`, an absolute path, nothing,
+/// or an over-long name is answered there with a refusal, for a paired key and
+/// an unpaired one alike, and never becomes a [`PeerAsk`].
+#[tokio::test]
+async fn a_request_naming_no_valid_user_id_is_refused_at_peer_ask() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = machine_db(dir.path()).await;
+    let (key, did) = key_and_did(24);
+    network_db::insert_paired_node(&db, "laptop", "alice", &did, &key, "[]", 0, Some("full")).await.unwrap();
+    let over_long = "a".repeat(65);
+    for bad in ["../../x", "/tmp/abs", "alice/../bob", "..", "", over_long.as_str()] {
+        for pk in [Some(&key), None] {
+            let refused = peer_ask(&db, pk, &other_for(bad)).await;
+            assert!(
+                matches!(&refused, Err(m) if m.contains("not a user id")),
+                "{bad:?} was taken for a person: {refused:?}"
+            );
+        }
+    }
+    assert_eq!(peer_ask(&db, Some(&key), &other_for("alice")).await, Ok(PeerAsk::Person(uid("alice"))));
+}
+
+/// **A minted user id passes the parse, for a gateway and a device alike**
+/// (kotton #262). Every request now passes `UserId::parse` before the posture
+/// row is read; the ids the window mints (`u` and thirty-two hex digits) are
+/// the shape most persons have, so the happy path is held for that shape, not
+/// only for a hand-picked name.
+#[tokio::test]
+async fn a_minted_user_id_is_taken_as_the_person_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = machine_db(dir.path()).await;
+    let gateway_person = crate::device_users::mint_user_id();
+    let device_person = crate::device_users::mint_user_id();
+    let (key, did) = key_and_did(25);
+    network_db::insert_paired_node(&db, "front-door", &gateway_person, &did, &key, "[]", 0, Some("gateway")).await.unwrap();
+    network_db::insert_paired_node(&db, "laptop", &device_person, &did, &key, "[]", 0, Some("full")).await.unwrap();
+    assert_eq!(
+        peer_ask(&db, Some(&key), &frame_for(Some(&gateway_person))).await,
+        Ok(PeerAsk::Gateway(uid(&gateway_person)))
+    );
+    assert_eq!(
+        peer_ask(&db, Some(&key), &other_for(&device_person)).await,
+        Ok(PeerAsk::Person(uid(&device_person)))
+    );
 }
 
 /// **`NodeRelay` hands this node's relay admission to the asking person's own
