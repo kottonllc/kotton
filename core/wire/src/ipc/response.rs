@@ -567,6 +567,13 @@ pub enum UserResponse {
     /// `DriveMove`): the drives the verb is about, each as its descriptor.
     Drives {
         drives: Vec<crate::ipc::DriveDescriptor>,
+        /// `DriveMove` only: how many keys the vault the drive left listed
+        /// that are not storage keys (`kotton_store::StorageKey`), each
+        /// refused before anything was read or written under it and not
+        /// carried (kotton #274), as a sync pass counts the keys it refuses.
+        /// Zero for every other verb, and for a move whose source listed none.
+        #[serde(default)]
+        keys_refused: u32,
     },
     /// Answer to `PinSet` and `PinList`: what this device keeps, and the
     /// notices.
