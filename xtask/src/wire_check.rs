@@ -48,7 +48,7 @@
 //! fails this check once, passes after `cargo xtask wire-surface` re-records
 //! `wire-surface.txt`, and is then refused at every vault and every device.
 //!
-//! So [`twin_findings`] reads the three recorded files as text, with no
+//! So [`twin_report`] reads the three recorded files as text, with no
 //! compile, beside each channel's own comparison, and every variant named in
 //! `peer-request-surface.txt` or `vault-peer-request-surface.txt` must have a
 //! block in `wire-surface.txt` identical to its own, line for line. Re-recording
@@ -76,12 +76,12 @@
 //! command that the next `wire-check` fails.
 //!
 //! Both text rules, this one and the kotton-wire tests, hold a naming agreement
-//! between three types. The seam past them is at the type level: #254's shared
-//! sealed-verbs sub-type, `SealedVerb` (PR 290,
-//! `core/wire/src/ipc/sealed_verb.rs`), gives the sender one type for the six
-//! verbs both peer wires share, converted to each peer type by one macro. While
-//! each peer wire is its own flat enum, the recordings still restate those
-//! verbs, and this rule is what holds the restatement in the gate.
+//! between three types. The type-level seam past both is a shared sealed-verbs
+//! sub-type on the sender side (#254): one type for the six verbs both peer
+//! wires share. Once it lands, the twin rule holds the recordings and the type
+//! holds the sender; while each peer wire is its own flat enum, the recordings
+//! still restate those verbs, and this rule is what holds the restatement in the
+//! gate.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -207,7 +207,7 @@ pub fn wire_check(bless: bool) {
         // Reporting only: a change to the door and both peer types is
         // re-recorded by this one command, so the rule cannot refuse it here.
         // A door-only re-record is told now rather than at the next check.
-        let findings = twin_findings(Path::new("."));
+        let findings = twin_report(Path::new("."));
         if findings.is_empty() {
             println!(
                 "wire-surface: every verb in {} and {} records its door twin's block in \
@@ -227,7 +227,7 @@ pub fn wire_check(bless: bool) {
     }
     // The twin rule reads only the recordings, so it runs first: a recording
     // edited by hand fails its channel below and is named here as well.
-    let findings = twin_findings(Path::new("."));
+    let findings = twin_report(Path::new("."));
     if !findings.is_empty() {
         print_twin_findings("wire-check", &findings);
     }
@@ -382,52 +382,81 @@ fn block_finding(twin: &str, block: &Block<'_>, door_block: &Block<'_>) -> Strin
     f.trim_end().to_string()
 }
 
+/// What a twin finding is about, so the advice printed after it fits it.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    /// A recording could not be read from disk at all.
+    Unread,
+    /// A recording was read but the parser cannot hold it to its header, or it
+    /// records no variant: the printer and the parser disagree, or a hand edit.
+    Format,
+    /// A peer verb's block differs from, or is missing in, the door's.
+    Mirror,
+}
+
 /// The twin rule over the recorded files under `root`, as text: one finding
 /// per variant of a peer recording whose block differs from, or is missing
-/// in, the door's recording, and one per recording the parser cannot hold to
-/// its header. Empty when they agree.
-pub fn twin_findings(root: &Path) -> Vec<String> {
+/// in, the door's recording, and one per recording that cannot be read or
+/// held to its header, each with its [`Kind`].
+fn twin_report(root: &Path) -> Vec<(Kind, String)> {
     let read = |rel: &str| std::fs::read_to_string(root.join(rel));
     let door_text = match read(DOOR_RECORDING) {
         Ok(t) => t,
-        Err(e) => return vec![format!("  {DOOR_RECORDING} could not be read: {e}")],
+        Err(e) => return vec![(Kind::Unread, format!("  {DOOR_RECORDING} could not be read: {e}"))],
     };
     let door_blocks = match recorded_blocks(&door_text) {
         Ok(b) => b,
-        Err(why) => return vec![format!("  {DOOR_RECORDING} cannot be read as a recording: {why}.")],
+        Err(why) => {
+            return vec![(
+                Kind::Format,
+                format!("  {DOOR_RECORDING} cannot be read as a recording: {why}."),
+            )]
+        }
     };
     let door: BTreeMap<&str, Block<'_>> = door_blocks.into_iter().map(|b| (b.name, b)).collect();
     if door.is_empty() {
-        return vec![format!("  {DOOR_RECORDING} records no variant, so it mirrors nothing.")];
+        return vec![(
+            Kind::Format,
+            format!("  {DOOR_RECORDING} records no variant, so it mirrors nothing."),
+        )];
     }
     let mut findings = Vec::new();
     for twin in TWIN_RECORDINGS {
         let text = match read(twin) {
             Ok(t) => t,
             Err(e) => {
-                findings.push(format!("  {twin} could not be read: {e}"));
+                findings.push((Kind::Unread, format!("  {twin} could not be read: {e}")));
                 continue;
             }
         };
         let blocks = match recorded_blocks(&text) {
             Ok(b) => b,
             Err(why) => {
-                findings.push(format!("  {twin} cannot be read as a recording: {why}."));
+                findings.push((
+                    Kind::Format,
+                    format!("  {twin} cannot be read as a recording: {why}."),
+                ));
                 continue;
             }
         };
         if blocks.is_empty() {
-            findings.push(format!("  {twin} records no variant, so the twin rule holds nothing."));
+            findings.push((
+                Kind::Format,
+                format!("  {twin} records no variant, so the twin rule holds nothing."),
+            ));
         }
         for block in blocks {
             match door.get(block.name) {
-                None => findings.push(format!(
-                    "  `{}` is in {twin} and not in {DOOR_RECORDING}: the door no longer \
-                     has the verb the peer wire mirrors.",
-                    block.name
+                None => findings.push((
+                    Kind::Mirror,
+                    format!(
+                        "  `{}` is in {twin} and not in {DOOR_RECORDING}: the door no longer \
+                         has the verb the peer wire mirrors.",
+                        block.name
+                    ),
                 )),
                 Some(door_block) if door_block.lines != block.lines => {
-                    findings.push(block_finding(twin, &block, door_block));
+                    findings.push((Kind::Mirror, block_finding(twin, &block, door_block)));
                 }
                 Some(_) => {}
             }
@@ -437,19 +466,43 @@ pub fn twin_findings(root: &Path) -> Vec<String> {
 }
 
 /// The twin findings, with what they mean, as `wire-check` and `wire-surface` print them.
-fn print_twin_findings(command: &str, findings: &[String]) {
-    eprintln!(
-        "{command}: a peer wire no longer mirrors the door, or a recording cannot be read to tell.\n"
+/// The twin findings, with one sentence of advice per kind present, as
+/// `wire-check` and `wire-surface` print them.
+fn print_twin_findings(command: &str, findings: &[(Kind, String)]) {
+    eprint!("{}", twin_findings_text(command, findings));
+}
+
+fn twin_findings_text(command: &str, findings: &[(Kind, String)]) -> String {
+    let mut out = format!(
+        "{command}: a peer wire no longer mirrors the door, or a recording cannot be read to tell.\n\n"
     );
-    for finding in findings {
-        eprintln!("{finding}\n");
+    for (_, finding) in findings {
+        out.push_str(&format!("{finding}\n\n"));
     }
-    eprintln!(
-        "A device sends these verbs as `UserRequest` to both peer decoders, so each peer wire \
-         must spell them as the door does. Change the peer type and the door's variant \
-         together and re-record both with `cargo xtask wire-surface` in the same commit; \
-         otherwise every vault or device refuses what the sync pass sends.\n"
-    );
+    let has = |kind: Kind| findings.iter().any(|(k, _)| *k == kind);
+    if has(Kind::Unread) {
+        out.push_str(
+            "A recording that could not be read is missing or out of reach from here: run from \
+             the workspace root, or re-record it with `cargo xtask wire-surface`.\n\n",
+        );
+    }
+    if has(Kind::Format) {
+        out.push_str(
+            "A recording whose `# variants:` header disagrees with what the rule parsed means the \
+             printer (`render`) and the parser (`recorded_blocks`) no longer agree, or the file \
+             was edited by hand: change the two together, or re-record with \
+             `cargo xtask wire-surface`; no peer type needs to change for this.\n\n",
+        );
+    }
+    if has(Kind::Mirror) {
+        out.push_str(
+            "A device sends these verbs as `UserRequest` to both peer decoders, so each peer wire \
+             must spell them as the door does: change the peer type and the door's variant \
+             together and re-record both with `cargo xtask wire-surface` in the same commit, \
+             or every vault or device refuses what the sync pass sends.\n\n",
+        );
+    }
+    out
 }
 
 fn check_channel(channel: &Channel, bless: bool) {
@@ -759,6 +812,11 @@ fn is_field_ident(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The twin rule's findings as text, in order, without their kinds.
+    fn twin_findings(root: &Path) -> Vec<String> {
+        twin_report(root).into_iter().map(|(_, f)| f).collect()
+    }
+
     fn tree(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for (path, text) in files {
@@ -997,6 +1055,34 @@ mod tests {
         assert_eq!(findings.len(), 2, "{findings:#?}");
         assert!(findings[0].contains("`NodeRelay` is in core/wire/peer-request-surface.txt and not in"), "{}", findings[0]);
         assert!(findings[1].contains("`ReadFile`") && findings[1].contains("another order"), "{}", findings[1]);
+    }
+
+    /// The advice after the findings fits their kind: a printer drift is not
+    /// told to change a peer type, and a differing block is.
+    #[test]
+    fn the_advice_printed_matches_the_kind_of_finding() {
+        let drift = tree(&[
+            (DOOR_RECORDING, &door("path: String")),
+            (TWIN_RECORDINGS[0], &peer().replace("\n    ", "\n\t")),
+            (TWIN_RECORDINGS[1], &vault()),
+        ]);
+        let text = twin_findings_text("wire-check", &twin_report(drift.path()));
+        assert!(text.contains("no peer type needs to change"), "{text}");
+        assert!(!text.contains("change the peer type"), "{text}");
+
+        let mirror = tree(&[
+            (DOOR_RECORDING, &door("object_path: String")),
+            (TWIN_RECORDINGS[0], &peer()),
+            (TWIN_RECORDINGS[1], &vault()),
+        ]);
+        let text = twin_findings_text("wire-check", &twin_report(mirror.path()));
+        assert!(text.contains("change the peer type"), "{text}");
+        assert!(!text.contains("no peer type needs to change"), "{text}");
+
+        let unread = tree(&[(DOOR_RECORDING, &door("path: String"))]);
+        let text = twin_findings_text("wire-check", &twin_report(unread.path()));
+        assert!(text.contains("could not be read is missing"), "{text}");
+        assert!(!text.contains("change the peer type") && !text.contains("no peer type"), "{text}");
     }
 
     /// The real recordings in this tree agree, so the gate starts green.
