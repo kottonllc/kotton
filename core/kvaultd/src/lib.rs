@@ -324,8 +324,8 @@ impl Vault {
 
     /// The vault's verbs, as the handler every door serves. It holds the
     /// landlord's door's context because the operator's key reaches the
-    /// door's four landlord verbs (`control::landlord`); what reaches what is
-    /// `peer::reaches`.
+    /// landlord's six verbs (`control::landlord`), four of which the door
+    /// answers too; what reaches what is `peer::reaches`.
     ///
     /// A peer's bytes decode as `VaultPeerRequest` and as nothing else: a verb
     /// that is not the vault's — a plaintext read, a record insert — is an

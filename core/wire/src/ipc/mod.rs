@@ -22,6 +22,7 @@ pub mod vault_peer_request;
 pub mod remote_request;
 pub mod request;
 pub mod response;
+pub mod sealed_verb;
 pub mod vault_request;
 
 pub use types::*;
@@ -33,5 +34,6 @@ pub use contact_request::{
 };
 pub use browser_inner::{ChannelCall, ChannelFrame};
 pub use peer_request::PeerRequest;
-pub use vault_peer_request::VaultPeerRequest;
+pub use sealed_verb::SealedVerb;
+pub use vault_peer_request::{LandlordVerb, TenantVerb, VaultPeerRequest, VaultVerb};
 pub use vault_request::{LineCame, LineEnrolled, LineToEnrol, MintWaiting, OperatedService, OperatorVerb, SecretBytes, SecretText, SecretValue, Unstood, UnstoodRelay, UnstoodRelayState, UnstoodWhy, VaultRequest, VaultTenant};
