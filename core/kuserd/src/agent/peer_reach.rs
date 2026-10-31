@@ -29,11 +29,13 @@
 //! and no handle a base directory beside them, is kotton #256.
 //!
 //! [`GuestSessions`] holds no keychain and no base directory (kotton #262): it
-//! holds the map of agent databases the daemon has already opened, and answers
+//! holds a read-only view of the agent databases the daemon has already opened
+//! (`user_db::OpenAgentDbs`), and answers
 //! from a database only when the daemon opened it on its own account — at boot,
 //! sign-in or unlock — never because a peer named its person. It cannot open,
-//! create or migrate one, because it does not hold what opening takes — held
-//! by its field types, not its method.
+//! create or migrate one, because it does not hold what opening takes, and
+//! cannot add a slot to the map, because its view has no method that writes —
+//! both held by its field types, not its method.
 //! Every `user_id` these handles are asked about is a
 //! [`crate::device_users::UserId`], parsed from the request before any of
 //! them is reached.
@@ -93,22 +95,22 @@ impl Standing {
 /// The guest sessions a stranger's key may hold: found in the person's own
 /// database, and checked against the ones revoked since they were read.
 ///
-/// Holds the map of agent databases the daemon has open and the revoked set,
-/// and nothing a database opens from: no base directory, no keychain, no
-/// schema registry (kotton #262). A database the daemon has not opened — the
+/// Holds a read-only view of the agent databases the daemon has open
+/// (`user_db::OpenAgentDbs`) and the revoked set, and nothing a database opens
+/// from: no base directory, no keychain, no schema registry (kotton #262). A database the daemon has not opened — the
 /// person is not taken up here, or their keys did not resolve — reads as no
 /// session, and the lookup leaves the map as it found it
-/// (`user_db::already_open`). So a peer naming a person it has no standing
+/// (`OpenAgentDbs::get`, the view's one method). So a peer naming a person it has no standing
 /// with makes this node open, create, migrate or remember nothing for that
 /// name, and reads no secret for it. The pool is not handed out.
 pub(super) struct GuestSessions {
-    user_dbs: crate::db::user_db::UserDbMap,
+    user_dbs: crate::db::user_db::OpenAgentDbs,
     revoked: Arc<RwLock<HashSet<String>>>,
 }
 
 impl GuestSessions {
     pub(super) fn new(
-        user_dbs: crate::db::user_db::UserDbMap,
+        user_dbs: crate::db::user_db::OpenAgentDbs,
         revoked: Arc<RwLock<HashSet<String>>>,
     ) -> Self {
         Self { user_dbs, revoked }
@@ -122,7 +124,7 @@ impl GuestSessions {
         guest_did: &str,
         user_id: &UserId,
     ) -> io::Result<Option<EphemeralSession>> {
-        let Some(user_db) = crate::db::user_db::already_open(&self.user_dbs, user_id) else {
+        let Some(user_db) = self.user_dbs.get(user_id) else {
             return Ok(None);
         };
         kotton_peer::daemon::db::find_ephemeral_session_by_guest_did(&user_db, guest_did, user_id.as_str())

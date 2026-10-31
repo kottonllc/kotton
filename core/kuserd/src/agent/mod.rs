@@ -1902,10 +1902,11 @@ impl DeviceDaemon {
                 self.runtime.paired_keys(),
                 chains.clone(),
             ),
-            // The open map only: a guest lookup reads a database the daemon
-            // already opened, and holds nothing one opens from (kotton #262).
+            // A read-only view of the open map: a guest lookup reads a
+            // database the daemon already opened, holds nothing one opens
+            // from, and cannot write the map (kotton #262).
             guests: peer_reach::GuestSessions::new(
-                Arc::clone(&self.user_dbs),
+                crate::db::user_db::OpenAgentDbs::of(&self.user_dbs),
                 Arc::clone(&self.revoked_sessions),
             ),
             stores: file_host::PeerStoreHost::new(
@@ -1986,9 +1987,10 @@ impl DeviceDaemon {
 /// those fields — holds the rest: two handles (`stores`, `signer`) each hold
 /// the whole keychain, `Arc<dyn SecretsStore>`, and that they read only their
 /// labels is true of their methods, not of their types (kotton #256).
-/// `guests` holds the map of agent databases the daemon already opened and
-/// nothing one opens from, so it cannot open, create or migrate a database on
-/// a peer's request — held by its field types (kotton #262). The keychain and
+/// `guests` holds a read-only view of the agent databases the daemon already
+/// opened and nothing one opens from, so it cannot open, create or migrate a
+/// database, nor add a slot to the map, on a peer's request — held by its
+/// field types (kotton #262). The keychain and
 /// a base directory, the inputs a record store opens from
 /// (`kotton_record::open`), still sit together in one handle: `stores` holds
 /// the keychain beside the resident stores, and a resident store answers its
@@ -2239,14 +2241,17 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 /// refused there, before any row, chain, path or keychain label is built from
 /// it, and every arm below uses the parsed id, not the variant's own string
 /// (kotton #262). The request type still carries a `String`; whether the wire
-/// should carry the parsed type is #262's open half.
+/// should carry the parsed type is kotton #283.
 ///
 /// **The guest lookup cannot open a database, and that is held by type.**
-/// [`peer_reach::GuestSessions`] holds only the map of agent databases the
-/// daemon already opened and the revoked set — no base directory, no keychain
-/// — so on a stranger's request this node opens, creates, migrates and
-/// remembers nothing for the name it gives, and reads no secret for it
-/// (kotton #262). [`peer_reach::Recovery`] holds the base directory and no
+/// [`peer_reach::GuestSessions`] holds only a read-only view of the agent
+/// databases the daemon already opened (`user_db::OpenAgentDbs`, whose one
+/// method reads) and the revoked set — no base directory, no keychain, no way
+/// to write the map — so on a stranger's request this node opens, creates and
+/// migrates nothing, adds no slot for the name it gives, and reads no secret
+/// for it (kotton #262; the suite case
+/// `peer_sync::a_peer_naming_a_user_it_has_no_standing_with_leaves_no_directory_and_no_slot`
+/// holds the effects). [`peer_reach::Recovery`] holds the base directory and no
 /// keychain.
 ///
 /// **Reach to a record store is not yet absent; it is held by method
@@ -2279,9 +2284,10 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 ///   what reads one label (method discipline);
 /// - the person's **database**, when the daemon already has it open, for the
 ///   one question of which guest session a stranger's key holds — read by
-///   [`peer_reach::GuestSessions`] from the open map, never opened by it; a
-///   database not open reads as no session, and the pool is not handed out
-///   (held by type: the handle holds nothing a database opens from);
+///   [`peer_reach::GuestSessions`] through its read-only view, never opened
+///   by it; a database not open reads as no session, and the pool is not
+///   handed out (held by type: the handle holds nothing a database opens from
+///   and nothing that writes the map);
 /// - the **identity chains** and the admission table (`Chains`), to classify
 ///   the peer and to keep a delivered recovery copy's events, and the
 ///   phrase-sealed copy itself ([`peer_reach::Recovery`]);

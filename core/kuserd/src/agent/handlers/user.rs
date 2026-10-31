@@ -288,6 +288,18 @@ pub(crate) async fn login_with_recovery_key(
     user_id: Option<String>,
     sessions: &sessions::SessionMap,
 ) -> io::Result<UserResponse> {
+    // A name given here can become a user on this device — a cold device's
+    // locked claim, then `Recover`, which acts for the session this opens — so
+    // it is held to the rule `CreateUser` holds, before anything is read or
+    // written under it. A user id this device registers is one the peer path
+    // can parse back (`device_users::UserId`, kotton #262).
+    if let Some(name) = user_id.as_deref() {
+        if let Err(e) = device_users::validate_user_id(name) {
+            return Ok(UserResponse::Error {
+                message: e.to_string(),
+            });
+        }
+    }
     match runtime
         .login_with_recovery_key(
             &recovery_key,

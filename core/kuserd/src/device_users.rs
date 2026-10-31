@@ -142,7 +142,7 @@ pub fn validate_user_id(user_id: &str) -> io::Result<()> {
 /// is found — so a name that would climb out of `users/` (`..`, `/`), name
 /// nobody (empty) or overrun the rule never reaches a path (kotton #262). The
 /// request type itself still carries a `String` (`kotton_wire::ipc::PeerRequest`);
-/// whether the wire should carry this type is kotton #262's open half.
+/// whether the wire should carry this type is kotton #283.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UserId(String);
 

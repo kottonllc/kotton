@@ -125,6 +125,30 @@ async fn a_request_naming_no_valid_user_id_is_refused_at_peer_ask() {
     assert_eq!(peer_ask(&db, Some(&key), &other_for("alice")).await, Ok(PeerAsk::Person(uid("alice"))));
 }
 
+/// **A minted user id passes the parse, for a gateway and a device alike**
+/// (kotton #262). Every request now passes `UserId::parse` before the posture
+/// row is read; the ids the window mints (`u` and thirty-two hex digits) are
+/// the shape most persons have, so the happy path is held for that shape, not
+/// only for a hand-picked name.
+#[tokio::test]
+async fn a_minted_user_id_is_taken_as_the_person_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = machine_db(dir.path()).await;
+    let gateway_person = crate::device_users::mint_user_id();
+    let device_person = crate::device_users::mint_user_id();
+    let (key, did) = key_and_did(25);
+    network_db::insert_paired_node(&db, "front-door", &gateway_person, &did, &key, "[]", 0, Some("gateway")).await.unwrap();
+    network_db::insert_paired_node(&db, "laptop", &device_person, &did, &key, "[]", 0, Some("full")).await.unwrap();
+    assert_eq!(
+        peer_ask(&db, Some(&key), &frame_for(Some(&gateway_person))).await,
+        Ok(PeerAsk::Gateway(uid(&gateway_person)))
+    );
+    assert_eq!(
+        peer_ask(&db, Some(&key), &other_for(&device_person)).await,
+        Ok(PeerAsk::Person(uid(&device_person)))
+    );
+}
+
 /// **`NodeRelay` hands this node's relay admission to the asking person's own
 /// full device, decided by that person's row.** One key, paired by alice as
 /// her full device and by bob as a vault he keeps a drive on: asked for
