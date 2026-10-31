@@ -75,6 +75,11 @@ pub struct CompactSummary {
     pub packs_retired: usize,
     /// Live chunks carried into the fresh packs.
     pub chunks_kept: usize,
+    /// Names under the pack prefix outside the reserved pack-id grammar,
+    /// listed and left in place: the store never wrote them, so it neither
+    /// reads nor deletes them (kotton #273). A peer's object sync can deliver
+    /// one; this count is where it shows.
+    pub packs_unadmitted: usize,
     /// The superblock generation committed, if the pass changed anything.
     pub generation: Option<u64>,
 }

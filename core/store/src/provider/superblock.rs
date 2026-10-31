@@ -25,6 +25,23 @@
 //! retirement completes, and the immediately-previous generation is always
 //! kept, so there is no moment with a single copy in flight.
 //!
+//! A generation whose superblock opens but whose **state does not decode** is
+//! passed over the same way ([`load_adopted_superblock`]): the pack layer's
+//! manifest naming a pack outside the reserved grammar (kotton #273) is
+//! authentic bytes a device of the person's wrote wrongly, and the generation
+//! before it is the last state anyone can read. Both cases are reported on the
+//! same channel, a `warn` naming the superblock's key and why. A failure to
+//! *fetch* that state is not passed over: it is not a property of the
+//! generation, and adopting an older one on a transient error would build on
+//! a stale base.
+//!
+//! A commit made past a passed-over generation is numbered above the
+//! highest generation passed over (kotton #308, `crate::packed`'s
+//! `Committed::base_generation`), so it sorts above it by generation, not by
+//! the key tie-break. Which states a caller passes over, and what it keeps for
+//! them, is the caller's: the pack layer passes over only a refused pack id,
+//! and holds that generation (`crate::packed`'s module doc).
+//!
 //! The `_superblock/` prefix cannot collide with a blinded object key: blinded
 //! components are base32, an alphabet with no `_`.
 //!
@@ -200,6 +217,130 @@ fn open_superblock(k_pack: &[u8; 32], key: &str, blob: &[u8]) -> ObjectStorageRe
     Ok(sb)
 }
 
+/// What [`load_adopted_superblock`] found: the newest generation whose
+/// superblock opens and whose state was adopted, and the keys of the newer
+/// generations whose superblock opened but whose state was refused.
+#[derive(Debug)]
+pub struct Adopted<T> {
+    /// The superblock adopted.
+    pub superblock: Superblock,
+    /// What `adopt` made of it.
+    pub state: T,
+    /// Each generation passed over because its state was refused, newest
+    /// first. Empty in a store no device wrote wrongly.
+    pub passed_over: Vec<PassedOver>,
+}
+
+/// A generation [`load_adopted_superblock`] passed over: its superblock
+/// opened, and the state it names was refused.
+#[derive(Debug, Clone)]
+pub struct PassedOver {
+    /// Its generation.
+    pub generation: u64,
+    /// Its superblock's storage key.
+    pub key: String,
+    /// Why its state was refused.
+    pub why: String,
+}
+
+/// Every superblock key on `store`, with its generation, highest first; the
+/// key string breaks a same-generation tie deterministically (two devices can
+/// commit the same generation under a naive object sync — see
+/// `superblock_key`).
+pub async fn superblock_keys<S>(store: &S) -> ObjectStorageResult<Vec<(u64, String)>>
+where
+    S: SealedObjectAccess + ?Sized,
+{
+    let entries = store.list_sealed(Path::new(SUPERBLOCK_PREFIX)).await?;
+    let mut keys: Vec<(u64, String)> = entries
+        .iter()
+        .filter(|m| !m.is_dir)
+        .filter_map(|m| parse_generation(&m.key).map(|g| (g, m.key.clone())))
+        .collect();
+    keys.sort_unstable_by(|a, b| b.cmp(a));
+    Ok(keys)
+}
+
+/// The superblock stored under `key`: `Ok(None)` when it does not open (torn,
+/// corrupt or relocated), `Err` when it could not be read.
+pub async fn read_superblock<S>(
+    store: &S,
+    k_pack: &[u8; 32],
+    key: &str,
+) -> ObjectStorageResult<Option<Superblock>>
+where
+    S: SealedObjectAccess + ?Sized,
+{
+    let blob = store.get_sealed(Path::new(key)).await?;
+    Ok(open_superblock(k_pack, key, &blob).ok())
+}
+
+/// Load the **highest generation that opens and whose state is adopted**.
+///
+/// [`load_current_superblock`] with one more reason to pass a generation
+/// over: `adopt` reads the state the superblock names and returns `Ok(Ok(t))`
+/// to adopt it, `Ok(Err(why))` when that state does not decode (the generation
+/// is passed over, as a superblock that does not open is, and reported the
+/// same way), or `Err` when it could not be read at all, which ends the walk:
+/// a read that failed says nothing about the generation.
+pub async fn load_adopted_superblock<S, T, F, Fut>(
+    store: &S,
+    k_pack: &[u8; 32],
+    mut adopt: F,
+) -> ObjectStorageResult<Option<Adopted<T>>>
+where
+    S: SealedObjectAccess + ?Sized,
+    F: FnMut(Superblock) -> Fut,
+    Fut: std::future::Future<Output = ObjectStorageResult<Result<T, ObjectStorageError>>>,
+{
+    let candidates = superblock_keys(store).await?;
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let mut last_err = None;
+    let mut passed_over = Vec::new();
+    for (generation, key) in candidates {
+        let blob = match store.get_sealed(Path::new(&key)).await {
+            Ok(b) => b,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        let sb = match open_superblock(k_pack, &key, &blob) {
+            Ok(sb) => sb,
+            Err(e) => {
+                tracing::warn!(%key, error = %e, "skipping unreadable superblock generation");
+                last_err = Some(e);
+                continue;
+            }
+        };
+        match adopt(sb.clone()).await? {
+            Ok(state) => {
+                return Ok(Some(Adopted {
+                    superblock: sb,
+                    state,
+                    passed_over,
+                }))
+            }
+            Err(e) => {
+                tracing::warn!(%key, error = %e, "skipping superblock generation whose state does not decode");
+                passed_over.push(PassedOver {
+                    generation,
+                    key,
+                    why: e.to_string(),
+                });
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(ObjectStorageError::BackendError(format!(
+        "superblocks exist but none open — store is damaged, scan recovery required: {}",
+        last_err.map(|e| e.to_string()).unwrap_or_default()
+    )))
+}
+
 /// Load the current superblock: the **highest generation that opens**.
 ///
 /// A generation that fails to open — torn by a crash mid-write, corrupted at
@@ -216,64 +357,40 @@ pub async fn load_current_superblock<S>(
 where
     S: SealedObjectAccess + ?Sized,
 {
-    let entries = store.list_sealed(Path::new(SUPERBLOCK_PREFIX)).await?;
-    let mut candidates: Vec<(u64, String)> = entries
-        .iter()
-        .filter(|m| !m.is_dir)
-        .filter_map(|m| parse_generation(&m.key).map(|g| (g, m.key.clone())))
-        .collect();
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-    // Highest generation first; the key string breaks a same-generation tie
-    // deterministically (two devices can commit the same generation under a
-    // naive object sync — see `superblock_key`).
-    candidates.sort_unstable_by(|a, b| b.cmp(a));
-
-    let mut last_err = None;
-    for (_gen, key) in candidates {
-        let blob = match store.get_sealed(Path::new(&key)).await {
-            Ok(b) => b,
-            Err(e) => {
-                last_err = Some(e);
-                continue;
-            }
-        };
-        match open_superblock(k_pack, &key, &blob) {
-            Ok(sb) => return Ok(Some(sb)),
-            Err(e) => {
-                tracing::warn!(%key, error = %e, "skipping unreadable superblock generation");
-                last_err = Some(e);
-            }
-        }
-    }
-    Err(ObjectStorageError::BackendError(format!(
-        "superblocks exist but none open — store is damaged, scan recovery required: {}",
-        last_err.map(|e| e.to_string()).unwrap_or_default()
-    )))
+    Ok(load_adopted_superblock(store, k_pack, |_| async { Ok(Ok(())) })
+        .await?
+        .map(|adopted| adopted.superblock))
 }
 
-/// Retire superblocks older than the previous generation, returning how many
-/// were deleted.
+/// The superblocks older than the previous generation: what retirement may
+/// delete. The two highest generations present — current plus one fallback —
+/// are never among them, so no state exists in which a single copy is in
+/// flight.
+pub async fn retirable_superblocks<S>(store: &S) -> ObjectStorageResult<Vec<String>>
+where
+    S: SealedObjectAccess + ?Sized,
+{
+    Ok(superblock_keys(store)
+        .await?
+        .into_iter()
+        .skip(2)
+        .map(|(_, key)| key)
+        .collect())
+}
+
+/// Retire every [`retirable_superblocks`] key, returning how many were
+/// deleted.
 ///
-/// Called only after a commit's pack retirement completes. Keeps the two
-/// highest generations present — current plus one fallback — so no state
-/// exists in which a single copy is in flight.
+/// The pack layer does not call this: it retires through
+/// `crate::packed`'s own pass, which also keeps a generation whose manifest
+/// was refused, since that superblock is what holds the data only it names.
 pub async fn retire_old_superblocks<S>(store: &S) -> ObjectStorageResult<usize>
 where
     S: SealedObjectAccess + ?Sized,
 {
-    let entries = store.list_sealed(Path::new(SUPERBLOCK_PREFIX)).await?;
-    let mut candidates: Vec<(u64, String)> = entries
-        .iter()
-        .filter(|m| !m.is_dir)
-        .filter_map(|m| parse_generation(&m.key).map(|g| (g, m.key.clone())))
-        .collect();
-    candidates.sort_unstable_by(|a, b| b.cmp(a));
-
     let mut deleted = 0usize;
-    for (_gen, key) in candidates.iter().skip(2) {
-        store.delete_sealed(Path::new(key)).await?;
+    for key in retirable_superblocks(store).await? {
+        store.delete_sealed(Path::new(&key)).await?;
         deleted += 1;
     }
     Ok(deleted)
@@ -301,7 +418,7 @@ mod tests {
             version: 1,
             generation: gen,
             manifest: PackChunkRef {
-                pack_id: format!("_pack/{gen:032x}"),
+                pack_id: crate::packed::PackId::parse(&format!("_pack/{gen:032x}")).unwrap(),
                 offset: 0,
                 length: 42,
                 digest: "ab".repeat(32),
@@ -423,7 +540,9 @@ mod tests {
         let store = MemoryObjectStorage::new();
         let small = sb(1);
         let mut big = sb(2);
-        big.manifest.pack_id = "_pack/".to_string() + &"f".repeat(200);
+        // A pack id has one length (`crate::packed::PackId`), so the body is
+        // grown by its digest.
+        big.manifest.digest = "f".repeat(200);
         let key_small = commit_superblock(&store, &K_PACK, &small).await.unwrap();
         let key_big = commit_superblock(&store, &K_PACK, &big).await.unwrap();
 
