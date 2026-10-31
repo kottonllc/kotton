@@ -139,14 +139,15 @@ pub fn file_host<'a>(
 /// mount's key domain and the node's, and the person's resident store — a
 /// [`StoreHost`] and nothing more (kotton #222, #242).
 ///
-/// Not the machine: it holds the event bus, the keychain, and the residency
-/// registry, each private, and reads the keychain only under the two labels a
-/// [`StoreHost`] names — a mount's pinned key domain, and the operational CEK
-/// whose domain this node advertises when the person's store is not resident.
-/// The resident store fetches a pack it does not keep through the
-/// `PackSource` the registry lent it (`residency::UserRegistry::lend_packs`),
-/// whose one verb is fetching a sealed pack by key; no sync host is behind
-/// this, so no record store is reachable through it.
+/// Not the machine: it holds the event bus, the whole keychain, and the
+/// residency registry, each private. Its methods read the keychain under the
+/// two labels a [`StoreHost`] names — a mount's pinned key domain, and the
+/// operational CEK whose domain this node advertises when the person's store
+/// is not resident; that it reads no other is those methods' discipline, not
+/// its type's (kotton #256). The resident store fetches a pack it does not
+/// keep through the `PackSource` the registry lent it
+/// (`residency::UserRegistry::lend_packs`), whose one verb is fetching a
+/// sealed pack by key. No sync host is behind this, by type.
 pub struct PeerStoreHost {
     events: Arc<EventBus>,
     secrets: Arc<dyn SecretsStore + Send + Sync>,

@@ -1879,8 +1879,10 @@ impl DeviceDaemon {
     fn build_peer_handler(self: &Arc<Self>) -> PeerHandler {
         // What a peer's request is served with on its own standing: one handle
         // per thing a peer verb does, and not the machine. No record store, no
-        // sync host, no sync engine, no `DeviceRuntime` — the compiler holds
-        // that, through `PeerContext`'s fields (kotton #222, #242).
+        // sync host, no sync engine, no `DeviceRuntime` among `PeerContext`'s
+        // field types (kotton #222, #242); three handles hold the keychain, and
+        // what keeps them to their labels is their methods (`PeerContext`'s doc,
+        // kotton #256).
         let chains = kotton_device::users::admission::Chains::of(&self.runtime);
         let peer = Arc::new(PeerContext {
             standing: peer_reach::Standing::new(
@@ -1965,6 +1967,18 @@ impl DeviceDaemon {
 /// the machine (`DeviceRuntime`): each is a handle with private fields and the
 /// methods its verbs ask ([`peer_reach`], [`file_host::PeerStoreHost`]).
 ///
+/// Three things hold three different claims, and they are not the same
+/// strength. **The field types** hold that no record store, sync host, sync
+/// engine or `DeviceRuntime` is here. **Module privacy** holds that this
+/// function's module cannot read a handle's fields. **Method discipline** —
+/// what the methods in `peer_reach.rs` and `file_host.rs` choose to do with
+/// those fields — holds the rest: three handles (`guests`, `stores`,
+/// `signer`) each hold the whole keychain, `Arc<dyn SecretsStore>`, and one
+/// of them (`guests`) holds it beside the base directory, which are exactly
+/// the inputs a record store opens from (`kotton_record::open`). That they
+/// read only their labels and open only the agent database is true of their
+/// methods, not of their types (kotton #256).
+///
 /// - `standing` — who the peer is to a person: the paired-node rows, the live
 ///   allowlist, and the identity chains a proof-admitted peer is replayed
 ///   against (`Chains`: the base directory's chains and the admission table,
@@ -1987,10 +2001,11 @@ impl DeviceDaemon {
 /// - `sealed_reassembly` — the state a chunked sealed write keeps between
 ///   requests.
 ///
-/// **What is not here, and so not reachable from [`handle_peer_request`]:**
-/// the machine, and through it the keychain and base directory a record store
-/// opens from; the record stores, the sync host that opens them, the sync
-/// engine, the sessions and every other field of [`AgentContext`].
+/// **What is not here, by type:** the machine; the record stores, the sync
+/// host that opens them, the sync engine, the sessions and every other field
+/// of [`AgentContext`]. The keychain and the base directory a record store
+/// opens from are *not* absent: they are inside `guests`, private, and a
+/// method added there could open one (kotton #256).
 pub(super) struct PeerContext {
     standing: peer_reach::Standing,
     guests: peer_reach::GuestSessions,
@@ -2193,14 +2208,20 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 /// **What a request can reach from here is [`PeerContext`], and that is all.**
 /// The request is a [`PeerRequest`], so no door verb arrives (kotton #231); the
 /// context holds no record store, no sync host and no sync engine (kotton
-/// #222); and it holds no `DeviceRuntime` (kotton #242). The base directory
-/// and the keychain a record store is opened from are held together in one
-/// place only, [`peer_reach::GuestSessions`], privately, which opens the
-/// person's agent database and answers which guest session a key holds.
-/// **No remaining reach to a record store exists on the peer's
-/// own standing**: nothing this function holds names one or opens one, and
-/// the compiler holds that through [`PeerContext`]'s field types. What remains,
-/// and why:
+/// #222); and it holds no `DeviceRuntime` (kotton #242). Those three are held
+/// by [`PeerContext`]'s field types.
+///
+/// **Reach to a record store is not yet absent; it is held by method
+/// discipline.** No arm here opens one, and this module cannot read a
+/// handle's private fields, but [`peer_reach::GuestSessions`] holds the base
+/// directory and the whole keychain together — exactly what
+/// `kotton_record::open` takes — to open the person's agent database, and its
+/// methods are what keep it to that. The keychain itself is in three handles
+/// (`GuestSessions`, [`file_host::PeerStoreHost`],
+/// [`peer_reach::FrostSigner`]), each holding all of it and reading only its
+/// labels because its methods do. Making the type hold this — no handle that
+/// holds the keychain beside the base directory, and each keychain reader lent
+/// only its labels — is kotton #256. What remains, and what holds each:
 ///
 /// - the person's resident **object stores**, at a path for a paired device or
 ///   a guest within its grant, and as sealed objects for a paired device —
@@ -2208,15 +2229,18 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 ///   no machine behind it. A resident store fetches a pack it does not keep
 ///   from the person's drives when it is read (kotton #55) through the
 ///   `PackSource` the registry lent it, whose one verb is fetching a sealed
-///   pack by key. The host reads the keychain under two labels only: a mount's
-///   pinned key domain, and the CEK whose domain this node advertises when the
-///   person's store is not resident;
+///   pack by key (the sync host's absence is held by type). The host holds the
+///   whole keychain and its methods read two labels: a mount's pinned key
+///   domain, and the CEK whose domain this node advertises when the person's
+///   store is not resident (method discipline);
 /// - this node's **FROST share** for the person, read by
 ///   [`peer_reach::FrostSigner`] under its one label to answer a round, and
-///   never handed out;
+///   never handed out — the signer holds the whole keychain, and its method is
+///   what reads one label (method discipline);
 /// - the person's **database**, opened by [`peer_reach::GuestSessions`] (which
-///   derives its key from the keychain) for the one question of which guest
-///   session a stranger's key holds; the pool is not handed out;
+///   holds the base directory and the whole keychain, and derives the
+///   database's key from it) for the one question of which guest session a
+///   stranger's key holds; the pool is not handed out (method discipline);
 /// - the **identity chains** and the admission table (`Chains`), to classify
 ///   the peer and to keep a delivered recovery copy's events, and the
 ///   phrase-sealed copy itself ([`peer_reach::Recovery`]);
