@@ -71,14 +71,20 @@ fn known_verb(word: &str) -> bool {
     KNOWN_VERBS.contains(&word)
 }
 
-/// The usage refusal, exit 2: what `device` prints for a word it does not have.
+/// The usage refusal, exit 2: what `device` prints for a word it does not have. The posture
+/// bracket and the gateway's word are assembled from the tables `parse_add` reads
+/// ([`ADD_POSTURES`], [`ADD_GATEWAY`]), so the printed grammar has no spelling of its own.
 fn usage() -> CommandOutput {
+    let postures: Vec<&str> = ADD_POSTURES.iter().map(|(flag, _)| *flag).collect();
     CommandOutput::usage(
-        "usage: device add [--as NAME] [--blind|--cosigner] | device add --browser | \
-         device add --gateway <code> | \
-         device join [code] [--as NAME] | device list | \
-         device revoke <id> | device revoke --browser <name> | \
-         device name [NAME]   (`kotton device reset` starts this device fresh)",
+        format!(
+            "usage: device add [--as NAME] [{}] | device add --browser | \
+             device add {ADD_GATEWAY} <code> | \
+             device join [code] [--as NAME] | device list | \
+             device revoke <id> | device revoke --browser <name> | \
+             device name [NAME]   (`kotton device reset` starts this device fresh)",
+            postures.join("|")
+        ),
         None,
     )
 }
@@ -219,7 +225,7 @@ impl DeviceCommand {
         let mut rx = client
             .gateway_enroll_stream(&user_id, code, ADD_TTL_SECS)
             .await
-            .map_err(|e| anyhow::anyhow!("device add --gateway: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("device add {ADD_GATEWAY}: {e}"))?;
         run_ceremony(
             &client,
             &user_id,
@@ -784,15 +790,17 @@ pub(crate) const ENROL_POSTURES: [(&str, Posture); 3] = [
 
 // The one vocabulary of `device add`'s posture flags is `DEVICE_ADD_POSTURE_FLAGS`, in
 // `kotton-schemas` beside `Posture` and not here, so the daemon's hints that name a posture
-// flag (`device_add_flag`, `kotton-device`) look up the same words `parse_add` reads. It is the
+// flag (`adds_instead`, `kotton-device`) walk the same words `parse_add` reads. It is the
 // sibling of `ENROL_POSTURES` and separate from it because the two doors differ: no flag is
 // `ADD_DEFAULT_POSTURE` (full, a device of your own) here and blind there, and `--full` is
 // not a word here (it is the default). Like the other it is grammar and a map: the daemon
-// decides what each posture may do, and remains the only guard on it. The usage line spells
-// the table's keys by hand; `the_usage_line_names_exactly_the_tables_posture_flags` holds it.
+// decides what each posture may do, and remains the only guard on it. The gateway's word,
+// `DEVICE_ADD_GATEWAY_FLAG`, sits beside it for the same reason. The usage line is assembled
+// from both, so it has no spelling of its own to hold.
 // (A comment, not `///`: rustdoc renders no doc on a private `use`.)
 use kotton_schemas::membership::{
-    DEVICE_ADD_DEFAULT_POSTURE as ADD_DEFAULT_POSTURE, DEVICE_ADD_POSTURE_FLAGS as ADD_POSTURES,
+    DEVICE_ADD_DEFAULT_POSTURE as ADD_DEFAULT_POSTURE, DEVICE_ADD_GATEWAY_FLAG as ADD_GATEWAY,
+    DEVICE_ADD_POSTURE_FLAGS as ADD_POSTURES,
 };
 
 /// What a `device add` line asks for.
@@ -823,7 +831,7 @@ fn parse_add(words: &[String]) -> Result<Add, CommandOutput> {
         if seen.contains(&w) {
             return Err(usage());
         }
-        if w == "--as" || w == "--gateway" {
+        if w == "--as" || w == ADD_GATEWAY {
             let Some(v) = words.get(i).filter(|v| !v.is_empty() && !v.starts_with('-')) else {
                 return Err(usage());
             };
@@ -948,28 +956,6 @@ mod tests {
                 assert!(parse_add(&args(&[flag, other])).is_err(), "{flag} {other}");
             }
         }
-    }
-
-    /// The usage line's posture bracket (`device add [--as NAME] [..]`) names exactly the
-    /// keys of `DEVICE_ADD_POSTURE_FLAGS`, the table `parse_add` reads: the printed grammar
-    /// is spelled by hand, and this keeps it from drifting from the parsed one either way.
-    #[test]
-    fn the_usage_line_names_exactly_the_tables_posture_flags() {
-        use kotton_schemas::membership::DEVICE_ADD_POSTURE_FLAGS;
-        let printed = super::usage();
-        let [crate::out::Out::Fail { what, .. }] = printed.out.as_slice() else {
-            panic!("not one failure: {:?}", printed.out)
-        };
-        let after = what
-            .split_once("device add [--as NAME] [")
-            .unwrap_or_else(|| panic!("no posture bracket after `device add [--as NAME]`: {what}"))
-            .1;
-        let (bracket, _) = after.split_once(']').unwrap_or_else(|| panic!("unclosed bracket: {what}"));
-        let mut named: Vec<&str> = bracket.split('|').collect();
-        let mut keys: Vec<&str> = DEVICE_ADD_POSTURE_FLAGS.iter().map(|(flag, _)| *flag).collect();
-        named.sort_unstable();
-        keys.sort_unstable();
-        assert_eq!(named, keys, "the usage line's posture bracket is the table's keys: {what}");
     }
 
     /// The same refusal before any session: a known verb whose words do not parse is answered
