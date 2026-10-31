@@ -287,22 +287,123 @@ impl Manifest {
 
     /// Parse from a framed chunk payload, refusing a non-manifest kind.
     pub fn from_chunk(framed: &[u8]) -> ObjectStorageResult<Self> {
-        let (kind, bytes) = unframe_chunk(framed)?;
+        Self::decode(framed).map_err(Into::into)
+    }
+
+    /// [`from_chunk`](Self::from_chunk), saying which of two ways a manifest
+    /// fails to decode ([`ManifestDecodeError`]).
+    pub fn decode(framed: &[u8]) -> Result<Self, ManifestDecodeError> {
+        let (kind, bytes) = unframe_chunk(framed).map_err(ManifestDecodeError::Malformed)?;
         if kind != ChunkKind::Manifest {
-            return Err(ObjectStorageError::BackendError(format!(
-                "expected a manifest chunk, found {kind:?}"
+            return Err(ManifestDecodeError::Malformed(ObjectStorageError::BackendError(
+                format!("expected a manifest chunk, found {kind:?}"),
             )));
         }
-        let manifest: Self = serde_json::from_slice(bytes).map_err(|e| {
-            ObjectStorageError::BackendError(format!("manifest parse: {e}"))
-        })?;
+        let manifest: Self = match serde_json::from_slice(bytes) {
+            Ok(m) => m,
+            Err(e) => return Err(refusal_or_malformed(bytes, e)),
+        };
         if manifest.version != 1 {
-            return Err(ObjectStorageError::BackendError(format!(
-                "unsupported manifest version {}",
-                manifest.version
+            return Err(ManifestDecodeError::Malformed(ObjectStorageError::BackendError(
+                format!("unsupported manifest version {}", manifest.version),
             )));
         }
         Ok(manifest)
+    }
+}
+
+/// Why a manifest did not decode.
+///
+/// The two are told apart because they ask for different things of a reader
+/// (`crate::packed::load_committed`). A refused pack id is a version-1
+/// manifest, well formed in every other way, with a ref a device wrote
+/// wrongly: the generation can be passed over and what only it names held. A
+/// malformed one, including one of a version this code does not read, may be
+/// a newer device's correct write, and passing over it would build past that
+/// device: the load fails, as it always did.
+#[derive(Debug)]
+pub enum ManifestDecodeError {
+    /// A version-1 manifest that decodes once its refused pack ids are set
+    /// aside; the first refusal (kotton #273).
+    PackIdRefused(crate::NotCanonical),
+    /// Anything else: not a manifest chunk, not JSON, not this shape, or not
+    /// this version.
+    Malformed(ObjectStorageError),
+}
+
+impl std::fmt::Display for ManifestDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PackIdRefused(refused) => write!(f, "manifest parse: {refused}"),
+            Self::Malformed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<ManifestDecodeError> for ObjectStorageError {
+    fn from(e: ManifestDecodeError) -> Self {
+        match e {
+            ManifestDecodeError::PackIdRefused(_) => ObjectStorageError::BackendError(e.to_string()),
+            ManifestDecodeError::Malformed(e) => e,
+        }
+    }
+}
+
+/// Tell a manifest whose only defect is refused pack ids from any other that
+/// did not parse (`parse_error`). Only on the failure path: a manifest that
+/// parses never reaches it.
+///
+/// It is a refusal when the JSON is version 1 and, with every refused
+/// `pack_id` replaced by an admitted placeholder, it parses. Anything else is
+/// malformed, reported with the parse error itself.
+fn refusal_or_malformed(bytes: &[u8], parse_error: serde_json::Error) -> ManifestDecodeError {
+    let malformed = || {
+        ManifestDecodeError::Malformed(ObjectStorageError::BackendError(format!(
+            "manifest parse: {parse_error}"
+        )))
+    };
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return malformed();
+    };
+    if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return malformed();
+    }
+    let mut first_refused = None;
+    set_aside_refused_pack_ids(&mut value, &mut first_refused);
+    match (first_refused, serde_json::from_value::<Manifest>(value)) {
+        (Some(refused), Ok(_)) => ManifestDecodeError::PackIdRefused(refused),
+        _ => malformed(),
+    }
+}
+
+/// Replace every `pack_id` string in `value` that [`crate::packed::PackId`]
+/// refuses with an admitted placeholder, keeping the first refusal.
+fn set_aside_refused_pack_ids(
+    value: &mut serde_json::Value,
+    first_refused: &mut Option<crate::NotCanonical>,
+) {
+    const PLACEHOLDER: &str = "_pack/00000000000000000000000000000000";
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if key == "pack_id" {
+                    if let serde_json::Value::String(id) = child {
+                        if let Err(refused) = crate::packed::PackId::parse(id) {
+                            first_refused.get_or_insert(refused);
+                            *child = serde_json::Value::from(PLACEHOLDER);
+                        }
+                        continue;
+                    }
+                }
+                set_aside_refused_pack_ids(child, first_refused);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                set_aside_refused_pack_ids(item, first_refused);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -439,6 +540,47 @@ mod tests {
             let m = Manifest::from_chunk(&frame_chunk(ChunkKind::Manifest, json.as_bytes())).unwrap();
             assert_eq!(m.files["notes/2026/trip.md"].chunks[0].pack_id.as_str(), id);
         }
+    }
+
+    /// **Only a refused pack id is a refusal** (kotton #273). The reader
+    /// passes over a generation for [`ManifestDecodeError::PackIdRefused`] and
+    /// fails on anything else, so that variant must mean exactly "a version-1
+    /// manifest, well formed but for its pack ids". A bad id beside another
+    /// defect, or in a manifest of another version, is malformed.
+    #[test]
+    fn only_a_refused_pack_id_is_a_refusal() {
+        let good = sample();
+        let real = good.files["notes/2026/trip.md"].chunks[0].pack_id.to_string();
+        let with_bad_id = serde_json::to_string(&good)
+            .unwrap()
+            .replace(&format!("\"{real}\""), "\"_pack/../x\"");
+        let decode = |json: &str| Manifest::decode(&frame_chunk(ChunkKind::Manifest, json.as_bytes()));
+
+        match decode(&with_bad_id) {
+            Err(ManifestDecodeError::PackIdRefused(refused)) => assert_eq!(refused.key, "_pack/../x"),
+            other => panic!("a bad id alone was not a refusal: {other:?}"),
+        }
+        for (what, json) in [
+            ("another version", with_bad_id.replace("\"version\":1", "\"version\":2")),
+            ("a bad size beside it", with_bad_id.replace("\"size\":", "\"size\":\"x\",\"was\":")),
+            ("not JSON", with_bad_id[..with_bad_id.len() / 2].to_string()),
+        ] {
+            assert!(json != with_bad_id, "{what}: the edit did not apply");
+            assert!(
+                matches!(decode(&json), Err(ManifestDecodeError::Malformed(_))),
+                "{what}: {:?}",
+                decode(&json)
+            );
+        }
+        let v2 = serde_json::to_string(&good).unwrap().replace("\"version\":1", "\"version\":2");
+        match decode(&v2) {
+            Err(ManifestDecodeError::Malformed(e)) => assert!(e.to_string().contains("unsupported manifest version 2"), "{e}"),
+            other => panic!("a newer version was not malformed: {other:?}"),
+        }
+        assert!(matches!(
+            Manifest::decode(&frame_chunk(ChunkKind::Data, with_bad_id.as_bytes())),
+            Err(ManifestDecodeError::Malformed(_))
+        ));
     }
 
     #[test]

@@ -58,15 +58,32 @@
 //! [`crate::StorageKey`] does not yet hold this grammar for every key
 //! (kotton #276).
 //!
-//! What a refusal costs. A manifest naming a pack outside the grammar does
-//! not decode, and its generation is passed over as a superblock that does
-//! not open is: reads, listings and commits use the newest generation whose
-//! manifest decodes, and the refusal is a `warn` from `crate::superblock`
-//! naming the generation and the id (`load_committed`). Compaction does not
-//! run while a generation is passed over, since the packs that manifest names
-//! are not provably dead. Only when no generation decodes is the mount
-//! unreadable. A name under `_pack/` outside the grammar is left in place and
-//! counted (`CompactSummary::packs_unadmitted`).
+//! # A refused generation is held
+//!
+//! The rule, for a manifest naming a pack outside the grammar (kotton #273):
+//!
+//! - **Its generation is passed over** as a superblock that does not open is.
+//!   Reads, listings and commits use the newest generation whose manifest
+//!   decodes, and the refusal is a `warn` from `crate::superblock` naming the
+//!   superblock's key and the id (`load_committed`). Only that refusal is
+//!   passed over: a malformed manifest, or one of a version this code does not
+//!   read, fails the load, since it may be a newer device's correct write.
+//! - **A commit past it is numbered above it** (kotton #308), so it sorts
+//!   below every later commit by generation alone.
+//! - **It is held.** While any present generation's manifest is refused,
+//!   wherever it sorts, compaction does not run and retirement keeps its
+//!   superblock (`held_generation`). The data only that manifest names is
+//!   unreadable, and kept on the shelf, never deleted.
+//!
+//! That is the concession: one bad ref costs the person the data only its
+//! generation names, readable again once the generation is repaired, and
+//! compaction until then. The rest of the mount reads and writes. The seam is
+//! a repair that re-adopts the held generation's other refs, which is not
+//! built (see PR 298). Only when no generation decodes is the mount
+//! unreadable.
+//!
+//! A name under `_pack/` outside the grammar is left in place and counted
+//! (`CompactSummary::packs_unadmitted`).
 //!
 //! # Deletes and tombstones
 //!
@@ -91,12 +108,13 @@
 use crate::chunker::chunk_boundaries;
 use crate::history::{Entry as HistoryEntry, Segment};
 use crate::manifest::{
-    chunk_digest, frame_chunk, unframe_chunk, ChunkKind, FileEntry, Manifest, PackChunkRef,
+    chunk_digest, frame_chunk, unframe_chunk, ChunkKind, FileEntry, Manifest, ManifestDecodeError,
+    PackChunkRef,
 };
 use crate::pack::{open_pack, read_chunk_from_plaintext, scan_chunks, ChunkRef};
 use crate::superblock::{
-    commit_superblock, load_adopted_superblock, load_current_superblock, retire_old_superblocks,
-    Superblock, SUPERBLOCK_PREFIX,
+    commit_superblock, load_adopted_superblock, load_current_superblock, read_superblock,
+    retirable_superblocks, superblock_keys, PassedOver, Superblock, SUPERBLOCK_PREFIX,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -458,7 +476,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
     async fn load_state_from_disk(&self) -> ObjectStorageResult<Option<(u64, Manifest)>> {
         Ok(load_committed(&*self.inner, &self.k_pack)
             .await?
-            .map(|c| (c.superblock.generation, c.manifest)))
+            .map(|c| (c.base_generation(), c.manifest)))
     }
 
     /// The current manifest, cached after first load.
@@ -654,7 +672,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         // One superblock load, since the pass needs both halves of the root
         // pointer: the manifest to build on, and the log head to chain to.
         let (base_gen, base_manifest) = match load_committed(&*self.inner, &self.k_pack).await? {
-            Some(c) => (c.superblock.generation, c.manifest),
+            Some(c) => (c.base_generation(), c.manifest),
             None => (0, Manifest::new()),
         };
 
@@ -753,7 +771,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             loose_deleted += 1;
         }
         self.save_tombstones(&Tombstones::default()).await?;
-        if let Err(e) = retire_old_superblocks(&*self.inner).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
 
@@ -804,18 +822,18 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             // to a no-op rather than sweeping packs it cannot account for.
             return Ok(CompactSummary::default());
         };
-        // A newer generation whose manifest does not decode was passed over.
-        // Reads and commits build on the generation before it, as they do
-        // past a superblock that does not open; this pass does not, because
-        // it deletes what the manifest it reads does not name, and the packs
-        // the passed-over manifest names are not provably dead. It runs again
-        // once a generation that decodes is newest (kotton #273).
-        if let Some(newer) = committed.passed_over.first() {
-            return Err(ObjectStorageError::BackendError(format!(
-                "compaction not run: a newer generation than {} was passed over because its \
-                 manifest does not decode, and its packs are not provably dead ({newer})",
-                committed.superblock.generation
-            )));
+        // Compaction deletes what the manifest it reads does not name. A
+        // present generation whose manifest was refused names packs no
+        // readable manifest may name, so while one is present, wherever it
+        // sorts, this pass deletes nothing (the rule in the module doc).
+        for (generation, key) in superblock_keys(&*self.inner).await? {
+            if let Some(why) = held_generation(&*self.inner, &self.k_pack, &key).await? {
+                return Err(ObjectStorageError::BackendError(format!(
+                    "compaction not run: generation {generation} ({key}) is held, its manifest \
+                     refused ({why}); the packs only it names are kept, and compaction stays off \
+                     until it is repaired"
+                )));
+            }
         }
         let Committed {
             superblock: sb,
@@ -1118,7 +1136,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             self.inner.delete_sealed(old_manifest_pack.as_path()).await?;
             packs_retired += 1;
         }
-        if let Err(e) = retire_old_superblocks(&*self.inner).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
 
@@ -1176,14 +1194,11 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         let Some(log) = &self.log else {
             return Ok(None);
         };
-        let Some(Committed {
-            superblock: sb,
-            mut manifest,
-            ..
-        }) = load_committed(&*self.inner, &self.k_pack).await?
-        else {
+        let Some(committed) = load_committed(&*self.inner, &self.k_pack).await? else {
             return Ok(None);
         };
+        let base_gen = committed.base_generation();
+        let mut manifest = committed.manifest;
         if manifest.log.is_empty() {
             return Ok(None);
         }
@@ -1218,7 +1233,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             // granularity and gain nothing.
             return Ok(Some(SnapshotSummary {
                 segments_retained: retained.len(),
-                generation: sb.generation,
+                generation: base_gen,
                 ..Default::default()
             }));
         }
@@ -1232,7 +1247,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
                 .map(|(r, s)| (r.digest.clone(), s.clone()))
                 .collect::<Vec<_>>(),
         );
-        let generation = sb.generation + 1;
+        let generation = base_gen + 1;
         let mut snapshot = Segment::new(log.writer_did.clone(), generation);
         snapshot.snapshot = true;
         snapshot.parents = segments.iter().map(|(r, _)| r.digest.clone()).collect();
@@ -1371,7 +1386,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             },
         )
         .await?;
-        if let Err(e) = retire_old_superblocks(&*self.inner).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         *self.manifest_cache.lock().unwrap() =
@@ -1451,7 +1466,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         // makes bootstrap and steady-state the same code path.
         let (base_gen, mut manifest) =
             match load_committed(&*self.inner, &self.k_pack).await? {
-                Some(c) => (c.superblock.generation, c.manifest),
+                Some(c) => (c.base_generation(), c.manifest),
                 None => (0, Manifest::new()),
             };
 
@@ -1569,7 +1584,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             },
         )
         .await?;
-        if let Err(e) = retire_old_superblocks(&*self.inner).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         *self.manifest_cache.lock().unwrap() =
@@ -1608,7 +1623,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         // has ever packed an object (bootstrap and steady state share a path).
         let (base_gen, mut manifest) =
             match load_committed(&*self.inner, &self.k_pack).await? {
-                Some(c) => (c.superblock.generation, c.manifest),
+                Some(c) => (c.base_generation(), c.manifest),
                 None => (0, Manifest::new()),
             };
         let generation = base_gen + 1;
@@ -1661,7 +1676,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             },
         )
         .await?;
-        if let Err(e) = retire_old_superblocks(&*self.inner).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         *self.manifest_cache.lock().unwrap() =
@@ -1969,14 +1984,32 @@ fn framed_from_plaintext(plaintext: &[u8], r: &PackChunkRef) -> ObjectStorageRes
 /// so a device of theirs wrote it, wrongly. Its generation is passed over as a
 /// superblock that does not open is, and reported on the same channel, a
 /// `warn` from `crate::superblock` naming the superblock's key and the
-/// refusal: one bad ref costs the generation it is in, not the mount. A
-/// manifest whose pack cannot be *read* is not passed over; that error ends
-/// the load, since it says nothing about the generation.
+/// refusal: one bad ref costs the generation it is in, not the mount.
+///
+/// Only that refusal is passed over ([`ManifestDecodeError::PackIdRefused`]).
+/// A manifest that is malformed, or of a version this code does not read,
+/// fails the load as it always did: it may be a newer device's correct write,
+/// and building past it would roll that device back. A manifest whose pack
+/// cannot be *read* fails the load too; that says nothing about the
+/// generation.
 struct Committed {
     superblock: Superblock,
     manifest: Manifest,
     /// The newer generations passed over, newest first (`Adopted::passed_over`).
-    passed_over: Vec<String>,
+    passed_over: Vec<PassedOver>,
+}
+
+impl Committed {
+    /// The generation a commit built on this state follows: the highest of the
+    /// one adopted and those passed over above it (kotton #308). Numbered past
+    /// a passed-over generation, a commit sorts above it by generation, not by
+    /// the key tie-break.
+    fn base_generation(&self) -> u64 {
+        self.passed_over
+            .iter()
+            .map(|p| p.generation)
+            .fold(self.superblock.generation, u64::max)
+    }
 }
 
 async fn load_committed<S: SealedObjectAccess + ?Sized>(
@@ -1985,7 +2018,11 @@ async fn load_committed<S: SealedObjectAccess + ?Sized>(
 ) -> ObjectStorageResult<Option<Committed>> {
     let adopted = load_adopted_superblock(store, k_pack, |sb| async move {
         let framed = read_framed_chunk_from(store, k_pack, &sb.manifest).await?;
-        Ok(Manifest::from_chunk(&framed))
+        match Manifest::decode(&framed) {
+            Ok(manifest) => Ok(Ok(manifest)),
+            Err(refused @ ManifestDecodeError::PackIdRefused(_)) => Ok(Err(refused.into())),
+            Err(ManifestDecodeError::Malformed(e)) => Err(e),
+        }
     })
     .await?;
     Ok(adopted.map(|a| Committed {
@@ -1993,6 +2030,55 @@ async fn load_committed<S: SealedObjectAccess + ?Sized>(
         manifest: a.state,
         passed_over: a.passed_over,
     }))
+}
+
+/// Whether the generation whose superblock is `key` is **held**: its
+/// superblock opens and its manifest is refused for a pack id
+/// ([`ManifestDecodeError::PackIdRefused`]). Returns the refusal if so.
+///
+/// A held generation's manifest may be the only one naming some packs, and
+/// none of them can be read through it. So while it is present nothing that
+/// deletes may run on the strength of the manifests that *do* decode:
+/// compaction refuses, and retirement ([`retire_superseded`]) keeps its
+/// superblock. A superblock that does not open, or whose manifest pack is
+/// gone (a superseded generation whose manifest compaction already retired),
+/// holds nothing. A read that fails otherwise is an error, not a "no".
+async fn held_generation<S: SealedObjectAccess + ?Sized>(
+    store: &S,
+    k_pack: &[u8; 32],
+    key: &str,
+) -> ObjectStorageResult<Option<String>> {
+    let Some(sb) = read_superblock(store, k_pack, key).await? else {
+        return Ok(None);
+    };
+    let framed = match read_framed_chunk_from(store, k_pack, &sb.manifest).await {
+        Ok(framed) => framed,
+        Err(ObjectStorageError::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    match Manifest::decode(&framed) {
+        Err(refused @ ManifestDecodeError::PackIdRefused(_)) => Ok(Some(refused.to_string())),
+        _ => Ok(None),
+    }
+}
+
+/// Retire the superblocks a commit superseded (`retirable_superblocks`),
+/// keeping any held generation ([`held_generation`]): its superblock is what
+/// holds the packs only it names. Returns how many were deleted.
+async fn retire_superseded<S: SealedObjectAccess + ?Sized>(
+    store: &S,
+    k_pack: &[u8; 32],
+) -> ObjectStorageResult<usize> {
+    let mut retired = 0usize;
+    for key in retirable_superblocks(store).await? {
+        if let Some(why) = held_generation(store, k_pack, &key).await? {
+            tracing::warn!(%key, error = %why, "keeping a superblock generation whose manifest was refused");
+            continue;
+        }
+        store.delete_sealed(Path::new(&key)).await?;
+        retired += 1;
+    }
+    Ok(retired)
 }
 
 async fn read_framed_chunk_from<S: SealedObjectAccess + ?Sized>(
@@ -2267,7 +2353,7 @@ impl<S: LooseObjectSource + 'static> ObjectSink for PackStreamSink<S> {
         // one, instead of being erased by a manifest assembled minutes ago.
         let (base_gen, base_manifest) =
             match load_committed(&*self.store, &self.k_pack).await? {
-                Some(c) => (c.superblock.generation, c.manifest),
+                Some(c) => (c.base_generation(), c.manifest),
                 None => (0, Manifest::new()),
             };
 
@@ -2327,7 +2413,7 @@ impl<S: LooseObjectSource + 'static> ObjectSink for PackStreamSink<S> {
             Err(e) => return Err(e),
         }
 
-        if let Err(e) = retire_old_superblocks(&*self.store).await {
+        if let Err(e) = retire_superseded(&*self.store, &self.k_pack).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         Ok(())
@@ -2564,7 +2650,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             },
         )
         .await?;
-        if let Err(e) = retire_old_superblocks(&*self.inner).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         *self.manifest_cache.lock().unwrap() =
@@ -2951,7 +3037,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         .await?;
         *self.manifest_cache.lock().unwrap() =
             CacheState::Loaded(Some((generation, Arc::new(next))));
-        if let Err(e) = retire_old_superblocks(&*self.inner).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         Ok(())
@@ -5759,23 +5845,35 @@ mod tests {
 
     /// Commit, as generation `generation`, the current manifest with the
     /// first chunk of `path` naming pack `bad`: what a device of the person's
-    /// that writes a bad ref commits. Sealed under the store's own key, so
-    /// everything but the id is authentic.
+    /// that writes a bad ref commits. Only that ref changes; another file's
+    /// ref into the same pack keeps naming it.
     async fn commit_forged_manifest<S: LooseObjectSource + 'static>(
         s: &PackedObjectStorage<S>,
         path: &str,
         bad: &str,
         generation: u64,
     ) {
+        commit_edited_manifest(s, generation, |m| {
+            m["files"][path]["chunks"][0]["pack_id"] = serde_json::Value::from(bad);
+        })
+        .await;
+    }
+
+    /// Commit, as generation `generation`, the current manifest as `edit`
+    /// leaves its JSON. Sealed under the store's own key, so everything but
+    /// the edit is authentic.
+    async fn commit_edited_manifest<S: LooseObjectSource + 'static>(
+        s: &PackedObjectStorage<S>,
+        generation: u64,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) {
         let (_, manifest) = s.manifest().await.unwrap().unwrap();
-        let real = manifest.files[path].chunks[0].pack_id.to_string();
-        let json = serde_json::to_string(&*manifest)
-            .unwrap()
-            .replace(&format!("\"{real}\""), &format!("\"{bad}\""));
-        assert!(json.contains(&format!("\"pack_id\":\"{bad}\"")), "{json}");
+        let mut value = serde_json::to_value(&*manifest).unwrap();
+        edit(&mut value);
+        let json = serde_json::to_string(&value).unwrap();
         let framed = frame_chunk(ChunkKind::Manifest, json.as_bytes());
         let (blob, refs) = crate::pack::seal_pack(&derive_pack_key(&CEK), &[framed.as_slice()]).unwrap();
-        let holder = format!("{PACK_PREFIX}/{}", "ab".repeat(16));
+        let holder = format!("{PACK_PREFIX}/{:032x}", generation | 0xab00);
         s.inner.put_sealed(Path::new(&holder), &blob).await.unwrap();
         let manifest_ref: PackChunkRef = serde_json::from_value(serde_json::json!({
             "pack_id": holder,
@@ -5786,6 +5884,13 @@ mod tests {
         .unwrap();
         let sb = Superblock { version: 1, generation, manifest: manifest_ref };
         commit_superblock(&*s.inner, &derive_pack_key(&CEK), &sb).await.unwrap();
+    }
+
+    /// The superblock keys of generation `generation` on `s`'s shelf.
+    async fn superblocks_of<S: LooseObjectSource + 'static>(s: &PackedObjectStorage<S>, generation: u64) -> Vec<String> {
+        let tag = format!("{generation:020}-");
+        s.inner.list_sealed(Path::new(SUPERBLOCK_PREFIX)).await.unwrap()
+            .into_iter().map(|m| m.key).filter(|k| k.contains(&tag)).collect()
     }
 
     /// The `warn` lines emitted on this thread while it is alive: the channel
@@ -5843,8 +5948,7 @@ mod tests {
         // bad id for `b.md`, as the device that wrote it would have committed.
         let (generation, _) = s.manifest().await.unwrap().unwrap();
         assert_eq!(generation, 2);
-        let sbs: Vec<String> = s.inner.list_sealed(Path::new(SUPERBLOCK_PREFIX)).await.unwrap()
-            .into_iter().map(|m| m.key).filter(|k| k.contains("00000000000000000002-")).collect();
+        let sbs = superblocks_of(&s, 2).await;
         commit_forged_manifest(&s, "notes/b.md", "_pack/../x", 2).await;
         for k in sbs {
             s.inner.delete_sealed(Path::new(&k)).await.unwrap();
@@ -5855,6 +5959,10 @@ mod tests {
         let before = shelf_keys(&backing).await;
         let lines = Arc::new(Mutex::new(Vec::new()));
         let _capture = tracing::subscriber::set_default(WarnLines(lines.clone()));
+        // Another test may already have registered the warn's callsite with
+        // no subscriber, and `Dispatch::new` rebuilds interest before
+        // `set_default` counts this one: rebuild now that it does.
+        tracing::callsite::rebuild_interest_cache();
 
         let fresh = fetching(&backing, &slot);
         assert_eq!(fresh.get(Path::new("notes/a.md")).await.unwrap().as_ref(), b"older");
@@ -5895,5 +6003,82 @@ mod tests {
             assert_eq!(s.inner.get_sealed(Path::new(planted)).await.unwrap().as_ref(), b"planted");
         }
         assert_eq!(s.get(Path::new("notes/a.md")).await.unwrap().as_ref(), b"hello");
+    }
+
+    /// **Data only a skipped generation names is held, not deleted**
+    /// (kotton #273, PR 298's second assessment).
+    ///
+    /// Generation 1 holds `a`; generation 2 holds `a`, `b` and `c`, and only
+    /// `c`'s ref names `_pack/../x`, so `b`'s pack is named by the refused
+    /// manifest alone. Two later writes commit above the skipped generation
+    /// (numbered past it, #308), and compaction stays off while it is present:
+    /// it refuses naming the generation and the id, and `b`'s pack and the
+    /// skipped superblock are still on the shelf. `b` is unreadable meanwhile;
+    /// everything else reads and writes.
+    #[tokio::test]
+    async fn a_pack_only_a_skipped_generation_names_is_held_and_compaction_stays_off() {
+        use crate::fetch::PackSlot;
+        use std::sync::atomic::Ordering;
+
+        let backing = MemoryObjectStorage::new();
+        let slot = PackSlot::default();
+        let s = fetching(&backing, &slot);
+        s.put(Path::new("notes/a.md"), b"one").await.unwrap();
+        s.pack_loose().await.unwrap();
+        s.put(Path::new("notes/b.md"), b"two").await.unwrap();
+        s.put(Path::new("notes/c.md"), b"three").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let (generation, manifest) = s.manifest().await.unwrap().unwrap();
+        assert_eq!(generation, 2);
+        let b_pack = manifest.files["notes/b.md"].chunks[0].pack_id.to_string();
+        let real = superblocks_of(&s, 2).await;
+        commit_forged_manifest(&s, "notes/c.md", "_pack/../x", 2).await;
+        for k in real {
+            s.inner.delete_sealed(Path::new(&k)).await.unwrap();
+        }
+        let skipped = superblocks_of(&s, 2).await;
+        assert_eq!(skipped.len(), 1);
+
+        let drive = Arc::new(AnsweringDrive { asked: Default::default() });
+        slot.lend(drive.clone());
+        let fresh = fetching(&backing, &slot);
+        fresh.put(Path::new("notes/d.md"), b"four").await.unwrap();
+        let first = fresh.pack_loose().await.unwrap().unwrap();
+        assert_eq!(first.generation, Some(3), "a commit past the skipped generation is not numbered above it");
+        fresh.put(Path::new("notes/e.md"), b"five").await.unwrap();
+        fresh.pack_loose().await.unwrap();
+
+        let err = fresh.compact().await.expect_err("compaction ran while a skipped generation names data");
+        assert!(err.to_string().contains("_pack/../x") && err.to_string().contains(&skipped[0]), "{err}");
+        let shelf = shelf_keys(&backing).await;
+        assert!(shelf.contains(&b_pack), "the pack only the skipped generation names was deleted");
+        assert!(shelf.contains(&skipped[0]), "the skipped generation's superblock was retired");
+        for (path, bytes) in [("notes/a.md", &b"one"[..]), ("notes/d.md", b"four"), ("notes/e.md", b"five")] {
+            assert_eq!(fresh.get(Path::new(path)).await.unwrap().as_ref(), bytes, "{path}");
+        }
+        assert!(matches!(fresh.get(Path::new("notes/b.md")).await, Err(ObjectStorageError::NotFound(_))));
+        assert_eq!(drive.asked.load(Ordering::SeqCst), 0, "a drive was asked for the bad id");
+    }
+
+    /// **Only a pack-id refusal is skipped.** A manifest of a version this
+    /// code does not read is not a bad ref: it is a newer format, and building
+    /// past it would roll back the device that wrote it. Its generation fails
+    /// the load as before, and nothing is written or deleted.
+    #[tokio::test]
+    async fn a_manifest_of_an_unsupported_version_fails_the_load_and_is_not_skipped() {
+        let backing = MemoryObjectStorage::new();
+        let slot = crate::fetch::PackSlot::default();
+        let s = fetching(&backing, &slot);
+        s.put(Path::new("notes/a.md"), b"one").await.unwrap();
+        s.pack_loose().await.unwrap();
+        commit_edited_manifest(&s, 2, |m| m["version"] = serde_json::Value::from(2)).await;
+
+        let before = shelf_keys(&backing).await;
+        let fresh = fetching(&backing, &slot);
+        let err = fresh.get(Path::new("notes/a.md")).await.expect_err("a newer format was skipped");
+        assert!(err.to_string().contains("unsupported manifest version 2"), "{err}");
+        assert!(fresh.list(Path::new("")).await.is_err(), "a newer format was listed past");
+        assert!(fresh.compact().await.is_err(), "compaction ran past a newer format");
+        assert_eq!(shelf_keys(&backing).await, before, "something was written or deleted");
     }
 }

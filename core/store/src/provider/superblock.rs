@@ -35,6 +35,13 @@
 //! generation, and adopting an older one on a transient error would build on
 //! a stale base.
 //!
+//! A commit made past a passed-over generation is numbered above the
+//! highest generation passed over (kotton #308, `crate::packed`'s
+//! `Committed::base_generation`), so it sorts above it by generation, not by
+//! the key tie-break. Which states a caller passes over, and what it keeps for
+//! them, is the caller's: the pack layer passes over only a refused pack id,
+//! and holds that generation (`crate::packed`'s module doc).
+//!
 //! The `_superblock/` prefix cannot collide with a blinded object key: blinded
 //! components are base32, an alphabet with no `_`.
 //!
@@ -220,8 +227,52 @@ pub struct Adopted<T> {
     /// What `adopt` made of it.
     pub state: T,
     /// Each generation passed over because its state was refused, newest
-    /// first, as `"<key>: <why>"`. Empty in a store no device wrote wrongly.
-    pub passed_over: Vec<String>,
+    /// first. Empty in a store no device wrote wrongly.
+    pub passed_over: Vec<PassedOver>,
+}
+
+/// A generation [`load_adopted_superblock`] passed over: its superblock
+/// opened, and the state it names was refused.
+#[derive(Debug, Clone)]
+pub struct PassedOver {
+    /// Its generation.
+    pub generation: u64,
+    /// Its superblock's storage key.
+    pub key: String,
+    /// Why its state was refused.
+    pub why: String,
+}
+
+/// Every superblock key on `store`, with its generation, highest first; the
+/// key string breaks a same-generation tie deterministically (two devices can
+/// commit the same generation under a naive object sync — see
+/// `superblock_key`).
+pub async fn superblock_keys<S>(store: &S) -> ObjectStorageResult<Vec<(u64, String)>>
+where
+    S: SealedObjectAccess + ?Sized,
+{
+    let entries = store.list_sealed(Path::new(SUPERBLOCK_PREFIX)).await?;
+    let mut keys: Vec<(u64, String)> = entries
+        .iter()
+        .filter(|m| !m.is_dir)
+        .filter_map(|m| parse_generation(&m.key).map(|g| (g, m.key.clone())))
+        .collect();
+    keys.sort_unstable_by(|a, b| b.cmp(a));
+    Ok(keys)
+}
+
+/// The superblock stored under `key`: `Ok(None)` when it does not open (torn,
+/// corrupt or relocated), `Err` when it could not be read.
+pub async fn read_superblock<S>(
+    store: &S,
+    k_pack: &[u8; 32],
+    key: &str,
+) -> ObjectStorageResult<Option<Superblock>>
+where
+    S: SealedObjectAccess + ?Sized,
+{
+    let blob = store.get_sealed(Path::new(key)).await?;
+    Ok(open_superblock(k_pack, key, &blob).ok())
 }
 
 /// Load the **highest generation that opens and whose state is adopted**.
@@ -242,23 +293,14 @@ where
     F: FnMut(Superblock) -> Fut,
     Fut: std::future::Future<Output = ObjectStorageResult<Result<T, ObjectStorageError>>>,
 {
-    let entries = store.list_sealed(Path::new(SUPERBLOCK_PREFIX)).await?;
-    let mut candidates: Vec<(u64, String)> = entries
-        .iter()
-        .filter(|m| !m.is_dir)
-        .filter_map(|m| parse_generation(&m.key).map(|g| (g, m.key.clone())))
-        .collect();
+    let candidates = superblock_keys(store).await?;
     if candidates.is_empty() {
         return Ok(None);
     }
-    // Highest generation first; the key string breaks a same-generation tie
-    // deterministically (two devices can commit the same generation under a
-    // naive object sync — see `superblock_key`).
-    candidates.sort_unstable_by(|a, b| b.cmp(a));
 
     let mut last_err = None;
     let mut passed_over = Vec::new();
-    for (_gen, key) in candidates {
+    for (generation, key) in candidates {
         let blob = match store.get_sealed(Path::new(&key)).await {
             Ok(b) => b,
             Err(e) => {
@@ -284,7 +326,11 @@ where
             }
             Err(e) => {
                 tracing::warn!(%key, error = %e, "skipping superblock generation whose state does not decode");
-                passed_over.push(format!("{key}: {e}"));
+                passed_over.push(PassedOver {
+                    generation,
+                    key,
+                    why: e.to_string(),
+                });
                 last_err = Some(e);
             }
         }
@@ -316,27 +362,35 @@ where
         .map(|adopted| adopted.superblock))
 }
 
-/// Retire superblocks older than the previous generation, returning how many
-/// were deleted.
+/// The superblocks older than the previous generation: what retirement may
+/// delete. The two highest generations present — current plus one fallback —
+/// are never among them, so no state exists in which a single copy is in
+/// flight.
+pub async fn retirable_superblocks<S>(store: &S) -> ObjectStorageResult<Vec<String>>
+where
+    S: SealedObjectAccess + ?Sized,
+{
+    Ok(superblock_keys(store)
+        .await?
+        .into_iter()
+        .skip(2)
+        .map(|(_, key)| key)
+        .collect())
+}
+
+/// Retire every [`retirable_superblocks`] key, returning how many were
+/// deleted.
 ///
-/// Called only after a commit's pack retirement completes. Keeps the two
-/// highest generations present — current plus one fallback — so no state
-/// exists in which a single copy is in flight.
+/// The pack layer does not call this: it retires through
+/// `crate::packed`'s own pass, which also keeps a generation whose manifest
+/// was refused, since that superblock is what holds the data only it names.
 pub async fn retire_old_superblocks<S>(store: &S) -> ObjectStorageResult<usize>
 where
     S: SealedObjectAccess + ?Sized,
 {
-    let entries = store.list_sealed(Path::new(SUPERBLOCK_PREFIX)).await?;
-    let mut candidates: Vec<(u64, String)> = entries
-        .iter()
-        .filter(|m| !m.is_dir)
-        .filter_map(|m| parse_generation(&m.key).map(|g| (g, m.key.clone())))
-        .collect();
-    candidates.sort_unstable_by(|a, b| b.cmp(a));
-
     let mut deleted = 0usize;
-    for (_gen, key) in candidates.iter().skip(2) {
-        store.delete_sealed(Path::new(key)).await?;
+    for key in retirable_superblocks(store).await? {
+        store.delete_sealed(Path::new(&key)).await?;
         deleted += 1;
     }
     Ok(deleted)
