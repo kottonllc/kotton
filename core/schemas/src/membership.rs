@@ -77,10 +77,14 @@ pub enum Posture {
     Gateway,
 }
 
-/// The words `device add` has for a posture, each with the posture it asks for: the grammar
-/// the shell parses (`parse_add`, `client/shell/src/commands/device.rs`) and the hints this
-/// workspace prints (`adds_instead`, `kotton-device`) both read, so they cannot spell it
-/// differently. A gateway is not here: it is `--gateway <code>`, a word with a value.
+/// The words `device add` has for a posture, each with the posture it asks for. The grammar
+/// the shell parses (`parse_add`, `client/shell/src/commands/device.rs`) reads it, and so do
+/// the daemon's hints that name a `device add` posture flag (`device_add_flag` in
+/// `kotton-device`, which looks a flag up by posture). A gateway is not here: it is
+/// `--gateway <code>`, a word with a value. What holds the rest: `cargo xtask
+/// device-add-check` finds no other `device add --` in code under `core/` outside tests and
+/// comments (its module doc says what a text check cannot see), and a shell test holds its
+/// usage line's bracket to these keys. Prose outside `core/` is not held.
 ///
 /// `drive enrol` has a table of its own in the shell, since its default (blind) and its set
 /// (it has `--full`) differ. Neither table is a judgement: the daemon remains the only guard

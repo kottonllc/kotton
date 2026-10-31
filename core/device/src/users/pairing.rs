@@ -834,9 +834,11 @@ pub async fn handle_device_join(
                 // handed, and the issuer is told why in its answer.
                 tracing::warn!(user_id = %user_id, "a vault refused a payload carrying keys");
                 let refused = UserResponse::PairFailed {
-                    reason: "this node is a vault: it keeps sealed bytes and holds no key, so \
-                             enrol it blind (`device add --blind`)"
-                        .to_string(),
+                    reason: format!(
+                        "this node is a vault: it keeps sealed bytes and holds no key, so \
+                         enrol it blind (`device add {}`)",
+                        device_add_flag(Posture::BlindStorage)
+                    ),
                 };
                 answer_the_issuer(answer, &sessions, refused).await
             }
@@ -948,15 +950,34 @@ fn not_blind_refusal(posture: Posture) -> String {
 /// interpolates and the test holds — so no test has to pick a command out of
 /// prose, and a sentence that named a second `device add` would fail the test
 /// that counts them. Exhaustive for the same reason as [`not_blind_refusal`].
-fn adds_instead(posture: Posture) -> &'static str {
+///
+/// A posture `device add` names with a flag takes the flag from
+/// [`device_add_flag`]: the hint has no spelling of its own to drift. The default
+/// posture is the bare line, and a gateway is `--gateway <code>`, a word with a
+/// value the table does not carry; `cargo xtask device-add-check` holds that this
+/// arm is the only `device add --` under `core/` outside tests and comments.
+fn adds_instead(posture: Posture) -> String {
     match posture {
-        Posture::Full => "device add",
-        Posture::Cosigner => "device add --cosigner",
-        Posture::Gateway => "device add --gateway <code>",
+        Posture::Full => "device add".to_owned(),
+        Posture::Cosigner => format!("device add {}", device_add_flag(posture)),
+        Posture::Gateway => "device add --gateway <code>".to_owned(),
         Posture::BlindStorage => {
             unreachable!("admits_by_code admits the blind posture before asking for a refusal")
         }
     }
+}
+
+/// The flag `device add` names `posture` with, from `DEVICE_ADD_POSTURE_FLAGS`, the
+/// table the shell's `parse_add` reads, looked up by posture: what every hint here
+/// that names a `device add` posture flag prints. Called only for a posture the
+/// table has a flag for (blind, cosigner); the default and the gateway are not flags.
+fn device_add_flag(posture: Posture) -> &'static str {
+    use kotton_schemas::membership::DEVICE_ADD_POSTURE_FLAGS;
+    DEVICE_ADD_POSTURE_FLAGS
+        .iter()
+        .find(|(_, p)| *p == posture)
+        .map(|(flag, _)| *flag)
+        .expect("`device add` names this posture with a flag of DEVICE_ADD_POSTURE_FLAGS")
 }
 
 /// A vault's invite as its code names it: where the ceremony
@@ -2100,6 +2121,18 @@ mod admit_tests {
         assert_eq!(device_add_parses("device add --cosigner"), Some(Posture::Cosigner));
     }
 
+    /// Every posture the table has a flag for gives, through `device_add_flag` (what the
+    /// vault's refusal and `adds_instead` print), a `device add` that asks for that posture.
+    #[test]
+    fn every_table_posture_is_printed_with_a_flag_the_hint_reader_reads_back() {
+        use kotton_schemas::membership::DEVICE_ADD_POSTURE_FLAGS;
+        for (_, posture) in DEVICE_ADD_POSTURE_FLAGS {
+            let line = format!("device add {}", super::device_add_flag(posture));
+            assert_eq!(device_add_parses(&line), Some(posture), "{line}");
+        }
+        assert_eq!(super::device_add_flag(Posture::BlindStorage), "--blind");
+    }
+
     /// Every posture the admit refuses is handed a `device add` that adds a
     /// device *of that posture* — never a bare one, which is a Full join code, and
     /// a gateway is never sent to `device join`, since it prints the code and this
@@ -2111,7 +2144,7 @@ mod admit_tests {
             let said = refused.to_string();
             // The command is data, held directly: it adds a device of this posture.
             let add = adds_instead(posture);
-            assert_eq!(device_add_parses(add), Some(posture), "{posture:?} adds by `{add}`");
+            assert_eq!(device_add_parses(&add), Some(posture), "{posture:?} adds by `{add}`");
             // And the sentence carries that command, backticked, and no other
             // `device add` — a second one would be a wider hint slipped in after
             // the right one, which is what this test exists to refuse.
@@ -2121,7 +2154,7 @@ mod admit_tests {
                 .step_by(2)
                 .filter(|quoted| quoted.starts_with("device add"))
                 .collect();
-            assert_eq!(adds, vec![add], "{posture:?} names exactly one `device add`: {said}");
+            assert_eq!(adds, vec![add.as_str()], "{posture:?} names exactly one `device add`: {said}");
             if posture == Posture::Gateway {
                 assert!(!said.contains("device join"), "a gateway does not join: {said}");
                 assert!(said.contains("prints the code"), "{said}");
