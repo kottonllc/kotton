@@ -164,7 +164,8 @@ impl<S: ObjectStorage + 'static> BlindedObjectStorage<S> {
     /// caller.
     ///
     /// `skip_reserved` skips the `_`-prefixed storage namespace (packs,
-    /// superblocks, tombstones — the pack layer's). Blinded components are base32, so a
+    /// superblocks, tombstones — the pack layer's), as `crate::packed::kind`
+    /// reads it: every key it does not call a file. Blinded components are base32, so a
     /// stored key starting with `_` can only be reserved — but a
     /// **pre-migration** store's keys are plaintext user paths, where `_` is an
     /// ordinary character, so migration must pass `false`.
@@ -180,7 +181,7 @@ impl<S: ObjectStorage + 'static> BlindedObjectStorage<S> {
         Box::pin(async move {
             let mut out = Vec::new();
             for entry in self.inner.list(prefix).await? {
-                if skip_reserved && entry.key.starts_with('_') {
+                if skip_reserved && crate::packed::kind(&entry.key) != crate::packed::ObjectKind::File {
                     continue;
                 }
                 if entry.is_dir {

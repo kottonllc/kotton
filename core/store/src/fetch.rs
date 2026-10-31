@@ -102,10 +102,11 @@ impl FetchOnMiss {
 
     /// Whether `key` names a pack: the one thing this layer fetches.
     fn is_pack(key: &Path) -> bool {
-        let key = key.to_string_lossy();
-        key.trim_start_matches('/')
-            .strip_prefix(crate::packed::PACK_PREFIX)
-            .is_some_and(|rest| rest.starts_with('/'))
+        use crate::packed::ObjectKind;
+        matches!(
+            crate::packed::kind(&key.to_string_lossy()),
+            ObjectKind::ContentPack | ObjectKind::IndexPack
+        )
     }
 
     /// `read`, and when it finds no pack here, the pack fetched, kept, and
