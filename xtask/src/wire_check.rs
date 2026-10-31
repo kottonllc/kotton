@@ -60,6 +60,28 @@
 //! and the mirror tests beside them hold that the door's bytes decode and
 //! re-encode on each peer wire. This rule holds the same fact in the gate
 //! `just lint` runs, which does not run those tests.
+//!
+//! The rule reads text, so it holds the parser to the printer: each recording's
+//! `# variants: N` header, which [`render`] writes, must equal the number of
+//! variants [`recorded_blocks`] parses back, and both indent with [`INDENT`]. A
+//! printer change the parser does not follow is a finding, not a rule that
+//! quietly compares the wrong lines. A differing block is listed as a line
+//! diff, by line number in each file, each line printed raw between `|` marks,
+//! so a dropped repeated attribute is named as the missing line and a
+//! whitespace-only difference is visible.
+//!
+//! `cargo xtask wire-surface` re-records every channel and then prints the
+//! rule's findings, exiting 0: a change to the door and both peer types is
+//! re-recorded in one command, and a door-only re-record is told in that same
+//! command that the next `wire-check` fails.
+//!
+//! Both text rules, this one and the kotton-wire tests, hold a naming agreement
+//! between three types. The seam past them is at the type level: #254's shared
+//! sealed-verbs sub-type, `SealedVerb` (PR 290,
+//! `core/wire/src/ipc/sealed_verb.rs`), gives the sender one type for the six
+//! verbs both peer wires share, converted to each peer type by one macro. While
+//! each peer wire is its own flat enum, the recordings still restate those
+//! verbs, and this rule is what holds the restatement in the gate.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -182,22 +204,32 @@ pub fn wire_check(bless: bool) {
         for channel in CHANNELS {
             check_channel(channel, true);
         }
+        // Reporting only: a change to the door and both peer types is
+        // re-recorded by this one command, so the rule cannot refuse it here.
+        // A door-only re-record is told now rather than at the next check.
+        let findings = twin_findings(Path::new("."));
+        if findings.is_empty() {
+            println!(
+                "wire-surface: every verb in {} and {} records its door twin's block in \
+                 {DOOR_RECORDING}.",
+                TWIN_RECORDINGS[0], TWIN_RECORDINGS[1]
+            );
+        } else {
+            print_twin_findings("wire-surface", &findings);
+            eprintln!(
+                "wire-surface wrote every recording and exits 0, but the next \
+                 `cargo xtask wire-check` fails until the peer recordings agree with the door's: \
+                 change the peer type (or the door's variant) to match and re-record with \
+                 `cargo xtask wire-surface` again."
+            );
+        }
         return;
     }
     // The twin rule reads only the recordings, so it runs first: a recording
     // edited by hand fails its channel below and is named here as well.
     let findings = twin_findings(Path::new("."));
     if !findings.is_empty() {
-        eprintln!("wire-check: a peer wire no longer mirrors the door.\n");
-        for finding in &findings {
-            eprintln!("{finding}\n");
-        }
-        eprintln!(
-            "A device sends these verbs as `UserRequest` to both peer decoders, so each peer wire \
-             must spell them as the door does. Change the peer type and the door's variant \
-             together and re-record both with `cargo xtask wire-surface` in the same commit; \
-             otherwise every vault or device refuses what the sync pass sends.\n"
-        );
+        print_twin_findings("wire-check", &findings);
     }
     for channel in CHANNELS {
         check_channel(channel, false);
@@ -220,32 +252,151 @@ const TWIN_RECORDINGS: [&str; 2] = [
     "core/wire/vault-peer-request-surface.txt",
 ];
 
-/// The variants of a recorded surface, each with its indented lines (field
-/// attributes and fields) as written. Header lines start with `#`.
-fn recorded_blocks(text: &str) -> Vec<(&str, Vec<&str>)> {
-    let mut out: Vec<(&str, Vec<&str>)> = Vec::new();
-    for line in text.lines() {
-        if line.starts_with(' ') {
-            if let Some((_, block)) = out.last_mut() {
-                block.push(line);
+/// The indent [`render`] writes before a field or attribute line, and the one
+/// [`recorded_blocks`] reads as "this line belongs to the variant above". One
+/// constant, so the printer and the parser cannot drift apart by spelling it
+/// twice; the header count in [`recorded_blocks`] catches a drift that does
+/// not go through it.
+const INDENT: &str = "    ";
+
+/// One variant of a recorded surface: its name, the file line it is on
+/// (1-based), and its indented lines (field attributes and fields) raw, in order.
+struct Block<'a> {
+    name: &'a str,
+    line: usize,
+    lines: Vec<&'a str>,
+}
+
+/// The variants of a recorded surface. Header lines start with `#`; every
+/// other non-empty line is a variant name unless it starts with [`INDENT`].
+///
+/// Refused, with the reason, when the count parsed differs from the
+/// recording's own `# variants: N` header (which [`render`] writes), when the
+/// header is missing, or when an indented line precedes every variant: each
+/// means the parser no longer reads what the printer writes, and a rule over
+/// misread blocks would compare the wrong lines and say so in green.
+fn recorded_blocks(text: &str) -> Result<Vec<Block<'_>>, String> {
+    let mut header: Option<usize> = None;
+    let mut out: Vec<Block<'_>> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.starts_with(INDENT) {
+            let Some(block) = out.last_mut() else {
+                return Err(format!(
+                    "line {} is indented before any variant, so it belongs to none",
+                    i + 1
+                ));
+            };
+            block.lines.push(line);
+        } else if let Some(rest) = line.strip_prefix('#') {
+            if let Some(n) = rest.trim().strip_prefix("variants:") {
+                header = Some(n.trim().parse().map_err(|_| {
+                    format!("line {} has a `# variants:` header that is not a count", i + 1)
+                })?);
             }
-        } else if !line.starts_with('#') && !line.trim().is_empty() {
-            out.push((line.trim_end(), Vec::new()));
+        } else if !line.trim().is_empty() {
+            out.push(Block {
+                name: line.trim_end(),
+                line: i + 1,
+                lines: Vec::new(),
+            });
+        }
+    }
+    match header {
+        None => Err("it has no `# variants: N` header, so its count cannot be held".into()),
+        Some(n) if n != out.len() => Err(format!(
+            "its header records {n} variants and the twin rule parsed {}: the printer \
+             (`render`) and this parser (`recorded_blocks`) no longer agree on the format, \
+             so the rule would compare the wrong lines",
+            out.len()
+        )),
+        Some(_) => Ok(out),
+    }
+}
+
+/// One line of a block, as a finding prints it: raw, between `|` marks, so an
+/// indent or a trailing space is visible, with a tab spelled `\t`.
+fn shown(line: &str) -> String {
+    format!("|{}|", line.replace('\t', "\\t"))
+}
+
+/// Which side of a line diff a line is on.
+#[derive(Debug, PartialEq)]
+enum Only {
+    Twin(usize),
+    Door(usize),
+}
+
+/// The lines of `twin` and `door` outside their longest common subsequence,
+/// in order, by index. A dropped line is one entry naming it, not a shift of
+/// every line after it, and a repeated line counts once per occurrence.
+fn line_diff(twin: &[&str], door: &[&str]) -> Vec<Only> {
+    let (n, m) = (twin.len(), door.len());
+    // lcs[i][j]: the common subsequence of twin[i..] and door[j..].
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if twin[i] == door[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j, mut out) = (0, 0, Vec::new());
+    while i < n || j < m {
+        if i < n && j < m && twin[i] == door[j] {
+            i += 1;
+            j += 1;
+        } else if j == m || (i < n && lcs[i + 1][j] >= lcs[i][j + 1]) {
+            out.push(Only::Twin(i));
+            i += 1;
+        } else {
+            out.push(Only::Door(j));
+            j += 1;
         }
     }
     out
 }
 
+/// The finding for a twin block that differs from its door block: each line
+/// on one side only, by file and line number, then a note when the two hold
+/// the same lines (counted with repeats) in another order.
+fn block_finding(twin: &str, block: &Block<'_>, door_block: &Block<'_>) -> String {
+    let mut f = format!(
+        "  `{}` in {twin} differs from its block in {DOOR_RECORDING}:\n",
+        block.name
+    );
+    for only in line_diff(&block.lines, &door_block.lines) {
+        let (file, at, line) = match only {
+            Only::Twin(i) => (twin, block.line + 1 + i, block.lines[i]),
+            Only::Door(j) => (DOOR_RECORDING, door_block.line + 1 + j, door_block.lines[j]),
+        };
+        f.push_str(&format!("    only in {file}:{at}: {}\n", shown(line)));
+    }
+    let (mut a, mut b) = (block.lines.clone(), door_block.lines.clone());
+    a.sort_unstable();
+    b.sort_unstable();
+    if a == b {
+        f.push_str("    the same lines in another order, which is another order on the wire\n");
+    }
+    f.trim_end().to_string()
+}
+
 /// The twin rule over the recorded files under `root`, as text: one finding
 /// per variant of a peer recording whose block differs from, or is missing
-/// in, the door's recording. Empty when they agree.
+/// in, the door's recording, and one per recording the parser cannot hold to
+/// its header. Empty when they agree.
 pub fn twin_findings(root: &Path) -> Vec<String> {
     let read = |rel: &str| std::fs::read_to_string(root.join(rel));
     let door_text = match read(DOOR_RECORDING) {
         Ok(t) => t,
         Err(e) => return vec![format!("  {DOOR_RECORDING} could not be read: {e}")],
     };
-    let door: BTreeMap<&str, Vec<&str>> = recorded_blocks(&door_text).into_iter().collect();
+    let door_blocks = match recorded_blocks(&door_text) {
+        Ok(b) => b,
+        Err(why) => return vec![format!("  {DOOR_RECORDING} cannot be read as a recording: {why}.")],
+    };
+    let door: BTreeMap<&str, Block<'_>> = door_blocks.into_iter().map(|b| (b.name, b)).collect();
     if door.is_empty() {
         return vec![format!("  {DOOR_RECORDING} records no variant, so it mirrors nothing.")];
     }
@@ -258,38 +409,47 @@ pub fn twin_findings(root: &Path) -> Vec<String> {
                 continue;
             }
         };
-        let blocks = recorded_blocks(&text);
+        let blocks = match recorded_blocks(&text) {
+            Ok(b) => b,
+            Err(why) => {
+                findings.push(format!("  {twin} cannot be read as a recording: {why}."));
+                continue;
+            }
+        };
         if blocks.is_empty() {
             findings.push(format!("  {twin} records no variant, so the twin rule holds nothing."));
         }
-        for (name, block) in blocks {
-            match door.get(name) {
+        for block in blocks {
+            match door.get(block.name) {
                 None => findings.push(format!(
-                    "  `{name}` is in {twin} and not in {DOOR_RECORDING}: the door no longer \
-                     has the verb the peer wire mirrors."
+                    "  `{}` is in {twin} and not in {DOOR_RECORDING}: the door no longer \
+                     has the verb the peer wire mirrors.",
+                    block.name
                 )),
-                Some(door_block) if *door_block != block => {
-                    let mut f = format!(
-                        "  `{name}` in {twin} differs from its block in {DOOR_RECORDING}:\n"
-                    );
-                    for line in block.iter().filter(|l| !door_block.contains(l)) {
-                        f.push_str(&format!("    {twin}: {}\n", line.trim()));
-                    }
-                    for line in door_block.iter().filter(|l| !block.contains(l)) {
-                        f.push_str(&format!("    {DOOR_RECORDING}: {}\n", line.trim()));
-                    }
-                    if block.iter().all(|l| door_block.contains(l))
-                        && door_block.iter().all(|l| block.contains(l))
-                    {
-                        f.push_str("    the same lines in another order, which is another order on the wire\n");
-                    }
-                    findings.push(f.trim_end().to_string());
+                Some(door_block) if door_block.lines != block.lines => {
+                    findings.push(block_finding(twin, &block, door_block));
                 }
                 Some(_) => {}
             }
         }
     }
     findings
+}
+
+/// The twin findings, with what they mean, as `wire-check` and `wire-surface` print them.
+fn print_twin_findings(command: &str, findings: &[String]) {
+    eprintln!(
+        "{command}: a peer wire no longer mirrors the door, or a recording cannot be read to tell.\n"
+    );
+    for finding in findings {
+        eprintln!("{finding}\n");
+    }
+    eprintln!(
+        "A device sends these verbs as `UserRequest` to both peer decoders, so each peer wire \
+         must spell them as the door does. Change the peer type and the door's variant \
+         together and re-record both with `cargo xtask wire-surface` in the same commit; \
+         otherwise every vault or device refuses what the sync pass sends.\n"
+    );
 }
 
 fn check_channel(channel: &Channel, bless: bool) {
@@ -411,11 +571,11 @@ fn render(variants: &BTreeMap<String, Variant>, what: &str) -> String {
         out.push('\n');
         for f in &v.fields {
             for a in &f.attrs {
-                out.push_str("    ");
+                out.push_str(INDENT);
                 out.push_str(a);
                 out.push('\n');
             }
-            out.push_str(&format!("    {}: {}\n", f.name, f.ty));
+            out.push_str(&format!("{INDENT}{}: {}\n", f.name, f.ty));
         }
     }
     out
@@ -609,27 +769,35 @@ mod tests {
         dir
     }
 
-    const HEADER: &str = "# The JSON surface. Generated — do not hand-edit.\n# variants: 3\n";
+    /// A recording of `body` with the two header lines `render` writes first
+    /// that matter here: a comment, and the count of variants in `body`.
+    fn recording(body: &str) -> String {
+        let n = body
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with(INDENT))
+            .count();
+        format!("# The JSON surface. Generated — do not hand-edit.\n# variants: {n}\n{body}")
+    }
 
     fn door(read_sealed_path: &str) -> String {
-        format!(
-            "{HEADER}NodeRelay\n    user_id: String\nReadFile\n    user_id: String\n    path: String\n\
+        recording(&format!(
+            "NodeRelay\n    user_id: String\nReadFile\n    user_id: String\n    path: String\n\
              ReadSealed\n    user_id: String\n    mount: String\n    {read_sealed_path}\n    offset: u64\n\
              Tenants\nWriteSealed\n    user_id: String\n    #[serde(with = \"crate::base64_bytes\")]\n    blob: Vec<u8>\n"
-        )
+        ))
     }
 
     fn peer() -> String {
-        format!(
-            "{HEADER}NodeRelay\n    user_id: String\nReadFile\n    user_id: String\n    path: String\n\
-             ReadSealed\n    user_id: String\n    mount: String\n    path: String\n    offset: u64\n"
+        recording(
+            "NodeRelay\n    user_id: String\nReadFile\n    user_id: String\n    path: String\n\
+             ReadSealed\n    user_id: String\n    mount: String\n    path: String\n    offset: u64\n",
         )
     }
 
     fn vault() -> String {
-        format!(
-            "{HEADER}ReadSealed\n    user_id: String\n    mount: String\n    path: String\n    offset: u64\n\
-             Tenants\nWriteSealed\n    user_id: String\n    #[serde(with = \"crate::base64_bytes\")]\n    blob: Vec<u8>\n"
+        recording(
+            "ReadSealed\n    user_id: String\n    mount: String\n    path: String\n    offset: u64\n\
+             Tenants\nWriteSealed\n    user_id: String\n    #[serde(with = \"crate::base64_bytes\")]\n    blob: Vec<u8>\n",
         )
     }
 
@@ -656,11 +824,143 @@ mod tests {
         ]);
         let findings = twin_findings(dir.path());
         assert_eq!(findings.len(), 2, "{findings:#?}");
-        for (finding, twin) in findings.iter().zip(TWIN_RECORDINGS) {
+        // `path` is line 11 of the peer recording and line 6 of the vault's;
+        // `object_path` is line 11 of the door's.
+        for ((finding, twin), at) in findings.iter().zip(TWIN_RECORDINGS).zip([11, 6]) {
             assert!(finding.contains("`ReadSealed`"), "{finding}");
             assert!(finding.contains(&format!("in {twin} differs from its block in {DOOR_RECORDING}")), "{finding}");
-            assert!(finding.contains(&format!("{twin}: path: String")), "{finding}");
-            assert!(finding.contains(&format!("{DOOR_RECORDING}: object_path: String")), "{finding}");
+            assert!(finding.contains(&format!("only in {twin}:{at}: |    path: String|")), "{finding}");
+            assert!(finding.contains(&format!("only in {DOOR_RECORDING}:11: |    object_path: String|")), "{finding}");
+        }
+    }
+
+    /// A door block with a repeated `#[serde(...)]` line, as `BrowserFrame`
+    /// has, and a twin that dropped one of the repeats: the finding names the
+    /// missing line, once, at its line in the door's file, and does not call
+    /// the two blocks the same lines in another order.
+    #[test]
+    fn a_dropped_repeated_attribute_is_named_as_the_missing_line() {
+        let skip = "    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n";
+        let frame = format!(
+            "BrowserFrame\n    #[serde(with = \"crate::base64_bytes\")]\n    bytes: Vec<u8>\n\
+             {skip}    user_id: Option<String>\n{skip}    channel: Option<String>\n"
+        );
+        let dropped = frame.replacen(&format!("{skip}    channel"), "    channel", 1);
+        let dir = tree(&[
+            (DOOR_RECORDING, &recording(&format!("{frame}NodeRelay\n    user_id: String\n"))),
+            (TWIN_RECORDINGS[0], &recording(&dropped)),
+            (TWIN_RECORDINGS[1], &recording("NodeRelay\n    user_id: String\n")),
+        ]);
+        let findings = twin_findings(dir.path());
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        let f = &findings[0];
+        // Header two lines, `BrowserFrame` on 3, the dropped repeat on 8.
+        assert!(
+            f.contains(&format!("only in {DOOR_RECORDING}:8: |{}|", skip.trim_end_matches('\n'))),
+            "{f}"
+        );
+        assert_eq!(f.matches("only in ").count(), 1, "{f}");
+        assert!(!f.contains("another order"), "{f}");
+    }
+
+    /// A trailing space on one side is a different byte in the recording; the
+    /// finding prints the two lines so that they read differently.
+    #[test]
+    fn a_trailing_space_on_one_side_prints_visibly_different_lines() {
+        let spaced = peer().replace("    path: String\n    offset", "    path: String \n    offset");
+        let dir = tree(&[
+            (DOOR_RECORDING, &door("path: String")),
+            (TWIN_RECORDINGS[0], &spaced),
+            (TWIN_RECORDINGS[1], &vault()),
+        ]);
+        let findings = twin_findings(dir.path());
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        let f = &findings[0];
+        assert!(f.contains(&format!("only in {}:11: |    path: String |", TWIN_RECORDINGS[0])), "{f}");
+        assert!(f.contains(&format!("only in {DOOR_RECORDING}:11: |    path: String|")), "{f}");
+    }
+
+    /// The printer drifting from the parser — here a recording indented with
+    /// tabs, so every field line would read as a fieldless variant — is a
+    /// finding on that recording, from its own `# variants: N` header, rather
+    /// than a rule comparing misread blocks.
+    #[test]
+    fn a_recording_the_parser_misreads_is_a_finding() {
+        let tabbed = peer().replace("\n    ", "\n\t");
+        let dir = tree(&[
+            (DOOR_RECORDING, &door("path: String")),
+            (TWIN_RECORDINGS[0], &tabbed),
+            (TWIN_RECORDINGS[1], &vault()),
+        ]);
+        let findings = twin_findings(dir.path());
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert!(
+            findings[0].contains(&format!(
+                "{} cannot be read as a recording: its header records 3 variants and the twin \
+                 rule parsed 10",
+                TWIN_RECORDINGS[0]
+            )),
+            "{}",
+            findings[0]
+        );
+
+        // The door's recording drifting is a finding the same way, and a
+        // recording with no header cannot be held to a count at all.
+        let dir = tree(&[
+            (DOOR_RECORDING, &door("path: String").replace("\n    ", "\n\t")),
+            (TWIN_RECORDINGS[0], &peer().replace("# variants: 3\n", "")),
+            (TWIN_RECORDINGS[1], &vault()),
+        ]);
+        let findings = twin_findings(dir.path());
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert!(findings[0].contains(&format!("{DOOR_RECORDING} cannot be read as a recording")), "{}", findings[0]);
+        let headless = peer().replace("# variants: 3\n", "");
+        assert!(
+            matches!(recorded_blocks(&headless), Err(why) if why.contains("no `# variants: N` header"))
+        );
+    }
+
+    /// The parser reads back exactly what the printer writes: every variant,
+    /// in order, with its attribute and field lines, and a header that agrees.
+    #[test]
+    fn the_parser_reads_back_what_the_printer_writes() {
+        let field = |attrs: &[&str], name: &str, ty: &str| Field {
+            attrs: attrs.iter().map(|a| a.to_string()).collect(),
+            name: name.to_string(),
+            ty: ty.to_string(),
+        };
+        let skip = "#[serde(default, skip_serializing_if = \"Option::is_none\")]";
+        let variants: BTreeMap<String, Variant> = [
+            Variant {
+                name: "BrowserFrame".into(),
+                fields: vec![
+                    field(&["#[serde(with = \"crate::base64_bytes\")]"], "bytes", "Vec<u8>"),
+                    field(&[skip], "user_id", "Option<String>"),
+                    field(&[skip], "channel", "Option<String>"),
+                ],
+            },
+            Variant { name: "Tenants".into(), fields: vec![] },
+            Variant { name: "NodeRelay".into(), fields: vec![field(&[], "user_id", "String")] },
+        ]
+        .into_iter()
+        .map(|v| (v.name.clone(), v))
+        .collect();
+        let text = render(&variants, "peer request");
+        let blocks = recorded_blocks(&text).expect("the parser reads the printer's output");
+        assert_eq!(blocks.len(), variants.len());
+        for (block, v) in blocks.iter().zip(variants.values()) {
+            assert_eq!(block.name, v.name);
+            let expected: Vec<String> = v
+                .fields
+                .iter()
+                .flat_map(|f| {
+                    f.attrs
+                        .iter()
+                        .map(|a| format!("{INDENT}{a}"))
+                        .chain([format!("{INDENT}{}: {}", f.name, f.ty)])
+                })
+                .collect();
+            assert_eq!(block.lines, expected, "{}", v.name);
         }
     }
 
