@@ -22,14 +22,24 @@
 //! only ever answers and wrong for one where replies share a descriptor with
 //! messages the acceptor raises itself.
 //!
-//! A peer's bytes arrive by a fourth road. A `PeerHandler` is the closure a node
-//! hands its peer transport, and the acceptors that predate `PeerDoor` decode
-//! inside one with `serde_json::from_slice::<Req>`. That call, inside a function
-//! that returns a `PeerHandler` (or a binding typed as one), is an acceptor of
-//! `Req` on the peer transport, however the turbofish is wrapped across lines.
-//! Any `serde_json` decode there whose type argument is not one named type — no
-//! turbofish, `_`, a tuple, a generic — is refused: a decode this check cannot
-//! read is a finding, never a pass.
+//! A peer's bytes arrive by a fourth road, and it has one form.
+//! `PeerDoor::<Req, Resp>::serving(..)` builds the `PeerHandler` a node hands
+//! its peer transport, and it is the only thing that can: `PeerHandler` has a
+//! private field and one constructor, in `core/peer/src/door.rs` (kotton #278).
+//! A closure is not a `PeerHandler`, wherever it is put — a struct field, an
+//! argument, a `Result` — so the compiler holds that a peer's bytes decode as
+//! the `Req` at a `PeerDoor` site, and this check reads those sites alone. A
+//! `PeerDoor` named any other way (its type inferred, aliased, imported under
+//! another name) or whose `Req` is not one named type is refused: a door this
+//! check cannot read is a finding, never a pass.
+//!
+//! Two decodes are findings by themselves. Any `serde_json` decode inside a
+//! `PeerHandler` region — a function whose return type names `PeerHandler`,
+//! or a `PeerDoor` call — is refused whatever its type: the door has already
+//! decoded the request, and a second decode there is a request type smuggled
+//! inside the first. And a decode that names a request type in [`CHANNELS`],
+//! anywhere outside a door, is refused: a channel's request type is decoded
+//! at its door and nowhere else.
 //!
 //! An acceptor is a crate *and* the transport it accepts on: a daemon's local
 //! door and its peer wire are two channels even in one crate, with different
@@ -54,24 +64,29 @@
 //!
 //! What it holds is *who accepts which request type*. The response-type
 //! column of [`CHANNELS`] is documentation only: no rule compares it with a
-//! call site, and the `PeerHandler` form has no response type to read.
+//! call site.
 //!
 //! ## What a text check cannot see
 //!
-//! - **A decode in a helper.** A `PeerHandler` closure that hands its bytes to
-//!   a function defined elsewhere (`fn decode(b: &[u8]) -> Result<UserRequest>`)
-//!   decodes outside the handler's text, and is neither counted nor refused.
-//!   `PeerDoor` is the way to build a peer acceptor this check reads whole.
-//! - **Braces in a string or char literal.** The end of a `PeerHandler` is
-//!   found by counting `{` and `}` on each line, literals included. A `"{"`
-//!   with no partner can end the handler early (a decode after it is missed)
-//!   or late (a decode after it is read as the handler's).
+//! - **A decode with no turbofish, outside a `PeerHandler` region.**
+//!   `let r: UserRequest = serde_json::from_slice(&b)?` names its type in a
+//!   binding, not the call, and outside a region it is read as no one's. It
+//!   cannot make a peer acceptor — no closure becomes a `PeerHandler` — but
+//!   the transports below `PeerHandler` (`Connection::serve_one_request` in
+//!   `kotton_sys::net`) take a raw closure, and a daemon that served one there
+//!   would decode a peer's bytes where this check does not look.
 //! - **Other decoders.** It reads `serde_json`'s `from_slice`, `from_str`,
 //!   `from_reader` and `from_value`, spelled with the crate path or bare. A
 //!   decode with another format crate, or through a renamed import, is not
 //!   read.
+//! - **Where a region ends.** A `PeerHandler` region ends at the first line
+//!   after its opening, comments aside, indented no deeper than the line that
+//!   opened it — rustfmt's layout, not the parser's. A line of a multi-line
+//!   string literal written at that indent ends it early.
 //! - **A `#[cfg(test)]` item outside a module**, and a `#[cfg(test)]` module
-//!   whose closing brace is not at its own indent, are read as code.
+//!   whose closing brace is not at its own indent, are read as code. Files
+//!   under a `tests/` directory are integration tests, in no binary that
+//!   serves anyone, and a request type decoded by name there is not refused.
 //! - **One crate, one transport, one acceptor.** Two sites of the same form
 //!   in one crate on one type are counted as one acceptor, so two doors of the
 //!   same transport inside one daemon are not told apart.
@@ -82,8 +97,7 @@ use std::path::{Path, PathBuf};
 /// Which transport an acceptor reads its request off.
 ///
 /// `Ipc` is a socket bound or handed over on this machine: `ChannelAcceptor`,
-/// `serve_inherited`, `read_frame`. `Peer` is the peer transport: a `PeerDoor`,
-/// or a decode inside a `PeerHandler`.
+/// `serve_inherited`, `read_frame`. `Peer` is the peer transport: a `PeerDoor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Transport {
     Ipc,
@@ -232,9 +246,16 @@ struct Site {
 struct Survey {
     /// request type -> every site that decodes it
     found: BTreeMap<String, Vec<Site>>,
-    /// Each decode inside a `PeerHandler` whose type this check cannot read:
-    /// `path:line`, and the type argument as written (empty when there is none).
+    /// Each `PeerDoor` this check cannot read: `path:line`, and what is wrong
+    /// with it.
     unreadable: Vec<(String, String)>,
+    /// Each `serde_json` decode inside a `PeerHandler` region: `path:line`, and
+    /// the type argument as written (empty when there is none).
+    inside: Vec<(String, String)>,
+    /// Each decode outside a region that names its type, outside test code:
+    /// `path:line`, and the type. The table says which of them is a channel's
+    /// request type.
+    named: Vec<(String, String)>,
 }
 
 fn survey(files: &[PathBuf]) -> Survey {
@@ -260,32 +281,35 @@ fn survey(files: &[PathBuf]) -> Survey {
 fn survey_file(path: &Path, src: &str, survey: &mut Survey) {
     let krate = acceptor_of(path);
     let p = display(path);
+    let integration = p.starts_with("tests/") || p.contains("/tests/");
     let tests = crate::docs_present_check::test_modules(src);
     let lines: Vec<&str> = src.lines().collect();
-    // Inside a `PeerHandler`: the brace depth of its body, and whether the
-    // body has opened yet (a signature can run over several lines).
-    let mut handler: Option<(i64, bool)> = None;
+    let regions = handler_regions(&lines);
     for (n, line) in lines.iter().enumerate() {
         let t = line.trim();
         if t.starts_with("//") || tests.iter().any(|&(a, b)| (a..=b).contains(&(n + 1))) {
             continue;
         }
         let at = format!("{p}:{}", n + 1);
-        if handler.is_none() && opens_peer_handler(t) {
-            handler = Some((0, false));
-        }
         let ipc = parse_listen(t)
             .or_else(|| parse_inherited(t))
             .or_else(|| parse_split(t))
             .map(|(req, _)| (req, Ipc));
-        let peer = parse_peer_door(t).map(|(req, _)| (req, Peer));
-        let mut decoded: Vec<(String, Transport)> = ipc.or(peer).into_iter().collect();
-        if handler.is_some() && decoded.is_empty() {
-            for decode in peer_handler_decodes(&lines[n..]) {
-                match decode {
-                    Decode::Named(req) => decoded.push((req, Peer)),
-                    Decode::Unreadable(arg) => survey.unreadable.push((at.clone(), arg)),
+        let mut decoded: Vec<(String, Transport)> = ipc.into_iter().collect();
+        for door in peer_doors(&lines[n..]) {
+            match door {
+                Door::Named(req) => decoded.push((req, Peer)),
+                Door::Unreadable(why) => survey.unreadable.push((at.clone(), why)),
+            }
+        }
+        let in_region = regions.iter().any(|&(a, b)| (a..=b).contains(&n));
+        for decode in decodes(&lines[n..]) {
+            match decode {
+                Decode::Named(arg) | Decode::Unreadable(arg) if in_region => {
+                    survey.inside.push((at.clone(), arg))
                 }
+                Decode::Named(req) if !integration => survey.named.push((at.clone(), req)),
+                _ => {}
             }
         }
         for (req, transport) in decoded {
@@ -294,18 +318,6 @@ fn survey_file(path: &Path, src: &str, survey: &mut Survey) {
                 transport,
                 at: at.clone(),
             });
-        }
-        if let Some((depth, opened)) = handler.as_mut() {
-            *depth += t.matches('{').count() as i64 - t.matches('}').count() as i64;
-            *opened |= *depth > 0;
-            let closed = if *opened {
-                *depth <= 0
-            } else {
-                t.ends_with(';')
-            };
-            if closed {
-                handler = None;
-            }
         }
     }
 }
@@ -395,18 +407,38 @@ fn judge(survey: &Survey, channels: &[(&str, &str, &[Acceptor])]) -> Vec<String>
         }
     }
 
-    // 4. A decode inside a `PeerHandler` that does not name its type.
-    for (at, arg) in &survey.unreadable {
+    // 4. A `PeerDoor` whose request type this check cannot read.
+    for (at, why) in &survey.unreadable {
+        problems.push(format!(
+            "{at} builds a peer door {why}. This check cannot say which channel that is; \
+             name the request type at the call, `{DOOR}::<Req, Resp>::serving(..)`."
+        ));
+    }
+
+    // 5. A decode inside a `PeerHandler` region, whatever its type.
+    for (at, arg) in &survey.inside {
         let what = if arg.is_empty() {
-            "without naming the type".to_string()
+            String::new()
         } else {
-            format!("as `{arg}`, which is not one named type")
+            format!(" as `{arg}`")
         };
         problems.push(format!(
-            "{at} decodes a peer's bytes inside a `PeerHandler` {what}. This check cannot \
-             say which channel that is; decode one request type, \
-             `serde_json::from_slice::<Req>`, or build the door with `PeerDoor`."
+            "{at} decodes{what} inside a `PeerHandler`. The `{DOOR}` has already decoded the \
+             peer's request; a second decode there is a request type carried inside the first, \
+             a door no row names. Give it a field of the request type instead."
         ));
+    }
+
+    // 6. A channel's request type decoded by name outside its door.
+    for (at, req) in &survey.named {
+        let name = type_name(req);
+        if channels.iter().any(|(r, _, _)| *r == name) {
+            problems.push(format!(
+                "{at} decodes `{name}`, a channel's request type, outside its door. A request \
+                 type is decoded where its channel accepts it — `{DOOR}`, `ChannelAcceptor`, \
+                 `serve_inherited`, `read_frame` — and nowhere else."
+            ));
+        }
     }
 
     problems
@@ -419,50 +451,118 @@ fn type_name(req: &str) -> String {
     req.rsplit("::").next().unwrap_or(req).trim().to_string()
 }
 
-/// A line that begins a `PeerHandler`: a function returning one
-/// (`-> PeerHandler`, `-> kotton_peer::PeerHandler`), or a binding typed as one
-/// (`let h: PeerHandler = ..`).
-fn opens_peer_handler(line: &str) -> bool {
-    let Some(i) = line.find("PeerHandler") else {
-        return false;
+/// The names this check reads, spelled in pieces: this file is under a root the
+/// check walks, and a whole name in its code would be read as a door.
+const DOOR: &str = concat!("Peer", "Door");
+const HANDLER: &str = concat!("Peer", "Handler");
+
+/// The `PeerHandler` regions of a file, as 0-based inclusive line ranges: each
+/// function whose return type names `PeerHandler`, and each `PeerDoor` call.
+///
+/// A region ends at the first line after its opening — comments and blank
+/// lines aside — indented no deeper than the line that opened it. A struct
+/// field typed `Box<dyn Fn() -> PeerHandler>` is no function, and opens none.
+fn handler_regions(lines: &[&str]) -> Vec<(usize, usize)> {
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let close_after = |open: usize, body: usize| -> usize {
+        (body + 1..lines.len())
+            .find(|&k| {
+                let t = lines[k].trim();
+                !t.is_empty() && !t.starts_with("//") && indent(lines[k]) <= indent(lines[open])
+            })
+            .unwrap_or(lines.len().saturating_sub(1))
     };
-    let after = &line[i + "PeerHandler".len()..];
-    if after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
-        return false;
+    let mut out = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        if t.starts_with("//") {
+            continue;
+        }
+        if is_fn_item(t) {
+            // The signature runs to the line that opens the body, or ends a
+            // declaration with no body.
+            let Some(body) = (n..lines.len().min(n + 24))
+                .find(|&k| lines[k].contains('{') || lines[k].trim_end().ends_with(';'))
+            else {
+                continue;
+            };
+            if !lines[body].contains('{') {
+                continue;
+            }
+            let sig: String = lines[n..=body].concat();
+            let sig = &sig[..sig.find('{').unwrap_or(sig.len())];
+            let returns = sig
+                .find("->")
+                .is_some_and(|i| has_word(&sig[i..], HANDLER));
+            if !returns {
+                continue;
+            }
+            let b = lines[body];
+            let one_line = b.matches('{').count() == b.matches('}').count();
+            out.push((n, if one_line { body } else { close_after(n, body) }));
+        } else if has_word(t, DOOR) && t.contains(&format!("{DOOR}::<")) {
+            out.push((n, close_after(n, n)));
+        }
     }
-    // Strip a path in front of the name: `kotton_peer::`, `crate::`.
-    let mut before = line[..i].trim_end();
-    while let Some(b) = before.strip_suffix("::") {
-        before = b.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
-    }
-    let before = before.trim_end();
-    before.ends_with("->") || (before.ends_with(':') && after.trim_start().starts_with('='))
+    out
 }
 
-/// A `serde_json` decode inside a `PeerHandler`.
+/// A line that begins a function item: `fn`, after any of `pub`, `pub(..)`,
+/// `async`, `const`, `unsafe`, `extern "C"`.
+fn is_fn_item(t: &str) -> bool {
+    let mut rest = t;
+    loop {
+        if let Some(r) = rest.strip_prefix("fn ") {
+            return !r.is_empty();
+        }
+        let word_end = if rest.starts_with("pub(") {
+            rest.find(')').map(|i| i + 1)
+        } else {
+            rest.find(' ')
+        };
+        let Some(end) = word_end else {
+            return false;
+        };
+        let word = &rest[..end];
+        let modifier = word.starts_with("pub")
+            || ["async", "const", "unsafe", "extern", "\"C\"", "\"Rust\""].contains(&word);
+        if !modifier {
+            return false;
+        }
+        rest = rest[end..].trim_start();
+    }
+}
+
+/// `word` appears in `text` as a whole identifier.
+fn has_word(text: &str, word: &str) -> bool {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(word).any(|(i, _)| {
+        !text[..i].ends_with(is_ident) && !text[i + word.len()..].starts_with(is_ident)
+    })
+}
+
+/// A `serde_json` decode, as written.
 #[derive(Debug, PartialEq, Eq)]
 enum Decode {
-    /// `serde_json::from_slice::<Req>`: an acceptor of `Req`.
+    /// `serde_json::from_slice::<T>`: one named type.
     Named(String),
     /// A decode whose type argument is not one named type, as written; empty
     /// when there is no turbofish at all.
     Unreadable(String),
 }
 
-/// The decoders a `PeerHandler` is read for.
+/// The decoders this check reads.
 const DECODERS: &[&str] = &["from_slice", "from_str", "from_reader", "from_value"];
 
-/// The decodes that begin on `lines[0]`, read inside a `PeerHandler`.
+/// The `serde_json` decodes that begin on `lines[0]`.
 ///
-/// The peer acceptors that are closures rather than `PeerDoor`s decode their
-/// request type this way. Outside a `PeerHandler` the same call is a client
+/// Inside a `PeerHandler` region every one is refused; outside, one that names
+/// a channel's request type is. Any other decode outside a region is a client
 /// reading an answer, or a file read back, and is no acceptor.
 ///
 /// The turbofish is gathered from the following lines when it is wrapped, as
-/// rustfmt wraps a long one. Its argument must be one type path
-/// (`kotton_wire::ipc::VaultPeerRequest`); anything else — none, `_`, a tuple,
-/// a generic, a turbofish that never closes — is [`Decode::Unreadable`].
-fn peer_handler_decodes(lines: &[&str]) -> Vec<Decode> {
+/// rustfmt wraps a long one.
+fn decodes(lines: &[&str]) -> Vec<Decode> {
     let first = lines.first().copied().unwrap_or_default();
     let mut out = Vec::new();
     let mut from = 0;
@@ -484,47 +584,116 @@ fn peer_handler_decodes(lines: &[&str]) -> Vec<Decode> {
         if after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
             continue;
         }
-        // The call's text from here, over as many lines as the turbofish takes.
-        let mut text = after.to_string();
-        for more in lines.iter().skip(1).take(8) {
-            text.push_str(more.trim());
-        }
-        let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
         // No turbofish: inferred from a binding, or the function passed by
         // name (`.and_then(serde_json::from_slice)`). Either way, unnamed here.
-        let Some(rest) = text.strip_prefix("::<") else {
-            out.push(Decode::Unreadable(String::new()));
-            continue;
-        };
-        let mut depth = 1;
-        let close = rest.char_indices().find_map(|(i, c)| {
-            match c {
-                '<' => depth += 1,
-                '>' => depth -= 1,
-                _ => {}
-            }
-            (depth == 0).then_some(i)
+        out.push(match turbofish(after, &lines[1..]) {
+            None => Decode::Unreadable(String::new()),
+            Some(Ok(args)) => match args.as_slice() {
+                [one] if one_path(one) => Decode::Named(one.clone()),
+                _ => Decode::Unreadable(args.join(",")),
+            },
+            Some(Err(open)) => Decode::Unreadable(open),
         });
-        let Some(close) = close else {
-            out.push(Decode::Unreadable(format!(
-                "{}…",
-                &rest[..rest.len().min(40)]
-            )));
+    }
+    out
+}
+
+/// The turbofish that `after` opens, read over as many of `more` as it takes:
+/// its top-level arguments with whitespace removed, and the text after its
+/// closing `>`. `None` when `after` opens none; `Err` with what was read when
+/// it never closes.
+fn turbofish_with_rest(after: &str, more: &[&str]) -> Option<Result<(Vec<String>, String), String>> {
+    let mut text = after.to_string();
+    for m in more.iter().take(8) {
+        text.push_str(m.trim());
+    }
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let rest = text.strip_prefix("::<")?;
+    let mut depth = 1;
+    let mut args = vec![String::new()];
+    for (i, c) in rest.char_indices() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 1 => {
+                args.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            // rustfmt leaves a trailing comma on a turbofish it wraps.
+            if args.len() > 1 && args.last().is_some_and(|a| a.is_empty()) {
+                args.pop();
+            }
+            return Some(Ok((args, rest[i + 1..].to_string())));
+        }
+        args.last_mut().unwrap().push(c);
+    }
+    Some(Err(format!("{}…", rest.chars().take(40).collect::<String>())))
+}
+
+fn turbofish(after: &str, more: &[&str]) -> Option<Result<Vec<String>, String>> {
+    turbofish_with_rest(after, more).map(|r| r.map(|(args, _)| args))
+}
+
+/// One type path: `kotton_wire::ipc::VaultPeerRequest`, not `_`, a tuple, a
+/// generic or a reference.
+fn one_path(arg: &str) -> bool {
+    !arg.is_empty()
+        && arg != "_"
+        && arg.split("::").all(|seg| {
+            !seg.is_empty()
+                && seg.chars().all(|c| c.is_alphanumeric() || c == '_')
+                && !seg.starts_with(|c: char| c.is_ascii_digit())
+        })
+}
+
+/// A `PeerDoor` named on `lines[0]`.
+#[derive(Debug, PartialEq, Eq)]
+enum Door {
+    /// `PeerDoor::<Req, Resp>::serving(..)`: an acceptor of `Req` on the peer
+    /// transport.
+    Named(String),
+    /// A door this check cannot read, and why.
+    Unreadable(String),
+}
+
+/// Every `PeerDoor` named on `lines[0]`, read over the following lines when
+/// rustfmt wraps its turbofish.
+///
+/// A door on a peer circuit is an acceptor as a listener is: a thing that
+/// deserializes a wire type. The one form read is the call with both type
+/// parameters written; a bare name ends an import (`use ..::PeerDoor;`,
+/// `{door::PeerDoor, ..}`) and is no door. Anything else — the type inferred
+/// from the closure (`PeerDoor::serving`), an alias (`PeerDoor<A, B>` in type
+/// position), a rename (`PeerDoor as D`), a request type that is not one path
+/// — is a door whose type the call site does not say.
+fn peer_doors(lines: &[&str]) -> Vec<Door> {
+    let first = lines.first().copied().unwrap_or_default();
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = Vec::new();
+    for (i, _) in first.match_indices(DOOR) {
+        let after = &first[i + DOOR.len()..];
+        if first[..i].ends_with(is_ident) || after.starts_with(is_ident) {
             continue;
-        };
-        // rustfmt leaves a trailing comma on a turbofish it wraps.
-        let arg = rest[..close].strip_suffix(',').unwrap_or(&rest[..close]);
-        let one_path = !arg.is_empty()
-            && arg != "_"
-            && arg.split("::").all(|seg| {
-                !seg.is_empty()
-                    && seg.chars().all(|c| c.is_alphanumeric() || c == '_')
-                    && !seg.starts_with(|c: char| c.is_ascii_digit())
-            });
-        out.push(if one_path {
-            Decode::Named(arg.to_string())
-        } else {
-            Decode::Unreadable(arg.to_string())
+        }
+        let next = after.trim_start();
+        if next.is_empty() || next.starts_with([',', ';', '}']) {
+            continue;
+        }
+        out.push(match turbofish_with_rest(after, &lines[1..]) {
+            Some(Ok((args, rest))) if rest.starts_with("::serving") => match args.as_slice() {
+                [req, _resp] if one_path(req) => Door::Named(req.clone()),
+                [req, _resp] => {
+                    Door::Unreadable(format!("on `{req}`, which is not one named type"))
+                }
+                _ => Door::Unreadable(format!("as `{DOOR}::<{}>`", args.join(","))),
+            },
+            None if next.starts_with("as ") => Door::Unreadable("under another name".to_string()),
+            _ => Door::Unreadable(
+                format!("that is not a `{DOOR}::<Req, Resp>::serving` call"),
+            ),
         });
     }
     out
@@ -568,19 +737,6 @@ fn parse_split(line: &str) -> Option<(String, String)> {
 }
 
 /// `ChannelAcceptor::<Req, Resp>::listen` → `(Req, Resp)`.
-/// `PeerDoor::<Req, Resp>::serving(..)` — a door on a peer circuit rather than
-/// a socket (`DEC-0055`'s contact mailbox is the first). An acceptor is a thing
-/// that deserializes a wire type; until this existed, every one of them was a
-/// listener, and reading only listener call sites would have made this check
-/// blind to the next kind.
-fn parse_peer_door(line: &str) -> Option<(String, String)> {
-    let i = line.find("PeerDoor::<")?;
-    let rest = &line[i + "PeerDoor::<".len()..];
-    let close = rest.find('>')?;
-    let (a, b) = rest[..close].split_once(',')?;
-    Some((a.trim().to_string(), b.trim().to_string()))
-}
-
 fn parse_listen(line: &str) -> Option<(String, String)> {
     let i = line.find("ChannelAcceptor::<")?;
     let rest = &line[i + "ChannelAcceptor::<".len()..];
@@ -633,14 +789,14 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Each case writes a throwaway tree and reads it as the check does.
 ///
-/// The fixtures spell the forms the check reads in pieces (`concat!`), because
-/// this file is itself under a root the check walks: written whole, a fixture
-/// would be read as an acceptor of the tree.
+/// The fixtures spell the forms the check reads in pieces (`concat!`, and the
+/// module's [`DOOR`] and [`HANDLER`]), because this file is itself under a root
+/// the check walks: written whole, a fixture would be read as an acceptor of
+/// the tree.
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const HANDLER: &str = concat!("Peer", "Handler");
     const DECODE: &str = concat!("serde_json::from_", "slice");
     const LISTEN: &str = concat!("Channel", "Acceptor");
 
@@ -649,15 +805,18 @@ mod tests {
         format!("fn serve() {{\n    let a = {LISTEN}::<{req}, UserResponse>::listen(&path)?;\n}}\n")
     }
 
-    /// A peer acceptor in the closure form, as kvaultd's and kuserd's are.
-    fn peer_handler(ret: &str, req: &str) -> String {
+    /// A peer acceptor, as kvaultd's and kuserd's are: a function returning
+    /// `ret` that builds a `PeerDoor` of `req`.
+    fn peer_door(ret: &str, req: &str) -> String {
         format!(
             "impl Daemon {{\n    fn peer_handler(&self) -> {ret} {{\n        \
-             Arc::new(move |peer_did: String, req_bytes: Vec<u8>| {{\n            \
-             pinned(async move {{\n                \
-             let request = match {DECODE}::<{req}>(&req_bytes) {{\n                    \
-             Ok(r) => r,\n                    Err(e) => return error(format!(\"invalid: {{e}}\")),\n                \
-             }};\n                serve(request).await\n            }})\n        }})\n    }}\n}}\n"
+             let ctx = Arc::clone(&self.ctx);\n        \
+             {DOOR}::<{req}, UserResponse>::serving(\n            \
+             move |peer_did, request| {{\n                \
+             let ctx = Arc::clone(&ctx);\n                \
+             async move {{ serve(&ctx, &peer_did, request).await }}\n            }},\n            \
+             |e| UserResponse::Error {{ message: format!(\"invalid: {{e}}\") }},\n        \
+             )\n    }}\n}}\n"
         )
     }
 
@@ -687,18 +846,32 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// The problems that name `rel` at `line`.
+    fn at(problems: &[String], rel: &str, line: usize) -> bool {
+        problems.iter().any(|p| p.contains(&format!("{rel}:{line} ")))
+    }
+
+    /// The 1-based lines of `src` that contain `needle`.
+    fn lines_with(src: &str, needle: &str) -> Vec<usize> {
+        src.lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains(needle))
+            .map(|(n, _)| n + 1)
+            .collect()
+    }
+
     /// The tree as it stands today, in miniature: every row of the table has
     /// its acceptor, so each case below changes one thing.
     fn as_it_stands() -> Vec<(&'static str, String)> {
         vec![
             (
                 "core/kuserd/src/agent/mod.rs",
-                door("UserRequest") + &peer_handler(HANDLER, "PeerRequest"),
+                door("UserRequest") + &peer_door(HANDLER, "PeerRequest"),
             ),
             (
                 "core/kvaultd/src/lib.rs",
                 door("VaultRequest")
-                    + &peer_handler(
+                    + &peer_door(
                         &format!("kotton_peer::{HANDLER}"),
                         "kotton_wire::ipc::VaultPeerRequest",
                     ),
@@ -706,8 +879,10 @@ mod tests {
             (
                 "core/peer/src/contact_door.rs",
                 format!(
-                    "    {}::<ContactRequest, ContactResponse>::serving(\n",
-                    concat!("Peer", "Door")
+                    "pub fn contact_door<F>(take: F) -> {HANDLER}\nwhere\n    F: Send,\n{{\n    \
+                     {DOOR}::<ContactRequest, ContactResponse>::serving(\n        \
+                     move |_peer_did, request| take(request),\n        \
+                     |e| ContactResponse::Refused {{ reason: e }},\n    )\n}}\n"
                 ),
             ),
             (
@@ -751,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn a_decode_inside_a_peer_handler_is_an_acceptor_on_the_peer_transport() {
+    fn a_peer_door_is_an_acceptor_on_the_peer_transport() {
         let (_dir, survey) = tree(&as_it_stands());
         assert_eq!(
             acceptors(&survey, "PeerRequest"),
@@ -762,39 +937,50 @@ mod tests {
             acceptors(&survey, "VaultPeerRequest"),
             vec![("kvaultd".to_string(), Transport::Peer)]
         );
+        assert_eq!(
+            acceptors(&survey, "ContactRequest"),
+            vec![("peer".to_string(), Transport::Peer)]
+        );
     }
 
     #[test]
-    fn a_decode_outside_a_peer_handler_is_no_acceptor() {
+    fn a_decode_outside_a_handler_that_names_no_channel_is_no_acceptor() {
         let client = format!(
             "fn ask() -> Result<UserResponse> {{\n    let r = {DECODE}::<UserResponse>(&bytes)?;\n    Ok(r)\n}}\n\
              fn after() {{\n    let s = {DECODE}::<Settings>(&b)?;\n}}\n"
         );
-        let (_dir, survey) = tree(&[("core/device/src/client.rs", client)]);
-        assert!(survey.found.is_empty(), "{:?}", survey.found);
+        let files = with(as_it_stands(), "core/device/src/client.rs", client);
+        let (_dir, survey) = tree(&files);
+        assert!(!survey.found.contains_key("UserResponse"), "{:?}", survey.found);
+        assert_eq!(judge(&survey, CHANNELS), Vec::<String>::new());
     }
 
+    /// The shapes `kotton #279` names: a closure handed to something
+    /// peer-facing without a signature that says `-> PeerHandler` — a struct
+    /// field typed as one, an argument, a `Result<PeerHandler>`. None of them
+    /// compiles now (a closure is not a `PeerHandler`); the check refuses each
+    /// all the same, because each decodes a channel's request type outside its
+    /// door. On the check before `kotton #278` all three passed.
     #[test]
-    fn a_handler_binding_and_a_multi_line_signature_both_open_a_peer_handler() {
+    fn a_raw_decode_in_a_closure_handed_to_anything_peer_facing_is_refused() {
+        let closure = format!(
+            "Arc::new(move |_, b: Vec<u8>| {{\n            \
+             pinned(async move {{\n                \
+             let r = {DECODE}::<UserRequest>(&b);\n            }})\n        }})"
+        );
         let src = format!(
-            "fn a(\n    x: u8,\n) -> kotton_peer::{HANDLER}\nwhere\n    F: Send,\n{{\n    \
-             Arc::new(|_, b| {{ let r = {DECODE}::<AlphaRequest>(&b); }})\n}}\n\
-             fn b() {{\n    let h: {HANDLER} = Arc::new(|_, b| {{ {DECODE}::<BetaRequest>(&b) }});\n    \
-             let after = {DECODE}::<Gamma>(&x);\n}}\n"
+            "fn field() {{\n    inboxes.push(DmInbox {{\n        own: k,\n        handler: {closure},\n    }});\n}}\n\
+             fn argument(rt: &Runtime) {{\n    rt.serve_introductions(\n        {closure},\n    );\n}}\n\
+             fn wrapped() -> Result<{HANDLER}> {{\n    Ok({closure})\n}}\n"
         );
-        let (_dir, survey) = tree(&[("core/kx/src/lib.rs", src)]);
-        assert_eq!(
-            acceptors(&survey, "AlphaRequest"),
-            vec![("kx".to_string(), Transport::Peer)]
-        );
-        assert_eq!(
-            acceptors(&survey, "BetaRequest"),
-            vec![("kx".to_string(), Transport::Peer)]
-        );
-        assert!(
-            !survey.found.contains_key("Gamma"),
-            "the binding's handler ended at its `;`"
-        );
+        let files = with(as_it_stands(), "core/kx/src/lib.rs", src.clone());
+        let (_dir, survey) = tree(&files);
+        let problems = judge(&survey, CHANNELS);
+        let decodes = lines_with(&src, DECODE);
+        assert_eq!(decodes.len(), 3, "{src}");
+        for line in decodes {
+            assert!(at(&problems, "core/kx/src/lib.rs", line), "line {line} passed: {problems:#?}");
+        }
     }
 
     /// The case that went unflagged: a second crate's peer acceptor decoding
@@ -805,7 +991,7 @@ mod tests {
             as_it_stands(),
             "core/kvaultd/src/lib.rs",
             door("VaultRequest")
-                + &peer_handler(
+                + &peer_door(
                     &format!("kotton_peer::{HANDLER}"),
                     "kotton_wire::ipc::UserRequest",
                 ),
@@ -828,7 +1014,7 @@ mod tests {
         let files = with(
             as_it_stands(),
             "core/kuserd/src/agent/mod.rs",
-            door("UserRequest") + &peer_handler(HANDLER, "UserRequest"),
+            door("UserRequest") + &peer_door(HANDLER, "UserRequest"),
         );
         let (_dir, survey) = tree(&files);
         let problems = judge(&survey, CHANNELS);
@@ -851,7 +1037,7 @@ mod tests {
         let files = with(
             as_it_stands(),
             "core/kvaultd/src/lib.rs",
-            door("VaultRequest") + &peer_handler(HANDLER, "UserRequest"),
+            door("VaultRequest") + &peer_door(HANDLER, "UserRequest"),
         );
         let (_dir, survey) = tree(&files);
         let shared: Vec<(&str, &str, &[Acceptor])> = CHANNELS
@@ -885,30 +1071,47 @@ mod tests {
         );
     }
 
+    /// Inside a `PeerHandler` region the door has already decoded; a decode
+    /// there is refused whatever it names — a type, none, `_`, a tuple, the
+    /// function passed by name — over a signature that runs across lines.
     #[test]
-    fn a_peer_handler_decode_that_names_no_type_is_refused() {
+    fn any_decode_inside_a_handler_is_refused() {
         let src = format!(
-            "fn h() -> {HANDLER} {{\n    Arc::new(|_, b| {{\n        let r: UserRequest = {DECODE}(&b)?;\n    }})\n}}\n"
+            "fn h(\n    x: u8,\n) -> Option<kotton_peer::{HANDLER}>\nwhere\n    F: Send,\n{{\n    \
+             Some({DOOR}::<Envelope, UserResponse>::serving(\n        |_, env| async move {{\n            \
+             let a = {DECODE}::<Settings>(&env.body);\n            \
+             let b: UserRequest = {DECODE}(&env.body)?;\n            \
+             let c = {DECODE}::<_>(&env.body);\n            \
+             let d = {DECODE}::<(kotton_wire::ipc::UserRequest, u8)>(&env.body);\n            \
+             let e = Ok(env.body).and_then({DECODE});\n        }},\n        \
+             |e| UserResponse::Error {{ message: e }},\n    ))\n}}\n\
+             fn after() {{\n    let s = {DECODE}::<Settings>(&x);\n}}\n"
         );
-        let files = with(as_it_stands(), "core/kx/src/lib.rs", src);
+        let files = with(as_it_stands(), "core/kx/src/lib.rs", src.clone());
         let (_dir, survey) = tree(&files);
         let problems = judge(&survey, CHANNELS);
-        assert!(
-            problems
-                .iter()
-                .any(|p| p.contains("core/kx/src/lib.rs:3 decodes a peer's bytes")),
-            "{problems:#?}"
-        );
+        let decodes = lines_with(&src, DECODE);
+        assert_eq!(decodes.len(), 6, "{src}");
+        let (inside, after) = decodes.split_at(5);
+        for &line in inside {
+            assert!(
+                problems.iter().any(|p| p
+                    .contains(&format!("core/kx/src/lib.rs:{line} decodes"))
+                    && p.contains(concat!("inside a `Peer", "Handler`"))),
+                "line {line}: {problems:#?}"
+            );
+        }
+        assert!(!at(&problems, "core/kx/src/lib.rs", after[0]), "{problems:#?}");
     }
 
-    /// rustfmt wraps a long turbofish over three lines; the decode is the
-    /// same acceptor, and a third crate's is still a third acceptor.
+    /// rustfmt wraps a long turbofish over lines; the door is the same
+    /// acceptor, and a third crate's is still a third acceptor.
     #[test]
-    fn a_turbofish_wrapped_over_lines_is_an_acceptor() {
+    fn a_door_wrapped_over_lines_is_an_acceptor() {
         let src = format!(
-            "fn h() -> kotton_peer::{HANDLER} {{\n    Arc::new(|_, b| {{\n        \
-             let r = match {DECODE}::<\n            kotton_wire::ipc::UserRequest,\n        \
-             >(&b) {{\n            Ok(r) => r,\n        }};\n    }})\n}}\n"
+            "fn h() -> kotton_peer::{HANDLER} {{\n    {DOOR}::<\n        \
+             kotton_wire::ipc::UserRequest,\n        kotton_wire::ipc::UserResponse,\n    \
+             >::serving(|_, r| async move {{ answer(r) }}, |e| refuse(e))\n}}\n"
         );
         let files = with(as_it_stands(), "core/kdeviced/src/peer.rs", src);
         let (_dir, survey) = tree(&files);
@@ -921,71 +1124,96 @@ mod tests {
         assert!(
             problems.iter().any(|p| p.starts_with(
                 "`UserRequest` is the wire type for 2 acceptors (kdeviced (peer), kuserd (ipc))"
-            ) && p.contains("core/kdeviced/src/peer.rs:3")),
+            ) && p.contains("core/kdeviced/src/peer.rs:2")),
             "{problems:#?}"
         );
     }
 
+    /// A door whose request type the call site does not say: inferred from the
+    /// closure, aliased, imported under another name, or not one named type.
+    /// A plain import names no door.
     #[test]
-    fn a_tuple_turbofish_is_refused_as_unreadable() {
+    fn a_door_that_does_not_name_its_request_type_is_refused() {
         let src = format!(
-            "fn h() -> {HANDLER} {{\n    Arc::new(|_, b| {{\n        \
-             let (r, n) = {DECODE}::<(kotton_wire::ipc::UserRequest, u8)>(&b)?;\n    }})\n}}\n"
+            "use kotton_peer::door::{DOOR};\nuse kotton_peer::{{door::{DOOR}, {HANDLER}}};\n\
+             fn inferred() -> {HANDLER} {{\n    {DOOR}::serving(|_, r: UserRequest| async move {{ answer(r) }}, refuse)\n}}\n\
+             type Aliased = {DOOR}<UserRequest, UserResponse>;\n\
+             use kotton_peer::door::{DOOR} as Renamed;\n\
+             fn tuple() -> {HANDLER} {{\n    {DOOR}::<(UserRequest, u8), UserResponse>::serving(serve, refuse)\n}}\n\
+             fn generic<R>() -> {HANDLER} {{\n    {DOOR}::<Vec<u8>, UserResponse>::serving(serve, refuse)\n}}\n"
         );
-        let files = with(as_it_stands(), "core/kx/src/lib.rs", src);
-        let (_dir, survey) = tree(&files);
-        assert!(
-            !survey.found.contains_key("UserRequest)")
-                && acceptors(&survey, "UserRequest").len() == 1
-        );
-        let problems = judge(&survey, CHANNELS);
-        assert!(
-            problems.iter().any(
-                |p| p.contains("core/kx/src/lib.rs:3 decodes a peer's bytes")
-                    && p.contains(
-                        "`(kotton_wire::ipc::UserRequest,u8)`, which is not one named type"
-                    )
-            ),
-            "{problems:#?}"
-        );
-    }
-
-    #[test]
-    fn a_decoder_passed_by_name_or_with_an_inferred_type_is_refused() {
-        let src = format!(
-            "fn h() -> {HANDLER} {{\n    Arc::new(|_, b| {{\n        \
-             let r = Some(b).map(|b| {DECODE}::<_>(&b));\n        \
-             let s = Ok(b).and_then({DECODE});\n    }})\n}}\n"
-        );
-        let files = with(as_it_stands(), "core/kx/src/lib.rs", src);
+        let files = with(as_it_stands(), "core/kx/src/lib.rs", src.clone());
         let (_dir, survey) = tree(&files);
         let problems = judge(&survey, CHANNELS);
-        for line in [3, 4] {
+        for line in [4, 6, 7, 9, 12] {
             assert!(
                 problems
                     .iter()
-                    .any(|p| p
-                        .contains(&format!("core/kx/src/lib.rs:{line} decodes a peer's bytes"))),
+                    .any(|p| p.contains(&format!("core/kx/src/lib.rs:{line} builds a peer door"))),
                 "line {line}: {problems:#?}"
             );
         }
+        for line in [1, 2] {
+            assert!(!at(&problems, "core/kx/src/lib.rs", line), "line {line}: {problems:#?}");
+        }
+        assert!(!survey.found.contains_key("u8)"), "{:?}", survey.found);
     }
 
-    /// A stated limit, held so that it stays stated: a decode in a helper the
-    /// handler calls is outside the handler's text, and is neither counted nor
-    /// refused. The module doc lists it under "What a text check cannot see".
+    /// The decode that used to be a stated limit, in a helper the handler
+    /// calls, is refused by name: a channel's request type is decoded at its
+    /// door and nowhere else.
     #[test]
-    fn a_decode_in_a_helper_called_from_a_handler_is_not_seen() {
+    fn a_request_type_decoded_in_a_helper_is_refused() {
         let src = format!(
-            "fn decode(b: &[u8]) -> Result<UserRequest> {{\n    Ok({DECODE}::<UserRequest>(b)?)\n}}\n\
-             fn h() -> {HANDLER} {{\n    Arc::new(|_, b| {{\n        let r = decode(&b);\n    }})\n}}\n"
+            "fn decode(b: &[u8]) -> Result<UserRequest> {{\n    Ok({DECODE}::<UserRequest>(b)?)\n}}\n"
         );
         let files = with(as_it_stands(), "core/kx/src/lib.rs", src);
         let (_dir, survey) = tree(&files);
-        assert_eq!(
-            acceptors(&survey, "UserRequest"),
-            vec![("kuserd".to_string(), Transport::Ipc)]
+        let problems = judge(&survey, CHANNELS);
+        assert!(
+            problems.iter().any(|p| p
+                .contains("core/kx/src/lib.rs:2 decodes `UserRequest`, a channel's request type")),
+            "{problems:#?}"
         );
+    }
+
+    /// A stated limit, held so that it stays stated: a decode that names its
+    /// type only in a binding, outside a `PeerHandler` region, is read as no
+    /// one's. It cannot be a peer acceptor (a closure is not a `PeerHandler`);
+    /// the module doc lists the transports below `PeerHandler` where it could
+    /// still be one, under "What a text check cannot see".
+    #[test]
+    fn an_inferred_decode_outside_a_handler_is_not_read() {
+        let src = format!(
+            "fn serve(conn: Conn) {{\n    conn.serve_one_request(|b| async move {{\n        \
+             let r: UserRequest = {DECODE}(&b).unwrap();\n    }});\n}}\n"
+        );
+        let files = with(as_it_stands(), "core/kx/src/lib.rs", src);
+        let (_dir, survey) = tree(&files);
+        assert_eq!(judge(&survey, CHANNELS), Vec::<String>::new());
+    }
+
+    /// A field typed `Arc<dyn Fn() -> PeerHandler>` is no function returning a
+    /// handler: it opens no region, and a decode after it is a client's.
+    #[test]
+    fn a_field_whose_type_returns_a_handler_opens_no_region() {
+        let src = format!(
+            "struct Builders {{\n    builder: Arc<dyn Fn() -> {HANDLER}>,\n    n: u8,\n}}\n\
+             fn read() {{\n    let s = {DECODE}::<Settings>(&b)?;\n}}\n"
+        );
+        let files = with(as_it_stands(), "core/kx/src/lib.rs", src);
+        let (_dir, survey) = tree(&files);
+        assert!(survey.inside.is_empty(), "{:?}", survey.inside);
+        assert_eq!(judge(&survey, CHANNELS), Vec::<String>::new());
+    }
+
+    /// An integration test decodes request types to assert what does not
+    /// decode; it is in no binary that serves anyone.
+    #[test]
+    fn a_request_type_decoded_under_tests_is_not_refused() {
+        let src = format!("fn a() {{\n    assert!({DECODE}::<UserRequest>(b).is_err());\n}}\n");
+        let files = with(as_it_stands(), "tests/tests/suite/kx.rs", src);
+        let (_dir, survey) = tree(&files);
         assert_eq!(judge(&survey, CHANNELS), Vec::<String>::new());
     }
 

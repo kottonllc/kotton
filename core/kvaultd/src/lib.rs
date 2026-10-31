@@ -332,22 +332,15 @@ impl Vault {
     /// unknown variant here, answered before any standing is read (`peer`).
     fn peer_handler(&self) -> kotton_peer::PeerHandler {
         let ctx = Arc::clone(&self.control);
-        Arc::new(move |peer_did: String, req_bytes: Vec<u8>| {
-            let ctx = Arc::clone(&ctx);
-            Box::pin(async move {
-                let request = match serde_json::from_slice::<kotton_wire::ipc::VaultPeerRequest>(&req_bytes) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return serde_json::to_vec(&kotton_wire::ipc::UserResponse::Error {
-                            message: format!("invalid peer request: {e}"),
-                        })
-                        .unwrap_or_default();
-                    }
-                };
-                let response = peer::handle(&ctx, &peer_did, request).await;
-                serde_json::to_vec(&response).unwrap_or_default()
-            }) as std::pin::Pin<Box<dyn std::future::Future<Output = Vec<u8>> + Send>>
-        })
+        kotton_peer::door::PeerDoor::<kotton_wire::ipc::VaultPeerRequest, kotton_wire::ipc::UserResponse>::serving(
+            move |peer_did, request| {
+                let ctx = Arc::clone(&ctx);
+                async move { peer::handle(&ctx, &peer_did, request).await }
+            },
+            |e| kotton_wire::ipc::UserResponse::Error {
+                message: format!("invalid peer request: {e}"),
+            },
+        )
     }
 
     /// Start, serve the door until it fails, then close what is held.

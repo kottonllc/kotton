@@ -14,6 +14,7 @@ use kotton_device::DeviceRuntime;
 use kotton_diag::service::spawn_subscriber_task;
 use kotton_diag::service::EventScope;
 use kotton_ipc::{ChannelAcceptor, HandlerOutput};
+use kotton_peer::door::PeerDoor;
 use kotton_peer::PeerHandler;
 use kotton_schemas::AppManifest;
 use kotton_session::service::tokens as sessions;
@@ -1880,13 +1881,12 @@ impl DeviceDaemon {
         ids
     }
 
-    /// Build the peer-request handler closure.
+    /// Build the peer door: a [`PeerDoor`] of [`PeerRequest`].
     ///
-    /// The closure decodes each inbound request as a [`PeerRequest`] — the
-    /// verbs a paired peer may ask on its own standing, and none of the local
-    /// door's — serves it through [`serve_peer_request`], and serializes the
-    /// `UserResponse`. A door verb fails at the decoder: it is no request on
-    /// this wire (kotton #231).
+    /// Each inbound request decodes as a `PeerRequest` — the verbs a paired
+    /// peer may ask on its own standing, and none of the local door's — and is
+    /// served through [`serve_peer_request`]. A door verb fails at the decoder:
+    /// it is no request on this wire (kotton #231).
     fn build_peer_handler(self: &Arc<Self>) -> PeerHandler {
         // What a peer's request is served with on its own standing: one handle
         // per thing a peer verb does, and not the machine. No record store, no
@@ -1938,30 +1938,23 @@ impl DeviceDaemon {
         // agent's reach. Held for that path alone ([`handle_gateway_request`]),
         // which only a key the named person pairs as their gateway enters.
         let gateway = Arc::new(self.agent_context());
-        Arc::new(move |peer_did: String, req_bytes: Vec<u8>| {
-            let peer = Arc::clone(&peer);
-            let gateway = Arc::clone(&gateway);
-            Box::pin(async move {
-                let request = match serde_json::from_slice::<PeerRequest>(&req_bytes) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return serde_json::to_vec(&UserResponse::Error {
-                            message: format!("invalid peer request: {e}"),
-                        })
-                        .unwrap_or_default();
-                    }
-                };
-                let response = serve_peer_request(&peer, &gateway, &peer_did, request).await;
-                serde_json::to_vec(&response).unwrap_or_default()
-            }) as std::pin::Pin<Box<dyn std::future::Future<Output = Vec<u8>> + Send>>
-        })
+        PeerDoor::<PeerRequest, UserResponse>::serving(
+            move |peer_did, request| {
+                let peer = Arc::clone(&peer);
+                let gateway = Arc::clone(&gateway);
+                async move { serve_peer_request(&peer, &gateway, &peer_did, request).await }
+            },
+            |e| UserResponse::Error {
+                message: format!("invalid peer request: {e}"),
+            },
+        )
     }
 
     /// Start the QUIC peer listener on `port`.
     ///
     /// The TLS allowlist is the runtime's own — `self.paired_keys` is a handle to
     /// the same set, seeded from the DB at startup and kept live as nodes are
-    /// added and revoked.  Builds the request-handler closure capturing the
+    /// added and revoked.  Builds the peer door ([`Self::build_peer_handler`]) over the
     /// [`PeerContext`] (and, for a gateway's frames, the agent) and delegates to
     /// [`DeviceRuntime::start_peer_listener`].  The daemon holds the `db` handle;
     /// the runtime crate stays free of a direct SQLite dep.
