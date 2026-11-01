@@ -679,8 +679,10 @@ pub enum UserResponse {
     /// carries its meeting relay's *invited* admission key when the vault holds
     /// one (`TASK-a-first-contact-ceremony-meets-at-a-relay-whose-rule-refuses-a-stranger`).
     /// So it is [`crate::ipc::SecretText`]: the same bytes on the wire, `<redacted>` in a
-    /// `{:?}`, read by the one reader that hands it on. Answer to
-    /// `OperatorVerb::Invite` as well: the vault's invite it mints.
+    /// `{:?}`, read by the one reader that hands it on. Answer to `DeviceAdd`,
+    /// `DeviceInvite`, `ContactPairStart` and `OperatorVerb::Invite`: the first
+    /// frame each of the three ceremonies streams, and the vault's invite the
+    /// operator verb mints.
     PairAdvertising {
         code: crate::ipc::vault_request::SecretText,
         /// Unix seconds when the offer expires.

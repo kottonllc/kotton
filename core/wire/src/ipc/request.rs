@@ -328,7 +328,8 @@ pub enum UserRequest {
     /// stream the invite (`PairAdvertising { code }` — `kotton-invite:vault:…`), and run
     /// the joiner half when a device dials the relay. Nothing listens on a
     /// public port. The vault's door speaks this (`kvaultd invite`); a device
-    /// admits it with `drive enrol <invite> --blind`.
+    /// admits it with `drive enrol <invite> --blind`. Answered with
+    /// `PairAdvertising`, the invite, before the joiner half runs.
     DeviceInvite {
         user_id: String,
         ttl_seconds: u64,
@@ -868,7 +869,8 @@ pub enum UserRequest {
     /// the interim connection code) → `PairConnected` → `PairShowCode` →
     /// `PairAwaitingPeer` → `PairTransferring` → `PairingComplete` | `PairFailed`.
     /// The six-digit SAS is confirmed via a separate `PairConfirmCode` carrying
-    /// the token from `PairShowCode`.
+    /// the token from `PairShowCode`. Answered with `PairAdvertising`, the first
+    /// of those frames.
     DeviceAdd {
         user_id: String,
         /// Override this device's announced name for this ceremony only (`--as`).
@@ -2325,6 +2327,7 @@ pub enum UserRequest {
     /// six digits are confirmed by `PairConfirmCode`. Needs a session and a
     /// screen of the person's own — `Paired`, so this machine or a browser it
     /// admitted by ceremony, and not a gateway or an mTLS peer (DEC-0057).
+    /// Answered with `PairAdvertising`, the first of those frames.
     ContactPairStart {
         user_id: String,
         /// The name the other person's screen will call this one. Defaults to
