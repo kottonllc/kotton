@@ -81,6 +81,10 @@ mod residency_check;
 mod scope_check;
 mod suite_check;
 mod wire_check;
+/// The files `wire_check` and `release_server` compile by `#[path]` from other crates, and the
+/// test that holds each to naming nothing but `std` (kotton #306). A test and nothing else.
+#[cfg(test)]
+mod std_only;
 mod actions_check;
 #[cfg(test)]
 mod git_fixture;
