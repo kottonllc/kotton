@@ -81,12 +81,9 @@ fn known_verb(word: &str) -> bool {
 /// own words are [`AS_WORD`] and [`BROWSER_WORD`], the constants `parse_add`, `join_args` and
 /// `revoke` read, so the printed grammar has no spelling of its own.
 fn usage() -> CommandOutput {
-    let mut valued = String::new();
-    for &posture in Posture::ALL {
-        if let word @ DeviceAddWord::FlagWithValue { .. } = device_add_word(posture) {
-            valued.push_str(&format!("device add {word} | "));
-        }
-    }
+    let valued: String = valued_words()
+        .map(|(word, _)| format!("device add {word} | "))
+        .collect();
     CommandOutput::usage(
         format!(
             "usage: device add [{AS_WORD} NAME] [{}] | device add {BROWSER_WORD} | \
@@ -98,6 +95,17 @@ fn usage() -> CommandOutput {
         ),
         None,
     )
+}
+
+/// Every `device add` word that takes a value, with its value's kind, in [`Posture::ALL`]'s
+/// order: what the usage line and the help page print after the posture bracket.
+fn valued_words() -> impl Iterator<Item = (DeviceAddWord, DeviceAddValue)> {
+    Posture::ALL
+        .iter()
+        .filter_map(|&posture| match device_add_word(posture) {
+            word @ DeviceAddWord::FlagWithValue { value, .. } => Some((word, value)),
+            DeviceAddWord::Bare | DeviceAddWord::Flag(_) => None,
+        })
 }
 
 /// The posture flags of `device add` as one bracket's contents, sorted and joined with `|`
@@ -125,20 +133,24 @@ fn retired_admit() -> CommandOutput {
 
 #[async_trait]
 impl Command for DeviceCommand {
-    /// The gateway's word is [`device_add_word`]'s, printed from it, and the browser's is
-    /// [`BROWSER_WORD`], so the page names the flags `parse_add` reads and a change to either
-    /// vocabulary changes the page with it. Built
+    /// Each word with a value is [`device_add_word`]'s, printed from it and said by its kind
+    /// ([`valued_words`]), and the browser's is [`BROWSER_WORD`], so the page names the flags
+    /// `parse_add` reads and a change to either vocabulary changes the page with it. Built
     /// once and kept, since the trait hands out a `&'static str`.
     fn help_text(&self) -> &'static str {
         static HELP: LazyLock<String> = LazyLock::new(|| {
+            let valued: String = valued_words()
+                .map(|(word, value)| match value {
+                    DeviceAddValue::GatewayCode => format!(", `{word}` a gateway elsewhere"),
+                })
+                .collect();
             format!(
                 "device add|join|list|name|revoke — pair another of your machines to this \
-                 identity (six-digit confirmation); `{BROWSER_WORD}` admits a phone's browser, \
-                 `{}` a gateway elsewhere. A vault's invite is `drive enrol \
+                 identity (six-digit confirmation); `{BROWSER_WORD}` admits a phone's browser\
+                 {valued}. A vault's invite is `drive enrol \
                  <invite>`. \
                  `kotton device reset` starts this whole device fresh and is the CLI's, not this \
-                 shell's — it deletes the directory this runtime is using",
-                device_add_word(Posture::Gateway)
+                 shell's — it deletes the directory this runtime is using"
             )
         });
         HELP.as_str()
@@ -849,7 +861,8 @@ fn revoke_browser_usage() -> String {
 // argument help are assembled from it, so none has a spelling of its own to hold.
 // (A comment, not `///`: rustdoc renders no doc on a private `use`.)
 use kotton_schemas::membership::{
-    device_add_word, DeviceAddWord, DEVICE_ADD_DEFAULT_POSTURE as ADD_DEFAULT_POSTURE,
+    device_add_word, DeviceAddValue, DeviceAddWord,
+    DEVICE_ADD_DEFAULT_POSTURE as ADD_DEFAULT_POSTURE,
 };
 
 /// What a `device add` line asks for.
@@ -857,8 +870,8 @@ use kotton_schemas::membership::{
 enum Add {
     /// `add --browser`: open the desk a phone's browser pairs at.
     Browser,
-    /// `add` with the gateway's word and its value: admit a gateway elsewhere. `flag` is the
-    /// word the line used, for the error that names it.
+    /// `add` with a word whose value is a [`DeviceAddValue::GatewayCode`], and the code: admit
+    /// a gateway elsewhere. `flag` is the word the line used, for the error that names it.
     Gateway { flag: &'static str, code: String },
     /// `add [--as NAME]` and at most one posture flag: the line named at most one posture, and
     /// [`ADD_DEFAULT_POSTURE`] when it named none.
@@ -879,8 +892,9 @@ fn add_flag(w: &str) -> Option<(Posture, DeviceAddWord)> {
 /// before any session. Grammar only: at most one posture flag, no flag twice, no flag
 /// outside [`device_add_word`], [`AS_WORD`] and [`BROWSER_WORD`], a word with a value and
 /// the browser's word alone (with no other word), and a value after the name's word and a
-/// word that takes one. Nothing
-/// here judges a posture.
+/// word that takes one. A word with a value is read by its value's kind, which says what the
+/// line starts, so no posture is named here and a new kind does not compile until it is given
+/// a path. Nothing here judges a posture.
 fn parse_add(words: &[String]) -> Result<Add, CommandOutput> {
     let mut seen: Vec<&str> = Vec::new();
     let mut as_name = None;
@@ -907,7 +921,14 @@ fn parse_add(words: &[String]) -> Result<Add, CommandOutput> {
                         return Err(usage());
                     }
                 }
-                Some((p, DeviceAddWord::FlagWithValue { flag, .. })) => valued = Some((p, flag, value()?)),
+                Some((_, DeviceAddWord::FlagWithValue { flag, value: kind })) => {
+                    valued = Some(match kind {
+                        DeviceAddValue::GatewayCode => Add::Gateway {
+                            flag,
+                            code: value()?,
+                        },
+                    })
+                }
                 Some((_, DeviceAddWord::Bare)) | None => return Err(usage()),
             }
         }
@@ -917,7 +938,7 @@ fn parse_add(words: &[String]) -> Result<Add, CommandOutput> {
     match (seen.contains(&BROWSER_WORD), valued) {
         (false, None) => Ok(Add::Device { as_name, posture }),
         (true, None) if seen.len() == 1 => Ok(Add::Browser),
-        (false, Some((Posture::Gateway, flag, code))) if seen.len() == 1 => Ok(Add::Gateway { flag, code }),
+        (false, Some(add)) if seen.len() == 1 => Ok(add),
         _ => Err(usage()),
     }
 }
@@ -1019,17 +1040,21 @@ mod tests {
     /// refusal, whichever way round.
     #[test]
     fn parse_add_and_the_shared_vocabulary_agree_on_every_posture_and_every_pair() {
-        use kotton_schemas::membership::{device_add_word, DeviceAddWord};
+        use kotton_schemas::membership::{device_add_word, DeviceAddValue, DeviceAddWord};
         let mut flags = Vec::new();
         for &posture in Posture::ALL {
             let word = device_add_word(posture);
             let parsed = parse_add(&args(&word.to_string().split_whitespace().collect::<Vec<_>>())).unwrap();
+            // What the line asked for, read back as the word that asks for it.
             let read = match parsed {
-                Add::Device { as_name: None, posture } => Some(posture),
-                Add::Gateway { .. } => Some(Posture::Gateway),
+                Add::Device { as_name: None, posture } => Some(device_add_word(posture)),
+                Add::Gateway { flag, .. } => Some(DeviceAddWord::FlagWithValue {
+                    flag,
+                    value: DeviceAddValue::GatewayCode,
+                }),
                 _ => None,
             };
-            assert_eq!(read, Some(posture), "{word}");
+            assert_eq!(read, Some(word), "{word}");
             if let DeviceAddWord::Flag(flag) = word {
                 flags.push(flag);
             }
