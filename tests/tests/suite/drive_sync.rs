@@ -742,12 +742,14 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
 /// counts the refused key. Before the admission, the device asked the vault
 /// it leaves to read `../x`, and the whole move was refused there.
 ///
-/// The vault the drive leaves then keeps it: its retire empties the tree by
-/// walking the same listing (`kvaultd::tenancy::clear_shelf`), and its store
-/// will not delete `../x`, a path outside the tree. That is the vault's own
-/// admission, not the move's; the answer says the drive is at both, and this
-/// case reads it so. When the vault's retire admits its listing as the move
-/// does, the move answers the drive moved, with `keys_refused` 1.
+/// The vault the drive leaves then retires it: its retire walks the same
+/// listing (`kvaultd::tenancy::clear_shelf`) and admits it as the move does
+/// (kotton #310), so it refuses `../x` rather than asking its store to delete
+/// a path outside the tree, deletes the rest, and removes the tree's
+/// directory whole, the refused file with it. The move answers the drive
+/// moved, with `keys_refused` 1; the drive is at the other vault alone, and
+/// the `x` beside the tree it left is untouched. Before the vault admitted
+/// its listing, its retire failed and the drive was left at both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_move_refuses_a_listed_key_that_is_not_canonical_and_says_so() {
     use kotton_device::users::residency::Residency as _;
@@ -802,17 +804,19 @@ async fn a_move_refuses_a_listed_key_that_is_not_canonical_and_says_so() {
     let listed: Vec<String> = pool.list_sealed(&tree, "").await.expect("the tree lists").into_iter().map(|(k, _, _)| k).collect();
     assert!(listed.iter().any(|k| k == "../x"), "the source vault lists `../x` as the move will read it: {listed:?}");
 
-    let said = client_a
-        .drive_move(USER, "photos", "vault-2", None)
-        .await
-        .expect_err("the vault the drive leaves cannot retire a tree holding `../x`")
-        .to_string();
-    assert!(said.contains("is on 'vault-2' now, and 'vault' still keeps it too"), "the copy was not named finished: {said}");
-    assert!(
-        said.contains("'vault' also listed 1 key that is not a storage key, which the move refused and did not carry"),
-        "the refusal is not in the move's answer: {said}"
+    let moved = client_a.drive_move(USER, "photos", "vault-2", None).await.expect("drive moved");
+    assert_eq!(moved.keys_refused, 1, "the refusal is not in the move's answer: {moved:?}");
+    assert_eq!(moved.drives.len(), 1, "{moved:?}");
+    assert_eq!(moved.drives[0].vault_key, second_id.pubkey_hex);
+    assert!(!trees_at(&first).contains(&tree), "the vault the drive left still keeps its tree");
+    assert!(!source_dir.exists(), "the vault the drive left kept the tree's directory, or the file it refused");
+    assert_eq!(
+        std::fs::read(source_dir.parent().unwrap().join("x")).expect("the file beside the tree"),
+        b"beside the served tree",
+        "the retire reached outside the tree it retired"
     );
     let at = where_recorded(&a, "photos").await;
+    assert_eq!(at.len(), 1, "the drive is recorded at more than the vault it moved to: {at:?}");
     let new_tree = at.iter().find(|(vault, _)| *vault == second_id.pubkey_hex).expect("the drive is recorded at the second vault").1.clone();
     assert_ne!(new_tree, tree);
     let dest_dir = tree_dir(&second, &new_tree);
