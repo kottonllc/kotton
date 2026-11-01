@@ -52,8 +52,12 @@ impl LocalObjectStorage {
     /// vault's `write_sealed`, which admits again, and
     /// `kotton_sealed::Sealed` takes only admitted keys and prefixes
     /// (kotton #275, #320) and admits each directory key a store lists
-    /// before it descends into it (kotton #336). None of them reaches here
-    /// with a key it did not admit.
+    /// before it descends into it (kotton #336). `BlindedObjectStorage`'s
+    /// walk (`collect_leaves`, behind its `list`, the packer's `list_loose`
+    /// and the blinding migration) admits every key the inner store lists,
+    /// directory or leaf, before it descends into it or hands it to a read,
+    /// write or delete (kotton #357). None of them reaches here with a key
+    /// it did not admit.
     ///
     /// The doors still relying on this refusal, each to close before it can
     /// go:
@@ -64,9 +68,6 @@ impl LocalObjectStorage {
     ///   else.
     /// - `kvaultd::meter::Meter::measure` (kotton #352): it descends into the
     ///   directory keys a shelf's listing names, unparsed.
-    /// - `BlindedObjectStorage::collect_leaves` and `list_loose` (kotton
-    ///   #357): the walk descends into every directory key the inner store
-    ///   listed, unparsed, and `list_loose` reads each listed leaf, unparsed.
     ///
     /// A leading `/` and a `.` component name nothing outside the root and
     /// are read past, as the logical paths the VFS hands this store may carry
