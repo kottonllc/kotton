@@ -166,6 +166,21 @@ fn refused_said(n: u32) -> String {
     )
 }
 
+/// What `drive move` says of the move's answer (`kotton::DriveMoved`): where
+/// the drive lives now, and, when the move refused any key the vault it left
+/// listed, a note counting them. No note for none.
+fn moved_said(name: &str, to: &str, moved: &kotton::DriveMoved) -> Vec<Out> {
+    let vault = moved.drives.first().map(|d| d.vault.clone()).unwrap_or_else(|| to.to_string());
+    let mut out = vec![Out::Confirm {
+        action: format!("drive moved to '{vault}'; your other devices follow it there at their next sync"),
+        subject: name.to_string(),
+    }];
+    if moved.keys_refused > 0 {
+        out.push(Out::Note(refused_said(moved.keys_refused)));
+    }
+    out
+}
+
 /// What `--json` prints: the descriptors the daemon answered, as they cross, a
 /// payload on stdout.
 fn json(drives: &[DriveDescriptor]) -> Result<CommandOutput> {
@@ -224,15 +239,7 @@ async fn run(line: Line<'_>, state: &mut ShellState) -> Result<CommandOutput> {
         }
         Line::Move { name, to, from } => {
             let moved = client.lock().await.drive_move(&user_id, name, to, from).await.map_err(|e| said("move", e))?;
-            let vault = moved.drives.first().map(|d| d.vault.clone()).unwrap_or_else(|| to.to_string());
-            let mut out = vec![Out::Confirm {
-                action: format!("drive moved to '{vault}'; your other devices follow it there at their next sync"),
-                subject: name.to_string(),
-            }];
-            if moved.keys_refused > 0 {
-                out.push(Out::Note(refused_said(moved.keys_refused)));
-            }
-            Ok(CommandOutput::shapes(out))
+            Ok(CommandOutput::shapes(moved_said(name, to, &moved)))
         }
         // The ceremony takes the lock for itself.
         Line::Enrol { invite, posture } => super::device::enrol_vault(&invite, posture, state).await,
@@ -464,6 +471,40 @@ mod tests {
         let Some(Out::Data(text)) = out.out.first() else { panic!("--json is data") };
         let back: Vec<DriveDescriptor> = serde_json::from_str(text).unwrap();
         assert_eq!(back[0].id.as_deref(), Some("ab".repeat(16).as_str()));
+    }
+
+    /// **A move that refused keys says so; one that refused none says nothing of
+    /// it** (kotton #313): the note counts the keys for a nonzero count, in the
+    /// singular for one, and is absent for 0.
+    #[test]
+    fn a_move_notes_the_keys_it_refused_and_says_nothing_for_none() {
+        let answered = |keys_refused| kotton::DriveMoved {
+            drives: vec![DriveDescriptor {
+                id: None,
+                name: "photos".into(),
+                vault: "vault-2".into(),
+                vault_key: "00".repeat(32),
+                size: None,
+                pinned_whole: vec![],
+                unfinished: false,
+            }],
+            keys_refused,
+        };
+        let notes = |out: &[Out]| -> Vec<String> {
+            out.iter().filter_map(|o| if let Out::Note(n) = o { Some(n.clone()) } else { None }).collect()
+        };
+
+        let none = moved_said("photos", "vault-2", &answered(0));
+        assert!(matches!(&none[..], [Out::Confirm { action, .. }] if action.contains("'vault-2'")), "{none:?}");
+        assert!(notes(&none).is_empty(), "a move that refused nothing printed a note: {none:?}");
+
+        let one = notes(&moved_said("photos", "vault-2", &answered(1)));
+        assert_eq!(one, vec![refused_said(1)]);
+        assert!(one[0].contains("listed 1 key that is not a storage key") && one[0].contains("refused it"), "{one:?}");
+
+        let three = notes(&moved_said("photos", "vault-2", &answered(3)));
+        assert_eq!(three, vec![refused_said(3)]);
+        assert!(three[0].contains("listed 3 keys that are not a storage key") && three[0].contains("refused them"), "{three:?}");
     }
 
     #[test]

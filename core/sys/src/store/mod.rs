@@ -11,6 +11,10 @@
 //! provides POSIX-like semantics, ObjectStorage provides simple key-value operations
 //! suitable for cloud storage backends.
 
+pub mod key;
+
+pub use key::{NotCanonical, StorageKey};
+
 use std::collections::BTreeMap;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -774,12 +778,17 @@ pub trait SealedObjectAccess: ObjectStorage {
     /// logical key space (`files/<person path>` for the person's tree). Kept
     /// versions are not asked about: they are history, fetched when opened.
     ///
+    /// Each pack is named by its storage key, already admitted ([`StorageKey`],
+    /// kotton #301): a store builds it from an id it admitted where the
+    /// manifest naming it was decoded, so a caller reads or writes under it
+    /// without parsing it again.
+    ///
     /// Default: `None` — a store with no pack layer has no packs to name, and
     /// "this store cannot say" is distinguishable from "no pack is needed".
     async fn packs_holding(
         &self,
         _kept: &(dyn for<'p> Fn(&'p str) -> bool + Send + Sync),
-    ) -> ObjectStorageResult<Option<BTreeMap<String, Vec<String>>>> {
+    ) -> ObjectStorageResult<Option<BTreeMap<StorageKey, Vec<String>>>> {
         Ok(None)
     }
 }
