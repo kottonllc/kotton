@@ -42,11 +42,10 @@ pub use utils::{expand_vars, normalize_path, parse_command};
 #[cfg(feature = "cli")]
 pub use commands::{scaffold_files, typed_lines, TypedLines, SDK_FROM_REPOSITORY};
 
-/// `device add`'s posture flags as the shell's usage line brackets them, and the word that
-/// names the device for the ceremony, for the CLI door's argument help of `device`, so both
-/// doors print the one vocabulary and neither spells it.
+/// `device`'s grammar as the shell's usage line prints it, for the CLI door's argument help of
+/// `device`: one grammar, printed by both doors, so the CLI re-spells no word of it.
 #[cfg(feature = "cli")]
-pub use commands::{device_add_posture_bracket, DEVICE_AS_WORD};
+pub use commands::device_usage_grammar;
 
 /// Return `(name, help page)` for every shell command, sorted alphabetically.
 pub fn shell_command_docs() -> Vec<(String, String)> {
