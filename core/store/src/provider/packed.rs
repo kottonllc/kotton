@@ -6199,6 +6199,106 @@ mod tests {
         }
     }
 
+    /// **A held generation above the good ones does not count toward the two**
+    /// (kotton #372, PR 367's review).
+    ///
+    /// Generations 1 and 2 hold `a` and `b`; a held generation is forged at 9,
+    /// above both. Retirement run then keeps all three: the held one is not
+    /// one of the two that are not held, so 2 and 1 are those two. A write
+    /// commits generation 10 (numbered above the held one, #308); retirement
+    /// keeps 10, the held 9 and 2, and retires 1. When 10 is torn the mount
+    /// reads from 2, past the held 9. The held generation sorting above the
+    /// good ones, not below them as in
+    /// `a_commit_past_a_held_generation_keeps_the_last_good_generation`, is
+    /// not what the rule depends on.
+    #[tokio::test]
+    async fn a_held_generation_above_the_good_ones_does_not_count_toward_the_two() {
+        let backing = MemoryObjectStorage::new();
+        let slot = crate::fetch::PackSlot::default();
+        let s = fetching(&backing, &slot);
+        s.put(Path::new("notes/a.md"), b"one").await.unwrap();
+        s.pack_loose().await.unwrap();
+        s.put(Path::new("notes/b.md"), b"two").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let first = superblocks_of(&s, 1).await;
+        let second = superblocks_of(&s, 2).await;
+        assert_eq!((first.len(), second.len()), (1, 1));
+        commit_forged_manifest(&s, "notes/a.md", "_pack/../x", 9).await;
+        let held = superblocks_of(&s, 9).await;
+        assert_eq!(held.len(), 1);
+
+        let retired = retire_superseded(&*s.inner, &s.k_pack).await.unwrap();
+        assert_eq!(retired, 0, "a generation was retired with only two that are not held present");
+        let shelf = shelf_keys(&backing).await;
+        for (key, what) in [(&held[0], "held"), (&second[0], "second"), (&first[0], "first")] {
+            assert!(shelf.contains(key), "the {what} generation was retired");
+        }
+
+        let fresh = fetching(&backing, &slot);
+        fresh.put(Path::new("notes/c.md"), b"three").await.unwrap();
+        let tenth = fresh.pack_loose().await.unwrap().unwrap();
+        assert_eq!(tenth.generation, Some(10), "the commit is not numbered above the held generation");
+        let shelf = shelf_keys(&backing).await;
+        assert!(shelf.contains(&held[0]), "the held generation was retired");
+        assert!(shelf.contains(&second[0]), "the generation the commit was built on was retired");
+        assert!(!shelf.contains(&first[0]), "a third generation that is not held was kept");
+
+        let newest = superblocks_of(&fresh, 10).await;
+        assert_eq!(newest.len(), 1);
+        fresh.inner.put_sealed(Path::new(&newest[0]), b"torn mid-write").await.unwrap();
+        let after_tear = fetching(&backing, &slot);
+        for (path, bytes) in [("notes/a.md", &b"one"[..]), ("notes/b.md", b"two")] {
+            let read = after_tear.get(Path::new(path)).await;
+            assert_eq!(read.expect("no generation decodes once generation 10 is torn").as_ref(), bytes, "{path}");
+        }
+        assert!(
+            matches!(after_tear.get(Path::new("notes/c.md")).await, Err(ObjectStorageError::NotFound(_))),
+            "the torn generation's write was served"
+        );
+    }
+
+    /// **Two held generations between commits keep the last good generation**
+    /// (kotton #372, PR 367's review).
+    ///
+    /// Generation 1 holds `a`; generations 2 and 3 are held; a write commits
+    /// generation 4. Retirement keeps all four: neither held generation counts
+    /// toward the two that are not held, so 4 and 1 are those two, however
+    /// many held ones sort between them. When 4 is torn the mount reads `a`
+    /// from 1, past both held generations.
+    #[tokio::test]
+    async fn two_held_generations_between_commits_keep_the_last_good_generation() {
+        let backing = MemoryObjectStorage::new();
+        let slot = crate::fetch::PackSlot::default();
+        let s = fetching(&backing, &slot);
+        s.put(Path::new("notes/a.md"), b"one").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let good = superblocks_of(&s, 1).await;
+        assert_eq!(good.len(), 1);
+        commit_forged_manifest(&s, "notes/a.md", "_pack/../x", 2).await;
+        commit_forged_manifest(&s, "notes/a.md", "_pack/../y", 3).await;
+        let held: Vec<String> = [superblocks_of(&s, 2).await, superblocks_of(&s, 3).await].concat();
+        assert_eq!(held.len(), 2);
+
+        let fresh = fetching(&backing, &slot);
+        fresh.put(Path::new("notes/d.md"), b"four").await.unwrap();
+        let fourth = fresh.pack_loose().await.unwrap().unwrap();
+        assert_eq!(fourth.generation, Some(4), "the commit is not numbered above the held generations");
+        let shelf = shelf_keys(&backing).await;
+        for key in &held {
+            assert!(shelf.contains(key), "the held generation {key} was retired");
+        }
+        assert!(shelf.contains(&good[0]), "the last good generation was retired");
+
+        let newest = superblocks_of(&fresh, 4).await;
+        assert_eq!(newest.len(), 1);
+        fresh.inner.put_sealed(Path::new(&newest[0]), b"torn mid-write").await.unwrap();
+        let after_tear = fetching(&backing, &slot);
+        assert_eq!(
+            after_tear.get(Path::new("notes/a.md")).await.expect("no generation decodes once generation 4 is torn").as_ref(),
+            b"one"
+        );
+    }
+
     /// **Only a pack-id refusal is skipped.** A manifest of a version this
     /// code does not read is not a bad ref: it is a newer format, and building
     /// past it would roll back the device that wrote it. Its generation fails
