@@ -2075,7 +2075,8 @@ mod admit_tests {
     /// value. Anything else, including two posture flags, which the shell's `parse_add`
     /// refuses, is `None`. This holds the shape of the hints, not the shell's full grammar
     /// (`--as`, `--browser`, ordering): this crate cannot reach the shell and a second copy of
-    /// that grammar would be a second reader to drift.
+    /// that grammar would be a second reader to drift. The shell's own words, which ask for no
+    /// posture, are read from `kotton-schemas` beside `device_add_word`, as the shell reads them.
     fn device_add_parses(command: &str) -> Option<Posture> {
         use kotton_schemas::membership::{device_add_word, DeviceAddWord};
         let words: Vec<&str> = command.split_whitespace().collect();
@@ -2088,13 +2089,17 @@ mod admit_tests {
         })
     }
 
-    /// The hints' reader refuses what the shell's refuses: two posture flags are no posture.
+    /// The hints' reader refuses what the shell's refuses: two posture flags are no posture,
+    /// and neither is a word of `device`'s own (the browser's, the name's), read from the one
+    /// constant the shell's `parse_add` reads, so a renamed word is still the word tested.
     #[test]
     fn two_posture_flags_are_no_posture_to_the_hint_reader() {
+        use kotton_schemas::membership::{DEVICE_AS_WORD, DEVICE_BROWSER_WORD};
         assert_eq!(device_add_parses("device add --blind --cosigner"), None);
         assert_eq!(device_add_parses("device add --cosigner --blind"), None);
         assert_eq!(device_add_parses("device add --blind --blind"), None);
-        assert_eq!(device_add_parses("device add --browser"), None);
+        assert_eq!(device_add_parses(&format!("device add {DEVICE_BROWSER_WORD}")), None);
+        assert_eq!(device_add_parses(&format!("device add {DEVICE_AS_WORD} phone")), None);
         assert_eq!(device_add_parses("device add --cosigner"), Some(Posture::Cosigner));
     }
 
