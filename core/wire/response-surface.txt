@@ -2,7 +2,7 @@
 # Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
 # Variants sorted by name; fields in declaration order, which is the order
 # serde writes them. See xtask/src/wire_check.rs for why this file exists.
-# variants: 191
+# variants: 192
 ActiveSession
     user_id: String
 AppBundlePath
@@ -112,10 +112,11 @@ DeviceNameInfo
 DoorsHeld
     held: u32
     through_epoch: u64
+DriveMoved
+    drives: Vec<crate::ipc::DriveDescriptor>
+    keys_refused: u32
 Drives
     drives: Vec<crate::ipc::DriveDescriptor>
-    #[serde(default)]
-    keys_refused: u32
 Error
     message: String
 EventList

@@ -885,7 +885,7 @@ async fn a_served_key_that_is_not_canonical_is_refused_before_any_path_is_built(
     let result = result.expect("a pass that refuses keys still completes");
     assert_eq!(result.pulled, 0, "nothing the drive listed was canonical: {result:?}");
     assert!(result.transfers.is_empty(), "{result:?}");
-    let held = rt.list_sealed("local", "").await.expect("list the local mount").len();
+    let held = rt.list_sealed("local", None).await.expect("list the local mount").len();
     assert_eq!(
         result.skipped as usize,
         held + hostile.len(),
