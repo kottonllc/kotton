@@ -2083,7 +2083,7 @@ async fn held_generation<S: SealedObjectAccess + ?Sized>(
 /// "Not held" is not yet "adoptable": a superblock that does not open (torn)
 /// is not held, and counts toward the two. A torn twin sorting between a
 /// commit and the generation it was built on can still take the place of
-/// that generation; that gap is reported with kotton #316, not closed here.
+/// that generation; that gap is reported with kotton #368, not closed here.
 ///
 /// The cost: every present generation is classified, so retirement reads
 /// the manifest of the two newest too, where it used to read only the

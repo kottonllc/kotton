@@ -29,7 +29,7 @@
 //! keeps two generations it does not hold *beside* every held one, since a
 //! held generation is kept but cannot be adopted (`crate::packed`'s
 //! `retire_superseded`, kotton #316). Neither yet discounts a superblock
-//! that does not open: a torn one counts toward the two.
+//! that does not open: a torn one counts toward the two (kotton #368).
 //!
 //! A generation whose superblock opens but whose **state does not decode** is
 //! passed over the same way ([`load_adopted_superblock`]): the pack layer's
