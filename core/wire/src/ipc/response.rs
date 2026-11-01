@@ -48,7 +48,8 @@ pub enum UserResponse {
         /// sender is the only member.
         fanout: Vec<crate::ipc::MemberDelivery>,
     },
-    /// A channel key-grant was created (and optionally stored for the member).
+    /// Answer to `MessageChannelGrantKey`: a channel key-grant was created (and
+    /// optionally stored for the member).
     ///
     /// `grant` is the wrapped key-grant JSON blob.  The caller may relay it
     /// to the member out-of-band (e.g. as an encrypted DM) if the member is
@@ -65,7 +66,7 @@ pub enum UserResponse {
     MessageHistory {
         messages: Vec<serde_json::Value>,
     },
-    /// Decrypted plaintext from a `MessageDecryptDm` or `MessageDecryptChannel` call.
+    /// Answer to `MessageDecryptDm` and `MessageDecryptChannel`: the decrypted plaintext.
     Decrypted {
         plaintext: String,
     },
@@ -163,7 +164,7 @@ pub enum UserResponse {
     IdentityRotated {
         new_key_hex: String,
     },
-    /// `Recover` succeeded: the identity is back on this device, its data roots
+    /// Answer to `Recover`: the identity is back on this device, its data roots
     /// are installed, and every paired node that served the recovery has admitted
     /// this device under the rotated key.
     Recovered {
@@ -192,14 +193,14 @@ pub enum UserResponse {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bundle: Option<String>,
     },
-    /// `HoldDoors`: how many doors this vault now holds for the person, and
+    /// Answer to `HoldDoors`: how many doors this vault now holds for the person, and
     /// the last epoch they reach.
     DoorsHeld { held: u32, through_epoch: u64 },
-    /// `TakeDeliveries`: what is still waiting after the acknowledgement.
+    /// Answer to `TakeDeliveries`: what is still waiting after the acknowledgement.
     Deliveries {
         items: Vec<crate::ipc::PendingDelivery>,
     },
-    /// `CarryFrame`: how many messages this vault now carries for the
+    /// Answer to `CarryFrame`: how many messages this vault now carries for the
     /// person, and which — by `ephemeral_pub`, the id the device itself sealed
     /// each under, with the last epoch its doors reach — so the device hands
     /// only the difference next, and a message again only as its window closes.
@@ -218,8 +219,8 @@ pub enum UserResponse {
     },
 
     // -- Session auth ---------------------------------------------------------
-    /// The `Authenticate` request succeeded; `user_id` is now bound to this
-    /// connection for the lifetime of the session.
+    /// Answer to `Authenticate`: the request succeeded, and `user_id` is now bound
+    /// to this connection for the lifetime of the session.
     ActiveSession {
         user_id: String,
     },
@@ -237,14 +238,16 @@ pub enum UserResponse {
     /// Custody for the named user is closed: the vault is sealed until the
     /// daily credential opens it. The session that asked is untouched.
     CustodyLocked,
-    /// The request variant is not in the scope declared at `Authenticate` time.
+    /// The request variant is not in the scope declared when the session
+    /// authenticated (see `Authenticate`).
     /// The connection remains open; the client may retry with an in-scope request.
     NotInScope,
     /// The connection's **trust-origin** is below the operation's `required_trust`
     /// (RFC-0035): a `Remote` (gateway) connection tried to invoke a `Local`-tier
     /// operation. Distinct from [`NotInScope`] (a least-privilege scope miss) — this
     /// is the structural local/remote floor, which no scope can re-open. The origin
-    /// is bound at `Authenticate` from the credential and is not caller-assertable.
+    /// is bound at authentication (see `Authenticate`) from the credential and is
+    /// not caller-assertable.
     NotAllowed,
     /// The PIN unlock succeeded; a fresh session token is ready.
     UnlockOk {
@@ -271,12 +274,13 @@ pub enum UserResponse {
     UnlockRateLimited {
         retry_after_secs: u64,
     },
-    /// Which credentials this device accepts for `GetUnlockMethods`'s user.
+    /// Answer to `GetUnlockMethods`: which credentials this device accepts for the
+    /// user it names.
     ///
     /// Carries no credential material and no attempt state — only which door to
     /// knock on. `pin` is false for an unknown user, so this does not confirm
-    /// whether an identity exists on the device (`ListUsers` answers that, and
-    /// is likewise pre-auth).
+    /// whether an identity exists on the device (see `ListUsers`, which answers
+    /// that and is likewise pre-auth).
     UnlockMethods {
         /// A PIN is configured and will be accepted.
         pin: bool,
@@ -375,11 +379,11 @@ pub enum UserResponse {
     PrincipalSession {
         token: crate::ipc::SecretText,
     },
-    /// The `WebShellPair` desk is open and waiting for a browser (RFC-0078). The
-    /// first frame of that stream, so the operator's screen can say "ready" and a
+    /// Answer to `WebShellPair`: the desk is open and waiting for a browser
+    /// (RFC-0078). The first frame of that stream, so the operator's screen can say "ready" and a
     /// caller knows the desk is registered before a browser could reach it.
     WebShellPairReady,
-    /// The browsers admitted for a user (`BrowserDeviceList`), oldest first.
+    /// Answer to `BrowserDeviceList`: the browsers admitted for a user, oldest first.
     BrowserDevices {
         browsers: Vec<super::types::BrowserDevice>,
     },
@@ -389,8 +393,8 @@ pub enum UserResponse {
     BrowserDeviceRevoked {
         channels_closed: u32,
     },
-    /// One frame back to a browser's sealed channel (the reply to
-    /// `UserRequest::BrowserFrame`). Handshake frames in the clear, then
+    /// Answer to `UserRequest::BrowserFrame`: one frame back to a browser's sealed
+    /// channel. Handshake frames in the clear, then
     /// ciphertext; `khttpd` forwards it to the WebSocket unread.
     BrowserFrame {
         /// The frame, base64 on the wire.
@@ -430,7 +434,7 @@ pub enum UserResponse {
         expected: String,
         got: String,
     },
-    /// Storage-space listing for `ListSealed`: the opaque stored keys and their
+    /// Answer to `ListSealed`: the storage-space listing, the opaque stored keys and their
     /// sizes, with no logical path recovered.
     SealedList {
         entries: Vec<SealedListEntry>,
@@ -638,7 +642,7 @@ pub enum UserResponse {
     NodeRevoked,
 
     /// The pairing ceremony completed successfully (terminal frame of the RFC-0040
-    /// `DeviceAdd` / `DeviceJoin` stream). On the admitting side it is sent only
+    /// pairing stream; see `DeviceAdd` and `DeviceJoin`). On the admitting side it is sent only
     /// after the joining device answered that it kept what it was handed, and
     /// the device was then recorded and introduced at the person's drives —
     /// and, for a vault admitted by code, after the vault answered that it
@@ -672,8 +676,8 @@ pub enum UserResponse {
     // request carrying the `token` from `PairShowCode`.
     /// Issuer: advertising and waiting for a device to connect. `code` is what
     /// the person hands the other side, and it is a secret on every ceremony
-    /// that streams it: `DeviceAdd`'s interim connection code (address and
-    /// session id) until mDNS discovery (P1) removes it; a contact pairing's
+    /// that streams it: an admit's interim connection code (address and
+    /// session id; see `DeviceAdd`) until mDNS discovery (P1) removes it; a contact pairing's
     /// spoken words, the PAKE's password; and a vault's invite
     /// (`kotton-invite:vault:…`), whose words are that password and which
     /// carries its meeting relay's *invited* admission key when the vault holds
@@ -693,8 +697,8 @@ pub enum UserResponse {
     /// The bootstrap connection is up; the committed handshake is running.
     PairConnected,
     /// Both devices derived the six-digit SAS. Show it (zero-padded, grouped
-    /// `"NNN NNN"`) and return the human's verdict via
-    /// `PairConfirmCode { token, matches }`.
+    /// `"NNN NNN"`) and return the human's verdict (see
+    /// `PairConfirmCode { token, matches }`).
     PairShowCode {
         /// Correlates the human's verdict back to this parked ceremony.
         token: crate::ipc::SecretText,
@@ -721,33 +725,33 @@ pub enum UserResponse {
     PairFailed {
         reason: String,
     },
-    /// Acknowledgement of a `PairConfirmCode` request (the verdict was delivered
-    /// to the parked ceremony).
+    /// Answer to `PairConfirmCode`: the verdict was delivered to the parked
+    /// ceremony.
     PairConfirmAck,
-    /// This device's current human name (the reply to `DeviceName`).
+    /// Answer to `DeviceName`: this device's current human name.
     DeviceNameInfo {
         name: String,
     },
 
     // -- Sync engine (RFC-0019) -----------------------------------------------
-    /// A sync pass was enqueued. Returned immediately by `SyncDrives`.
+    /// A sync pass was enqueued. Answer to `SyncDrives`, at once.
     SyncStarted {
         /// Opaque job identifier — pass to `SyncAwait` to block for the result.
         job_id: String,
         /// How many drives the pass syncs.
         targets: u32,
     },
-    /// A sync pass completed successfully. Returned by `SyncAwait`.
+    /// A sync pass completed successfully. Answer to `SyncAwait`.
     SyncOutcomeMsg {
         job_id: String,
         outcome: SyncOutcome,
     },
-    /// A sync pass failed. Returned by `SyncAwait`.
+    /// A sync pass failed. Answer to `SyncAwait`.
     SyncJobFailed {
         job_id: String,
         message: String,
     },
-    /// `SyncAwait` timed out before the pass completed.
+    /// Answer to `SyncAwait`: it timed out before the pass completed.
     SyncJobTimeout {
         job_id: String,
     },
@@ -794,7 +798,7 @@ pub enum UserResponse {
     RendezvousStatus(crate::rendezvous::RendezvousStatusInfo),
     /// The TURN URL was saved.
     TurnSet,
-    /// Where the local-network door stands. Returned by `LocalDoor`.
+    /// Where the local-network door stands. Answer to `LocalDoor`.
     LocalDoorResult {
         /// `closed`, `10m` or `always` — the one lit answer on this network.
         answer: String,
@@ -808,7 +812,7 @@ pub enum UserResponse {
         /// can be chosen here.
         network_known: bool,
     },
-    /// QUIC gateway configuration and live status. Returned by `QuicGatewayStatus`.
+    /// QUIC gateway configuration and live status. Answer to `QuicGatewayStatus`.
     QuicGatewayStatusResult {
         enabled: bool,
         port: u16,
@@ -820,7 +824,7 @@ pub enum UserResponse {
         /// Whether `kquicd` is expected to be running based on the enabled flag.
         running: bool,
     },
-    /// List of authorised-client public keys (hex) for a node. Returned by
+    /// List of authorised-client public keys (hex) for a node. Answer to
     /// `GetAuthorizedClients`.
     AuthorizedClients {
         /// Paired DID strings (for logging / display).
@@ -829,14 +833,14 @@ pub enum UserResponse {
         pubkey_hexes: Vec<String>,
     },
     /// Ed25519 signing key material for `kquicd`'s QUIC mTLS listener.
-    /// Returned by `GetDeviceCert`. `Local`-tier.
+    /// Answer to `GetDeviceCert`. `Local`-tier.
     DeviceCert {
         /// Raw 32-byte Ed25519 signing key bytes (little-endian scalar).
         signing_key_bytes: crate::ipc::SecretBytes,
     },
 
     /// This daemon's stable device DID and ephemeral signing public key.
-    /// Returned by `GetNodeIdentity`.
+    /// Answer to `GetNodeIdentity`.
     NodeIdentity {
         /// `did:key:z6Mk…` stable device DID.
         device_did: String,
@@ -845,7 +849,7 @@ pub enum UserResponse {
     },
 
     // -- HTTP gateway (RFC-0016) -----------------------------------------------
-    /// Configuration and runtime state of the HTTP gateway. Returned by `WebShellStatus`.
+    /// Configuration and runtime state of the HTTP gateway. Answer to `WebShellStatus`.
     WebShellStatusResult {
         enabled: bool,
         port: u16,
@@ -858,7 +862,7 @@ pub enum UserResponse {
         /// `true` when `khttpd` is actively running.
         running: bool,
     },
-    /// Device configuration summary table. Returned by `DeviceRequest::ConfigStatus`.
+    /// Device configuration summary table. Answer to `ConfigStatus`.
     ConfigStatus {
         items: Vec<ConfigItem>,
     },
@@ -970,8 +974,8 @@ pub enum UserResponse {
     ///
     /// The answer to [`UserRequest::AppInstallPreview`]. `requested` is rendered
     /// with [`CapabilityGrant::display_string`] alongside the structured grants,
-    /// so what the user is shown and what the client echoes back in
-    /// `AppInstall { approved }` are the same values, not two renderings that
+    /// so what the user is shown and what the client echoes back (see
+    /// `AppInstall { approved }`) are the same values, not two renderings that
     /// could disagree.
     AppInstallPreview {
         app_id: String,
@@ -1025,7 +1029,8 @@ pub enum UserResponse {
     /// The app was uninstalled and all its data removed.
     AppUninstalled,
 
-    /// A channel was created and its key granted to the creator.
+    /// Answer to `MessageChannelCreate`: a channel was created and its key granted
+    /// to the creator.
     ///
     /// Echoes the channel id back rather than returning the key-grant record id.
     /// The previous shape reused `MessageSent { message_id }`, so the obvious
@@ -1162,7 +1167,7 @@ pub enum UserResponse {
     ///
     /// The coordinator prints `session_id`, `message_hex`, `my_id_hex`, and
     /// `my_commitment_hex` and shares them with a co-signer so they can
-    /// execute `OrgFrostSignContribute`.
+    /// contribute (see `OrgFrostSignContribute`).
     OrgFrostSignSession {
         /// Opaque session identifier.
         session_id: String,
@@ -1176,8 +1181,8 @@ pub enum UserResponse {
     /// A co-signer completed their contribution. Answer to `OrgFrostSignContribute`.
     ///
     /// Return `cosigner_id_hex`, `cosigner_commitment_hex`, and
-    /// `cosigner_share_hex` to the coordinator so they can call
-    /// `OrgFrostSignFinalize`.
+    /// `cosigner_share_hex` to the coordinator so they can finalise (see
+    /// `OrgFrostSignFinalize`).
     OrgFrostContributed {
         /// Co-signer's FROST `Identifier` (hex).
         cosigner_id_hex: String,
@@ -1216,7 +1221,8 @@ pub enum UserResponse {
         #[serde(default)]
         patches: Vec<Vec<u8>>,
     },
-    /// No app with the given `app_id` is installed on this device.
+    /// No app with the given `app_id` is installed on this device. Answer to
+    /// `AppGetRole` when no app holds the role, among other app verbs.
     AppNotFound {
         app_id: String,
     },
@@ -1244,8 +1250,8 @@ pub enum UserResponse {
     EventList {
         events: Vec<EventEntry>,
     },
-    /// A single live event delivered by a [`DeviceRequest::SubscribeEvents`]
-    /// stream.  The connection receives one frame per matching event.
+    /// Answer to `SubscribeEvents`: a single live event of its stream. The
+    /// connection receives one frame per matching event.
     EventStream {
         event: EventEntry,
     },
@@ -1261,8 +1267,7 @@ pub enum UserResponse {
     },
 
     // -- Daemon health (M22b) -------------------------------------------------
-    /// Live snapshot of daemon state.  Also used as catch-all for the
-    /// `DaemonStatus` request.
+    /// Answer to `DaemonStatus`: a live snapshot of daemon state.
     DaemonStatusInfo {
         /// Daemon binary version.
         version: String,
@@ -1281,11 +1286,11 @@ pub enum UserResponse {
     },
 
     // -- Device sync responses (RFC-0008) -------------------------------------
-    /// The daemon has acknowledged a `SyncAvailable` or `RecordSyncAvailable`
-    /// notification and has woken its sync engine.
+    /// Answer to `SyncAvailable` or `RecordSyncAvailable`: the daemon has
+    /// acknowledged the notification and has woken its sync engine.
     SyncAck,
 
-    /// Reply to a [`crate::UserRequest::FrostSignRound`] — one round of a
+    /// Answer to [`crate::UserRequest::FrostSignRound`]: one round of a
     /// distributed FROST signing ceremony. `payload` is the JSON-serialised
     /// runtime `FrostRoundReply` (a commitment for round 1, a signature share for
     /// round 2).
@@ -1293,7 +1298,7 @@ pub enum UserResponse {
         payload: String,
     },
 
-    /// Reply to a [`crate::UserRequest::ThresholdSign`] — the aggregate
+    /// Answer to [`crate::UserRequest::ThresholdSign`]: the aggregate
     /// threshold signature as lowercase hex (64 bytes), verifiable as a standard
     /// Ed25519 signature under the group (identity) DID.
     ThresholdSigned {
@@ -1301,8 +1306,8 @@ pub enum UserResponse {
     },
 
     // -- VFS watch subscription (RFC-0017) ------------------------------------
-    /// The first frame of a [`crate::UserRequest::VfsWatch`] stream: the watch is
-    /// **established**, and a change made from here on is delivered.
+    /// Answer to [`crate::UserRequest::VfsWatch`], the first frame of its stream:
+    /// the watch is **established**, and a change made from here on is delivered.
     ///
     /// Without it a subscriber cannot tell "nothing has changed yet" from "the
     /// watch is not up yet", so a write made straight after subscribing can
@@ -1325,7 +1330,7 @@ pub enum UserResponse {
         /// `error!` line carries, sent to the one party that cannot read the log.
         reason: String,
     },
-    /// A filesystem change delivered by a [`crate::UserRequest::VfsWatch`] stream.
+    /// Answer to [`crate::UserRequest::VfsWatch`]: a filesystem change its stream delivers.
     VfsChanged {
         /// Absolute VFS path of the changed file or directory.
         path: String,
@@ -1334,25 +1339,25 @@ pub enum UserResponse {
         /// Unix timestamp (seconds) when the change was observed.
         timestamp_secs: u64,
     },
-    /// The daemon is closing the [`crate::UserRequest::VfsWatch`] subscription
-    /// (daemon shutdown or internal error).  After receiving this the client
-    /// should drop the connection.
+    /// Answer to [`crate::UserRequest::VfsWatch`], its last frame: the daemon is
+    /// closing the subscription (daemon shutdown or internal error). After
+    /// receiving this the client should drop the connection.
     VfsWatchEnd,
 
     // -- Runtime inspection (runtime_inspection sprint) -----------------------
-    /// Snapshot of all sidecar processes. Returned by `DaemonSidecars`.
+    /// Snapshot of all sidecar processes. Answer to `DaemonSidecars`.
     DaemonSidecarsResult {
         sidecars: Vec<crate::ipc::types::SidecarInfo>,
     },
-    /// Snapshot of all authenticated IPC sessions. Returned by `IpcSessions`.
+    /// Snapshot of all authenticated IPC sessions. Answer to `IpcSessions`.
     IpcSessionsResult {
         sessions: Vec<crate::ipc::types::IpcSessionInfo>,
     },
 
     // -- Network status (net_status sprint) -----------------------------------
-    /// Sync state summary returned by [`crate::UserRequest::SyncStatus`].
+    /// Answer to [`crate::UserRequest::SyncStatus`]: the sync state summary.
     SyncStatusResult(crate::ipc::types::SyncStatusResult),
-    /// Aggregated network status returned by [`crate::UserRequest::NetworkStatus`].
+    /// Answer to [`crate::UserRequest::NetworkStatus`]: the aggregated network status.
     NetworkStatusResult {
         peers: Vec<crate::ipc::types::PeerStatus>,
         quic_gateway: crate::ipc::types::GatewaySummary,
