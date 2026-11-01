@@ -85,6 +85,19 @@ impl fmt::Display for NotCanonical {
 
 impl std::error::Error for NotCanonical {}
 
+impl NotCanonical {
+    /// `n` refused keys as a person reads them: "1 key that is not a storage key", "3 keys
+    /// that are not storage keys". The one spelling every door that counts them reads, so the
+    /// daemon's answer and the shell's note cannot say it two ways (kotton #315).
+    pub fn counted(n: usize) -> String {
+        if n == 1 {
+            "1 key that is not a storage key".to_string()
+        } else {
+            format!("{n} keys that are not storage keys")
+        }
+    }
+}
+
 impl StorageKey {
     /// Admit `key`, or say why it is not canonical.
     pub fn parse(key: &str) -> Result<Self, NotCanonical> {
@@ -175,5 +188,12 @@ mod tests {
                 "{key:?}"
             );
         }
+    }
+
+    /// One refused key is said in the singular, any other count in the plural.
+    #[test]
+    fn a_count_of_refused_keys_is_said_in_its_number() {
+        assert_eq!(NotCanonical::counted(1), "1 key that is not a storage key");
+        assert_eq!(NotCanonical::counted(3), "3 keys that are not storage keys");
     }
 }

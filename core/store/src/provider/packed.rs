@@ -215,10 +215,12 @@ pub enum ObjectKind {
 ///   recovery act on ([`PackId`], kotton #273); a drive move's listing of
 ///   the vault it leaves (kotton #274); and every key and prefix the sealed
 ///   view (`kotton_sealed::Sealed`) is handed, which it takes typed
-///   (kotton #275, #320). Keys still reach a store unadmitted through a
-///   guest re-wrap's raw read (kotton #299) and `Sealed::list`'s descent
-///   into the directory keys a store listed (kotton #336), each tracked in
-///   `LocalObjectStorage::resolve_key`'s doc.
+///   (kotton #275, #320), and each directory key a store lists that its
+///   walk descends into (kotton #336). The doors still relying on
+///   `LocalObjectStorage::resolve_key`'s refusal, each tracked in that doc:
+///   - the guest re-wrap's raw read (kotton #299);
+///   - `kvaultd::meter::Meter::measure` (kotton #352);
+///   - `BlindedObjectStorage::collect_leaves` and `list_loose` (kotton #357).
 /// - **The rest of the `_` namespace** is [`ObjectKind::Reserved`].
 ///   Blinded components are base32, an alphabet with no `_`, so only a key
 ///   in the reserved namespace starts with one, and every other key is

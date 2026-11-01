@@ -79,15 +79,16 @@ fn shell_help(name: &str) -> String {
     DOOR.get_or_init(|| kotton_shell::ShellExecutor::new().registry()).help_of(name).unwrap_or_default()
 }
 
-/// The `<ARGS>` help of `device`. `add`'s posture bracket is the one the REPL's usage line
-/// prints ([`kotton_shell::device_add_posture_bracket`]), walked from `device_add_word`, and
-/// the name's word is the one `parse_add` and `join` read ([`kotton_shell::DEVICE_AS_WORD`]),
-/// so this line names the flags the shell reads and spells none of them.
+/// The `<ARGS>` help of `device`: the shell's grammar, whole, as its usage line prints it
+/// ([`kotton_shell::device_usage_grammar`]), so both doors print one grammar and this one
+/// spells none of the shell's words (kotton #326); then `reset`, which is this door's alone,
+/// with its own word ([`device::YES_WORD`], the one `reset` reads). In backticks, as the
+/// reference page renders it: the grammar's `<code>` and `<id>` are placeholders, not markup.
 fn device_args_help() -> String {
     format!(
-        "Arguments: `add [{as_} N] [{}]` | `join [code] [{as_} N]` | `list` | `revoke <id>` | `name [N]` | `reset [--yes]`",
-        kotton_shell::device_add_posture_bracket(),
-        as_ = kotton_shell::DEVICE_AS_WORD,
+        "Arguments: `{} | device reset [{}]`",
+        kotton_shell::device_usage_grammar(),
+        device::YES_WORD
     )
 }
 
@@ -133,8 +134,8 @@ pub enum Commands {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        // Its help is `device_args_help()`: the posture bracket is the shell's, read from the
-        // vocabulary, so it is not written here.
+        // Its help is `device_args_help()`: the shell's grammar, printed whole, so it is not
+        // written here.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word, help = device_args_help())]
         args: Vec<String>,
     },
