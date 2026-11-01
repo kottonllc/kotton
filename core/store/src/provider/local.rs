@@ -47,17 +47,22 @@ impl LocalObjectStorage {
     /// manifest or superblock names, at decode ([`crate::packed::PackId`],
     /// kotton #273), so neither reaches this refusal any more.
     ///
+    /// What it no longer stands in for: drive move (kotton #274) admits each
+    /// key where the source vault's listing enters it and writes through a
+    /// vault's `write_sealed`, which admits again, and
+    /// `kotton_sealed::Sealed` takes only admitted keys and prefixes
+    /// (kotton #275, #320) and admits each directory key a store lists
+    /// before it descends into it (kotton #336). None of them reaches here
+    /// with a key it did not admit.
+    ///
     /// What it still stands in for: `UserStore::read_raw_local_object`, which
     /// reads the path a guest re-wrap names on a store of its own, past a
-    /// trimmed leading `/` and admitted by nothing else (kotton #299). That is
-    /// the reach to close before this refusal can go. Drive move (kotton #274)
-    /// admits each key where the source vault's listing enters it and writes
-    /// through a vault's `write_sealed`, which admits again, and
-    /// `kotton_sealed::Sealed` takes only admitted keys and prefixes
-    /// (kotton #275, #320), so neither reaches here with one from a caller.
-    /// `Sealed::list`'s descent into the directory keys a store itself listed
-    /// is not yet admitted (kotton #336), and this refusal still stands in for
-    /// it.
+    /// trimmed leading `/` and admitted by nothing else (kotton #299), the
+    /// one door left of those this doc has tracked. And a vault's own walks
+    /// of a shelf's listing, `kvaultd`'s `tenancy::clear_shelf` (kotton
+    /// #310) and `Meter::measure`, which descend into and delete the keys
+    /// the listing names, unparsed. Those are the reaches to close before
+    /// this refusal can go.
     ///
     /// A leading `/` and a `.` component name nothing outside the root and
     /// are read past, as the logical paths the VFS hands this store may carry
