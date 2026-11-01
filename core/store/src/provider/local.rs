@@ -47,17 +47,26 @@ impl LocalObjectStorage {
     /// manifest or superblock names, at decode ([`crate::packed::PackId`],
     /// kotton #273), so neither reaches this refusal any more.
     ///
-    /// What it still stands in for: `UserStore::read_raw_local_object`, which
-    /// reads the path a guest re-wrap names on a store of its own, past a
-    /// trimmed leading `/` and admitted by nothing else (kotton #299). That is
-    /// the reach to close before this refusal can go. Drive move (kotton #274)
-    /// admits each key where the source vault's listing enters it and writes
-    /// through a vault's `write_sealed`, which admits again, and
+    /// What it no longer stands in for: drive move (kotton #274) admits each
+    /// key where the source vault's listing enters it and writes through a
+    /// vault's `write_sealed`, which admits again, and
     /// `kotton_sealed::Sealed` takes only admitted keys and prefixes
-    /// (kotton #275, #320), so neither reaches here with one from a caller.
-    /// `Sealed::list`'s descent into the directory keys a store itself listed
-    /// is not yet admitted (kotton #336), and this refusal still stands in for
-    /// it.
+    /// (kotton #275, #320) and admits each directory key a store lists
+    /// before it descends into it (kotton #336). None of them reaches here
+    /// with a key it did not admit.
+    ///
+    /// The doors still relying on this refusal, each to close before it can
+    /// go:
+    ///
+    /// - The guest re-wrap's raw read (kotton #299):
+    ///   `UserStore::read_raw_local_object` reads the path a re-wrap names on
+    ///   a store of its own, past a trimmed leading `/`, admitted by nothing
+    ///   else.
+    /// - `kvaultd::meter::Meter::measure` (kotton #352): it descends into the
+    ///   directory keys a shelf's listing names, unparsed.
+    /// - `BlindedObjectStorage::collect_leaves` and `list_loose` (kotton
+    ///   #357): the walk descends into every directory key the inner store
+    ///   listed, unparsed, and `list_loose` reads each listed leaf, unparsed.
     ///
     /// A leading `/` and a `.` component name nothing outside the root and
     /// are read past, as the logical paths the VFS hands this store may carry

@@ -103,8 +103,55 @@
 //! holds the sender; while each peer wire is its own flat enum, the recordings
 //! still restate those verbs, and this rule is what holds the restatement in the
 //! gate.
+//!
+//! ## The answer rule, between the docs and the response recording
+//!
+//! A verb's doc says what it is answered with ("Answered with `Drives`"), and the
+//! answer's doc says which verbs it answers ("Answer to `DriveCreate`, `DriveList` and
+//! `DriveShow`"). Nothing compiles either, so they drift: a move that came to answer
+//! `DriveMoved` kept a doc saying `Drives` until a reviewer read it (kotton #341).
+//! `Drives` is still a recorded answer, so a rule that only asked whether the name is
+//! recorded would pass that drift; the rule holds the two docs to each other.
+//!
+//! [`answer_report`] reads every doc comment (`///`, `//!`) under [`ANSWER_DOCS`] with
+//! one reader, [`doc_blocks`]: each block's lines are joined so a phrase wrapped onto
+//! the next doc line reads as one, and a block on a variant of a top-level `pub enum`
+//! knows its item as `Enum::Variant`.
+//!
+//! - **A verb's claim.** "Answered with" (any case) and the first backticked span after
+//!   it in the same clause, or "Answered" and a backticked span right after it. Prose
+//!   ("Answered with what the service answered.") reaches a `.`, `,`, `;` or `:` before
+//!   any backtick and is not a claim, and a span that is not a name (`kvaultd tenants`)
+//!   is not one either.
+//! - **An answer's list.** "Answer to" on a `UserResponse` variant in
+//!   [`RESPONSE_SOURCE`], then the backticked verbs joined by `,`, "and" or "or". A bare
+//!   verb is a `UserRequest` verb; `VaultRequest::Tenants` and `UserRequest::Tenants` are
+//!   two verbs, and an answer to both names both.
+//!
+//! Each claimed name must be a variant in [`RESPONSE_RECORDING`], read through
+//! [`recorded_surface::read`], the one reader ([`Kind::Answer`]). A verb claiming `X`
+//! must be in `X`'s list, and each verb in `X`'s list must claim `X`
+//! ([`Kind::Pair`]). Every finding names the file and line on each side.
+//!
+//! **Both sides are required only where one is written.** A claim whose other side is
+//! missing is [`Kind::Unwritten`], but a verb and an answer with neither doc are not a
+//! finding: the tree writes few lists (28 "Answer to" docs over 192 answers when this
+//! rule landed, 24 of them written before it), and asking for every pair at once would
+//! be a wall of findings no one change can clear. A pair joins the rule when either side is written. The generic
+//! answers in [`GENERIC_ANSWERS`] (`Ok`) need no list, since one would grow with every
+//! verb that answers with it and be the doc most likely to drift; a claim of `Ok` is
+//! still held to the recording.
+//!
+//! **One answer type of five.** `core/wire/src` declares five response enums:
+//! `KuidResponse` (`kuid_ipc.rs`), `ContactResponse` (`ipc/contact_request.rs`),
+//! `DeviceResponse` (`sys_ipc.rs`), `RelayOperatorResponse` (`rendezvous.rs`) and
+//! `UserResponse` (`ipc/response.rs`). The rule reads `UserResponse` alone: every claim
+//! is held to `response-surface.txt`, and only `UserResponse`'s "Answer to" lists are
+//! read. A claim of another enum's variant today is a finding. Holding another enum
+//! needs its recording (`RelayOperatorResponse` shares `relay-operator-surface.txt`
+//! with its request; the other three have none) and its lists read here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// The one reader of a recorded surface, compiled here from kotton-wire's source rather
@@ -203,7 +250,7 @@ const CHANNELS: &[Channel] = &[
     Channel {
         what: "IPC response",
         sources: &[("core/wire/src/ipc/response.rs", "UserResponse")],
-        golden: "core/wire/response-surface.txt",
+        golden: RESPONSE_RECORDING,
     },
 ];
 
@@ -251,24 +298,517 @@ pub fn wire_check(bless: bool) {
                  `cargo xtask wire-surface` again."
             );
         }
+        // Reporting only, as the twin rule is: a response variant renamed and
+        // re-recorded here is told now that a doc still names the old answer.
+        let answers = answer_report(Path::new("."));
+        if answers.findings.is_empty() {
+            println!("{}", answers_ok("wire-surface", &answers));
+        } else {
+            eprint!("{}", answer_findings_text("wire-surface", &answers.findings));
+            eprintln!(
+                "wire-surface wrote every recording and exits 0, but the next \
+                 `cargo xtask wire-check` fails until each doc above names an answer the \
+                 daemon gives."
+            );
+        }
         return;
     }
-    // The twin rule reads only the recordings, so it runs first: a recording
-    // edited by hand fails its channel below and is named here as well.
+    // The twin rule and the answer rule read only text, so they run first: a
+    // recording edited by hand fails its channel below and is named here as well.
     let findings = twin_report(Path::new("."));
     if !findings.is_empty() {
         print_twin_findings("wire-check", &findings);
     }
+    let answers = answer_report(Path::new("."));
+    if !answers.findings.is_empty() {
+        eprint!("{}", answer_findings_text("wire-check", &answers.findings));
+    }
     for channel in CHANNELS {
         check_channel(channel, false);
     }
-    if !findings.is_empty() {
+    if !findings.is_empty() || !answers.findings.is_empty() {
         std::process::exit(1);
     }
     println!(
         "wire-check: OK — every verb in {} and {} records its door twin's block in {DOOR_RECORDING}.",
         TWIN_RECORDINGS[0], TWIN_RECORDINGS[1]
     );
+    println!("{}", answers_ok("wire-check", &answers));
+}
+
+/// The line a command prints when every answer a doc names is a recorded variant and
+/// every pair of docs agrees.
+fn answers_ok(command: &str, report: &AnswerReport) -> String {
+    format!(
+        "{command}: OK — each of the {} \"Answered with `X`\" docs under {ANSWER_DOCS} names a \
+         variant in {RESPONSE_RECORDING}, and each of the {} verbs an \"Answer to\" doc in \
+         {RESPONSE_SOURCE} names says it is answered with that variant.",
+        report.claims, report.answered_verbs
+    )
+}
+
+/// The recording of what the daemon answers on the user channel: the names a doc's
+/// "Answered with `X`" may give.
+const RESPONSE_RECORDING: &str = "core/wire/response-surface.txt";
+
+/// The source of those answers. Each variant's doc says which verbs it answers
+/// ("Answer to `DriveMove`"), and the rule holds that list against the verbs' own docs.
+const RESPONSE_SOURCE: &str = "core/wire/src/ipc/response.rs";
+
+/// The one answer type the rule holds. A second answer type (the relay operator's,
+/// say) would need its own recording and its own "Answer to" docs held here.
+const RESPONSE_ENUM: &str = "UserResponse";
+
+/// The request enum a verb named bare in an "Answer to" doc belongs to.
+const BARE_VERB_ENUM: &str = "UserRequest";
+
+/// Answers many verbs give, which need no "Answer to" list: such a list would grow with
+/// every verb that answers with it, and would be the doc most likely to drift. A verb
+/// naming one is still held to the recording, and one that is given a list is held to it.
+const GENERIC_ANSWERS: &[&str] = &["Ok"];
+
+/// The tree whose doc comments the answer rule reads.
+const ANSWER_DOCS: &str = "core/wire/src";
+
+/// One doc comment block: its lines trimmed and joined by one space, where each line's
+/// text starts in that string with its 1-based file line, and the enum variant it
+/// documents as `Enum::Variant`, when it documents one.
+#[derive(Debug)]
+struct DocBlock {
+    text: String,
+    starts: Vec<(usize, usize)>,
+    item: Option<String>,
+}
+
+impl DocBlock {
+    /// The file line the joined text's byte `offset` came from.
+    fn line_of(&self, offset: usize) -> usize {
+        self.starts[self.starts.partition_point(|&(s, _)| s <= offset) - 1].1
+    }
+}
+
+/// The doc comment blocks (`///`, `//!`; not `////`) of `src`, in order. Lines are joined
+/// so a phrase wrapped onto the next doc line reads as one. Inside a top-level
+/// `pub enum`, a block's item is the next line at the variant indent that is not an
+/// attribute or a comment, read as `Enum::Variant` when it starts with a variant name.
+fn doc_blocks(src: &str) -> Vec<DocBlock> {
+    const VARIANT_INDENT: &str = "    ";
+    let mut out = Vec::new();
+    let mut open: Option<DocBlock> = None;
+    let mut in_enum: Option<&str> = None;
+    for (i, line) in src.lines().enumerate() {
+        if let Some(rest) = line.strip_prefix("pub enum ") {
+            in_enum = rest.split(|c: char| !(c.is_alphanumeric() || c == '_')).next();
+        } else if line.starts_with('}') {
+            in_enum = None;
+        }
+        let t = line.trim_start();
+        let doc = t
+            .strip_prefix("///")
+            .or_else(|| t.strip_prefix("//!"))
+            .filter(|rest| !rest.starts_with('/'));
+        if let Some(rest) = doc {
+            let block = open.get_or_insert_with(|| DocBlock {
+                text: String::new(),
+                starts: Vec::new(),
+                item: None,
+            });
+            if !block.text.is_empty() {
+                block.text.push(' ');
+            }
+            block.starts.push((block.text.len(), i + 1));
+            block.text.push_str(rest.trim());
+            continue;
+        }
+        let Some(block) = open.as_mut() else { continue };
+        if t.is_empty() || t.starts_with("#[") || t.starts_with("//") {
+            continue;
+        }
+        if let Some(enum_name) = in_enum {
+            let indent = line.len() - t.len();
+            // A multi-line attribute's continuation sits under the variant, and its close
+            // at the variant's indent.
+            if indent > VARIANT_INDENT.len()
+                || (indent == VARIANT_INDENT.len() && t.starts_with([')', ']']))
+            {
+                continue;
+            }
+            if indent == VARIANT_INDENT.len() {
+                let name: String =
+                    t.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                if is_ident(&name) {
+                    block.item = Some(format!("{enum_name}::{name}"));
+                }
+            }
+        }
+        out.extend(open.take());
+    }
+    out.extend(open);
+    out
+}
+
+/// Each offset in `lower` where `word` starts at a word boundary and a space follows it.
+fn word_at(lower: &str, word: &str) -> Vec<usize> {
+    lower
+        .match_indices(word)
+        .map(|(i, _)| i)
+        .filter(|&i| {
+            let before = lower[..i].chars().next_back();
+            !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                && lower[i + word.len()..].starts_with([' ', '\t'])
+        })
+        .collect()
+}
+
+/// The backticked span opening at `text[open]`: its content, and the offset just past
+/// its closing backtick.
+fn span_at(text: &str, open: usize) -> Option<(&str, usize)> {
+    let rest = &text[open + 1..];
+    let close = rest.find('`')?;
+    Some((&rest[..close], open + 1 + close + 1))
+}
+
+/// The offset of the first backtick in `text[from..]`, unless the clause ends first at a
+/// `.`, `,`, `;` or `:`: prose with no name in it.
+fn first_span_in_clause(text: &str, from: usize) -> Option<usize> {
+    let at = from + text[from..].find(['`', '.', ',', ';', ':'])?;
+    text[at..].starts_with('`').then_some(at)
+}
+
+/// One "Answered with `X`" or "Answered `X`" a doc says: the line the name is on, the
+/// name as written, and the verb whose doc says it, as `Enum::Variant`, when the doc is
+/// a variant's.
+#[derive(Debug, PartialEq)]
+struct AnswerClaim {
+    at: usize,
+    name: String,
+    verb: Option<String>,
+}
+
+/// The answer claims of `src`'s docs: each "answered with" followed in the same clause
+/// by a backticked name, and each "answered" followed directly by one. A span that is
+/// not a name (an upper-case identifier, `UserResponse::` allowed before it) is prose.
+fn answer_claims(src: &str) -> Vec<AnswerClaim> {
+    let mut out = Vec::new();
+    for block in doc_blocks(src) {
+        let (text, lower) = (&block.text, block.text.to_ascii_lowercase());
+        for found in word_at(&lower, "answered") {
+            let after = found + "answered".len();
+            let next = after + (text[after..].len() - text[after..].trim_start().len());
+            let open = if lower[next..].starts_with("with ") || lower[next..].starts_with("with\t") {
+                first_span_in_clause(text, next + "with".len())
+            } else {
+                text[next..].starts_with('`').then_some(next)
+            };
+            let Some((written, _)) = open.and_then(|o| span_at(text, o)) else { continue };
+            if !is_ident(answer_name(written)) {
+                continue;
+            }
+            out.push(AnswerClaim {
+                at: block.line_of(open.unwrap_or(next)),
+                name: written.to_string(),
+                verb: block.item.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// A claimed answer's variant name, with a `UserResponse::` path before it taken off.
+fn answer_name(written: &str) -> &str {
+    let written = written.strip_prefix("crate::").unwrap_or(written);
+    written.strip_prefix("UserResponse::").unwrap_or(written)
+}
+
+/// One "Answer to `V`" doc on an answer: the line it is on, the answer it documents,
+/// and the verbs it names, each as `Enum::Variant` with its line.
+#[derive(Debug, PartialEq)]
+struct AnswerTo {
+    at: usize,
+    answer: String,
+    verbs: Vec<(usize, String)>,
+}
+
+/// The "answer to" docs on `src`'s `UserResponse` variants. After "answer to", the first
+/// backticked span in the clause begins a list of verbs; each next span joins it only
+/// when nothing but `,`, `[`, `]`, "and" or "or" stands between. A verb named bare is a
+/// `UserRequest` verb; `crate::` and an enum path before it are read.
+fn answer_to_docs(src: &str) -> Vec<AnswerTo> {
+    let mut out = Vec::new();
+    for block in doc_blocks(src) {
+        let Some(answer) = block
+            .item
+            .as_deref()
+            .and_then(|item| item.strip_prefix(RESPONSE_ENUM))
+            .and_then(|rest| rest.strip_prefix("::"))
+        else {
+            continue;
+        };
+        let (text, lower) = (&block.text, block.text.to_ascii_lowercase());
+        for found in word_at(&lower, "answer to") {
+            let mut open = first_span_in_clause(text, found + "answer to".len());
+            let mut verbs = Vec::new();
+            while let Some(o) = open {
+                let Some((written, past)) = span_at(text, o) else { break };
+                if let Some(verb) = verb_key(written) {
+                    verbs.push((block.line_of(o), verb));
+                }
+                open = text[past..].find('`').map(|n| past + n).filter(|&next| {
+                    text[past..next]
+                        .replace([',', '[', ']'], " ")
+                        .split_whitespace()
+                        .all(|w| w == "and" || w == "or")
+                });
+            }
+            if !verbs.is_empty() {
+                out.push(AnswerTo { at: block.line_of(found), answer: answer.to_string(), verbs });
+            }
+        }
+    }
+    out
+}
+
+/// A verb as an "Answer to" doc writes it, as `Enum::Variant`: `DriveMove` is
+/// `UserRequest::DriveMove`, and `crate::UserRequest::NodeRelay` and
+/// `OperatorVerb::ReadRule` keep their enum. A span that is not a verb is `None`.
+fn verb_key(written: &str) -> Option<String> {
+    let written = written.strip_prefix("crate::").unwrap_or(written);
+    let parts: Vec<&str> = written.split("::").collect();
+    let (enum_name, variant) = match parts[..] {
+        [variant] => (BARE_VERB_ENUM, variant),
+        [.., enum_name, variant] => (enum_name, variant),
+        [] => return None,
+    };
+    (is_ident(enum_name) && is_ident(variant)).then(|| format!("{enum_name}::{variant}"))
+}
+
+/// A verb as a finding prints it: bare for the user channel's, with its enum otherwise.
+fn verb_shown(key: &str) -> &str {
+    key.strip_prefix(BARE_VERB_ENUM).and_then(|k| k.strip_prefix("::")).unwrap_or(key)
+}
+
+/// The `.rs` files under `dir`, recursively, sorted, so findings print in one order.
+fn rust_files(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// What the answer rule read and found.
+#[derive(Debug, Default, PartialEq)]
+struct AnswerReport {
+    /// "Answered with `X`" claims read under [`ANSWER_DOCS`].
+    claims: usize,
+    /// Verbs named by an "Answer to" doc in [`RESPONSE_SOURCE`].
+    answered_verbs: usize,
+    findings: Vec<(Kind, String)>,
+}
+
+/// The answer rule over the tree under `root`.
+///
+/// - Every "Answered with `X`" under [`ANSWER_DOCS`] must name a variant in
+///   [`RESPONSE_RECORDING`] ([`Kind::Answer`]).
+/// - A verb's doc naming `X` and `X`'s "Answer to" doc in [`RESPONSE_SOURCE`] must agree
+///   both ways: `X`'s doc names the verb, and each verb `X`'s doc names says it is
+///   answered with `X` ([`Kind::Pair`]).
+/// - A claim on either side whose other side is not written is [`Kind::Unwritten`]: the
+///   pair cannot be held with one side missing.
+fn answer_report(root: &Path) -> AnswerReport {
+    let fail = |kind, what: String| AnswerReport { findings: vec![(kind, what)], ..Default::default() };
+    let recording = match std::fs::read_to_string(root.join(RESPONSE_RECORDING)) {
+        Ok(t) => t,
+        Err(e) => return fail(Kind::Unread, format!("  {RESPONSE_RECORDING} could not be read: {e}")),
+    };
+    let variants: BTreeSet<&str> = match recorded_surface::read(&recording) {
+        Ok(blocks) => blocks.into_iter().map(|b| b.name).collect(),
+        Err(why) => {
+            return fail(Kind::Format, format!("  {RESPONSE_RECORDING} cannot be read as a recording: {why}."))
+        }
+    };
+    let files = match rust_files(&root.join(ANSWER_DOCS)) {
+        Ok(f) => f,
+        Err(e) => return fail(Kind::Unread, format!("  {ANSWER_DOCS} could not be read: {e}")),
+    };
+    let mut report = AnswerReport::default();
+    // Each verb's claims, by `Enum::Variant`: where, and the answer named.
+    let mut by_verb: BTreeMap<String, Vec<(String, usize, String)>> = BTreeMap::new();
+    let mut answer_tos: Vec<AnswerTo> = Vec::new();
+    let mut response_read = false;
+    for path in files {
+        let file = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                report.findings.push((Kind::Unread, format!("  {file} could not be read: {e}")));
+                continue;
+            }
+        };
+        if file == RESPONSE_SOURCE {
+            response_read = true;
+            answer_tos = answer_to_docs(&src);
+        }
+        for claim in answer_claims(&src) {
+            report.claims += 1;
+            let name = answer_name(&claim.name).to_string();
+            if !variants.contains(name.as_str()) {
+                report.findings.push((
+                    Kind::Answer,
+                    format!(
+                        "  {file}:{}: a doc says it is answered with `{}`, which is not a \
+                         variant in {RESPONSE_RECORDING}.",
+                        claim.at, claim.name
+                    ),
+                ));
+            }
+            if let Some(verb) = claim.verb {
+                by_verb.entry(verb).or_default().push((file.clone(), claim.at, name));
+            }
+        }
+    }
+    if !response_read {
+        report.findings.push((Kind::Unread, format!("  {RESPONSE_SOURCE} could not be read.")));
+        return report;
+    }
+    // Each answer's "Answer to" docs, by name: where, and every verb named.
+    let mut by_answer: BTreeMap<&str, Vec<&AnswerTo>> = BTreeMap::new();
+    for doc in &answer_tos {
+        by_answer.entry(doc.answer.as_str()).or_default().push(doc);
+    }
+    let names_verb = |doc: &&AnswerTo, verb: &str| doc.verbs.iter().any(|(_, v)| v == verb);
+    let list = |docs: &[&AnswerTo]| {
+        docs.iter()
+            .flat_map(|d| d.verbs.iter().map(|(_, v)| format!("`{}`", verb_shown(v))))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    // The verb's side: the answer it names must name it back.
+    for (verb, claims) in &by_verb {
+        for (file, at, name) in claims {
+            let shown = verb_shown(verb);
+            // A name not recorded is its own finding above.
+            if !variants.contains(name.as_str()) {
+                continue;
+            }
+            match by_answer.get(name.as_str()) {
+                // A generic answer is said by many verbs; its list is not asked for.
+                None if GENERIC_ANSWERS.contains(&name.as_str()) => {}
+                None => report.findings.push((
+                    Kind::Unwritten,
+                    format!(
+                        "  {file}:{at}: `{shown}` is answered with `{name}`, and `{name}`'s doc in \
+                         {RESPONSE_SOURCE} names no verb it is the answer to, so this claim has no \
+                         other side to hold it to."
+                    ),
+                )),
+                Some(docs) if !docs.iter().any(|d| names_verb(d, verb)) => {
+                    let mut f = format!(
+                        "  {file}:{at}: `{shown}` is answered with `{name}`, but `{name}` is the \
+                         answer to {} ({RESPONSE_SOURCE}:{})",
+                        list(docs),
+                        docs[0].at
+                    );
+                    for other in answer_tos.iter().filter(|d| d.answer != *name && names_verb(d, verb)) {
+                        f.push_str(&format!(
+                            "; `{}`'s doc ({RESPONSE_SOURCE}:{}) names `{shown}`",
+                            other.answer, other.at
+                        ));
+                    }
+                    f.push('.');
+                    report.findings.push((Kind::Pair, f));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    // The answer's side: every verb it names must say it is answered with it.
+    for doc in &answer_tos {
+        for (at, verb) in &doc.verbs {
+            report.answered_verbs += 1;
+            let shown = verb_shown(verb);
+            let answer = &doc.answer;
+            match by_verb.get(verb) {
+                None => report.findings.push((
+                    Kind::Unwritten,
+                    format!(
+                        "  {RESPONSE_SOURCE}:{at}: `{answer}` is the answer to `{shown}`, and no \
+                         doc of `{shown}` under {ANSWER_DOCS} says what it is answered with."
+                    ),
+                )),
+                Some(claims) if !claims.iter().any(|(_, _, n)| n == answer) => {
+                    let (file, cat, name) = &claims[0];
+                    report.findings.push((
+                        Kind::Pair,
+                        format!(
+                            "  {RESPONSE_SOURCE}:{at}: `{answer}` is the answer to `{shown}`, but \
+                             `{shown}`'s doc ({file}:{cat}) says it is answered with `{name}`."
+                        ),
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    report
+}
+
+/// The answer rule's findings, with one sentence of advice per kind present.
+fn answer_findings_text(command: &str, findings: &[(Kind, String)]) -> String {
+    let mut out = format!(
+        "{command}: a doc names an answer the daemon does not give, a verb's doc and its \
+         answer's doc disagree, or one of the two is not written.\n\n"
+    );
+    for (_, finding) in findings {
+        out.push_str(&format!("{finding}\n\n"));
+    }
+    let has = |kind: Kind| findings.iter().any(|(k, _)| *k == kind);
+    if has(Kind::Unread) {
+        out.push_str(
+            "A file that could not be read is missing or out of reach from here: run from the \
+             workspace root, or re-record the response surface with `cargo xtask wire-surface`.\n\n",
+        );
+    }
+    if has(Kind::Format) {
+        out.push_str(
+            "The response recording cannot be read as one (no `# variants:` header, a header \
+             that disagrees with what was read, or no variant at all): it was edited by hand, or \
+             the printer (`render`) and the reader (core/wire/src/recorded_surface.rs) no longer \
+             agree. Re-record with `cargo xtask wire-surface`; no doc needs to change for this.\n\n",
+        );
+    }
+    if has(Kind::Answer) {
+        out.push_str(
+            "A name in backticks after \"Answered with\" is the variant of `UserResponse` the verb \
+             is answered with, and a reader takes it at its word: change the doc to the variant \
+             the verb's handler returns, or, when the answer was renamed, rename it in the doc in \
+             the same commit. Prose there (\"what the service answered\") is not held.\n\n",
+        );
+    }
+    if has(Kind::Pair) {
+        out.push_str(
+            "A verb's \"Answered with `X`\" and `X`'s \"Answer to\" list are one fact written \
+             twice, and here they disagree: read the verb's handler for the variant it returns, \
+             and correct whichever doc is wrong, in the same commit as the change that moved it.\n\n",
+        );
+    }
+    if has(Kind::Unwritten) {
+        out.push_str(
+            "One side of a verb and its answer is written and the other is not, so the two cannot \
+             be held together: write the missing side, \"Answered with `X`\" on the verb or \
+             \"Answer to `V`\" on the answer.\n\n",
+        );
+    }
+    out
 }
 
 /// The recording every peer wire's verbs must match: the door's.
@@ -443,6 +983,13 @@ enum Kind {
     Format,
     /// A peer verb's block differs from, or is missing in, the door's.
     Mirror,
+    /// A doc says a verb is answered with a backticked name that is not a variant in
+    /// the response recording.
+    Answer,
+    /// A verb's "Answered with `X`" and `X`'s "Answer to" doc disagree.
+    Pair,
+    /// One side of that pair is written and the other is not.
+    Unwritten,
 }
 
 /// The twin rule over the recorded files under `root`, as text: one finding
@@ -1277,6 +1824,341 @@ mod tests {
         let text = twin_findings_text("wire-check", &twin_report(unread.path()));
         assert!(text.contains("could not be read is missing"), "{text}");
         assert!(!text.contains("change the peer type") && !text.contains("no peer type"), "{text}");
+    }
+
+    /// The names each answer claim in `src`'s docs gives, with the line each is on.
+    fn claims(src: &str) -> Vec<(usize, String)> {
+        answer_claims(src).into_iter().map(|c| (c.at, c.name)).collect()
+    }
+
+    fn named(pairs: &[(usize, &str)]) -> Vec<(usize, String)> {
+        pairs.iter().map(|&(at, name)| (at, name.to_string())).collect()
+    }
+
+    /// Every way a doc spells the claim is read, at the line its name is on: on one
+    /// line, wrapped after "with" or between "Answered" and "with", lower-case,
+    /// after a few words of the same clause, with no "with", and in a module doc.
+    #[test]
+    fn each_spelling_of_answered_with_is_read_at_the_line_of_its_name() {
+        let src = "\
+/// Answered with `Drives`.
+A,
+/// One line, then the phrase wrapped after its last word. Answered with
+/// `DriveMoved`, the drive.
+B,
+/// Wrapped between the two words: Answered
+///   with `Pins`.
+C,
+/// each: answered with `VaultTenants`.
+D,
+/// Answered with the pool's `VaultCapacityResult` after the set.
+E,
+/// Answered with `UserResponse::Status`.
+F,
+/// A local act. Answered
+/// `OperatorForgotten`.
+G,
+//! Answered with `OrgRootCreated`.
+";
+        assert_eq!(
+            claims(src),
+            named(&[
+                (1, "Drives"),
+                (4, "DriveMoved"),
+                (7, "Pins"),
+                (9, "VaultTenants"),
+                (11, "VaultCapacityResult"),
+                (13, "UserResponse::Status"),
+                (16, "OperatorForgotten"),
+                (18, "OrgRootCreated"),
+            ])
+        );
+    }
+
+    /// What is not a claim is not read as one: prose with no backticked name before
+    /// the clause ends, a backticked span that is not a name, "answered like", a word
+    /// that merely ends in "answered", an ordinary comment, and a phrase split by a
+    /// line of code.
+    #[test]
+    fn prose_code_and_ordinary_comments_are_not_claims() {
+        let src = "\
+/// Answered with what the service answered. The `Drives` after it is another sentence.
+A,
+/// Answered with the readout (`kvaultd tenants`).
+B,
+/// Unanswered with `Nope`.
+C,
+// Answered with `Comment`.
+D,
+//// Answered with `FourSlashes`.
+E,
+/// Answered
+F,
+/// with `AcrossCode`.
+G,
+/// The word `MessageSend` already answered with, read again: `Later`.
+H,
+/// Answered like `NodeRelay`, a fact of the node.
+";
+        assert_eq!(claims(src), named(&[]));
+    }
+
+    /// A doc block knows the variant it documents, past attributes, a multi-line
+    /// attribute and an ordinary comment, by its enum; a field's doc is no variant's,
+    /// and a doc outside an enum has no item.
+    #[test]
+    fn a_doc_block_knows_the_variant_it_documents() {
+        let src = "\
+/// The enum.
+pub enum UserRequest {
+    /// Answered with `Drives`.
+    #[serde(rename = \"x\")]
+    #[serde(
+        default,
+    )]
+    // a note
+    DriveList {
+        /// Answered with `Field`.
+        user_id: String,
+    },
+}
+/// Answered with `Outside`.
+pub struct S;
+";
+        let items: Vec<Option<String>> = answer_claims(src).into_iter().map(|c| c.verb).collect();
+        assert_eq!(items, [Some("UserRequest::DriveList".to_string()), None, None]);
+    }
+
+    /// An answer's "Answer to" list: bare verbs joined by `,` and "and", a bracketed
+    /// `crate::` path, an enum path after a few words, and a list that ends at a word
+    /// other than "and" or "or". A doc that is not on a `UserResponse` variant is not
+    /// read as a list.
+    #[test]
+    fn an_answer_to_doc_lists_the_verbs_it_names() {
+        let src = "\
+pub enum UserResponse {
+    /// Answer to `DriveCreate`, `DriveList` and `DriveShow`: the drives.
+    Drives { drives: Vec<D> },
+    /// Answer to [`crate::UserRequest::NodeRelay`]: the relay.
+    NodeRelayResult,
+    /// Answer to the door's `VaultRequest::Tenants` or `UserRequest::Tenants`.
+    VaultTenants,
+    /// The answer to `Status`, which carries `DeviceStatus`.
+    Status,
+    /// A client's correct answer to it is to stop.
+    Bye,
+}
+pub enum Other {
+    /// Answer to `NotAnAnswer`.
+    X,
+}
+";
+        let lists: Vec<(String, Vec<String>)> = answer_to_docs(src)
+            .into_iter()
+            .map(|d| (d.answer, d.verbs.into_iter().map(|(_, v)| v).collect()))
+            .collect();
+        let want = |answer: &str, verbs: &[&str]| {
+            (answer.to_string(), verbs.iter().map(|v| v.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            lists,
+            [
+                want("Drives", &["UserRequest::DriveCreate", "UserRequest::DriveList", "UserRequest::DriveShow"]),
+                want("NodeRelayResult", &["UserRequest::NodeRelay"]),
+                want("VaultTenants", &["VaultRequest::Tenants", "UserRequest::Tenants"]),
+                want("Status", &["UserRequest::Status"]),
+            ]
+        );
+    }
+
+    const REQUEST: &str = "core/wire/src/ipc/request.rs";
+
+    /// A throwaway tree's response recording and source: `Drives` answers three verbs,
+    /// `DriveMoved` answers the move, and `Ok` has no list.
+    fn answers_recording() -> String {
+        recording(
+            "DriveMoved\n    drives: Vec<DriveDescriptor>\n    keys_refused: u32\n\
+             Drives\n    drives: Vec<DriveDescriptor>\nOk\n",
+        )
+    }
+
+    const RESPONSE: &str = "pub enum UserResponse {
+    /// Answer to `DriveList` and `DriveShow`.
+    Drives { drives: Vec<DriveDescriptor> },
+    /// Answer to `DriveMove`.
+    DriveMoved { drives: Vec<DriveDescriptor>, keys_refused: u32 },
+    /// Done.
+    Ok,
+}
+";
+
+    /// The request source of that tree, every doc agreeing with its answer's.
+    /// `DriveMove`'s claim is wrapped onto its next doc line, on line 7.
+    const AGREEING: &str = "pub enum UserRequest {
+    /// Answered with `Drives`.
+    DriveList,
+    /// Answered with `Drives`.
+    DriveShow,
+    /// Moves it. Answered with
+    /// `DriveMoved`, the drive.
+    DriveMove,
+    /// Answered `Ok`.
+    StandAt,
+    /// Answered with what the service answered.
+    AsOperator,
+}
+";
+
+    fn answers_tree(request: &str) -> tempfile::TempDir {
+        tree(&[
+            (RESPONSE_RECORDING, &answers_recording()),
+            (RESPONSE_SOURCE, RESPONSE),
+            (REQUEST, request),
+        ])
+    }
+
+    fn finding_texts(report: &AnswerReport) -> Vec<&str> {
+        report.findings.iter().map(|(_, f)| f.as_str()).collect()
+    }
+
+    /// Docs that agree both ways are no finding, and `Ok`, a generic answer, needs no
+    /// list for the verb that claims it.
+    #[test]
+    fn docs_that_agree_both_ways_are_no_finding() {
+        let report = answer_report(answers_tree(AGREEING).path());
+        assert_eq!(report.findings, Vec::new());
+        assert_eq!((report.claims, report.answered_verbs), (4, 3));
+    }
+
+    /// The drift #341 was filed for: `DriveMove` saying `Drives`, a recorded answer that
+    /// is not its own. Both docs are named, each by its file and line.
+    #[test]
+    fn a_recorded_answer_that_is_not_the_verbs_own_is_a_finding_naming_both_sides() {
+        let stale = AGREEING.replace("`DriveMoved`, the drive", "`Drives`, the drive");
+        let report = answer_report(answers_tree(&stale).path());
+        assert_eq!(
+            finding_texts(&report),
+            [
+                format!(
+                    "  {REQUEST}:7: `DriveMove` is answered with `Drives`, but `Drives` is the \
+                     answer to `DriveList`, `DriveShow` ({RESPONSE_SOURCE}:2); `DriveMoved`'s doc \
+                     ({RESPONSE_SOURCE}:4) names `DriveMove`."
+                ),
+                format!(
+                    "  {RESPONSE_SOURCE}:4: `DriveMoved` is the answer to `DriveMove`, but \
+                     `DriveMove`'s doc ({REQUEST}:7) says it is answered with `Drives`."
+                ),
+            ]
+        );
+        assert!(report.findings.iter().all(|(k, _)| *k == Kind::Pair));
+        let text = answer_findings_text("wire-check", &report.findings);
+        assert!(text.contains("one fact written twice"), "{text}");
+    }
+
+    /// A name that is no answer at all is a finding naming the file and line, with its
+    /// advice; the answer whose list names the verb is told the verb's doc disagrees.
+    #[test]
+    fn a_name_that_is_no_recorded_answer_is_a_finding_naming_the_file_and_line() {
+        let stale = AGREEING.replace("`DriveMoved`, the drive", "`DriveMovd`, the drive");
+        let report = answer_report(answers_tree(&stale).path());
+        assert_eq!(
+            report.findings,
+            [
+                (
+                    Kind::Answer,
+                    format!(
+                        "  {REQUEST}:7: a doc says it is answered with `DriveMovd`, which is not a \
+                         variant in {RESPONSE_RECORDING}."
+                    )
+                ),
+                (
+                    Kind::Pair,
+                    format!(
+                        "  {RESPONSE_SOURCE}:4: `DriveMoved` is the answer to `DriveMove`, but \
+                         `DriveMove`'s doc ({REQUEST}:7) says it is answered with `DriveMovd`."
+                    )
+                ),
+            ]
+        );
+        let text = answer_findings_text("wire-check", &report.findings);
+        assert!(text.contains("change the doc to the variant"), "{text}");
+    }
+
+    /// One side written and the other not is a finding on that side: an answer whose
+    /// list names a verb with no claim, and a verb claiming an answer that has no list.
+    /// A verb and an answer with neither doc are none.
+    #[test]
+    fn one_side_written_and_the_other_not_is_unwritten() {
+        let unclaimed = AGREEING.replace("    /// Answered with `Drives`.\n    DriveShow,", "    DriveShow,");
+        let report = answer_report(answers_tree(&unclaimed).path());
+        assert_eq!(
+            report.findings,
+            [(
+                Kind::Unwritten,
+                format!(
+                    "  {RESPONSE_SOURCE}:2: `Drives` is the answer to `DriveShow`, and no doc of \
+                     `DriveShow` under {ANSWER_DOCS} says what it is answered with."
+                )
+            )]
+        );
+        let text = answer_findings_text("wire-check", &report.findings);
+        assert!(text.contains("write the missing side"), "{text}");
+
+        let listless = tree(&[
+            (RESPONSE_RECORDING, &answers_recording()),
+            (RESPONSE_SOURCE, &RESPONSE.replace("/// Answer to `DriveMove`.", "/// The move.")),
+            (REQUEST, AGREEING),
+        ]);
+        let report = answer_report(listless.path());
+        assert_eq!(
+            report.findings,
+            [(
+                Kind::Unwritten,
+                format!(
+                    "  {REQUEST}:7: `DriveMove` is answered with `DriveMoved`, and `DriveMoved`'s \
+                     doc in {RESPONSE_SOURCE} names no verb it is the answer to, so this claim \
+                     has no other side to hold it to."
+                )
+            )]
+        );
+
+        // Neither side written: no finding.
+        let neither = AGREEING.replace("    /// Answered `Ok`.\n", "");
+        assert_eq!(answer_report(answers_tree(&neither).path()).findings, Vec::new());
+    }
+
+    /// The response recording read through the one reader: one the reader refuses, or
+    /// none at all, is a finding of its own kind with its own advice, not a rule that
+    /// passes every name or refuses every one.
+    #[test]
+    fn an_unreadable_response_recording_is_a_finding_of_its_kind() {
+        let headless = answers_recording().replace("# variants: 3\n", "");
+        let dir = tree(&[(RESPONSE_RECORDING, &headless), (RESPONSE_SOURCE, RESPONSE), (REQUEST, AGREEING)]);
+        let findings = answer_report(dir.path()).findings;
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert!(findings[0].0 == Kind::Format, "{}", findings[0].1);
+        assert!(answer_findings_text("wire-check", &findings).contains("no doc needs to change"));
+
+        let dir = tree(&[(RESPONSE_SOURCE, RESPONSE), (REQUEST, AGREEING)]);
+        let findings = answer_report(dir.path()).findings;
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert!(findings[0].0 == Kind::Unread, "{}", findings[0].1);
+
+        let dir = tree(&[(RESPONSE_RECORDING, &answers_recording()), (REQUEST, AGREEING)]);
+        let findings = answer_report(dir.path()).findings;
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert!(findings[0].0 == Kind::Unread && findings[0].1.contains(RESPONSE_SOURCE), "{}", findings[0].1);
+    }
+
+    /// Every answer claim in this tree names a recorded answer and agrees with its
+    /// answer's list, and the rule reads enough of both not to be green by reading none.
+    #[test]
+    fn every_answer_named_in_this_tree_is_recorded_and_agrees() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let report = answer_report(&root);
+        assert_eq!(report.findings, Vec::new());
+        assert!(report.claims >= 30, "read {} claims", report.claims);
+        assert!(report.answered_verbs >= 30, "read {} listed verbs", report.answered_verbs);
     }
 
     /// The real recordings in this tree agree, so the gate starts green.
