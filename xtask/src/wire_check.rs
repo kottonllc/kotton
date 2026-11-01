@@ -142,9 +142,14 @@
 //! verb that answers with it and be the doc most likely to drift; a claim of `Ok` is
 //! still held to the recording.
 //!
-//! **One answer type.** The rule holds `UserResponse` alone. A second answer type (the
-//! relay operator's `RelayOperatorResponse`) would need its own recording and its own
-//! lists read here; a claim of one of its variants today is a finding.
+//! **One answer type of five.** `core/wire/src` declares five response enums:
+//! `KuidResponse` (`kuid_ipc.rs`), `ContactResponse` (`ipc/contact_request.rs`),
+//! `DeviceResponse` (`sys_ipc.rs`), `RelayOperatorResponse` (`rendezvous.rs`) and
+//! `UserResponse` (`ipc/response.rs`). The rule reads `UserResponse` alone: every claim
+//! is held to `response-surface.txt`, and only `UserResponse`'s "Answer to" lists are
+//! read. A claim of another enum's variant today is a finding. Holding another enum
+//! needs its recording (`RelayOperatorResponse` shares `relay-operator-surface.txt`
+//! with its request; the other three have none) and its lists read here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

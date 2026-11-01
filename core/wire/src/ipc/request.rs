@@ -1647,17 +1647,6 @@ pub enum UserRequest {
         #[serde(default)]
         bindings: Vec<(String, String)>,
     },
-    /// Parse and validate an app package, and report what it is asking for.
-    ///
-    /// **Mints nothing and signs nothing.** This is the first half of the
-    /// two-phase install ([`IDEA-install-consent-gate`], Option B): the client
-    /// asks what the app wants, shows a human, and sends back the approved
-    /// subset in [`Self::AppInstall`]. Nothing is written to the app store here,
-    /// so a preview the user declines leaves no trace.
-    ///
-    /// Returns [`UserResponse::AppInstallPreview`].
-    ///
-    /// [`IDEA-install-consent-gate`]: https://kotton.sh/records/IDEA-install-consent-gate
     /// Report what an installed app **asked for** and what it **holds**.
     ///
     /// The read-only counterpart to the consent ceremony. Until this existed
@@ -1674,8 +1663,17 @@ pub enum UserRequest {
     AppGrants {
         app_id: String,
     },
-    /// What an app package is asking for, read before anything is installed.
-    /// Answered with `AppInstallPreview`.
+    /// Parse and validate an app package, and report what it is asking for.
+    ///
+    /// **Mints nothing and signs nothing.** This is the first half of the
+    /// two-phase install ([`IDEA-install-consent-gate`], Option B): the client
+    /// asks what the app wants, shows a human, and sends back the approved
+    /// subset in [`Self::AppInstall`]. Nothing is written to the app store here,
+    /// so a preview the user declines leaves no trace.
+    ///
+    /// Answered with [`UserResponse::AppInstallPreview`].
+    ///
+    /// [`IDEA-install-consent-gate`]: https://kotton.sh/records/IDEA-install-consent-gate
     AppInstallPreview {
         /// The user_id the install would be for.
         user_id: String,
