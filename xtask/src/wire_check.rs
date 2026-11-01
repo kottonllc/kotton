@@ -103,8 +103,24 @@
 //! holds the sender; while each peer wire is its own flat enum, the recordings
 //! still restate those verbs, and this rule is what holds the restatement in the
 //! gate.
+//!
+//! ## The answer rule, between the docs and the response recording
+//!
+//! A verb's doc says what it is answered with ("Answered with `Drives`"). Nothing
+//! compiles that name, so it can name an answer the daemon no longer gives: a move
+//! that came to answer `DriveMoved` kept a doc saying `Drives` until a reviewer read
+//! it (kotton #341). [`answer_report`] reads every doc comment (`///`, `//!`) under
+//! [`ANSWER_DOCS`], joins each block's lines so a phrase wrapped onto the next doc
+//! line reads as one, and for every "answered with" (any case) takes the first
+//! backticked span after it in the same clause. A span that is a name (an upper-case
+//! identifier, `UserResponse::` allowed before it) must be a variant in
+//! [`RESPONSE_RECORDING`], read through [`recorded_surface::read`], the one reader;
+//! anything else is a finding naming the file and the line the name is on. Prose
+//! ("Answered with what the service answered.") reaches a `.`, `,`, `;` or `:` before
+//! any backtick and is not a claim; a span that is not a name (`kvaultd tenants`) is
+//! not one either.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// The one reader of a recorded surface, compiled here from kotton-wire's source rather
@@ -203,7 +219,7 @@ const CHANNELS: &[Channel] = &[
     Channel {
         what: "IPC response",
         sources: &[("core/wire/src/ipc/response.rs", "UserResponse")],
-        golden: "core/wire/response-surface.txt",
+        golden: RESPONSE_RECORDING,
     },
 ];
 
@@ -251,24 +267,233 @@ pub fn wire_check(bless: bool) {
                  `cargo xtask wire-surface` again."
             );
         }
+        // Reporting only, as the twin rule is: a response variant renamed and
+        // re-recorded here is told now that a doc still names the old answer.
+        let (claims, answers) = answer_report(Path::new("."));
+        if answers.is_empty() {
+            println!("{}", answers_ok("wire-surface", claims));
+        } else {
+            eprint!("{}", answer_findings_text("wire-surface", &answers));
+            eprintln!(
+                "wire-surface wrote every recording and exits 0, but the next \
+                 `cargo xtask wire-check` fails until each doc above names an answer the \
+                 daemon gives."
+            );
+        }
         return;
     }
-    // The twin rule reads only the recordings, so it runs first: a recording
-    // edited by hand fails its channel below and is named here as well.
+    // The twin rule and the answer rule read only text, so they run first: a
+    // recording edited by hand fails its channel below and is named here as well.
     let findings = twin_report(Path::new("."));
     if !findings.is_empty() {
         print_twin_findings("wire-check", &findings);
     }
+    let (claims, answers) = answer_report(Path::new("."));
+    if !answers.is_empty() {
+        eprint!("{}", answer_findings_text("wire-check", &answers));
+    }
     for channel in CHANNELS {
         check_channel(channel, false);
     }
-    if !findings.is_empty() {
+    if !findings.is_empty() || !answers.is_empty() {
         std::process::exit(1);
     }
     println!(
         "wire-check: OK — every verb in {} and {} records its door twin's block in {DOOR_RECORDING}.",
         TWIN_RECORDINGS[0], TWIN_RECORDINGS[1]
     );
+    println!("{}", answers_ok("wire-check", claims));
+}
+
+/// The line a command prints when every answer a doc names is a recorded variant.
+fn answers_ok(command: &str, claims: usize) -> String {
+    format!(
+        "{command}: OK — each of the {claims} \"Answered with `X`\" docs under {ANSWER_DOCS} \
+         names a variant in {RESPONSE_RECORDING}."
+    )
+}
+
+/// The recording of what the daemon answers on the user channel: the names a doc's
+/// "Answered with `X`" may give.
+const RESPONSE_RECORDING: &str = "core/wire/response-surface.txt";
+
+/// The tree whose doc comments the answer rule reads.
+const ANSWER_DOCS: &str = "core/wire/src";
+
+/// One "Answered with `X`" a doc says: the 1-based line the name is on, and the name
+/// as written between the backticks.
+#[derive(Debug, PartialEq)]
+struct AnswerClaim {
+    at: usize,
+    name: String,
+}
+
+/// Every "answered with" in `src`'s doc comments that is followed, in the same clause,
+/// by a backticked name. The doc lines of one block are joined by a space, so a phrase
+/// wrapped onto the next doc line reads as one; a line that is not a doc comment ends
+/// the block, and nothing is read across it.
+fn answer_claims(src: &str) -> Vec<AnswerClaim> {
+    // The doc text joined, and where each line's text starts in it, with its line.
+    let mut text = String::new();
+    let mut starts: Vec<(usize, usize)> = Vec::new();
+    let mut in_doc = false;
+    for (i, line) in src.lines().enumerate() {
+        let t = line.trim_start();
+        let doc = t.strip_prefix("///").or_else(|| t.strip_prefix("//!"));
+        match doc {
+            // `////` is an ordinary comment, not a doc.
+            Some(rest) if !rest.starts_with('/') => {
+                // Each line trimmed and joined by one space, so "Answered" at the end of
+                // one line and "with" at the start of the next read as the phrase.
+                text.push(if in_doc { ' ' } else { '\n' });
+                starts.push((text.len(), i + 1));
+                text.push_str(rest.trim());
+                in_doc = true;
+            }
+            _ => in_doc = false,
+        }
+    }
+    let line_of = |offset: usize| starts[starts.partition_point(|&(s, _)| s <= offset) - 1].1;
+    let lower = text.to_ascii_lowercase();
+    const PHRASE: &str = "answered with";
+    let mut out = Vec::new();
+    for (found, _) in lower.match_indices(PHRASE) {
+        let before = lower[..found].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let after = &text[found + PHRASE.len()..];
+        if !after.starts_with([' ', '\t']) {
+            continue;
+        }
+        // The first backtick in the clause, or none: prose ends the clause first.
+        let Some(open) = after.find(['`', '.', ',', ';', ':', '\n']) else {
+            continue;
+        };
+        if !after[open..].starts_with('`') {
+            continue;
+        }
+        let span = &after[open + 1..];
+        let Some(close) = span.find(['`', '\n']) else {
+            continue;
+        };
+        if !span[close..].starts_with('`') {
+            continue;
+        }
+        let written = &span[..close];
+        let name = written.strip_prefix("UserResponse::").unwrap_or(written);
+        if !is_ident(name) {
+            continue;
+        }
+        let offset = found + PHRASE.len() + open + 1;
+        out.push(AnswerClaim { at: line_of(offset), name: written.to_string() });
+    }
+    out
+}
+
+/// The `.rs` files under `dir`, recursively, sorted, so findings print in one order.
+fn rust_files(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The answer rule over the tree under `root`: how many "Answered with `X`" claims the
+/// docs under [`ANSWER_DOCS`] make, and one finding per claim whose name is not a variant
+/// in [`RESPONSE_RECORDING`], or per file or recording that cannot be read to tell, each
+/// with its [`Kind`].
+fn answer_report(root: &Path) -> (usize, Vec<(Kind, String)>) {
+    let recording = match std::fs::read_to_string(root.join(RESPONSE_RECORDING)) {
+        Ok(t) => t,
+        Err(e) => {
+            return (0, vec![(Kind::Unread, format!("  {RESPONSE_RECORDING} could not be read: {e}"))])
+        }
+    };
+    let variants: BTreeSet<&str> = match recorded_surface::read(&recording) {
+        Ok(blocks) => blocks.into_iter().map(|b| b.name).collect(),
+        Err(why) => {
+            return (
+                0,
+                vec![(Kind::Format, format!("  {RESPONSE_RECORDING} cannot be read as a recording: {why}."))],
+            )
+        }
+    };
+    let files = match rust_files(&root.join(ANSWER_DOCS)) {
+        Ok(f) => f,
+        Err(e) => return (0, vec![(Kind::Unread, format!("  {ANSWER_DOCS} could not be read: {e}"))]),
+    };
+    let (mut claims, mut findings) = (0, Vec::new());
+    for path in files {
+        let shown_path = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                findings.push((Kind::Unread, format!("  {shown_path} could not be read: {e}")));
+                continue;
+            }
+        };
+        for claim in answer_claims(&src) {
+            claims += 1;
+            let name = claim.name.strip_prefix("UserResponse::").unwrap_or(&claim.name);
+            if !variants.contains(name) {
+                findings.push((
+                    Kind::Answer,
+                    format!(
+                        "  {shown_path}:{}: a doc says it is answered with `{}`, which is not a \
+                         variant in {RESPONSE_RECORDING}.",
+                        claim.at, claim.name
+                    ),
+                ));
+            }
+        }
+    }
+    (claims, findings)
+}
+
+/// The answer rule's findings, with one sentence of advice per kind present.
+fn answer_findings_text(command: &str, findings: &[(Kind, String)]) -> String {
+    let mut out = format!(
+        "{command}: a doc names an answer the daemon does not give, or the docs or the \
+         response recording cannot be read to tell.\n\n"
+    );
+    for (_, finding) in findings {
+        out.push_str(&format!("{finding}\n\n"));
+    }
+    let has = |kind: Kind| findings.iter().any(|(k, _)| *k == kind);
+    if has(Kind::Unread) {
+        out.push_str(
+            "A file that could not be read is missing or out of reach from here: run from the \
+             workspace root, or re-record the response surface with `cargo xtask wire-surface`.\n\n",
+        );
+    }
+    if has(Kind::Format) {
+        out.push_str(
+            "The response recording cannot be read as one (no `# variants:` header, a header \
+             that disagrees with what was read, or no variant at all): it was edited by hand, or \
+             the printer (`render`) and the reader (core/wire/src/recorded_surface.rs) no longer \
+             agree. Re-record with `cargo xtask wire-surface`; no doc needs to change for this.\n\n",
+        );
+    }
+    if has(Kind::Answer) {
+        out.push_str(
+            "A name in backticks after \"Answered with\" is the variant of `UserResponse` the verb \
+             is answered with, and a reader takes it at its word: change the doc to the variant \
+             the verb's handler returns, or, when the answer was renamed, rename it in the doc in \
+             the same commit. Prose there (\"what the service answered\") is not held.\n\n",
+        );
+    }
+    out
 }
 
 /// The recording every peer wire's verbs must match: the door's.
@@ -443,6 +668,9 @@ enum Kind {
     Format,
     /// A peer verb's block differs from, or is missing in, the door's.
     Mirror,
+    /// A doc says a verb is answered with a backticked name that is not a variant in
+    /// the response recording.
+    Answer,
 }
 
 /// The twin rule over the recorded files under `root`, as text: one finding
@@ -1277,6 +1505,148 @@ mod tests {
         let text = twin_findings_text("wire-check", &twin_report(unread.path()));
         assert!(text.contains("could not be read is missing"), "{text}");
         assert!(!text.contains("change the peer type") && !text.contains("no peer type"), "{text}");
+    }
+
+    /// The names each "answered with" in `src`'s docs claims, with the line each is on.
+    fn claims(src: &str) -> Vec<(usize, String)> {
+        answer_claims(src).into_iter().map(|c| (c.at, c.name)).collect()
+    }
+
+    fn named(pairs: &[(usize, &str)]) -> Vec<(usize, String)> {
+        pairs.iter().map(|&(at, name)| (at, name.to_string())).collect()
+    }
+
+    /// Every way a doc spells the claim is read, at the line its name is on: on one
+    /// line, wrapped after "with" or between "Answered" and "with", lower-case,
+    /// after a few words of the same clause, and in a module doc.
+    #[test]
+    fn each_spelling_of_answered_with_is_read_at_the_line_of_its_name() {
+        let src = "\
+/// Answered with `Drives`.
+A,
+/// One line, then the phrase wrapped after its last word. Answered with
+/// `DriveMoved`, the drive.
+B,
+/// Wrapped between the two words: Answered
+///   with `Pins`.
+C,
+/// each: answered with `VaultTenants`.
+D,
+/// Answered with the pool's `VaultCapacityResult` after the set.
+E,
+/// Answered with `UserResponse::Status`.
+F,
+//! Answered with `OrgRootCreated`.
+";
+        assert_eq!(
+            claims(src),
+            named(&[
+                (1, "Drives"),
+                (4, "DriveMoved"),
+                (7, "Pins"),
+                (9, "VaultTenants"),
+                (11, "VaultCapacityResult"),
+                (13, "UserResponse::Status"),
+                (15, "OrgRootCreated"),
+            ])
+        );
+    }
+
+    /// What is not a claim is not read as one: prose with no backticked name before
+    /// the clause ends, a backticked span that is not a name, a word that merely ends
+    /// in "answered", an ordinary comment, and a phrase split by a line of code.
+    #[test]
+    fn prose_code_and_ordinary_comments_are_not_claims() {
+        let src = "\
+/// Answered with what the service answered. The `Drives` after it is another sentence.
+A,
+/// Answered with the readout (`kvaultd tenants`).
+B,
+/// Unanswered with `Nope`.
+C,
+// Answered with `Comment`.
+D,
+//// Answered with `FourSlashes`.
+E,
+/// Answered
+F,
+/// with `AcrossCode`.
+G,
+/// The word `MessageSend` already answered with, read again: `Later`.
+";
+        assert_eq!(claims(src), named(&[]));
+    }
+
+    /// The response recording a throwaway tree's answer rule reads: `Drives` and
+    /// `DriveMoved`, as the tree records them.
+    fn answers_recording() -> String {
+        recording("DriveMoved\n    drives: Vec<DriveDescriptor>\n    keys_refused: u32\nDrives\n    drives: Vec<DriveDescriptor>\n")
+    }
+
+    /// A doc naming an answer the recording does not hold — on one line, or wrapped
+    /// onto the next doc line — is a finding naming the file and the line the name is
+    /// on, and the advice for it; the same tree naming recorded answers is none.
+    #[test]
+    fn a_stale_answer_name_is_a_finding_naming_the_file_and_line() {
+        let good = "pub enum UserRequest {\n    /// Answered with `Drives`.\n    DriveList,\n    \
+                    /// Moves it. Answered with\n    /// `DriveMoved`, the drive.\n    DriveMove,\n    \
+                    /// Answered with what the service answered.\n    AsOperator,\n}\n";
+        let request = "core/wire/src/ipc/request.rs";
+        let dir = tree(&[(RESPONSE_RECORDING, &answers_recording()), (request, good)]);
+        assert_eq!(answer_report(dir.path()), (2, Vec::new()));
+
+        let stale = good
+            .replace("`Drives`.", "`DriveListed`.")
+            .replace("`DriveMoved`, the drive", "`DriveMovd`, the drive");
+        let dir = tree(&[
+            (RESPONSE_RECORDING, &answers_recording()),
+            (request, &stale),
+            ("core/wire/src/ipc/vault_request.rs", "/// Answered with `TenantDropped`.\nDropTenant,\n"),
+        ]);
+        let (claims, findings) = answer_report(dir.path());
+        assert_eq!(claims, 3);
+        let texts: Vec<&str> = findings.iter().map(|(_, f)| f.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                format!("  {request}:2: a doc says it is answered with `DriveListed`, which is not a variant in {RESPONSE_RECORDING}."),
+                format!("  {request}:5: a doc says it is answered with `DriveMovd`, which is not a variant in {RESPONSE_RECORDING}."),
+                format!("  core/wire/src/ipc/vault_request.rs:1: a doc says it is answered with `TenantDropped`, which is not a variant in {RESPONSE_RECORDING}."),
+            ]
+        );
+        assert!(findings.iter().all(|(k, _)| *k == Kind::Answer));
+        let text = answer_findings_text("wire-check", &findings);
+        assert!(text.contains("change the doc to the variant"), "{text}");
+        assert!(!text.contains("no doc needs to change"), "{text}");
+    }
+
+    /// The response recording read through the one reader: one the reader refuses, or
+    /// none at all, is a finding of its own kind with its own advice, not a rule that
+    /// passes every name or refuses every one.
+    #[test]
+    fn an_unreadable_response_recording_is_a_finding_of_its_kind() {
+        let src = ("core/wire/src/ipc/request.rs", "/// Answered with `Drives`.\nA,\n");
+        let headless = answers_recording().replace("# variants: 2\n", "");
+        let dir = tree(&[(RESPONSE_RECORDING, &headless), src]);
+        let (_, findings) = answer_report(dir.path());
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert!(findings[0].0 == Kind::Format, "{}", findings[0].1);
+        assert!(answer_findings_text("wire-check", &findings).contains("no doc needs to change"));
+
+        let dir = tree(&[src]);
+        let (_, findings) = answer_report(dir.path());
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert!(findings[0].0 == Kind::Unread, "{}", findings[0].1);
+    }
+
+    /// Every "Answered with `X`" in this tree names a recorded answer, and the rule
+    /// reads a dozen or more of them, so it is not green by reading none.
+    #[test]
+    fn every_answer_named_in_this_tree_is_recorded() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let (claims, findings) = answer_report(&root);
+        assert_eq!(findings, Vec::new());
+        assert!(claims >= 12, "read {claims} claims");
     }
 
     /// The real recordings in this tree agree, so the gate starts green.
