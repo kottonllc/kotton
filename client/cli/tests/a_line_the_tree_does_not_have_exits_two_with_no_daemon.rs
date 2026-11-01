@@ -119,10 +119,10 @@ fn flags(line: &str) -> Vec<&str> {
 }
 
 /// `kotton device --help`'s argument help and the usage line `device` refuses a word with are
-/// two doors to one grammar (kotton #326): the help prints the shell's grammar whole, and adds
-/// only `reset`'s own word, `--yes`, since `reset` is the CLI's and the shell does not run it.
-/// Read from outside, as a person reads them: the flags each names are the same list, and the
-/// usage line's grammar is in the help word for word.
+/// two doors to one grammar (kotton #326): each renders the shell's grammar with its own
+/// prefix (kotton #361), and the help adds only `reset`'s own word, `--yes`, since `reset` is
+/// the CLI's and the shell does not run it. Read from outside, as a person reads them: the
+/// flags each names are the same list.
 #[test]
 fn the_device_help_names_the_words_the_usage_line_names() {
     let dir = scratch("device-help");
@@ -147,6 +147,30 @@ fn the_device_help_names_the_words_the_usage_line_names() {
         "`kotton device --help` names {help_flags:?}; the usage line names {:?}\nhelp: {args_help}\nusage: {usage}",
         flags(grammar)
     );
-    assert!(args_help.contains(grammar), "the help does not print the usage line's grammar:\nhelp: {args_help}\nusage: {grammar}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `kotton device --help`'s argument help reads like its siblings' (`kotton peer`, `kotton
+/// app`): `Arguments to the verb:`, then each alternative after the verb word, never starting
+/// with `device` again, since clap prints `kotton device` before it and `kotton device device
+/// add` is no line anyone runs (kotton #361).
+#[test]
+fn the_device_help_names_its_alternatives_after_the_verb_word() {
+    let dir = scratch("device-help-form");
+    let help = kotton(&dir, &["device", "--help"]);
+    assert_eq!(help.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&help.stderr));
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    let args_help = help.lines().find(|l| l.trim_start().starts_with("[ARGS]...")).unwrap_or_else(|| panic!("no argument help:\n{help}"));
+    let (_, alternatives) = args_help.split_once(": ").unwrap_or_else(|| panic!("no alternatives:\nhelp: {args_help}"));
+    let led: Vec<&str> = alternatives
+        .split(" | ")
+        .map(|a| a.trim_matches('`'))
+        .filter(|a| a.split_whitespace().next() == Some("device"))
+        .collect();
+    assert!(led.is_empty(), "alternatives that begin with the verb word: {led:?}\nhelp: {args_help}");
+    assert!(
+        args_help.contains("Arguments to the verb: "),
+        "the help does not read `Arguments to the verb:` as its siblings do:\nhelp: {args_help}"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
