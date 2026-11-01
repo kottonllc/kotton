@@ -356,13 +356,21 @@ impl From<ManifestDecodeError> for ObjectStorageError {
 /// It is a refusal when the JSON is version 1 and, with every refused
 /// `pack_id` replaced by an admitted placeholder, it parses. Anything else is
 /// malformed, reported with the parse error itself.
+///
+/// The document is read once more here, as a tree, and that reader must not
+/// accept what the derive refuses for any reason but a pack id. A plain
+/// `serde_json::Value` does: it keeps the last of two equal keys, where the
+/// derive fails on the duplicate, so a ref with a good `pack_id` and then a
+/// refused one would read as a refusal (kotton #317). [`StrictValue`] refuses
+/// a duplicate key anywhere, so a duplicated document is malformed whichever
+/// key it repeats and wherever the derive stopped.
 fn refusal_or_malformed(bytes: &[u8], parse_error: serde_json::Error) -> ManifestDecodeError {
     let malformed = || {
         ManifestDecodeError::Malformed(ObjectStorageError::BackendError(format!(
             "manifest parse: {parse_error}"
         )))
     };
-    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+    let Ok(StrictValue(mut value)) = serde_json::from_slice::<StrictValue>(bytes) else {
         return malformed();
     };
     if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
@@ -373,6 +381,75 @@ fn refusal_or_malformed(bytes: &[u8], parse_error: serde_json::Error) -> Manifes
     match (first_refused, serde_json::from_value::<Manifest>(value)) {
         (Some(refused), Ok(_)) => ManifestDecodeError::PackIdRefused(refused),
         _ => malformed(),
+    }
+}
+
+/// A JSON tree read like `serde_json::Value`, except that an object naming
+/// the same key twice does not read. The derive refuses a repeated field; the
+/// tree [`refusal_or_malformed`] re-checks must not quietly keep one of them.
+/// Repeated keys in a map-typed field (a `files` path), which the derive
+/// would take, are refused too: that only ever turns a refusal into
+/// malformed, which fails the load rather than passing over a generation.
+struct StrictValue(serde_json::Value);
+
+impl<'de> serde::Deserialize<'de> for StrictValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = StrictValue;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("JSON with no key repeated in an object")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<StrictValue, E> {
+                Ok(StrictValue(v.into()))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<StrictValue, E> {
+                Ok(StrictValue(v.into()))
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<StrictValue, E> {
+                Ok(StrictValue(v.into()))
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<StrictValue, E> {
+                Ok(StrictValue(v.into()))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<StrictValue, E> {
+                Ok(StrictValue(v.into()))
+            }
+            fn visit_string<E>(self, v: String) -> Result<StrictValue, E> {
+                Ok(StrictValue(v.into()))
+            }
+            fn visit_unit<E>(self) -> Result<StrictValue, E> {
+                Ok(StrictValue(serde_json::Value::Null))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<StrictValue, A::Error> {
+                let mut items = Vec::new();
+                while let Some(StrictValue(item)) = seq.next_element()? {
+                    items.push(item);
+                }
+                Ok(StrictValue(items.into()))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<StrictValue, A::Error> {
+                let mut object = serde_json::Map::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if object.contains_key(&key) {
+                        return Err(serde::de::Error::custom(format_args!(
+                            "duplicate key {key:?}"
+                        )));
+                    }
+                    let StrictValue(value) = map.next_value()?;
+                    object.insert(key, value);
+                }
+                Ok(StrictValue(object.into()))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
     }
 }
 
@@ -546,7 +623,8 @@ mod tests {
     /// passes over a generation for [`ManifestDecodeError::PackIdRefused`] and
     /// fails on anything else, so that variant must mean exactly "a version-1
     /// manifest, well formed but for its pack ids". A bad id beside another
-    /// defect, or in a manifest of another version, is malformed.
+    /// defect, or in a manifest of another version, is malformed; so is one
+    /// that names a key twice, whichever key and wherever (kotton #317).
     #[test]
     fn only_a_refused_pack_id_is_a_refusal() {
         let good = sample();
@@ -560,12 +638,26 @@ mod tests {
             Err(ManifestDecodeError::PackIdRefused(refused)) => assert_eq!(refused.key, "_pack/../x"),
             other => panic!("a bad id alone was not a refusal: {other:?}"),
         }
+        // Two `pack_id` keys in one ref, the last refused (kotton #317). The
+        // derive fails on the duplicate; a reader that kept the last value
+        // would see only the refused id and call it a refusal.
+        let duplicate_pack_id = serde_json::to_string(&good)
+            .unwrap()
+            .replace(&format!("\"pack_id\":\"{real}\""), &format!("\"pack_id\":\"{real}\",\"pack_id\":\"_pack/../x\""));
+        // A refused id, and a duplicate key the derive reaches only after it:
+        // the derive's error names the refusal, so its message alone cannot
+        // tell this document from a refusal.
+        let duplicate_after_bad_id = with_bad_id.replace("\"log\":[]", "\"log\":[],\"log\":[]");
+        let derive_error = serde_json::from_str::<Manifest>(&duplicate_after_bad_id).unwrap_err().to_string();
+        assert!(derive_error.contains("storage key \"_pack/../x\" refused"), "{derive_error}");
         for (what, json) in [
+            ("two pack_id keys in one ref, the second refused", duplicate_pack_id),
+            ("a duplicate key after a bad id", duplicate_after_bad_id),
             ("another version", with_bad_id.replace("\"version\":1", "\"version\":2")),
             ("a bad size beside it", with_bad_id.replace("\"size\":", "\"size\":\"x\",\"was\":")),
             ("not JSON", with_bad_id[..with_bad_id.len() / 2].to_string()),
         ] {
-            assert!(json != with_bad_id, "{what}: the edit did not apply");
+            assert!(json != with_bad_id && json != serde_json::to_string(&good).unwrap(), "{what}: the edit did not apply");
             assert!(
                 matches!(decode(&json), Err(ManifestDecodeError::Malformed(_))),
                 "{what}: {:?}",
