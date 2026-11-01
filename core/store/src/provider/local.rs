@@ -55,14 +55,14 @@ impl LocalObjectStorage {
     /// before it descends into it (kotton #336). None of them reaches here
     /// with a key it did not admit.
     ///
-    /// What it still stands in for: `UserStore::read_raw_local_object`, which
-    /// reads the path a guest re-wrap names on a store of its own, past a
-    /// trimmed leading `/` and admitted by nothing else (kotton #299), the
-    /// one door left of those this doc has tracked. And a vault's own walks
-    /// of a shelf's listing, `kvaultd`'s `tenancy::clear_shelf` (kotton
-    /// #310) and `Meter::measure`, which descend into and delete the keys
-    /// the listing names, unparsed. Those are the reaches to close before
-    /// this refusal can go.
+    /// The doors still relying on this refusal are the guest re-wrap's raw
+    /// read (kotton #299): `UserStore::read_raw_local_object` reads the path
+    /// a re-wrap names on a store of its own, past a trimmed leading `/` and
+    /// admitted by nothing else; `kvaultd::tenancy::clear_shelf` (kotton
+    /// #310, PR 345 admits it); and `kvaultd::meter::Meter::measure` (kotton
+    /// #352). The two vault walks descend into, and `clear_shelf` deletes,
+    /// the keys a shelf's listing names, unparsed. Those are the reaches to
+    /// close before this refusal can go.
     ///
     /// A leading `/` and a `.` component name nothing outside the root and
     /// are read past, as the logical paths the VFS hands this store may carry
