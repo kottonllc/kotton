@@ -159,7 +159,7 @@ fn table(drives: &[DriveDescriptor]) -> Out {
 /// not storage keys: the move refused them and carried everything else
 /// (kotton #274), and the person's event log names each, which `logs` reads
 /// (kotton #315; the daemon records them there as the move reads the listing,
-/// `kotton_device::users::drive_verbs::refused_event`). The count is said as
+/// `kotton_device::users::drive_verbs::refused_events`). The count is said as
 /// the daemon's refusals say it ([`NotCanonical::counted`]).
 fn refused_said(n: u32) -> String {
     let it = if n == 1 { "it" } else { "them" };
