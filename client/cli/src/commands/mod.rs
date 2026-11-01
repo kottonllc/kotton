@@ -80,12 +80,14 @@ fn shell_help(name: &str) -> String {
 }
 
 /// The `<ARGS>` help of `device`. `add`'s posture bracket is the one the REPL's usage line
-/// prints ([`kotton_shell::device_add_posture_bracket`]), walked from `device_add_word`, so
-/// this line names the flags `parse_add` reads and spells none of them.
+/// prints ([`kotton_shell::device_add_posture_bracket`]), walked from `device_add_word`, and
+/// the name's word is the one `parse_add` and `join` read ([`kotton_shell::DEVICE_AS_WORD`]),
+/// so this line names the flags the shell reads and spells none of them.
 fn device_args_help() -> String {
     format!(
-        "Arguments: `add [--as N] [{}]` | `join [code] [--as N]` | `list` | `revoke <id>` | `name [N]` | `reset [--yes]`",
-        kotton_shell::device_add_posture_bracket()
+        "Arguments: `add [{as_} N] [{}]` | `join [code] [{as_} N]` | `list` | `revoke <id>` | `name [N]` | `reset [--yes]`",
+        kotton_shell::device_add_posture_bracket(),
+        as_ = kotton_shell::DEVICE_AS_WORD,
     )
 }
 

@@ -61,14 +61,35 @@
 //! re-encode on each peer wire. This rule holds the same fact in the gate
 //! `just lint` runs, which does not run those tests.
 //!
-//! The rule reads text, so it holds the parser to the printer: each recording's
+//! The rule reads text, so it holds the reader to the printer: each recording's
 //! `# variants: N` header, which [`render`] writes, must equal the number of
-//! variants [`recorded_blocks`] parses back, and both indent with [`INDENT`]. A
-//! printer change the parser does not follow is a finding, not a rule that
-//! quietly compares the wrong lines. A differing block is listed as a line
-//! diff, by line number in each file, each line printed raw between `|` marks,
-//! so a dropped repeated attribute is named as the missing line and a
-//! whitespace-only difference is visible.
+//! variants [`recorded_surface::read`] parses back, and both indent with
+//! [`INDENT`]. A printer change the reader does not follow is a finding, not a
+//! rule that quietly compares the wrong lines. A differing block is listed as a
+//! line diff, by each line's own number in its file, each line printed raw
+//! between `|` marks, so a dropped repeated attribute is named as the missing
+//! line, a whitespace-only difference is visible, and a line both blocks hold
+//! at different places is printed once as moved.
+//!
+//! ## One reader of the format
+//!
+//! [`render`] is the one printer of a recording and
+//! `core/wire/src/recorded_surface.rs` is the one reader, compiled here by
+//! `#[path]` as [`recorded_surface`] and in kotton-wire for the tests that read
+//! the recordings. Every reader is therefore held to the `# variants: N` header
+//! in one place. A crate dependency on kotton-wire was the other seam and is
+//! not taken: it would build kotton-wire's closure into every `cargo xtask`,
+//! and this check reads the wire as text so that it needs no compile of the
+//! crate it checks. The reader names nothing but `std`, which is what lets both
+//! crates compile it (kotton #297).
+//!
+//! ## The channel diff
+//!
+//! When a channel's recording and its source disagree, [`channel_diff`] lists
+//! the differing lines through the same positional [`line_diff`] the twin rule
+//! uses, by line number on each side and raw between `|` marks, so a dropped
+//! repeated `#[serde(...)]` line is printed as the one missing line rather than
+//! as no line at all (kotton #296).
 //!
 //! `cargo xtask wire-surface` re-records every channel and then prints the
 //! rule's findings, exiting 0: a change to the door and both peer types is
@@ -85,6 +106,13 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+
+/// The one reader of a recorded surface, compiled here from kotton-wire's source rather
+/// than linked: see that file's module doc, and "One reader of the format" above.
+#[path = "../../core/wire/src/recorded_surface.rs"]
+mod recorded_surface;
+
+use recorded_surface::{Block, INDENT};
 
 /// The enums making up the **user channel's** wire surface.
 ///
@@ -252,90 +280,39 @@ const TWIN_RECORDINGS: [&str; 2] = [
     "core/wire/vault-peer-request-surface.txt",
 ];
 
-/// The indent [`render`] writes before a field or attribute line, and the one
-/// [`recorded_blocks`] reads as "this line belongs to the variant above". One
-/// constant, so the printer and the parser cannot drift apart by spelling it
-/// twice; the header count in [`recorded_blocks`] catches a drift that does
-/// not go through it.
-const INDENT: &str = "    ";
-
-/// One variant of a recorded surface: its name, the file line it is on
-/// (1-based), and its indented lines (field attributes and fields) raw, in order.
-struct Block<'a> {
-    name: &'a str,
-    line: usize,
-    lines: Vec<&'a str>,
-}
-
-/// The variants of a recorded surface. Header lines start with `#`; every
-/// other non-empty line is a variant name unless it starts with [`INDENT`].
-///
-/// Refused, with the reason, when the count parsed differs from the
-/// recording's own `# variants: N` header (which [`render`] writes), when the
-/// header is missing, or when an indented line precedes every variant: each
-/// means the parser no longer reads what the printer writes, and a rule over
-/// misread blocks would compare the wrong lines and say so in green.
-fn recorded_blocks(text: &str) -> Result<Vec<Block<'_>>, String> {
-    let mut header: Option<usize> = None;
-    let mut out: Vec<Block<'_>> = Vec::new();
-    for (i, line) in text.lines().enumerate() {
-        if line.starts_with(INDENT) {
-            let Some(block) = out.last_mut() else {
-                return Err(format!(
-                    "line {} is indented before any variant, so it belongs to none",
-                    i + 1
-                ));
-            };
-            block.lines.push(line);
-        } else if let Some(rest) = line.strip_prefix('#') {
-            if let Some(n) = rest.trim().strip_prefix("variants:") {
-                header = Some(n.trim().parse().map_err(|_| {
-                    format!("line {} has a `# variants:` header that is not a count", i + 1)
-                })?);
-            }
-        } else if !line.trim().is_empty() {
-            out.push(Block {
-                name: line.trim_end(),
-                line: i + 1,
-                lines: Vec::new(),
-            });
-        }
-    }
-    match header {
-        None => Err("it has no `# variants: N` header, so its count cannot be held".into()),
-        Some(n) if n != out.len() => Err(format!(
-            "its header records {n} variants and the twin rule parsed {}: the printer \
-             (`render`) and this parser (`recorded_blocks`) no longer agree on the format, \
-             so the rule would compare the wrong lines",
-            out.len()
-        )),
-        Some(_) => Ok(out),
-    }
-}
-
 /// One line of a block, as a finding prints it: raw, between `|` marks, so an
 /// indent or a trailing space is visible, with a tab spelled `\t`.
 fn shown(line: &str) -> String {
     format!("|{}|", line.replace('\t', "\\t"))
 }
 
-/// Which side of a line diff a line is on.
+/// Which side of a line diff a line is on, by its index in that side.
 #[derive(Debug, PartialEq)]
 enum Only {
-    Twin(usize),
-    Door(usize),
+    Left(usize),
+    Right(usize),
 }
 
-/// The lines of `twin` and `door` outside their longest common subsequence,
-/// in order, by index. A dropped line is one entry naming it, not a shift of
-/// every line after it, and a repeated line counts once per occurrence.
-fn line_diff(twin: &[&str], door: &[&str]) -> Vec<Only> {
-    let (n, m) = (twin.len(), door.len());
-    // lcs[i][j]: the common subsequence of twin[i..] and door[j..].
-    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+/// The lines of `left` and `right` outside their longest common subsequence, in
+/// order, by index. A dropped line is one entry naming it, not a shift of every
+/// line after it, and a repeated line counts once per occurrence. The common
+/// prefix and suffix are set aside first, so a whole recording with one change
+/// in it costs a table the size of the change.
+fn line_diff(left: &[&str], right: &[&str]) -> Vec<Only> {
+    let pre = left.iter().zip(right).take_while(|(a, b)| a == b).count();
+    let suf = left[pre..]
+        .iter()
+        .rev()
+        .zip(right[pre..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (l, r) = (&left[pre..left.len() - suf], &right[pre..right.len() - suf]);
+    let (n, m) = (l.len(), r.len());
+    // lcs[i][j]: the common subsequence of l[i..] and r[j..].
+    let mut lcs = vec![vec![0u32; m + 1]; n + 1];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
-            lcs[i][j] = if twin[i] == door[j] {
+            lcs[i][j] = if l[i] == r[j] {
                 lcs[i + 1][j + 1] + 1
             } else {
                 lcs[i + 1][j].max(lcs[i][j + 1])
@@ -344,36 +321,102 @@ fn line_diff(twin: &[&str], door: &[&str]) -> Vec<Only> {
     }
     let (mut i, mut j, mut out) = (0, 0, Vec::new());
     while i < n || j < m {
-        if i < n && j < m && twin[i] == door[j] {
+        if i < n && j < m && l[i] == r[j] {
             i += 1;
             j += 1;
         } else if j == m || (i < n && lcs[i + 1][j] >= lcs[i][j + 1]) {
-            out.push(Only::Twin(i));
+            out.push(Only::Left(pre + i));
             i += 1;
         } else {
-            out.push(Only::Door(j));
+            out.push(Only::Right(pre + j));
             j += 1;
         }
     }
     out
 }
 
+/// One line of a twin block's diff against its door block.
+#[derive(Debug, PartialEq)]
+enum Edit {
+    /// On one side only.
+    Only(Only),
+    /// On both sides, at different places: by its index in the twin's block and the door's.
+    Moved { twin: usize, door: usize },
+}
+
+/// [`line_diff`] of a twin block (left) against its door block (right), with each line
+/// that is on both sides but at different places paired into one [`Edit::Moved`], at the
+/// twin's position, rather than printed as "only in" each file.
+fn block_diff(twin: &[&str], door: &[&str]) -> Vec<Edit> {
+    let diff = line_diff(twin, door);
+    let mut paired = vec![false; diff.len()];
+    let mut out = Vec::new();
+    for k in 0..diff.len() {
+        if paired[k] {
+            continue;
+        }
+        let edit = match diff[k] {
+            Only::Left(i) => {
+                let partner = (0..diff.len()).find(|&q| {
+                    !paired[q] && matches!(diff[q], Only::Right(j) if door[j] == twin[i])
+                });
+                match partner {
+                    Some(q) => {
+                        paired[q] = true;
+                        let Only::Right(j) = diff[q] else { unreachable!() };
+                        Edit::Moved { twin: i, door: j }
+                    }
+                    None => Edit::Only(Only::Left(i)),
+                }
+            }
+            Only::Right(j) => {
+                let partner = (0..diff.len()).find(|&q| {
+                    !paired[q] && matches!(diff[q], Only::Left(i) if twin[i] == door[j])
+                });
+                match partner {
+                    Some(q) => {
+                        paired[q] = true;
+                        let Only::Left(i) = diff[q] else { unreachable!() };
+                        Edit::Moved { twin: i, door: j }
+                    }
+                    None => Edit::Only(Only::Right(j)),
+                }
+            }
+        };
+        paired[k] = true;
+        out.push(edit);
+    }
+    out
+}
+
 /// The finding for a twin block that differs from its door block: each line
-/// on one side only, by file and line number, then a note when the two hold
-/// the same lines (counted with repeats) in another order.
+/// on one side only, by file and its own line number, each line on both sides
+/// at different places once as moved, then a note when the two hold the same
+/// lines (counted with repeats) in another order.
 fn block_finding(twin: &str, block: &Block<'_>, door_block: &Block<'_>) -> String {
     let mut f = format!(
         "  `{}` in {twin} differs from its block in {DOOR_RECORDING}:\n",
         block.name
     );
-    for only in line_diff(&block.lines, &door_block.lines) {
-        let (file, at, line) = match only {
-            Only::Twin(i) => (twin, block.line + 1 + i, block.lines[i]),
-            Only::Door(j) => (DOOR_RECORDING, door_block.line + 1 + j, door_block.lines[j]),
+    let (t, d) = (block.texts(), door_block.texts());
+    for edit in block_diff(&t, &d) {
+        let line = match edit {
+            Edit::Only(Only::Left(i)) => {
+                format!("only in {twin}:{}: {}", block.lines[i].at, shown(t[i]))
+            }
+            Edit::Only(Only::Right(j)) => {
+                format!("only in {DOOR_RECORDING}:{}: {}", door_block.lines[j].at, shown(d[j]))
+            }
+            Edit::Moved { twin: i, door: j } => format!(
+                "moved: {twin}:{}, {DOOR_RECORDING}:{}: {}",
+                block.lines[i].at,
+                door_block.lines[j].at,
+                shown(t[i])
+            ),
         };
-        f.push_str(&format!("    only in {file}:{at}: {}\n", shown(line)));
+        f.push_str(&format!("    {line}\n"));
     }
-    let (mut a, mut b) = (block.lines.clone(), door_block.lines.clone());
+    let (mut a, mut b) = (t, d);
     a.sort_unstable();
     b.sort_unstable();
     if a == b {
@@ -383,12 +426,13 @@ fn block_finding(twin: &str, block: &Block<'_>, door_block: &Block<'_>) -> Strin
 }
 
 /// What a twin finding is about, so the advice printed after it fits it.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     /// A recording could not be read from disk at all.
     Unread,
-    /// A recording was read but the parser cannot hold it to its header, or it
-    /// records no variant: the printer and the parser disagree, or a hand edit.
+    /// A recording was read but the reader refuses it (no header, a header that
+    /// disagrees with what it parsed, a line before any variant, or no variant):
+    /// the printer and the reader disagree, or the file was edited by hand.
     Format,
     /// A peer verb's block differs from, or is missing in, the door's.
     Mirror,
@@ -404,7 +448,7 @@ fn twin_report(root: &Path) -> Vec<(Kind, String)> {
         Ok(t) => t,
         Err(e) => return vec![(Kind::Unread, format!("  {DOOR_RECORDING} could not be read: {e}"))],
     };
-    let door_blocks = match recorded_blocks(&door_text) {
+    let door_blocks = match recorded_surface::read(&door_text) {
         Ok(b) => b,
         Err(why) => {
             return vec![(
@@ -414,12 +458,6 @@ fn twin_report(root: &Path) -> Vec<(Kind, String)> {
         }
     };
     let door: BTreeMap<&str, Block<'_>> = door_blocks.into_iter().map(|b| (b.name, b)).collect();
-    if door.is_empty() {
-        return vec![(
-            Kind::Format,
-            format!("  {DOOR_RECORDING} records no variant, so it mirrors nothing."),
-        )];
-    }
     let mut findings = Vec::new();
     for twin in TWIN_RECORDINGS {
         let text = match read(twin) {
@@ -429,7 +467,7 @@ fn twin_report(root: &Path) -> Vec<(Kind, String)> {
                 continue;
             }
         };
-        let blocks = match recorded_blocks(&text) {
+        let blocks = match recorded_surface::read(&text) {
             Ok(b) => b,
             Err(why) => {
                 findings.push((
@@ -439,23 +477,17 @@ fn twin_report(root: &Path) -> Vec<(Kind, String)> {
                 continue;
             }
         };
-        if blocks.is_empty() {
-            findings.push((
-                Kind::Format,
-                format!("  {twin} records no variant, so the twin rule holds nothing."),
-            ));
-        }
         for block in blocks {
             match door.get(block.name) {
                 None => findings.push((
                     Kind::Mirror,
                     format!(
-                        "  `{}` is in {twin} and not in {DOOR_RECORDING}: the door no longer \
-                         has the verb the peer wire mirrors.",
-                        block.name
+                        "  `{}` is in {twin} (line {}) and not in {DOOR_RECORDING}: the door no \
+                         longer has the verb the peer wire mirrors.",
+                        block.name, block.at
                     ),
                 )),
-                Some(door_block) if door_block.lines != block.lines => {
+                Some(door_block) if door_block.texts() != block.texts() => {
                     findings.push((Kind::Mirror, block_finding(twin, &block, door_block)));
                 }
                 Some(_) => {}
@@ -465,7 +497,6 @@ fn twin_report(root: &Path) -> Vec<(Kind, String)> {
     findings
 }
 
-/// The twin findings, with what they mean, as `wire-check` and `wire-surface` print them.
 /// The twin findings, with one sentence of advice per kind present, as
 /// `wire-check` and `wire-surface` print them.
 fn print_twin_findings(command: &str, findings: &[(Kind, String)]) {
@@ -488,10 +519,11 @@ fn twin_findings_text(command: &str, findings: &[(Kind, String)]) -> String {
     }
     if has(Kind::Format) {
         out.push_str(
-            "A recording whose `# variants:` header disagrees with what the rule parsed means the \
-             printer (`render`) and the parser (`recorded_blocks`) no longer agree, or the file \
-             was edited by hand: change the two together, or re-record with \
-             `cargo xtask wire-surface`; no peer type needs to change for this.\n\n",
+            "A recording the rule cannot read as one (no `# variants:` header, a header that \
+             disagrees with what was read, or no variant at all) was edited by hand, or the \
+             printer (`render`) and the reader (core/wire/src/recorded_surface.rs) no longer \
+             agree: re-record with `cargo xtask wire-surface`, or change the printer and the \
+             reader together; no peer type needs to change for this.\n\n",
         );
     }
     if has(Kind::Mirror) {
@@ -506,102 +538,139 @@ fn twin_findings_text(command: &str, findings: &[(Kind, String)]) -> String {
 }
 
 fn check_channel(channel: &Channel, bless: bool) {
-    let Channel {
-        what,
-        sources,
-        golden,
-    } = channel;
-    let (sources, golden_path): (&[(&str, &str)], &str) = (sources, golden);
+    let root = Path::new(".");
+    if bless {
+        let (variants, rendered) = channel_surface(root, channel).unwrap_or_else(|why| {
+            eprintln!("wire-check: {why}");
+            std::process::exit(1);
+        });
+        if let Err(e) = std::fs::write(channel.golden, &rendered) {
+            eprintln!("wire-check: could not write {}: {e}", channel.golden);
+            std::process::exit(1);
+        }
+        println!("Wrote {} — {} variants.", channel.golden, variants.len());
+        return;
+    }
+    match compare_channel(root, channel) {
+        Ok(Compared::Same(ok)) => println!("{ok}"),
+        Ok(Compared::Changed(diff)) => {
+            eprintln!("{diff}");
+            std::process::exit(1);
+        }
+        Err(why) => {
+            eprintln!("wire-check: {why}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// A channel's variants under `root`, parsed from its sources, and the recording
+/// [`render`] makes of them; or why the sources cannot be read as that channel.
+fn channel_surface(
+    root: &Path,
+    channel: &Channel,
+) -> Result<(BTreeMap<String, Variant>, String), String> {
     let mut variants: BTreeMap<String, Variant> = BTreeMap::new();
     let mut scanned = 0usize;
-
-    for (path, enum_name) in sources {
-        let Ok(src) = std::fs::read_to_string(Path::new(path)) else {
-            eprintln!("wire-check: could not read {path}. Run from the workspace root.");
-            std::process::exit(1);
+    for (path, enum_name) in channel.sources {
+        let Ok(src) = std::fs::read_to_string(root.join(path)) else {
+            return Err(format!("could not read {path}. Run from the workspace root."));
         };
         let found = parse_enum(&src, enum_name);
         if found.is_empty() {
-            eprintln!(
-                "wire-check: parsed no variants out of `{enum_name}` in {path}, which cannot \
-                 be true. Either the enum was renamed or the parser is broken — and in both \
-                 cases this check has stopped looking at the thing it guards."
-            );
-            std::process::exit(1);
+            return Err(format!(
+                "parsed no variants out of `{enum_name}` in {path}, which cannot be true. \
+                 Either the enum was renamed or the parser is broken — and in both cases this \
+                 check has stopped looking at the thing it guards."
+            ));
         }
         scanned += 1;
         for v in found {
             if let Some(prev) = variants.insert(v.name.clone(), v) {
-                eprintln!(
-                    "wire-check: `{}` is declared in more than one source enum. Untagged \
-                     deserialization resolves by trying each in order, so a duplicated name \
-                     makes the wire ambiguous and the winner arbitrary.",
+                return Err(format!(
+                    "`{}` is declared in more than one source enum. Untagged deserialization \
+                     resolves by trying each in order, so a duplicated name makes the wire \
+                     ambiguous and the winner arbitrary.",
                     prev.name
-                );
-                std::process::exit(1);
+                ));
             }
         }
     }
-
-    if scanned != sources.len() {
-        eprintln!(
-            "wire-check: {scanned} of {} sources scanned.",
-            sources.len()
-        );
-        std::process::exit(1);
+    if scanned != channel.sources.len() {
+        return Err(format!("{scanned} of {} sources scanned.", channel.sources.len()));
     }
+    let rendered = render(&variants, channel.what);
+    Ok((variants, rendered))
+}
 
-    let rendered = render(&variants, what);
+/// What comparing one channel's source with its recording found.
+enum Compared {
+    /// They agree; the line `wire-check` prints for it.
+    Same(String),
+    /// They differ; the report `wire-check` prints for it, the differing lines listed.
+    Changed(String),
+}
 
-    if bless {
-        if let Err(e) = std::fs::write(golden_path, &rendered) {
-            eprintln!("wire-check: could not write {golden_path}: {e}");
-            std::process::exit(1);
-        }
-        println!("Wrote {golden_path} — {} variants.", variants.len());
-        return;
-    }
-
-    let Ok(golden) = std::fs::read_to_string(golden_path) else {
-        eprintln!(
-            "wire-check: {golden_path} is missing. It is the record of what the {what} wire looks \
-             like today; without it this check confirms nothing. Regenerate with \
+/// One channel's source under `root` against its recording there, or why the two cannot
+/// be compared at all.
+fn compare_channel(root: &Path, channel: &Channel) -> Result<Compared, String> {
+    let Channel { what, golden: golden_path, .. } = channel;
+    let (variants, rendered) = channel_surface(root, channel)?;
+    let Ok(golden) = std::fs::read_to_string(root.join(golden_path)) else {
+        return Err(format!(
+            "{golden_path} is missing. It is the record of what the {what} wire looks like \
+             today; without it this check confirms nothing. Regenerate with \
              `cargo xtask wire-surface`."
-        );
-        std::process::exit(1);
+        ));
     };
     if golden.trim().is_empty() {
-        eprintln!("wire-check: {golden_path} is empty, so it asserts nothing.");
-        std::process::exit(1);
+        return Err(format!("{golden_path} is empty, so it asserts nothing."));
     }
-
     if golden == rendered {
-        println!(
+        return Ok(Compared::Same(format!(
             "wire-check: OK — the {what} wire surface matches {golden_path} ({} variants, {} fields).",
             variants.len(),
             variants.values().map(|v| v.fields.len()).sum::<usize>()
-        );
-        return;
+        )));
     }
-
-    eprintln!("wire-check: the {what} wire surface has changed.\n");
-    let old: Vec<&str> = golden.lines().collect();
-    let new: Vec<&str> = rendered.lines().collect();
-    for line in old.iter().filter(|l| !new.contains(l)) {
-        eprintln!("  -{line}");
-    }
-    for line in new.iter().filter(|l| !old.contains(l)) {
-        eprintln!("  +{line}");
-    }
-    eprintln!(
-        "\nEvery line here is a byte on the wire: a variant name is a JSON key, a field name \
+    Ok(Compared::Changed(format!(
+        "wire-check: the {what} wire surface has changed. `-` is a line of {golden_path} the \
+         source no longer gives, by its line there; `+` is a line `cargo xtask wire-surface` \
+         would write, by its line in that re-recording; each printed raw between `|` marks.\n\n\
+         {}\n\
+         Every line here is a byte on the wire: a variant name is a JSON key, a field name \
          is an object key, and a `#[serde(...)]` attribute decides whether and how the field \
          is written at all.\n\nIf this change is deliberate, re-record it with \
          `cargo xtask wire-surface` **in the same commit**, so the diff of {golden_path} is the \
          review. If it is not deliberate, it is a compatibility break: an older peer or a \
-         stored request will no longer parse."
-    );
-    std::process::exit(1);
+         stored request will no longer parse.",
+        channel_diff(golden_path, &golden, &rendered)
+    )))
+}
+
+/// The lines of a channel's recording (`golden`) and of its re-recording (`rendered`)
+/// that differ, through the twin rule's positional [`line_diff`]: one line per entry,
+/// `-` for the recording's side and `+` for the re-recording's, each by its own line
+/// number and raw. Lines are not paired as moved here, as they are within a twin block:
+/// a whole recording repeats lines like `user_id: String` across variants, and a pairing
+/// would join two unrelated variants' changes into one.
+fn channel_diff(golden_path: &str, golden: &str, rendered: &str) -> String {
+    let old: Vec<&str> = golden.lines().collect();
+    let new: Vec<&str> = rendered.lines().collect();
+    let mut out = String::new();
+    for only in line_diff(&old, &new) {
+        let line = match only {
+            Only::Left(i) => format!("  -{golden_path}:{}: {}", i + 1, shown(old[i])),
+            Only::Right(j) => format!("  +re-recorded:{}: {}", j + 1, shown(new[j])),
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    if out.is_empty() {
+        // Same lines, different bytes: only the line endings or the final newline differ.
+        out.push_str("  (no line differs: the line endings or the final newline do)\n");
+    }
+    out
 }
 
 fn render(variants: &BTreeMap<String, Variant>, what: &str) -> String {
@@ -954,8 +1023,8 @@ mod tests {
         assert_eq!(findings.len(), 1, "{findings:#?}");
         assert!(
             findings[0].contains(&format!(
-                "{} cannot be read as a recording: its header records 3 variants and the twin \
-                 rule parsed 10",
+                "{} cannot be read as a recording: its header records 3 variants and the \
+                 reader parsed 10",
                 TWIN_RECORDINGS[0]
             )),
             "{}",
@@ -974,8 +1043,23 @@ mod tests {
         assert!(findings[0].contains(&format!("{DOOR_RECORDING} cannot be read as a recording")), "{}", findings[0]);
         let headless = peer().replace("# variants: 3\n", "");
         assert!(
-            matches!(recorded_blocks(&headless), Err(why) if why.contains("no `# variants: N` header"))
+            matches!(recorded_surface::read(&headless), Err(why) if why.contains("no `# variants: N` header"))
         );
+
+        // A recording of no variant, reachable only by a hand edit since
+        // `check_channel` refuses an empty enum before it writes, is refused by
+        // the reader like the rest, and gets the same kind and advice.
+        let dir = tree(&[
+            (DOOR_RECORDING, &door("path: String")),
+            (TWIN_RECORDINGS[0], &recording("")),
+            (TWIN_RECORDINGS[1], &vault()),
+        ]);
+        let report = twin_report(dir.path());
+        assert_eq!(report.len(), 1, "{report:#?}");
+        assert!(report[0].0 == Kind::Format, "{}", report[0].1);
+        assert!(report[0].1.contains("records no variant"), "{}", report[0].1);
+        let text = twin_findings_text("wire-check", &report);
+        assert!(text.contains("A recording the rule cannot read as one"), "{text}");
     }
 
     /// The parser reads back exactly what the printer writes: every variant,
@@ -1004,7 +1088,7 @@ mod tests {
         .map(|v| (v.name.clone(), v))
         .collect();
         let text = render(&variants, "peer request");
-        let blocks = recorded_blocks(&text).expect("the parser reads the printer's output");
+        let blocks = recorded_surface::read(&text).expect("the reader reads the printer's output");
         assert_eq!(blocks.len(), variants.len());
         for (block, v) in blocks.iter().zip(variants.values()) {
             assert_eq!(block.name, v.name);
@@ -1018,7 +1102,7 @@ mod tests {
                         .chain([format!("{INDENT}{}: {}", f.name, f.ty)])
                 })
                 .collect();
-            assert_eq!(block.lines, expected, "{}", v.name);
+            assert_eq!(block.texts(), expected, "{}", v.name);
         }
     }
 
@@ -1053,8 +1137,84 @@ mod tests {
         ]);
         let findings = twin_findings(dir.path());
         assert_eq!(findings.len(), 2, "{findings:#?}");
-        assert!(findings[0].contains("`NodeRelay` is in core/wire/peer-request-surface.txt and not in"), "{}", findings[0]);
+        assert!(findings[0].contains("`NodeRelay` is in core/wire/peer-request-surface.txt (line 3) and not in"), "{}", findings[0]);
         assert!(findings[1].contains("`ReadFile`") && findings[1].contains("another order"), "{}", findings[1]);
+        // The swapped pair is one line moved, printed once with its line in
+        // each file, not as a line "only in" each of them.
+        assert!(
+            findings[1].contains(&format!(
+                "moved: {}:6, {DOOR_RECORDING}:7: |    path: String|",
+                TWIN_RECORDINGS[0]
+            )),
+            "{}",
+            findings[1]
+        );
+        assert!(!findings[1].contains("only in"), "{}", findings[1]);
+    }
+
+    /// A blank line and a comment a hand edit left inside a door block do not
+    /// shift the line numbers printed for the lines after them: each line is
+    /// numbered by its own line in the file.
+    #[test]
+    fn a_blank_line_inside_a_block_keeps_the_line_numbers_printed() {
+        let edited = door("object_path: String")
+            .replace("    mount: String\n    object_path", "    mount: String\n\n# by hand\n    object_path");
+        let dir = tree(&[
+            (DOOR_RECORDING, &edited),
+            (TWIN_RECORDINGS[0], &peer()),
+            (TWIN_RECORDINGS[1], &vault()),
+        ]);
+        let findings = twin_findings(dir.path());
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        for ((finding, twin), at) in findings.iter().zip(TWIN_RECORDINGS).zip([11, 6]) {
+            // `object_path` was line 11 of the door's file; the blank and the
+            // comment above it put it on 13.
+            assert!(finding.contains(&format!("only in {DOOR_RECORDING}:13: |    object_path: String|")), "{finding}");
+            assert!(finding.contains(&format!("only in {twin}:{at}: |    path: String|")), "{finding}");
+        }
+    }
+
+    /// The source enum of a throwaway tree's IPC request channel: one variant
+    /// with the repeated `#[serde(...)]` line `BrowserFrame` has.
+    const FRAME_SOURCE: &str = "pub enum UserRequest {
+    BrowserFrame {
+        #[serde(with = \"crate::base64_bytes\")]
+        bytes: Vec<u8>,
+        #[serde(default, skip_serializing_if = \"Option::is_none\")]
+        user_id: Option<String>,
+        #[serde(default, skip_serializing_if = \"Option::is_none\")]
+        channel: Option<String>,
+    },
+    Tenants,
+}
+";
+
+    /// A channel's recording that dropped one of two identical lines is
+    /// reported with that one line, by its line in the re-recording, through
+    /// the twin rule's positional diff (kotton #296): not "has changed" with
+    /// no line, which a `contains` comparison printed.
+    #[test]
+    fn a_dropped_repeated_line_in_a_channel_recording_is_printed_as_the_one_missing_line() {
+        let channel = &CHANNELS[0];
+        let src = tree(&[(channel.sources[0].0, FRAME_SOURCE)]);
+        let (_, rendered) = channel_surface(src.path(), channel).expect("the source parses");
+        let skip = "    #[serde(default, skip_serializing_if = \"Option::is_none\")]";
+        assert_eq!(rendered.matches(skip).count(), 2, "{rendered}");
+        let dropped = rendered.replacen(&format!("{skip}\n    channel"), "    channel", 1);
+        let dir = tree(&[(channel.sources[0].0, FRAME_SOURCE), (channel.golden, &dropped)]);
+        let Ok(Compared::Changed(report)) = compare_channel(dir.path(), channel) else {
+            panic!("a dropped line must be a change");
+        };
+        let listed: Vec<&str> = report
+            .lines()
+            .filter(|l| l.starts_with("  -") || l.starts_with("  +"))
+            .collect();
+        // Five header lines, `BrowserFrame` on 6, and the second repeat on 11.
+        assert_eq!(listed, [format!("  +re-recorded:11: |{skip}|")], "{report}");
+
+        // And the same tree re-recorded is no change.
+        let same = tree(&[(channel.sources[0].0, FRAME_SOURCE), (channel.golden, &rendered)]);
+        assert!(matches!(compare_channel(same.path(), channel), Ok(Compared::Same(_))));
     }
 
     /// The advice after the findings fits their kind: a printer drift is not

@@ -348,7 +348,7 @@ pub use app::{scaffold_files, AppCommand, SDK_FROM_REPOSITORY};
 #[cfg(feature = "cli")]
 pub use cp::CpCommand;
 #[cfg(feature = "cli")]
-pub use device::{device_add_posture_bracket, DeviceCommand};
+pub use device::{device_add_posture_bracket, DeviceCommand, AS_WORD as DEVICE_AS_WORD};
 // The committed-SAS ceremony driver is shared with the onboarding join branch.
 #[cfg(feature = "cli")]
 pub(crate) use device::join_identity;
