@@ -465,7 +465,9 @@ impl VaultPeerRequest {
 mod tests {
     use super::*;
     use crate::ipc::UserRequest;
-    use crate::recorded_twin::{each_verb_records_its_door_twin, variants, DOOR_SURFACE, PEER_SURFACE};
+    use crate::recorded_twin::{
+        each_verb_records_its_door_twin, only_these_door_verbs_decode, variants, DOOR_SURFACE, PEER_SURFACE,
+    };
 
     /// The vault's peer wire's recorded surface; the door's and a device's are in
     /// `recorded_twin`.
@@ -559,16 +561,12 @@ mod tests {
     #[test]
     fn no_door_verb_but_the_vaults_decodes_on_the_vaults_peer_wire() {
         let vault = variants(VAULT_PEER_SURFACE);
+        only_these_door_verbs_decode::<VaultPeerRequest>(
+            &vault,
+            "vault",
+            "is not a vault's verb and decoded on its peer wire",
+        );
         let door = variants(DOOR_SURFACE);
-        assert!(door.len() > 150, "the door's surface no longer parses: {} variants", door.len());
-        let mut refused = 0;
-        for name in door.iter().filter(|n| !vault.contains(n)) {
-            let err = serde_json::from_str::<VaultPeerRequest>(&format!(r#"{{"{name}":{{}}}}"#))
-                .expect_err(&format!("{name} is not a vault's verb and decoded on its peer wire"));
-            assert!(err.to_string().contains("unknown variant"), "{name}: {err}");
-            refused += 1;
-        }
-        assert_eq!(refused + vault.len(), door.len(), "every vault verb is a door verb");
 
         // The verbs that read plaintext or touch a record, by name, so this
         // test says what it is for even if the surfaces it reads were emptied.
