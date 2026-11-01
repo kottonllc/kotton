@@ -830,7 +830,8 @@ drive where it was; a copy the other vault would not take back is listed as an
 unfinished move, and moving the drive there again clears it. A move cut off
 after the other vault has the drive is finished by running it again. A key the
 vault lists that is not a storage key is refused, not carried, and noted in the
-move's answer; `logs --level warn` names it. `personal` does not move.
+move's answer; `logs --level warn`, in the REPL, names it. `personal` does not
+move.
 
 `enrol` takes the invite a vault's landlord gave you (`vault invite <name>`
 at theirs): this device meets the vault at the invite's relay, and you type

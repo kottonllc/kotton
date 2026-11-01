@@ -43,7 +43,8 @@
 //! refuses it** (kotton #315). The answer carries a count; the names go to the
 //! log of the person whose drive it is ([`refused_events`], scoped to them, so
 //! their log takes them and the device's and no one else's do), which `logs`
-//! reads: the note a count is said with points there (`logs --level warn`).
+//! reads: the note a count is said with points there (`logs --level warn`, in
+//! the REPL; the last three words go when `logs` has a CLI door, kotton #355).
 //! The listing is the vault's to answer, so a vault that lists a great many
 //! such keys gets [`NAMED_AT_MOST`] of them named and one event counting the
 //! rest, not a log the vault can fill. They are published as the listing is
@@ -869,7 +870,7 @@ fn refused_said(refused: &[NotCanonical], src: &str) -> String {
     match refused.len() {
         0 => String::new(),
         n => format!(
-            " ('{src}' also listed {}, which the move refused and did not carry; your event log names {}: `logs --level warn`)",
+            " ('{src}' also listed {}, which the move refused and did not carry; your event log names {}: `logs --level warn`, in the REPL)",
             NotCanonical::counted(n),
             if n == 1 { "it" } else { "them" }
         ),
@@ -1270,9 +1271,9 @@ mod tests {
         assert!(recorded.iter().all(|(_, reads)| *reads == 0), "a refused key was recorded after the copy began: {recorded:?}");
         let said = refused_said(&settled.refused, "vault");
         assert!(said.contains(&format!("listed {},", NotCanonical::counted(6))), "{said}");
-        assert!(said.contains("listed 6 keys that are not storage keys") && said.contains("names them: `logs --level warn`"), "{said}");
+        assert!(said.contains("listed 6 keys that are not storage keys") && said.contains("names them: `logs --level warn`, in the REPL"), "{said}");
         let one = refused_said(&settled.refused[..1], "vault");
-        assert!(one.contains("listed 1 key that is not a storage key,") && one.contains("names it: `logs --level warn`"), "{one}");
+        assert!(one.contains("listed 1 key that is not a storage key,") && one.contains("names it: `logs --level warn`, in the REPL"), "{one}");
         assert!(refused_said(&[], "vault").is_empty());
     }
 
