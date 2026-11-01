@@ -212,10 +212,11 @@ pub enum ObjectKind {
 ///   view (`kotton_sealed::Sealed`) is handed, which it takes typed
 ///   (kotton #275, #320), and each directory key a store lists that its
 ///   walk descends into (kotton #336). The doors still relying on
-///   `LocalObjectStorage::resolve_key`'s refusal are the guest re-wrap's raw
-///   read (kotton #299), `kvaultd::tenancy::clear_shelf` (kotton #310,
-///   PR 345 admits it), and `kvaultd::meter::Meter::measure` (kotton #352),
-///   each tracked in that doc.
+///   `LocalObjectStorage::resolve_key`'s refusal, each tracked in that doc:
+///   - the guest re-wrap's raw read (kotton #299);
+///   - `kvaultd::tenancy::clear_shelf` until PR 345 lands (kotton #310);
+///   - `kvaultd::meter::Meter::measure` (kotton #352);
+///   - `BlindedObjectStorage::collect_leaves` and `list_loose` (kotton #357).
 /// - **The rest of the `_` namespace** is [`ObjectKind::Reserved`].
 ///   Blinded components are base32, an alphabet with no `_`, so only a key
 ///   in the reserved namespace starts with one, and every other key is

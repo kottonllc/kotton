@@ -55,14 +55,20 @@ impl LocalObjectStorage {
     /// before it descends into it (kotton #336). None of them reaches here
     /// with a key it did not admit.
     ///
-    /// The doors still relying on this refusal are the guest re-wrap's raw
-    /// read (kotton #299): `UserStore::read_raw_local_object` reads the path
-    /// a re-wrap names on a store of its own, past a trimmed leading `/` and
-    /// admitted by nothing else; `kvaultd::tenancy::clear_shelf` (kotton
-    /// #310, PR 345 admits it); and `kvaultd::meter::Meter::measure` (kotton
-    /// #352). The two vault walks descend into, and `clear_shelf` deletes,
-    /// the keys a shelf's listing names, unparsed. Those are the reaches to
-    /// close before this refusal can go.
+    /// The doors still relying on this refusal, each to close before it can
+    /// go:
+    ///
+    /// - The guest re-wrap's raw read (kotton #299):
+    ///   `UserStore::read_raw_local_object` reads the path a re-wrap names on
+    ///   a store of its own, past a trimmed leading `/`, admitted by nothing
+    ///   else.
+    /// - `kvaultd::tenancy::clear_shelf` until PR 345 lands (kotton #310): it
+    ///   descends into and deletes the keys a shelf's listing names, unparsed.
+    /// - `kvaultd::meter::Meter::measure` (kotton #352): it descends into the
+    ///   directory keys a shelf's listing names, unparsed.
+    /// - `BlindedObjectStorage::collect_leaves` and `list_loose` (kotton
+    ///   #357): the walk descends into every directory key the inner store
+    ///   listed, unparsed, and `list_loose` reads each listed leaf, unparsed.
     ///
     /// A leading `/` and a `.` component name nothing outside the root and
     /// are read past, as the logical paths the VFS hands this store may carry
