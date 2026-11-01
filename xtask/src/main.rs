@@ -81,6 +81,8 @@ mod residency_check;
 mod scope_check;
 mod suite_check;
 mod wire_check;
+/// The files compiled above by `#[path]` from other crates, and the test that holds each to `std`.
+mod std_only;
 mod actions_check;
 #[cfg(test)]
 mod git_fixture;
