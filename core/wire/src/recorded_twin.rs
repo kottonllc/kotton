@@ -13,7 +13,15 @@
 //! `lib.rs`). It is a sibling of `recorded_surface.rs` rather than part of it because that
 //! file is also compiled into xtask by `#[path]` and must name nothing but `std`; this one
 //! reads it through `crate::`. xtask's `wire-check` has its own twin rule (`line_diff`
-//! findings, not a panic), and whether it should share this comparison is open.
+//! findings, not a panic): today these tests and `wire-check` each read the recordings and
+//! compare them, two spellings of one rule; kotton #364 is open to fold them into one.
+//!
+//! Each peer wire's test also calls [`only_these_door_verbs_decode`], so the refusal of
+//! every other door verb at that wire's decoder is spelled once too (kotton #365).
+
+use std::fmt::Debug;
+
+use serde::de::DeserializeOwned;
 
 use crate::recorded_surface::read;
 
@@ -52,4 +60,26 @@ pub fn each_verb_records_its_door_twin(twin_file: &str, twin: &str) {
             door_block.at
         );
     }
+}
+
+/// No door verb but `ours`, a peer wire's recorded verbs, decodes at `T`, that wire's
+/// decoder: every other verb of the door's recording ([`DOOR_SURFACE`]) is an unknown
+/// variant there, whatever its fields, and every verb of `ours` is a door verb. A door verb
+/// that decodes panics with "{name} {decoded_here}"; a verb of `ours` the door does not
+/// record fails the count with "every {ours_named} verb is a door verb".
+pub fn only_these_door_verbs_decode<T: DeserializeOwned + Debug>(
+    ours: &[&str],
+    ours_named: &str,
+    decoded_here: &str,
+) {
+    let door = variants(DOOR_SURFACE);
+    assert!(door.len() > 150, "the door's surface no longer parses: {} variants", door.len());
+    let mut refused = 0;
+    for name in door.iter().filter(|n| !ours.contains(n)) {
+        let err = serde_json::from_str::<T>(&format!(r#"{{"{name}":{{}}}}"#))
+            .expect_err(&format!("{name} {decoded_here}"));
+        assert!(err.to_string().contains("unknown variant"), "{name}: {err}");
+        refused += 1;
+    }
+    assert_eq!(refused + ours.len(), door.len(), "every {ours_named} verb is a door verb");
 }
