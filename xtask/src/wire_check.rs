@@ -287,7 +287,7 @@ fn shown(line: &str) -> String {
 }
 
 /// Which side of a line diff a line is on, by its index in that side.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Only {
     Left(usize),
     Right(usize),
@@ -346,45 +346,52 @@ enum Edit {
 
 /// [`line_diff`] of a twin block (left) against its door block (right), with each line
 /// that is on both sides but at different places paired into one [`Edit::Moved`], at the
-/// twin's position, rather than printed as "only in" each file.
+/// place in the diff of whichever side comes first, rather than printed as "only in" each
+/// file.
+///
+/// Pairing is nearest first: of every twin-only and door-only line of equal text, the
+/// two whose offsets in their blocks are closest pair before any farther apart. A block
+/// that repeats a line (`BrowserFrame`'s `skip_serializing_if` attribute) can leave one
+/// occurrence outside the common subsequence on both sides at the same offset, when the
+/// subsequence holds a line that crossed it; such a pair is a line in its own place on
+/// both sides, so it pairs at distance zero and is no edit at all (kotton #305).
 fn block_diff(twin: &[&str], door: &[&str]) -> Vec<Edit> {
     let diff = line_diff(twin, door);
-    let mut paired = vec![false; diff.len()];
-    let mut out = Vec::new();
-    for k in 0..diff.len() {
-        if paired[k] {
-            continue;
+    // Every pair of a twin-only and a door-only line of equal text, nearest first.
+    let mut candidates = Vec::new();
+    for (k, left) in diff.iter().enumerate() {
+        let Only::Left(i) = *left else { continue };
+        for (q, right) in diff.iter().enumerate() {
+            let Only::Right(j) = *right else { continue };
+            if door[j] == twin[i] {
+                candidates.push((i.abs_diff(j), k, q));
+            }
         }
-        let edit = match diff[k] {
-            Only::Left(i) => {
-                let partner = (0..diff.len()).find(|&q| {
-                    !paired[q] && matches!(diff[q], Only::Right(j) if door[j] == twin[i])
-                });
-                match partner {
-                    Some(q) => {
-                        paired[q] = true;
-                        let Only::Right(j) = diff[q] else { unreachable!() };
-                        Edit::Moved { twin: i, door: j }
-                    }
-                    None => Edit::Only(Only::Left(i)),
+    }
+    candidates.sort_unstable();
+    let mut partner: Vec<Option<usize>> = vec![None; diff.len()];
+    for (_, k, q) in candidates {
+        if partner[k].is_none() && partner[q].is_none() {
+            partner[k] = Some(q);
+            partner[q] = Some(k);
+        }
+    }
+    let mut out = Vec::new();
+    for (k, &entry) in diff.iter().enumerate() {
+        match partner[k] {
+            None => out.push(Edit::Only(entry)),
+            // A pair is printed once, where its first side falls in the diff.
+            Some(q) if q < k => {}
+            Some(q) => {
+                let (i, j) = match (entry, diff[q]) {
+                    (Only::Left(i), Only::Right(j)) | (Only::Right(j), Only::Left(i)) => (i, j),
+                    _ => unreachable!("a pair is one line from each side"),
+                };
+                if i != j {
+                    out.push(Edit::Moved { twin: i, door: j });
                 }
             }
-            Only::Right(j) => {
-                let partner = (0..diff.len()).find(|&q| {
-                    !paired[q] && matches!(diff[q], Only::Left(i) if twin[i] == door[j])
-                });
-                match partner {
-                    Some(q) => {
-                        paired[q] = true;
-                        let Only::Left(i) = diff[q] else { unreachable!() };
-                        Edit::Moved { twin: i, door: j }
-                    }
-                    None => Edit::Only(Only::Right(j)),
-                }
-            }
-        };
-        paired[k] = true;
-        out.push(edit);
+        }
     }
     out
 }
@@ -988,6 +995,38 @@ mod tests {
         );
         assert_eq!(f.matches("only in ").count(), 1, "{f}");
         assert!(!f.contains("another order"), "{f}");
+    }
+
+    /// A block that repeats a line, as `BrowserFrame` repeats its
+    /// `skip_serializing_if` attribute, with two fields swapped: the field that
+    /// moved is printed once as moved, and the repeated attribute, which sits at
+    /// the same place in both blocks, is not printed at all (kotton #305).
+    #[test]
+    fn a_repeated_line_at_the_same_place_in_both_blocks_is_not_printed_as_moved() {
+        let skip = "    #[serde(default, skip_serializing_if = \"Option::is_none\")]";
+        let (user, channel) = ("    user_id: Option<String>", "    channel: Option<String>");
+        let twin = [skip, user, skip, channel];
+        let door = [skip, channel, skip, user];
+        assert_eq!(block_diff(&twin, &door), vec![Edit::Moved { twin: 1, door: 3 }]);
+
+        let block = |lines: &[&str]| format!("BrowserFrame\n{}\n", lines.join("\n"));
+        let dir = tree(&[
+            (DOOR_RECORDING, &recording(&format!("{}NodeRelay\n    user_id: String\n", block(&door)))),
+            (TWIN_RECORDINGS[0], &recording(&block(&twin))),
+            (TWIN_RECORDINGS[1], &recording("NodeRelay\n    user_id: String\n")),
+        ]);
+        let findings = twin_findings(dir.path());
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        let f = &findings[0];
+        // Header two lines, `BrowserFrame` on 3: `user_id` is on 5 in the twin, 7 in the door.
+        let moved: Vec<&str> = f.lines().filter(|l| l.trim_start().starts_with("moved:")).collect();
+        assert_eq!(
+            moved,
+            vec![format!("    moved: {}:5, {DOOR_RECORDING}:7: |{user}|", TWIN_RECORDINGS[0])],
+            "{f}"
+        );
+        assert!(!f.contains("only in "), "{f}");
+        assert!(f.contains("another order"), "{f}");
     }
 
     /// A trailing space on one side is a different byte in the recording; the
