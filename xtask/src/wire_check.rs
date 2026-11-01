@@ -578,7 +578,6 @@ fn channel_surface(
     channel: &Channel,
 ) -> Result<(BTreeMap<String, Variant>, String), String> {
     let mut variants: BTreeMap<String, Variant> = BTreeMap::new();
-    let mut scanned = 0usize;
     for (path, enum_name) in channel.sources {
         let Ok(src) = std::fs::read_to_string(root.join(path)) else {
             return Err(format!("could not read {path}. Run from the workspace root."));
@@ -591,7 +590,6 @@ fn channel_surface(
                  check has stopped looking at the thing it guards."
             ));
         }
-        scanned += 1;
         for v in found {
             if let Some(prev) = variants.insert(v.name.clone(), v) {
                 return Err(format!(
@@ -602,9 +600,6 @@ fn channel_surface(
                 ));
             }
         }
-    }
-    if scanned != channel.sources.len() {
-        return Err(format!("{scanned} of {} sources scanned.", channel.sources.len()));
     }
     let rendered = render(&variants, channel.what);
     Ok((variants, rendered))
