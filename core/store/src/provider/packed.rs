@@ -74,6 +74,11 @@
 //!   wherever it sorts, compaction does not run and retirement keeps its
 //!   superblock (`held_generation`). The data only that manifest names is
 //!   unreadable, and kept on the shelf, never deleted.
+//! - **It does not count as a fallback.** Retirement keeps two generations
+//!   that are not held beside every held one (`retire_superseded`,
+//!   kotton #316), so a commit past a held generation keeps the generation it
+//!   was built on, and a tear of that commit still leaves a state that
+//!   decodes.
 //!
 //! That is the concession: one bad ref costs the person the data only its
 //! generation names, readable again once the generation is repaired, and
@@ -114,7 +119,7 @@ use crate::manifest::{
 use crate::pack::{open_pack, read_chunk_from_plaintext, scan_chunks, ChunkRef};
 use crate::superblock::{
     commit_superblock, load_adopted_superblock, load_current_superblock, read_superblock,
-    retirable_superblocks, superblock_keys, PassedOver, Superblock, SUPERBLOCK_PREFIX,
+    superblock_keys, PassedOver, Superblock, SUPERBLOCK_PREFIX,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -2066,17 +2071,46 @@ async fn held_generation<S: SealedObjectAccess + ?Sized>(
     }
 }
 
-/// Retire the superblocks a commit superseded (`retirable_superblocks`),
-/// keeping any held generation ([`held_generation`]): its superblock is what
-/// holds the packs only it names. Returns how many were deleted.
+/// Retire the superblocks a commit superseded, keeping **two generations
+/// that are not held, beside every held one** ([`held_generation`]).
+///
+/// The walk is newest first. A held generation is never retired: its
+/// superblock is what holds the packs only it names. It is also not counted
+/// toward the two, because it is not adoptable: a commit past it
+/// (kotton #316) that kept only the two newest superblocks would keep the
+/// held one and the commit, and retire the generation the commit was built
+/// on, so a tear of the commit would leave nothing that decodes. Past the
+/// second generation that is not held, everything not held is retired.
+///
+/// "Not held" is not yet "adoptable": a superblock that does not open (torn)
+/// is not held, and counts toward the two. A torn twin sorting between a
+/// commit and the generation it was built on can still take the place of
+/// that generation; that gap is reported with kotton #368, not closed here.
+///
+/// The cost: every present generation is classified, so retirement reads
+/// the manifest of the two newest too, where it used to read only the
+/// manifests past them. Normally those are the states the commit just wrote
+/// and was built on, which this device holds. With three superblocks present
+/// that is three manifest reads where there was one; with two or fewer
+/// nothing is read, as before. Returns how many were deleted.
 async fn retire_superseded<S: SealedObjectAccess + ?Sized>(
     store: &S,
     k_pack: &[u8; 32],
 ) -> ObjectStorageResult<usize> {
+    const ADOPTABLE_KEPT: usize = 2;
+    let keys = superblock_keys(store).await?;
+    if keys.len() <= ADOPTABLE_KEPT {
+        return Ok(0);
+    }
+    let mut kept = 0usize;
     let mut retired = 0usize;
-    for key in retirable_superblocks(store).await? {
+    for (_, key) in keys {
         if let Some(why) = held_generation(store, k_pack, &key).await? {
             tracing::warn!(%key, error = %why, "keeping a superblock generation whose manifest was refused");
+            continue;
+        }
+        if kept < ADOPTABLE_KEPT {
+            kept += 1;
             continue;
         }
         store.delete_sealed(Path::new(&key)).await?;
@@ -5838,6 +5872,7 @@ mod tests {
         backing: &MemoryObjectStorage,
         slot: &crate::fetch::PackSlot,
     ) -> PackedObjectStorage<BlindedObjectStorage<EncryptedObjectStorage<crate::fetch::FetchOnMiss>>> {
+        route_warns();
         let shelf = crate::fetch::FetchOnMiss::new(Arc::new(backing.clone()), "alice", slot.clone());
         let enc = EncryptedObjectStorage::new(shelf, CEK);
         PackedObjectStorage::new(BlindedObjectStorage::new(enc, derive_path_blind_key(&CEK)), derive_pack_key(&CEK))
@@ -5897,11 +5932,28 @@ mod tests {
             .into_iter().map(|m| m.key).filter(|k| k.contains(&tag)).collect()
     }
 
-    /// The `warn` lines emitted on this thread while it is alive: the channel
-    /// the generation fallback reports on (`crate::superblock`). A
-    /// current-thread test runtime keeps every poll on this thread.
-    struct WarnLines(Arc<Mutex<Vec<String>>>);
-    impl tracing::Subscriber for WarnLines {
+    /// The `warn` lines emitted on a thread while a [`WarnCapture`] is open
+    /// on it: the channel the generation fallback reports on
+    /// (`crate::superblock`). A current-thread test runtime keeps every poll
+    /// on the test's thread.
+    ///
+    /// It is installed once, as the process's subscriber, by [`route_warns`]
+    /// before any store is built, not per test with `set_default`. With one
+    /// dispatcher, tracing-core computes a callsite's interest against the
+    /// *registering thread's* default and stores it afterwards
+    /// (`DefaultCallsite::register`, 0.1.36). So a test thread that registered
+    /// the refusal's `warn` while another had a scoped capture open stored
+    /// "never" for it, past that capture's `rebuild_interest_cache`, and the
+    /// capture came back empty (seen beside kotton #316's test, which passes
+    /// over a generation as early as the fallback test does). With this
+    /// subscriber every thread's default, every interest it computes is the
+    /// same, whichever thread registers.
+    struct WarnRouter;
+    thread_local! {
+        static WARN_CAPTURE: std::cell::RefCell<Option<Arc<Mutex<Vec<String>>>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    impl tracing::Subscriber for WarnRouter {
         fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
             *m.level() <= tracing::Level::WARN
         }
@@ -5918,12 +5970,44 @@ mod tests {
                     let _ = write!(self.0, "{}={v:?} ", f.name());
                 }
             }
-            let mut line = String::new();
-            event.record(&mut Line(&mut line));
-            self.0.lock().unwrap().push(line);
+            WARN_CAPTURE.with(|capture| {
+                if let Some(lines) = capture.borrow().as_ref() {
+                    let mut line = String::new();
+                    event.record(&mut Line(&mut line));
+                    lines.lock().unwrap().push(line);
+                }
+            });
         }
         fn enter(&self, _: &tracing::span::Id) {}
         fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Install [`WarnRouter`] as the process's subscriber, once. Every store a
+    /// capturing test builds comes from [`fetching`], which calls this first.
+    fn route_warns() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            tracing::subscriber::set_global_default(WarnRouter).expect("no other subscriber in kotton-store's tests");
+        });
+    }
+
+    /// The `warn` lines emitted on this thread until it is dropped.
+    struct WarnCapture(Arc<Mutex<Vec<String>>>);
+    impl WarnCapture {
+        fn open() -> Self {
+            route_warns();
+            let lines = Arc::new(Mutex::new(Vec::new()));
+            WARN_CAPTURE.with(|capture| *capture.borrow_mut() = Some(lines.clone()));
+            WarnCapture(lines)
+        }
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+    impl Drop for WarnCapture {
+        fn drop(&mut self) {
+            WARN_CAPTURE.with(|capture| *capture.borrow_mut() = None);
+        }
     }
 
     /// **A newer manifest that does not decode is passed over, like a
@@ -5961,12 +6045,7 @@ mod tests {
         let drive = Arc::new(AnsweringDrive { asked: Default::default() });
         slot.lend(drive.clone());
         let before = shelf_keys(&backing).await;
-        let lines = Arc::new(Mutex::new(Vec::new()));
-        let _capture = tracing::subscriber::set_default(WarnLines(lines.clone()));
-        // Another test may already have registered the warn's callsite with
-        // no subscriber, and `Dispatch::new` rebuilds interest before
-        // `set_default` counts this one: rebuild now that it does.
-        tracing::callsite::rebuild_interest_cache();
+        let capture = WarnCapture::open();
 
         let fresh = fetching(&backing, &slot);
         assert_eq!(fresh.get(Path::new("notes/a.md")).await.unwrap().as_ref(), b"older");
@@ -5976,7 +6055,7 @@ mod tests {
             matches!(fresh.get(Path::new("notes/b.md")).await, Err(ObjectStorageError::NotFound(_))),
             "a file only the refused generation names was served"
         );
-        let refused = lines.lock().unwrap().clone();
+        let refused = capture.lines();
         assert!(
             refused.iter().any(|l| l.contains("_pack/../x") && l.contains("00000000000000000002-")),
             "the refusal was not reported: {refused:?}"
@@ -6062,6 +6141,62 @@ mod tests {
         }
         assert!(matches!(fresh.get(Path::new("notes/b.md")).await, Err(ObjectStorageError::NotFound(_))));
         assert_eq!(drive.asked.load(Ordering::SeqCst), 0, "a drive was asked for the bad id");
+    }
+
+    /// **A commit past a held generation keeps the last good generation**
+    /// (kotton #316, PR 298's review).
+    ///
+    /// Generation 1 holds `a`; generation 2 is held (its manifest names
+    /// `_pack/../x`); a write commits generation 3. Retirement keeps two
+    /// generations that are not held beside the held one, so generation 1 is
+    /// still on the shelf, and when generation 3 is then torn the mount reads
+    /// `a` from it. A further commit retires generation 1 and keeps the held
+    /// one: two adoptable generations are kept, not every one.
+    #[tokio::test]
+    async fn a_commit_past_a_held_generation_keeps_the_last_good_generation() {
+        let backing = MemoryObjectStorage::new();
+        let slot = crate::fetch::PackSlot::default();
+        let s = fetching(&backing, &slot);
+        s.put(Path::new("notes/a.md"), b"one").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let good = superblocks_of(&s, 1).await;
+        assert_eq!(good.len(), 1);
+        commit_forged_manifest(&s, "notes/a.md", "_pack/../x", 2).await;
+        let held = superblocks_of(&s, 2).await;
+        assert_eq!(held.len(), 1);
+
+        let fresh = fetching(&backing, &slot);
+        fresh.put(Path::new("notes/d.md"), b"four").await.unwrap();
+        let third = fresh.pack_loose().await.unwrap().unwrap();
+        assert_eq!(third.generation, Some(3));
+        let shelf = shelf_keys(&backing).await;
+        assert!(shelf.contains(&held[0]), "the held generation was retired");
+        assert!(shelf.contains(&good[0]), "the last good generation was retired");
+
+        let newest = superblocks_of(&fresh, 3).await;
+        assert_eq!(newest.len(), 1);
+        fresh.inner.put_sealed(Path::new(&newest[0]), b"torn mid-write").await.unwrap();
+        let after_tear = fetching(&backing, &slot);
+        assert_eq!(
+            after_tear.get(Path::new("notes/a.md")).await.expect("no generation decodes once generation 3 is torn").as_ref(),
+            b"one"
+        );
+
+        // Remove the torn superblock and commit twice: generation 1 is then the third
+        // generation that is not held, and goes; the held one stays.
+        let again = fetching(&backing, &slot);
+        again.inner.delete_sealed(Path::new(&newest[0])).await.unwrap();
+        again.put(Path::new("notes/e.md"), b"five").await.unwrap();
+        let recommitted = again.pack_loose().await.unwrap().unwrap();
+        assert_eq!(recommitted.generation, Some(3), "the recommit is numbered above the held generation");
+        again.put(Path::new("notes/f.md"), b"six").await.unwrap();
+        again.pack_loose().await.unwrap();
+        let shelf = shelf_keys(&backing).await;
+        assert!(shelf.contains(&held[0]), "the held generation was retired");
+        assert!(!shelf.contains(&good[0]), "a third generation that is not held was kept");
+        for (path, bytes) in [("notes/a.md", &b"one"[..]), ("notes/e.md", b"five"), ("notes/f.md", b"six")] {
+            assert_eq!(fetching(&backing, &slot).get(Path::new(path)).await.unwrap().as_ref(), bytes, "{path}");
+        }
     }
 
     /// **Only a pack-id refusal is skipped.** A manifest of a version this
