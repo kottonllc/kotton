@@ -10,6 +10,9 @@ authors.workspace = true
 # takes: nothing in this crate rewrites a key (kotton #275, #320).
 kotton-sys = { path = "../sys" }
 anyhow = "1.0"
+# A directory key a listing names that is not canonical is skipped and
+# named in the log (kotton #336).
+tracing = { workspace = true }
 
 [lints]
 workspace = true

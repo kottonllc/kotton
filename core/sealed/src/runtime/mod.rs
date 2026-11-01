@@ -94,15 +94,33 @@ impl<'a> Sealed<'a> {
     /// missing everything below the top level.
     ///
     /// Directory-marker keys (trailing `/`) are skipped; they are never
-    /// readable objects. The directories the walk descends are the keys the
-    /// store itself listed, not a caller's words.
+    /// readable objects.
+    ///
+    /// **A directory is descended only once admitted** (kotton #336). The
+    /// keys the walk descends are the ones the store listed, and a listing is
+    /// what the store's contents spell: a filesystem store rebuilds each key
+    /// from a file's name, decoding `%2F` to `/`, so a directory named
+    /// `..%2Fx` is listed as `../x`, and a bucket's keys are whatever was
+    /// written to it. Neither is a reason to trust the listing, so each
+    /// directory key is parsed into a [`StorageKey`] where the listing enters
+    /// the walk, and the store is asked to list only its root or an admitted
+    /// key. One that is not canonical is skipped, not a refusal of the whole
+    /// listing, as a sync pass skips the keys it refuses: nothing under it is
+    /// listed, every canonical object is still returned, and the refusal is
+    /// named in the log with the store. It is not counted in the answer:
+    /// the wire's `SealedList` has no field to carry a count to the reader.
+    ///
+    /// A leaf's key is returned as the store spelled it. Nothing here reads
+    /// or writes it; every caller that does admits it where this listing
+    /// enters it (a sync pass, a drive move), so a second admission here
+    /// would be a second guard on the same key.
     pub async fn list(&self, prefix: Option<&StorageKey>) -> Result<Vec<(String, u64, Option<u64>)>> {
         let mut out = Vec::new();
-        let mut queue: Vec<String> = vec![prefix.map_or_else(String::new, |k| k.as_str().to_string())];
+        let mut queue: Vec<Option<StorageKey>> = vec![prefix.cloned()];
         while let Some(dir) = queue.pop() {
             let entries = self
                 .store
-                .list_sealed(Path::new(&dir))
+                .list_sealed(dir.as_ref().map_or(Path::new(""), StorageKey::as_path))
                 .await
                 .with_context(|| {
                     format!("Failed to list sealed on store '{}'", self.store_name)
@@ -112,7 +130,13 @@ impl<'a> Sealed<'a> {
                     continue;
                 }
                 if m.is_dir {
-                    queue.push(m.key);
+                    match StorageKey::parse(&m.key) {
+                        Ok(key) => queue.push(Some(key)),
+                        Err(refused) => tracing::warn!(
+                            store = self.store_name,
+                            "sealed list: {refused}; the directory is not descended"
+                        ),
+                    }
                 } else {
                     out.push((m.key, m.size, m.modified));
                 }
@@ -131,19 +155,31 @@ mod tests {
     use kotton_sys::store::{ObjectMetadata, ObjectStorage, ObjectStorageError, ObjectStorageResult};
     use std::sync::Mutex;
 
-    /// A store that answers nothing and records every key it is asked for:
-    /// what the sealed view hands a store is exactly what these tests read.
+    /// A store that records every key it is asked for, and lists, for a
+    /// prefix, the entries it was given for it (nothing otherwise): what the
+    /// sealed view hands a store is exactly what these tests read.
     #[derive(Default)]
-    struct Asked(Mutex<Vec<String>>);
+    struct Asked {
+        asked: Mutex<Vec<String>>,
+        listing: Vec<(&'static str, Vec<ObjectMetadata>)>,
+    }
 
     impl Asked {
         fn note(&self, key: &Path) -> ObjectStorageResult<()> {
-            self.0.lock().unwrap().push(key.to_string_lossy().into_owned());
+            self.asked.lock().unwrap().push(key.to_string_lossy().into_owned());
             Ok(())
         }
         fn asked(&self) -> Vec<String> {
-            self.0.lock().unwrap().clone()
+            self.asked.lock().unwrap().clone()
         }
+    }
+
+    fn dir(key: &str) -> ObjectMetadata {
+        ObjectMetadata { key: key.into(), is_dir: true, size: 0, modified: None }
+    }
+
+    fn leaf(key: &str, size: u64) -> ObjectMetadata {
+        ObjectMetadata { key: key.into(), is_dir: false, size, modified: Some(7) }
     }
 
     #[async_trait]
@@ -179,7 +215,8 @@ mod tests {
         }
         async fn list_sealed(&self, prefix: &Path) -> ObjectStorageResult<Vec<ObjectMetadata>> {
             self.note(prefix)?;
-            Ok(Vec::new())
+            let prefix = prefix.to_string_lossy();
+            Ok(self.listing.iter().find(|(p, _)| *p == prefix).map(|(_, l)| l.clone()).unwrap_or_default())
         }
     }
 
@@ -202,5 +239,29 @@ mod tests {
         let refused = StorageKey::parse("../x").unwrap_err();
         assert_eq!(refused.to_string(), "storage key \"../x\" refused: a component is `.` or `..`");
         assert_eq!(store.asked().len(), 4, "a refused key reached the store");
+    }
+
+    /// **The walk descends only into directory keys it admitted** (kotton
+    /// #336). A filesystem store rebuilds each key from a file's name,
+    /// decoding `%2F` to `/`, so a directory named `..%2Fx` is listed as
+    /// `../x`. The walk refuses it where the listing enters, before it asks
+    /// the store for anything under it, and returns everything else: the
+    /// root's leaf and the leaf under the canonical directory `a`.
+    #[test]
+    fn a_listed_directory_that_is_not_canonical_is_not_descended() {
+        let store = Asked {
+            listing: vec![
+                ("", vec![dir("../x"), leaf("top", 3), dir("a")]),
+                ("a", vec![leaf("a/b", 5)]),
+                ("../x", vec![leaf("../x/served", 6)]),
+            ],
+            ..Asked::default()
+        };
+        let listed = block_on(Sealed::new(&store, "asked").list(None)).unwrap();
+
+        assert_eq!(store.asked(), ["", "a"], "the store was asked under a directory key that is not canonical");
+        let mut listed: Vec<_> = listed.into_iter().map(|(k, size, _)| (k, size)).collect();
+        listed.sort();
+        assert_eq!(listed, [("a/b".to_string(), 5), ("top".to_string(), 3)]);
     }
 }
