@@ -201,21 +201,7 @@ mod tests {
     use super::*;
     use crate::ipc::{SecretText, UserRequest};
     use crate::recorded_surface::read;
-    use crate::recorded_twin::each_verb_records_its_door_twin;
-
-    /// The peer wire's recorded surface, and the door's.
-    const PEER_SURFACE: &str = include_str!("../../peer-request-surface.txt");
-    const DOOR_SURFACE: &str = include_str!("../../wire-surface.txt");
-
-    /// Variant names of a recorded surface, read by the one reader of the format,
-    /// which holds the recording to its own `# variants: N` header.
-    fn variants(surface: &str) -> Vec<&str> {
-        read(surface)
-            .unwrap_or_else(|e| panic!("a recorded surface cannot be read as one: {e}"))
-            .into_iter()
-            .map(|b| b.name)
-            .collect()
-    }
+    use crate::recorded_twin::{each_verb_records_its_door_twin, variants, DOOR_SURFACE, PEER_SURFACE};
 
     /// Every variant, built: what a device's client and a gateway send.
     fn every_peer_verb_as_the_door_spells_it() -> Vec<UserRequest> {
@@ -295,7 +281,7 @@ mod tests {
     /// before a device and a gateway of different builds disagree.
     #[test]
     fn each_peer_verb_records_the_fields_of_its_door_twin() {
-        each_verb_records_its_door_twin(DOOR_SURFACE, "peer-request-surface.txt", PEER_SURFACE);
+        each_verb_records_its_door_twin("peer-request-surface.txt", PEER_SURFACE);
     }
 
     /// **No verb on the peer wire writes or reads a record.** Every door verb

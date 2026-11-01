@@ -17,10 +17,28 @@
 
 use crate::recorded_surface::read;
 
+/// The door's recording, `wire-surface.txt`, which every peer wire's recording is held to.
+pub const DOOR_SURFACE: &str = include_str!("../wire-surface.txt");
+
+/// A device's peer wire's recording, `peer-request-surface.txt`.
+pub const PEER_SURFACE: &str = include_str!("../peer-request-surface.txt");
+
+/// Variant names of a recorded surface, read by the one reader of the format, which holds
+/// the recording to its own `# variants: N` header. It needs only the reader and the text,
+/// so it sits here with the recordings it is asked of; `recorded_surface.rs` is compiled
+/// into xtask, which has no use for it.
+pub fn variants(surface: &str) -> Vec<&str> {
+    read(surface)
+        .unwrap_or_else(|e| panic!("a recorded surface cannot be read as one: {e}"))
+        .into_iter()
+        .map(|b| b.name)
+        .collect()
+}
+
 /// Each verb of `twin` (recorded in `twin_file`) records its block in the door's
-/// recording `door` (`wire-surface.txt`), line for line.
-pub fn each_verb_records_its_door_twin(door: &str, twin_file: &str, twin: &str) {
-    let door = read(door).unwrap_or_else(|e| panic!("wire-surface.txt: {e}"));
+/// recording ([`DOOR_SURFACE`], `wire-surface.txt`), line for line.
+pub fn each_verb_records_its_door_twin(twin_file: &str, twin: &str) {
+    let door = read(DOOR_SURFACE).unwrap_or_else(|e| panic!("wire-surface.txt: {e}"));
     for block in read(twin).unwrap_or_else(|e| panic!("{twin_file}: {e}")) {
         let Some(door_block) = door.iter().find(|d| d.name == block.name) else {
             panic!("{} ({twin_file}:{}) is not on the door's surface", block.name, block.at);

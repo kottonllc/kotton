@@ -465,24 +465,11 @@ impl VaultPeerRequest {
 mod tests {
     use super::*;
     use crate::ipc::UserRequest;
-    use crate::recorded_surface::read;
-    use crate::recorded_twin::each_verb_records_its_door_twin;
+    use crate::recorded_twin::{each_verb_records_its_door_twin, variants, DOOR_SURFACE, PEER_SURFACE};
 
-    /// The vault's peer wire's recorded surface, the door's, and a device's
-    /// peer wire's.
+    /// The vault's peer wire's recorded surface; the door's and a device's are in
+    /// `recorded_twin`.
     const VAULT_PEER_SURFACE: &str = include_str!("../../vault-peer-request-surface.txt");
-    const DOOR_SURFACE: &str = include_str!("../../wire-surface.txt");
-    const PEER_SURFACE: &str = include_str!("../../peer-request-surface.txt");
-
-    /// Variant names of a recorded surface, read by the one reader of the format,
-    /// which holds the recording to its own `# variants: N` header.
-    fn variants(surface: &str) -> Vec<&str> {
-        read(surface)
-            .unwrap_or_else(|e| panic!("a recorded surface cannot be read as one: {e}"))
-            .into_iter()
-            .map(|b| b.name)
-            .collect()
-    }
 
     /// Every variant, built as the door spells it.
     fn every_vault_verb_as_the_door_spells_it() -> Vec<UserRequest> {
@@ -562,7 +549,7 @@ mod tests {
     /// Each vault verb's recorded fields are its door twin's, line for line.
     #[test]
     fn each_vault_verb_records_the_fields_of_its_door_twin() {
-        each_verb_records_its_door_twin(DOOR_SURFACE, "vault-peer-request-surface.txt", VAULT_PEER_SURFACE);
+        each_verb_records_its_door_twin("vault-peer-request-surface.txt", VAULT_PEER_SURFACE);
     }
 
     /// **No door verb but the vault's decodes on the vault's peer wire** — the
