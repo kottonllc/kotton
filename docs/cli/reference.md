@@ -471,7 +471,7 @@ RETIRED:
 
 ###### **Arguments:**
 
-* `<ARGS>` — Arguments: `device add [--as NAME] [--blind|--cosigner] | device add --browser | device add --gateway <code> | device join [code] [--as NAME] | device list | device revoke <id> | device revoke --browser <name> | device name [NAME] | device reset [--yes]`
+* `<ARGS>` — Arguments to the verb: `add [--as NAME] [--blind|--cosigner]` | `add --browser` | `add --gateway <code>` | `join [code] [--as NAME]` | `list` | `revoke <id>` | `revoke --browser <name>` | `name [NAME]` | `reset [--yes]`
 
 ###### **Options:**
 

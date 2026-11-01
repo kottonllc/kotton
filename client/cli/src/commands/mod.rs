@@ -79,17 +79,20 @@ fn shell_help(name: &str) -> String {
     DOOR.get_or_init(|| kotton_shell::ShellExecutor::new().registry()).help_of(name).unwrap_or_default()
 }
 
-/// The `<ARGS>` help of `device`: the shell's grammar, whole, as its usage line prints it
-/// ([`kotton_shell::device_usage_grammar`]), so both doors print one grammar and this one
-/// spells none of the shell's words (kotton #326); then `reset`, which is this door's alone,
-/// with its own word ([`device::YES_WORD`], the one `reset` reads). In backticks, as the
-/// reference page renders it: the grammar's `<code>` and `<id>` are placeholders, not markup.
+/// The `<ARGS>` help of `device`, in its siblings' form (`Arguments to the verb:`, each
+/// alternative in backticks, so `<code>` and `<id>` render as placeholders, not markup): the
+/// shell's grammar ([`kotton_shell::device_grammar`]), each alternative as it is, since clap
+/// prints `kotton device` before it, so both doors print one grammar and this one spells none
+/// of the shell's words (kotton #326, #361); then `reset`, which is this door's alone, with its
+/// own word ([`device::YES_WORD`], the one `reset` reads).
 fn device_args_help() -> String {
-    format!(
-        "Arguments: `{} | device reset [{}]`",
-        kotton_shell::device_usage_grammar(),
-        device::YES_WORD
-    )
+    let reset = format!("reset [{}]", device::YES_WORD);
+    let alternatives: Vec<String> = kotton_shell::device_grammar()
+        .iter()
+        .chain(std::iter::once(&reset))
+        .map(|line| format!("`{line}`"))
+        .collect();
+    format!("Arguments to the verb: {}", alternatives.join(" | "))
 }
 
 #[derive(Subcommand)]
@@ -134,8 +137,8 @@ pub enum Commands {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        // Its help is `device_args_help()`: the shell's grammar, printed whole, so it is not
-        // written here.
+        // Its help is `device_args_help()`: the shell's grammar, rendered after this door's
+        // prefix, so it is not written here.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word, help = device_args_help())]
         args: Vec<String>,
     },
