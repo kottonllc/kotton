@@ -212,6 +212,17 @@ pub const fn device_add_word(posture: Posture) -> DeviceAddWord {
     }
 }
 
+/// `device`'s own words, which ask for no posture: the name a device announces for the
+/// ceremony (`device add` and `device join`), and the browser `device add` admits and `device
+/// revoke` revokes. Spelled here once, beside [`device_add_word`], so every reader of `device
+/// add`'s words reads one vocabulary: the shell's `parse_add`, `join_args` and `revoke`, its
+/// usage line and help page (`client/shell/src/commands/device.rs`), and the daemon's tests of
+/// the hints it prints (`kotton-device`), which cannot reach the shell. Neither is a posture's
+/// word; a test in the shell holds that.
+pub const DEVICE_AS_WORD: &str = "--as";
+/// The browser's word: see [`DEVICE_AS_WORD`].
+pub const DEVICE_BROWSER_WORD: &str = "--browser";
+
 /// The posture `device add` asks for when the line names none: the one posture whose word is
 /// [`DeviceAddWord::Bare`], read off [`device_add_word`] at compile time. None, or two, is a
 /// build error, not a line that means two things.

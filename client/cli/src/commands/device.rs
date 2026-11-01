@@ -110,9 +110,14 @@ async fn daemon_is_up() -> bool {
     )
 }
 
+/// `reset`'s one word: the confirmation it refuses to delete without. `reset` is this door's
+/// alone (the shell does not run it), so its word is spelled here, where [`reset`] reads it,
+/// and the argument help for `device` prints it after the shell's grammar.
+pub const YES_WORD: &str = "--yes";
+
 /// `kotton device reset [--yes]`.
 pub async fn reset(args: &[String]) -> io::Result<()> {
-    let confirmed = args.iter().any(|a| a == "--yes");
+    let confirmed = args.iter().any(|a| a == YES_WORD);
 
     let base = kotton_common::paths::base_dir().map_err(|e| {
         io::Error::other(format!("cannot work out where Kotton keeps this device: {e}"))
@@ -184,7 +189,7 @@ pub async fn reset(args: &[String]) -> io::Result<()> {
     }
 
     if !confirmed {
-        println!("Refusing without --yes. Re-run as: kotton device reset --yes");
+        println!("Refusing without {YES_WORD}. Re-run as: kotton device reset {YES_WORD}");
         // Exit rather than returning an `io::Error`: this is a refusal the person
         // asked for by not passing `--yes`, and it has already said everything it
         // has to say. Returning would print a second, uglier copy through
