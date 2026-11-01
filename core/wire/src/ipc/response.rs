@@ -991,7 +991,8 @@ pub enum UserResponse {
         /// consent prompt, since a signature is what ties it to a publisher.
         publisher_verified: bool,
     },
-    /// What an installed app asked for, and what it actually holds.
+    /// Answer to `AppGrants`: what an installed app asked for, and what it
+    /// actually holds.
     ///
     /// The two lists are deliberately both here. An app's manifest is a request,
     /// and reading it as the grant is the defect
@@ -1058,7 +1059,7 @@ pub enum UserResponse {
     ExtensionRemoved {
         extension_id: String,
     },
-    /// Result of `AppVerify` — re-hashed binary compared against stored hash.
+    /// Answer to `AppVerify`: the re-hashed binary compared against the stored hash.
     AppVerifyResult {
         app_id: String,
         /// Stored BLAKE3 hash (64 hex chars).
@@ -1140,7 +1141,7 @@ pub enum UserResponse {
     },
 
     // -- Org identity Ã¢â‚¬â€ FROST multi-sig (Step 10) ----------------------------
-    /// A FROST org was created. Response to `OrgFrostNew`.
+    /// A FROST org was created. Answer to `OrgFrostNew`.
     ///
     /// The initiator must securely deliver `shares[i].1` to participant `i+2`
     /// (1-based index). Share at index 0 is for participant 2, etc.
@@ -1152,12 +1153,12 @@ pub enum UserResponse {
         /// The initiator's share (index 1) is already stored in the daemon.
         shares: Vec<(u16, crate::ipc::vault_request::SecretText)>,
     },
-    /// A participant successfully joined a FROST org. Response to `OrgFrostJoin`.
+    /// A participant successfully joined a FROST org. Answer to `OrgFrostJoin`.
     OrgFrostJoined {
         /// The `did:key:Ã¢â‚¬Â¦` of the joined org.
         org_did: String,
     },
-    /// A FROST signing session was initiated. Response to `OrgFrostSignBegin`.
+    /// A FROST signing session was initiated. Answer to `OrgFrostSignBegin`.
     ///
     /// The coordinator prints `session_id`, `message_hex`, `my_id_hex`, and
     /// `my_commitment_hex` and shares them with a co-signer so they can
@@ -1172,7 +1173,7 @@ pub enum UserResponse {
         /// Coordinator's round-1 commitment (hex).  Needed by the co-signer.
         coordinator_commitment_hex: String,
     },
-    /// A co-signer completed their contribution. Response to `OrgFrostSignContribute`.
+    /// A co-signer completed their contribution. Answer to `OrgFrostSignContribute`.
     ///
     /// Return `cosigner_id_hex`, `cosigner_commitment_hex`, and
     /// `cosigner_share_hex` to the coordinator so they can call
@@ -1186,7 +1187,7 @@ pub enum UserResponse {
         cosigner_share_hex: crate::ipc::vault_request::SecretText,
     },
     /// The FROST signing ceremony completed and the grant was issued.
-    /// Response to `OrgFrostSignFinalize`.
+    /// Answer to `OrgFrostSignFinalize`.
     OrgFrostSigned {
         /// The `GrantEnvelope.id` of the newly issued grant.
         envelope_id: String,
@@ -1197,7 +1198,7 @@ pub enum UserResponse {
     AppList {
         apps: Vec<InstalledApp>,
     },
-    /// The app ID registered for a named system role.
+    /// Answer to `AppGetRole`: the app ID registered for a named system role.
     AppRole {
         role: String,
         app_id: String,

@@ -1659,7 +1659,7 @@ pub enum UserRequest {
     /// It is also the surface a user is owed: "what does this app hold" should
     /// be answerable without reading a manifest off disk.
     ///
-    /// Returns [`UserResponse::AppGrants`].
+    /// Answered with [`UserResponse::AppGrants`].
     AppGrants {
         app_id: String,
     },
@@ -1691,8 +1691,8 @@ pub enum UserRequest {
     },
     /// Re-hash the installed WASM binary and confirm it matches the stored hash.
     ///
-    /// Returns [`UserResponse::AppVerifyResult`] with the stored hash, computed
-    /// hash, and a boolean indicating whether they match.
+    /// Answered with [`UserResponse::AppVerifyResult`], carrying the stored hash,
+    /// the computed hash, and a boolean indicating whether they match.
     AppVerify {
         app_id: String,
     },
@@ -1811,8 +1811,8 @@ pub enum UserRequest {
     },
     /// Query which app is registered for a named system role.
     ///
-    /// Returns [`DeviceResponse::AppRole`] with the `app_id`, or
-    /// [`DeviceResponse::AppNotFound`] if no app is registered for the role.
+    /// Answered with [`UserResponse::AppRole`], carrying the `app_id`, or
+    /// [`UserResponse::AppNotFound`] if no app is registered for the role.
     AppGetRole {
         /// Named role to look up, e.g. `"shell"` or `"dock"`.
         role: String,
@@ -1969,6 +1969,8 @@ pub enum UserRequest {
     /// `PublicKeyPackage` in SQLite, and returns the share blobs for all other
     /// participants. Each share blob must be delivered to its participant over a
     /// confidential channel; the participant imports it with `OrgFrostJoin`.
+    ///
+    /// Answered with `OrgFrostCreated`.
     OrgFrostNew {
         user_id: String,
         /// Human-readable org name.
@@ -1985,6 +1987,8 @@ pub enum UserRequest {
     /// converts it to a `KeyPackage`, stores it in `frost_key_packages`, and
     /// also inserts a row in `org_identities` (so the org is visible in
     /// `OrgList`).
+    ///
+    /// Answered with `OrgFrostJoined`.
     OrgFrostJoin {
         user_id: String,
         /// Human-readable name for the org (used in `org_identities`).
@@ -2005,6 +2009,8 @@ pub enum UserRequest {
     ///
     /// Called internally from `OrgGrantIssue` when `is_frost_org` returns true;
     /// also callable directly.
+    ///
+    /// Answered with `OrgFrostSignSession`.
     OrgFrostSignBegin {
         user_id: String,
         /// DID of the FROST org issuing the grant.
@@ -2027,6 +2033,8 @@ pub enum UserRequest {
     ///
     /// The result (commitment + share) is sent back to the coordinator, who
     /// calls `OrgFrostSignFinalize`.
+    ///
+    /// Answered with `OrgFrostContributed`.
     OrgFrostSignContribute {
         user_id: String,
         /// Session ID printed by `OrgFrostSignBegin`.
@@ -2048,6 +2056,8 @@ pub enum UserRequest {
     /// 3. Calls `frost::aggregate` with both shares.
     /// 4. Embeds the resulting Ed25519 signature into the `GrantEnvelope`.
     /// 5. Stores the envelope in `org_members` (same as single-key path).
+    ///
+    /// Answered with `OrgFrostSigned`.
     OrgFrostSignFinalize {
         user_id: String,
         /// Session ID from `OrgFrostSignBegin`.

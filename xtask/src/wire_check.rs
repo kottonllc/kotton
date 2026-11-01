@@ -128,6 +128,20 @@
 //!   verb is a `UserRequest` verb; `VaultRequest::Tenants` and `UserRequest::Tenants` are
 //!   two verbs, and an answer to both names both.
 //!
+//! **One spelling per side.** The claim was also written "Returns
+//! `UserResponse::AppGrants`" (in brackets, as a link) on verbs and "Response to `OrgFrostNew`" on answers.
+//! A reader of one form passes a doc in the other unread, so a drifted doc could hide
+//! behind a synonym (kotton #369). What made a check of the other spellings necessary was
+//! the second spelling itself, so the fix is to have one: the tree's instances are
+//! reworded, and [`refused_spellings`] refuses each other spelling the rule recognises
+//! ([`Kind::Spelling`]), naming the line and the one form, rather than reading it as well.
+//! Reading both would keep two forms alive for every reader after this one; refusing them
+//! keeps every claim inside the one reader above. The refusal keys on the enum path, as the
+//! claim does: "Returns" counts only before a `UserResponse::X` span, so a doc returning
+//! another enum's variant (`DeviceRequest::Ping`'s `SysResponse::Pong` in `sys_ipc.rs`) or a
+//! bare `true` is not refused, and "Response to" counts only on a `UserResponse` variant in
+//! [`RESPONSE_SOURCE`], so `DeviceResponse::Pong`'s is not.
+//!
 //! Each claimed name must be a variant in [`RESPONSE_RECORDING`], read through
 //! [`recorded_surface::read`], the one reader ([`Kind::Answer`]). A verb claiming `X`
 //! must be in `X`'s list, and each verb in `X`'s list must claim `X`
@@ -141,6 +155,22 @@
 //! answers in [`GENERIC_ANSWERS`] (`Ok`) need no list, since one would grow with every
 //! verb that answers with it and be the doc most likely to drift; a claim of `Ok` is
 //! still held to the recording.
+//!
+//! **Two docs, not the handler.** The rule holds the two docs to each other, not to the
+//! code that answers, so a change that edits both wrongly passes. A handler-derived map was
+//! weighed and not built (kotton #369). The arms are not where a reader would want them:
+//! `UserRequest` is dispatched in `core/kuserd/src/agent/dispatch.rs`, and most arms call a
+//! function in a domain crate (`kotton_org::daemon::frost_orgs::org_frost_new`,
+//! `kotton_app::daemon::apps::app_get_role`) returning `io::Result<UserResponse>`, often
+//! more than one variant (`AppRole` or `AppNotFound`, and `Error` everywhere). Deriving the
+//! map by text means following calls across a dozen crates; deriving it from types means a
+//! parser in `xtask` and a cold build it does not pay today. The two-doc rule is enough
+//! for now because the drift it was built for (#341) is one doc moved and the other not,
+//! and a drift in both needs two wrong edits in two files in one change, both in front of
+//! a reviewer. What would change that: a drift found with both docs agreeing and the
+//! handler not, or a per-verb answer type (a domain split whose handlers return their own
+//! answer enum), at which point the compiler holds the pair and this rule can retire
+//! rather than grow. The handler-derived check is kotton #382, with that design.
 //!
 //! **One answer type of five.** `core/wire/src` declares five response enums:
 //! `KuidResponse` (`kuid_ipc.rs`), `ContactResponse` (`ipc/contact_request.rs`),
@@ -342,7 +372,8 @@ fn answers_ok(command: &str, report: &AnswerReport) -> String {
     format!(
         "{command}: OK — each of the {} \"Answered with `X`\" docs under {ANSWER_DOCS} names a \
          variant in {RESPONSE_RECORDING}, and each of the {} verbs an \"Answer to\" doc in \
-         {RESPONSE_SOURCE} names says it is answered with that variant.",
+         {RESPONSE_SOURCE} names says it is answered with that variant; no doc spells either \
+         side another way.",
         report.claims, report.answered_verbs
     )
 }
@@ -582,6 +613,70 @@ fn verb_key(written: &str) -> Option<String> {
     (is_ident(enum_name) && is_ident(variant)).then(|| format!("{enum_name}::{variant}"))
 }
 
+/// A spelling of the answer claim the rule recognises and does not read: the line its
+/// name is on, what was written, and the same claim in the one form the rule reads.
+#[derive(Debug, PartialEq)]
+struct Spelling {
+    at: usize,
+    written: String,
+    one_form: String,
+}
+
+/// The claim's other spellings in `src`'s docs, each refused rather than read.
+///
+/// - **On a verb**, "Returns" (any case) and, first in the same clause, a backticked
+///   `UserResponse::X`: the claim "Answered with `X`" says. Keyed on the enum path, so a
+///   doc returning another enum's variant (`DeviceResponse::AppRole`, a bare `true`) is
+///   not a claim the rule holds and is not refused.
+/// - **On an answer**, "Response to" and a backticked verb in a `UserResponse` variant's
+///   doc, read only when `response_source` (the file "Answer to" is read from): the list
+///   "Answer to `V`" says. Another enum's "Response to" is not this rule's.
+fn refused_spellings(src: &str, response_source: bool) -> Vec<Spelling> {
+    let mut out = Vec::new();
+    for block in doc_blocks(src) {
+        let (text, lower) = (&block.text, block.text.to_ascii_lowercase());
+        let span_after = |found: usize, word: &str| {
+            first_span_in_clause(text, found + word.len())
+                .and_then(|open| span_at(text, open).map(|(written, _)| (open, written)))
+        };
+        for found in word_at(&lower, "returns") {
+            let Some((open, written)) = span_after(found, "returns") else { continue };
+            if let Some(answer) = response_variant(written) {
+                out.push(Spelling {
+                    at: block.line_of(open),
+                    written: format!("{} `{written}`", &text[found..found + "returns".len()]),
+                    one_form: format!("Answered with `{answer}`"),
+                });
+            }
+        }
+        let on_answer = block.item.as_deref().and_then(|i| i.strip_prefix(RESPONSE_ENUM)).is_some_and(|r| r.starts_with("::"));
+        if !(response_source && on_answer) {
+            continue;
+        }
+        for found in word_at(&lower, "response to") {
+            let Some((open, written)) = span_after(found, "response to") else { continue };
+            if verb_key(written).is_some() {
+                out.push(Spelling {
+                    at: block.line_of(open),
+                    written: format!("{} `{written}`", &text[found..found + "response to".len()]),
+                    one_form: format!("Answer to `{written}`"),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The variant `written` names when it is a `UserResponse` path (`UserResponse::X`, with
+/// `crate::` or a module path before it); `None` for a bare name or another enum's.
+fn response_variant(written: &str) -> Option<&str> {
+    let parts: Vec<&str> = written.split("::").collect();
+    match parts[..] {
+        [.., enum_name, variant] if enum_name == RESPONSE_ENUM && is_ident(variant) => Some(variant),
+        _ => None,
+    }
+}
+
 /// A verb as a finding prints it: bare for the user channel's, with its enum otherwise.
 fn verb_shown(key: &str) -> &str {
     key.strip_prefix(BARE_VERB_ENUM).and_then(|k| k.strip_prefix("::")).unwrap_or(key)
@@ -657,6 +752,16 @@ fn answer_report(root: &Path) -> AnswerReport {
         if file == RESPONSE_SOURCE {
             response_read = true;
             answer_tos = answer_to_docs(&src);
+        }
+        for spelling in refused_spellings(&src, file == RESPONSE_SOURCE) {
+            report.findings.push((
+                Kind::Spelling,
+                format!(
+                    "  {file}:{}: \"{}\" spells the answer claim another way, which this rule does \
+                     not read; write it \"{}\", the one form it holds.",
+                    spelling.at, spelling.written, spelling.one_form
+                ),
+            ));
         }
         for claim in answer_claims(&src) {
             report.claims += 1;
@@ -766,7 +871,8 @@ fn answer_report(root: &Path) -> AnswerReport {
 fn answer_findings_text(command: &str, findings: &[(Kind, String)]) -> String {
     let mut out = format!(
         "{command}: a doc names an answer the daemon does not give, a verb's doc and its \
-         answer's doc disagree, or one of the two is not written.\n\n"
+         answer's doc disagree, one of the two is not written, or a doc spells the claim \
+         another way.\n\n"
     );
     for (_, finding) in findings {
         out.push_str(&format!("{finding}\n\n"));
@@ -806,6 +912,14 @@ fn answer_findings_text(command: &str, findings: &[(Kind, String)]) -> String {
             "One side of a verb and its answer is written and the other is not, so the two cannot \
              be held together: write the missing side, \"Answered with `X`\" on the verb or \
              \"Answer to `V`\" on the answer.\n\n",
+        );
+    }
+    if has(Kind::Spelling) {
+        out.push_str(
+            "Each side of the claim has one spelling, \"Answered with `X`\" on a verb and \"Answer \
+             to `V`\" on an answer, and the rule holds only that one: a second spelling is a doc \
+             the rule cannot hold, so it is refused rather than read. Reword it to the form \
+             named, in the same commit; the rule then holds it both ways.\n\n",
         );
     }
     out
@@ -990,6 +1104,9 @@ enum Kind {
     Pair,
     /// One side of that pair is written and the other is not.
     Unwritten,
+    /// A doc spells the claim another way the rule recognises ("Returns
+    /// `UserResponse::X`", "Response to `V`") instead of the one form it reads.
+    Spelling,
 }
 
 /// The twin rule over the recorded files under `root`, as text: one finding
@@ -2125,6 +2242,99 @@ pub enum Other {
         // Neither side written: no finding.
         let neither = AGREEING.replace("    /// Answered `Ok`.\n", "");
         assert_eq!(answer_report(answers_tree(&neither).path()).findings, Vec::new());
+    }
+
+    /// "Returns [`UserResponse::X`]" on a verb is the claim in a second spelling: refused,
+    /// naming its line and the one form, and not read as a claim, so the answer's list
+    /// that names the verb is told the verb's side is unwritten. The key is the enum path:
+    /// another enum's variant (`DeviceResponse::AppRole`, request.rs's `AppGetRole` before
+    /// this rule) and a bare span are not this rule's claim and are not refused.
+    #[test]
+    fn a_returns_spelling_on_a_verb_is_refused_naming_the_line_and_the_one_form() {
+        let returns = AGREEING
+            .replace(
+                "    /// Answered with `Drives`.\n    DriveShow,",
+                "    /// Returns [`UserResponse::Drives`].\n    DriveShow,",
+            )
+            .replace(
+                "    AsOperator,\n",
+                "    AsOperator,\n    /// Returns [`DeviceResponse::AppRole`] with the `app_id`.\n    AppGetRole,\n    \
+                 /// Returns `true` when it holds.\n    AppHolds,\n",
+            );
+        let report = answer_report(answers_tree(&returns).path());
+        assert_eq!(
+            report.findings,
+            [
+                (
+                    Kind::Spelling,
+                    format!(
+                        "  {REQUEST}:4: \"Returns `UserResponse::Drives`\" spells the answer claim \
+                         another way, which this rule does not read; write it \"Answered with \
+                         `Drives`\", the one form it holds."
+                    )
+                ),
+                (
+                    Kind::Unwritten,
+                    format!(
+                        "  {RESPONSE_SOURCE}:2: `Drives` is the answer to `DriveShow`, and no doc of \
+                         `DriveShow` under {ANSWER_DOCS} says what it is answered with."
+                    )
+                ),
+            ]
+        );
+        let text = answer_findings_text("wire-check", &report.findings);
+        assert!(text.contains("Reword it to the form named"), "{text}");
+
+        // Lower case, `crate::` before the path, and wrapped onto the next doc line: the
+        // same spelling, at the line of its name.
+        let wrapped = AGREEING.replace(
+            "    /// Answered with `Drives`.\n    DriveShow,",
+            "    /// Shows it, and returns\n    /// [`crate::ipc::UserResponse::Drives`].\n    DriveShow,",
+        );
+        let found: Vec<_> =
+            refused_spellings(&wrapped, false).into_iter().map(|s| (s.at, s.one_form)).collect();
+        assert_eq!(found, [(5, "Answered with `Drives`".to_string())]);
+    }
+
+    /// "Response to `V`" on a `UserResponse` variant is the list in a second spelling:
+    /// refused, naming its line and the one form, and not read as a list, so the verb
+    /// claiming that answer is told the answer's side is unwritten. Another enum's
+    /// "Response to" (`DeviceResponse::Pong`'s in sys_ipc.rs) and one outside the
+    /// response source are not refused.
+    #[test]
+    fn a_response_to_spelling_on_an_answer_is_refused_naming_the_line_and_the_one_form() {
+        let response = RESPONSE.replace("/// Answer to `DriveMove`.", "/// Response to `DriveMove`.")
+            + "pub enum DeviceResponse {\n    /// Response to [`SysRequest::Ping`].\n    Pong,\n}\n";
+        let request = AGREEING.replace("    /// Answered `Ok`.", "    /// Response to `StandAt` is `Ok`. Answered `Ok`.");
+        let dir = tree(&[
+            (RESPONSE_RECORDING, &answers_recording()),
+            (RESPONSE_SOURCE, &response),
+            (REQUEST, &request),
+        ]);
+        let report = answer_report(dir.path());
+        assert_eq!(
+            report.findings,
+            [
+                (
+                    Kind::Spelling,
+                    format!(
+                        "  {RESPONSE_SOURCE}:4: \"Response to `DriveMove`\" spells the answer claim \
+                         another way, which this rule does not read; write it \"Answer to \
+                         `DriveMove`\", the one form it holds."
+                    )
+                ),
+                (
+                    Kind::Unwritten,
+                    format!(
+                        "  {REQUEST}:7: `DriveMove` is answered with `DriveMoved`, and `DriveMoved`'s \
+                         doc in {RESPONSE_SOURCE} names no verb it is the answer to, so this claim \
+                         has no other side to hold it to."
+                    )
+                ),
+            ]
+        );
+        let text = answer_findings_text("wire-check", &report.findings);
+        assert!(text.contains("Reword it to the form named"), "{text}");
     }
 
     /// The response recording read through the one reader: one the reader refuses, or
