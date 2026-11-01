@@ -201,6 +201,7 @@ mod tests {
     use super::*;
     use crate::ipc::{SecretText, UserRequest};
     use crate::recorded_surface::read;
+    use crate::recorded_twin::each_verb_records_its_door_twin;
 
     /// The peer wire's recorded surface, and the door's.
     const PEER_SURFACE: &str = include_str!("../../peer-request-surface.txt");
@@ -214,24 +215,6 @@ mod tests {
             .into_iter()
             .map(|b| b.name)
             .collect()
-    }
-
-    /// Each verb of `twin` records its block in the door's recording, line for line.
-    fn each_verb_records_its_door_twin(twin_file: &str, twin: &str) {
-        let door = read(DOOR_SURFACE).unwrap_or_else(|e| panic!("wire-surface.txt: {e}"));
-        for block in read(twin).unwrap_or_else(|e| panic!("{twin_file}: {e}")) {
-            let Some(door_block) = door.iter().find(|d| d.name == block.name) else {
-                panic!("{} ({twin_file}:{}) is not on the door's surface", block.name, block.at);
-            };
-            assert_eq!(
-                block.texts(),
-                door_block.texts(),
-                "{}'s fields: {twin_file}:{} against wire-surface.txt:{}",
-                block.name,
-                block.at,
-                door_block.at
-            );
-        }
     }
 
     /// Every variant, built: what a device's client and a gateway send.
@@ -312,7 +295,7 @@ mod tests {
     /// before a device and a gateway of different builds disagree.
     #[test]
     fn each_peer_verb_records_the_fields_of_its_door_twin() {
-        each_verb_records_its_door_twin("peer-request-surface.txt", PEER_SURFACE);
+        each_verb_records_its_door_twin(DOOR_SURFACE, "peer-request-surface.txt", PEER_SURFACE);
     }
 
     /// **No verb on the peer wire writes or reads a record.** Every door verb

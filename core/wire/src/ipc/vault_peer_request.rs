@@ -466,6 +466,7 @@ mod tests {
     use super::*;
     use crate::ipc::UserRequest;
     use crate::recorded_surface::read;
+    use crate::recorded_twin::each_verb_records_its_door_twin;
 
     /// The vault's peer wire's recorded surface, the door's, and a device's
     /// peer wire's.
@@ -481,24 +482,6 @@ mod tests {
             .into_iter()
             .map(|b| b.name)
             .collect()
-    }
-
-    /// Each verb of `twin` records its block in the door's recording, line for line.
-    fn each_verb_records_its_door_twin(twin_file: &str, twin: &str) {
-        let door = read(DOOR_SURFACE).unwrap_or_else(|e| panic!("wire-surface.txt: {e}"));
-        for block in read(twin).unwrap_or_else(|e| panic!("{twin_file}: {e}")) {
-            let Some(door_block) = door.iter().find(|d| d.name == block.name) else {
-                panic!("{} ({twin_file}:{}) is not on the door's surface", block.name, block.at);
-            };
-            assert_eq!(
-                block.texts(),
-                door_block.texts(),
-                "{}'s fields: {twin_file}:{} against wire-surface.txt:{}",
-                block.name,
-                block.at,
-                door_block.at
-            );
-        }
     }
 
     /// Every variant, built as the door spells it.
@@ -579,7 +562,7 @@ mod tests {
     /// Each vault verb's recorded fields are its door twin's, line for line.
     #[test]
     fn each_vault_verb_records_the_fields_of_its_door_twin() {
-        each_verb_records_its_door_twin("vault-peer-request-surface.txt", VAULT_PEER_SURFACE);
+        each_verb_records_its_door_twin(DOOR_SURFACE, "vault-peer-request-surface.txt", VAULT_PEER_SURFACE);
     }
 
     /// **No door verb but the vault's decodes on the vault's peer wire** — the
