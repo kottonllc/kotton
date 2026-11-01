@@ -521,7 +521,7 @@ pub enum UserRequest {
     /// admitted on a recovery claim for this identity or that is already one of
     /// its paired devices; the IPC path refuses it outright. Neither half opens
     /// anything: the chain is public by construction, and the copy opens under
-    /// the phrase alone, which never crosses.
+    /// the phrase alone, which never crosses. Answered with `RecoveryMaterial`.
     RecoveryFetch {
         user_id: String,
     },
@@ -941,7 +941,7 @@ pub enum UserRequest {
     /// device records so its next dial lands even after this node changes relay
     /// (RFC-0083 R5: the pair is the resolver; a relay change is a forwarding
     /// address). One URL of this node's own configuration, no address of a
-    /// peer's, nothing of the user's.
+    /// peer's, nothing of the user's. Answered with `NodeRelayResult`.
     NodeRelay {
         user_id: String,
     },
@@ -957,7 +957,8 @@ pub enum UserRequest {
     /// bytes, hex; `router` is the key of the network the dialler is on (hex,
     /// the door's `RouterKey`), and a device on another network — or one that
     /// cannot name its own — declines, so no dial is ever aimed at an address
-    /// that belongs to a stranger where the dialler sits.
+    /// that belongs to a stranger where the dialler sits. Answered with
+    /// `Introduced`.
     Introduce {
         user_id: String,
         addr: String,
@@ -967,8 +968,8 @@ pub enum UserRequest {
     },
     /// How much a vault keeps for this user and how much it may (RFC-0084 V3):
     /// bytes held and the quota, the one meter a keyless keeper has. Answered
-    /// like `NodeRelay` — a fact of the node's own configuration, nothing read
-    /// from what it holds.
+    /// with `VaultCapacityResult`, as `NodeRelay` is answered: a fact of the
+    /// node's own configuration, nothing read from what it holds.
     VaultCapacity {
         user_id: String,
     },
@@ -1671,6 +1672,8 @@ pub enum UserRequest {
     AppGrants {
         app_id: String,
     },
+    /// What an app package is asking for, read before anything is installed.
+    /// Answered with `AppInstallPreview`.
     AppInstallPreview {
         /// The user_id the install would be for.
         user_id: String,
@@ -2170,7 +2173,8 @@ pub enum UserRequest {
     ///
     /// `Remote`-eligible, unlike `NetworkStatus`: it answers a state and two
     /// counts, no address, no port, no bind. A paired browser learning that its
-    /// node is reachable is the readout's whole purpose.
+    /// node is reachable is the readout's whole purpose. Answered with
+    /// `ReachStatusResult`.
     ReachStatus {
         user_id: String,
     },
@@ -2269,7 +2273,7 @@ pub enum UserRequest {
     /// says who is unlocked at this machine, which is nobody's business
     /// over a gateway. It discloses no key material and no credential, and
     /// an unknown user reads as `Locked` with no session, the same as a
-    /// real one who never unlocked.
+    /// real one who never unlocked. Answered with `UnlockState`.
     GetUnlockState {
         user_id: String,
     },
@@ -2529,7 +2533,7 @@ pub enum UserRequest {
     /// message that was waiting when it was sent reads *delivered* once one of
     /// the recipient's devices signs for it. Only messages the outbox has held
     /// are listed; which device signed, and when, is not in the answer and is
-    /// not kept (`DEC-0056`).
+    /// not kept (`DEC-0056`). Answered with `MessageDeliveries`.
     MessageDeliveries {
         user_id: String,
         peer_did: String,

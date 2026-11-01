@@ -383,8 +383,8 @@ pub enum UserResponse {
     BrowserDevices {
         browsers: Vec<super::types::BrowserDevice>,
     },
-    /// A browser was revoked (`BrowserDeviceRevoke`): its row, its session and
-    /// its live channels are gone. `channels_closed` counts the channels that
+    /// Answer to `BrowserDeviceRevoke`: a browser was revoked, and its row, its
+    /// session and its live channels are gone. `channels_closed` counts the channels that
     /// were open when it was revoked — zero for a browser not connected then.
     BrowserDeviceRevoked {
         channels_closed: u32,
@@ -552,8 +552,9 @@ pub enum UserResponse {
     Introduced {
         addr: String,
     },
-    /// Answer to [`crate::UserRequest::VaultCapacity`]: sealed bytes held for
-    /// the user and the quota they may fill, `None` when the keeper sets none.
+    /// Answer to [`crate::UserRequest::VaultCapacity`], `SetQuota` and
+    /// `VaultRequest::SetQuota`: sealed bytes held for the user and the quota
+    /// they may fill, `None` when the keeper sets none.
     VaultCapacityResult {
         held: u64,
         quota: Option<u64>,
@@ -614,7 +615,8 @@ pub enum UserResponse {
     VaultKeepsAlready {
         user_id: String,
     },
-    /// Answer to the door's `VaultRequest::Tenants`: every tenant the vault
+    /// Answer to the door's `VaultRequest::Tenants` and
+    /// `UserRequest::Tenants`: every tenant the vault
     /// keeps anything for, by name, with bytes held, quota and a device count.
     VaultTenants {
         tenants: Vec<super::VaultTenant>,
@@ -626,7 +628,8 @@ pub enum UserResponse {
     InviteDigits {
         digits: Vec<u32>,
     },
-    /// Answer to the door's `VaultRequest::DropTenant`: the tenant is gone
+    /// Answer to the door's `VaultRequest::DropTenant` and
+    /// `UserRequest::DropTenant`: the tenant is gone
     /// from this vault, and this is their readout as it stood before.
     TenantDropped {
         tenant: super::VaultTenant,
@@ -676,7 +679,8 @@ pub enum UserResponse {
     /// carries its meeting relay's *invited* admission key when the vault holds
     /// one (`TASK-a-first-contact-ceremony-meets-at-a-relay-whose-rule-refuses-a-stranger`).
     /// So it is [`crate::ipc::SecretText`]: the same bytes on the wire, `<redacted>` in a
-    /// `{:?}`, read by the one reader that hands it on.
+    /// `{:?}`, read by the one reader that hands it on. Answer to
+    /// `OperatorVerb::Invite` as well: the vault's invite it mints.
     PairAdvertising {
         code: crate::ipc::vault_request::SecretText,
         /// Unix seconds when the offer expires.
@@ -1113,7 +1117,7 @@ pub enum UserResponse {
         /// Number of envelopes that were revoked.
         revoked_count: u32,
     },
-    /// A root owned by an org was created. Response to `OrgRootCreate`.
+    /// A root owned by an org was created. Answer to `OrgRootCreate`.
     OrgRootCreated {
         /// The new root's id — what `OrgRootInvite` and the record verbs' `root` name.
         root: String,
@@ -1122,7 +1126,7 @@ pub enum UserResponse {
         /// How `org.invite` on the root reached the person.
         delegation: OrgRootDelegation,
     },
-    /// A member was admitted to a root an org owns. Response to `OrgRootInvite`.
+    /// A member was admitted to a root an org owns. Answer to `OrgRootInvite`.
     OrgRootInvited {
         /// The identity admitted.
         member: String,
