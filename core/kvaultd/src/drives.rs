@@ -344,7 +344,7 @@ mod tests {
     }
 
     async fn keys(ctx: &PeerContext, user: &str, tree: &str) -> Vec<String> {
-        ctx.pools.get(user).unwrap().list_sealed(tree, "").await.unwrap().into_iter().map(|(k, _, _)| k).collect()
+        ctx.pools.get(user).unwrap().list_sealed(tree, None).await.unwrap().into_iter().map(|(k, _, _)| k).collect()
     }
 
     async fn listed(ctx: &PeerContext, user: &str) -> Vec<TenantDrive> {

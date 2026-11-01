@@ -565,7 +565,7 @@ async fn sealed_in(vault: &RunningVault, tree: &str) -> Vec<(String, Vec<u8>)> {
     use kotton_device::users::residency::Residency as _;
     let pool = vault.vault.pools().get(USER).expect("the vault keeps a pool for the person");
     let mut out = Vec::new();
-    for (key, _, _) in pool.list_sealed(tree, "").await.expect("the tree lists") {
+    for (key, _, _) in pool.list_sealed(tree, None).await.expect("the tree lists") {
         let blob = pool.read_sealed(tree, &key).await.expect("the object reads");
         out.push((key, blob));
     }
@@ -732,9 +732,9 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
 /// drive's tree: a file whose name percent-decodes to it (a filesystem
 /// listing rebuilds each key from a file's name, decoding `%2F` to `/`), with
 /// a file beside the tree at `x`, so a read of `../x` would find bytes. The
-/// listing is the vault's own, through the store's sealed view, whose prefix
-/// handling (kotton #275) does not touch it: the prefix is empty, and a
-/// leaf's key is passed through as the store spelled it.
+/// listing is the vault's own, through the store's sealed view at its root:
+/// the prefix is admitted (kotton #275) and a leaf's key is passed through as
+/// the store spelled it.
 ///
 /// The move refuses the key where the listing enters it, before any read or
 /// write: every canonical object is carried and the copy is named finished,
@@ -799,7 +799,7 @@ async fn a_move_refuses_a_listed_key_that_is_not_canonical_and_says_so() {
     std::fs::write(source_dir.join("..%2Fx"), b"served").expect("plant a served key");
     std::fs::write(source_dir.parent().unwrap().join("x"), b"beside the served tree").expect("the bytes ../x reads");
     let pool = first.vault.pools().get(USER).expect("the vault keeps a pool for the person");
-    let listed: Vec<String> = pool.list_sealed(&tree, "").await.expect("the tree lists").into_iter().map(|(k, _, _)| k).collect();
+    let listed: Vec<String> = pool.list_sealed(&tree, None).await.expect("the tree lists").into_iter().map(|(k, _, _)| k).collect();
     assert!(listed.iter().any(|k| k == "../x"), "the source vault lists `../x` as the move will read it: {listed:?}");
 
     let said = client_a
