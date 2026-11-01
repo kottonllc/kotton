@@ -214,7 +214,6 @@ pub enum ObjectKind {
 ///   walk descends into (kotton #336). The doors still relying on
 ///   `LocalObjectStorage::resolve_key`'s refusal, each tracked in that doc:
 ///   - the guest re-wrap's raw read (kotton #299);
-///   - `kvaultd::tenancy::clear_shelf` until PR 345 lands (kotton #310);
 ///   - `kvaultd::meter::Meter::measure` (kotton #352);
 ///   - `BlindedObjectStorage::collect_leaves` and `list_loose` (kotton #357).
 /// - **The rest of the `_` namespace** is [`ObjectKind::Reserved`].

@@ -62,8 +62,6 @@ impl LocalObjectStorage {
     ///   `UserStore::read_raw_local_object` reads the path a re-wrap names on
     ///   a store of its own, past a trimmed leading `/`, admitted by nothing
     ///   else.
-    /// - `kvaultd::tenancy::clear_shelf` until PR 345 lands (kotton #310): it
-    ///   descends into and deletes the keys a shelf's listing names, unparsed.
     /// - `kvaultd::meter::Meter::measure` (kotton #352): it descends into the
     ///   directory keys a shelf's listing names, unparsed.
     /// - `BlindedObjectStorage::collect_leaves` and `list_loose` (kotton
