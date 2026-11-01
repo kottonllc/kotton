@@ -471,7 +471,7 @@ RETIRED:
 
 ###### **Arguments:**
 
-* `<ARGS>` — Arguments: `add [--as N] [--blind|--cosigner]` | `join [code] [--as N]` | `list` | `revoke <id>` | `name [N]` | `reset [--yes]`
+* `<ARGS>` — Arguments: `device add [--as NAME] [--blind|--cosigner] | device add --browser | device add --gateway <code> | device join [code] [--as NAME] | device list | device revoke <id> | device revoke --browser <name> | device name [NAME] | device reset [--yes]`
 
 ###### **Options:**
 
@@ -828,8 +828,9 @@ retires the drive where it was only once the other vault holds all of it.
 Your other devices follow it at their next sync. A move that fails leaves the
 drive where it was; a copy the other vault would not take back is listed as an
 unfinished move, and moving the drive there again clears it. A move cut off
-after the other vault has the drive is finished by running it again. `personal`
-does not move.
+after the other vault has the drive is finished by running it again. A key the
+vault lists that is not a storage key is refused, not carried, and noted in the
+move's answer; `logs --level warn` names it. `personal` does not move.
 
 `enrol` takes the invite a vault's landlord gave you (`vault invite <name>`
 at theirs): this device meets the vault at the invite's relay, and you type

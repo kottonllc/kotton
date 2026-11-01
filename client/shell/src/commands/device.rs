@@ -75,25 +75,37 @@ fn known_verb(word: &str) -> bool {
     KNOWN_VERBS.contains(&word)
 }
 
-/// The usage refusal, exit 2: what `device` prints for a word it does not have. The posture
-/// bracket (its flags sorted) and each word with a value are assembled by walking
-/// [`device_add_word`] over every posture, the vocabulary `parse_add` reads, and the shell's
-/// own words are [`AS_WORD`] and [`BROWSER_WORD`], the constants `parse_add`, `join_args` and
-/// `revoke` read, so the printed grammar has no spelling of its own.
+/// The usage refusal, exit 2: what `device` prints for a word it does not have: the
+/// grammar ([`device_usage_grammar`]), and an aside that `reset` is the CLI's.
 fn usage() -> CommandOutput {
+    CommandOutput::usage(
+        format!(
+            "usage: {}   (`kotton device reset` starts this device fresh)",
+            device_usage_grammar()
+        ),
+        None,
+    )
+}
+
+/// `device`'s grammar, every line the shell runs, as both doors print it: the usage line
+/// (`usage`) after its `usage: `, and the CLI door's argument help for `device`
+/// (`kotton_cli`'s `device_args_help`), so there is one grammar and the CLI re-spells no word
+/// of it (kotton #326). The posture bracket (its flags sorted) and each word with a value are
+/// assembled by walking [`device_add_word`] over every posture, the vocabulary `parse_add`
+/// reads, and the shell's own words are `DEVICE_AS_WORD` and `DEVICE_BROWSER_WORD`
+/// (`kotton_schemas::membership`), the constants `parse_add`, `join_args` and `revoke` read,
+/// so the printed grammar has no spelling of its own. `reset` is not in it: the shell does not run it, and each door says so its own way.
+pub fn device_usage_grammar() -> String {
     let valued: String = valued_words()
         .map(|(word, _)| format!("device add {word} | "))
         .collect();
-    CommandOutput::usage(
-        format!(
-            "usage: device add [{AS_WORD} NAME] [{}] | device add {BROWSER_WORD} | \
-             {valued}\
-             device join [code] [{AS_WORD} NAME] | device list | \
-             device revoke <id> | device revoke {BROWSER_WORD} <name> | \
-             device name [NAME]   (`kotton device reset` starts this device fresh)",
-            device_add_posture_bracket()
-        ),
-        None,
+    format!(
+        "device add [{AS_WORD} NAME] [{}] | device add {BROWSER_WORD} | \
+         {valued}\
+         device join [code] [{AS_WORD} NAME] | device list | \
+         device revoke <id> | device revoke {BROWSER_WORD} <name> | \
+         device name [NAME]",
+        device_add_posture_bracket()
     )
 }
 
@@ -109,10 +121,9 @@ fn valued_words() -> impl Iterator<Item = (DeviceAddWord, DeviceAddValue)> {
 }
 
 /// The posture flags of `device add` as one bracket's contents, sorted and joined with `|`
-/// (`--blind|--cosigner`): every [`DeviceAddWord::Flag`] [`device_add_word`] yields. The usage
-/// line prints it, and so does the CLI door's argument help for `device`, so the two cannot
-/// name different flags and neither spells one.
-pub fn device_add_posture_bracket() -> String {
+/// (`--blind|--cosigner`): every [`DeviceAddWord::Flag`] [`device_add_word`] yields, for
+/// [`device_usage_grammar`].
+fn device_add_posture_bracket() -> String {
     let mut flags: Vec<&str> = Posture::ALL
         .iter()
         .filter_map(|&posture| match device_add_word(posture) {
@@ -834,16 +845,14 @@ pub(crate) const ENROL_POSTURES: [(&str, Posture); 3] = [
     ("--full", Posture::Full),
 ];
 
-/// `device`'s own words, which are no posture's: the name a device announces for this
-/// ceremony (`device add` and `device join`), and the browser `device add` admits and
-/// `device revoke` revokes. Each is spelled here once. `parse_add`, `join_args` and `revoke`
-/// read them, and the usage line, the help page and the CLI door's argument help for `device`
-/// ([`kotton_shell::DEVICE_AS_WORD`](AS_WORD)) print them, so no reader can take a word the
-/// printed grammar does not name. They are not in [`device_add_word`] because they ask for no
-/// posture; a test in this module holds that neither is one.
-pub const AS_WORD: &str = "--as";
-/// The browser's word: see [`AS_WORD`].
-pub const BROWSER_WORD: &str = "--browser";
+// `device`'s own words, which are no posture's: the name a device announces for this
+// ceremony (`device add` and `device join`), and the browser `device add` admits and `device
+// revoke` revokes. Each is spelled once, in `kotton-schemas` beside `device_add_word`, so the
+// daemon's tests of its hints read the same word (kotton #326). `parse_add`, `join_args` and
+// `revoke` read them, and the usage grammar and the help page print them, so no reader can take
+// a word the printed grammar does not name. They are not in `device_add_word` because they ask
+// for no posture; a test in this module holds that neither is one.
+use kotton_schemas::membership::{DEVICE_AS_WORD as AS_WORD, DEVICE_BROWSER_WORD as BROWSER_WORD};
 
 /// What `device revoke` with the browser's word and no name says.
 fn revoke_browser_usage() -> String {

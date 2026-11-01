@@ -39,6 +39,28 @@
 //! and the move's answer counts it (`UserResponse::DriveMoved::keys_refused`), as a sync
 //! pass counts the keys it refuses.
 //!
+//! **Each refused key is named in the person's own event log, where the move
+//! refuses it** (kotton #315). The answer carries a count; the names go to the
+//! log of the person whose drive it is ([`refused_events`], scoped to them, so
+//! their log takes them and the device's and no one else's do), which `logs`
+//! reads: the note a count is said with points there (`logs --level warn`).
+//! The listing is the vault's to answer, so a vault that lists a great many
+//! such keys gets [`NAMED_AT_MOST`] of them named and one event counting the
+//! rest, not a log the vault can fill. They are published as the listing is
+//! admitted, before anything is copied, so a move cut off afterwards has
+//! already handed them to the log. That is what covers **finishing an
+//! interrupted move** ([`Plan::AtDestination`]): the finish reads no listing,
+//! so it refuses nothing and answers `keys_refused: 0`; the keys the cut-off
+//! move refused were counted in that move's own refusal when it answered one
+//! ([`Carried::SourceKept`]'s), and named in the log either way, including
+//! when the device died between naming the copy and retiring the source and
+//! nothing answered. What this does not hold: a log not open for the person
+//! (no subscriber) takes nothing, and a daemon that dies in the moment between
+//! publishing and the log's write loses the names; the count in the answer is
+//! unaffected. The alternative, the names carried in the answer itself, is a
+//! wire change (`DriveMoved` would carry them), and the finish would still
+//! have none to carry.
+//!
 //! **A move is finished in one order, and undone in the reverse.** The tree at
 //! the other vault is made under a name sealed *unfinished*
 //! (`UserStore::seal_drive_name`), which every device reads as a move in
@@ -157,6 +179,7 @@
 use crate::users::DeviceUsers as _;
 use crate::users::pins;
 use crate::DeviceRuntime;
+use kotton_diag::{Event, EventCategory, EventLevel, EventScope};
 use kotton_record::SqliteRecordStore;
 use kotton_peer::daemon::drives::{self as record, Drive};
 use kotton_peer::KottonPeerObjectStorage;
@@ -731,12 +754,59 @@ fn admit_listing(listed: Vec<(String, u64)>) -> (Vec<(StorageKey, u64)>, Vec<Not
     (admitted, refused)
 }
 
+/// How many refused keys one move names in the log, one event each; past it,
+/// one event counts the rest ([`refused_events`]).
+pub const NAMED_AT_MOST: usize = 32;
+
+/// The events that name the keys a move of the drive `name` refused
+/// (`refused`), for the log of the person whose drive it is (`user_id`):
+/// scoped to them, so their own log takes them ([`EventScope::User`]), which
+/// `logs` reads; at `warn`, which the note that counts the keys names (`logs
+/// --level warn`). Each names the drive and the vault (`from`) as the person
+/// calls them, and the key as the vault listed it, quoted, so a key with a
+/// control character in it is printed escaped. The first [`NAMED_AT_MOST`] are
+/// named, one event each, and one more event counts any past them: the listing
+/// is the vault's, and how much it writes into the person's log is not.
+pub fn refused_events(user_id: &str, name: &str, from: &str, refused: &[NotCanonical]) -> Vec<Event> {
+    let scope = EventScope::User(user_id.to_string());
+    let mut events: Vec<Event> = refused
+        .iter()
+        .take(NAMED_AT_MOST)
+        .map(|not| {
+            Event::with_payload(
+                EventCategory::Storage,
+                EventLevel::Warn,
+                format!("drive move of '{name}' from '{from}': {not}; the move read and wrote nothing under it, and did not carry it"),
+                serde_json::json!({ "drive": name, "from": from, "key": not.key, "why": not.why }),
+            )
+            .in_scope(scope.clone())
+        })
+        .collect();
+    if let Some(rest) = refused.len().checked_sub(NAMED_AT_MOST).filter(|rest| *rest > 0) {
+        events.push(
+            Event::with_payload(
+                EventCategory::Storage,
+                EventLevel::Warn,
+                format!(
+                    "drive move of '{name}' from '{from}': it also listed {}, past the {NAMED_AT_MOST} named before \
+                     this; the move read and wrote nothing under them, and did not carry them",
+                    NotCanonical::counted(rest)
+                ),
+                serde_json::json!({ "drive": name, "from": from, "not_named": rest }),
+            )
+            .in_scope(scope),
+        );
+    }
+    events
+}
+
 /// Copy the drive, check it, name it finished at `to`, then retire it at
 /// `from` — and, if any step before the naming fails, retire the unfinished
 /// tree at `to` (module doc). `to` was made under a name sealed unfinished;
 /// `finished_name` is the drive's name sealed finished for `to_id`. Each key
 /// `from` lists is admitted before anything is read or written under it
-/// ([`admit_listing`]); those refused are in the answer.
+/// ([`admit_listing`]); those refused are handed to `record` then, before
+/// anything is copied, and are in the answer.
 pub async fn carry_and_settle(
     user_id: &str,
     from: &dyn VaultEnd,
@@ -744,11 +814,15 @@ pub async fn carry_and_settle(
     to: &dyn VaultEnd,
     to_id: MadeDrive,
     finished_name: Vec<u8>,
+    record: &(dyn Fn(&[NotCanonical]) + Sync),
 ) -> Settled {
     let mut refused = Vec::new();
     let carried = async {
         let listed = from.objects().await.map_err(|e| format!("the drive could not be listed: {e}"))?;
         let (wanted, not_canonical) = admit_listing(listed);
+        if !not_canonical.is_empty() {
+            record(&not_canonical);
+        }
         refused = not_canonical;
         for (key, _) in &wanted {
             let blob = from.read(key).await.map_err(|e| format!("reading {key}: {e}"))?;
@@ -787,13 +861,18 @@ pub async fn carry_and_settle(
 }
 
 /// The clause a refused move's answer adds when the vault it left listed keys
-/// it refused ([`admit_listing`]); empty when it listed none. A count, as the
-/// answer to a move that went counts them: the keys are in the log.
+/// it refused ([`admit_listing`]); empty when it listed none. A count, said as
+/// the shell's note says it ([`NotCanonical::counted`]), as the answer to a
+/// move that went counts them, and where the names are: the person's event
+/// log, which [`refused_events`] wrote them to.
 fn refused_said(refused: &[NotCanonical], src: &str) -> String {
     match refused.len() {
         0 => String::new(),
-        1 => format!(" ('{src}' also listed 1 key that is not a storage key, which the move refused and did not carry)"),
-        n => format!(" ('{src}' also listed {n} keys that are not storage keys, which the move refused and did not carry)"),
+        n => format!(
+            " ('{src}' also listed {}, which the move refused and did not carry; your event log names {}: `logs --level warn`)",
+            NotCanonical::counted(n),
+            if n == 1 { "it" } else { "them" }
+        ),
     }
 }
 
@@ -921,7 +1000,8 @@ pub async fn move_to(
             let moved = moved.ok_or_else(|| io::Error::other("the drive's copy at the vault was not recorded"))?;
             tracing::info!(user_id, to = %dest.node.id, "finished an interrupted drive move");
             // Finishing reads no listing, so it refuses no key; what the
-            // cut-off move refused was in that move's log.
+            // cut-off move refused it named in the person's event log as it
+            // read its listing (module doc).
             return Ok(UserResponse::DriveMoved { drives: vec![describe(&moved, &sizes, &pins)], keys_refused: 0 });
         }
         Plan::Carry { source, retire_after } => (source, retire_after),
@@ -963,7 +1043,18 @@ pub async fn move_to(
     }
     let from_end = PeerEnd(from_client.with_remote_mount(source.tree.clone()).with_domain_id(domain.clone()));
     let to_end = PeerEnd(dest_client.with_remote_mount(to_tree.clone()).with_domain_id(domain));
-    let Settled { carried, refused: not_carried } = carry_and_settle(user_id, &from_end, from_id, &to_end, to_id, finished_name).await;
+    // The keys the move refuses are named in the person's own log as the
+    // listing is admitted ([`refused_events`]). No subscriber (no log open)
+    // drops them; the count is still in the answer.
+    let bus = runtime.event_bus();
+    let src_label = source_vault.node.id.as_str();
+    let record = |refused: &[NotCanonical]| {
+        for event in refused_events(user_id, name, src_label, refused) {
+            let _ = bus.publish(event);
+        }
+    };
+    let Settled { carried, refused: not_carried } =
+        carry_and_settle(user_id, &from_end, from_id, &to_end, to_id, finished_name, &record).await;
     let left = if carried == Carried::Moved { retire_copies(runtime, &vaults, user_id, &retire_after).await } else { None };
 
     let mut sizes = HashMap::new();
@@ -1142,7 +1233,7 @@ mod tests {
     }
 
     async fn settle(from: &Fake, to: &Fake) -> Carried {
-        let settled = carry_and_settle("alice", from, FROM, to, TO, b"finished".to_vec()).await;
+        let settled = carry_and_settle("alice", from, FROM, to, TO, b"finished".to_vec(), &|_| {}).await;
         assert!(settled.refused.is_empty(), "a source of canonical keys had one refused: {settled:?}");
         settled.carried
     }
@@ -1158,7 +1249,13 @@ mod tests {
         let mut held: Vec<(&str, &[u8])> = vec![("p/one", b"one"), ("p/two", b"two two")];
         held.extend(hostile.iter().map(|k| (*k, &b"served"[..])));
         let (from, to) = (Fake::holding(&held), Fake::default());
-        let settled = carry_and_settle("alice", &from, FROM, &to, TO, b"finished".to_vec()).await;
+        // What was recorded, each with how many reads the source had served when it was.
+        let recorded = std::sync::Mutex::new(Vec::new());
+        let record = |refused: &[NotCanonical]| {
+            let reads = from.reads.lock().unwrap().len();
+            recorded.lock().unwrap().extend(refused.iter().map(|not| (not.key.clone(), reads)));
+        };
+        let settled = carry_and_settle("alice", &from, FROM, &to, TO, b"finished".to_vec(), &record).await;
         assert_eq!(settled.carried, Carried::Moved, "{settled:?}");
         let refused: Vec<&str> = settled.refused.iter().map(|r| r.key.as_str()).collect();
         assert_eq!(refused, hostile, "each key that is not canonical is refused, and only those");
@@ -1166,9 +1263,55 @@ mod tests {
         assert_eq!(to.keys(), ["p/one", "p/two"], "a refused key was written at the destination");
         assert_eq!(to.told(), ["TenantDriveName"]);
         assert_eq!(from.told(), ["TenantDriveRetire"]);
+        // Each refused key was recorded, and before anything was read: a move cut
+        // off after its listing has named them already (kotton #315).
+        let recorded = recorded.into_inner().unwrap();
+        assert_eq!(recorded.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), hostile, "each refused key is recorded, and only those");
+        assert!(recorded.iter().all(|(_, reads)| *reads == 0), "a refused key was recorded after the copy began: {recorded:?}");
         let said = refused_said(&settled.refused, "vault");
-        assert!(said.contains("listed 6 keys that are not storage keys"), "{said}");
+        assert!(said.contains(&format!("listed {},", NotCanonical::counted(6))), "{said}");
+        assert!(said.contains("listed 6 keys that are not storage keys") && said.contains("names them: `logs --level warn`"), "{said}");
+        let one = refused_said(&settled.refused[..1], "vault");
+        assert!(one.contains("listed 1 key that is not a storage key,") && one.contains("names it: `logs --level warn`"), "{one}");
         assert!(refused_said(&[], "vault").is_empty());
+    }
+
+    /// **A refused key is named in the log of the person whose drive it is**
+    /// (kotton #315): the event is theirs, so their own log takes it and the
+    /// device's and every other person's do not; it is at `warn`, the level the
+    /// note names; and it names the drive, the vault and the key, escaped.
+    #[test]
+    fn a_refused_key_is_an_event_in_the_persons_own_log() {
+        let not = StorageKey::parse("../x\u{7}").unwrap_err();
+        let events = refused_events("alice", "photos", "vault-1", std::slice::from_ref(&not));
+        let [event] = events.as_slice() else { panic!("one refused key is not one event: {events:?}") };
+        assert!(event.belongs_to(&EventScope::User("alice".into())));
+        assert!(!event.belongs_to(&EventScope::Device));
+        assert!(!event.belongs_to(&EventScope::User("bob".into())));
+        assert_eq!(event.level, EventLevel::Warn);
+        assert!(
+            event.message.contains("'photos'") && event.message.contains("'vault-1'") && event.message.contains(&format!("{:?}", not.key)),
+            "{}",
+            event.message
+        );
+        let payload = event.payload.as_ref().unwrap();
+        assert_eq!(payload["key"], not.key);
+        assert_eq!(payload["drive"], "photos");
+    }
+
+    /// **A vault cannot fill the person's log**: past [`NAMED_AT_MOST`] refused
+    /// keys, one event counts the rest, in the person's log too.
+    #[test]
+    fn past_the_named_keys_one_event_counts_the_rest() {
+        let refused: Vec<NotCanonical> =
+            (0..NAMED_AT_MOST + 5).map(|i| StorageKey::parse(&format!("../{i}")).unwrap_err()).collect();
+        let events = refused_events("alice", "photos", "vault-1", &refused);
+        assert_eq!(events.len(), NAMED_AT_MOST + 1, "{events:?}");
+        assert!(events.iter().all(|e| e.belongs_to(&EventScope::User("alice".into())) && e.level == EventLevel::Warn));
+        let last = events.last().unwrap();
+        assert!(last.message.contains(&format!("also listed {}, past the {NAMED_AT_MOST}", NotCanonical::counted(5))), "{}", last.message);
+        assert!(refused_events("alice", "photos", "vault-1", &refused[..NAMED_AT_MOST]).len() == NAMED_AT_MOST);
+        assert!(refused_events("alice", "photos", "vault-1", &[]).is_empty());
     }
 
     /// The order when every vault answers: copy, name the other vault's tree
