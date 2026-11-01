@@ -6,10 +6,9 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+# `kotton-sys` also carries the admitted key, `StorageKey`, every verb here
+# takes: nothing in this crate rewrites a key (kotton #275, #320).
 kotton-sys = { path = "../sys" }
-# For `to_object_key` — sync and fs must address the same key space exactly.
-kotton-schemas = { path = "../schemas" }
-kotton-fs = { path = "../fs" }
 anyhow = "1.0"
 
 [lints]
@@ -17,3 +16,6 @@ workspace = true
 
 [dev-dependencies]
 workspace-hack = { path = "../../tools/workspace-hack" }
+async-trait = "0.1"
+bytes = "1.5"
+futures = "0.3"

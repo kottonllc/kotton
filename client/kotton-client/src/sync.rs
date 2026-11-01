@@ -231,7 +231,7 @@ impl KottonClient {
 impl KottonClient {
     async fn drives(&mut self, request: UserRequest) -> io::Result<Vec<kotton_wire::ipc::DriveDescriptor>> {
         match self.client.send(&request).await? {
-            UserResponse::Drives { drives, .. } => Ok(drives),
+            UserResponse::Drives { drives } => Ok(drives),
             UserResponse::Error { message } => Err(io::Error::other(message)),
             got => Err(crate::protocol::unexpected(got)),
         }
@@ -259,15 +259,17 @@ impl KottonClient {
     pub async fn drive_move(&mut self, user_id: &str, name: &str, to: &str, from: Option<&str>) -> io::Result<DriveMoved> {
         let request = UserRequest::DriveMove { user_id: user_id.into(), name: name.into(), to: to.into(), from: from.map(Into::into) };
         match self.client.send(&request).await? {
-            UserResponse::Drives { drives, keys_refused } => Ok(DriveMoved { drives, keys_refused }),
+            UserResponse::DriveMoved { drives, keys_refused } => Ok(DriveMoved { drives, keys_refused }),
             UserResponse::Error { message } => Err(io::Error::other(message)),
             got => Err(crate::protocol::unexpected(got)),
         }
     }
 }
 
-/// What `drive move` answered: the drive where it now lives, and the keys the
-/// vault it left listed that are not storage keys, refused and not carried
+/// What `drive move` answered: `UserResponse::DriveMoved` (kotton #314), its
+/// fields as they crossed, under the variant's name, so the answer is one
+/// thing on both sides of the door: the drive where it now lives, and the keys
+/// the vault it left listed that are not storage keys, refused and not carried
 /// (kotton #274).
 #[derive(Debug, Clone)]
 pub struct DriveMoved {

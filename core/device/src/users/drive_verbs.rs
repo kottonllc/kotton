@@ -36,7 +36,7 @@
 //! ([`admit_listing`]), and carried typed from there. A key that is not
 //! canonical, such as `../x`, is no object any device wrote: it is refused,
 //! read at neither vault and written at neither, the rest of the drive moves,
-//! and the answer counts it (`UserResponse::Drives::keys_refused`), as a sync
+//! and the move's answer counts it (`UserResponse::DriveMoved::keys_refused`), as a sync
 //! pass counts the keys it refuses.
 //!
 //! **A move is finished in one order, and undone in the reverse.** The tree at
@@ -582,10 +582,7 @@ pub async fn create(
     // telling that only the vault holds it (`crate::users::pins`), which is
     // the truth.
     tracing::info!(user_id, vault = %vault.node.id, "made a drive");
-    Ok(UserResponse::Drives {
-        drives: vec![describe(&made, &sizes, &pins_now(runtime, records, store, db, user_id).await?)],
-        keys_refused: 0,
-    })
+    Ok(UserResponse::Drives { drives: vec![describe(&made, &sizes, &pins_now(runtime, records, store, db, user_id).await?)] })
 }
 
 /// `drive list`: every drive, after asking each vault what it keeps, and
@@ -602,7 +599,7 @@ pub async fn list(
     let pins = pins_now(runtime, records, store, db, user_id).await?;
     let mut drives: Vec<DriveDescriptor> = record::all(db, user_id).await?.iter().map(|d| describe(d, &sizes, &pins)).collect();
     drives.extend(unfinished_described(db, user_id, &seen).await?);
-    Ok(UserResponse::Drives { drives, keys_refused: 0 })
+    Ok(UserResponse::Drives { drives })
 }
 
 /// `drive show <name>`: the drives called `name`, one per vault it is kept on.
@@ -627,7 +624,7 @@ pub async fn show(
     if drives.is_empty() {
         return refused(format!("drive show: you have no drive called '{name}'"));
     }
-    Ok(UserResponse::Drives { drives, keys_refused: 0 })
+    Ok(UserResponse::Drives { drives })
 }
 
 /// One vault a move reads from or writes to: a made drive's tree there, and
@@ -923,7 +920,9 @@ pub async fn move_to(
             let moved = record::all(db, user_id).await?.into_iter().find(|d| d.vault_key == keep.vault_key && d.tree == keep.tree);
             let moved = moved.ok_or_else(|| io::Error::other("the drive's copy at the vault was not recorded"))?;
             tracing::info!(user_id, to = %dest.node.id, "finished an interrupted drive move");
-            return Ok(UserResponse::Drives { drives: vec![describe(&moved, &sizes, &pins)], keys_refused: 0 });
+            // Finishing reads no listing, so it refuses no key; what the
+            // cut-off move refused was in that move's log.
+            return Ok(UserResponse::DriveMoved { drives: vec![describe(&moved, &sizes, &pins)], keys_refused: 0 });
         }
         Plan::Carry { source, retire_after } => (source, retire_after),
     };
@@ -1004,7 +1003,7 @@ pub async fn move_to(
         .ok_or_else(|| io::Error::other("the drive was moved but the vault it moved to did not list it"))?;
     tracing::info!(user_id, from = %src, to = %dst, keys_refused = not_carried.len(), "moved a drive");
     let keys_refused = u32::try_from(not_carried.len()).unwrap_or(u32::MAX);
-    Ok(UserResponse::Drives { drives: vec![describe(&moved, &sizes, &pins)], keys_refused })
+    Ok(UserResponse::DriveMoved { drives: vec![describe(&moved, &sizes, &pins)], keys_refused })
 }
 
 /// Retire each of `copies` at its vault. `None` when every one went; else the

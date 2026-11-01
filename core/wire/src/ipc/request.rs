@@ -716,7 +716,8 @@ pub enum UserRequest {
     /// the drive there. A move left half-done — named at `to`, not yet retired
     /// where it was — is finished by moving it there again. `from` names the
     /// copy meant where two drives no move made share the name. Answered with
-    /// `Drives`, the drive where it now lives.
+    /// `DriveMoved`, the drive where it now lives and how many keys the vault
+    /// it left listed that the move refused (kotton #314).
     DriveMove {
         user_id: String,
         name: String,

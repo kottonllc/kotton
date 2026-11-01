@@ -5,6 +5,10 @@
 //! without holding the means to open them. `store` depends on this; it is below
 //! `store`, not above it.
 //!
+//! So the key it takes, [`kotton_sys::store::StorageKey`], is not `store`'s to
+//! own: it lives in `kotton-sys`, under both, and `store` re-exports it. This
+//! crate names `kotton-sys` and nothing of the store's (kotton #275).
+//!
 //! ## Why this is not called `sync`
 //!
 //! It was, until 2026-08-24, and the name cost a day. The crate's own doc promised
