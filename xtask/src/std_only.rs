@@ -18,12 +18,25 @@
 //! **The compiler is asked.** "Names nothing but `std`" is a property of name resolution,
 //! and rustc is the one reader that resolves names exactly. [`compile_alone`] compiles a
 //! shared file as a crate of its own, in place, with no `--extern` and an empty library
-//! path, so the only crates it can reach are `std`, `core` and `alloc`. Any other root —
+//! path, so the only crates it can reach are the toolchain's own: `std`, `core`, `alloc`,
+//! and one more, below. Any other root —
 //! however it is spelled, through a macro, a raw identifier, a nested `#[path]` module or
 //! an `include!`, or past a local item of the same name in the value namespace — fails to
 //! resolve, and the compiler's own message is the finding. Each file is compiled twice:
 //! once as a library, and once with `--test`, so the `#[cfg(test)]` module xtask's tests
 //! compile in is held too. Lints are capped, so only an error fails.
+//!
+//! **One toolchain crate past `std` is reachable: `proc_macro`.** The sysroot holds more
+//! crates than `std`, `core` and `alloc`, and an `extern crate` finds them there without an
+//! `--extern`. On stable every other one is refused (`test` and the rustc-private crates
+//! need a `#![feature]`, which stable rejects), and a path that names `proc_macro` without
+//! `extern crate` does not resolve, since it is in no extern prelude here; but
+//! `extern crate proc_macro;` compiles. That is accepted: it is part of the toolchain, the
+//! same in every crate that compiles the file, so it brings in no dependency closure, which
+//! is what the claim protects. No stable flag takes the sysroot's crates out of reach short
+//! of a sysroot of our own, so the behaviour is pinned instead:
+//! `extern_crate_proc_macro_is_the_one_toolchain_crate_past_std_in_reach` fails if a
+//! toolchain change widens or narrows it.
 //!
 //! **What this holds is exactly what rustc resolves, and so it does not hold:**
 //! - code under a `cfg` the host's test build does not enable (`#[cfg(windows)]` on Linux,
@@ -38,8 +51,10 @@
 //!
 //! **A test, not a guard in the build, and no new dependency.** The build cannot say this:
 //! it resolves names against whatever the compiling crate links, and both crates link more
-//! than `std`. The test runs the toolchain's own `rustc` (`$RUSTC`, as cargo sets it, or
-//! `rustc`), so it needs no crate, and no build but `cargo test -p xtask` pays for it.
+//! than `std`. The test runs `rustc` from `PATH` — cargo sets `$RUSTC` for build scripts,
+//! not for tests, so the variable is read only when someone sets it — and rustup resolves
+//! that `rustc` to the version `rust-toolchain.toml` pins, the one that builds xtask. It
+//! needs no crate, and no build but `cargo test -p xtask` pays for it.
 //!
 //! **The list cannot miss an include.** [`STD_ONLY`] is the one list; the includes are in
 //! `wire_check.rs` and `release_server.rs`, each beside the module that uses it, and
@@ -73,8 +88,8 @@ pub(crate) const STD_ONLY: &[&str] = &[
 /// The edition the owners and xtask all compile these files under.
 const EDITION: &str = "2021";
 
-/// Compile `file` as a crate of its own, with no crate but `std`, `core` and `alloc` in
-/// reach — as a library, or with `--test` as its test harness — writing only metadata, into
+/// Compile `file` as a crate of its own, with no crate but the toolchain's in reach (`std`,
+/// `core`, `alloc`, and `proc_macro` through `extern crate`; see the module doc) — as a library, or with `--test` as its test harness — writing only metadata, into
 /// `out`. `Err` carries the compiler's own messages.
 pub(crate) fn compile_alone(file: &Path, test: bool, out: &Path) -> Result<(), String> {
     let empty = out.join("empty-library-path");
@@ -131,6 +146,9 @@ mod tests {
     /// this test binary (the dep-info cargo keeps beside it): a file compiled in and not
     /// listed would go unheld, and a listed file nothing compiles in would be held for no
     /// reason. `xtask/tests/` is a different binary and out of scope (see the module doc).
+    /// Under a `CARGO_TARGET_DIR` shared between worktrees, another checkout building the
+    /// same unit may overwrite that dep-info file between the build and this read; CI's
+    /// single checkout cannot.
     #[test]
     fn the_list_is_every_file_xtask_compiles_from_outside_xtask() {
         let exe = std::env::current_exe().unwrap();
@@ -220,6 +238,26 @@ mod tests {
         let (lib, test) = alone(&[("a.rs", "#[cfg(test)]\nmod tests { #[allow(unused_imports)] use serde_json::Value; }")]);
         assert!(lib.is_ok(), "{lib:?}");
         assert!(test.as_ref().is_err_and(|e| e.contains("serde_json")), "a `use` only the tests compile is held by `--test`: {test:?}");
+    }
+
+    /// The one toolchain crate past `std` an `extern crate` reaches without `--extern` is
+    /// `proc_macro` (see the module doc). Pinned both ways, so a toolchain that widens or
+    /// narrows what the sysroot lends is noticed here rather than trusted.
+    #[test]
+    fn extern_crate_proc_macro_is_the_one_toolchain_crate_past_std_in_reach() {
+        let (lib, test) = alone(&[("a.rs", "extern crate proc_macro as serde_json;\npub fn f() {}")]);
+        assert!(lib.is_ok() && test.is_ok(), "`extern crate proc_macro` no longer compiles alone:\n{lib:?}\n{test:?}");
+        for (src, needle) in [
+            ("pub fn f() { let _ = proc_macro::TokenStream::new; }", "proc_macro"),
+            ("extern crate test;\npub fn f() {}", "test"),
+            ("extern crate libc;\npub fn f() {}", "rustc_private"),
+        ] {
+            let (lib, test) = alone(&[("a.rs", src)]);
+            for result in [lib, test] {
+                let e = result.expect_err(src);
+                assert!(e.contains(needle), "{src}:\n{e}");
+            }
+        }
     }
 
     /// What names only `std` compiles alone: the standard library and the file's own
