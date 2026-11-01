@@ -563,16 +563,22 @@ pub enum UserResponse {
     TenantDrivesResult {
         drives: Vec<crate::ipc::TenantDrive>,
     },
-    /// Answer to the drive's verbs (`DriveCreate`, `DriveList`, `DriveShow`,
-    /// `DriveMove`): the drives the verb is about, each as its descriptor.
+    /// Answer to `DriveCreate`, `DriveList` and `DriveShow`: the drives the
+    /// verb is about, each as its descriptor.
     Drives {
         drives: Vec<crate::ipc::DriveDescriptor>,
-        /// `DriveMove` only: how many keys the vault the drive left listed
-        /// that are not storage keys (`kotton_store::StorageKey`), each
-        /// refused before anything was read or written under it and not
-        /// carried (kotton #274), as a sync pass counts the keys it refuses.
-        /// Zero for every other verb, and for a move whose source listed none.
-        #[serde(default)]
+    },
+    /// Answer to `DriveMove` (kotton #314): the drive where it now lives, as its
+    /// descriptor, and what the move refused. Its own answer, as `SyncComplete`
+    /// is the sync verb's, so no other verb's answer carries a count it never
+    /// fills.
+    DriveMoved {
+        drives: Vec<crate::ipc::DriveDescriptor>,
+        /// How many keys the vault the drive left listed that are not storage
+        /// keys (`kotton_store::StorageKey`), each refused before anything was
+        /// read or written under it and not carried (kotton #274), as a sync
+        /// pass counts the keys it refuses. Required on the wire: a move
+        /// answer that does not say how many it refused has not said none.
         keys_refused: u32,
     },
     /// Answer to `PinSet` and `PinList`: what this device keeps, and the
@@ -1619,5 +1625,36 @@ mod secret_debug_tests {
         assert_eq!(wire["DeviceCert"]["signing_key_bytes"], serde_json::json!(seed));
         let back: UserResponse = serde_json::from_value(wire).unwrap();
         assert!(matches!(back, UserResponse::DeviceCert { ref signing_key_bytes } if signing_key_bytes.expose() == seed));
+    }
+}
+
+
+#[cfg(test)]
+mod drive_answer_tests {
+    use super::UserResponse;
+
+    /// **Only the move answers a refused-key count** (kotton #314): create,
+    /// list and show answer `Drives`, which carries the descriptors and
+    /// nothing a move fills, and a `Drives` written without `keys_refused`,
+    /// as every daemon before kotton #274 wrote it, decodes (kotton #313).
+    #[test]
+    fn a_drives_answer_carries_no_refused_count_and_decodes_without_one() {
+        let wire = serde_json::to_string(&UserResponse::Drives { drives: vec![] }).unwrap();
+        assert_eq!(wire, r#"{"Drives":{"drives":[]}}"#);
+        let recorded: UserResponse = serde_json::from_str(r#"{"Drives":{"drives":[]}}"#).unwrap();
+        assert!(matches!(recorded, UserResponse::Drives { ref drives } if drives.is_empty()), "{recorded:?}");
+    }
+
+    /// **A move's answer says how many keys it refused, or it is not a move's
+    /// answer.** `keys_refused` has no default: a `DriveMoved` without it does
+    /// not decode as "none refused", which would tell the person every listed
+    /// key was carried when the daemon never said so.
+    #[test]
+    fn a_drive_moved_answer_carries_its_count_and_does_not_decode_without_it() {
+        let wire = serde_json::to_string(&UserResponse::DriveMoved { drives: vec![], keys_refused: 2 }).unwrap();
+        assert_eq!(wire, r#"{"DriveMoved":{"drives":[],"keys_refused":2}}"#);
+        let back: UserResponse = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(back, UserResponse::DriveMoved { keys_refused: 2, .. }), "{back:?}");
+        assert!(serde_json::from_str::<UserResponse>(r#"{"DriveMoved":{"drives":[]}}"#).is_err());
     }
 }

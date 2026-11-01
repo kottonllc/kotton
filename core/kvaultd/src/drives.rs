@@ -234,6 +234,13 @@ pub async fn name(ctx: &PeerContext, user_id: &str, drive: MadeDrive, sealed_nam
 ///
 /// Idempotent: a drive this vault no longer keeps is answered `Ok`, as one it
 /// has just retired is, so a retry after a lost answer is read truly.
+///
+/// A key the tree's listing holds that is not canonical (`../x`) is refused by
+/// the walk, not deleted by key, and goes with the tree's directory
+/// (`crate::tenancy`, "The walk admits its listing"). How many were refused is
+/// in this vault's log: the answer is `UserResponse::Ok`, which carries no
+/// count (kotton #310). The device that asked has counted the same keys at its
+/// own admission of the listing, when it was a move.
 pub async fn retire(ctx: &PeerContext, user_id: &str, drive: MadeDrive) -> io::Result<UserResponse> {
     let Some(pool) = ctx.pools.get(user_id) else {
         return Ok(refused(format!("this vault keeps no pool for '{user_id}'")));
@@ -259,7 +266,7 @@ pub async fn retire(ctx: &PeerContext, user_id: &str, drive: MadeDrive) -> io::R
         return Ok(UserResponse::Ok);
     };
     let shelf = ctx.runtime.shelves().open(user_id, &tree, &path);
-    let objects = crate::tenancy::clear_shelf(shelf.as_ref()).await?;
+    let cleared = crate::tenancy::clear_shelf(shelf.as_ref()).await?;
     pool.remove_remote(&tree).map_err(|e| io::Error::other(format!("{e:#}")))?;
     let _ = ctx.runtime.secrets().delete_secret(&kdf_labels::sealed_mount_domain(user_id, &tree));
     sqlx::query("DELETE FROM tenant_drives WHERE user_id = ? AND tree = ?")
@@ -271,8 +278,12 @@ pub async fn retire(ctx: &PeerContext, user_id: &str, drive: MadeDrive) -> io::R
     if path.starts_with(pool.base_dir()) {
         let _ = kotton_common::fs::remove_dir_all_retrying(&path);
     }
+    let keys_refused = cleared.refused.len();
+    if keys_refused > 0 && crate::tenancy::left_on(shelf.as_ref()).await {
+        tracing::warn!(user_id, tree, keys_refused, "a retired drive's shelf still holds objects whose keys are not storage keys; nothing at the shelf seam removes them by prefix");
+    }
     ctx.meter.set(user_id, crate::peer::measure_pool(&pool).await);
-    tracing::info!(user_id, tree, objects, "retired a tenant's drive");
+    tracing::info!(user_id, tree, objects = cleared.removed, keys_refused, "retired a tenant's drive");
     Ok(UserResponse::Ok)
 }
 
@@ -503,5 +514,104 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(listed(&ctx, "alice").await.len(), 1);
+    }
+
+    /// Where `tree` of `user`'s pool rests on the disk.
+    fn tree_dir(ctx: &PeerContext, user: &str, tree: &str) -> std::path::PathBuf {
+        let pool = ctx.pools.get(user).unwrap();
+        pool.shelf_mounts().into_iter().find(|(t, _)| t == tree).expect("the tree rests on a directory").1
+    }
+
+    /// Plant, in `tree`'s directory, a file the shelf lists as `../x` (a
+    /// filesystem listing decodes `%2F` to `/`), and a file `x` beside the tree,
+    /// so a delete of `../x` would find bytes outside it.
+    async fn plant_a_key_outside(ctx: &PeerContext, user: &str, tree: &str) -> std::path::PathBuf {
+        let dir = tree_dir(ctx, user, tree);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("..%2Fx"), b"served").unwrap();
+        let beside = dir.parent().unwrap().join("x");
+        std::fs::write(&beside, b"beside the tree").unwrap();
+        let shelf = ctx.runtime.shelves().open(user, tree, &dir);
+        let listed: Vec<String> = shelf.list(std::path::Path::new("")).await.unwrap().into_iter().map(|e| e.key).collect();
+        assert!(listed.iter().any(|k| k == "../x"), "the shelf lists `../x`: {listed:?}");
+        beside
+    }
+
+    /// **A retire takes a tree whose listing holds a key that is not
+    /// canonical** (kotton #310). The tree's shelf lists `../x`; the retire's
+    /// walk admits each listed key, refuses that one rather than asking the
+    /// store to delete it, deletes every canonical object, and the tree's
+    /// directory goes whole, the refused file with it. Nothing outside the tree
+    /// is touched: the `x` a delete of `../x` would have reached is still
+    /// there, and so is every other drive.
+    #[tokio::test]
+    async fn a_retire_takes_a_tree_whose_listing_holds_a_key_that_is_not_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = a_vault(dir.path()).await;
+        let photos = MadeDrive([5; 16]);
+        assert!(matches!(make(&ctx, "alice", photos, b"sealed".to_vec()).await.unwrap(), UserResponse::Ok));
+        write(&ctx, "alice", FIRST_DRIVE_TREE, "x/first", b"first").await;
+        write(&ctx, "alice", &photos.tree(), "x/photo", b"a photo").await;
+        let tree = tree_dir(&ctx, "alice", &photos.tree());
+        let beside = plant_a_key_outside(&ctx, "alice", &photos.tree()).await;
+
+        let answer = retire(&ctx, "alice", photos).await;
+        assert!(matches!(answer, Ok(UserResponse::Ok)), "the retire refused the tree: {answer:?}");
+        assert!(!tree.exists(), "the retired tree, or the file it refused, is on the disk");
+        assert_eq!(std::fs::read(&beside).unwrap(), b"beside the tree", "the retire reached outside the tree");
+        assert_eq!(listed(&ctx, "alice").await.iter().map(|d| d.tree.clone()).collect::<Vec<_>>(), [FIRST_DRIVE_TREE]);
+        assert_eq!(keys(&ctx, "alice", FIRST_DRIVE_TREE).await, ["x/first"], "the retire touched another drive");
+    }
+
+    /// **The walk counts what it refused, and deletes it by no key.** On the
+    /// tree's own shelf, the walk deletes the one canonical object, returns
+    /// `../x` as refused, and leaves the refused file where it rests for the
+    /// directory removal to take; the `x` beside the tree is untouched.
+    #[tokio::test]
+    async fn the_walk_refuses_a_listed_key_that_is_not_canonical_and_counts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = a_vault(dir.path()).await;
+        let photos = MadeDrive([7; 16]);
+        assert!(matches!(make(&ctx, "alice", photos, b"sealed".to_vec()).await.unwrap(), UserResponse::Ok));
+        write(&ctx, "alice", &photos.tree(), "x/photo", b"a photo").await;
+        let tree = tree_dir(&ctx, "alice", &photos.tree());
+        let beside = plant_a_key_outside(&ctx, "alice", &photos.tree()).await;
+        let shelf = ctx.runtime.shelves().open("alice", &photos.tree(), &tree);
+
+        let cleared = crate::tenancy::clear_shelf(shelf.as_ref()).await.expect("the walk refused the shelf");
+        assert_eq!(cleared.removed, 1, "the canonical object was not deleted: {cleared:?}");
+        assert_eq!(cleared.refused.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), ["../x"]);
+        assert!(tree.join("..%2Fx").exists(), "the refused file was deleted by its key");
+        assert_eq!(std::fs::read(&beside).unwrap(), b"beside the tree");
+        assert!(crate::tenancy::left_on(shelf.as_ref()).await, "the shelf does not list the refused file");
+        kotton_common::fs::remove_dir_all_retrying(&tree).unwrap();
+        assert!(!crate::tenancy::left_on(shelf.as_ref()).await, "the directory removal left something listed");
+    }
+
+    /// **A drop takes a pool whose listings hold a key that is not canonical**
+    /// (kotton #310). Alice's first drive and a made one each list `../x`; the
+    /// drop's walk refuses it in each, empties the rest, and her directory goes
+    /// whole. Bob, on the same vault, keeps all of his.
+    #[tokio::test]
+    async fn a_drop_takes_a_pool_whose_listings_hold_a_key_that_is_not_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = a_vault(dir.path()).await;
+        crate::meter::init(&ctx.db).await.unwrap();
+        crate::doors::init(&ctx.db).await.unwrap();
+        crate::carry::init(&ctx.db).await.unwrap();
+        let photos = MadeDrive([6; 16]);
+        assert!(matches!(make(&ctx, "alice", photos, b"sealed".to_vec()).await.unwrap(), UserResponse::Ok));
+        write(&ctx, "alice", FIRST_DRIVE_TREE, "x/first", b"first").await;
+        write(&ctx, "alice", &photos.tree(), "x/photo", b"a photo").await;
+        write(&ctx, "bob", FIRST_DRIVE_TREE, "x/bobs", b"bob's").await;
+        plant_a_key_outside(&ctx, "alice", FIRST_DRIVE_TREE).await;
+        plant_a_key_outside(&ctx, "alice", &photos.tree()).await;
+
+        let sessions = kotton_session::service::tokens::SessionMap::default();
+        let dropped = crate::tenancy::drop_tenant(&ctx, &sessions, "alice").await;
+        assert!(dropped.is_ok(), "the drop refused the pool: {:?}", dropped.err());
+        assert!(!dir.path().join("vault/users/alice").exists(), "alice's directory is on the disk");
+        assert!(ctx.pools.get("alice").is_none());
+        assert_eq!(keys(&ctx, "bob", FIRST_DRIVE_TREE).await, ["x/bobs"], "the drop touched bob's pool");
     }
 }
