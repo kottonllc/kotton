@@ -44,9 +44,3 @@ cli-docs = ["dep:kotton-cli", "dep:clap", "dep:clap-markdown"]
 [dev-dependencies]
 workspace-hack = { path = "../tools/workspace-hack" }
 tempfile = "3.8"
-# `std_only`'s test parses each `#[path]`-shared file and walks it, rather than scanning its
-# characters: two character lexers in a row read `-> ::serde_json` as mid-path (kotton #306).
-# A dev-dependency only, so `cargo xtask` builds none of it; `span-locations` is what gives a
-# finding its line.
-syn = { version = "2", features = ["full", "visit"] }
-proc-macro2 = { version = "1", features = ["span-locations"] }
