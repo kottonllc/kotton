@@ -105,3 +105,48 @@ fn a_line_that_parses_goes_on_to_the_daemon() {
     assert_eq!(out.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The `--word`s of a line, in order of first appearance, each once.
+fn flags(line: &str) -> Vec<&str> {
+    let mut seen = Vec::new();
+    for w in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).filter(|w| w.starts_with("--")) {
+        if !seen.contains(&w) {
+            seen.push(w);
+        }
+    }
+    seen.sort_unstable();
+    seen
+}
+
+/// `kotton device --help`'s argument help and the usage line `device` refuses a word with are
+/// two doors to one grammar (kotton #326): the help prints the shell's grammar whole, and adds
+/// only `reset`'s own word, `--yes`, since `reset` is the CLI's and the shell does not run it.
+/// Read from outside, as a person reads them: the flags each names are the same list, and the
+/// usage line's grammar is in the help word for word.
+#[test]
+fn the_device_help_names_the_words_the_usage_line_names() {
+    let dir = scratch("device-help");
+    let help = kotton(&dir, &["device", "--help"]);
+    assert_eq!(help.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&help.stderr));
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    let args_help = help.lines().find(|l| l.trim_start().starts_with("[ARGS]...")).unwrap_or_else(|| panic!("no argument help:\n{help}"));
+    let refused = kotton(&dir, &["device", "--user", "nobody", "admitx"]);
+    assert_eq!(refused.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    let usage = stderr
+        .lines()
+        .find_map(|l| l.split_once("usage: ").map(|(_, rest)| rest))
+        .unwrap_or_else(|| panic!("no usage line:\n{stderr}"));
+    // The usage line ends on an aside naming the CLI's `reset`; the grammar is what precedes it.
+    let grammar = usage.split("   (").next().unwrap();
+
+    let help_flags: Vec<&str> = flags(args_help).into_iter().filter(|w| *w != "--yes").collect();
+    assert_eq!(
+        help_flags,
+        flags(grammar),
+        "`kotton device --help` names {help_flags:?}; the usage line names {:?}\nhelp: {args_help}\nusage: {usage}",
+        flags(grammar)
+    );
+    assert!(args_help.contains(grammar), "the help does not print the usage line's grammar:\nhelp: {args_help}\nusage: {grammar}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
