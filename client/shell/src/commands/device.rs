@@ -76,37 +76,40 @@ fn known_verb(word: &str) -> bool {
 }
 
 /// The usage refusal, exit 2: what `device` prints for a word it does not have: the
-/// grammar ([`device_usage_grammar`]), and an aside that `reset` is the CLI's.
+/// grammar ([`device_grammar`]), each alternative after this door's prefix, the verb word,
+/// and an aside that `reset` is the CLI's.
 fn usage() -> CommandOutput {
+    let grammar: Vec<String> = device_grammar().iter().map(|line| format!("device {line}")).collect();
     CommandOutput::usage(
-        format!(
-            "usage: {}   (`kotton device reset` starts this device fresh)",
-            device_usage_grammar()
-        ),
+        format!("usage: {}   (`kotton device reset` starts this device fresh)", grammar.join(" | ")),
         None,
     )
 }
 
-/// `device`'s grammar, every line the shell runs, as both doors print it: the usage line
-/// (`usage`) after its `usage: `, and the CLI door's argument help for `device`
-/// (`kotton_cli`'s `device_args_help`), so there is one grammar and the CLI re-spells no word
-/// of it (kotton #326). The posture bracket (its flags sorted) and each word with a value are
-/// assembled by walking [`device_add_word`] over every posture, the vocabulary `parse_add`
-/// reads, and the shell's own words are `DEVICE_AS_WORD` and `DEVICE_BROWSER_WORD`
-/// (`kotton_schemas::membership`), the constants `parse_add`, `join_args` and `revoke` read,
-/// so the printed grammar has no spelling of its own. `reset` is not in it: the shell does not run it, and each door says so its own way.
-pub fn device_usage_grammar() -> String {
-    let valued: String = valued_words()
-        .map(|(word, _)| format!("device add {word} | "))
-        .collect();
-    format!(
-        "device add [{AS_WORD} NAME] [{}] | device add {BROWSER_WORD} | \
-         {valued}\
-         device join [code] [{AS_WORD} NAME] | device list | \
-         device revoke <id> | device revoke {BROWSER_WORD} <name> | \
-         device name [NAME]",
-        device_add_posture_bracket()
-    )
+/// `device`'s grammar as data: every line the shell runs, one alternative each, without the
+/// verb word, since each door prints its own prefix (kotton #361). The usage line ([`usage`])
+/// puts `device ` before each; the CLI door's argument help for `device` (`kotton_cli`'s
+/// `device_args_help`) prints each as it is, after clap's `kotton device`. So there is one
+/// grammar and neither door re-spells a word of it (kotton #326). The posture bracket (its
+/// flags sorted) and each word with a value are assembled by walking [`device_add_word`] over
+/// every posture, the vocabulary `parse_add` reads, and the shell's own words are
+/// `DEVICE_AS_WORD` and `DEVICE_BROWSER_WORD` (`kotton_schemas::membership`), the constants
+/// `parse_add`, `join_args` and `revoke` read, so the printed grammar has no spelling of its
+/// own. `reset` is not in it: the shell does not run it, and each door says so its own way.
+pub fn device_grammar() -> Vec<String> {
+    let mut lines = vec![
+        format!("add [{AS_WORD} NAME] [{}]", device_add_posture_bracket()),
+        format!("add {BROWSER_WORD}"),
+    ];
+    lines.extend(valued_words().map(|(word, _)| format!("add {word}")));
+    lines.extend([
+        format!("join [code] [{AS_WORD} NAME]"),
+        "list".to_owned(),
+        "revoke <id>".to_owned(),
+        format!("revoke {BROWSER_WORD} <name>"),
+        "name [NAME]".to_owned(),
+    ]);
+    lines
 }
 
 /// Every `device add` word that takes a value, with its value's kind, in [`Posture::ALL`]'s
@@ -122,7 +125,7 @@ fn valued_words() -> impl Iterator<Item = (DeviceAddWord, DeviceAddValue)> {
 
 /// The posture flags of `device add` as one bracket's contents, sorted and joined with `|`
 /// (`--blind|--cosigner`): every [`DeviceAddWord::Flag`] [`device_add_word`] yields, for
-/// [`device_usage_grammar`].
+/// [`device_grammar`].
 fn device_add_posture_bracket() -> String {
     let mut flags: Vec<&str> = Posture::ALL
         .iter()

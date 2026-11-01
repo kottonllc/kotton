@@ -42,10 +42,11 @@ pub use utils::{expand_vars, normalize_path, parse_command};
 #[cfg(feature = "cli")]
 pub use commands::{scaffold_files, typed_lines, TypedLines, SDK_FROM_REPOSITORY};
 
-/// `device`'s grammar as the shell's usage line prints it, for the CLI door's argument help of
-/// `device`: one grammar, printed by both doors, so the CLI re-spells no word of it.
+/// `device`'s grammar as data, its alternatives without the verb word, for the CLI door's
+/// argument help of `device`: one grammar, each door printing its own prefix, so the CLI
+/// re-spells no word of it.
 #[cfg(feature = "cli")]
-pub use commands::device_usage_grammar;
+pub use commands::device_grammar;
 
 /// Return `(name, help page)` for every shell command, sorted alphabetically.
 pub fn shell_command_docs() -> Vec<(String, String)> {
