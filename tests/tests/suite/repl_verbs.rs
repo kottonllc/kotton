@@ -22,6 +22,8 @@
 //!   passphrase chosen it refuses before anything changes;
 //! - `device admit`, a word the command-tree decision retired for `drive enrol`, is refused
 //!   at the REPL through the registry with the retired line, exit 2.
+//! - `logs --level warn` answers the same at both doors: the REPL's registry and
+//!   `kotton logs`, which runs the one verb through `bridge::run_verb` (kotton #355).
 
 use std::sync::Arc;
 
@@ -475,4 +477,73 @@ async fn an_unknown_device_word_at_the_repl_is_the_usage_line_with_exit_two() {
         };
         assert!(what.starts_with("usage: device add [--as NAME] [--blind|--cosigner]"), "{line:?}: {what}");
     }
+}
+
+/// **`kotton logs --level warn` answers what the REPL's `logs --level warn` answers**
+/// (kotton #355): the note a `drive move` that refused keys ends on names that line, and
+/// before this the terminal had no `logs` to type it at. Both doors run the one verb, so
+/// the test reads one log through each and holds the answers equal: the REPL's through
+/// its registry, the terminal's as the shapes `--json` serializes, which are the shapes
+/// the person's line renders, and the plain line for its exit and what it shows.
+#[tokio::test]
+async fn kotton_logs_answers_what_the_repls_logs_answers() {
+    use kotton_diag::service::{Event, EventCategory, EventLevel};
+
+    let mut env = TestEnv::spawn_cli_reachable().await;
+    env.client.create_user(USER, TEST_PASSPHRASE).await.expect("create_user");
+    let token = env.client.session_token.clone().expect("create_user binds a session");
+    let cli = Cli::for_env(&env);
+    cli.seed_session(USER, &token);
+
+    // Short, so the rendered table at the terminal's width shows each whole.
+    const WARNED: &str = "said at warn";
+    const INFORMED: &str = "said at info";
+    for (level, line) in [(EventLevel::Warn, WARNED), (EventLevel::Info, INFORMED)] {
+        env.runtime
+            .event_bus()
+            .publish(Event::for_user(USER, EventCategory::Storage, level, line))
+            .expect("the bus has subscribers: the device log is always one");
+    }
+    // The log is a task on the bus: wait for its write, bounded, rather than sleep.
+    let mut written = false;
+    for _ in 0..300 {
+        let lines = env.client.query_events(None, None, None, Some(500)).await.expect("the log is read");
+        if [WARNED, INFORMED].iter().all(|l| lines.iter().any(|e| e.message == *l)) {
+            written = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(written, "the two lines never reached {USER}'s log");
+
+    let mut client = KottonClient::connect_to(env.endpoint.clone()).await.expect("connect");
+    client.authenticate(&token).await.expect("authenticate as the REPL's identity");
+    let mut state = ShellState::new(USER.to_string(), Arc::new(Mutex::new(client)));
+    let words = vec!["--level".to_string(), "warn".to_string()];
+    let repl = kotton_cli::bridge::repl_executor()
+        .registry()
+        .execute("logs", &words, &mut state)
+        .await
+        .expect("the REPL's `logs --level warn`");
+    assert!(matches!(repl.exit_code, ExitCode::Success), "the REPL's `logs --level warn` failed: {:?}", repl.out);
+    let [Out::Table { rows, .. }] = repl.out.as_slice() else {
+        panic!("the REPL's `logs --level warn` is not one table: {:?}", repl.out)
+    };
+    assert!(rows.iter().any(|r| r.last().map(String::as_str) == Some(WARNED)), "the REPL's answer lacks the warn line: {rows:?}");
+    assert!(!rows.iter().any(|r| r.last().map(String::as_str) == Some(INFORMED)), "the REPL's answer has the info line: {rows:?}");
+
+    let shapes = cli.run(&["--json", "logs", "--user", USER, "--level", "warn"]);
+    assert!(shapes.status.success(), "`kotton --json logs --level warn` failed.\n{}", crate::common::cli::said(&shapes));
+    let terminal: serde_json::Value = serde_json::from_slice(&shapes.stdout)
+        .unwrap_or_else(|e| panic!("`kotton --json logs` printed no JSON ({e}).\n{}", crate::common::cli::said(&shapes)));
+    assert_eq!(
+        terminal,
+        serde_json::to_value(&repl.out).expect("the REPL's shapes serialize"),
+        "`kotton logs --level warn` and the REPL's `logs --level warn` answered differently"
+    );
+
+    let line = cli.run(&["logs", "--user", USER, "--level", "warn"]);
+    let text = crate::common::cli::said(&line);
+    assert_eq!(line.status.code(), Some(0), "`kotton logs --level warn` did not exit 0.\n{text}");
+    assert!(text.contains(WARNED) && !text.contains(INFORMED), "`kotton logs --level warn` did not show the warn line alone.\n{text}");
 }

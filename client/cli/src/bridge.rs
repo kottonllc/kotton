@@ -243,7 +243,7 @@ mod tests {
                 );
             }
         }
-        for verb in ["app", "peer", "device", "sync", "drive", "pin", "issuer", "cp", "cat", "keep", "mint", "enrol", "relay", "vault"] {
+        for verb in ["app", "peer", "device", "sync", "drive", "pin", "issuer", "cp", "cat", "keep", "mint", "enrol", "relay", "vault", "logs"] {
             assert!(
                 walked.iter().any(|w| w == verb),
                 "the walk did not reach `kotton {verb}`: {walked:?}"
@@ -289,6 +289,7 @@ mod tests {
             (&["drive", "move", "photos", "--to", "office"], &["move", "photos", "--to", "office"]),
             (&["cp", "host:photo.jpg", "/photos/"], &["host:photo.jpg", "/photos/"]),
             (&["keep", "../Photos", "as", "/photos"], &["../Photos", "as", "/photos"]),
+            (&["logs", "--level", "warn", "-n", "5"], &["--level", "warn", "-n", "5"]),
         ] {
             let argv: Vec<&str> = std::iter::once("kotton")
                 .chain(line.iter().copied())
@@ -336,7 +337,7 @@ mod tests {
             );
             seen.push(name.to_string());
         }
-        for verb in ["mint", "enrol", "cp", "cat", "keep", "relay", "vault", "sync", "drive", "pin"] {
+        for verb in ["mint", "enrol", "cp", "cat", "keep", "relay", "vault", "sync", "drive", "pin", "logs"] {
             assert!(seen.iter().any(|s| s == verb), "`kotton {verb}` is not a pass-through: {seen:?}");
         }
     }

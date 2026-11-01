@@ -53,6 +53,7 @@ async fn run() -> io::Result<()> {
         Commands::Drive { user, args } => kotton_cli::bridge::run_verb(user, "drive", args, json).await,
         Commands::Pin { user, args } => kotton_cli::bridge::run_verb(user, "pin", args, json).await,
         Commands::Status { user, args } => kotton_cli::bridge::run_verb(user, "status", args, json).await,
+        Commands::Logs { user, args } => kotton_cli::bridge::run_verb(user, "logs", args, json).await,
         Commands::Issuer { user, args } => kotton_cli::bridge::run_verb(user, "issuer", args, json).await,
         Commands::Cp { user, args } => kotton_cli::bridge::run_verb(user, "cp", args, json).await,
         Commands::Cat { user, args } => kotton_cli::bridge::run_verb(user, "cat", args, json).await,
