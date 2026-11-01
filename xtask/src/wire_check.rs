@@ -977,8 +977,8 @@ fn block_finding(twin: &str, block: &Block<'_>, door_block: &Block<'_>) -> Strin
 enum Kind {
     /// A recording could not be read from disk at all.
     Unread,
-    /// A recording was read but the reader refuses it (no header, a header that
-    /// disagrees with what it parsed, a line before any variant, or no variant):
+    /// A recording was read but the reader refuses it (no header, two headers, a
+    /// header that disagrees with what it parsed, a line before any variant, or no variant):
     /// the printer and the reader disagree, or the file was edited by hand.
     Format,
     /// A peer verb's block differs from, or is missing in, the door's.
@@ -1073,9 +1073,9 @@ fn twin_findings_text(command: &str, findings: &[(Kind, String)]) -> String {
     }
     if has(Kind::Format) {
         out.push_str(
-            "A recording the rule cannot read as one (no `# variants:` header, a header that \
-             disagrees with what was read, or no variant at all) was edited by hand, or the \
-             printer (`render`) and the reader (core/wire/src/recorded_surface.rs) no longer \
+            "A recording the rule cannot read as one (no `# variants:` header, two of them, a \
+             header that disagrees with what was read, or no variant at all) was edited by \
+             hand, or the printer (`render`) and the reader (core/wire/src/recorded_surface.rs) no longer \
              agree: re-record with `cargo xtask wire-surface`, or change the printer and the \
              reader together; no peer type needs to change for this.\n\n",
         );
