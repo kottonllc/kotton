@@ -2577,8 +2577,8 @@ pub enum Other {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let report = answer_report(&root);
         assert_eq!(report.findings, Vec::new());
-        assert!(report.claims >= 94, "read {} claims", report.claims);
-        assert!(report.answered_verbs >= 88, "read {} listed verbs", report.answered_verbs);
+        assert!(report.claims >= 96, "read {} claims", report.claims);
+        assert!(report.answered_verbs >= 90, "read {} listed verbs", report.answered_verbs);
     }
 
     /// The real recordings in this tree agree, so the gate starts green.

@@ -1255,7 +1255,8 @@ pub enum UserResponse {
     EventStream {
         event: EventEntry,
     },
-    /// The server is closing the subscription stream (daemon shutdown, etc.).
+    /// Answer to `SubscribeEvents`, its last frame: the server is closing the
+    /// subscription stream (daemon shutdown, etc.).
     /// After receiving this the client should drop the connection.
     EventStreamEnd,
     /// HMAC integrity chain verification result.
@@ -1315,8 +1316,8 @@ pub enum UserResponse {
     /// client's race, not only a test's — `ksyncd` subscribes and then trusts
     /// the stream for the life of the daemon.
     VfsWatchReady,
-    /// The watch could **not** be established, and no change will ever arrive on
-    /// this stream.
+    /// Answer to [`crate::UserRequest::VfsWatch`], its first and only frame when the
+    /// watch could **not** be established: no change will ever arrive on this stream.
     ///
     /// Distinct from [`Self::VfsWatchEnd`] on purpose. `VfsWatchEnd` means *the
     /// daemon is going away*, and a client's correct answer to it is to stop. A

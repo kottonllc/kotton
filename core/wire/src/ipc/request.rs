@@ -2148,7 +2148,7 @@ pub enum UserRequest {
     /// Filtering mirrors [`QueryEvents`]: omit either field to receive all
     /// categories / levels.
     ///
-    /// Answered with `EventStream`.
+    /// Answered with `EventStream`, then `EventStreamEnd`.
     SubscribeEvents {
         /// Filter by category (e.g. `"wasm"`, `"auth"`). `None` = all.
         category: Option<String>,
@@ -2159,11 +2159,13 @@ pub enum UserRequest {
     // -- VFS watch subscription (RFC-0017) -------------------------------------
     /// Subscribe to filesystem change notifications for `user_id`'s VFS.
     ///
-    /// Streaming. Answered with [`crate::UserResponse::VfsWatchReady`], then
-    /// [`crate::UserResponse::VfsChanged`], then [`crate::UserResponse::VfsWatchEnd`]:
-    /// the first frame says the watch is established, and a change made from
-    /// here on is delivered; a change frame follows for each change; the last
-    /// says the subscription closed.
+    /// Streaming. Answered with [`crate::UserResponse::VfsWatchReady`] or
+    /// [`crate::UserResponse::VfsWatchFailed`], then [`crate::UserResponse::VfsChanged`],
+    /// then [`crate::UserResponse::VfsWatchEnd`]: the first frame says the watch is
+    /// established, and a change made from here on is delivered; a change frame
+    /// follows for each change; the last says the subscription closed. When the
+    /// watch could not be established, the failure is the first frame and the
+    /// only one.
     ///
     /// **Wait for the first frame before acting.** Sending this request does not
     /// establish the watch; a write made before `VfsWatchReady` arrives can be
