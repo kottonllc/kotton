@@ -13,8 +13,9 @@
 //!
 //! **Every reader is held to the header.** [`read`] refuses a recording whose
 //! `# variants: N` differs from the number of variants it parsed, one with no such
-//! header, one with an indented line before any variant, and one that records no variant
-//! at all. Each means the printer and this reader no longer agree, or the file was edited
+//! header or with two (the printer writes one, and a second would leave which count is
+//! held to whichever came last), one with an indented line before any variant, and one
+//! that records no variant at all. Each means the printer and this reader no longer agree, or the file was edited
 //! by hand, and a rule over misread blocks would compare the wrong lines and say so in
 //! green.
 //!
@@ -24,7 +25,9 @@
 //! it: it would build kotton-wire's closure into every `cargo xtask`, and `wire-check`
 //! reads the wire as text precisely so that it needs no compile of the crate it checks. So
 //! this file names nothing but `std`; a `use crate::…` here fails xtask's build, which is
-//! the point. It is how xtask already compiles `kvaultd`'s reader of its settings file.
+//! the point, and a name both crates link (`serde_json`), which no build catches, fails
+//! xtask's test of every `#[path]`-shared file (`xtask/src/std_only.rs`, kotton #306). It
+//! is how xtask already compiles `kvaultd`'s reader of its settings file.
 
 /// The indent the printer writes before a field or attribute line, and the one [`read`]
 /// takes as "this line belongs to the variant above". xtask's `render` writes this
@@ -63,7 +66,7 @@ impl<'a> Block<'a> {
 /// A line starting with `#` is a header line; every other non-empty line is a variant name
 /// unless it starts with [`INDENT`], when it belongs to the variant above.
 pub fn read(text: &str) -> Result<Vec<Block<'_>>, String> {
-    let mut header: Option<usize> = None;
+    let mut header: Option<(usize, usize)> = None;
     let mut out: Vec<Block<'_>> = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let at = i + 1;
@@ -74,11 +77,17 @@ pub fn read(text: &str) -> Result<Vec<Block<'_>>, String> {
             block.lines.push(Line { at, text: line });
         } else if let Some(rest) = line.strip_prefix('#') {
             if let Some(n) = rest.trim().strip_prefix("variants:") {
-                header = Some(
-                    n.trim()
-                        .parse()
-                        .map_err(|_| format!("line {at} has a `# variants:` header that is not a count"))?,
-                );
+                if let Some((first, _)) = header {
+                    return Err(format!(
+                        "line {at} is a second `# variants:` header after line {first}: the \
+                         printer writes one, so which count the recording holds is not known"
+                    ));
+                }
+                let n = n
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("line {at} has a `# variants:` header that is not a count"))?;
+                header = Some((at, n));
             }
         } else if !line.trim().is_empty() {
             out.push(Block {
@@ -90,7 +99,7 @@ pub fn read(text: &str) -> Result<Vec<Block<'_>>, String> {
     }
     match header {
         None => Err("it has no `# variants: N` header, so its count cannot be held".into()),
-        Some(n) if n != out.len() => Err(format!(
+        Some((_, n)) if n != out.len() => Err(format!(
             "its header records {n} variants and the reader parsed {}: the printer (`render` in \
              xtask/src/wire_check.rs) and the reader (core/wire/src/recorded_surface.rs) no \
              longer agree on the format, so a rule over it would compare the wrong lines",
@@ -136,6 +145,8 @@ mod tests {
         refused("# variants: 0\n    x: u8\n", "line 2 is indented before any variant");
         refused("# variants: many\nA\n", "line 1 has a `# variants:` header that is not a count");
         refused("# variants: 0\n", "records no variant");
+        refused("# variants: 1\n# variants: 1\nA\n", "line 2 is a second `# variants:` header after line 1");
+        refused("# variants: 2\nA\n# variants: 1\n", "line 3 is a second `# variants:` header after line 1");
     }
 
     /// The recordings in this tree are each read whole, by this reader, from whichever

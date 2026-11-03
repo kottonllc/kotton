@@ -17,8 +17,10 @@
 //! installs with this same function, compiled into xtask from this file by `#[path]`
 //! (`release_server::env_pairs`) rather than linked, because a dependency on `kvaultd`
 //! would build its whole closure into every `cargo xtask`. So this file names nothing but
-//! `std` — a `use crate::…` here fails xtask's build, which is the point — and its tests
-//! find the repository from whichever crate compiles them
+//! `std` — a `use crate::…` here fails xtask's build, which is the point, and a name both
+//! crates link, which no build catches, fails xtask's test of every `#[path]`-shared file
+//! (`xtask/src/std_only.rs`, kotton #306) — and its tests find the repository from
+//! whichever crate compiles them
 //! (`TASK-release-server-tests-reader-of-the-env-file-is-not-the-plain-form`).
 
 /// The file's settings, in order, or why it is not in the plain form: the line, and what
