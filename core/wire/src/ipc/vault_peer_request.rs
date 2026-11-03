@@ -465,21 +465,13 @@ impl VaultPeerRequest {
 mod tests {
     use super::*;
     use crate::ipc::UserRequest;
+    use crate::recorded_twin::{
+        each_verb_records_its_door_twin, only_these_door_verbs_decode, variants, DOOR_SURFACE, PEER_SURFACE,
+    };
 
-    /// The vault's peer wire's recorded surface, the door's, and a device's
-    /// peer wire's.
+    /// The vault's peer wire's recorded surface; the door's and a device's are in
+    /// `recorded_twin`.
     const VAULT_PEER_SURFACE: &str = include_str!("../../vault-peer-request-surface.txt");
-    const DOOR_SURFACE: &str = include_str!("../../wire-surface.txt");
-    const PEER_SURFACE: &str = include_str!("../../peer-request-surface.txt");
-
-    /// Variant names of a recorded surface: its unindented, uncommented lines.
-    fn variants(surface: &str) -> Vec<&str> {
-        surface
-            .lines()
-            .filter(|l| !l.is_empty() && !l.starts_with(' ') && !l.starts_with('#'))
-            .map(str::trim)
-            .collect()
-    }
 
     /// Every variant, built as the door spells it.
     fn every_vault_verb_as_the_door_spells_it() -> Vec<UserRequest> {
@@ -559,14 +551,7 @@ mod tests {
     /// Each vault verb's recorded fields are its door twin's, line for line.
     #[test]
     fn each_vault_verb_records_the_fields_of_its_door_twin() {
-        fn block<'s>(surface: &'s str, name: &str) -> Vec<&'s str> {
-            let mut lines = surface.lines().skip_while(|l| l.trim_end() != name);
-            assert!(lines.next().is_some(), "{name} is not on the surface");
-            lines.take_while(|l| l.starts_with(' ')).collect()
-        }
-        for name in variants(VAULT_PEER_SURFACE) {
-            assert_eq!(block(VAULT_PEER_SURFACE, name), block(DOOR_SURFACE, name), "{name}'s fields");
-        }
+        each_verb_records_its_door_twin("vault-peer-request-surface.txt", VAULT_PEER_SURFACE);
     }
 
     /// **No door verb but the vault's decodes on the vault's peer wire** — the
@@ -576,16 +561,12 @@ mod tests {
     #[test]
     fn no_door_verb_but_the_vaults_decodes_on_the_vaults_peer_wire() {
         let vault = variants(VAULT_PEER_SURFACE);
+        only_these_door_verbs_decode::<VaultPeerRequest>(
+            &vault,
+            "vault",
+            "is not a vault's verb and decoded on its peer wire",
+        );
         let door = variants(DOOR_SURFACE);
-        assert!(door.len() > 150, "the door's surface no longer parses: {} variants", door.len());
-        let mut refused = 0;
-        for name in door.iter().filter(|n| !vault.contains(n)) {
-            let err = serde_json::from_str::<VaultPeerRequest>(&format!(r#"{{"{name}":{{}}}}"#))
-                .expect_err(&format!("{name} is not a vault's verb and decoded on its peer wire"));
-            assert!(err.to_string().contains("unknown variant"), "{name}: {err}");
-            refused += 1;
-        }
-        assert_eq!(refused + vault.len(), door.len(), "every vault verb is a door verb");
 
         // The verbs that read plaintext or touch a record, by name, so this
         // test says what it is for even if the surfaces it reads were emptied.

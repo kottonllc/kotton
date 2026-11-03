@@ -62,6 +62,7 @@ pub async fn compact_mount(
             written = s.packs_written,
             retired = s.packs_retired,
             chunks_kept = s.chunks_kept,
+            unadmitted = s.packs_unadmitted,
             generation = ?s.generation,
             "RFC-0045: compaction pass complete"
         );

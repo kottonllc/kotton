@@ -448,4 +448,52 @@ mod tests {
         }
         assert!(seen >= 5, "the tables retired fewer words than this test was written against: {seen}");
     }
+
+    /// **A posture's flag on any help page is one the page's own noun reads.** Two tables own
+    /// the posture words, and they differ (`--full` is only `drive enrol`'s, the gateway's word
+    /// only `device add`'s): `device_add_word` for `device` and `ENROL_POSTURES` for `drive`.
+    /// Every `--word` in every page `command_docs` serves that is any posture's flag, in either
+    /// table, must be the flag of the table of the noun whose page it is, so a page cannot
+    /// advertise the other door's word, a noun with no posture table advertises none, and a
+    /// spelling a table dropped while the other still has it fails here. The next noun that
+    /// names a posture flag (`drive enrol`'s page, when it does) is held from its first word:
+    /// it passes only by naming its own table's words. A page is best printed from its table
+    /// (as `device`'s is); this is what holds a page that is not.
+    #[cfg(feature = "cli")]
+    #[test]
+    fn every_posture_flag_any_help_page_names_is_its_own_nouns() {
+        use super::super::device::ENROL_POSTURES;
+        use kotton_schemas::membership::{device_add_word, DeviceAddWord, Posture};
+        let device_add: Vec<&str> = Posture::ALL
+            .iter()
+            .filter_map(|&p| match device_add_word(p) {
+                DeviceAddWord::Bare => None,
+                DeviceAddWord::Flag(flag) | DeviceAddWord::FlagWithValue { flag, .. } => Some(flag),
+            })
+            .collect();
+        let enrol: Vec<&str> = ENROL_POSTURES.iter().map(|(word, _)| *word).collect();
+        // Each noun whose parser reads a posture table, and that table.
+        let own = |noun: &str| -> &[&str] {
+            match noun {
+                "device" => &device_add,
+                "drive" => &enrol,
+                _ => &[],
+            }
+        };
+        let any_posture = |w: &str| device_add.contains(&w) || enrol.contains(&w);
+        let mut named = 0;
+        for (noun, page) in crate::ShellExecutor::new().command_docs() {
+            for word in page
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .filter(|t| t.starts_with("--") && any_posture(t))
+            {
+                named += 1;
+                assert!(
+                    own(&noun).contains(&word),
+                    "`{noun}`'s help names `{word}`, a posture's flag that `{noun}` does not read"
+                );
+            }
+        }
+        assert!(named >= 1, "no help page names a posture's flag: this test holds nothing");
+    }
 }

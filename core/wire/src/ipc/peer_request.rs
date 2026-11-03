@@ -200,19 +200,10 @@ impl PeerRequest {
 mod tests {
     use super::*;
     use crate::ipc::{SecretText, UserRequest};
-
-    /// The peer wire's recorded surface, and the door's.
-    const PEER_SURFACE: &str = include_str!("../../peer-request-surface.txt");
-    const DOOR_SURFACE: &str = include_str!("../../wire-surface.txt");
-
-    /// Variant names of a recorded surface: its unindented, uncommented lines.
-    fn variants(surface: &str) -> Vec<&str> {
-        surface
-            .lines()
-            .filter(|l| !l.is_empty() && !l.starts_with(' ') && !l.starts_with('#'))
-            .map(str::trim)
-            .collect()
-    }
+    use crate::recorded_surface::read;
+    use crate::recorded_twin::{
+        each_verb_records_its_door_twin, only_these_door_verbs_decode, variants, DOOR_SURFACE, PEER_SURFACE,
+    };
 
     /// Every variant, built: what a device's client and a gateway send.
     fn every_peer_verb_as_the_door_spells_it() -> Vec<UserRequest> {
@@ -292,14 +283,7 @@ mod tests {
     /// before a device and a gateway of different builds disagree.
     #[test]
     fn each_peer_verb_records_the_fields_of_its_door_twin() {
-        fn block<'s>(surface: &'s str, name: &str) -> Vec<&'s str> {
-            let mut lines = surface.lines().skip_while(|l| l.trim_end() != name);
-            assert!(lines.next().is_some(), "{name} is not on the surface");
-            lines.take_while(|l| l.starts_with(' ')).collect()
-        }
-        for name in variants(PEER_SURFACE) {
-            assert_eq!(block(PEER_SURFACE, name), block(DOOR_SURFACE, name), "{name}'s fields");
-        }
+        each_verb_records_its_door_twin("peer-request-surface.txt", PEER_SURFACE);
     }
 
     /// **No verb on the peer wire writes or reads a record.** Every door verb
@@ -310,16 +294,12 @@ mod tests {
     #[test]
     fn no_door_verb_but_the_peer_verbs_decodes_on_the_peer_wire() {
         let peer = variants(PEER_SURFACE);
+        only_these_door_verbs_decode::<PeerRequest>(
+            &peer,
+            "peer",
+            "is a door verb and decoded on the peer wire",
+        );
         let door = variants(DOOR_SURFACE);
-        assert!(door.len() > 150, "the door's surface no longer parses: {} variants", door.len());
-        let mut refused = 0;
-        for name in door.iter().filter(|n| !peer.contains(n)) {
-            let err = serde_json::from_str::<PeerRequest>(&format!(r#"{{"{name}":{{}}}}"#))
-                .expect_err(&format!("{name} is a door verb and decoded on the peer wire"));
-            assert!(err.to_string().contains("unknown variant"), "{name}: {err}");
-            refused += 1;
-        }
-        assert_eq!(refused + peer.len(), door.len(), "every peer verb is a door verb");
 
         // The record verbs by name, so this test says what it is for even if
         // the surfaces it reads were emptied.
@@ -329,13 +309,10 @@ mod tests {
         }
         let record_named: Vec<&&str> = peer.iter().filter(|n| n.starts_with("Record")).collect();
         assert_eq!(record_named, [&"RecordSyncAvailable"], "the peer wire's only record-named verb is the wake");
-        let mut fields = PEER_SURFACE
-            .lines()
-            .skip_while(|l| l.trim_end() != "RecordSyncAvailable")
-            .skip(1)
-            .take_while(|l| l.starts_with(' '))
-            .filter(|l| !l.trim_start().starts_with('#'))
-            .map(str::trim);
+        let blocks = read(PEER_SURFACE).expect("the peer wire's recording reads");
+        let wake = blocks.iter().find(|b| b.name == "RecordSyncAvailable").expect("the wake is recorded");
+        let wake_lines = wake.texts();
+        let mut fields = wake_lines.iter().map(|l| l.trim()).filter(|l| !l.starts_with("#["));
         assert_eq!(fields.next(), Some("user_id: String"));
         assert_eq!(fields.next(), Some("nsids: Vec<String>"), "the wake carries namespaces, never a record");
         assert_eq!(fields.next(), None);

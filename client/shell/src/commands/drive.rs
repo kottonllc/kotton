@@ -2,6 +2,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use kotton_schemas::membership::Posture;
+use kotton_sys::store::key::NotCanonical;
 use kotton_wire::ipc::DriveDescriptor;
 
 use super::device::ENROL_POSTURES;
@@ -154,6 +155,36 @@ fn table(drives: &[DriveDescriptor]) -> Out {
     }
 }
 
+/// What `drive move` says when the vault the drive left listed keys that are
+/// not storage keys: the move refused them and carried everything else
+/// (kotton #274), and the person's event log names each, which `logs` reads
+/// (kotton #315; the daemon records them there as the move reads the listing,
+/// `kotton_device::users::drive_verbs::refused_events`). The count is said as
+/// the daemon's refusals say it ([`NotCanonical::counted`]).
+fn refused_said(n: u32) -> String {
+    let it = if n == 1 { "it" } else { "them" };
+    format!(
+        "the vault the drive left listed {}; the move refused {it} and carried everything else. Your event log \
+         names {it}: `logs --level warn`",
+        NotCanonical::counted(usize::try_from(n).unwrap_or(usize::MAX))
+    )
+}
+
+/// What `drive move` says of the move's answer (`kotton::DriveMoved`): where
+/// the drive lives now, and, when the move refused any key the vault it left
+/// listed, a note counting them. No note for none.
+fn moved_said(name: &str, to: &str, moved: &kotton::DriveMoved) -> Vec<Out> {
+    let vault = moved.drives.first().map(|d| d.vault.clone()).unwrap_or_else(|| to.to_string());
+    let mut out = vec![Out::Confirm {
+        action: format!("drive moved to '{vault}'; your other devices follow it there at their next sync"),
+        subject: name.to_string(),
+    }];
+    if moved.keys_refused > 0 {
+        out.push(Out::Note(refused_said(moved.keys_refused)));
+    }
+    out
+}
+
 /// What `--json` prints: the descriptors the daemon answered, as they cross, a
 /// payload on stdout.
 fn json(drives: &[DriveDescriptor]) -> Result<CommandOutput> {
@@ -211,12 +242,8 @@ async fn run(line: Line<'_>, state: &mut ShellState) -> Result<CommandOutput> {
             ))
         }
         Line::Move { name, to, from } => {
-            let drives = client.lock().await.drive_move(&user_id, name, to, from).await.map_err(|e| said("move", e))?;
-            let vault = drives.first().map(|d| d.vault.clone()).unwrap_or_else(|| to.to_string());
-            Ok(CommandOutput::shapes(vec![Out::Confirm {
-                action: format!("drive moved to '{vault}'; your other devices follow it there at their next sync"),
-                subject: name.to_string(),
-            }]))
+            let moved = client.lock().await.drive_move(&user_id, name, to, from).await.map_err(|e| said("move", e))?;
+            Ok(CommandOutput::shapes(moved_said(name, to, &moved)))
         }
         // The ceremony takes the lock for itself.
         Line::Enrol { invite, posture } => super::device::enrol_vault(&invite, posture, state).await,
@@ -285,8 +312,9 @@ retires the drive where it was only once the other vault holds all of it.
 Your other devices follow it at their next sync. A move that fails leaves the
 drive where it was; a copy the other vault would not take back is listed as an
 unfinished move, and moving the drive there again clears it. A move cut off
-after the other vault has the drive is finished by running it again. `personal`
-does not move.
+after the other vault has the drive is finished by running it again. A key the
+vault lists that is not a storage key is refused, not carried, and noted in the
+move's answer; `logs --level warn` names it. `personal` does not move.
 
 `enrol` takes the invite a vault's landlord gave you (`vault invite <name>`
 at theirs): this device meets the vault at the invite's relay, and you type
@@ -448,6 +476,47 @@ mod tests {
         let Some(Out::Data(text)) = out.out.first() else { panic!("--json is data") };
         let back: Vec<DriveDescriptor> = serde_json::from_str(text).unwrap();
         assert_eq!(back[0].id.as_deref(), Some("ab".repeat(16).as_str()));
+    }
+
+    /// **A move that refused keys says so; one that refused none says nothing of
+    /// it** (kotton #313): the note counts the keys for a nonzero count, in the
+    /// singular for one, and is absent for 0. The count is the one spelling the
+    /// daemon's refusals read too, and the note says where the names are: the
+    /// person's event log, `logs --level warn` (kotton #315), which reads the same
+    /// in the REPL and as `kotton logs` (kotton #355), so the note names no door.
+    #[test]
+    fn a_move_notes_the_keys_it_refused_and_says_nothing_for_none() {
+        let answered = |keys_refused| kotton::DriveMoved {
+            drives: vec![DriveDescriptor {
+                id: None,
+                name: "photos".into(),
+                vault: "vault-2".into(),
+                vault_key: "00".repeat(32),
+                size: None,
+                pinned_whole: vec![],
+                unfinished: false,
+            }],
+            keys_refused,
+        };
+        let notes = |out: &[Out]| -> Vec<String> {
+            out.iter().filter_map(|o| if let Out::Note(n) = o { Some(n.clone()) } else { None }).collect()
+        };
+
+        let none = moved_said("photos", "vault-2", &answered(0));
+        assert!(matches!(&none[..], [Out::Confirm { action, .. }] if action.contains("'vault-2'")), "{none:?}");
+        assert!(notes(&none).is_empty(), "a move that refused nothing printed a note: {none:?}");
+
+        let one = notes(&moved_said("photos", "vault-2", &answered(1)));
+        assert_eq!(one, vec![refused_said(1)]);
+        assert!(one[0].contains(&format!("listed {};", NotCanonical::counted(1))), "{one:?}");
+        assert!(one[0].contains("listed 1 key that is not a storage key") && one[0].contains("refused it"), "{one:?}");
+        assert!(one[0].contains("names it: `logs --level warn`") && !one[0].contains("in the REPL"), "the note does not say where the key is named: {one:?}");
+
+        let three = notes(&moved_said("photos", "vault-2", &answered(3)));
+        assert_eq!(three, vec![refused_said(3)]);
+        assert!(three[0].contains(&format!("listed {};", NotCanonical::counted(3))), "{three:?}");
+        assert!(three[0].contains("listed 3 keys that are not storage keys") && three[0].contains("refused them"), "{three:?}");
+        assert!(three[0].contains("names them: `logs --level warn`") && !three[0].contains("in the REPL"), "the note does not say where the keys are named: {three:?}");
     }
 
     #[test]

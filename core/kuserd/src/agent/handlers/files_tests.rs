@@ -645,6 +645,47 @@ mod reassembly_tests {
         let models = store.list_daemon_objects("/models/").await.unwrap_or_default();
         assert!(models.is_empty(), "a refused stream left a daemon object: {models:?}");
     }
+
+    /// `ListSealed`'s prefix is a peer's word, and a peer that asks for `../x`
+    /// is refused for it, with the [`kotton_store::NotCanonical`] text: it is
+    /// not answered for `x`, the prefix a rewrite would have made of it
+    /// (kotton #275). An empty prefix is the root, and a canonical one lists
+    /// what is under it.
+    #[tokio::test]
+    async fn a_sealed_listing_for_a_prefix_that_is_not_canonical_is_refused() {
+        let (_d, rt, users) = env().await;
+        let domain = rt
+            .user_cek_domain_id("alice", users.get("alice").as_deref())
+            .expect("domain");
+        let resp = push(&rt, &users, &map(), "x/a.bin", b"sealed", &domain, 4096).await;
+        assert!(matches!(resp, UserResponse::Ok), "{resp:?}");
+
+        let list = |prefix: &str| {
+            let (rt, users, prefix) = (Arc::clone(&rt), users.clone(), prefix.to_string());
+            async move {
+                list_sealed(
+                    &crate::agent::file_host::file_host(&rt, &*resources(&rt, &users)),
+                    "alice".into(),
+                    "local".into(),
+                    prefix,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let keys = |resp: UserResponse| match resp {
+            UserResponse::SealedList { entries } => entries.into_iter().map(|e| e.key).collect::<Vec<_>>(),
+            other => panic!("expected a listing, got {other:?}"),
+        };
+        assert!(keys(list("").await).contains(&"x/a.bin".to_string()), "the root lists the object");
+        assert_eq!(keys(list("x").await), vec!["x/a.bin".to_string()]);
+        match list("../x").await {
+            UserResponse::Error { message } => {
+                assert_eq!(message, "storage key \"../x\" refused: a component is `.` or `..`")
+            }
+            other => panic!("`../x` was answered: {other:?}"),
+        }
+    }
 }
 
 /// The device's host reads a mount's pin through the same trait as the vault's,

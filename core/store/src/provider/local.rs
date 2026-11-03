@@ -42,12 +42,36 @@ impl LocalObjectStorage {
     /// **A key resolves under the mount root or not at all.** A `..`
     /// component, or a host prefix such as a Windows drive, is refused: it
     /// would name a path outside the root, and no key the store writes has
-    /// one. Keys from outside are admitted before they get here
-    /// ([`crate::StorageKey`], kotton #265); this is the last line under every
-    /// caller, including those that build a key from something a peer wrote
-    /// (a pack id in a manifest). A leading `/` and a `.` component name
-    /// nothing outside the root and are read past, as the logical paths the
-    /// VFS hands this store may carry them.
+    /// one. Keys from outside are admitted before they get here: a sync
+    /// pass's listings ([`crate::StorageKey`], kotton #265), and a pack id a
+    /// manifest or superblock names, at decode ([`crate::packed::PackId`],
+    /// kotton #273), so neither reaches this refusal any more.
+    ///
+    /// What it no longer stands in for: drive move (kotton #274) admits each
+    /// key where the source vault's listing enters it and writes through a
+    /// vault's `write_sealed`, which admits again, and
+    /// `kotton_sealed::Sealed` takes only admitted keys and prefixes
+    /// (kotton #275, #320) and admits each directory key a store lists
+    /// before it descends into it (kotton #336). `BlindedObjectStorage`'s
+    /// walk (`collect_leaves`, behind its `list`, the packer's `list_loose`
+    /// and the blinding migration) admits every key the inner store lists,
+    /// directory or leaf, before it descends into it or hands it to a read,
+    /// write or delete (kotton #357). None of them reaches here with a key
+    /// it did not admit.
+    ///
+    /// The doors still relying on this refusal, each to close before it can
+    /// go:
+    ///
+    /// - The guest re-wrap's raw read (kotton #299):
+    ///   `UserStore::read_raw_local_object` reads the path a re-wrap names on
+    ///   a store of its own, past a trimmed leading `/`, admitted by nothing
+    ///   else.
+    /// - `kvaultd::meter::Meter::measure` (kotton #352): it descends into the
+    ///   directory keys a shelf's listing names, unparsed.
+    ///
+    /// A leading `/` and a `.` component name nothing outside the root and
+    /// are read past, as the logical paths the VFS hands this store may carry
+    /// them.
     fn resolve_key(&self, key: &Path) -> ObjectStorageResult<PathBuf> {
         use std::path::Component;
         let mut path = self.base_path.clone();

@@ -603,9 +603,12 @@ impl CapabilitySet {
 /// rejects traversal (audit H3); this must not honour it either, which is
 /// defence in depth rather than duplication.
 ///
-/// Public because the sealed replication verbs address the same key space and
-/// must agree with it exactly — a second implementation is how the two would
-/// quietly diverge.
+/// Public because the VFS views above this crate (`kotton_store::fs_view`, the
+/// app daemon) address the same key space and must agree with it exactly — a
+/// second implementation is how the two would quietly diverge. The sealed
+/// replication verbs do not use it: a key a peer names is refused when it is
+/// not canonical, never rewritten into one that is
+/// (`kotton_sys::store::StorageKey`, kotton #275).
 pub fn to_object_key(path: &str) -> String {
     let unix = path.replace('\\', "/");
     normalize_vfs_path(&unix)

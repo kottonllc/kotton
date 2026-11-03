@@ -26,6 +26,34 @@
 //! identities from the remaining tenants' chains — rather than subtracted, so
 //! an identity or a key two names share survives the one being dropped.
 //!
+//! **The walk admits its listing** (kotton #310; the rule is kotton #265's).
+//! A shelf is emptied by walking its own listing and deleting each key
+//! ([`clear_shelf`]), here for a drop and in `crate::drives` for a retire. The
+//! listing is what is on the disk or in the bucket, and a file whose name
+//! decodes to `../x` lists as that key, which the store will not delete: it
+//! names a path outside the mount root. So each listed key is parsed into a
+//! [`StorageKey`] where the listing enters the walk, and only an admitted key
+//! is deleted or walked into. A key that is not canonical is no object any
+//! device wrote, since a store writes only canonical keys; it is refused,
+//! logged and counted ([`Cleared::refused`]), and the walk goes on, as a
+//! drive move and a sync pass treat it. No second check stands before the
+//! delete: the key it is handed is already a `StorageKey`.
+//!
+//! **What the walk refused goes with the directory, not by its key.** Kept
+//! and counted, such an object would be left under a tree or a tenant that no
+//! longer exists, owned by nobody and reachable by no verb: a leak, not
+//! caution. So once every canonical object is deleted by key, the retire
+//! removes the tree's directory whole, and the drop the tenant's directory
+//! whole, and the refused file goes with it. Nothing a canonical key names is
+//! deleted that way, since by then the walk has deleted each of those and
+//! nothing was left for the removal but what no key names; and nothing outside
+//! the directory is reached, since the removal is of the directory and never
+//! of a path a listing spelled. On a bucket there is no directory, and the
+//! shelf seam (`kotton_sys::store::SyncableStore`) has no delete by prefix, so
+//! there the refused object stays: the vault lists the shelf once more after
+//! the removal and logs that it still holds something ([`left_on`]), rather
+//! than keeping it silently. A delete by prefix at the seam is what closes it.
+//!
 //! **What a drop is, under Article VII.** It removes the tenant from this
 //! vault's index: access, not data. A tenant's data is theirs and on their own
 //! devices; the vault held a sealed copy it could not read, and forgets it. A
@@ -43,12 +71,13 @@ use kotton_common::crypto::kdf_labels;
 use kotton_device::users::residency::Residency as _;
 use kotton_device::users::DeviceUsers as _;
 use kotton_session::service::tokens::SessionMap;
+use kotton_store::{NotCanonical, StorageKey};
 use kotton_sys::store::SyncableStore;
 use kotton_wire::ipc::VaultTenant;
 use sqlx::{Row as _, SqlitePool};
 use std::collections::BTreeSet;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::sync::Arc;
 
 /// Is `name` something a tenant can be called and the drop can take: one
@@ -161,31 +190,61 @@ pub async fn list(ctx: &PeerContext) -> io::Result<Vec<VaultTenant>> {
     Ok(out)
 }
 
+/// What a walk of one shelf did ([`clear_shelf`]).
+#[derive(Debug, Default)]
+pub struct Cleared {
+    /// The objects it deleted.
+    pub removed: u64,
+    /// Each key the shelf listed that is not a storage key, and why: refused
+    /// where the listing entered the walk, so never deleted by key and never
+    /// walked into. What becomes of the object is the caller's directory
+    /// removal (module doc, "The walk admits its listing").
+    pub refused: Vec<NotCanonical>,
+}
+
 /// Delete every object on one shelf, walked through its own listing — the
 /// same walk the meter measures with, so a bucket is emptied as a directory
-/// is. Returns how many objects went.
-pub async fn clear_shelf(shelf: &dyn SyncableStore) -> io::Result<u64> {
-    let mut removed = 0u64;
-    let mut pending = vec![PathBuf::new()];
+/// is. Each listed key is admitted as a [`StorageKey`] where the listing enters
+/// the walk, and only an admitted key is deleted or listed under; one that is
+/// not canonical is logged and returned in [`Cleared::refused`] (kotton #310).
+pub async fn clear_shelf(shelf: &dyn SyncableStore) -> io::Result<Cleared> {
+    let mut cleared = Cleared::default();
+    let mut pending: Vec<Option<StorageKey>> = vec![None];
     while let Some(prefix) = pending.pop() {
+        let at = prefix.as_ref().map_or(Path::new(""), StorageKey::as_path);
         let entries = shelf
-            .list(&prefix)
+            .list(at)
             .await
-            .map_err(|e| io::Error::other(format!("listing the shelf at {prefix:?}: {e}")))?;
+            .map_err(|e| io::Error::other(format!("listing the shelf at {at:?}: {e}")))?;
         for e in entries {
-            let key = PathBuf::from(&e.key);
+            let key = match StorageKey::parse(&e.key) {
+                Ok(key) => key,
+                Err(refused) => {
+                    tracing::warn!(key = ?refused.key, why = refused.why, "the shelf listed a key that is not a storage key; the walk refused it");
+                    cleared.refused.push(refused);
+                    continue;
+                }
+            };
             if e.is_dir {
-                pending.push(key);
+                pending.push(Some(key));
             } else {
                 shelf
-                    .delete(&key)
+                    .delete(key.as_path())
                     .await
                     .map_err(|err| io::Error::other(format!("deleting {key:?} from the shelf: {err}")))?;
-                removed += 1;
+                cleared.removed += 1;
             }
         }
     }
-    Ok(removed)
+    Ok(cleared)
+}
+
+/// Whether `shelf` still lists anything once its directory was removed: what
+/// a walk refused and a directory removal did not take, on a bucket (module
+/// doc). Logged by the caller; a listing that fails is read as nothing left
+/// to say, since the walk itself has already listed this shelf.
+pub async fn left_on(shelf: &dyn SyncableStore) -> bool {
+    shelf.list(Path::new("")).await.is_ok_and(|left| !left.is_empty())
 }
 
 /// Drop exactly one tenant: everything in the module table, found by their
@@ -270,9 +329,14 @@ pub async fn drop_tenant(
     // 2. The bytes on the shelf, through the shelf: on a bucket this is the
     // only way the objects go, and on the disk it is the same walk.
     let mut objects = 0u64;
+    let mut keys_refused = 0usize;
+    let mut shelves = Vec::with_capacity(mounts.len());
     for (mount, path) in &mounts {
         let shelf = ctx.runtime.shelves().open(user_id, mount, path);
-        objects += clear_shelf(shelf.as_ref()).await?;
+        let cleared = clear_shelf(shelf.as_ref()).await?;
+        objects += cleared.removed;
+        keys_refused += cleared.refused.len();
+        shelves.push((mount, shelf));
         let _ = ctx
             .runtime
             .secrets()
@@ -294,9 +358,19 @@ pub async fn drop_tenant(
             .map_err(|e| io::Error::other(e.to_string()))?;
         kotton_identity::provisioning::delete_all_user_secrets(ctx.runtime.secrets(), user_id);
     }
+    // What the walk refused went with the directory; on a bucket nothing
+    // removes it, and the vault says so rather than keeping it silently.
+    if keys_refused > 0 {
+        for (mount, shelf) in &shelves {
+            if left_on(shelf.as_ref()).await {
+                tracing::warn!(user_id, mount = %mount, "a dropped tenant's shelf still holds objects whose keys are not storage keys; nothing at the shelf seam removes them by prefix");
+            }
+        }
+    }
     tracing::info!(
         user_id,
         objects,
+        keys_refused,
         rows = ?swept.iter().filter(|(_, n)| *n > 0).collect::<Vec<_>>(),
         "dropped a tenant"
     );

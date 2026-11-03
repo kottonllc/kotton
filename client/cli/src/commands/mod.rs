@@ -79,14 +79,20 @@ fn shell_help(name: &str) -> String {
     DOOR.get_or_init(|| kotton_shell::ShellExecutor::new().registry()).help_of(name).unwrap_or_default()
 }
 
-/// The `<ARGS>` help of `device`. `add`'s posture bracket is the one the REPL's usage line
-/// prints ([`kotton_shell::device_add_posture_bracket`]), walked from `device_add_word`, so
-/// this line names the flags `parse_add` reads and spells none of them.
+/// The `<ARGS>` help of `device`, in its siblings' form (`Arguments to the verb:`, each
+/// alternative in backticks, so `<code>` and `<id>` render as placeholders, not markup): the
+/// shell's grammar ([`kotton_shell::device_grammar`]), each alternative as it is, since clap
+/// prints `kotton device` before it, so both doors print one grammar and this one spells none
+/// of the shell's words (kotton #326, #361); then `reset`, which is this door's alone, with its
+/// own word ([`device::YES_WORD`], the one `reset` reads).
 fn device_args_help() -> String {
-    format!(
-        "Arguments: `add [--as N] [{}]` | `join [code] [--as N]` | `list` | `revoke <id>` | `name [N]` | `reset [--yes]`",
-        kotton_shell::device_add_posture_bracket()
-    )
+    let reset = format!("reset [{}]", device::YES_WORD);
+    let alternatives: Vec<String> = kotton_shell::device_grammar()
+        .iter()
+        .chain(std::iter::once(&reset))
+        .map(|line| format!("`{line}`"))
+        .collect();
+    format!("Arguments to the verb: {}", alternatives.join(" | "))
 }
 
 #[derive(Subcommand)]
@@ -131,8 +137,8 @@ pub enum Commands {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        // Its help is `device_args_help()`: the posture bracket is the shell's, read from the
-        // vocabulary, so it is not written here.
+        // Its help is `device_args_help()`: the shell's grammar, rendered after this door's
+        // prefix, so it is not written here.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word, help = device_args_help())]
         args: Vec<String>,
     },
@@ -187,6 +193,17 @@ pub enum Commands {
         #[arg(long)]
         user: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word, hide = true)]
+        args: Vec<String>,
+    },
+    /// Read your event log — by level, category or age, or follow it live — shares the
+    /// REPL's `logs` verb
+    #[command(after_help = shell_help("logs"))]
+    Logs {
+        /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
+        #[arg(long)]
+        user: Option<String>,
+        /// Arguments: `[--level <level>] [--category <cat>] [--since <secs>] [-n <count>] [-f|--follow]`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },
     /// Trusted-issuer registry (add, remove, list) — shares the REPL's `issuer` verb

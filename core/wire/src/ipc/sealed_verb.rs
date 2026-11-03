@@ -145,7 +145,7 @@ mod tests {
                 total_size: 3,
                 content_hash: "h".into(),
             },
-            SealedVerb::ListSealed { user_id: u(), mount: "local".into(), prefix: "x/".into() },
+            SealedVerb::ListSealed { user_id: u(), mount: "local".into(), prefix: "x".into() },
             SealedVerb::RecoveryFetch { user_id: u() },
             SealedVerb::RecoveryStore { user_id: u(), bundle: "b".into(), kel: vec![] },
             SealedVerb::NodeRelay { user_id: u() },

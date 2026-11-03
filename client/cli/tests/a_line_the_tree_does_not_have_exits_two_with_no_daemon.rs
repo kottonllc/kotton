@@ -105,3 +105,72 @@ fn a_line_that_parses_goes_on_to_the_daemon() {
     assert_eq!(out.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The `--word`s of a line, in order of first appearance, each once.
+fn flags(line: &str) -> Vec<&str> {
+    let mut seen = Vec::new();
+    for w in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).filter(|w| w.starts_with("--")) {
+        if !seen.contains(&w) {
+            seen.push(w);
+        }
+    }
+    seen.sort_unstable();
+    seen
+}
+
+/// `kotton device --help`'s argument help and the usage line `device` refuses a word with are
+/// two doors to one grammar (kotton #326): each renders the shell's grammar with its own
+/// prefix (kotton #361), and the help adds only `reset`'s own word, `--yes`, since `reset` is
+/// the CLI's and the shell does not run it. Read from outside, as a person reads them: the
+/// flags each names are the same list.
+#[test]
+fn the_device_help_names_the_words_the_usage_line_names() {
+    let dir = scratch("device-help");
+    let help = kotton(&dir, &["device", "--help"]);
+    assert_eq!(help.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&help.stderr));
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    let args_help = help.lines().find(|l| l.trim_start().starts_with("[ARGS]...")).unwrap_or_else(|| panic!("no argument help:\n{help}"));
+    let refused = kotton(&dir, &["device", "--user", "nobody", "admitx"]);
+    assert_eq!(refused.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    let usage = stderr
+        .lines()
+        .find_map(|l| l.split_once("usage: ").map(|(_, rest)| rest))
+        .unwrap_or_else(|| panic!("no usage line:\n{stderr}"));
+    // The usage line ends on an aside naming the CLI's `reset`; the grammar is what precedes it.
+    let grammar = usage.split("   (").next().unwrap();
+
+    let help_flags: Vec<&str> = flags(args_help).into_iter().filter(|w| *w != "--yes").collect();
+    assert_eq!(
+        help_flags,
+        flags(grammar),
+        "`kotton device --help` names {help_flags:?}; the usage line names {:?}\nhelp: {args_help}\nusage: {usage}",
+        flags(grammar)
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `kotton device --help`'s argument help reads like its siblings' (`kotton peer`, `kotton
+/// app`): `Arguments to the verb:`, then each alternative after the verb word, never starting
+/// with `device` again, since clap prints `kotton device` before it and `kotton device device
+/// add` is no line anyone runs (kotton #361).
+#[test]
+fn the_device_help_names_its_alternatives_after_the_verb_word() {
+    let dir = scratch("device-help-form");
+    let help = kotton(&dir, &["device", "--help"]);
+    assert_eq!(help.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&help.stderr));
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    let args_help = help.lines().find(|l| l.trim_start().starts_with("[ARGS]...")).unwrap_or_else(|| panic!("no argument help:\n{help}"));
+    let (_, alternatives) = args_help.split_once(": ").unwrap_or_else(|| panic!("no alternatives:\nhelp: {args_help}"));
+    let led: Vec<&str> = alternatives
+        .split(" | ")
+        .map(|a| a.trim_matches('`'))
+        .filter(|a| a.split_whitespace().next() == Some("device"))
+        .collect();
+    assert!(led.is_empty(), "alternatives that begin with the verb word: {led:?}\nhelp: {args_help}");
+    assert!(
+        args_help.contains("Arguments to the verb: "),
+        "the help does not read `Arguments to the verb:` as its siblings do:\nhelp: {args_help}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

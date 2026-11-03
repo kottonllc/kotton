@@ -567,18 +567,36 @@ pub(super) async fn accept_chunk(
 
 /// List a mount in storage-key space — the opaque keys replication
 /// addresses. See [`read_sealed`] on why authorisation lives in the dispatcher.
+///
+/// `prefix` is the caller's word — a peer's, through kuserd's and kvaultd's
+/// doors — so it is parsed here, once, before anything is asked: empty is the
+/// mount's root, and anything else must be a canonical
+/// [`StorageKey`](kotton_store::StorageKey). `../x` is refused with the
+/// [`NotCanonical`](kotton_store::NotCanonical) text, not answered for `x`
+/// (kotton #275).
 pub async fn list_sealed(
     host: &dyn StoreHost,
     user_id: String,
     mount: String,
     prefix: String,
 ) -> io::Result<UserResponse> {
+    let prefix = match prefix.as_str() {
+        "" => None,
+        given => match kotton_store::StorageKey::parse(given) {
+            Ok(key) => Some(key),
+            Err(refused) => {
+                return Ok(UserResponse::Error {
+                    message: refused.to_string(),
+                })
+            }
+        },
+    };
     let Some(user_store) = host.user_store(&user_id) else {
         return Ok(UserResponse::Error {
             message: format!("user '{user_id}' not found"),
         });
     };
-    match user_store.list_sealed(&mount, &prefix).await {
+    match user_store.list_sealed(&mount, prefix.as_ref()).await {
         Ok(entries) => Ok(UserResponse::SealedList {
             entries: entries
                 .into_iter()
@@ -1214,5 +1232,55 @@ pub async fn sync_mount(
         Err(e) => Ok(UserResponse::Error {
             message: e.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host that answers nothing: any question a handler asks of it fails
+    /// the test, so a handler that returns has asked nothing.
+    struct AsksNothing;
+
+    impl StoreHost for AsksNothing {
+        fn events(&self) -> &Arc<kotton_diag::service::EventBus> {
+            unreachable!("the host was asked for its events")
+        }
+        fn mount_domain(&self, _: &str, _: &str) -> io::Result<Option<String>> {
+            unreachable!("the host was asked for a mount's domain")
+        }
+        fn pin_mount_domain(&self, _: &str, _: &str, _: &str) -> io::Result<()> {
+            unreachable!("the host was asked to pin a domain")
+        }
+        fn cek_domain_id(&self, _: &str, _: Option<&kotton_store::runtime::user::UserStore>) -> Option<String> {
+            unreachable!("the host was asked for a key domain")
+        }
+        fn user_store(&self, _: &str) -> Option<Arc<kotton_store::runtime::user::UserStore>> {
+            unreachable!("the host was asked for a store")
+        }
+    }
+
+    /// A `ListSealed` prefix that is not canonical is refused where it
+    /// enters, with the `NotCanonical` text, before the host is asked for a
+    /// store (kotton #275).
+    #[tokio::test]
+    async fn a_list_prefix_that_is_not_canonical_is_refused_before_any_store_is_asked() {
+        for (prefix, why) in [
+            ("../x", "a component is `.` or `..`"),
+            ("x/../y", "a component is `.` or `..`"),
+            ("/x", "it starts with `/`"),
+            ("x/", "a component is empty"),
+        ] {
+            let resp = list_sealed(&AsksNothing, "alice".into(), "local".into(), prefix.into())
+                .await
+                .unwrap();
+            match resp {
+                UserResponse::Error { message } => {
+                    assert_eq!(message, format!("storage key {prefix:?} refused: {why}"))
+                }
+                other => panic!("{prefix:?} was answered: {other:?}"),
+            }
+        }
     }
 }

@@ -29,7 +29,11 @@
 //! shelf, so every layer above reads the pack exactly as if it had always been
 //! here: the bytes it fetches are the sealed pack the drive holds, verbatim,
 //! and are opened by the same layers that open a pack synced in a pass. It
-//! sees only storage keys under `_pack/`; a pack's name says nothing about
+//! sees only storage keys under `_pack/`, each admitted before it was built:
+//! a pack id a manifest or superblock names is admitted where it is decoded
+//! ([`crate::packed::PackId`], kotton #273), and a key a sync pass lists
+//! where it is listed ([`crate::StorageKey`], kotton #265), so a manifest
+//! naming `_pack/../x` asks no drive for anything. A pack's name says nothing about
 //! what is in it, and the source is asked for nothing else — not a path, not a
 //! file. What the drive learns is that this device asked for one pack — and,
 //! unlike a pass, *when*: a fetch is timed to a read, often a person's, so the

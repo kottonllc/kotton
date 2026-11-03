@@ -7,7 +7,9 @@
 //! One finder for every reader of the question: the relay's and the vault's differential
 //! tests (through `settings_corpus.rs`), and `xtask`'s release gate and `doctor`, which
 //! compile this file by `#[path]`. It names nothing but `std`, which is what lets it be
-//! compiled in all three crates.
+//! compiled in all three crates; xtask's test of every `#[path]`-shared file
+//! (`xtask/src/std_only.rs`, kotton #306) holds that, where a name all three link would
+//! compile and go unseen.
 //!
 //! **A run that cannot reach the parser is not a pass.** A differential test that finds it
 //! missing fails naming what is missing, unless [`SKIP_VAR`] is set — by a developer, on a

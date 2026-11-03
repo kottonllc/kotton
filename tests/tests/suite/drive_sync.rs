@@ -565,7 +565,7 @@ async fn sealed_in(vault: &RunningVault, tree: &str) -> Vec<(String, Vec<u8>)> {
     use kotton_device::users::residency::Residency as _;
     let pool = vault.vault.pools().get(USER).expect("the vault keeps a pool for the person");
     let mut out = Vec::new();
-    for (key, _, _) in pool.list_sealed(tree, "").await.expect("the tree lists") {
+    for (key, _, _) in pool.list_sealed(tree, None).await.expect("the tree lists") {
         let blob = pool.read_sealed(tree, &key).await.expect("the object reads");
         out.push((key, blob));
     }
@@ -701,6 +701,8 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
     // The move: the sealed bytes to the second vault, under the same key.
     let first_drive = sealed_in(&first, FIRST_DRIVE_TREE).await;
     let moved = client_a.drive_move(USER, "photos", "vault-2", None).await.expect("drive move");
+    assert_eq!(moved.keys_refused, 0, "{moved:?}");
+    let moved = moved.drives;
     assert_eq!(moved.len(), 1, "{moved:?}");
     assert_eq!(moved[0].vault_key, second_id.pubkey_hex);
     let now = where_recorded(&a, "photos").await;
@@ -721,4 +723,103 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
     // The first drive is kept at both vaults and does not move.
     let refused = client_b.drive_move(USER, "personal", "vault-2", None).await.expect_err("personal moved");
     assert!(refused.to_string().contains("tenancy's own tree"), "{refused}");
+}
+
+/// **A move admits every key the vault it leaves lists, and carries none that
+/// is not canonical** (kotton #274). A move takes the source vault's listing
+/// as the keys it reads there and writes at the other vault, so the listing is
+/// what the vault it leaves controls. Here that vault lists `../x` in the
+/// drive's tree: a file whose name percent-decodes to it (a filesystem
+/// listing rebuilds each key from a file's name, decoding `%2F` to `/`), with
+/// a file beside the tree at `x`, so a read of `../x` would find bytes. The
+/// listing is the vault's own, through the store's sealed view at its root:
+/// the prefix is admitted (kotton #275) and a leaf's key is passed through as
+/// the store spelled it.
+///
+/// The move refuses the key where the listing enters it, before any read or
+/// write: every canonical object is carried and the copy is named finished,
+/// the other vault holds those and nothing beside its tree, and the answer
+/// counts the refused key. Before the admission, the device asked the vault
+/// it leaves to read `../x`, and the whole move was refused there.
+///
+/// The vault the drive leaves then retires it: its retire walks the same
+/// listing (`kvaultd::tenancy::clear_shelf`) and admits it as the move does
+/// (kotton #310), so it refuses `../x` rather than asking its store to delete
+/// a path outside the tree, deletes the rest, and removes the tree's
+/// directory whole, the refused file with it. The move answers the drive
+/// moved, with `keys_refused` 1; the drive is at the other vault alone, and
+/// the `x` beside the tree it left is untouched. Before the vault admitted
+/// its listing, its retire failed and the drive was left at both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_move_refuses_a_listed_key_that_is_not_canonical_and_says_so() {
+    use kotton_device::users::residency::Residency as _;
+    use kotton_wire::ipc::FIRST_DRIVE_TREE;
+    init_crypto();
+    let first = spawn_vault("vault").await;
+    let second = spawn_vault("second vault").await;
+    let a = spawn_device("device A").await;
+    let mut client_a = connect_when_ready(&a.ipc, "client A").await;
+    client_a.create_user(USER, crate::common::TEST_PASSPHRASE).await.expect("create_user on A");
+    let (client_a, first_id) = enrol_vault_from(client_a, "device-a", &first, USER, "vault").await;
+    let (mut client_a, second_id) = enrol_vault_from(client_a, "device-a", &second, USER, "vault-2").await;
+    // A's first write pins the person's key domain at the vault.
+    client_a.write_file(USER, "from-a.txt", b"written on A").await.expect("write on A");
+    synced(&mut client_a, "A").await;
+    let domain = first
+        .vault
+        .runtime()
+        .secrets()
+        .get_secret(&kotton_common::crypto::kdf_labels::sealed_mount_domain(USER, FIRST_DRIVE_TREE))
+        .expect("the vault's secrets read")
+        .expect("the first drive pinned the person's key domain at its first write");
+
+    client_a.drive_create(USER, "photos", Some("vault")).await.expect("drive create");
+    let tree = where_recorded(&a, "photos").await[0].1.clone();
+    let objects: Vec<(String, Vec<u8>)> = vec![("p/one".into(), vec![1; 300])];
+    for (key, body) in &objects {
+        let request = serde_json::to_vec(&UserRequest::WriteSealed {
+            user_id: USER.into(),
+            mount: tree.clone(),
+            path: key.clone(),
+            blob: body.clone(),
+            domain_id: domain.clone(),
+            offset: 0,
+            total_size: body.len() as u64,
+            content_hash: blake3::hash(body).to_hex().to_string(),
+        })
+        .unwrap();
+        let answer = try_ask_the_vault_as(&a, &first_id, request).await.expect("A reaches the vault");
+        assert!(matches!(answer, UserResponse::Ok), "{answer:?}");
+    }
+
+    // The vault the drive leaves lists `../x` in its tree.
+    let tree_dir = |vault: &RunningVault, tree: &str| {
+        let pool = vault.vault.pools().get(USER).expect("the vault keeps a pool for the person");
+        pool.shelf_mounts().into_iter().find(|(t, _)| t == tree).expect("the tree rests on a directory").1
+    };
+    let source_dir = tree_dir(&first, &tree);
+    std::fs::write(source_dir.join("..%2Fx"), b"served").expect("plant a served key");
+    std::fs::write(source_dir.parent().unwrap().join("x"), b"beside the served tree").expect("the bytes ../x reads");
+    let pool = first.vault.pools().get(USER).expect("the vault keeps a pool for the person");
+    let listed: Vec<String> = pool.list_sealed(&tree, None).await.expect("the tree lists").into_iter().map(|(k, _, _)| k).collect();
+    assert!(listed.iter().any(|k| k == "../x"), "the source vault lists `../x` as the move will read it: {listed:?}");
+
+    let moved = client_a.drive_move(USER, "photos", "vault-2", None).await.expect("drive moved");
+    assert_eq!(moved.keys_refused, 1, "the refusal is not in the move's answer: {moved:?}");
+    assert_eq!(moved.drives.len(), 1, "{moved:?}");
+    assert_eq!(moved.drives[0].vault_key, second_id.pubkey_hex);
+    assert!(!trees_at(&first).contains(&tree), "the vault the drive left still keeps its tree");
+    assert!(!source_dir.exists(), "the vault the drive left kept the tree's directory, or the file it refused");
+    assert_eq!(
+        std::fs::read(source_dir.parent().unwrap().join("x")).expect("the file beside the tree"),
+        b"beside the served tree",
+        "the retire reached outside the tree it retired"
+    );
+    let at = where_recorded(&a, "photos").await;
+    assert_eq!(at.len(), 1, "the drive is recorded at more than the vault it moved to: {at:?}");
+    let new_tree = at.iter().find(|(vault, _)| *vault == second_id.pubkey_hex).expect("the drive is recorded at the second vault").1.clone();
+    assert_ne!(new_tree, tree);
+    let dest_dir = tree_dir(&second, &new_tree);
+    assert!(!dest_dir.parent().unwrap().join("x").exists(), "`../x` was written beside the other vault's tree");
+    assert_eq!(sealed_in(&second, &new_tree).await, objects, "the other vault holds the canonical objects and nothing else");
 }

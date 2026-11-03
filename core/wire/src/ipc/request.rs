@@ -123,6 +123,8 @@ pub enum UserRequest {
     /// All of it here, in one request, so every door that recovers records the
     /// drive the same way (`kotton_device::users::recover`). Required: a
     /// `Recover` without the line is not on the wire.
+    ///
+    /// Answered with `Recovered`.
     Recover {
         user_id: String,
         recovery_key: crate::ipc::vault_request::SecretText,
@@ -138,13 +140,15 @@ pub enum UserRequest {
     /// `scope` is an optional allow-list of `UserRequest` variant names
     /// (e.g. `["ReadFile", "WriteFile"]`). When present and non-empty,
     /// `kuserd` will reject any request whose variant is not in this list
-    /// with `UserResponse::NotInScope`. A `None` or empty scope means full
+    /// (see `UserResponse::NotInScope`). A `None` or empty scope means full
     /// access: what `kotton-client` asks for, and the CLI through it, and what
     /// `kquicd` asks for when it mints a session for a peer it authenticated
     /// and when it forwards a remote request. `kquicd`'s own administrative
     /// connection and its refresh of the authorized keys ask for a scope.
     /// This is a backwards-compatible addition, callers that omit `scope`
     /// continue to work unchanged.
+    ///
+    /// Answered with `ActiveSession`.
     Authenticate {
         token: crate::ipc::SecretText,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -249,7 +253,7 @@ pub enum UserRequest {
     /// end (`kotton_pair::browser::Issuer`): four cleartext handshake frames, then
     /// ciphertext the gateway cannot open. Once established, each frame carries
     /// one `UserRequest` the daemon dispatches **as the browser** — the principal
-    /// bound to the channel — and the reply comes back sealed in
+    /// bound to the channel — and the reply comes back sealed. Answered with
     /// `UserResponse::BrowserFrame`.
     ///
     /// The only verb `khttpd` speaks. Who it is for is named where the
@@ -325,10 +329,11 @@ pub enum UserRequest {
     /// Mint an invite and wait to be admitted through the relay
     /// (`DEC-0068`): reserve
     /// under the invite's handle at this node's relay for `ttl_seconds`,
-    /// stream the invite (`PairAdvertising { code }` — `kotton-invite:vault:…`), and run
+    /// stream the invite (its `code`, `kotton-invite:vault:…`), and run
     /// the joiner half when a device dials the relay. Nothing listens on a
     /// public port. The vault's door speaks this (`kvaultd invite`); a device
-    /// admits it with `drive enrol <invite> --blind`.
+    /// admits it with `drive enrol <invite> --blind`. Answered with
+    /// `PairAdvertising`, the invite, before the joiner half runs.
     DeviceInvite {
         user_id: String,
         ttl_seconds: u64,
@@ -521,7 +526,7 @@ pub enum UserRequest {
     /// admitted on a recovery claim for this identity or that is already one of
     /// its paired devices; the IPC path refuses it outright. Neither half opens
     /// anything: the chain is public by construction, and the copy opens under
-    /// the phrase alone, which never crosses.
+    /// the phrase alone, which never crosses. Answered with `RecoveryMaterial`.
     RecoveryFetch {
         user_id: String,
     },
@@ -577,6 +582,8 @@ pub enum UserRequest {
     /// Replaces the window; doors for epochs already past are dropped.
     ///
     /// Peer-only, from a paired device of the person's. A vault verb.
+    ///
+    /// Answered with `DoorsHeld`.
     HoldDoors {
         user_id: String,
         doors: Vec<crate::ipc::HeldDoor>,
@@ -586,6 +593,8 @@ pub enum UserRequest {
     /// it. Returns whatever is still pending after the acknowledgement.
     ///
     /// Peer-only, from a paired device of the person's. A vault verb.
+    ///
+    /// Answered with `Deliveries`.
     TakeDeliveries {
         user_id: String,
         ack: Vec<String>,
@@ -616,6 +625,8 @@ pub enum UserRequest {
     /// and a device from before is refused by a vault from after the same way.
     ///
     /// Peer-only, from a paired device of the person's. A vault verb.
+    ///
+    /// Answered with `FrameCarried`.
     CarryFrame {
         user_id: String,
         messages: Vec<crate::ipc::CarriedMessage>,
@@ -716,7 +727,8 @@ pub enum UserRequest {
     /// the drive there. A move left half-done — named at `to`, not yet retired
     /// where it was — is finished by moving it there again. `from` names the
     /// copy meant where two drives no move made share the name. Answered with
-    /// `Drives`, the drive where it now lives.
+    /// `DriveMoved`, the drive where it now lives and how many keys the vault
+    /// it left listed that the move refused (kotton #314).
     DriveMove {
         user_id: String,
         name: String,
@@ -759,6 +771,8 @@ pub enum UserRequest {
     /// stored keys on both sides — a blinding peer would otherwise un-blind them
     /// to plaintext, which both breaks key comparison and would put the paths on
     /// the wire.
+    ///
+    /// Answered with `SealedList`.
     ListSealed {
         user_id: String,
         mount: String,
@@ -867,7 +881,8 @@ pub enum UserRequest {
     /// the interim connection code) → `PairConnected` → `PairShowCode` →
     /// `PairAwaitingPeer` → `PairTransferring` → `PairingComplete` | `PairFailed`.
     /// The six-digit SAS is confirmed via a separate `PairConfirmCode` carrying
-    /// the token from `PairShowCode`.
+    /// the token from `PairShowCode`. Answered with `PairAdvertising`, the first
+    /// of those frames.
     DeviceAdd {
         user_id: String,
         /// Override this device's announced name for this ceremony only (`--as`).
@@ -915,6 +930,8 @@ pub enum UserRequest {
     /// lower of the two streams it confirms — `Paired` since DEC-0057. The tier is
     /// not what protects it, and adding a second check beside the token would add
     /// a guard without removing anything's reach.
+    ///
+    /// Answered with `PairConfirmAck`.
     PairConfirmCode {
         user_id: String,
         /// The ceremony token from `PairShowCode`.
@@ -927,6 +944,8 @@ pub enum UserRequest {
     /// pairing (RFC-0040 §1). Device-level (shared across users on this machine),
     /// so no `user_id`. `new_name = None` returns the current name, defaulting to
     /// the OS hostname if never set; `Some(name)` sets it. Local-only.
+    ///
+    /// Answered with `DeviceNameInfo`.
     DeviceName {
         #[serde(default)]
         new_name: Option<String>,
@@ -940,7 +959,7 @@ pub enum UserRequest {
     /// device records so its next dial lands even after this node changes relay
     /// (RFC-0083 R5: the pair is the resolver; a relay change is a forwarding
     /// address). One URL of this node's own configuration, no address of a
-    /// peer's, nothing of the user's.
+    /// peer's, nothing of the user's. Answered with `NodeRelayResult`.
     NodeRelay {
         user_id: String,
     },
@@ -956,7 +975,8 @@ pub enum UserRequest {
     /// bytes, hex; `router` is the key of the network the dialler is on (hex,
     /// the door's `RouterKey`), and a device on another network — or one that
     /// cannot name its own — declines, so no dial is ever aimed at an address
-    /// that belongs to a stranger where the dialler sits.
+    /// that belongs to a stranger where the dialler sits. Answered with
+    /// `Introduced`.
     Introduce {
         user_id: String,
         addr: String,
@@ -966,8 +986,8 @@ pub enum UserRequest {
     },
     /// How much a vault keeps for this user and how much it may (RFC-0084 V3):
     /// bytes held and the quota, the one meter a keyless keeper has. Answered
-    /// like `NodeRelay` — a fact of the node's own configuration, nothing read
-    /// from what it holds.
+    /// with `VaultCapacityResult`, as `NodeRelay` is answered: a fact of the
+    /// node's own configuration, nothing read from what it holds.
     VaultCapacity {
         user_id: String,
     },
@@ -989,6 +1009,8 @@ pub enum UserRequest {
     ///
     /// This is a **peer-only** request (served via the QUIC peer listener, like
     /// file/record sync); it is intentionally `Remote`-eligible.
+    ///
+    /// Answered with `FrostSignReply`.
     FrostSignRound {
         user_id: String,
         /// JSON of the runtime `FrostRound` message.
@@ -1002,6 +1024,8 @@ pub enum UserRequest {
     /// Local-IPC only — it signs with this node's share, so a remote peer must
     /// never trigger it (it is `Local`-tier); peers contribute via
     /// `FrostSignRound` instead.
+    ///
+    /// Answered with `ThresholdSigned`.
     ThresholdSign {
         user_id: String,
         /// Lowercase-hex of the message bytes to threshold-sign.
@@ -1042,6 +1066,8 @@ pub enum UserRequest {
     /// generated at daemon startup — the same value a remote peer must store via
     /// `PeerAdd` to allow mTLS connections from this node.  Not in
     /// `Remote`-eligible (public identity, not private key material).
+    ///
+    /// Answered with `NodeIdentity`.
     GetNodeIdentity,
     /// Add or update this device's sync rule for one of its person's drives.
     ///
@@ -1075,8 +1101,8 @@ pub enum UserRequest {
     },
     /// Sync this device's drives now: every drive the person has recorded
     /// here, each in the direction its rule chooses (both ways when it has
-    /// none). Returns at once with `SyncStarted { job_id }`; `SyncAwait` waits
-    /// for the pass.
+    /// none). Answered with `SyncStarted` at once, carrying its `job_id`;
+    /// `SyncAwait` waits for the pass.
     ///
     /// **Named for what it now means.** It was `SyncTrigger`, and could name a
     /// single paired node — another of the person's devices among them. A
@@ -1088,7 +1114,7 @@ pub enum UserRequest {
     },
     /// Block until a previously enqueued sync job completes or times out.
     ///
-    /// Returns `SyncOutcomeMsg`, `SyncFailed`, or `SyncTimeout`.
+    /// Answered with `SyncOutcomeMsg`, `SyncJobFailed` or `SyncJobTimeout`.
     SyncAwait {
         user_id: String,
         /// Job id returned by `SyncDrives`.
@@ -1156,6 +1182,8 @@ pub enum UserRequest {
 
     /// Return a human-readable table of all device-level config keys, their
     /// current values, and the command needed to configure each one.
+    ///
+    /// Answered with `ConfigStatus`.
     ConfigStatus,
 
     /// Set (or clear) the TURN relay URL for this device.
@@ -1276,6 +1304,8 @@ pub enum UserRequest {
     /// `Local`-tier. Opening a port on the network this machine sits on is an act at
     /// the machine; a browser session or a peer must not be able to open a door that
     /// exists precisely because it is reachable by strangers.
+    ///
+    /// Answered with `LocalDoorResult`.
     LocalDoor {
         #[serde(default)]
         answer: Option<String>,
@@ -1309,11 +1339,15 @@ pub enum UserRequest {
     /// Return current QUIC gateway configuration and whether `kquicd` is running.
     ///
     /// `Local`-tier.
+    ///
+    /// Answered with `QuicGatewayStatusResult`.
     QuicGatewayStatus,
     /// Return the raw Ed25519 public-key bytes (hex) for every DID in `paired_nodes`
     /// for `user_id`.
     ///
     /// Used by `kquicd` to build its in-memory authorised-client allowlist.
+    ///
+    /// Answered with `AuthorizedClients`.
     GetAuthorizedClients {
         user_id: String,
     },
@@ -1322,6 +1356,8 @@ pub enum UserRequest {
     /// Used by `kquicd` to construct the QUIC mTLS server certificate that
     /// remote clients verify against the node DID.  `Local`-tier —
     /// never callable from a remote gateway connection.
+    ///
+    /// Answered with `DeviceCert`.
     GetDeviceCert {
         user_id: String,
     },
@@ -1347,12 +1383,16 @@ pub enum UserRequest {
     /// Return current HTTP gateway configuration and whether `khttpd` is running.
     ///
     /// `Local`-tier.
+    ///
+    /// Answered with `WebShellStatusResult`.
     WebShellStatus,
     /// Wait for a browser to pair, and show its six digits here (RFC-0078).
     ///
-    /// Streams the ceremony like `DeviceAdd`: `PairShowCode { token, sas, .. }`
-    /// when a browser with an unregistered device key arrives on the sealed
-    /// channel, then `PairAwaitingPeer` / `PairTransferring` / `PairFailed`. The
+    /// Answered with `WebShellPairReady`, the first frame of a stream, once the
+    /// desk is open; then it streams the ceremony like `DeviceAdd` (see
+    /// `PairShowCode { token, sas, .. }`) when a browser with an unregistered device
+    /// key arrives on the sealed channel, then `PairAwaitingPeer` /
+    /// `PairTransferring` / `PairFailed`. The
     /// human compares the digits with the phone and answers with
     /// `PairConfirmCode { token, matches }`; on yes the browser's key is
     /// registered under the name it proposed.
@@ -1371,6 +1411,8 @@ pub enum UserRequest {
     /// `Local`-tier, like the desk that admits one: the list is the person's own
     /// roster of what acts as them, read on a trusted screen. A browser does not
     /// see it through its own channel, and no app is handed it.
+    ///
+    /// Answered with `BrowserDevices`.
     BrowserDeviceList {
         user_id: String,
     },
@@ -1643,17 +1685,6 @@ pub enum UserRequest {
         #[serde(default)]
         bindings: Vec<(String, String)>,
     },
-    /// Parse and validate an app package, and report what it is asking for.
-    ///
-    /// **Mints nothing and signs nothing.** This is the first half of the
-    /// two-phase install ([`IDEA-install-consent-gate`], Option B): the client
-    /// asks what the app wants, shows a human, and sends back the approved
-    /// subset in [`Self::AppInstall`]. Nothing is written to the app store here,
-    /// so a preview the user declines leaves no trace.
-    ///
-    /// Returns [`UserResponse::AppInstallPreview`].
-    ///
-    /// [`IDEA-install-consent-gate`]: https://kotton.sh/records/IDEA-install-consent-gate
     /// Report what an installed app **asked for** and what it **holds**.
     ///
     /// The read-only counterpart to the consent ceremony. Until this existed
@@ -1666,10 +1697,21 @@ pub enum UserRequest {
     /// It is also the surface a user is owed: "what does this app hold" should
     /// be answerable without reading a manifest off disk.
     ///
-    /// Returns [`UserResponse::AppGrants`].
+    /// Answered with [`UserResponse::AppGrants`].
     AppGrants {
         app_id: String,
     },
+    /// Parse and validate an app package, and report what it is asking for.
+    ///
+    /// **Mints nothing and signs nothing.** This is the first half of the
+    /// two-phase install ([`IDEA-install-consent-gate`], Option B): the client
+    /// asks what the app wants, shows a human, and sends back the approved
+    /// subset in [`Self::AppInstall`]. Nothing is written to the app store here,
+    /// so a preview the user declines leaves no trace.
+    ///
+    /// Answered with [`UserResponse::AppInstallPreview`].
+    ///
+    /// [`IDEA-install-consent-gate`]: https://kotton.sh/records/IDEA-install-consent-gate
     AppInstallPreview {
         /// The user_id the install would be for.
         user_id: String,
@@ -1687,8 +1729,8 @@ pub enum UserRequest {
     },
     /// Re-hash the installed WASM binary and confirm it matches the stored hash.
     ///
-    /// Returns [`UserResponse::AppVerifyResult`] with the stored hash, computed
-    /// hash, and a boolean indicating whether they match.
+    /// Answered with [`UserResponse::AppVerifyResult`], carrying the stored hash,
+    /// the computed hash, and a boolean indicating whether they match.
     AppVerify {
         app_id: String,
     },
@@ -1807,8 +1849,8 @@ pub enum UserRequest {
     },
     /// Query which app is registered for a named system role.
     ///
-    /// Returns [`DeviceResponse::AppRole`] with the `app_id`, or
-    /// [`DeviceResponse::AppNotFound`] if no app is registered for the role.
+    /// Answered with [`UserResponse::AppRole`] or [`UserResponse::AppNotFound`]:
+    /// the `app_id` registered for the role, or none.
     AppGetRole {
         /// Named role to look up, e.g. `"shell"` or `"dock"`.
         role: String,
@@ -1965,6 +2007,8 @@ pub enum UserRequest {
     /// `PublicKeyPackage` in SQLite, and returns the share blobs for all other
     /// participants. Each share blob must be delivered to its participant over a
     /// confidential channel; the participant imports it with `OrgFrostJoin`.
+    ///
+    /// Answered with `OrgFrostCreated`.
     OrgFrostNew {
         user_id: String,
         /// Human-readable org name.
@@ -1981,6 +2025,8 @@ pub enum UserRequest {
     /// converts it to a `KeyPackage`, stores it in `frost_key_packages`, and
     /// also inserts a row in `org_identities` (so the org is visible in
     /// `OrgList`).
+    ///
+    /// Answered with `OrgFrostJoined`.
     OrgFrostJoin {
         user_id: String,
         /// Human-readable name for the org (used in `org_identities`).
@@ -2001,6 +2047,8 @@ pub enum UserRequest {
     ///
     /// Called internally from `OrgGrantIssue` when `is_frost_org` returns true;
     /// also callable directly.
+    ///
+    /// Answered with `OrgFrostSignSession`.
     OrgFrostSignBegin {
         user_id: String,
         /// DID of the FROST org issuing the grant.
@@ -2023,6 +2071,8 @@ pub enum UserRequest {
     ///
     /// The result (commitment + share) is sent back to the coordinator, who
     /// calls `OrgFrostSignFinalize`.
+    ///
+    /// Answered with `OrgFrostContributed`.
     OrgFrostSignContribute {
         user_id: String,
         /// Session ID printed by `OrgFrostSignBegin`.
@@ -2044,6 +2094,8 @@ pub enum UserRequest {
     /// 3. Calls `frost::aggregate` with both shares.
     /// 4. Embeds the resulting Ed25519 signature into the `GrantEnvelope`.
     /// 5. Stores the envelope in `org_members` (same as single-key path).
+    ///
+    /// Answered with `OrgFrostSigned`.
     OrgFrostSignFinalize {
         user_id: String,
         /// Session ID from `OrgFrostSignBegin`.
@@ -2093,8 +2145,12 @@ pub enum UserRequest {
     /// until the connection is dropped (client disconnect) or the daemon shuts
     /// down (server sends [`DeviceResponse::EventStreamEnd`]).
     ///
-    /// Filtering mirrors [`QueryEvents`]: omit either field to receive all
-    /// categories / levels.
+    /// Scope and filtering mirror [`QueryEvents`]: the stream carries only the
+    /// session user's own events (another identity's are not streamed, and
+    /// neither are device-scoped events, which no user's log holds); omit
+    /// either field to receive all categories / levels.
+    ///
+    /// Answered with `EventStream`, then `EventStreamEnd`.
     SubscribeEvents {
         /// Filter by category (e.g. `"wasm"`, `"auth"`). `None` = all.
         category: Option<String>,
@@ -2105,10 +2161,13 @@ pub enum UserRequest {
     // -- VFS watch subscription (RFC-0017) -------------------------------------
     /// Subscribe to filesystem change notifications for `user_id`'s VFS.
     ///
-    /// Streaming: opens with [`crate::UserResponse::VfsWatchReady`] — the watch
-    /// is established, and a change made from here on is delivered — then
-    /// [`crate::UserResponse::VfsChanged`] frames, then
-    /// [`crate::UserResponse::VfsWatchEnd`] when the subscription closes.
+    /// Streaming. Answered with [`crate::UserResponse::VfsWatchReady`] or
+    /// [`crate::UserResponse::VfsWatchFailed`], then [`crate::UserResponse::VfsChanged`],
+    /// then [`crate::UserResponse::VfsWatchEnd`]: the first frame says the watch is
+    /// established, and a change made from here on is delivered; a change frame
+    /// follows for each change; the last says the subscription closed. When the
+    /// watch could not be established, the failure is the first frame and the
+    /// only one.
     ///
     /// **Wait for the first frame before acting.** Sending this request does not
     /// establish the watch; a write made before `VfsWatchReady` arrives can be
@@ -2129,6 +2188,8 @@ pub enum UserRequest {
     ///
     /// `Local`-tier — internal runtime state must not be
     /// readable from a remote gateway connection.
+    ///
+    /// Answered with `DaemonSidecarsResult`.
     DaemonSidecars,
     /// Return a list of all currently authenticated IPC sessions.
     ///
@@ -2137,6 +2198,8 @@ pub enum UserRequest {
     /// `LockSession` is called.
     ///
     /// `Local`-tier — session metadata is internal runtime state.
+    ///
+    /// Answered with `IpcSessionsResult`.
     IpcSessions,
 
     // -- Network status (net_status sprint) -----------------------------------
@@ -2151,6 +2214,8 @@ pub enum UserRequest {
     },
     /// Return sync state for the given user: last sync time, pending items,
     /// connected peer count, and whether ksyncd is running.
+    ///
+    /// Answered with `SyncStatusResult`.
     SyncStatus {
         user_id: String,
     },
@@ -2159,6 +2224,8 @@ pub enum UserRequest {
     /// rendezvous URL, and sync state.
     ///
     /// `Local`-tier — network topology is local-only operator data.
+    ///
+    /// Answered with `NetworkStatusResult`.
     NetworkStatus {
         user_id: String,
     },
@@ -2169,7 +2236,8 @@ pub enum UserRequest {
     ///
     /// `Remote`-eligible, unlike `NetworkStatus`: it answers a state and two
     /// counts, no address, no port, no bind. A paired browser learning that its
-    /// node is reachable is the readout's whole purpose.
+    /// node is reachable is the readout's whole purpose. Answered with
+    /// `ReachStatusResult`.
     ReachStatus {
         user_id: String,
     },
@@ -2196,6 +2264,8 @@ pub enum UserRequest {
     ///
     /// Polled every 5s from the hub health panel. No persistent state required,
     /// all fields are derived from existing tables.
+    ///
+    /// Answered with `DaemonStatusInfo`.
     DaemonStatus,
 
     // -- session: credentials, locks, and device binding -----------------------
@@ -2254,6 +2324,8 @@ pub enum UserRequest {
     /// Local-origin only, like [`UserRequest::UnlockWithPin`]. It is a small
     /// enumeration surface — it tells a caller which door to knock on — and a
     /// remote caller has no business asking, since it cannot use either answer.
+    ///
+    /// Answered with `UnlockMethods`.
     GetUnlockMethods {
         user_id: String,
     },
@@ -2268,7 +2340,7 @@ pub enum UserRequest {
     /// says who is unlocked at this machine, which is nobody's business
     /// over a gateway. It discloses no key material and no credential, and
     /// an unknown user reads as `Locked` with no session, the same as a
-    /// real one who never unlocked.
+    /// real one who never unlocked. Answered with `UnlockState`.
     GetUnlockState {
         user_id: String,
     },
@@ -2320,6 +2392,7 @@ pub enum UserRequest {
     /// six digits are confirmed by `PairConfirmCode`. Needs a session and a
     /// screen of the person's own — `Paired`, so this machine or a browser it
     /// admitted by ceremony, and not a gateway or an mTLS peer (DEC-0057).
+    /// Answered with `PairAdvertising`, the first of those frames.
     ContactPairStart {
         user_id: String,
         /// The name the other person's screen will call this one. Defaults to
@@ -2409,7 +2482,7 @@ pub enum UserRequest {
     /// `sh.kotton.channel.key-grant` record at **epoch 0** in the creator's
     /// record store. Every later membership change mints the next epoch.
     ///
-    /// Returns `MessageSent { message_id }` with the key-grant record ID.
+    /// Answered with `ChannelCreated`, carrying the channel's id.
     MessageChannelCreate {
         user_id: String,
         /// `did:…` of the channel identity.
@@ -2426,8 +2499,8 @@ pub enum UserRequest {
     ///
     /// A member with a local account on this daemon gets the grant written
     /// directly into their record store; a member elsewhere receives theirs by
-    /// sync. The grant is always returned as `ChannelKeyGrantCreated { grant }`
-    /// for out-of-band delivery if needed.
+    /// sync. Answered with `ChannelKeyGrantCreated`, which always carries the
+    /// `grant` for out-of-band delivery if needed.
     MessageChannelGrantKey {
         user_id: String,
         channel_did: String,
@@ -2528,7 +2601,7 @@ pub enum UserRequest {
     /// message that was waiting when it was sent reads *delivered* once one of
     /// the recipient's devices signs for it. Only messages the outbox has held
     /// are listed; which device signed, and when, is not in the answer and is
-    /// not kept (`DEC-0056`).
+    /// not kept (`DEC-0056`). Answered with `MessageDeliveries`.
     MessageDeliveries {
         user_id: String,
         peer_did: String,
@@ -2576,8 +2649,8 @@ pub enum UserRequest {
     ///
     /// The daemon derives the X25519 private key from the user's Ed25519 identity
     /// key, performs ECDH with `ephemeral_pub`, derives the ChaCha20-Poly1305
-    /// session key via HKDF-SHA-256, and decrypts in-process.  Returns
-    /// `Decrypted { plaintext }` on success.
+    /// session key via HKDF-SHA-256, and decrypts in-process. Answered with
+    /// `Decrypted`, carrying the `plaintext`, on success.
     MessageDecryptDm {
         user_id: String,
         /// Base64-encoded ChaCha20-Poly1305 ciphertext.
@@ -2592,7 +2665,8 @@ pub enum UserRequest {
     ///
     /// The daemon looks up the `sh.kotton.channel.key-grant` record for
     /// `user_id` + `channel_did`, unwraps the channel key, then decrypts
-    /// `body` with it.  Returns `Decrypted { plaintext }` on success.
+    /// `body` with it. Answered with `Decrypted`, carrying the `plaintext`, on
+    /// success.
     MessageDecryptChannel {
         user_id: String,
         /// `did:key:...` of the channel.
@@ -2629,6 +2703,8 @@ pub enum UserRequest {
     ///
     /// On receipt the daemon wakes its local sync engine so it can pull the
     /// pushed objects without waiting for the next poll tick.
+    ///
+    /// Answered with `SyncAck`.
     SyncAvailable {
         /// User whose VFS was updated on the sender.
         user_id: String,
@@ -2640,6 +2716,8 @@ pub enum UserRequest {
     /// Sent by a peer after a successful record-sync push.
     ///
     /// Wakes the local record sync pass for the listed NSIDs.
+    ///
+    /// Answered with `SyncAck`.
     RecordSyncAvailable {
         /// User whose records were updated on the sender.
         user_id: String,
@@ -4581,18 +4659,18 @@ mod secret_debug_tests {
         ];
         let mut plain = Vec::new();
         for (which, surface, at_least) in surfaces {
-            let mut variant = "";
+            // The one reader of the format, held to the recording's own header.
+            let blocks = crate::recorded_surface::read(surface)
+                .unwrap_or_else(|e| panic!("the {which} surface cannot be read as a recording: {e}"));
             let mut seen = 0;
-            for line in surface.lines() {
-                if !line.starts_with(' ') && !line.starts_with('#') {
-                    variant = line.trim();
-                    continue;
-                }
-                let Some((name, ty)) = line.trim().split_once(": ") else { continue };
-                if SECRET_NAMES.contains(&name) {
-                    seen += 1;
-                    if ty != "bool" && !SECRET_TYPES.iter().any(|secret| ty.contains(secret)) {
-                        plain.push(format!("{which} {variant}.{name}: {ty}"));
+            for block in &blocks {
+                for line in &block.lines {
+                    let Some((name, ty)) = line.text.trim().split_once(": ") else { continue };
+                    if SECRET_NAMES.contains(&name) {
+                        seen += 1;
+                        if ty != "bool" && !SECRET_TYPES.iter().any(|secret| ty.contains(secret)) {
+                            plain.push(format!("{which} {}.{name}: {ty} (line {})", block.name, line.at));
+                        }
                     }
                 }
             }

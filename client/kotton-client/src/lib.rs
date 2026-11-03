@@ -39,7 +39,7 @@ pub use record::{ImportFormat, Record};
 pub use records::{records_export, records_import, ImportReport, OrgRoot, OrgRootDelegation};
 pub use surface::Surface;
 pub use store::Store;
-pub use sync::Sync;
+pub use sync::{DriveMoved, Sync};
 pub use net::{ForgottenCredential, InvitedMe, KeptCredential, LocalDoor, Net, NetworkStatusSummary};
 pub use org::Org;
 pub use frost_orgs::{org_grant_issue_full, OrgGrantIssueResult};

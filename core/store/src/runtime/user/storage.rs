@@ -305,7 +305,7 @@ mod tests {
         store.write_sealed("local", "x/two", b"sealed two").await.unwrap();
         let keys = |mount: &'static str| {
             let store = &store;
-            async move { store.list_sealed(mount, "").await.unwrap().into_iter().map(|(k, _, _)| k).collect::<Vec<_>>() }
+            async move { store.list_sealed(mount, None).await.unwrap().into_iter().map(|(k, _, _)| k).collect::<Vec<_>>() }
         };
         assert_eq!(keys("drive-aa").await, ["x/one"]);
         assert_eq!(keys("local").await, ["x/two"]);

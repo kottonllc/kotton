@@ -115,10 +115,14 @@ impl UserStore {
     /// looked complete while silently missing everything below the top level.
     /// Directory-marker keys (trailing `/`) are skipped — never readable
     /// objects.
+    ///
+    /// `prefix` is the mount's root (`None`) or an admitted key: a prefix
+    /// from outside is parsed into a [`StorageKey`] where it enters, so a
+    /// `../x` is refused there and never answered for `x` (kotton #275).
     pub async fn list_sealed(
         &self,
         mount_name: &str,
-        prefix: &str,
+        prefix: Option<&StorageKey>,
     ) -> Result<Vec<(String, u64, Option<u64>)>> {
         let storage = self
             .get_remote(mount_name)
@@ -187,7 +191,7 @@ impl UserStore {
         let storage = self
             .get_remote(mount_name)
             .ok_or_else(|| anyhow!("Remote '{mount_name}' not found"))?;
-        Sealed::new(storage.as_ref(), mount_name).read(key.as_str()).await
+        Sealed::new(storage.as_ref(), mount_name).read(&key).await
     }
 
     /// Write a **sealed blob** verbatim — no sealing is applied.
@@ -205,7 +209,7 @@ impl UserStore {
         let storage = self
             .get_remote(mount_name)
             .ok_or_else(|| anyhow!("Remote '{mount_name}' not found"))?;
-        Sealed::new(storage.as_ref(), mount_name).write(key.as_str(), blob).await
+        Sealed::new(storage.as_ref(), mount_name).write(&key, blob).await
     }
 
     /// Read a file from a specific storage mount

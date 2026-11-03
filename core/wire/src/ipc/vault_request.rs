@@ -429,10 +429,10 @@ pub enum OperatorVerb {
     /// stand at, so the pool's devices are refused there from the rotation
     /// after this one; with no such relay, nothing rotates.
     Drop { pool: String },
-    /// The rule the relay holds (`RelayRule`). Asked of the relay under its
-    /// own credential's key.
+    /// The rule the relay holds. Asked of the relay under its own
+    /// credential's key. Answered with `RelayRule`.
     ReadRule,
-    /// Set the relay's rule (`RelayRule`): the desktop mints the relay's two
+    /// Set the relay's rule (answered with `RelayRule`): the desktop mints the relay's two
     /// admission keys if it holds none, tells every vault it told to stand at
     /// that relay its reach set again with them (to none when there is none),
     /// and then sets the rule with them at the relay, in that order, so no rule
@@ -440,7 +440,7 @@ pub enum OperatorVerb {
     SetRule {
         rule: crate::rendezvous::AdmissionRule,
     },
-    /// Mint an invite to the relay (`RelayInvite`): the relay's key, its
+    /// Mint an invite to the relay (answered with `RelayInvite`): the relay's key, its
     /// address and the *invited* admission key this desktop keeps for it, in
     /// the one code grammar. Said to nothing — the desktop holds all three —
     /// and refused for a relay whose rule admits only its operator's devices,
