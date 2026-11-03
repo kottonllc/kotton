@@ -8,6 +8,10 @@ use crate::state::ShellState;
 
 /// logs — view or stream daemon event logs.
 ///
+/// One verb, two doors: the REPL's `logs` and the terminal's `kotton logs` (the CLI's
+/// `bridge::run_verb`) run this one parser on the same words, as the identity each door
+/// acts as, so the two answer alike (kotton #355).
+///
 /// Usage:
 ///   logs [OPTIONS]
 ///
