@@ -195,6 +195,17 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word, hide = true)]
         args: Vec<String>,
     },
+    /// Read your event log — by level, category or age, or follow it live — shares the
+    /// REPL's `logs` verb
+    #[command(after_help = shell_help("logs"))]
+    Logs {
+        /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
+        #[arg(long)]
+        user: Option<String>,
+        /// Arguments: `[--level <level>] [--category <cat>] [--since <secs>] [-n <count>] [-f|--follow]`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
+        args: Vec<String>,
+    },
     /// Trusted-issuer registry (add, remove, list) — shares the REPL's `issuer` verb
     #[command(after_help = shell_help("issuer"))]
     Issuer {

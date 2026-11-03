@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! **The verbs whose clients read the answer as a stream, answered as one.**
 //!
-//! Eleven verbs on the agent's door are read with `send_streaming`: the event
-//! bus, the VFS watch, every pairing ceremony, the web-shell desk and a browser
-//! channel's outbound side. `send_streaming` reads frames until the door closes
+//! Eleven verbs on the agent's door are read with `send_streaming`: the
+//! session user's live events (never another identity's, nor the device's:
+//! see [`dispatch::handle_subscribe`]), the VFS watch, every pairing ceremony,
+//! the web-shell desk and a browser channel's outbound side. `send_streaming` reads frames until the door closes
 //! the connection, and `accept_with_session_streaming` closes it after a
 //! `HandlerOutput::Stream` and not after a `Single`: after a `Single` it waits
 //! for a next request that a streaming client never sends. So a `Single`
@@ -89,8 +90,18 @@ fn opening<'a>(
     use kotton_device::users::{contacts, pairing};
     let residency = || Arc::new(ctx.users.clone()) as Arc<dyn Residency>;
     Some(match request {
+        // The session user's events only (#393). The gate has passed a live
+        // session; if it ended in between, there is no user to stream for,
+        // and the answer is the refusal, never the device's bus.
         UserRequest::SubscribeEvents { category, level } => Box::pin(async move {
-            Ok(dispatch::handle_subscribe(&ctx.runtime, category.clone(), level.clone()).await)
+            let user_id = {
+                let g = conn_session.lock().unwrap();
+                g.as_ref().and_then(|s| sessions::live_user(&ctx.sessions, &s.token))
+            };
+            let Some(user_id) = user_id else {
+                return Ok(one_frame(UserResponse::NoActiveSession));
+            };
+            Ok(dispatch::handle_subscribe(&ctx.runtime, user_id, category.clone(), level.clone()).await)
         }),
         UserRequest::VfsWatch { user_id, paths } => Box::pin(async move {
             Ok(dispatch::handle_vfs_watch(
@@ -543,5 +554,54 @@ mod tests {
         };
         assert_eq!(message, super::super::NO_RELAY_FOR_AN_INVITE);
         door.abort();
+    }
+
+    /// **A session's event stream carries only that session user's events
+    /// (#393).** On a device holding two identities, alice subscribes; bob's
+    /// event and a device event are published, then one of alice's as a
+    /// sentinel. The bus is one channel in order, so whatever the stream would
+    /// have delivered before the sentinel it delivers first: the first frame
+    /// being the sentinel is the proof the other two were not streamed.
+    #[tokio::test]
+    async fn a_session_streams_only_its_own_users_events() {
+        use kotton_diag::service::{Event, EventCategory, EventLevel};
+        let dir = a_dir();
+        let daemon = a_daemon(dir.path()).await;
+        let ctx = daemon.agent_context();
+        sessions::insert(&ctx.sessions, "alice-session".to_string(), "alice".to_string());
+        let principal = Principal::LocalOperator;
+        let conn_session: ConnSession = Arc::new(Mutex::new(Some(ConnSessionData {
+            origin: principal.trust_origin(),
+            token: "alice-session".to_string(),
+            scope: None,
+            cek_available: true,
+            principal,
+            browser_key: None,
+        })));
+        let (changes, _) = broadcast::channel(16);
+        let (_watching, watcher) = watch::channel(kotton_sync::engine::FsWatchState::Watching);
+        let vfs = VfsWatchSource { changes: &changes, watcher: &watcher };
+        let request = UserRequest::SubscribeEvents { category: None, level: None };
+        let mut stream = answer(&ctx, &request, &conn_session, vfs)
+            .await
+            .expect("answered as a stream")
+            .expect("subscribed");
+
+        let bus = ctx.runtime.event_bus();
+        let (cat, lvl) = (EventCategory::System, EventLevel::Info);
+        bus.publish(Event::for_user("bob", cat, lvl, "bob's event")).expect("published");
+        bus.publish(Event::new(cat, lvl, "the device's event")).expect("published");
+        bus.publish(Event::for_user("alice", cat, lvl, "alice's event")).expect("published");
+
+        let first = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+            .await
+            .expect("a frame within five seconds");
+        let Some(UserResponse::EventStream { event }) = first else {
+            panic!("expected an event frame, got {first:?}");
+        };
+        assert_eq!(
+            event.message, "alice's event",
+            "alice's stream delivered an event that is not hers before her own"
+        );
     }
 }

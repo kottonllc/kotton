@@ -34,6 +34,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use kotton_sys::store::{
     ObjectMetadata, ObjectStorage, ObjectStorageError, ObjectStorageResult, SealedObjectAccess,
+    StorageKey,
 };
 use kotton_crypto::path_blind::blind_object_key;
 use std::path::Path;
@@ -118,21 +119,21 @@ impl<S: ObjectStorage + 'static> BlindedObjectStorage<S> {
         // `skip_reserved: false` — pre-migration stored keys are the user's own
         // plaintext paths, where a leading `_` (say `_drafts/x.md`) is a real
         // name that must migrate, not the pack layer's reserved namespace.
-        let keys: Vec<String> = self
+        let keys: Vec<StorageKey> = self
             .collect_leaves(Path::new(""), false)
             .await?
             .into_iter()
-            .map(|m| m.key)
+            .map(|(key, _)| key)
             .collect();
         let mut moved = 0usize;
 
         for key in keys {
-            let blob = self.inner.get(Path::new(&key)).await?;
-            if self.is_migrated(&key, &blob) {
+            let blob = self.inner.get(key.as_path()).await?;
+            if self.is_migrated(key.as_str(), &blob) {
                 continue;
             }
 
-            let trimmed = key.trim_start_matches('/');
+            let trimmed = key.as_str();
             let blinded = blind_object_key(&self.path_key, trimmed);
             let framed = Self::frame(trimmed, &blob)?;
             self.inner.put(Path::new(&blinded), &framed).await?;
@@ -146,14 +147,14 @@ impl<S: ObjectStorage + 'static> BlindedObjectStorage<S> {
                 )));
             }
 
-            self.inner.delete(Path::new(&key)).await?;
+            self.inner.delete(key.as_path()).await?;
             moved += 1;
         }
         Ok(moved)
     }
 
-    /// Every leaf object under `prefix` in **stored-key space**, recursing
-    /// through directory entries.
+    /// Every leaf object under `root` in **stored-key space**, recursing
+    /// through directory entries, each with its key admitted.
     ///
     /// The inner store's `list` is one directory level, not a flat recursion (a
     /// filesystem backend returns `is_dir` entries), so every walk of the tree —
@@ -163,38 +164,71 @@ impl<S: ObjectStorage + 'static> BlindedObjectStorage<S> {
     /// could not surface, and one this file has now grown twice, once per
     /// caller.
     ///
+    /// **Every listed key is admitted where the listing enters** (kotton
+    /// #357). The keys this walk descends into and the leaves it hands back
+    /// are the ones the inner store listed, and a listing is what the store's
+    /// contents spell: a filesystem store rebuilds each key from a file's
+    /// name, decoding `%2F` to `/`, so a directory named `..%2Fx` is listed as
+    /// `../x`, and a bucket's keys are whatever was written to it. So each
+    /// listed key, directory or leaf, is parsed into a [`StorageKey`] before
+    /// anything is built from it: the inner store is asked to list only
+    /// `root` or an admitted directory key, and every caller reads, writes
+    /// and deletes only admitted leaf keys — the type is the proof, there is
+    /// no `String` to hand the store. A key that is not canonical is skipped
+    /// and logged, not a refusal of the whole walk, as the sealed view's walk
+    /// skips it (kotton #336): nothing under a refused directory is listed, a
+    /// refused leaf is not read, and every canonical object is still returned.
+    /// No key this layer wrote is refused: a blinded key is base32 components
+    /// joined by `/`, and a pre-migration plaintext key, listed back by a
+    /// filesystem store, is rebuilt from its normal components only.
+    ///
+    /// `root` itself is not admitted here: every caller passes the empty root
+    /// or [`blind`](Self::blind)'s output, which is this layer's own
+    /// derivation, never a listing.
+    ///
     /// `skip_reserved` skips the `_`-prefixed storage namespace (packs,
     /// superblocks, tombstones — the pack layer's), as `crate::packed::kind`
-    /// reads it: every key it does not call a file. Blinded components are base32, so a
+    /// reads it: every key it does not call a file. It reads the admitted key,
+    /// as that rule expects. Blinded components are base32, so a
     /// stored key starting with `_` can only be reserved — but a
     /// **pre-migration** store's keys are plaintext user paths, where `_` is an
     /// ordinary character, so migration must pass `false`.
-    fn collect_leaves<'a>(
-        &'a self,
-        prefix: &'a Path,
+    async fn collect_leaves(
+        &self,
+        root: &Path,
         skip_reserved: bool,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = ObjectStorageResult<Vec<ObjectMetadata>>> + Send + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            let mut out = Vec::new();
-            for entry in self.inner.list(prefix).await? {
-                if skip_reserved && crate::packed::kind(&entry.key) != crate::packed::ObjectKind::File {
+    ) -> ObjectStorageResult<Vec<(StorageKey, ObjectMetadata)>> {
+        let mut out = Vec::new();
+        let mut queue: Vec<Option<StorageKey>> = vec![None];
+        while let Some(dir) = queue.pop() {
+            let at = dir.as_ref().map_or(root, StorageKey::as_path);
+            for entry in self.inner.list(at).await? {
+                let key = match StorageKey::parse(&entry.key) {
+                    Ok(key) => key,
+                    Err(refused) => {
+                        let skipped = if entry.is_dir {
+                            "the directory is not descended"
+                        } else {
+                            "the object is not read"
+                        };
+                        tracing::warn!(
+                            store = self.inner.backend_name(),
+                            "blinded walk: {refused}; {skipped}"
+                        );
+                        continue;
+                    }
+                };
+                if skip_reserved && crate::packed::kind(key.as_str()) != crate::packed::ObjectKind::File {
                     continue;
                 }
                 if entry.is_dir {
-                    let mut nested = self
-                        .collect_leaves(Path::new(&entry.key), skip_reserved)
-                        .await?;
-                    out.append(&mut nested);
+                    queue.push(Some(key));
                 } else {
-                    out.push(entry);
+                    out.push((key, entry));
                 }
             }
-            Ok(out)
-        })
+        }
+        Ok(out)
     }
 
     fn blind(&self, key: &Path) -> String {
@@ -304,14 +338,14 @@ impl<S: ObjectStorage + 'static> ObjectStorage for BlindedObjectStorage<S> {
             .await?;
 
         let mut out = Vec::with_capacity(entries.len());
-        for mut meta in entries {
+        for (key, mut meta) in entries {
             // An object deleted between the listing above and this read was
             // deleted during the listing, and is not in it: a listing is what
             // the prefix held at some moment, not a promise each entry still
             // exists. Failing the whole listing on it made every reader of a
             // prefix someone else deletes from — an outbox whose signed-for
             // entries a pickup takes out — fail for a moment, as if locked.
-            let blob = match self.inner.get(Path::new(&meta.key)).await {
+            let blob = match self.inner.get(key.as_path()).await {
                 Ok(blob) => blob,
                 Err(ObjectStorageError::NotFound(_)) => continue,
                 Err(e) => return Err(e),
@@ -387,7 +421,9 @@ impl<S: ObjectStorage + SealedObjectAccess + 'static> SealedObjectAccess
 /// key space, with its logical name recovered from the sealed body.
 ///
 /// Skips the reserved `_` storage namespace (packs, superblocks, tombstones) —
-/// those are not loose objects. An object that carries no path frame is an
+/// those are not loose objects — and reads only leaves the walk admitted
+/// (`collect_leaves`, kotton #357): a listed key that is not a storage key is
+/// logged and left, never read. An object that carries no path frame is an
 /// **error**, not a skip: it means the blinding migration has not
 /// finished, and packing over it would silently leave it behind forever.
 #[async_trait]
@@ -397,13 +433,12 @@ impl<S: ObjectStorage + SealedObjectAccess + 'static> crate::packed::LooseObject
     async fn list_loose(&self) -> ObjectStorageResult<Vec<crate::packed::LooseEntry>> {
         let leaves = self.collect_leaves(Path::new(""), true).await?;
         let mut out = Vec::with_capacity(leaves.len());
-        for meta in leaves {
-            let blob = self.inner.get(Path::new(&meta.key)).await?;
+        for (key, meta) in leaves {
+            let blob = self.inner.get(key.as_path()).await?;
             let (path, data) = Self::unframe(&blob).map_err(|_| {
                 ObjectStorageError::BackendError(format!(
-                    "object at {} carries no path frame — an unmigrated (RFC-0044) \
-                     object; run the blinding migration before packing",
-                    meta.key
+                    "object at {key} carries no path frame — an unmigrated (RFC-0044) \
+                     object; run the blinding migration before packing"
                 ))
             })?;
             out.push(crate::packed::LooseEntry {
@@ -620,6 +655,101 @@ mod tests {
 
         mine.put(Path::new("notes/a.md"), b"one").await.unwrap();
         assert!(theirs.get(Path::new("notes/a.md")).await.is_err());
+    }
+
+    /// **Every walk asks the inner store only for keys it admitted** (kotton
+    /// #357). A filesystem store rebuilds each key from a file's name,
+    /// decoding `%2F` to `/`, so a directory named `..%2Fx` is listed as
+    /// `../x`; beside it the root lists a leaf `../y`. All three walks over
+    /// the listing — the logical `list`, the packer's `list_loose` and the
+    /// blinding migration — refuse both where the listing enters: the store is
+    /// never asked to list under `../x` nor to read, write or delete `../y`,
+    /// and the canonical object under `a` is still found.
+    #[tokio::test]
+    async fn a_listed_key_that_is_not_canonical_is_never_asked_for() {
+        use std::sync::Mutex;
+
+        /// Lists, for a prefix, the entries it was given for it, holds
+        /// objects in memory, and records every key it is asked for.
+        struct Recording {
+            objects: MemoryObjectStorage,
+            listing: Vec<(&'static str, Vec<ObjectMetadata>)>,
+            asked: Mutex<Vec<String>>,
+        }
+        impl Recording {
+            fn note(&self, key: &Path) {
+                self.asked.lock().unwrap().push(key.to_string_lossy().into_owned());
+            }
+        }
+        #[async_trait]
+        impl ObjectStorage for Recording {
+            async fn get(&self, key: &Path) -> ObjectStorageResult<Bytes> {
+                self.note(key);
+                self.objects.get(key).await
+            }
+            async fn put(&self, key: &Path, data: &[u8]) -> ObjectStorageResult<()> {
+                self.note(key);
+                self.objects.put(key, data).await
+            }
+            async fn delete(&self, key: &Path) -> ObjectStorageResult<()> {
+                self.note(key);
+                self.objects.delete(key).await
+            }
+            async fn list(&self, prefix: &Path) -> ObjectStorageResult<Vec<ObjectMetadata>> {
+                self.note(prefix);
+                let prefix = prefix.to_string_lossy();
+                Ok(self.listing.iter().find(|(p, _)| *p == prefix).map(|(_, l)| l.clone()).unwrap_or_default())
+            }
+            async fn metadata(&self, key: &Path) -> ObjectStorageResult<ObjectMetadata> {
+                self.note(key);
+                self.objects.metadata(key).await
+            }
+            fn backend_name(&self) -> &str {
+                "recording"
+            }
+        }
+        #[async_trait]
+        impl SealedObjectAccess for Recording {
+            async fn get_sealed(&self, key: &Path) -> ObjectStorageResult<Bytes> {
+                self.get(key).await
+            }
+            async fn put_sealed(&self, key: &Path, blob: &[u8]) -> ObjectStorageResult<()> {
+                self.put(key, blob).await
+            }
+        }
+
+        let entry = |key: &str, is_dir: bool| ObjectMetadata { key: key.into(), is_dir, size: 0, modified: Some(7) };
+        let framed = BlindedObjectStorage::<MemoryObjectStorage>::frame("notes/a.md", b"one").unwrap();
+        let objects = MemoryObjectStorage::new();
+        objects.put(Path::new("a/b"), &framed).await.unwrap();
+        // Were either refused key asked for, it would be served.
+        objects.put(Path::new("../y"), &framed).await.unwrap();
+        objects.put(Path::new("../x/served"), &framed).await.unwrap();
+        let s = BlindedObjectStorage::new(
+            Recording {
+                objects,
+                listing: vec![
+                    ("", vec![entry("../x", true), entry("../y", false), entry("a", true)]),
+                    ("a", vec![entry("a/b", false)]),
+                    ("../x", vec![entry("../x/served", false)]),
+                ],
+                asked: Mutex::default(),
+            },
+            derive_path_blind_key(&[0x11; 32]),
+        );
+
+        let listed: Vec<String> = s.list(Path::new("")).await.unwrap().into_iter().map(|m| m.key).collect();
+        assert_eq!(listed, ["notes/a.md"]);
+        let loose: Vec<String> = s.list_loose().await.unwrap().into_iter().map(|e| e.path).collect();
+        assert_eq!(loose, ["notes/a.md"]);
+        assert_eq!(s.migrate_from_plaintext().await.unwrap(), 1, "the canonical leaf migrates");
+
+        let asked = s.inner.asked.lock().unwrap().clone();
+        assert!(asked.iter().any(|k| k == "a/b"), "the canonical leaf was read: {asked:?}");
+        assert!(
+            asked.iter().all(|k| !k.split('/').any(|c| c == "..")),
+            "the inner store was asked for a key that is not canonical: {asked:?}"
+        );
     }
 
     // ── migration ────────────────────────────────────────────────────────────

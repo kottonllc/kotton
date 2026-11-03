@@ -50,6 +50,7 @@ This document contains the help content for the `Kotton` command-line program.
 * [`Kotton drive`↴](#Kotton-drive)
 * [`Kotton pin`↴](#Kotton-pin)
 * [`Kotton status`↴](#Kotton-status)
+* [`Kotton logs`↴](#Kotton-logs)
 * [`Kotton issuer`↴](#Kotton-issuer)
 * [`Kotton cp`↴](#Kotton-cp)
 * [`Kotton keep`↴](#Kotton-keep)
@@ -132,6 +133,7 @@ Kotton - Your data sovereignty platform
 * `drive` — Your drives — create, list, show, move, enrol — the REPL's `drive`, one parser for both
 * `pin` — What this device keeps of your drives — default, a drive or folder, list — the REPL's `pin`, one parser for both
 * `status` — When this device last synced, what it keeps of each drive, and the notices — shares the REPL's `status` verb
+* `logs` — Read your event log — by level, category or age, or follow it live — shares the REPL's `logs` verb
 * `issuer` — Trusted-issuer registry (add, remove, list) — shares the REPL's `issuer` verb
 * `cp` — Copy files into and out of your tree — shares the REPL's `cp` verb. `host:` names this computer's own files, a relative one from the directory the command is run in
 * `keep` — Keep a folder of yours in your tree, and copy only what changed when run again — shares the REPL's `keep` verb. The folder is on this computer, a relative one from the directory the command is run in; with no arguments it lists what is kept
@@ -830,8 +832,7 @@ drive where it was; a copy the other vault would not take back is listed as an
 unfinished move, and moving the drive there again clears it. A move cut off
 after the other vault has the drive is finished by running it again. A key the
 vault lists that is not a storage key is refused, not carried, and noted in the
-move's answer; `logs --level warn`, in the REPL, names it. `personal` does not
-move.
+move's answer; `logs --level warn` names it. `personal` does not move.
 
 `enrol` takes the invite a vault's landlord gave you (`vault invite <name>`
 at theirs): this device meets the vault at the invite's relay, and you type
@@ -947,6 +948,37 @@ USAGE:
 ###### **Options:**
 
 * `--user <USER>` — Identity to act as (defaults to the active identity / KOTTON_USER)
+
+
+
+## `Kotton logs`
+
+Read your event log — by level, category or age, or follow it live — shares the REPL's `logs` verb
+
+**Usage:** `Kotton logs [OPTIONS] [ARGS]...`
+
+```text
+logs — view daemon event logs
+
+USAGE:
+logs [OPTIONS]
+
+OPTIONS:
+--level <level>     Minimum level: trace, debug, info, warn, error  (default: info)
+--category <cat>    Filter by category (e.g. wasm, vfs, auth)
+--since <secs>      Only events from the last N seconds
+-n <count>          Number of entries to show  (default: 50)
+-f, --follow        Stream live events (Ctrl-C to stop)
+
+```
+
+###### **Arguments:**
+
+* `<ARGS>` — Arguments: `[--level <level>] [--category <cat>] [--since <secs>] [-n <count>] [-f|--follow]`
+
+###### **Options:**
+
+* `--user <USER>` — Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
 
 
 

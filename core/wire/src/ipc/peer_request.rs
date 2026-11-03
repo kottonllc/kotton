@@ -201,7 +201,9 @@ mod tests {
     use super::*;
     use crate::ipc::{SecretText, UserRequest};
     use crate::recorded_surface::read;
-    use crate::recorded_twin::{each_verb_records_its_door_twin, variants, DOOR_SURFACE, PEER_SURFACE};
+    use crate::recorded_twin::{
+        each_verb_records_its_door_twin, only_these_door_verbs_decode, variants, DOOR_SURFACE, PEER_SURFACE,
+    };
 
     /// Every variant, built: what a device's client and a gateway send.
     fn every_peer_verb_as_the_door_spells_it() -> Vec<UserRequest> {
@@ -292,16 +294,12 @@ mod tests {
     #[test]
     fn no_door_verb_but_the_peer_verbs_decodes_on_the_peer_wire() {
         let peer = variants(PEER_SURFACE);
+        only_these_door_verbs_decode::<PeerRequest>(
+            &peer,
+            "peer",
+            "is a door verb and decoded on the peer wire",
+        );
         let door = variants(DOOR_SURFACE);
-        assert!(door.len() > 150, "the door's surface no longer parses: {} variants", door.len());
-        let mut refused = 0;
-        for name in door.iter().filter(|n| !peer.contains(n)) {
-            let err = serde_json::from_str::<PeerRequest>(&format!(r#"{{"{name}":{{}}}}"#))
-                .expect_err(&format!("{name} is a door verb and decoded on the peer wire"));
-            assert!(err.to_string().contains("unknown variant"), "{name}: {err}");
-            refused += 1;
-        }
-        assert_eq!(refused + peer.len(), door.len(), "every peer verb is a door verb");
 
         // The record verbs by name, so this test says what it is for even if
         // the surfaces it reads were emptied.

@@ -24,18 +24,35 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Handle a `SubscribeEvents` request by subscribing to the live event bus
-/// and forwarding matching events as `DeviceResponse::EventStream` frames.
+/// and forwarding `session_user`'s matching events as
+/// `DeviceResponse::EventStream` frames.
+///
+/// **The stream is the session user's log, live.** The bus is the device's:
+/// it carries every identity's events and the device's own. The stream takes
+/// from it by the same rule the log does, [`Event::belongs_to`] with
+/// `EventScope::User(session_user)`, so it carries exactly what `QueryEvents`
+/// would return from that user's database. Another identity's events are not
+/// streamed, and neither are device-scoped (unattributed) events: they never
+/// land in a user's log, so they do not reach a user's stream either. Before
+/// this (#393), the stream filtered only by level and category, and a session
+/// on a device holding two identities read the other one's live events.
 ///
 /// Requires an active authenticated session, applied by
 /// [`stream_entry_refusal`] before this is reached — `SubscribeEvents` is
 /// `requires_session`, so an unauthenticated connection is answered
-/// `NoActiveSession` there and never arrives here.
+/// `NoActiveSession` there and never arrives here. The caller resolves
+/// `session_user` from the connection's session as `handle_request` does for
+/// `QueryEvents`, and answers `NoActiveSession` itself if it has gone; there is
+/// no user-less stream.
+///
+/// [`Event::belongs_to`]: kotton_diag::service::Event::belongs_to
 pub(super) async fn handle_subscribe(
     runtime: &Arc<DeviceRuntime>,
+    session_user: String,
     category: Option<String>,
     level: Option<String>,
 ) -> tokio::sync::mpsc::Receiver<UserResponse> {
-    use kotton_diag::service::{EventCategory, EventLevel};
+    use kotton_diag::service::{EventCategory, EventLevel, EventScope};
     use kotton_wire::ipc::EventEntry;
     use std::time::UNIX_EPOCH;
     use tokio::sync::mpsc;
@@ -48,6 +65,7 @@ pub(super) async fn handle_subscribe(
         .as_deref()
         .and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok());
 
+    let owner = EventScope::User(session_user);
     let mut sub = runtime.event_bus().subscribe();
     let (tx, rx) = mpsc::channel::<UserResponse>(256);
 
@@ -56,6 +74,10 @@ pub(super) async fn handle_subscribe(
         loop {
             match sub.recv().await {
                 Ok(event) => {
+                    // Only the session user's own events: the log's rule.
+                    if !event.belongs_to(&owner) {
+                        continue;
+                    }
                     // Apply level filter.
                     if let Some(min) = min_level {
                         if event.level < min {
