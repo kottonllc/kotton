@@ -2145,8 +2145,10 @@ pub enum UserRequest {
     /// until the connection is dropped (client disconnect) or the daemon shuts
     /// down (server sends [`DeviceResponse::EventStreamEnd`]).
     ///
-    /// Filtering mirrors [`QueryEvents`]: omit either field to receive all
-    /// categories / levels.
+    /// Scope and filtering mirror [`QueryEvents`]: the stream carries only the
+    /// session user's own events (another identity's are not streamed, and
+    /// neither are device-scoped events, which no user's log holds); omit
+    /// either field to receive all categories / levels.
     ///
     /// Answered with `EventStream`, then `EventStreamEnd`.
     SubscribeEvents {
