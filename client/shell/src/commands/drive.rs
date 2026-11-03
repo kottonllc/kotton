@@ -165,7 +165,7 @@ fn refused_said(n: u32) -> String {
     let it = if n == 1 { "it" } else { "them" };
     format!(
         "the vault the drive left listed {}; the move refused {it} and carried everything else. Your event log \
-         names {it}: `logs --level warn`, in the REPL",
+         names {it}: `logs --level warn`",
         NotCanonical::counted(usize::try_from(n).unwrap_or(usize::MAX))
     )
 }
@@ -314,8 +314,7 @@ drive where it was; a copy the other vault would not take back is listed as an
 unfinished move, and moving the drive there again clears it. A move cut off
 after the other vault has the drive is finished by running it again. A key the
 vault lists that is not a storage key is refused, not carried, and noted in the
-move's answer; `logs --level warn`, in the REPL, names it. `personal` does not
-move.
+move's answer; `logs --level warn` names it. `personal` does not move.
 
 `enrol` takes the invite a vault's landlord gave you (`vault invite <name>`
 at theirs): this device meets the vault at the invite's relay, and you type
@@ -483,8 +482,8 @@ mod tests {
     /// it** (kotton #313): the note counts the keys for a nonzero count, in the
     /// singular for one, and is absent for 0. The count is the one spelling the
     /// daemon's refusals read too, and the note says where the names are: the
-    /// person's event log, `logs --level warn`, in the REPL (kotton #315; the
-    /// last three words go when `logs` has a CLI door, kotton #355).
+    /// person's event log, `logs --level warn` (kotton #315), which reads the same
+    /// in the REPL and as `kotton logs` (kotton #355), so the note names no door.
     #[test]
     fn a_move_notes_the_keys_it_refused_and_says_nothing_for_none() {
         let answered = |keys_refused| kotton::DriveMoved {
@@ -511,13 +510,13 @@ mod tests {
         assert_eq!(one, vec![refused_said(1)]);
         assert!(one[0].contains(&format!("listed {};", NotCanonical::counted(1))), "{one:?}");
         assert!(one[0].contains("listed 1 key that is not a storage key") && one[0].contains("refused it"), "{one:?}");
-        assert!(one[0].contains("names it: `logs --level warn`, in the REPL"), "the note does not say where the key is named: {one:?}");
+        assert!(one[0].contains("names it: `logs --level warn`") && !one[0].contains("in the REPL"), "the note does not say where the key is named: {one:?}");
 
         let three = notes(&moved_said("photos", "vault-2", &answered(3)));
         assert_eq!(three, vec![refused_said(3)]);
         assert!(three[0].contains(&format!("listed {};", NotCanonical::counted(3))), "{three:?}");
         assert!(three[0].contains("listed 3 keys that are not storage keys") && three[0].contains("refused them"), "{three:?}");
-        assert!(three[0].contains("names them: `logs --level warn`, in the REPL"), "the note does not say where the keys are named: {three:?}");
+        assert!(three[0].contains("names them: `logs --level warn`") && !three[0].contains("in the REPL"), "the note does not say where the keys are named: {three:?}");
     }
 
     #[test]
