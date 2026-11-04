@@ -98,10 +98,11 @@ impl<'a> Sealed<'a> {
     ///
     /// **A directory is descended only once admitted** (kotton #336). The
     /// keys the walk descends are the ones the store listed, and a listing is
-    /// what the store's contents spell: a filesystem store rebuilds each key
-    /// from a file's name, decoding `%2F` to `/`, so a directory named
-    /// `..%2Fx` is listed as `../x`, and a bucket's keys are whatever was
-    /// written to it. Neither is a reason to trust the listing, so each
+    /// what the store's contents spell: a filesystem store names only what
+    /// its encoding writes (kotton #349), so no longer `../x`, but those
+    /// names can still decode to a key holding a `\`, and a bucket's or a
+    /// peer's keys are whatever was written to it, `../x` among them. Neither
+    /// is a reason to trust the listing, so each
     /// directory key is parsed into a [`StorageKey`] where the listing enters
     /// the walk, and the store is asked to list only its root or an admitted
     /// key. One that is not canonical is skipped, not a refusal of the whole
@@ -242,9 +243,9 @@ mod tests {
     }
 
     /// **The walk descends only into directory keys it admitted** (kotton
-    /// #336). A filesystem store rebuilds each key from a file's name,
-    /// decoding `%2F` to `/`, so a directory named `..%2Fx` is listed as
-    /// `../x`. The walk refuses it where the listing enters, before it asks
+    /// #336). A filesystem store no longer lists a directory named `..%2Fx`
+    /// as `../x` (kotton #349), but a bucket's or a peer's listing can name
+    /// it, as this one does. The walk refuses it where the listing enters, before it asks
     /// the store for anything under it, and returns everything else: the
     /// root's leaf and the leaf under the canonical directory `a`.
     #[test]

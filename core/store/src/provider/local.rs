@@ -3,6 +3,15 @@
 ///
 /// Uses platform::Filesystem to store objects as files on local disk.
 /// Bridges object storage semantics to filesystem operations.
+///
+/// A key's segments are written to the disk through [`encode_segment`], and a
+/// listing reads them back through [`decode_segment`]. The directory can hold
+/// names this store never wrote — a put's in-flight copy, or a file put there
+/// by hand — and a listing names only a host name in `encode_segment`'s image,
+/// so every key it names resolves back to the name it was read from
+/// (kotton #349). One gap is open: the filesystem layer hands this store each
+/// name as text, converted lossily, so a host name that is not UTF-8 arrives
+/// already rewritten (see [`decode_segment`]).
 use async_trait::async_trait;
 use bytes::Bytes;
 use kotton_sys::fs::Filesystem;
@@ -36,8 +45,10 @@ impl LocalObjectStorage {
     /// — `did:key:z…` — and `:` is illegal in a Windows filename). Each path
     /// segment is therefore percent-encoded for the host (see [`encode_segment`]);
     /// [`list`](Self::list) decodes on the way back, so the logical key is
-    /// host-independent. Separators are preserved as directory structure; only
-    /// `Normal` components are encoded.
+    /// host-independent, and lists only host names this encoding writes, so
+    /// a listed key resolves here to the very name it was listed from.
+    /// Separators are preserved as directory structure; only `Normal`
+    /// components are encoded.
     ///
     /// **A key resolves under the mount root or not at all.** A `..`
     /// component, or a host prefix such as a Windows drive, is refused: it
@@ -104,8 +115,9 @@ impl LocalObjectStorage {
 
 /// What a put's in-flight copy is named with: `%` followed by a byte that is not
 /// a hex digit, which [`encode_segment`] can never produce — it writes every `%`
-/// as `%25` — so no key resolves to such a name, and a listing can tell the copy
-/// from an object without guessing.
+/// as `%25` — so no key resolves to such a name. A listing leaves it out by the
+/// rule it applies to every name, [`decode_segment`]'s; this prefix only tells
+/// it which of the names it leaves out are a put's to reap.
 const IN_FLIGHT: &str = "%put-";
 
 /// How old an in-flight copy must be before a listing reaps it, in seconds.
@@ -160,7 +172,8 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 /// Percent-encode the host-unsafe bytes of one logical path segment so it is a
-/// legal host filename. Inverse of [`decode_segment`].
+/// legal host filename. [`decode_segment`] inverts it on its image, and refuses
+/// every name outside it.
 ///
 /// Note: this escapes the host-illegal *character* set; reserved whole-segment
 /// forms (Windows device names like `CON`, trailing dot/space) are out of scope
@@ -181,9 +194,27 @@ fn encode_segment(seg: &str) -> String {
     out
 }
 
-/// Reverse [`encode_segment`]: percent-decode `%XX` escapes in one segment. A `%`
-/// not followed by two hex digits is passed through literally.
-fn decode_segment(seg: &str) -> String {
+/// Reverse [`encode_segment`]: the logical segment it encodes to the host name
+/// `seg`, or `None` when it encodes none to it.
+///
+/// `None` is every name `encode_segment` never writes: a `%` not followed by
+/// two hex digits (`a%zz`, and a put's in-flight copy, [`IN_FLIGHT`]), an
+/// escape in lower case or of a byte it leaves alone (`%3a`, `%41`), an
+/// unescaped byte it would escape, or escapes that decode to bytes that are
+/// not UTF-8 (`%FF`). Decoded leniently, such a name would give a key that
+/// resolves to another name, so a listing would name an object that no verb
+/// on its key reaches, and a walk that deletes what it lists would fail on it
+/// (kotton #349). The test is exact: a name is decoded only if encoding the
+/// result spells it again.
+///
+/// It is exact on the text it is given, and that text is not always the host
+/// name. The filesystem layer lists each name as a `String`, converted
+/// lossily, so a host name whose bytes are not UTF-8 (`a\xff`) arrives as
+/// `a\u{FFFD}`: inside the image, listed under a key that resolves to a name
+/// that is not there, and a walk that deletes it still fails. Closing that
+/// wants the filesystem layer to hand names over as the host's bytes; it is
+/// the open part of this rule.
+fn decode_segment(seg: &str) -> Option<String> {
     let bytes = seg.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -198,7 +229,8 @@ fn decode_segment(seg: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    let decoded = String::from_utf8(out).ok()?;
+    (encode_segment(&decoded) == seg).then_some(decoded)
 }
 
 #[async_trait]
@@ -254,6 +286,16 @@ impl ObjectStorage for LocalObjectStorage {
         Ok(())
     }
 
+    /// The objects and directories directly under `prefix`, each by the key
+    /// that resolves back to its host name.
+    ///
+    /// A listing names what this store wrote and nothing else: a host name is
+    /// named only if [`decode_segment`] decodes it, which is only if
+    /// [`encode_segment`] writes it. A name outside that image — a put's
+    /// in-flight copy, or a file or directory put there by hand, such as
+    /// `a%zz` — is not listed, so a caller's walk neither hands it to a verb
+    /// under a key that resolves elsewhere nor descends into it (kotton #349).
+    /// It stays where it rests; a stale in-flight copy is reaped.
     async fn list(&self, prefix: &Path) -> ObjectStorageResult<Vec<ObjectMetadata>> {
         let abs_path = self.resolve_key(prefix)?;
         let entries = match self.filesystem.list_dir(&abs_path).await {
@@ -267,22 +309,6 @@ impl ObjectStorage for LocalObjectStorage {
 
         let mut result = Vec::new();
         for metadata in entries {
-            // A put still in flight is not an object yet. One left by a put
-            // that stopped before its rename is not going to be one, and is
-            // swept here (`IN_FLIGHT_STALE_SECS`).
-            if is_in_flight(Path::new(&metadata.path)) {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                if now - metadata.modified > IN_FLIGHT_STALE_SECS {
-                    let _ = self
-                        .filesystem
-                        .delete_file(Path::new(&metadata.path))
-                        .await;
-                }
-                continue;
-            }
             // Recover the logical key from the host path: strip the mount root,
             // then decode each segment (the inverse of `resolve_key`'s encoding)
             // and rejoin with `/` so the returned key is host-independent and
@@ -294,11 +320,30 @@ impl ObjectStorage for LocalObjectStorage {
             let rel_key = rel
                 .components()
                 .filter_map(|c| match c {
-                    std::path::Component::Normal(s) => Some(decode_segment(&s.to_string_lossy())),
+                    std::path::Component::Normal(s) => Some(s.to_str().and_then(decode_segment)),
                     _ => None,
                 })
-                .collect::<Vec<_>>()
-                .join("/");
+                .collect::<Option<Vec<_>>>()
+                .map(|segments| segments.join("/"));
+            // The one listing rule: a name `encode_segment` never writes is
+            // not an object of this store, file or directory, and is not
+            // named, so no walk of the listing reaches it by a key that
+            // resolves elsewhere or descends into it. A put still in flight
+            // is such a name; one left by a put that stopped before its
+            // rename never will be an object, and is swept here
+            // (`IN_FLIGHT_STALE_SECS`). Any other is left where it rests.
+            let Some(rel_key) = rel_key else {
+                if is_in_flight(&entry_path) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    if now - metadata.modified > IN_FLIGHT_STALE_SECS {
+                        let _ = self.filesystem.delete_file(&entry_path).await;
+                    }
+                }
+                continue;
+            };
 
             result.push(ObjectMetadata {
                 key: rel_key,
@@ -423,6 +468,47 @@ mod tests {
         contracts::run_all(storage).await;
     }
 
+    /// **A listing names only what resolves back to the host name it was read
+    /// from** (kotton #349). Beside objects whose keys `encode_segment`
+    /// escapes, the root holds names it never writes: a bare `%` (`a%zz`), an
+    /// escape of a byte it leaves alone (`%41`), one in lower case (`%3a`), and
+    /// a directory `b%zz` with a file inside. Each would decode to a key that
+    /// resolves elsewhere; none is listed, every listed key resolves back
+    /// through `resolve_key` to a path on the disk, and the contract's walk
+    /// reads every leaf it lists. The planted names stay where they are.
+    #[tokio::test]
+    async fn a_listing_names_only_keys_that_resolve_back_to_their_host_names() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+        let storage = LocalObjectStorage::new(root.to_path_buf(), OsFilesystem);
+        storage.put(Path::new("pct/%already"), b"one").await.unwrap();
+        storage.put(Path::new("pct/did:key:zNode2"), b"two").await.unwrap();
+        let planted = [root.join("a%zz"), root.join("%41"), root.join("pct/%3a"), root.join("b%zz/inner")];
+        std::fs::create_dir_all(root.join("b%zz")).unwrap();
+        for host in &planted {
+            std::fs::write(host, b"planted").unwrap();
+        }
+
+        let mut every = Vec::new();
+        let mut pending = vec![String::new()];
+        while let Some(prefix) = pending.pop() {
+            for entry in storage.list(Path::new(&prefix)).await.unwrap() {
+                let host = storage.resolve_key(Path::new(&entry.key)).unwrap();
+                assert!(host.exists(), "{:?} is listed but resolves to {host:?}, which is not there", entry.key);
+                if entry.is_dir {
+                    pending.push(entry.key.clone());
+                }
+                every.push(entry.key);
+            }
+        }
+        every.sort();
+        assert_eq!(every, ["pct", "pct/%already", "pct/did:key:zNode2"], "the listing names what the store wrote, and only that");
+        contracts::every_listed_key_resolves_back(&storage).await;
+        for host in &planted {
+            assert!(host.exists(), "a listing removed {host:?}");
+        }
+    }
+
     /// A key whose segment contains host-illegal characters (`:` is the real
     /// case — membership records are keyed by `did:key:…`, and `:` is reserved on
     /// Windows) must round-trip through put / get / metadata / list / delete. This
@@ -496,9 +582,13 @@ mod tests {
             "%already%percent",
             "unicode-é-ok",
         ] {
-            assert_eq!(decode_segment(&encode_segment(seg)), seg, "round-trip {seg}");
+            assert_eq!(decode_segment(&encode_segment(seg)).as_deref(), Some(seg), "round-trip {seg}");
         }
         // The colon is actually escaped (not passed through).
         assert!(encode_segment("a:b").contains("%3A"));
+        // A name `encode_segment` never writes is decoded to nothing (kotton #349).
+        for host in ["a%zz", "%", "a%2", "%3a", "%41", "a:b", "%FF", "%put-00000000000000aa"] {
+            assert_eq!(decode_segment(host), None, "{host} is outside the image");
+        }
     }
 }

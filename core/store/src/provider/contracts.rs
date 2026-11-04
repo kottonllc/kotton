@@ -41,6 +41,7 @@ pub async fn run_all(store: impl ObjectStorage) {
     list_no_match_returns_empty(&store).await;
     large_object_roundtrip(&store).await;
     empty_value_roundtrip(&store).await;
+    every_listed_key_resolves_back(&store).await;
 }
 
 // ── Individual contract assertions ──────────────────────────────────────────
@@ -207,4 +208,35 @@ async fn empty_value_roundtrip(store: &impl ObjectStorage) {
         b"",
         "storing an empty value must round-trip to empty bytes"
     );
+}
+
+/// **Every key a listing names resolves back to what it named** (kotton #349):
+/// a listed leaf reads, and a listed directory lists, which is all a walk
+/// does with one. A walk hands each key a listing names straight back to
+/// `get`, `delete` or `list` — the vault's retire deletes every leaf its walk
+/// lists, and fails whole on one that is not found — so a listing that names
+/// something no key resolves to fails every walk of that store.
+///
+/// [`run_all`] walks what the other contracts wrote. A backend whose namespace
+/// can hold names it did not write, a directory on the disk, plants them and
+/// calls this again.
+pub async fn every_listed_key_resolves_back(store: &impl ObjectStorage) {
+    let mut pending = vec![String::new()];
+    while let Some(prefix) = pending.pop() {
+        let listed = store
+            .list(Path::new(&prefix))
+            .await
+            .unwrap_or_else(|e| panic!("listing {prefix:?} failed: {e:?}"));
+        for entry in listed {
+            if entry.is_dir {
+                // Listed under in turn, when the walk pops it.
+                pending.push(entry.key);
+            } else {
+                store
+                    .get(Path::new(&entry.key))
+                    .await
+                    .unwrap_or_else(|e| panic!("{prefix:?} lists {:?}, which does not read back: {e:?}", entry.key));
+            }
+        }
+    }
 }

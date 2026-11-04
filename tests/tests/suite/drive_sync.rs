@@ -728,10 +728,9 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
 /// **A move admits every key the vault it leaves lists, and carries none that
 /// is not canonical** (kotton #274). A move takes the source vault's listing
 /// as the keys it reads there and writes at the other vault, so the listing is
-/// what the vault it leaves controls. Here that vault lists `../x` in the
-/// drive's tree: a file whose name percent-decodes to it (a filesystem
-/// listing rebuilds each key from a file's name, decoding `%2F` to `/`), with
-/// a file beside the tree at `x`, so a read of `../x` would find bytes. The
+/// what the vault it leaves controls. Here that vault lists `x\y` in the
+/// drive's tree: a file `x%5Cy`, which the store's encoding writes and a
+/// filesystem listing decodes to a key holding a `\`, not a storage key. The
 /// listing is the vault's own, through the store's sealed view at its root:
 /// the prefix is admitted (kotton #275) and a leaf's key is passed through as
 /// the store spelled it.
@@ -740,16 +739,24 @@ async fn a_vault_keeps_several_drives_and_a_moved_drive_is_followed_by_every_dev
 /// write: every canonical object is carried and the copy is named finished,
 /// the other vault holds those and nothing beside its tree, and the answer
 /// counts the refused key. Before the admission, the device asked the vault
-/// it leaves to read `../x`, and the whole move was refused there.
+/// it leaves to read a key that is not canonical, and the whole move was
+/// refused there.
+///
+/// The tree also holds `..%2Fx`, once listed as `../x`, with a file beside
+/// the tree at `x` that a read of `../x` would find, and `a%zz`. The store's
+/// encoding writes neither, so a filesystem listing names neither (kotton
+/// #349): the move is never handed them, and nothing is read beside the tree.
+/// A bucket's or a peer's listing can still name `../x`; carrying such a
+/// listing end to end wants a fixture that serves it directly.
 ///
 /// The vault the drive leaves then retires it: its retire walks the same
 /// listing (`kvaultd::tenancy::clear_shelf`) and admits it as the move does
-/// (kotton #310), so it refuses `../x` rather than asking its store to delete
-/// a path outside the tree, deletes the rest, and removes the tree's
-/// directory whole, the refused file with it. The move answers the drive
-/// moved, with `keys_refused` 1; the drive is at the other vault alone, and
-/// the `x` beside the tree it left is untouched. Before the vault admitted
-/// its listing, its retire failed and the drive was left at both.
+/// (kotton #310), so it refuses `x\y` rather than asking its store to delete
+/// it, deletes the rest, and removes the tree's directory whole, the refused
+/// file and the unlisted ones with it. The move answers the drive moved, with
+/// `keys_refused` 1; the drive is at the other vault alone, and the `x`
+/// beside the tree it left is untouched. Before the vault admitted its
+/// listing, its retire failed and the drive was left at both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_move_refuses_a_listed_key_that_is_not_canonical_and_says_so() {
     use kotton_device::users::residency::Residency as _;
@@ -792,17 +799,24 @@ async fn a_move_refuses_a_listed_key_that_is_not_canonical_and_says_so() {
         assert!(matches!(answer, UserResponse::Ok), "{answer:?}");
     }
 
-    // The vault the drive leaves lists `../x` in its tree.
+    // The vault the drive leaves lists `x\y` in its tree, and not the names
+    // its store never writes.
     let tree_dir = |vault: &RunningVault, tree: &str| {
         let pool = vault.vault.pools().get(USER).expect("the vault keeps a pool for the person");
         pool.shelf_mounts().into_iter().find(|(t, _)| t == tree).expect("the tree rests on a directory").1
     };
     let source_dir = tree_dir(&first, &tree);
-    std::fs::write(source_dir.join("..%2Fx"), b"served").expect("plant a served key");
+    for name in ["x%5Cy", "..%2Fx", "a%zz"] {
+        std::fs::write(source_dir.join(name), b"served").expect("plant a served key");
+    }
     std::fs::write(source_dir.parent().unwrap().join("x"), b"beside the served tree").expect("the bytes ../x reads");
     let pool = first.vault.pools().get(USER).expect("the vault keeps a pool for the person");
     let listed: Vec<String> = pool.list_sealed(&tree, None).await.expect("the tree lists").into_iter().map(|(k, _, _)| k).collect();
-    assert!(listed.iter().any(|k| k == "../x"), "the source vault lists `../x` as the move will read it: {listed:?}");
+    assert!(listed.iter().any(|k| k == "x\\y"), "the source vault lists `x\\y` as the move will read it: {listed:?}");
+    assert!(
+        !listed.iter().any(|k| k == "../x" || k.starts_with("a%")),
+        "the source vault lists a name its store never writes: {listed:?}"
+    );
 
     let moved = client_a.drive_move(USER, "photos", "vault-2", None).await.expect("drive moved");
     assert_eq!(moved.keys_refused, 1, "the refusal is not in the move's answer: {moved:?}");

@@ -29,9 +29,12 @@
 //! **The walk admits its listing** (kotton #310; the rule is kotton #265's).
 //! A shelf is emptied by walking its own listing and deleting each key
 //! ([`clear_shelf`]), here for a drop and in `crate::drives` for a retire. The
-//! listing is what is on the disk or in the bucket, and a file whose name
-//! decodes to `../x` lists as that key, which the store will not delete: it
-//! names a path outside the mount root. So each listed key is parsed into a
+//! listing is what is on the disk or in the bucket. A bucket's listing can
+//! name `../x`, which the store will not delete: it names a path outside the
+//! mount root. A disk's listing no longer names a file `..%2Fx` as `../x`,
+//! since it names only what the store's encoding writes (kotton #349), but
+//! what that encoding writes can still decode to a key holding a `\`. So each
+//! listed key is parsed into a
 //! [`StorageKey`] where the listing enters the walk, and only an admitted key
 //! is deleted or walked into. A key that is not canonical is no object any
 //! device wrote, since a store writes only canonical keys; it is refused,
@@ -44,7 +47,8 @@
 //! longer exists, owned by nobody and reachable by no verb: a leak, not
 //! caution. So once every canonical object is deleted by key, the retire
 //! removes the tree's directory whole, and the drop the tenant's directory
-//! whole, and the refused file goes with it. Nothing a canonical key names is
+//! whole, and the refused file goes with it, as does a file on the disk the
+//! listing never named, such as `a%zz` (kotton #349). Nothing a canonical key names is
 //! deleted that way, since by then the walk has deleted each of those and
 //! nothing was left for the removal but what no key names; and nothing outside
 //! the directory is reached, since the removal is of the directory and never
