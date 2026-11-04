@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kotton_wire::ipc::UserResponse;
+use kotton_sys::store::ObjectStorageError;
 
 // ---------------------------------------------------------------------------
 // What these handlers need from the node
@@ -242,6 +243,13 @@ pub async fn read_sealed(
                 domain_id,
                 total_size,
             })
+        }
+        // Absence is the store's own answer, typed where the store gave it:
+        // a reader takes `SealedNotFound` as "this drive holds nothing", so
+        // it is never inferred from an error's words (kotton #412). Every
+        // other failure, the pool and the mount above among them, is `Error`.
+        Err(e) if matches!(e.downcast_ref::<ObjectStorageError>(), Some(ObjectStorageError::NotFound(_))) => {
+            Ok(UserResponse::SealedNotFound)
         }
         Err(e) => Ok(UserResponse::Error {
             message: e.to_string(),

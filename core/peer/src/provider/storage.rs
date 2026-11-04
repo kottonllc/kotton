@@ -255,12 +255,10 @@ impl ObjectStorage for KottonPeerObjectStorage {
                         )));
                     }
                 }
+                // An error is the peer failing, whatever its words: absence is
+                // never read from an error's text (kotton #412).
                 UserResponse::Error { message } => {
-                    return if message.to_lowercase().contains("not found") {
-                        Err(ObjectStorageError::NotFound(path))
-                    } else {
-                        Err(ObjectStorageError::BackendError(message))
-                    };
+                    return Err(ObjectStorageError::BackendError(message))
                 }
                 other => {
                     return Err(ObjectStorageError::BackendError(format!(
@@ -313,13 +311,8 @@ impl ObjectStorage for KottonPeerObjectStorage {
         };
         match self.send(&req).await.map_err(Self::io_err)? {
             UserResponse::Ok => Ok(()),
-            UserResponse::Error { message } => {
-                if message.to_lowercase().contains("not found") {
-                    Err(ObjectStorageError::NotFound(Self::path_str(key)))
-                } else {
-                    Err(ObjectStorageError::BackendError(message))
-                }
-            }
+            // As `get`: an error is a failure, never absence (kotton #412).
+            UserResponse::Error { message } => Err(ObjectStorageError::BackendError(message)),
             other => Err(ObjectStorageError::BackendError(format!(
                 "unexpected peer response: {other:?}"
             ))),
@@ -434,12 +427,16 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                         )));
                     }
                 }
+                // The serving store found no such object, and said so in the
+                // one answer that means it. Absence is that answer alone: an
+                // `Error` is the peer failing, whatever its words — a vault
+                // whose tenant's pool is not resident answers
+                // `user '…' not found` — and reading its text as absence let
+                // compaction delete what only a held generation names
+                // (kotton #412).
+                UserResponse::SealedNotFound => return Err(ObjectStorageError::NotFound(path)),
                 UserResponse::Error { message } => {
-                    return if message.to_lowercase().contains("not found") {
-                        Err(ObjectStorageError::NotFound(path))
-                    } else {
-                        Err(ObjectStorageError::BackendError(message))
-                    };
+                    return Err(ObjectStorageError::BackendError(message))
                 }
                 other => {
                     return Err(ObjectStorageError::BackendError(format!(
@@ -572,8 +569,11 @@ mod tests {
         assert_eq!(data.as_ref(), b"hello world");
     }
 
+    /// An error is the peer failing, whatever its words: `ReadFile` has no
+    /// typed absence, so a peer's `file not found` is an error and is not read
+    /// as one (kotton #412).
     #[tokio::test]
-    async fn get_not_found_maps_to_not_found_error() {
+    async fn get_error_is_a_failure_whatever_its_words() {
         let resp = mock_response(&UserResponse::Error {
             message: "file not found".to_string(),
         });
@@ -582,9 +582,41 @@ mod tests {
 
         let err = storage.get(Path::new("/missing.txt")).await.unwrap_err();
         assert!(
-            matches!(err, ObjectStorageError::NotFound(_)),
-            "expected NotFound, got {err:?}"
+            matches!(&err, ObjectStorageError::BackendError(m) if m == "file not found"),
+            "expected the peer's error, got {err:?}"
         );
+    }
+
+    // -- get_sealed -----------------------------------------------------------
+
+    /// **A vault's error is a failure, whatever its words say** (kotton #412).
+    /// A vault answers `user '{id}' not found` from `read_sealed` when the
+    /// tenant's pool is not resident: the vault failing, not a drive holding
+    /// nothing. It reaches the caller as an error, never as `NotFound`.
+    #[tokio::test]
+    async fn a_vault_error_saying_not_found_is_not_absence() {
+        let resp = mock_response(&UserResponse::Error {
+            message: "user 'x' not found".to_string(),
+        });
+        let ch = Arc::new(MockPeerChannel::new(vec![resp]));
+        let storage = make_storage(ch).with_domain_id("d".to_string());
+
+        let err = storage.get_sealed(Path::new("_pack/0a")).await.unwrap_err();
+        assert!(
+            matches!(&err, ObjectStorageError::BackendError(m) if m == "user 'x' not found"),
+            "a vault's failure was read as something else: {err:?}"
+        );
+    }
+
+    /// `SealedNotFound` is the one answer that means the serving store holds no
+    /// such object, and it is `NotFound` here, naming the key asked for.
+    #[tokio::test]
+    async fn sealed_not_found_is_absence() {
+        let ch = Arc::new(MockPeerChannel::new(vec![mock_response(&UserResponse::SealedNotFound)]));
+        let storage = make_storage(ch).with_domain_id("d".to_string());
+
+        let err = storage.get_sealed(Path::new("_pack/0a")).await.unwrap_err();
+        assert!(matches!(&err, ObjectStorageError::NotFound(k) if k == "_pack/0a"), "{err:?}");
     }
 
     // -- put ------------------------------------------------------------------

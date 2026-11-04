@@ -100,6 +100,38 @@ impl LocalObjectStorage {
         Ok(path)
     }
 
+    /// What a failed operation on `key` answers: [`Self::map_error`]'s
+    /// answer, except that "not found" is absence only under a root that is
+    /// there.
+    ///
+    /// **A store whose root is gone holds nothing it can name, and says so as
+    /// a refusal** (kotton #412). Every key under a missing root is missing
+    /// too, so ENOENT alone would answer `NotFound` for every object and an
+    /// empty listing for every prefix: a shelf unmounted or its directory
+    /// removed from outside would read as a store that holds nothing, and a
+    /// device that reads a drive's absence as "not held" may delete what only
+    /// that drive keeps. So the one operation that met ENOENT asks whether
+    /// the root is there, and only then answers absence. A missing root is an
+    /// `IoError` naming it. Nothing is asked on the way in: a store is not
+    /// required to have a root before its first write, which makes one
+    /// (`put`), and a read that finds what it asked for never asks.
+    async fn answer(&self, e: ObjectStorageError) -> ObjectStorageError {
+        let ObjectStorageError::NotFound(key) = e else {
+            return e;
+        };
+        let root = self.base_path.display();
+        match self.filesystem.dir_exists(&self.base_path).await {
+            Ok(true) => ObjectStorageError::NotFound(key),
+            Ok(false) => ObjectStorageError::IoError(format!(
+                "{root}: the store's root is missing, so it cannot say whether it holds '{key}'"
+            )),
+            Err(why) => ObjectStorageError::IoError(format!(
+                "{root}: whether the store's root is there could not be read ({why}), so it cannot \
+                 say whether it holds '{key}'"
+            )),
+        }
+    }
+
     /// Convert filesystem error to object storage error
     fn map_error(e: impl std::error::Error, key: &str) -> ObjectStorageError {
         let err_str = e.to_string().to_lowercase();
@@ -237,12 +269,10 @@ fn decode_segment(seg: &str) -> Option<String> {
 impl ObjectStorage for LocalObjectStorage {
     async fn get(&self, key: &Path) -> ObjectStorageResult<Bytes> {
         let abs_path = self.resolve_key(key)?;
-        let bytes = self
-            .filesystem
-            .read_file(&abs_path)
-            .await
-            .map_err(|e| Self::map_error(e, key.to_str().unwrap_or("")))?;
-        Ok(bytes)
+        match self.filesystem.read_file(&abs_path).await {
+            Ok(bytes) => Ok(bytes),
+            Err(e) => Err(self.answer(Self::map_error(e, key.to_str().unwrap_or(""))).await),
+        }
     }
 
     async fn put(&self, key: &Path, data: &[u8]) -> ObjectStorageResult<()> {
@@ -279,11 +309,10 @@ impl ObjectStorage for LocalObjectStorage {
 
     async fn delete(&self, key: &Path) -> ObjectStorageResult<()> {
         let abs_path = self.resolve_key(key)?;
-        self.filesystem
-            .delete_file(&abs_path)
-            .await
-            .map_err(|e| Self::map_error(e, key.to_str().unwrap_or("")))?;
-        Ok(())
+        match self.filesystem.delete_file(&abs_path).await {
+            Ok(()) => Ok(()),
+            Err(e) => Err(self.answer(Self::map_error(e, key.to_str().unwrap_or(""))).await),
+        }
     }
 
     /// The objects and directories directly under `prefix`, each by the key
@@ -300,8 +329,9 @@ impl ObjectStorage for LocalObjectStorage {
         let abs_path = self.resolve_key(prefix)?;
         let entries = match self.filesystem.list_dir(&abs_path).await {
             Ok(entries) => entries,
-            Err(e) => match Self::map_error(e, prefix.to_str().unwrap_or("")) {
-                // A non-existent prefix is not an error — it simply has no objects.
+            Err(e) => match self.answer(Self::map_error(e, prefix.to_str().unwrap_or(""))).await {
+                // A non-existent prefix under a present root is not an error —
+                // it simply has no objects.
                 ObjectStorageError::NotFound(_) => return Ok(vec![]),
                 other => return Err(other),
             },
@@ -358,11 +388,10 @@ impl ObjectStorage for LocalObjectStorage {
 
     async fn metadata(&self, key: &Path) -> ObjectStorageResult<ObjectMetadata> {
         let abs_path = self.resolve_key(key)?;
-        let metadata = self
-            .filesystem
-            .file_metadata(&abs_path)
-            .await
-            .map_err(|e| Self::map_error(e, key.to_str().unwrap_or("")))?;
+        let metadata = match self.filesystem.file_metadata(&abs_path).await {
+            Ok(metadata) => metadata,
+            Err(e) => return Err(self.answer(Self::map_error(e, key.to_str().unwrap_or(""))).await),
+        };
 
         Ok(ObjectMetadata {
             key: key.to_string_lossy().to_string(),
@@ -571,6 +600,42 @@ mod tests {
             assert!(matches!(refused, Err(ObjectStorageError::InvalidKey(_))), "{refused:?}");
         }
         assert!(outer.path().join("beside").exists(), "a delete reached outside the root");
+    }
+
+    /// **A store whose root is gone refuses; it does not answer absence**
+    /// (kotton #412). A key missing under a present root is `NotFound`, and a
+    /// prefix missing under it lists nothing. Once the root itself is removed
+    /// (a shelf unmounted, a directory deleted from outside) every read,
+    /// listing and delete is an error naming the root: the store cannot say
+    /// what it holds, and "nothing" would read as an answer.
+    #[tokio::test]
+    async fn a_store_whose_root_is_missing_refuses_rather_than_answering_absence() {
+        let outer = TempDir::new().unwrap();
+        let root = outer.path().join("shelf");
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = LocalObjectStorage::new(root.clone(), OsFilesystem);
+        storage.put(Path::new("_pack/held"), b"sealed").await.unwrap();
+        assert!(matches!(storage.get(Path::new("_pack/absent")).await, Err(ObjectStorageError::NotFound(_))));
+        assert!(matches!(storage.get_sealed(Path::new("_pack/absent")).await, Err(ObjectStorageError::NotFound(_))));
+        assert!(matches!(storage.delete(Path::new("_pack/absent")).await, Err(ObjectStorageError::NotFound(_))));
+        assert!(matches!(storage.metadata(Path::new("_pack/absent")).await, Err(ObjectStorageError::NotFound(_))));
+        assert!(storage.list(Path::new("no/such/prefix")).await.unwrap().is_empty());
+
+        std::fs::remove_dir_all(&root).unwrap();
+        let named = root.display().to_string();
+        for refused in [
+            storage.get(Path::new("_pack/held")).await.map(|_| ()),
+            storage.get_sealed(Path::new("_pack/held")).await.map(|_| ()),
+            storage.metadata(Path::new("_pack/held")).await.map(|_| ()),
+            storage.delete(Path::new("_pack/held")).await,
+            storage.list(Path::new("")).await.map(|_| ()),
+            storage.list(Path::new("_pack")).await.map(|_| ()),
+        ] {
+            match refused {
+                Err(ObjectStorageError::IoError(m)) => assert!(m.contains(&named), "the refusal does not name the root: {m}"),
+                other => panic!("a store whose root is gone answered {other:?}"),
+            }
+        }
     }
 
     #[test]
