@@ -135,7 +135,7 @@ impl LocalObjectStorage {
     /// Convert filesystem error to object storage error.
     ///
     /// **An error is `NotFound` by its variant, never by its words** (kotton
-    /// #416). `NotFound` is what `held_generation` reads as "not held", so it
+    /// #416). `NotFound` is what `held_generation` reads as "neither", so it
     /// is answered only for a provider that said `FilesystemError::NotFound`;
     /// a failure whose text happens to say "not found" is an `IoError`. The
     /// providers type ENOENT and EACCES at their source (`map_io_error` in
@@ -645,7 +645,7 @@ mod tests {
     }
 
     /// **An error is `NotFound` by its variant, not by its words** (kotton
-    /// #416). `held_generation` reads `NotFound` as "not held", so a failure
+    /// #416). `held_generation` reads `NotFound` as "neither", so a failure
     /// whose text merely says "not found" must not become it.
     #[test]
     fn an_error_is_not_found_by_its_variant_not_by_its_words() {

@@ -32,8 +32,17 @@
 //! it knows of each key as written, never by re-reading a manifest at commit
 //! time (kotton #319), and keeps any generation it does not know for
 //! compaction to decide. Compaction judges from its own check, within its
-//! pass, and that check still counts a superblock that does not open toward
-//! the two (kotton #368).
+//! pass.
+//!
+//! **A superblock that does not open is not a fallback** (kotton #368). A
+//! generation is *held* (it opens, and its state is refused), *adoptable* (it
+//! opens and its state decodes), or *neither*: its superblock is present and
+//! does not open, or the state it names is gone. Only adoptable generations
+//! count toward the two kept. "Neither" is a reading of the shelf by one
+//! pass, never a fact kept about the key, since a superblock torn in delivery
+//! can arrive whole afterwards; the walk returns what it could not open
+//! ([`Adopted::not_opened`]) for its caller's pass alone. A superblock that
+//! could not be *read* is neither of these: the read's error ends the walk.
 //!
 //! A generation whose superblock opens but whose **state does not decode** is
 //! passed over the same way ([`load_adopted_superblock`]): the pack layer's
@@ -48,7 +57,10 @@
 //! A commit made past a passed-over generation is numbered above the
 //! highest generation passed over (kotton #308, `crate::packed`'s
 //! `Committed::base_generation`), so it sorts above it by generation, not by
-//! the key tie-break. Which states a caller passes over, and what it keeps for
+//! the key tie-break. A commit past a superblock that does not open is
+//! numbered above it by the same rule (kotton #368), so generation numbers
+//! stay strictly increasing over every superblock on the shelf, and a torn
+//! generation N and the commit after it never share N. Which states a caller passes over, and what it keeps for
 //! them, is the caller's: the pack layer passes over only a refused pack id,
 //! and holds that generation (`crate::packed`'s module doc).
 //!
@@ -241,6 +253,22 @@ pub struct Adopted<T> {
     /// Each generation passed over because its state was refused, newest
     /// first. Empty in a store no device wrote wrongly.
     pub passed_over: Vec<PassedOver>,
+    /// Each newer generation whose superblock is present and does not open
+    /// (torn by a crash, corrupt or relocated), newest first. This is what
+    /// this walk read of the shelf, not a fact about the key: a superblock
+    /// torn in delivery can arrive whole afterwards. A caller numbers above
+    /// these and hands them to its own pass; it does not keep them.
+    pub not_opened: Vec<NotOpened>,
+}
+
+/// A generation [`load_adopted_superblock`] walked past because its
+/// superblock is present and does not open.
+#[derive(Debug, Clone)]
+pub struct NotOpened {
+    /// Its generation, as its key names it.
+    pub generation: u64,
+    /// Its superblock's storage key.
+    pub key: String,
 }
 
 /// A generation [`load_adopted_superblock`] passed over: its superblock
@@ -294,7 +322,11 @@ where
 /// to adopt it, `Ok(Err(why))` when that state does not decode (the generation
 /// is passed over, as a superblock that does not open is, and reported the
 /// same way), or `Err` when it could not be read at all, which ends the walk:
-/// a read that failed says nothing about the generation.
+/// a read that failed says nothing about the generation. The same holds of
+/// the superblock itself: one that is present and does not open is walked
+/// past ([`Adopted::not_opened`]), and one whose read fails, other than by
+/// having gone from the shelf since the listing, ends the walk with that
+/// error.
 pub async fn load_adopted_superblock<S, T, F, Fut>(
     store: &S,
     k_pack: &[u8; 32],
@@ -312,18 +344,23 @@ where
 
     let mut last_err = None;
     let mut passed_over = Vec::new();
+    let mut not_opened = Vec::new();
     for (generation, key) in candidates {
         let blob = match store.get_sealed(Path::new(&key)).await {
             Ok(b) => b,
-            Err(e) => {
-                last_err = Some(e);
-                continue;
-            }
+            // Listed and then gone: retired between the listing and the read.
+            // It is no longer on the shelf, so there is nothing to walk past.
+            Err(ObjectStorageError::NotFound(_)) => continue,
+            // A read that failed says nothing about the generation, as a
+            // failed read of its state does not: adopting an older one on it
+            // would build on a stale base (kotton #410).
+            Err(e) => return Err(e),
         };
         let sb = match open_superblock(k_pack, &key, &blob) {
             Ok(sb) => sb,
             Err(e) => {
                 tracing::warn!(%key, error = %e, "skipping unreadable superblock generation");
+                not_opened.push(NotOpened { generation, key });
                 last_err = Some(e);
                 continue;
             }
@@ -335,6 +372,7 @@ where
                     key,
                     state,
                     passed_over,
+                    not_opened,
                 }))
             }
             Err(e) => {
