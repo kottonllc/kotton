@@ -211,8 +211,8 @@ async fn empty_value_roundtrip(store: &impl ObjectStorage) {
 }
 
 /// **Every key a listing names resolves back to what it named** (kotton #349):
-/// a listed leaf reads and has metadata, and a listed directory has metadata
-/// and lists in turn. A walk hands each key a listing names straight back to
+/// a listed leaf reads, and a listed directory lists, which is all a walk
+/// does with one. A walk hands each key a listing names straight back to
 /// `get`, `delete` or `list` — the vault's retire deletes every leaf its walk
 /// lists, and fails whole on one that is not found — so a listing that names
 /// something no key resolves to fails every walk of that store.
@@ -228,17 +228,12 @@ pub async fn every_listed_key_resolves_back(store: &impl ObjectStorage) {
             .await
             .unwrap_or_else(|e| panic!("listing {prefix:?} failed: {e:?}"));
         for entry in listed {
-            let key = Path::new(&entry.key);
-            let meta = store
-                .metadata(key)
-                .await
-                .unwrap_or_else(|e| panic!("{prefix:?} lists {:?}, which does not resolve back: {e:?}", entry.key));
-            assert_eq!(meta.is_dir, entry.is_dir, "{:?} resolves back to another kind of entry", entry.key);
             if entry.is_dir {
+                // Listed under in turn, when the walk pops it.
                 pending.push(entry.key);
             } else {
                 store
-                    .get(key)
+                    .get(Path::new(&entry.key))
                     .await
                     .unwrap_or_else(|e| panic!("{prefix:?} lists {:?}, which does not read back: {e:?}", entry.key));
             }

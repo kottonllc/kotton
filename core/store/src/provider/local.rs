@@ -9,7 +9,9 @@
 /// names this store never wrote — a put's in-flight copy, or a file put there
 /// by hand — and a listing names only a host name in `encode_segment`'s image,
 /// so every key it names resolves back to the name it was read from
-/// (kotton #349).
+/// (kotton #349). One gap is open: the filesystem layer hands this store each
+/// name as text, converted lossily, so a host name that is not UTF-8 arrives
+/// already rewritten (see [`decode_segment`]).
 use async_trait::async_trait;
 use bytes::Bytes;
 use kotton_sys::fs::Filesystem;
@@ -198,11 +200,20 @@ fn encode_segment(seg: &str) -> String {
 /// `None` is every name `encode_segment` never writes: a `%` not followed by
 /// two hex digits (`a%zz`, and a put's in-flight copy, [`IN_FLIGHT`]), an
 /// escape in lower case or of a byte it leaves alone (`%3a`, `%41`), an
-/// unescaped byte it would escape, a name that is not UTF-8. Decoded leniently,
-/// such a name would give a key that resolves to another name, so a listing
-/// would name an object that no verb on its key reaches, and a walk that
-/// deletes what it lists would fail on it (kotton #349). The test is exact:
-/// a name is decoded only if encoding the result spells it again.
+/// unescaped byte it would escape, or escapes that decode to bytes that are
+/// not UTF-8 (`%FF`). Decoded leniently, such a name would give a key that
+/// resolves to another name, so a listing would name an object that no verb
+/// on its key reaches, and a walk that deletes what it lists would fail on it
+/// (kotton #349). The test is exact: a name is decoded only if encoding the
+/// result spells it again.
+///
+/// It is exact on the text it is given, and that text is not always the host
+/// name. The filesystem layer lists each name as a `String`, converted
+/// lossily, so a host name whose bytes are not UTF-8 (`a\xff`) arrives as
+/// `a\u{FFFD}`: inside the image, listed under a key that resolves to a name
+/// that is not there, and a walk that deletes it still fails. Closing that
+/// wants the filesystem layer to hand names over as the host's bytes; it is
+/// the open part of this rule.
 fn decode_segment(seg: &str) -> Option<String> {
     let bytes = seg.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
