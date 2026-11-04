@@ -83,7 +83,8 @@
 //! - **Retirement reads no manifest** (kotton #319). It decides from what
 //!   the store's passes already learned (`Known`): the key each commit wrote,
 //!   the generation `load_committed` adopted and those it passed over, and
-//!   what compaction's check read. A re-read at commit time would ask a
+//!   what compaction's check read; a held finding overrides whatever was
+//!   learned of that key before. A re-read at commit time would ask a
 //!   fetching shelf's drive for an old index pack at the moment of a commit.
 //!   A generation the store has not classified is kept, is not counted
 //!   toward the two, and is decided by compaction.
@@ -2121,6 +2122,10 @@ enum Standing {
     /// Compaction's check read it and found it not held: its manifest
     /// decodes, its superblock does not open, or its manifest pack is gone.
     /// [`held_generation`] does not yet tell these apart (kotton #368).
+    ///
+    /// Unlike the other two, this is a finding about the shelf at one moment,
+    /// not about the key: a twin delivered in part reads as not held until
+    /// its bytes, or the pack its manifest is in, arrive whole.
     NotHeld,
 }
 
@@ -2130,23 +2135,40 @@ enum Standing {
 /// It is fed by what the passes already do: a commit learns the key it wrote
 /// (adoptable), [`load_committed`] the generation it adopted (adoptable) and
 /// those it passed over (held), and compaction's check, which reads every
-/// present generation, what it read. A superblock's key is never rewritten
-/// and the manifest pack it names is immutable, so what was learned of a key
-/// stays true; it is held in memory, for the life of the store, and dropped
-/// for keys no longer on the shelf.
+/// present generation, what it read. It is held in memory, for the life of
+/// the store, and dropped for keys no longer on the shelf.
+///
+/// Not everything learned of a key stays true, so [`Known::learn`] does not
+/// keep the first answer. **Adoptable is a property of the key as written**:
+/// a superblock key carries a random nonce bound as the seal's AAD, so only
+/// the superblock sealed for it opens under it, and the manifest it names is
+/// in a pack with a random id, read only when its digest matches. A manifest
+/// that decoded once decodes whenever it is read. **Not held is a finding
+/// about the shelf at one moment** ([`Standing::NotHeld`]), and a later
+/// reading can contradict it: a torn or partly delivered twin completes, and
+/// reads as held. So a held finding always wins, whatever was learned before
+/// it; a decode replaces a "not held"; and a "not held" replaces only an
+/// older "not held".
 #[derive(Default)]
 struct Known(Mutex<BTreeMap<String, Standing>>);
 
 impl Known {
-    /// Record `standing` for `key`, unless something is already known of it:
-    /// what a key is does not change, and an earlier, more precise answer
-    /// (adoptable over not held) is kept.
+    /// Record `standing` for `key`. **Held always wins**: it replaces any
+    /// earlier standing, and nothing replaces it, since keeping a generation
+    /// that may hold data is what retirement must never get wrong.
+    /// **Adoptable is kept for good** against a later "not held", since it
+    /// is a property of the key as written. A **"not held" is only a reading
+    /// of the shelf**: it is recorded for a key with no standing, and a fresh
+    /// one replaces an older one, but it never displaces held or adoptable.
     fn learn(&self, key: &str, standing: Standing) {
-        self.0
-            .lock()
-            .unwrap()
-            .entry(key.to_owned())
-            .or_insert(standing);
+        let mut known = self.0.lock().unwrap();
+        let replaces = match (known.get(key), &standing) {
+            (_, Standing::Held(_)) | (None, _) | (Some(Standing::NotHeld), _) => true,
+            (Some(Standing::Held(_) | Standing::Adoptable), _) => false,
+        };
+        if replaces {
+            known.insert(key.to_owned(), standing);
+        }
     }
 
     fn standing(&self, key: &str) -> Option<Standing> {
@@ -6375,6 +6397,61 @@ mod tests {
             matches!(after_tear.get(Path::new("notes/c.md")).await, Err(ObjectStorageError::NotFound(_))),
             "the torn generation's write was served"
         );
+    }
+
+    /// **A held finding overrides what was learned of a key earlier**
+    /// (PR 409's assessment).
+    ///
+    /// Generations 1 and 2 hold `a` and `b`; a held twin is forged at 9, and
+    /// torn, its bytes and its manifest pack set aside. Compaction reads it
+    /// then as not held, a finding about the shelf at that moment, and
+    /// commits 3. The twin's bytes and pack then arrive whole. The same store
+    /// commits 10, its load passing over 9 as held: that finding must replace
+    /// the earlier one, so retirement keeps 10, the held 9 and 3, and a tear
+    /// of 10 still reads from 3. Were the earlier "not held" kept, 9 would
+    /// count toward the two and 3 be retired, leaving nothing that decodes
+    /// once 10 is torn (kotton #316's gap).
+    #[tokio::test]
+    async fn a_held_finding_overrides_an_earlier_not_held_one() {
+        let backing = MemoryObjectStorage::new();
+        let slot = crate::fetch::PackSlot::default();
+        let s = fetching(&backing, &slot);
+        s.put(Path::new("notes/a.md"), b"one").await.unwrap();
+        s.pack_loose().await.unwrap();
+        s.put(Path::new("notes/b.md"), b"two").await.unwrap();
+        s.pack_loose().await.unwrap();
+        commit_forged_manifest(&s, "notes/a.md", "_pack/../x", 9).await;
+        let twin = superblocks_of(&s, 9).await;
+        assert_eq!(twin.len(), 1);
+        let twin_pack = format!("{PACK_PREFIX}/{:032x}", 9u64 | 0xab00);
+        let twin_bytes = backing.get_sealed(Path::new(&twin[0])).await.unwrap();
+        let pack_bytes = backing.get_sealed(Path::new(&twin_pack)).await.unwrap();
+        backing.put_sealed(Path::new(&twin[0]), b"torn mid-delivery").await.unwrap();
+        backing.delete_sealed(Path::new(&twin_pack)).await.unwrap();
+
+        s.compact().await.unwrap();
+        assert_eq!(s.known.standing(&twin[0]), Some(Standing::NotHeld));
+        let third = superblocks_of(&s, 3).await;
+        assert_eq!(third.len(), 1, "compaction did not commit generation 3");
+
+        backing.put_sealed(Path::new(&twin[0]), &twin_bytes).await.unwrap();
+        backing.put_sealed(Path::new(&twin_pack), &pack_bytes).await.unwrap();
+        s.put(Path::new("notes/c.md"), b"three").await.unwrap();
+        let tenth = s.pack_loose().await.unwrap().unwrap();
+        assert_eq!(tenth.generation, Some(10), "the commit is not numbered above the held twin");
+        let shelf = shelf_keys(&backing).await;
+        assert!(shelf.contains(&twin[0]), "the held generation was retired");
+        assert!(shelf.contains(&third[0]), "the generation the commit was built on was retired");
+        assert!(matches!(s.known.standing(&twin[0]), Some(Standing::Held(_))), "the held finding was discarded");
+
+        let newest = superblocks_of(&s, 10).await;
+        assert_eq!(newest.len(), 1);
+        backing.put_sealed(Path::new(&newest[0]), b"torn mid-write").await.unwrap();
+        let after_tear = fetching(&backing, &slot);
+        for (path, bytes) in [("notes/a.md", &b"one"[..]), ("notes/b.md", b"two")] {
+            let read = after_tear.get(Path::new(path)).await;
+            assert_eq!(read.expect("no generation decodes once generation 10 is torn").as_ref(), bytes, "{path}");
+        }
     }
 
     /// **Two held generations between commits keep the last good generation**
