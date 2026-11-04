@@ -18,8 +18,12 @@
 //!
 //! ## Which user an event belongs to
 //!
-//! [`user_db_for`]'s existing fallback: `None` resolves to the single resident
-//! user — on a one-user node, the same user a session of kuid's would name.
+//! [`user_db_for_compositor`](super::dispatch::user_db_for_compositor), which
+//! takes the principal fallback by name
+//! ([`user_db_for_principal`](super::dispatch::user_db_for_principal)): the
+//! single resident user — on a one-user node, the same user a session of kuid's
+//! would name. No verb that requires a session reaches that fallback (#428);
+//! this channel has no session to hand on.
 //!
 //! It is deliberately *not* read from the event. An `app_id` arriving over a
 //! channel cannot vouch for whose app it is, and a compositor that could name

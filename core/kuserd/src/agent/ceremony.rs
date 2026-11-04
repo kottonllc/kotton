@@ -299,12 +299,11 @@ impl Ceremonies {
     /// caller supplies: a guest that could name the target could aim a push at
     /// another app.
     async fn shell_app(&self, user_id: &str) -> Option<(String, Arc<SqlitePool>)> {
-        let user_db = super::dispatch::user_db_for(
+        let user_db = super::dispatch::user_db_named(
             &self.runtime,
-            &self.users,
             &self.user_dbs,
             &self.base,
-            Some(user_id),
+            user_id,
         )
         .await
         .ok()?;
