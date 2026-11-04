@@ -41,18 +41,38 @@
 //! pack. That is the cost of keeping on demand, which the protocol's storage
 //! model chooses; a device that keeps a drive whole pays none of it.
 //!
-//! **Offline.** A write on a device that cannot reach a drive fails, not
-//! found, when it reuses a chunk whose pack this device does not hold: the
-//! commit reads back every chunk the new state depends on, the reused one
-//! included (`crate::packed`'s `commit_new_state`), and that read is a fetch
-//! with no drive to answer. An overwrite of a file kept on demand, unopened,
-//! offline, is that case.
+//! **Not found is an answer; a failed fetch is not** (kotton #410). A miss
+//! here is answered one of three ways:
+//!
+//! - **The pack fetched**: kept, and read as if it had always been here.
+//! - **Not found** ([`ObjectStorageError::NotFound`]): the source was asked
+//!   and every drive it reached said it holds no such pack — including a
+//!   source with no drive to ask. That is a finding about the pack, and a
+//!   caller may act on it: compaction's check reads a manifest pack held
+//!   nowhere as a generation that holds nothing (`crate::packed`'s
+//!   `held_generation`).
+//! - **A backend error** ([`ObjectStorageError::BackendError`]): the fetch
+//!   failed — the drive could not be reached, did not answer in time, or
+//!   answered with an error. It says nothing about whether the pack exists,
+//!   and carries both the miss here and why the fetch failed. A caller that
+//!   would delete on "not found" refuses on this instead, and so compaction
+//!   with the drive down deletes nothing.
+//!
+//! **Offline.** A write on a device that cannot reach a drive fails, with
+//! the fetch's error, when it reuses a chunk whose pack this device does not
+//! hold: the commit reads back every chunk the new state depends on, the
+//! reused one included (`crate::packed`'s `commit_new_state`), and that read
+//! is a fetch the drive did not answer. An overwrite of a file kept on
+//! demand, unopened, offline, is that case.
 //!
 //! **Who lends the source.** The store cannot dial a vault — it does not know
 //! one exists — so the daemon that hosts it lends one ([`PackSlot::lend`]),
-//! once, for every user it makes resident. Until one is lent, or when the
-//! source has no drive that answers, a read of a pack this device does not
-//! hold fails as it did before this layer existed: not found.
+//! once, for every user it makes resident. Until one is lent, a read of a
+//! pack this device does not hold fails as it did before this layer existed:
+//! not found. That is this shelf's own answer, the one it gave before any
+//! drive could be asked, and the answer a store never lent a source must
+//! give: a vault's own tree is a store of this kind, and its shelf is where
+//! the drive's packs are, so a miss there is the drive holding nothing.
 
 use async_trait::async_trait;
 /// The bytes a [`PackSource`] hands back, named here so a source need not
@@ -114,7 +134,8 @@ impl FetchOnMiss {
     }
 
     /// `read`, and when it finds no pack here, the pack fetched, kept, and
-    /// read again.
+    /// read again: not found only when no drive holds it, and a backend
+    /// error when the fetch failed (module doc).
     async fn read_or_fetch<T, F, Fut>(&self, key: &Path, read: F) -> ObjectStorageResult<T>
     where
         F: Fn() -> Fut,
@@ -135,7 +156,9 @@ impl FetchOnMiss {
                     Ok(None) => Err(ObjectStorageError::NotFound(format!(
                         "{missing}: this device does not keep it, and no drive it reached holds it"
                     ))),
-                    Err(e) => Err(ObjectStorageError::NotFound(format!(
+                    // Unreachable, or erroring: no finding about the pack
+                    // (module doc), so never `NotFound`.
+                    Err(e) => Err(ObjectStorageError::BackendError(format!(
                         "{missing}: this device does not keep it, and fetching it from a drive failed: {e:#}"
                     ))),
                 }
@@ -256,5 +279,48 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(drive.asked.load(Ordering::SeqCst), 2, "only packs are asked for");
+    }
+
+    /// A drive that cannot be reached.
+    struct Unreachable;
+
+    #[async_trait]
+    impl PackSource for Unreachable {
+        async fn fetch(&self, _user_id: &str, _key: &str) -> anyhow::Result<Option<Bytes>> {
+            anyhow::bail!("the drive did not answer in time")
+        }
+    }
+
+    /// **Not found is an answer; a failed fetch is not** (kotton #410). A
+    /// drive reached that holds nothing, and a store with no source lent,
+    /// answer not found; a fetch that failed answers a backend error carrying
+    /// both the miss here and why the fetch failed, never not found.
+    #[tokio::test]
+    async fn only_a_drive_that_holds_nothing_answers_not_found() {
+        let key = Path::new("_pack/cabc");
+
+        let unlent = FetchOnMiss::new(Arc::new(MemoryObjectStorage::new()), "alice", PackSlot::default());
+        assert!(matches!(unlent.get_sealed(key).await, Err(ObjectStorageError::NotFound(_))), "no source lent");
+
+        let slot = PackSlot::default();
+        slot.lend(Arc::new(Drive { held: MemoryObjectStorage::new(), asked: AtomicUsize::new(0) }));
+        let empty = FetchOnMiss::new(Arc::new(MemoryObjectStorage::new()), "alice", slot);
+        match empty.get_sealed(key).await {
+            Err(ObjectStorageError::NotFound(m)) => assert!(m.contains("no drive it reached holds it"), "{m}"),
+            other => panic!("a drive that holds nothing: {other:?}"),
+        }
+
+        let slot = PackSlot::default();
+        slot.lend(Arc::new(Unreachable));
+        let down = FetchOnMiss::new(Arc::new(MemoryObjectStorage::new()), "alice", slot);
+        for read in [down.get_sealed(key).await, down.get(key).await, down.get_range(key, 0, 1).await.map(|(b, _)| b)] {
+            match read {
+                Err(ObjectStorageError::BackendError(m)) => {
+                    assert!(m.contains("_pack/cabc"), "the miss here is not named: {m}");
+                    assert!(m.contains("fetching it from a drive failed: the drive did not answer in time"), "{m}");
+                }
+                other => panic!("a drive that could not be reached: {other:?}"),
+            }
+        }
     }
 }

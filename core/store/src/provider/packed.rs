@@ -2097,6 +2097,12 @@ async fn load_committed<S: SealedObjectAccess + ?Sized>(
 /// gone (a superseded generation whose manifest compaction already retired),
 /// holds nothing. A read that fails otherwise is an error, not a "no".
 ///
+/// Gone means not found: on a fetching shelf, a pack no drive it reached
+/// holds. A fetch that failed, the drive unreachable or erroring, is a
+/// backend error (`crate::fetch`, kotton #410), and it comes back as one:
+/// the generation is kept, undecided, and compaction refuses the pass rather
+/// than retire on the word of a drive it could not reach.
+///
 /// Only compaction asks this, of every present generation, before it
 /// deletes anything. Retirement after a commit does not: it reads no
 /// manifest, and decides from what is [`Known`].
@@ -6660,6 +6666,83 @@ mod tests {
         for (path, bytes) in [("notes/a.md", &b"one"[..]), ("notes/d.md", b"four"), ("notes/e.md", b"five")] {
             assert_eq!(fetching(&backing, &slot).get(Path::new(path)).await.unwrap().as_ref(), bytes, "{path}");
         }
+    }
+
+    /// A drive that cannot be reached: every fetch fails.
+    struct UnreachableDrive {
+        asked: Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl crate::fetch::PackSource for UnreachableDrive {
+        async fn fetch(&self, _user_id: &str, key: &str) -> anyhow::Result<Option<Bytes>> {
+            self.asked.lock().unwrap().push(key.to_owned());
+            anyhow::bail!("the drive did not answer in time")
+        }
+    }
+
+    /// **A drive that could not be reached is not a drive that holds nothing**
+    /// (kotton #410).
+    ///
+    /// Generations 1 and 2 hold `a` and `b`; generation 3 is held, its
+    /// manifest refused for a pack id; `b` is deleted at 4 and `c` written at
+    /// 5, so the packs `b` was written into are named by the held generation
+    /// alone. The held generation's manifest pack is not on this device, and
+    /// the drive it would be fetched from cannot be reached. A store new to
+    /// the shelf, which knows nothing of generation 3, compacts: its check
+    /// asks the drive for that manifest, the fetch fails, and the pass is
+    /// refused naming the failure. Nothing is retired and nothing is swept:
+    /// the held superblock and every pack only it names are still here.
+    #[tokio::test]
+    async fn compaction_with_the_drive_unreachable_keeps_a_held_generation_and_its_packs() {
+        let backing = MemoryObjectStorage::new();
+        let slot = crate::fetch::PackSlot::default();
+        let s = fetching(&backing, &slot);
+        s.put(Path::new("notes/a.md"), b"one").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let before_b = shelf_keys(&backing).await;
+        s.put(Path::new("notes/b.md"), b"two").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let b_packs: BTreeSet<String> = shelf_keys(&backing)
+            .await
+            .difference(&before_b)
+            .filter(|k| k.starts_with(PACK_PREFIX))
+            .cloned()
+            .collect();
+        assert!(!b_packs.is_empty(), "b was packed into no pack");
+        commit_forged_manifest(&s, "notes/a.md", "_pack/../x", 3).await;
+        let held = superblocks_of(&s, 3).await;
+        assert_eq!(held.len(), 1);
+        s.delete(Path::new("notes/b.md")).await.unwrap();
+        assert_eq!(s.pack_loose().await.unwrap().unwrap().generation, Some(4));
+        s.put(Path::new("notes/c.md"), b"three").await.unwrap();
+        assert_eq!(s.pack_loose().await.unwrap().unwrap().generation, Some(5));
+        let (_, base) = s.manifest().await.unwrap().unwrap();
+        let named_by_base: BTreeSet<String> = base
+            .files
+            .values()
+            .flat_map(|e| e.chunks.iter().map(|r| r.pack_id.to_string()))
+            .chain(base.log.iter().map(|r| r.pack_id.to_string()))
+            .collect();
+        assert!(b_packs.is_disjoint(&named_by_base), "the base still names b's packs");
+
+        // The held generation's manifest pack lives on the drive alone, and
+        // the drive cannot be reached.
+        let held_manifest_pack = format!("{PACK_PREFIX}/{:032x}", 3u64 | 0xab00);
+        backing.delete_sealed(Path::new(&held_manifest_pack)).await.unwrap();
+        let drive = Arc::new(UnreachableDrive { asked: Mutex::new(Vec::new()) });
+        slot.lend(drive.clone());
+
+        let before = shelf_keys(&backing).await;
+        let compacting = fetching(&backing, &slot);
+        let err = compacting.compact().await.expect_err("compaction ran with the drive unreachable");
+        assert!(err.to_string().contains("did not answer in time"), "the refusal does not say why: {err}");
+        assert_eq!(*drive.asked.lock().unwrap(), vec![held_manifest_pack], "compaction did not ask for the held manifest");
+        let shelf = shelf_keys(&backing).await;
+        assert!(shelf.contains(&held[0]), "the held generation was retired");
+        for pack in &b_packs {
+            assert!(shelf.contains(pack), "a pack only the held generation names was swept: {pack}");
+        }
+        assert_eq!(shelf, before, "compaction deleted or wrote something");
     }
 
     /// **Only a pack-id refusal is skipped.** A manifest of a version this
