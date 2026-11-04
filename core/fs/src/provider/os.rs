@@ -150,7 +150,7 @@ impl Filesystem for OsFilesystem {
                 // for a directory full of objects
                 // (`TASK-a-contact-who-learned-a-rotated-key-is-sometimes-unreachable-at-the-new-door`).
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(FilesystemError::IoError(e.to_string())),
+                Err(e) => return Err(map_io_error(e, &entry.path())),
             };
 
             entries.push(FileMetadata {
