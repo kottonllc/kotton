@@ -86,9 +86,11 @@
 //!   `load_committed` adopted, held for those it passed over and those
 //!   compaction's check found held. Held beats adoptable, and nothing
 //!   replaces held. A re-read at commit time would ask a fetching shelf's
-//!   drive for an old index pack at the moment of a commit. A generation not
-//!   known is kept, is not counted toward the two, and is decided by
-//!   compaction.
+//!   drive for an old index pack at the moment of a commit. It opens only
+//!   the superblocks it would count (`superblock_opens`), which are local on
+//!   every device, so a key torn since this store read it is not counted. A
+//!   generation not known is kept, is not counted toward the two, and is
+//!   decided by compaction.
 //! - **Compaction decides from its own check.** It reads every present
 //!   generation, and what it finds adoptable counts toward the two in that
 //!   pass's retirement only: a reading of the shelf, never stored, since a
@@ -113,16 +115,22 @@
 //!   what it read as neither to its own, as a value (`ShelfReading`). The
 //!   reading overrides what `Known` says of the key for that pass: the key
 //!   was adoptable when this store read it, and has been torn, or had its
-//!   manifest pack retired, since. A commit keeps it; compaction retires it
-//!   once two adoptable generations sort above it.
+//!   manifest pack retired, since. Every retirement also opens each
+//!   superblock it would count (`superblock_opens`), so a commit on the
+//!   cached state, which made no load, counts no torn key either. A commit
+//!   keeps a neither generation; compaction retires it once two adoptable
+//!   generations sort above it.
 //! - **Could not be read is not neither.** A superblock or manifest pack
 //!   whose read fails, other than by not being found where the source was
 //!   reached, is an error: it ends the load's walk, and refuses compaction's
 //!   pass (`crate::fetch`, kotton #410).
 //! - **A commit past it is numbered above it**, by #308's rule
-//!   (`Committed::base_generation`), so generation numbers stay strictly
-//!   increasing over every superblock on the shelf, and a torn N and the
-//!   commit after it never share N.
+//!   (`Committed::base_generation`): a commit built on a load is numbered
+//!   above every superblock that load's walk listed, so a torn N and the
+//!   commit after it never share N. A commit on the cached state is numbered
+//!   above the state it cached, which a tear of that state's own superblock
+//!   does not change; a superblock that arrived since the state was cached,
+//!   such as a twin another device committed, it does not see.
 //! - **Compaction's own deletions are not covered.** Compaction deletes the
 //!   packs its base names, its manifest pack among them, after its check and
 //!   before its retirement. So the base it keeps as the second of the two can
@@ -838,7 +846,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             loose_deleted += 1;
         }
         self.save_tombstones(&Tombstones::default()).await?;
-        if let Err(e) = retire_superseded_as_read(&*self.inner, &self.known, &committed_key, &reading).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack, &self.known, &committed_key, &reading).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
 
@@ -899,7 +907,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         // is deleted. A held finding is what the key is as written, and is
         // kept ([`Known`]); adoptable and neither are a reading of the shelf
         // now, which this pass's retirement decides from and which goes no
-        // further (`retire_superseded_as_read`). A read that fails otherwise
+        // further (`retire_superseded`). A read that fails otherwise
         // refuses the pass.
         let mut reading = ShelfReading { check: true, ..ShelfReading::default() };
         for (generation, key) in superblock_keys(&*self.inner).await? {
@@ -1224,7 +1232,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             self.inner.delete_sealed(old_manifest_pack.as_path()).await?;
             packs_retired += 1;
         }
-        if let Err(e) = retire_superseded_as_read(&*self.inner, &self.known, &committed_key, &reading).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack, &self.known, &committed_key, &reading).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
 
@@ -1475,7 +1483,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             },
         )
         .await?;
-        if let Err(e) = retire_superseded_as_read(&*self.inner, &self.known, &committed_key, &reading).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack, &self.known, &committed_key, &reading).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         *self.manifest_cache.lock().unwrap() =
@@ -1673,7 +1681,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             },
         )
         .await?;
-        if let Err(e) = retire_superseded_as_read(&*self.inner, &self.known, &committed_key, &reading).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack, &self.known, &committed_key, &reading).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         *self.manifest_cache.lock().unwrap() =
@@ -1765,7 +1773,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             },
         )
         .await?;
-        if let Err(e) = retire_superseded_as_read(&*self.inner, &self.known, &committed_key, &reading).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack, &self.known, &committed_key, &reading).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         *self.manifest_cache.lock().unwrap() =
@@ -2120,7 +2128,7 @@ impl Committed {
 
 /// Load the committed state, and record in `known` what the load learned of
 /// the generations it walked: the one adopted decodes, and each one passed
-/// over is held. Retirement decides from that and reads nothing again
+/// over is held. Retirement decides from that, and reads no manifest again
 /// ([`retire_superseded`]).
 async fn load_committed<S: SealedObjectAccess + ?Sized>(
     store: &S,
@@ -2189,8 +2197,9 @@ enum Checked {
 ///
 /// Only compaction asks this, of every present generation, before it
 /// deletes anything. Retirement after a commit does not: it reads no
-/// manifest, and decides from what is [`Known`] and what its own load's walk
-/// found ([`ShelfReading`]).
+/// manifest, and decides from what is [`Known`], what its own pass read
+/// ([`ShelfReading`]), and whether each superblock it would count opens
+/// ([`superblock_opens`]).
 async fn held_generation<S: SealedObjectAccess + ?Sized>(
     store: &S,
     k_pack: &[u8; 32],
@@ -2226,16 +2235,19 @@ async fn held_generation<S: SealedObjectAccess + ?Sized>(
 /// What a pass finds of the shelf at one moment (a superblock that does not
 /// open, a manifest pack not found) is not one of these, and is never
 /// stored: a torn or partly delivered twin can complete afterwards. That
-/// reading, *neither*, decides the pass that made it ([`ShelfReading`]), and
-/// overrides adoptable there.
+/// reading, *neither*, decides the pass that made it ([`ShelfReading`],
+/// [`superblock_opens`]), and overrides adoptable there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Standing {
     /// Its manifest decoded when this store read it: this store committed
     /// it, or adopted it in [`load_committed`]. The manifest is immutable,
     /// but compaction may retire the pack it is in, and a superblock can be
-    /// torn at rest; after either the key is *neither* (kotton #368), which a
-    /// pass learns from its own reading ([`ShelfReading`]) and never from
-    /// this record.
+    /// torn at rest; after either the key is *neither* (kotton #368). That is
+    /// learned by the pass that retires, never from this record: from its own
+    /// reading ([`ShelfReading`]), and on every path from opening the
+    /// superblocks it would count ([`superblock_opens`]). A manifest pack
+    /// retired since is seen by compaction's check alone; what compaction's
+    /// own deletions do to its base is kotton #423.
     Adoptable,
     /// Its manifest was refused for a pack id ([`held_generation`]): passed
     /// over in [`load_committed`], or found so by compaction's check. Carries
@@ -2254,7 +2266,7 @@ enum Standing {
 /// it. What a pass reads of the shelf, a generation compaction's check finds
 /// adoptable or *neither*, or a superblock a load's walk could not open
 /// (kotton #368), is never stored here: it decides that pass's retirement
-/// alone ([`ShelfReading`], [`retire_superseded_as_read`]).
+/// alone ([`ShelfReading`], [`retire_superseded`]).
 /// It is held in memory, for the life of the store, and dropped for keys no
 /// longer on the shelf.
 #[derive(Default)]
@@ -2298,8 +2310,15 @@ impl Known {
 ///   ([`held_generation`]), read before it deletes anything: `adoptable`
 ///   and `neither`, with `check` set.
 ///
-/// A superblock that could not be read is in neither set: the read's error
-/// ends the walk, or refuses compaction's pass.
+/// - A commit built on the cached state made no load, and hands
+///   [`ShelfReading::of_cached_state`]: nothing read beyond what retirement
+///   itself reads.
+///
+/// Whatever the pass hands, retirement opens every superblock it would count
+/// ([`superblock_opens`]), so no path counts a key that no longer opens,
+/// whatever [`Known`] says of it. A superblock that could not be read is in
+/// neither set: the read's error ends the walk, refuses compaction's pass,
+/// or fails the retirement.
 #[derive(Debug, Default)]
 struct ShelfReading {
     /// Keys this pass read as adoptable. Only compaction's check fills it.
@@ -2313,23 +2332,45 @@ struct ShelfReading {
     check: bool,
 }
 
-/// Retire the superblocks a commit superseded, keeping **two generations
-/// known to be adoptable, beside every held one and every one not known**,
-/// and **reading no manifest** to decide (kotton #319).
+impl ShelfReading {
+    /// The reading of a commit built on the cached state, which made no load
+    /// of its own: it read no superblock and no manifest. Retirement still
+    /// opens every superblock it would count ([`superblock_opens`]), so a key
+    /// torn since the state was cached is not counted (kotton #368).
+    fn of_cached_state() -> Self {
+        Self::default()
+    }
+}
+
+/// Whether the superblock under `key` opens now: `Some(true)` if it does,
+/// `Some(false)` if it is present and does not open (torn, corrupt or
+/// relocated), `None` if it has gone from the shelf since the listing.
 ///
-/// [`retire_superseded_as_read`] with no reading of the shelf: for a commit
-/// built on the cached state rather than on a load of its own.
-async fn retire_superseded<S: SealedObjectAccess + ?Sized>(
+/// **The one rule for which superblocks retirement may count** (kotton
+/// #368): a generation counts toward the two only if its superblock opens
+/// when the retirement runs, whatever [`Known`] says of the key and whichever
+/// pass is retiring. It reads the superblock only, never the manifest it
+/// names. Superblocks are kept whole on every device, and a fetching shelf
+/// fetches only packs (`crate::fetch`), so this asks no drive, and a commit
+/// still makes no request a drive could join to its timing (kotton #319). A
+/// read that fails otherwise is an error, never a "does not open".
+async fn superblock_opens<S: SealedObjectAccess + ?Sized>(
     store: &S,
-    known: &Known,
-    committed: &str,
-) -> ObjectStorageResult<usize> {
-    retire_superseded_as_read(store, known, committed, &ShelfReading::default()).await
+    k_pack: &[u8; 32],
+    key: &str,
+) -> ObjectStorageResult<Option<bool>> {
+    match read_superblock(store, k_pack, key).await {
+        Ok(sb) => Ok(Some(sb.is_some())),
+        Err(ObjectStorageError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Retire the superblocks a commit superseded, keeping **two adoptable
 /// generations, beside every held one, every one this pass read as neither,
-/// and every one not known**, and reading no manifest to decide.
+/// and every one not known**, and **reading no manifest** to decide (kotton
+/// #319). Every path that commits retires through here, with its own pass's
+/// `reading`; there is no entry point without one.
 ///
 /// `committed` is the key the commit just wrote; with it, retirement decides
 /// from what the store already knows of each key as written ([`Known`]): the
@@ -2337,7 +2378,9 @@ async fn retire_superseded<S: SealedObjectAccess + ?Sized>(
 /// over above that base ([`load_committed`]), what earlier commits of this
 /// store learned the same way, and the held generations compaction's check
 /// found. `reading` is what this pass itself read of the shelf
-/// ([`ShelfReading`]). Nothing is re-read at commit time. A manifest re-read
+/// ([`ShelfReading`]). No manifest is read at commit time; only the
+/// superblocks retirement would count are opened ([`superblock_opens`]),
+/// which asks no drive. A manifest re-read
 /// here would, on a fetching shelf, ask the drive for an old index pack this
 /// device no longer holds, a request timed to a commit, which the drive could
 /// join to the device's reads.
@@ -2358,7 +2401,11 @@ async fn retire_superseded<S: SealedObjectAccess + ?Sized>(
 ///   commit keeps it; compaction, whose check read every present
 ///   generation, retires it once two adoptable generations sort above it.
 /// - **Adoptable**, known so or read so by compaction's check: the first two
-///   are kept, and every one past them is retired.
+///   whose superblock opens now ([`superblock_opens`]) are kept and counted,
+///   and every one past them is retired. One that is present and does not
+///   open is neither, kept and not counted: [`Known`] said adoptable of the
+///   key when this store read it, and a superblock can be torn at rest since,
+///   which a commit built on the cached state has not otherwise read.
 /// - **Not known**: kept, and not counted. Only a generation known to be
 ///   adoptable is a fallback a commit can count on; one it has not
 ///   classified may be held, and is kept for compaction, whose check reads
@@ -2379,8 +2426,9 @@ async fn retire_superseded<S: SealedObjectAccess + ?Sized>(
 /// neither, which stay until the next compaction decides them. What
 /// compaction's own deletions do to the base it keeps as the second of the
 /// two is kotton #423. Returns how many were deleted.
-async fn retire_superseded_as_read<S: SealedObjectAccess + ?Sized>(
+async fn retire_superseded<S: SealedObjectAccess + ?Sized>(
     store: &S,
+    k_pack: &[u8; 32],
     known: &Known,
     committed: &str,
     reading: &ShelfReading,
@@ -2414,7 +2462,13 @@ async fn retire_superseded_as_read<S: SealedObjectAccess + ?Sized>(
             continue;
         }
         if kept < ADOPTABLE_KEPT {
-            kept += 1;
+            match superblock_opens(store, k_pack, &key).await? {
+                Some(true) => kept += 1,
+                Some(false) => {
+                    tracing::debug!(%key, "keeping a superblock generation that no longer opens; it does not count toward the two");
+                }
+                None => {}
+            }
             continue;
         }
         store.delete_sealed(Path::new(&key)).await?;
@@ -2757,7 +2811,7 @@ impl<S: LooseObjectSource + 'static> ObjectSink for PackStreamSink<S> {
             Err(e) => return Err(e),
         }
 
-        if let Err(e) = retire_superseded_as_read(&*self.store, &self.known, &committed_key, &reading).await {
+        if let Err(e) = retire_superseded(&*self.store, &self.k_pack, &self.known, &committed_key, &reading).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         Ok(())
@@ -2994,7 +3048,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             },
         )
         .await?;
-        if let Err(e) = retire_superseded(&*self.inner, &self.known, &committed_key).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack, &self.known, &committed_key, &ShelfReading::of_cached_state()).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         *self.manifest_cache.lock().unwrap() =
@@ -3381,7 +3435,7 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         .await?;
         *self.manifest_cache.lock().unwrap() =
             CacheState::Loaded(Some((generation, Arc::new(next))));
-        if let Err(e) = retire_superseded(&*self.inner, &self.known, &committed_key).await {
+        if let Err(e) = retire_superseded(&*self.inner, &self.k_pack, &self.known, &committed_key, &ShelfReading::of_cached_state()).await {
             tracing::warn!(error = %e, "old superblock retirement failed; harmless, retried next pass");
         }
         Ok(())
@@ -6535,7 +6589,7 @@ mod tests {
         let held = superblocks_of(&s, 9).await;
         assert_eq!(held.len(), 1);
 
-        let retired = retire_superseded(&*s.inner, &s.known, &second[0]).await.unwrap();
+        let retired = retire_superseded(&*s.inner, &s.k_pack, &s.known, &second[0], &ShelfReading::of_cached_state()).await.unwrap();
         assert_eq!(retired, 0, "a generation was retired with only two that are not held present");
         let shelf = shelf_keys(&backing).await;
         for (key, what) in [(&held[0], "held"), (&second[0], "second"), (&first[0], "first")] {
@@ -6985,5 +7039,111 @@ mod tests {
         assert_eq!(known.standing("k2"), Some(Standing::Held("first".into())), "adoptable replaced held");
         known.learn("k3", Standing::Adoptable);
         assert_eq!(known.standing("k3"), Some(Standing::Adoptable));
+    }
+
+    /// **A commit on the cached state counts no torn key either** (kotton
+    /// #368, PR 424's assessment).
+    ///
+    /// Generations 1 to 3 hold `a`, `b` and `c`, all committed by one store,
+    /// which knows each as adoptable; generation 3's superblock is then torn
+    /// at rest. The store commits a manifest on its cached state, generation
+    /// 3's, as a released conflict or a turned switch does: generation 4.
+    /// Retirement must not count the torn 3 from what the store knew of it,
+    /// so it keeps 2, and a tear of 4 still reads `a` and `b` from 2.
+    #[tokio::test]
+    async fn a_commit_on_the_cached_state_does_not_count_a_superblock_torn_since() {
+        let backing = MemoryObjectStorage::new();
+        let slot = crate::fetch::PackSlot::default();
+        let s = fetching(&backing, &slot);
+        for (path, bytes) in [("notes/a.md", &b"one"[..]), ("notes/b.md", b"two"), ("notes/c.md", b"three")] {
+            s.put(Path::new(path), bytes).await.unwrap();
+            s.pack_loose().await.unwrap();
+        }
+        let second = superblocks_of(&s, 2).await;
+        let third = superblocks_of(&s, 3).await;
+        assert_eq!((second.len(), third.len()), (1, 1));
+        backing.put_sealed(Path::new(&third[0]), b"torn at rest").await.unwrap();
+
+        let (generation, manifest) = s.manifest().await.unwrap().unwrap();
+        assert_eq!(generation, 3, "the fixture needs the cached state of generation 3");
+        s.commit_manifest((*manifest).clone(), generation, "a cached commit").await.unwrap();
+        let fourth = superblocks_of(&s, 4).await;
+        assert_eq!(fourth.len(), 1);
+        assert!(shelf_keys(&backing).await.contains(&second[0]), "the cached commit retired 2, counting the torn 3 from Known");
+
+        backing.put_sealed(Path::new(&fourth[0]), b"torn mid-write").await.unwrap();
+        let after_tear = fetching(&backing, &slot);
+        for (path, bytes) in [("notes/a.md", &b"one"[..]), ("notes/b.md", b"two")] {
+            let read = after_tear.get(Path::new(path)).await;
+            assert_eq!(read.expect("nothing opens once the cached commit is torn").as_ref(), bytes, "{path}");
+        }
+    }
+
+    /// **A restore on the cached state counts no torn key either** (kotton
+    /// #368, PR 424's assessment).
+    ///
+    /// A note is packed (1), set to keep its versions (2), and edited (3),
+    /// all by one store; generation 3's superblock is then torn at rest. The
+    /// good draft is restored, built on the cached state of 3, as generation
+    /// 4. Retirement must not count the torn 3, so it keeps 2, and a tear of
+    /// 4 still reads the good draft from 2.
+    #[tokio::test]
+    async fn a_restore_on_the_cached_state_does_not_count_a_superblock_torn_since() {
+        let backing = MemoryObjectStorage::new();
+        let slot = crate::fetch::PackSlot::default();
+        let s = fetching(&backing, &slot).with_log(WRITER, K_LOG);
+        s.put(Path::new(NOTE), b"the good draft").await.unwrap();
+        s.pack_loose().await.unwrap();
+        s.set_keep_versions(Path::new(NOTE), true).await.unwrap();
+        let good = s.manifest().await.unwrap().unwrap().1.files[NOTE].content_id();
+        s.put(Path::new(NOTE), b"the bad edit").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let second = superblocks_of(&s, 2).await;
+        let third = superblocks_of(&s, 3).await;
+        assert_eq!((second.len(), third.len()), (1, 1));
+        backing.put_sealed(Path::new(&third[0]), b"torn at rest").await.unwrap();
+
+        s.restore_version(Path::new(NOTE), &good).await.unwrap();
+        let fourth = superblocks_of(&s, 4).await;
+        assert_eq!(fourth.len(), 1, "the restore did not commit generation 4 on the cached state");
+        assert!(shelf_keys(&backing).await.contains(&second[0]), "the restore retired 2, counting the torn 3 from Known");
+
+        backing.put_sealed(Path::new(&fourth[0]), b"torn mid-write").await.unwrap();
+        let after_tear = fetching(&backing, &slot);
+        let read = after_tear.get(Path::new(NOTE)).await;
+        assert_eq!(read.expect("nothing opens once the restore is torn").as_ref(), b"the good draft");
+    }
+
+    /// **A commit on the cached state asks the drive for nothing** (kotton
+    /// #319, #368). Retirement opens the superblocks it would count, which
+    /// are local, and reads no manifest: with the manifest packs of every
+    /// superseded generation moved to the drive, a switch turned on and a
+    /// restore, both built on the cached state, ask the drive for nothing,
+    /// and still retire what is past the two.
+    #[tokio::test]
+    async fn a_commit_on_the_cached_state_asks_the_drive_for_nothing() {
+        let backing = MemoryObjectStorage::new();
+        let slot = crate::fetch::PackSlot::default();
+        let s = fetching(&backing, &slot).with_log(WRITER, K_LOG);
+        s.put(Path::new(NOTE), b"the good draft").await.unwrap();
+        s.pack_loose().await.unwrap();
+        s.put(Path::new("notes/b.md"), b"two").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let drive = Arc::new(RecordingDrive { held: MemoryObjectStorage::new(), asked: Mutex::new(Vec::new()) });
+        move_manifest_pack_to_drive(&s, &backing, &drive, 1).await;
+        slot.lend(drive.clone());
+
+        s.set_keep_versions(Path::new(NOTE), true).await.unwrap();
+        assert_eq!(*drive.asked.lock().unwrap(), Vec::<String>::new(), "the drive was asked during a cached commit");
+        assert!(superblocks_of(&s, 1).await.is_empty(), "a third adoptable generation was kept");
+        let good = s.manifest().await.unwrap().unwrap().1.files[NOTE].content_id();
+        s.put(Path::new(NOTE), b"the bad edit").await.unwrap();
+        s.pack_loose().await.unwrap();
+        move_manifest_pack_to_drive(&s, &backing, &drive, 3).await;
+
+        s.restore_version(Path::new(NOTE), &good).await.unwrap();
+        assert_eq!(*drive.asked.lock().unwrap(), Vec::<String>::new(), "the drive was asked during a cached commit");
+        assert!(superblocks_of(&s, 3).await.is_empty(), "a third adoptable generation was kept");
+        assert_eq!(superblocks_of(&s, 4).await.len() + superblocks_of(&s, 5).await.len(), 2);
     }
 }

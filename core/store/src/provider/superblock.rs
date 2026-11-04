@@ -58,11 +58,14 @@
 //! highest generation passed over (kotton #308, `crate::packed`'s
 //! `Committed::base_generation`), so it sorts above it by generation, not by
 //! the key tie-break. A commit past a superblock that does not open is
-//! numbered above it by the same rule (kotton #368), so generation numbers
-//! stay strictly increasing over every superblock on the shelf, and a torn
-//! generation N and the commit after it never share N. Which states a caller passes over, and what it keeps for
-//! them, is the caller's: the pack layer passes over only a refused pack id,
-//! and holds that generation (`crate::packed`'s module doc).
+//! numbered above it by the same rule (kotton #368): a commit built on a
+//! load is numbered above every superblock the walk listed, so a torn
+//! generation N and the commit after it never share N. A commit the pack
+//! layer builds on its cached state is numbered above that state, and does
+//! not see a superblock that arrived since it was cached. Which states a
+//! caller passes over, and what it keeps for them, is the caller's: the pack
+//! layer passes over only a refused pack id, and holds that generation
+//! (`crate::packed`'s module doc).
 //!
 //! The `_superblock/` prefix cannot collide with a blinded object key: blinded
 //! components are base32, an alphabet with no `_`.
