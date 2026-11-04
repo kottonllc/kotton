@@ -4,7 +4,7 @@
 //! `spawn_accept_loop` accepts incoming QUIC connections and, for each one,
 //! spawns a task that loops calling `connection.serve_one_request` until the
 //! peer closes the connection.  Each request is dispatched through the
-//! caller-supplied [`PeerHandler`] closure.  The loop ends when its listener
+//! caller-supplied [`PeerHandler`].  The loop ends when its listener
 //! closes or its handle is aborted.
 
 use crate::runtime::DeviceRuntime;
@@ -52,7 +52,7 @@ impl DeviceRuntime {
                 match listener.accept().await {
                     Ok(connection) => {
                         let transport_name_clone = transport_name.clone();
-                        let handler_clone = Arc::clone(&handler);
+                        let handler_clone = handler.clone();
                         // Capture the peer's DID (or fall-back socket address) once per
                         // connection — the same identity applies to every request on it.
                         let peer_fingerprint = connection.peer_id().to_owned();
@@ -62,14 +62,14 @@ impl DeviceRuntime {
                         tokio::spawn(async move {
                             // Serve requests on this connection until it closes.
                             loop {
-                                // Wrap the Arc<dyn Fn> into a Box<dyn FnOnce> for each call.
-                                let h = Arc::clone(&handler_clone);
+                                // Wrap the handler into a Box<dyn FnOnce> for each call.
+                                let h = handler_clone.clone();
                                 let pf = peer_fingerprint.clone();
                                 let req_handler: RequestHandler = Box::new(
                                     move |req: Vec<u8>| -> Pin<
                                         Box<dyn Future<Output = Vec<u8>> + Send + 'static>,
                                     > {
-                                        Box::pin(async move { h(pf, req).await })
+                                        Box::pin(async move { h.serve(pf, req).await })
                                     },
                                 );
 
@@ -149,7 +149,7 @@ mod tests {
             .unwrap(),
         );
         let listener = Arc::new(Closed(Address::Quic("127.0.0.1:1".parse().unwrap())));
-        let handler: PeerHandler = Arc::new(|_, _| Box::pin(async { Vec::new() }));
+        let handler: PeerHandler = kotton_peer::door::PeerDoor::<(), ()>::serving(|_, ()| async {}, |_| ());
         let accept = rt.spawn_accept_loop(listener, "closed".into(), handler);
         tokio::time::timeout(std::time::Duration::from_secs(2), accept)
             .await
