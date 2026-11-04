@@ -56,18 +56,17 @@ impl LocalObjectStorage {
     /// walk (`collect_leaves`, behind its `list`, the packer's `list_loose`
     /// and the blinding migration) admits every key the inner store lists,
     /// directory or leaf, before it descends into it or hands it to a read,
-    /// write or delete (kotton #357). None of them reaches here with a key
-    /// it did not admit.
+    /// write or delete (kotton #357). `kvaultd::meter::Meter::measure`
+    /// holds the directories it descends into as admitted keys, parsed where
+    /// the listing enters its walk (kotton #352). None of them reaches here
+    /// with a key it did not admit.
     ///
-    /// The doors still relying on this refusal, each to close before it can
-    /// go:
+    /// The door still relying on this refusal, to close before it can go:
     ///
     /// - The guest re-wrap's raw read (kotton #299):
     ///   `UserStore::read_raw_local_object` reads the path a re-wrap names on
     ///   a store of its own, past a trimmed leading `/`, admitted by nothing
     ///   else.
-    /// - `kvaultd::meter::Meter::measure` (kotton #352): it descends into the
-    ///   directory keys a shelf's listing names, unparsed.
     ///
     /// A leading `/` and a `.` component name nothing outside the root and
     /// are read past, as the logical paths the VFS hands this store may carry

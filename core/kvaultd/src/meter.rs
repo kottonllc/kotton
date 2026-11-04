@@ -32,6 +32,7 @@
 //! because a shelf need not be a directory (RFC-0084 V5): a bucket answers the
 //! same listing, and the meter is the same meter.
 
+use kotton_store::StorageKey;
 use kotton_sys::store::SyncableStore;
 use sqlx::{Row as _, SqlitePool};
 use std::collections::HashMap;
@@ -187,14 +188,25 @@ impl Meter {
     /// shelf that cannot be listed holds nothing it can be charged for.
     pub async fn measure(shelf: &dyn SyncableStore) -> u64 {
         let mut total = 0u64;
-        let mut pending = vec![std::path::PathBuf::new()];
-        while let Some(prefix) = pending.pop() {
-            let Ok(entries) = shelf.list_sealed(&prefix).await else {
+        // The root is the empty prefix; every other directory is a key the
+        // listing named and this walk admitted, so the walk holds no name it
+        // did not parse and cannot leave the tree (kotton #352).
+        let mut pending: Vec<Option<StorageKey>> = vec![None];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = shelf
+                .list_sealed(dir.as_ref().map_or(Path::new(""), StorageKey::as_path))
+                .await
+            else {
                 continue;
             };
             for e in entries {
                 if e.is_dir {
-                    pending.push(Path::new(&e.key).to_path_buf());
+                    match StorageKey::parse(&e.key) {
+                        Ok(key) => pending.push(Some(key)),
+                        Err(refused) => tracing::warn!(
+                            "meter: {refused}; the directory is not descended"
+                        ),
+                    }
                 } else {
                     total = total.saturating_add(e.size);
                 }
@@ -268,8 +280,11 @@ impl Meter {
 mod tests {
     use super::*;
 
+    use kotton_store::fetch::Bytes;
     use kotton_store::MemoryObjectStorage;
-    use kotton_sys::store::ObjectStorage as _;
+    use kotton_sys::store::{
+        ObjectMetadata, ObjectStorage, ObjectStorageError, ObjectStorageResult, SealedObjectAccess,
+    };
 
     /// **A tenant's quota holds over every drive they keep here**: bytes in
     /// a made drive count against the pool as bytes in its first drive do,
@@ -427,6 +442,83 @@ mod tests {
         assert_eq!(m.quota("alice"), Some(4096));
         assert_eq!(m.quota("bob"), Some(1 << 21), "the last number set is the one kept");
         assert_eq!(m.quota("carol"), Some(99), "a pool with no number reads this start's default");
+    }
+
+    /// A shelf that records every prefix it is asked to list, and lists, for
+    /// a prefix, the entries it was given for it (nothing otherwise).
+    struct Asked {
+        asked: std::sync::Mutex<Vec<String>>,
+        listing: Vec<(&'static str, Vec<ObjectMetadata>)>,
+    }
+
+    fn dir(key: &str) -> ObjectMetadata {
+        ObjectMetadata { key: key.into(), is_dir: true, size: 0, modified: None }
+    }
+
+    fn leaf(key: &str, size: u64) -> ObjectMetadata {
+        ObjectMetadata { key: key.into(), is_dir: false, size, modified: Some(7) }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStorage for Asked {
+        async fn get(&self, key: &Path) -> ObjectStorageResult<Bytes> {
+            Err(ObjectStorageError::NotFound(key.display().to_string()))
+        }
+        async fn put(&self, _: &Path, _: &[u8]) -> ObjectStorageResult<()> {
+            unreachable!("the meter writes nothing")
+        }
+        async fn delete(&self, _: &Path) -> ObjectStorageResult<()> {
+            unreachable!("the meter deletes nothing")
+        }
+        async fn list(&self, _: &Path) -> ObjectStorageResult<Vec<ObjectMetadata>> {
+            unreachable!("the meter lists through `list_sealed`")
+        }
+        async fn metadata(&self, key: &Path) -> ObjectStorageResult<ObjectMetadata> {
+            Err(ObjectStorageError::NotFound(key.display().to_string()))
+        }
+        fn backend_name(&self) -> &str {
+            "asked"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SealedObjectAccess for Asked {
+        async fn get_sealed(&self, key: &Path) -> ObjectStorageResult<Bytes> {
+            Err(ObjectStorageError::NotFound(key.display().to_string()))
+        }
+        async fn put_sealed(&self, _: &Path, _: &[u8]) -> ObjectStorageResult<()> {
+            unreachable!("the meter writes nothing")
+        }
+        async fn list_sealed(&self, prefix: &Path) -> ObjectStorageResult<Vec<ObjectMetadata>> {
+            let prefix = prefix.to_string_lossy().into_owned();
+            self.asked.lock().unwrap().push(prefix.clone());
+            Ok(self.listing.iter().find(|(p, _)| *p == prefix).map(|(_, l)| l.clone()).unwrap_or_default())
+        }
+    }
+
+    /// **The meter descends only into directory keys it admitted** (kotton
+    /// #352). A filesystem shelf rebuilds each key from a file's name,
+    /// decoding `%2F` to `/`, so a directory named `..%2Fx` is listed as
+    /// `../x`. The walk refuses it where the listing enters, before it asks
+    /// the shelf for anything under it: the store is asked at the root and
+    /// under `a` only, and the bytes counted are the root's leaf and the leaf
+    /// under `a`, none from outside the tree.
+    #[tokio::test]
+    async fn a_listed_directory_that_is_not_canonical_is_not_measured() {
+        let shelf = Asked {
+            asked: Default::default(),
+            listing: vec![
+                ("", vec![dir("../x"), leaf("top", 3), dir("a")]),
+                ("a", vec![leaf("a/b", 5)]),
+                ("../x", vec![leaf("../x/served", 6)]),
+            ],
+        };
+        let total = Meter::measure(&shelf).await;
+
+        let mut asked = shelf.asked.lock().unwrap().clone();
+        asked.sort();
+        assert_eq!(asked, ["", "a"], "the store was asked under a directory key that is not canonical");
+        assert_eq!(total, 8);
     }
 
     #[tokio::test]
