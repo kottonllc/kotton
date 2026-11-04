@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 /// before this is reached — `SubscribeEvents` is `requires_session`, so an
 /// unauthenticated connection is answered `NoActiveSession` there and never
 /// arrives here. `session_user` is the user the gate read and handed on, the
-/// one read `QueryEvents` is scoped by too; there is no user-less stream.
+/// same session user `QueryEvents` is scoped by; there is no user-less stream.
 ///
 /// [`Event::belongs_to`]: kotton_diag::service::Event::belongs_to
 pub(super) async fn handle_subscribe(

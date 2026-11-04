@@ -33,9 +33,9 @@
 //! requires a session the gate's answer is the live session user
 //! ([`dispatch::Entry::Session`]) or the refusal. The two verbs that act as
 //! that user, `SubscribeEvents` and `BrowserOutbound`, take it from the gate
-//! through [`Handed`]; neither reads the session again, so neither has an
-//! answer of its own for a session that ended between two reads, because there
-//! is no second read.
+//! as an [`Opening::AsUser`], built from that user once the gate has passed it;
+//! neither reads the session again, so neither has an answer of its own for a
+//! session that ended between two reads, because there is no second read.
 
 use super::{browser_channel, dispatch, AgentContext, ConnSessionData};
 use kotton_ipc::HandlerOutput;
@@ -43,7 +43,7 @@ use kotton_wire::ipc::{UserRequest, UserResponse};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, watch};
 
 /// The connection's session slot, as the acceptor hands it to the handler.
@@ -56,23 +56,14 @@ pub(super) struct VfsWatchSource<'a> {
     pub(super) watcher: &'a watch::Receiver<kotton_sync::engine::FsWatchState>,
 }
 
-/// A streamed verb's opening, not yet started.
-type Opening<'a> = Pin<Box<dyn Future<Output = io::Result<mpsc::Receiver<UserResponse>>> + Send + 'a>>;
+/// A streamed verb's work, not yet started.
+type Run<'a> = Pin<Box<dyn Future<Output = io::Result<mpsc::Receiver<UserResponse>>> + Send + 'a>>;
 
-/// What the gate handed on, set by [`answer`] after it passes the request and
-/// before the verb's opening is first polled. An opening is built before the
-/// gate reads, so it holds this and reads it when it runs.
-type Handed = OnceLock<dispatch::Entry>;
-
-/// The session user the gate handed to a verb that requires a session.
-///
-/// A verb that requires one is never passed without it; this is an error for
-/// the door to frame, not a second answer to a missing session.
-fn handed_user(handed: &Handed) -> io::Result<&str> {
-    match handed.get() {
-        Some(dispatch::Entry::Session(user)) => Ok(user),
-        _ => Err(io::Error::other("the gate handed no session user to a verb that requires one")),
-    }
+/// A streamed verb's opening, not yet started: its work, or, for a verb that
+/// acts as the session user, its work once handed that user.
+enum Opening<'a> {
+    Ready(Run<'a>),
+    AsUser(Box<dyn FnOnce(String) -> Run<'a> + Send + 'a>),
 }
 
 /// The door's answer to `request` when its client reads it as a stream, and
@@ -87,14 +78,19 @@ pub(super) async fn answer(
     conn_session: &ConnSession,
     vfs: VfsWatchSource<'_>,
 ) -> Option<io::Result<mpsc::Receiver<UserResponse>>> {
-    let handed = Handed::new();
-    let opening = opening(ctx, request, vfs, &handed)?;
-    Some(match dispatch::stream_entry(&ctx.sessions, conn_session, request) {
+    use dispatch::Entry;
+    let opening = opening(ctx, request, vfs)?;
+    Some(match (dispatch::stream_entry(&ctx.sessions, conn_session, request), opening) {
         // Dropped unpolled: the verb's opening never ran.
-        dispatch::Entry::Refused(refusal) => Ok(one_frame(*refusal)),
-        entry => {
-            let _ = handed.set(entry);
-            opening.await
+        (Entry::Refused(refusal), _) => Ok(one_frame(*refusal)),
+        (_, Opening::Ready(run)) => run.await,
+        (Entry::Session(user), Opening::AsUser(run)) => run(user).await,
+        // Impossible: both `AsUser` verbs are `requires_session()`, so the gate
+        // passes them as `Session` or refuses them (pinned by
+        // `the_gate_hands_a_session_verb_the_user_it_read`). An error for the
+        // door to frame, not a second answer to a missing session.
+        (Entry::Sessionless, Opening::AsUser(_)) => {
+            Err(io::Error::other("the gate handed no session user to a verb that requires one"))
         }
     })
 }
@@ -113,18 +109,20 @@ fn opening<'a>(
     ctx: &'a AgentContext,
     request: &'a UserRequest,
     vfs: VfsWatchSource<'a>,
-    handed: &'a Handed,
 ) -> Option<Opening<'a>> {
     use kotton_device::users::residency::Residency;
     use kotton_device::users::{contacts, pairing};
     let residency = || Arc::new(ctx.users.clone()) as Arc<dyn Residency>;
-    Some(match request {
-        // The session user's events only (#393): the user the gate handed on,
-        // never the device's bus and never a second read of the session.
-        UserRequest::SubscribeEvents { category, level } => Box::pin(async move {
-            let user_id = handed_user(handed)?.to_owned();
-            Ok(dispatch::handle_subscribe(&ctx.runtime, user_id, category.clone(), level.clone()).await)
-        }),
+    Some(Opening::Ready(match request {
+        // The session user's events only (#393): built from the user the gate
+        // read, never the device's bus and never a second read of the session.
+        UserRequest::SubscribeEvents { category, level } => {
+            return Some(Opening::AsUser(Box::new(move |user_id| {
+                Box::pin(async move {
+                    Ok(dispatch::handle_subscribe(&ctx.runtime, user_id, category.clone(), level.clone()).await)
+                })
+            })))
+        }
         UserRequest::VfsWatch { user_id, paths } => Box::pin(async move {
             Ok(dispatch::handle_vfs_watch(
                 &ctx.base,
@@ -300,8 +298,7 @@ fn opening<'a>(
         // carries frames no call is waiting on, and holds it for as long as
         // `khttpd` holds the browser's socket. When it ends, so does the
         // channel.
-        UserRequest::BrowserOutbound { channel } => Box::pin(async move {
-            let user_id = handed_user(handed)?.to_owned();
+        UserRequest::BrowserOutbound { channel } => return Some(Opening::AsUser(Box::new(move |user_id| Box::pin(async move {
             let key = browser_channel::local_key(&user_id, Some(channel));
             let (tx, rx) = mpsc::channel::<UserResponse>(256);
             // Say so on the stream itself, first, before anything else can be
@@ -327,9 +324,9 @@ fn opening<'a>(
                 browser_channel::close_channel(&ctx_for_close, &key).await;
             });
             Ok(out_rx)
-        }),
+        })))),
         _ => return None,
-    })
+    }))
 }
 
 #[cfg(test)]
