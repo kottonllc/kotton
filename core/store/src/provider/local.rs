@@ -14,7 +14,7 @@
 /// already rewritten (see [`decode_segment`]).
 use async_trait::async_trait;
 use bytes::Bytes;
-use kotton_sys::fs::Filesystem;
+use kotton_sys::fs::{Filesystem, FilesystemError};
 use kotton_sys::store::{
     ObjectMetadata, ObjectStorage, ObjectStorageError, ObjectStorageResult, SealedObjectAccess,
 };
@@ -132,15 +132,21 @@ impl LocalObjectStorage {
         }
     }
 
-    /// Convert filesystem error to object storage error
-    fn map_error(e: impl std::error::Error, key: &str) -> ObjectStorageError {
-        let err_str = e.to_string().to_lowercase();
-        if err_str.contains("not found") || err_str.contains("no such file") {
-            ObjectStorageError::NotFound(key.to_string())
-        } else if err_str.contains("permission") || err_str.contains("denied") {
-            ObjectStorageError::PermissionDenied(e.to_string())
-        } else {
-            ObjectStorageError::IoError(e.to_string())
+    /// Convert filesystem error to object storage error.
+    ///
+    /// **An error is `NotFound` by its variant, never by its words** (kotton
+    /// #416). `NotFound` is what `held_generation` reads as "not held", so it
+    /// is answered only for a provider that said `FilesystemError::NotFound`;
+    /// a failure whose text happens to say "not found" is an `IoError`. The
+    /// providers type ENOENT and EACCES at their source (`map_io_error` in
+    /// `kotton-fs`), so there is no second rule here.
+    fn map_error(e: FilesystemError, key: &str) -> ObjectStorageError {
+        match e {
+            FilesystemError::NotFound(_) => ObjectStorageError::NotFound(key.to_string()),
+            FilesystemError::PermissionDenied(_) => {
+                ObjectStorageError::PermissionDenied(e.to_string())
+            }
+            other => ObjectStorageError::IoError(other.to_string()),
         }
     }
 }
@@ -636,6 +642,72 @@ mod tests {
                 other => panic!("a store whose root is gone answered {other:?}"),
             }
         }
+    }
+
+    /// **An error is `NotFound` by its variant, not by its words** (kotton
+    /// #416). `held_generation` reads `NotFound` as "not held", so a failure
+    /// whose text merely says "not found" must not become it.
+    #[test]
+    fn an_error_is_not_found_by_its_variant_not_by_its_words() {
+        use kotton_sys::fs::FilesystemError as E;
+        for look_alike in [
+            E::IoError("I/O error: volume not found".into()),
+            E::IoError("No such file or directory (os error 2)".into()),
+            E::InvalidPath("not found".into()),
+            E::AlreadyExists("not found".into()),
+        ] {
+            let mapped = LocalObjectStorage::map_error(look_alike, "k");
+            assert!(matches!(mapped, ObjectStorageError::IoError(_)), "{mapped:?}");
+        }
+        let denied_by_words = E::IoError("permission denied by the volume".into());
+        assert!(matches!(
+            LocalObjectStorage::map_error(denied_by_words, "k"),
+            ObjectStorageError::IoError(_)
+        ));
+        assert!(matches!(
+            LocalObjectStorage::map_error(E::NotFound("/x".into()), "k"),
+            ObjectStorageError::NotFound(k) if k == "k"
+        ));
+        assert!(matches!(
+            LocalObjectStorage::map_error(E::PermissionDenied("/x".into()), "k"),
+            ObjectStorageError::PermissionDenied(_)
+        ));
+    }
+
+    /// The typed variant is what the OS provider hands up for ENOENT, on every
+    /// operation the store calls, so absence is still absence.
+    #[tokio::test]
+    async fn a_real_missing_file_through_the_os_provider_is_still_not_found() {
+        let dir = TempDir::new().unwrap();
+        let storage = LocalObjectStorage::new(dir.path().to_path_buf(), OsFilesystem);
+        let key = Path::new("absent/object");
+        assert!(matches!(storage.get(key).await, Err(ObjectStorageError::NotFound(_))));
+        assert!(matches!(storage.metadata(key).await, Err(ObjectStorageError::NotFound(_))));
+        assert!(matches!(storage.delete(key).await, Err(ObjectStorageError::NotFound(_))));
+        assert!(storage.list(Path::new("absent")).await.unwrap().is_empty());
+    }
+
+    /// EACCES is `PermissionDenied` by variant. Unix only, and skipped when the
+    /// process can read past a 000 mode (root).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_real_permission_error_through_the_os_provider_is_still_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let storage = LocalObjectStorage::new(dir.path().to_path_buf(), OsFilesystem);
+        storage.put(Path::new("sealed/obj"), b"x").await.unwrap();
+        let locked = dir.path().join("sealed");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipped: running with privileges that ignore file modes (root)");
+            return;
+        }
+        let got = storage.get(Path::new("sealed/obj")).await;
+        let listed = storage.list(Path::new("sealed")).await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(got, Err(ObjectStorageError::PermissionDenied(_))), "{got:?}");
+        assert!(matches!(listed, Err(ObjectStorageError::PermissionDenied(_))), "{listed:?}");
     }
 
     #[test]
