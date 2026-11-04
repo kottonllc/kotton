@@ -505,6 +505,10 @@ pub enum UserRequest {
     // Restricting them to own-device members is therefore a *membership* check in
     // the handler, not a trust-origin tier.
     /// Read an object as a sealed blob, with the CEK epoch it is sealed under.
+    ///
+    /// Answered with `SealedObject` or `SealedNotFound`. Absence is
+    /// `SealedNotFound` alone: an `Error` is the serving side failing, never
+    /// an object it does not hold.
     ReadSealed {
         user_id: String,
         mount: String,

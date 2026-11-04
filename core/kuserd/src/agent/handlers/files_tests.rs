@@ -191,7 +191,7 @@ mod reassembly_tests {
             reasm.lock().await.is_empty(),
             "buffer not cleaned after mismatch"
         );
-        // Nothing was written.
+        // Nothing was written: the store holds no such object, and says so.
         assert!(matches!(
             read_sealed(
                 &crate::agent::file_host::file_host(&rt, &*resources(&rt, &users)),
@@ -203,7 +203,7 @@ mod reassembly_tests {
             )
             .await
             .unwrap(),
-            UserResponse::Error { .. }
+            UserResponse::SealedNotFound
         ));
     }
 

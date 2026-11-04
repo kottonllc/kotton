@@ -2058,3 +2058,157 @@ mod drive_target_tests {
         assert!(got.is_empty(), "a rule for alice's tenancy watched bob's");
     }
 }
+
+#[cfg(test)]
+mod drive_packs_tests {
+    //! [`DrivePacks`] over the real peer client, against a vault that fails
+    //! with words that say "not found" (kotton #412).
+    use super::*;
+    use kotton_store::fetch::{FetchOnMiss, PackSlot};
+    use kotton_store::runtime::user::UserStore;
+    use kotton_store::MemoryObjectStorage;
+    use kotton_sys::store::{ObjectStorage as _, SealedObjectAccess as _, SyncableStore};
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    /// The words a vault's `read_sealed` answers with when the tenant's pool
+    /// is not resident, as they cross the wire: a vault failing, not a drive
+    /// holding nothing.
+    const POOL_NOT_RESIDENT: &[u8] = br#"{"Error":{"message":"user 'alice' not found"}}"#;
+
+    /// A vault reached over the peer link that answers every request with
+    /// [`POOL_NOT_RESIDENT`], counting what it is asked.
+    struct APoolNotResident {
+        asked: Mutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl kotton_peer::PeerChannel for APoolNotResident {
+        async fn request(&self, _req: &[u8]) -> anyhow::Result<Vec<u8>> {
+            *self.asked.lock().unwrap() += 1;
+            Ok(POOL_NOT_RESIDENT.to_vec())
+        }
+    }
+
+    /// A host whose one peer link is that vault.
+    struct Host {
+        vault: Arc<APoolNotResident>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::UserResources for Host {
+        fn user_ids(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn user_store(&self, _user_id: &str) -> Option<Arc<UserStore>> {
+            None
+        }
+        fn record_store(&self, _user_id: &str) -> anyhow::Result<Arc<kotton_record::SqliteRecordStore>> {
+            anyhow::bail!("a fetch reads no records")
+        }
+        async fn agent_db(&self, _user_id: &str) -> Option<Arc<sqlx::SqlitePool>> {
+            None
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::PeerLinks for Host {
+        async fn open_peer_client(
+            &self,
+            node: kotton_wire::peer::PairedNode,
+            user_id: &str,
+            _loaded: Option<&UserStore>,
+        ) -> anyhow::Result<kotton_peer::KottonPeerObjectStorage> {
+            let channel: Arc<dyn kotton_peer::PeerChannel> = self.vault.clone();
+            Ok(kotton_peer::KottonPeerObjectStorage::new(channel, node, user_id.to_owned(), kotton_common::LOCAL_MOUNT)
+                .with_domain_id("the person's key domain".into()))
+        }
+    }
+
+    /// Alice's sealed stack over `backing`, through a fetching shelf whose
+    /// source is `slot`'s: what `UserStore::create` builds over a shelf.
+    fn shelf(backing: &MemoryObjectStorage, slot: &PackSlot) -> Arc<dyn SyncableStore> {
+        kotton_store::stack::build_sealed_store(
+            kotton_store::stack::ArcStore(Arc::new(FetchOnMiss::new(Arc::new(backing.clone()), "alice", slot.clone()))),
+            Some([7u8; 32]),
+            Some([9u8; 32]),
+            None,
+            kotton_wire::remote::KeyFormat::Blinded,
+        )
+    }
+
+    async fn keys(backing: &MemoryObjectStorage) -> BTreeSet<String> {
+        backing.list(Path::new("")).await.unwrap().into_iter().map(|m| m.key).collect()
+    }
+
+    /// **A vault that fails is not a drive that holds nothing** (kotton #412).
+    ///
+    /// Generations 1 to 3 are committed, and the index pack generation 2's
+    /// commit wrote is not on this device: an old manifest a fetching shelf
+    /// asks the person's drive for. The drive is a vault reached over the
+    /// peer link, and it fails with the words its `read_sealed` answers when
+    /// the tenant's pool is not resident, `user 'alice' not found`. A store
+    /// new to the shelf compacts. Its check of generation 2 asks the drive
+    /// through [`DrivePacks`] and the real peer client, and the pass is
+    /// refused with the vault's words. Nothing is retired and nothing is
+    /// swept. Before the fix the client read those words as "not found",
+    /// the drive as holding nothing, and generation 2 as not held, and
+    /// compaction retired it.
+    #[tokio::test]
+    async fn a_vault_failing_in_words_that_say_not_found_reaches_compaction_as_an_error() {
+        let backing = MemoryObjectStorage::new();
+        let slot = PackSlot::default();
+        let s = shelf(&backing, &slot);
+        s.put(Path::new("notes/a.md"), b"one").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let before_second = keys(&backing).await;
+        s.put(Path::new("notes/b.md"), b"two").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let second_index: Vec<String> = keys(&backing)
+            .await
+            .difference(&before_second)
+            .filter(|k| k.starts_with("_pack/") && !k.starts_with(kotton_store::provider::packed::CONTENT_PACK_PREFIX))
+            .cloned()
+            .collect();
+        assert!(!second_index.is_empty(), "generation 2 wrote no index pack");
+        s.put(Path::new("notes/c.md"), b"three").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let second = |keys: &BTreeSet<String>| {
+            keys.iter().filter(|k| k.starts_with("_superblock") && k.contains(&format!("{:020}-", 2))).count()
+        };
+        assert_eq!(second(&keys(&backing).await), 1, "generation 2 is not present to be checked");
+        for pack in &second_index {
+            backing.delete_sealed(Path::new(pack)).await.unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(kotton_record::open_sqlite(&dir.path().join("agent.db")).await.unwrap());
+        kotton_device::db::MIGRATOR.run(db.as_ref()).await.unwrap();
+        let vault_key = [5u8; 32];
+        kotton_peer::daemon::db::insert_paired_node(
+            &db,
+            "vault",
+            "alice",
+            "did:key:z6MkVault",
+            &vault_key,
+            "[]",
+            0,
+            Some(kotton_schemas::membership::Posture::BlindStorage.as_str()),
+        )
+        .await
+        .unwrap();
+        kotton_peer::daemon::drives::record(&db, "alice", &vault_key).await.unwrap();
+        let vault = Arc::new(APoolNotResident { asked: Mutex::new(0) });
+        slot.lend(Arc::new(DrivePacks { db, resources: Arc::new(Host { vault: vault.clone() }) }));
+
+        let before = keys(&backing).await;
+        let compacting = shelf(&backing, &slot);
+        let compacted = compacting.compact().await;
+        assert!(*vault.asked.lock().unwrap() > 0, "compaction did not ask the drive for generation 2's manifest");
+        let err = compacted.expect_err("compaction ran past a vault that failed");
+        assert!(err.to_string().contains("user 'alice' not found"), "the refusal does not carry the vault's words: {err}");
+        let after = keys(&backing).await;
+        assert_eq!(second(&after), 1, "generation 2 was retired");
+        assert_eq!(after, before, "compaction deleted or wrote something");
+    }
+}

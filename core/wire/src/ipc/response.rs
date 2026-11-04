@@ -403,7 +403,8 @@ pub enum UserResponse {
     },
 
     // -- Sealed replication (RFC-0041) -----------------------------------------
-    /// An object as it rests, tagged with the key domain it belongs to.
+    /// Answer to `ReadSealed`: an object as it rests, tagged with the key domain
+    /// it belongs to.
     ///
     /// `blob` is opaque — the protocol layer never interprets it, and a node
     /// without the CEK cannot open it. `domain_id` is the hex-encoded one-way
@@ -418,6 +419,17 @@ pub enum UserResponse {
         /// it has assembled all of it.
         total_size: u64,
     },
+    /// Answer to `ReadSealed`: the store was read, and it holds no object under
+    /// that key.
+    ///
+    /// **Absence is this answer and nothing else** (kotton #412). A reader of a
+    /// drive takes it as "this drive holds nothing", and compaction may then
+    /// retire a generation whose manifest is absent everywhere. So it is given
+    /// only where the serving store itself said it has no such object. A
+    /// serving side that failed — the tenant's pool not resident, the mount
+    /// not there, the shelf's root or bucket gone — answers `Error`, whatever
+    /// its words, and a reader takes every `Error` as a failure.
+    SealedNotFound,
     /// A sealed transfer was refused because the peer's key domain is not the one
     /// this node can open (or, on a blind mount, not the one it already holds).
     ///

@@ -163,7 +163,19 @@ impl S3Shelf {
             .map_err(|e| ObjectStorageError::IoError(format!("{key}: {e}")))?;
         match resp.status() {
             s if s.is_success() => Ok(resp),
-            reqwest::StatusCode::NOT_FOUND => Err(ObjectStorageError::NotFound(key.to_string())),
+            // **A 404 is absence only when it is the key's** (kotton #412). A
+            // bucket that does not exist answers 404 too, with the code
+            // `NoSuchBucket`, and read as `NotFound` it would say every object
+            // is absent: a device reading a drive's absence as "not held" may
+            // then delete what only that drive keeps. So a 404 whose body
+            // names the bucket is a refusal. A `HEAD` carries no body and
+            // cannot tell the two apart, so its 404 stays `NotFound`
+            // (`metadata`, and `delete`'s look first); the reads the store
+            // decides absence by, `get` and `list`, are `GET`s, and say.
+            reqwest::StatusCode::NOT_FOUND => {
+                let body = resp.text().await.unwrap_or_default();
+                Err(not_found(&body, key, self.bucket.name()))
+            }
             reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::UNAUTHORIZED => Err(
                 ObjectStorageError::PermissionDenied(format!("{key}: {}", resp.status())),
             ),
@@ -290,6 +302,17 @@ impl ObjectStorage for S3Shelf {
 
     fn backend_name(&self) -> &str {
         "s3"
+    }
+}
+
+/// What a 404 answers, by its body: `NotFound` for the key, unless the body's
+/// error code says the bucket does not exist, which is a backend error naming
+/// it. A `HEAD`'s 404 has no body, so it is `NotFound` (see [`S3Shelf::send`]).
+fn not_found(body: &str, key: &str, bucket: &str) -> ObjectStorageError {
+    if body.contains("<Code>NoSuchBucket</Code>") {
+        ObjectStorageError::BackendError(format!("{key}: the bucket '{bucket}' does not exist"))
+    } else {
+        ObjectStorageError::NotFound(key.to_string())
     }
 }
 
@@ -507,6 +530,43 @@ mod tests {
             .collect();
         pools.sort();
         assert_eq!(pools, vec![("alice".to_string(), true), ("bob".to_string(), true)]);
+    }
+
+    /// **A bucket that does not exist is refused, not answered as absence**
+    /// (kotton #412). A missing key in a bucket that is there stays
+    /// `NotFound`, and a listing of a bucket that is not is a backend error
+    /// naming it. The server here answers a `GET` of an object in a missing
+    /// bucket `NoSuchKey` (`s3s-fs` looks for the file and not the bucket),
+    /// so the `GET` half is held below on the body AWS sends.
+    #[tokio::test]
+    async fn a_missing_bucket_refuses_rather_than_answering_absence() {
+        let server = serve("kotton").await;
+        let present = shelves(&server, "kotton", None).open("alice", "local", Path::new("/unused"));
+        assert!(matches!(present.get(Path::new("_pack/absent")).await, Err(ObjectStorageError::NotFound(_))));
+        assert!(matches!(present.get_sealed(Path::new("_pack/absent")).await, Err(ObjectStorageError::NotFound(_))));
+        assert!(present.list(Path::new("no/such/prefix")).await.unwrap().is_empty());
+
+        let gone = shelves(&server, "gone", None).open("alice", "local", Path::new("/unused"));
+        match gone.list(Path::new("")).await {
+            Err(ObjectStorageError::BackendError(m)) => assert!(m.contains("'gone' does not exist"), "{m}"),
+            other => panic!("a bucket that does not exist answered {other:?}"),
+        }
+    }
+
+    /// A 404 whose body says `NoSuchBucket` is a backend error naming the
+    /// bucket; one that says `NoSuchKey`, or has no body (a `HEAD`), is
+    /// `NotFound`. The bodies are the ones AWS sends.
+    #[test]
+    fn a_404_is_absence_only_when_it_is_the_keys() {
+        let bucket = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message><BucketName>gone</BucketName></Error>"#;
+        let key = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Key>alice/local/_pack/a</Key></Error>"#;
+        assert!(
+            matches!(not_found(bucket, "alice/local/_pack/a", "gone"), ObjectStorageError::BackendError(m) if m.contains("'gone' does not exist"))
+        );
+        assert!(matches!(not_found(key, "alice/local/_pack/a", "gone"), ObjectStorageError::NotFound(k) if k == "alice/local/_pack/a"));
+        assert!(matches!(not_found("", "alice/local/_pack/a", "gone"), ObjectStorageError::NotFound(_)));
     }
 
     /// The wrong secret is refused by the server, and the refusal is the
