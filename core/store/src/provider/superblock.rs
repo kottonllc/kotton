@@ -26,13 +26,13 @@
 //! kept and adoptable, so there is no moment with a single copy in flight.
 //! "Adoptable" is the caller's to judge: with nothing passed over, the two
 //! newest generations are kept ([`retirable_superblocks`]); the pack layer
-//! keeps two generations it knows are not held *beside* every held one, since
-//! a held generation is kept but cannot be adopted (`crate::packed`'s
-//! `retire_superseded`, kotton #316). It judges from what its own commits and
-//! loads already learned, never by re-reading a manifest at commit time
-//! (kotton #319), and keeps any generation it has not classified for
-//! compaction to decide. Neither yet discounts a superblock that does not
-//! open once it is classified: compaction's check counts a torn one toward
+//! keeps two generations it can count on *beside* every held one, since a
+//! held generation is kept but cannot be adopted (`crate::packed`'s
+//! `retire_superseded`, kotton #316). After a commit it judges only from what
+//! it knows of each key as written, never by re-reading a manifest at commit
+//! time (kotton #319), and keeps any generation it does not know for
+//! compaction to decide. Compaction judges from its own check, within its
+//! pass, and that check still counts a superblock that does not open toward
 //! the two (kotton #368).
 //!
 //! A generation whose superblock opens but whose **state does not decode** is
