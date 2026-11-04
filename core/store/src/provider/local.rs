@@ -714,6 +714,9 @@ mod tests {
     /// #418): `answer` reaches its error arm and names the failure, instead
     /// of saying the root is missing. A parent that is a regular file gives
     /// ENOTDIR, which needs no permissions, so this asserts as root too.
+    /// Unix only: Windows answers that path with `ERROR_PATH_NOT_FOUND`
+    /// (`NotFound`), so there the root is reported missing by the OS itself.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_root_that_cannot_be_looked_at_is_not_reported_missing() {
         let dir = TempDir::new().unwrap();

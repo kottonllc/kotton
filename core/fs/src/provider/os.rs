@@ -304,7 +304,10 @@ mod tests {
 
     /// A path whose parent is a regular file fails with ENOTDIR, which is a
     /// failure to look, not absence (kotton #418). This needs no permissions,
-    /// so it asserts as root too.
+    /// so it asserts as root too. Unix only: Windows answers a path under a
+    /// file with `ERROR_PATH_NOT_FOUND`, which Rust reports as `NotFound`, so
+    /// there the OS itself says the path is absent.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_path_under_a_regular_file_is_an_error_not_absence() {
         let (fs, temp_dir) = setup().await;
