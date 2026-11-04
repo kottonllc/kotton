@@ -82,6 +82,12 @@ pub trait Filesystem: Send + Sync {
     async fn delete_file(&self, path: &Path) -> FilesystemResult<()>;
 
     /// Check if a file exists
+    ///
+    /// `Ok(false)` is absence: nothing is at `path`, or what is there is not
+    /// a file. A failure to look (permission denied, a parent that is not a
+    /// directory, an I/O fault) is an `Err`, never `Ok(false)`: a caller that
+    /// reads `false` as "not held" must not be told so by a path it could not
+    /// look at. Symlinks are followed.
     async fn file_exists(&self, path: &Path) -> FilesystemResult<bool>;
 
     /// Get file metadata
@@ -100,6 +106,11 @@ pub trait Filesystem: Send + Sync {
     async fn list_dir(&self, path: &Path) -> FilesystemResult<Vec<FileMetadata>>;
 
     /// Check if a directory exists
+    ///
+    /// `Ok(false)` is absence: nothing is at `path`, or what is there is not
+    /// a directory. A failure to look (permission denied, a parent that is
+    /// not a directory, an I/O fault) is an `Err`, never `Ok(false)`. Symlinks
+    /// are followed.
     async fn dir_exists(&self, path: &Path) -> FilesystemResult<bool>;
 
     /// Copy a file

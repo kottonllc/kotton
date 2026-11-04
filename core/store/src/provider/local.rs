@@ -710,6 +710,56 @@ mod tests {
         assert!(matches!(listed, Err(ObjectStorageError::PermissionDenied(_))), "{listed:?}");
     }
 
+    /// A root that cannot be looked at is not a root that is missing (kotton
+    /// #418): `answer` reaches its error arm and names the failure, instead
+    /// of saying the root is missing. A parent that is a regular file gives
+    /// ENOTDIR, which needs no permissions, so this asserts as root too.
+    /// Unix only: Windows answers that path with `ERROR_PATH_NOT_FOUND`
+    /// (`NotFound`), so there the root is reported missing by the OS itself.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_root_that_cannot_be_looked_at_is_not_reported_missing() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("plain");
+        std::fs::write(&file, b"x").unwrap();
+        let storage = LocalObjectStorage::new(file.join("shelf"), OsFilesystem);
+        match storage.answer(ObjectStorageError::NotFound("k".into())).await {
+            ObjectStorageError::IoError(m) => {
+                assert!(m.contains("could not be read"), "wrong reason: {m}");
+                assert!(!m.contains("is missing"), "a failure to look read as missing: {m}");
+            }
+            other => panic!("answered {other:?}"),
+        }
+    }
+
+    /// The same through EACCES: the root's parent is mode 000. Unix only;
+    /// skipped, and says so, when the process can look past it (root).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_root_reaches_answers_error_arm() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let locked = dir.path().join("locked");
+        let root = locked.join("shelf");
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = LocalObjectStorage::new(root.clone(), OsFilesystem);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::metadata(&root).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipped: running with privileges that ignore file modes (root)");
+            return;
+        }
+        let got = storage.answer(ObjectStorageError::NotFound("k".into())).await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        match got {
+            ObjectStorageError::IoError(m) => {
+                assert!(m.contains("could not be read"), "wrong reason: {m}");
+                assert!(!m.contains("is missing"), "{m}");
+            }
+            other => panic!("answered {other:?}"),
+        }
+    }
+
     #[test]
     fn encode_decode_segment_round_trips_the_reserved_set() {
         for seg in [
