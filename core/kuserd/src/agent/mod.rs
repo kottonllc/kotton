@@ -1638,10 +1638,10 @@ impl DeviceDaemon {
                     }
                     // The same gate for a verb answered in one frame, before
                     // anything below runs; `handle_request` reads it again.
-                    if let Some(refusal) =
-                        dispatch::stream_entry_refusal(&sessions, &conn_session, &request)
+                    if let dispatch::Entry::Refused(refusal) =
+                        dispatch::stream_entry(&sessions, &conn_session, &request)
                     {
-                        return Ok(HandlerOutput::Single(refusal));
+                        return Ok(HandlerOutput::Single(*refusal));
                     }
                     // One relayed frame of a browser's sealed channel.
                     if let UserRequest::BrowserFrame { bytes, channel, user_id } = request {

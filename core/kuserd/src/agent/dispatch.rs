@@ -37,13 +37,11 @@ use std::sync::{Arc, Mutex};
 /// this (#393), the stream filtered only by level and category, and a session
 /// on a device holding two identities read the other one's live events.
 ///
-/// Requires an active authenticated session, applied by
-/// [`stream_entry_refusal`] before this is reached — `SubscribeEvents` is
-/// `requires_session`, so an unauthenticated connection is answered
-/// `NoActiveSession` there and never arrives here. The caller resolves
-/// `session_user` from the connection's session as `handle_request` does for
-/// `QueryEvents`, and answers `NoActiveSession` itself if it has gone; there is
-/// no user-less stream.
+/// Requires an active authenticated session, applied by [`stream_entry`]
+/// before this is reached — `SubscribeEvents` is `requires_session`, so an
+/// unauthenticated connection is answered `NoActiveSession` there and never
+/// arrives here. `session_user` is the user the gate read and handed on, the
+/// one read `QueryEvents` is scoped by too; there is no user-less stream.
 ///
 /// [`Event::belongs_to`]: kotton_diag::service::Event::belongs_to
 pub(super) async fn handle_subscribe(
@@ -140,7 +138,7 @@ pub(super) async fn handle_subscribe(
 /// Handle a [`UserRequest::VfsWatch`] streaming subscription.
 ///
 /// Requires an authenticated session owning `user_id`, applied by
-/// [`stream_entry_refusal`] before this is reached.  Opens with
+/// [`stream_entry`] before this is reached.  Opens with
 /// [`UserResponse::VfsWatchReady`], then streams [`UserResponse::VfsChanged`]
 /// frames from the daemon's VFS broadcast channel, filtered to `user_id`'s own
 /// tree and then by the caller's optional path prefixes.  Ends with
@@ -467,11 +465,11 @@ fn session_refusal(session_user: Option<&str>, request: &UserRequest) -> Option<
 /// itself could sit on the node's event bus, which is a description of what the
 /// person is doing, held by the sidecar the rule exists to disarm. The gate
 /// gives the rule one home on this path.
-pub(super) fn stream_entry_refusal(
+pub(super) fn stream_entry(
     sessions: &sessions::SessionMap,
     conn_session: &Mutex<Option<ConnSessionData>>,
     request: &UserRequest,
-) -> Option<UserResponse> {
+) -> Entry {
     let (origin, token, principal) = {
         let g = conn_session.lock().unwrap();
         match g.as_ref() {
@@ -484,15 +482,35 @@ pub(super) fn stream_entry_refusal(
         }
     };
     if let Some(refusal) = mint_only_refusal(principal.as_ref(), request) {
-        return Some(refusal);
+        return Entry::Refused(Box::new(refusal));
     }
     if let Some(refusal) = origin_refusal(origin, request) {
-        return Some(refusal);
+        return Entry::Refused(Box::new(refusal));
     }
     let session_user = token
         .as_deref()
         .and_then(|tok| sessions::live_user(sessions, tok));
-    session_refusal(session_user.as_deref(), request)
+    if let Some(refusal) = session_refusal(session_user.as_deref(), request) {
+        return Entry::Refused(Box::new(refusal));
+    }
+    // The one read of the session, kept: a verb that requires a session is
+    // handed the user the guard just passed, so none reads it a second time
+    // and none has a window of its own in which the session has gone.
+    match session_user {
+        Some(user) if request.requires_session() => Entry::Session(user),
+        _ => Entry::Sessionless,
+    }
+}
+
+/// What [`stream_entry`] answers a request: the refusal, or what it hands on.
+pub(super) enum Entry {
+    /// The gate refuses the request; this is its one answer.
+    Refused(Box<UserResponse>),
+    /// The verb requires a session, and this is its live user: the one the
+    /// guard passed, read once.
+    Session(String),
+    /// The verb does not require a session; the gate has nothing to hand on.
+    Sessionless,
 }
 
 /// The door's one-frame answer to `request`. The eleven verbs whose clients

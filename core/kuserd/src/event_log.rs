@@ -2,8 +2,10 @@
 //! SQLite-backed event log subscriber
 //!
 //! Persists events from the daemon's EventBus to a local SQLite database.
-//! This is the storage layer that unblocks `Kotton events` CLI and
-//! MCP `get_events` (both read directly from the DB once it exists).
+//! This is the storage layer events are read from, and the readers go through
+//! the daemon, not the database: `QueryEvents` reads the session user's own
+//! log, and `SubscribeEvents` streams the same scope live (the session user's
+//! events, never another identity's nor the device's).
 //!
 //! Schema lives in `core/device/migrations/0001_create_events.sql`. New schema changes
 //! get a new numbered file; sqlx tracks which migrations have run.

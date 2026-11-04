@@ -23,19 +23,27 @@
 //! own session check, and they were not the same rule — a gateway's
 //! `MintPrincipalSession` session satisfied them, so a `Remote` origin could
 //! reach `Local`-tier `DeviceAdd`. The rule now lives in
-//! [`dispatch::stream_entry_refusal`], the same functions `handle_request`
+//! [`dispatch::stream_entry`], the same functions `handle_request`
 //! reads, and it is read here once, before the verb's opening runs. The opening
 //! is a future that has not been polled when the gate reads the request, so a
 //! refused verb does nothing at all: no desk is registered, no relay is read,
 //! no ceremony reserves a code.
+//!
+//! **The gate reads the session once, and hands the user on.** For a verb that
+//! requires a session the gate's answer is the live session user
+//! ([`dispatch::Entry::Session`]) or the refusal. The two verbs that act as
+//! that user, `SubscribeEvents` and `BrowserOutbound`, take it from the gate
+//! through [`Handed`]; neither reads the session again, so neither has an
+//! answer of its own for a session that ended between two reads, because there
+//! is no second read.
 
-use super::{browser_channel, dispatch, sessions, AgentContext, ConnSessionData};
+use super::{browser_channel, dispatch, AgentContext, ConnSessionData};
 use kotton_ipc::HandlerOutput;
 use kotton_wire::ipc::{UserRequest, UserResponse};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{broadcast, mpsc, watch};
 
 /// The connection's session slot, as the acceptor hands it to the handler.
@@ -51,22 +59,43 @@ pub(super) struct VfsWatchSource<'a> {
 /// A streamed verb's opening, not yet started.
 type Opening<'a> = Pin<Box<dyn Future<Output = io::Result<mpsc::Receiver<UserResponse>>> + Send + 'a>>;
 
+/// What the gate handed on, set by [`answer`] after it passes the request and
+/// before the verb's opening is first polled. An opening is built before the
+/// gate reads, so it holds this and reads it when it runs.
+type Handed = OnceLock<dispatch::Entry>;
+
+/// The session user the gate handed to a verb that requires a session.
+///
+/// A verb that requires one is never passed without it; this is an error for
+/// the door to frame, not a second answer to a missing session.
+fn handed_user(handed: &Handed) -> io::Result<&str> {
+    match handed.get() {
+        Some(dispatch::Entry::Session(user)) => Ok(user),
+        _ => Err(io::Error::other("the gate handed no session user to a verb that requires one")),
+    }
+}
+
 /// The door's answer to `request` when its client reads it as a stream, and
 /// `None` when it does not.
 ///
 /// The gate is read first; a refusal is answered through [`one_frame`], so
-/// the client's `recv` gives the refusal and then `None`.
+/// the client's `recv` gives the refusal and then `None`. What it passes it
+/// hands to the opening.
 pub(super) async fn answer(
     ctx: &AgentContext,
     request: &UserRequest,
     conn_session: &ConnSession,
     vfs: VfsWatchSource<'_>,
 ) -> Option<io::Result<mpsc::Receiver<UserResponse>>> {
-    let opening = opening(ctx, request, conn_session, vfs)?;
-    Some(match dispatch::stream_entry_refusal(&ctx.sessions, conn_session, request) {
+    let handed = Handed::new();
+    let opening = opening(ctx, request, vfs, &handed)?;
+    Some(match dispatch::stream_entry(&ctx.sessions, conn_session, request) {
         // Dropped unpolled: the verb's opening never ran.
-        Some(refusal) => Ok(one_frame(refusal)),
-        None => opening.await,
+        dispatch::Entry::Refused(refusal) => Ok(one_frame(*refusal)),
+        entry => {
+            let _ = handed.set(entry);
+            opening.await
+        }
     })
 }
 
@@ -83,24 +112,17 @@ fn one_frame(frame: UserResponse) -> mpsc::Receiver<UserResponse> {
 fn opening<'a>(
     ctx: &'a AgentContext,
     request: &'a UserRequest,
-    conn_session: &'a ConnSession,
     vfs: VfsWatchSource<'a>,
+    handed: &'a Handed,
 ) -> Option<Opening<'a>> {
     use kotton_device::users::residency::Residency;
     use kotton_device::users::{contacts, pairing};
     let residency = || Arc::new(ctx.users.clone()) as Arc<dyn Residency>;
     Some(match request {
-        // The session user's events only (#393). The gate has passed a live
-        // session; if it ended in between, there is no user to stream for,
-        // and the answer is the refusal, never the device's bus.
+        // The session user's events only (#393): the user the gate handed on,
+        // never the device's bus and never a second read of the session.
         UserRequest::SubscribeEvents { category, level } => Box::pin(async move {
-            let user_id = {
-                let g = conn_session.lock().unwrap();
-                g.as_ref().and_then(|s| sessions::live_user(&ctx.sessions, &s.token))
-            };
-            let Some(user_id) = user_id else {
-                return Ok(one_frame(UserResponse::NoActiveSession));
-            };
+            let user_id = handed_user(handed)?.to_owned();
             Ok(dispatch::handle_subscribe(&ctx.runtime, user_id, category.clone(), level.clone()).await)
         }),
         UserRequest::VfsWatch { user_id, paths } => Box::pin(async move {
@@ -279,13 +301,7 @@ fn opening<'a>(
         // `khttpd` holds the browser's socket. When it ends, so does the
         // channel.
         UserRequest::BrowserOutbound { channel } => Box::pin(async move {
-            let user_id = {
-                let g = conn_session.lock().unwrap();
-                g.as_ref().and_then(|s| sessions::live_user(&ctx.sessions, &s.token))
-            };
-            let Some(user_id) = user_id else {
-                return Ok(one_frame(UserResponse::NoActiveSession));
-            };
+            let user_id = handed_user(handed)?.to_owned();
             let key = browser_channel::local_key(&user_id, Some(channel));
             let (tx, rx) = mpsc::channel::<UserResponse>(256);
             // Say so on the stream itself, first, before anything else can be
@@ -319,6 +335,7 @@ fn opening<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::sessions;
     use kotton_ipc::{ChannelAcceptor, IpcClient};
     use kotton_sys::ipc::IpcEndpoint;
     use kotton_wire::ipc::{Principal, SecretText};
@@ -370,8 +387,9 @@ mod tests {
         }
     }
 
-    /// What the door says to [`a_gateway`] for `request`: the gate's refusal,
-    /// or, for `BrowserOutbound`, which the gate passes, the verb's own.
+    /// What the door says to [`a_gateway`] for `request`: the gate's refusal.
+    /// `BrowserOutbound` is on the mint-only list, so the gate's next guard
+    /// answers it, for want of a live session; the arm answers nothing of its own.
     fn refusal_to_a_gateway(request: &UserRequest) -> UserResponse {
         match request {
             UserRequest::BrowserOutbound { .. } => UserResponse::NoActiveSession,
@@ -603,5 +621,51 @@ mod tests {
             event.message, "alice's event",
             "alice's stream delivered an event that is not hers before her own"
         );
+    }
+
+    /// **The gate hands a verb that requires a session the user it read (#400).**
+    ///
+    /// `SubscribeEvents` and `BrowserOutbound` require a session, and the gate
+    /// answers them with the live session user, the one read their arms take
+    /// instead of reading again. A verb that does not require one is passed
+    /// with nothing handed, and a session that has gone is the gate's one
+    /// refusal.
+    #[tokio::test]
+    async fn the_gate_hands_a_session_verb_the_user_it_read() {
+        let dir = a_dir();
+        let daemon = a_daemon(dir.path()).await;
+        let ctx = daemon.agent_context();
+        sessions::insert(&ctx.sessions, "alice-session".to_string(), "alice".to_string());
+        let principal = Principal::LocalOperator;
+        let session = |token: &str| -> Mutex<Option<ConnSessionData>> {
+            Mutex::new(Some(ConnSessionData {
+                origin: principal.trust_origin(),
+                token: token.to_string(),
+                scope: None,
+                cek_available: true,
+                principal: principal.clone(),
+                browser_key: None,
+            }))
+        };
+
+        for request in [
+            UserRequest::SubscribeEvents { category: None, level: None },
+            UserRequest::BrowserOutbound { channel: "c".into() },
+        ] {
+            match dispatch::stream_entry(&ctx.sessions, &session("alice-session"), &request) {
+                dispatch::Entry::Session(user) => assert_eq!(user, "alice", "{}", request.variant_name()),
+                _ => panic!("{}: the gate did not hand on the session user", request.variant_name()),
+            }
+            let gone = dispatch::stream_entry(&ctx.sessions, &session("no-such-session"), &request);
+            assert!(
+                matches!(gone, dispatch::Entry::Refused(r) if matches!(*r, UserResponse::NoActiveSession)),
+                "{}: a session that has gone is the gate's refusal",
+                request.variant_name()
+            );
+        }
+
+        let invite = UserRequest::DeviceInvite { user_id: "alice".into(), ttl_seconds: 60, as_name: None };
+        let passed = dispatch::stream_entry(&ctx.sessions, &Mutex::new(None), &invite);
+        assert!(matches!(passed, dispatch::Entry::Sessionless), "a session-less verb hands nothing on");
     }
 }
