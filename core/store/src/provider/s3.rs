@@ -157,24 +157,31 @@ impl S3Shelf {
         req: reqwest::RequestBuilder,
         key: &str,
     ) -> ObjectStorageResult<reqwest::Response> {
-        let resp = req
-            .send()
+        let req = req
+            .build()
+            .map_err(|e| ObjectStorageError::IoError(format!("{key}: {e}")))?;
+        let head = req.method() == reqwest::Method::HEAD;
+        let resp = self
+            .client
+            .execute(req)
             .await
             .map_err(|e| ObjectStorageError::IoError(format!("{key}: {e}")))?;
         match resp.status() {
             s if s.is_success() => Ok(resp),
-            // **A 404 is absence only when it is the key's** (kotton #412). A
-            // bucket that does not exist answers 404 too, with the code
-            // `NoSuchBucket`, and read as `NotFound` it would say every object
-            // is absent: a device reading a drive's absence as "not held" may
-            // then delete what only that drive keeps. So a 404 whose body
-            // names the bucket is a refusal. A `HEAD` carries no body and
-            // cannot tell the two apart, so its 404 stays `NotFound`
+            // **A 404 is absence only when its code says so** (kotton #412,
+            // #419). A bucket that does not exist answers 404 too, with the
+            // code `NoSuchBucket`, and read as `NotFound` it would say every
+            // object is absent: a device reading a drive's absence as "not
+            // held" may then delete what only that drive keeps. So the body's
+            // code is parsed: `NoSuchKey` is absence; any other code, or a
+            // body that is unreadable, is a refusal. A `HEAD` carries no body
+            // and cannot say, so only a `HEAD`'s empty 404 stays `NotFound`
             // (`metadata`, and `delete`'s look first); the reads the store
-            // decides absence by, `get` and `list`, are `GET`s, and say.
+            // decides absence by, `get` and `list`, are `GET`s, and say. The
+            // method is passed in, never inferred from an empty body.
             reqwest::StatusCode::NOT_FOUND => {
                 let body = resp.text().await.unwrap_or_default();
-                Err(not_found(&body, key, self.bucket.name()))
+                Err(not_found(&body, key, self.bucket.name(), head))
             }
             reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::UNAUTHORIZED => Err(
                 ObjectStorageError::PermissionDenied(format!("{key}: {}", resp.status())),
@@ -305,14 +312,39 @@ impl ObjectStorage for S3Shelf {
     }
 }
 
-/// What a 404 answers, by its body: `NotFound` for the key, unless the body's
-/// error code says the bucket does not exist, which is a backend error naming
-/// it. A `HEAD`'s 404 has no body, so it is `NotFound` (see [`S3Shelf::send`]).
-fn not_found(body: &str, key: &str, bucket: &str) -> ObjectStorageError {
-    if body.contains("<Code>NoSuchBucket</Code>") {
-        ObjectStorageError::BackendError(format!("{key}: the bucket '{bucket}' does not exist"))
-    } else {
-        ObjectStorageError::NotFound(key.to_string())
+/// What a 404 answers, by the error code its body carries. `NotFound` only
+/// when the code is `NoSuchKey`, or when the request was a `HEAD` and the body
+/// is empty (a `HEAD` carries none). `NoSuchBucket` is a backend error naming
+/// the bucket; any other code, or a body that does not parse as an error
+/// document with a code, is a backend error naming the code or "an unreadable
+/// 404". `head` is the request's method, not inferred from the body, so an
+/// empty body on a `GET` refuses.
+fn not_found(body: &str, key: &str, bucket: &str, head: bool) -> ObjectStorageError {
+    if head && body.is_empty() {
+        return ObjectStorageError::NotFound(key.to_string());
+    }
+    let code = roxmltree::Document::parse(body).ok().and_then(|doc| {
+        let root = doc.root_element();
+        if root.tag_name().name() != "Error" {
+            return None;
+        }
+        root.children()
+            .find(|c| c.is_element() && c.tag_name().name() == "Code")
+            .and_then(|c| c.text())
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+    });
+    match code.as_deref() {
+        Some("NoSuchKey") => ObjectStorageError::NotFound(key.to_string()),
+        Some("NoSuchBucket") => {
+            ObjectStorageError::BackendError(format!("{key}: the bucket '{bucket}' does not exist"))
+        }
+        Some(other) => ObjectStorageError::BackendError(format!(
+            "{key}: a 404 from bucket '{bucket}' with code {other}, which is not absence"
+        )),
+        None => ObjectStorageError::BackendError(format!(
+            "{key}: an unreadable 404 from bucket '{bucket}', which is not absence"
+        )),
     }
 }
 
@@ -553,20 +585,36 @@ mod tests {
         }
     }
 
-    /// A 404 whose body says `NoSuchBucket` is a backend error naming the
-    /// bucket; one that says `NoSuchKey`, or has no body (a `HEAD`), is
-    /// `NotFound`. The bodies are the ones AWS sends.
+    /// A 404 is absence only when its code says `NoSuchKey`, or when it is a
+    /// `HEAD`'s and has no body. `NoSuchBucket`, any other code, a body that
+    /// is not an error document, and an empty body on a `GET` all refuse. The
+    /// bodies are the ones AWS sends.
     #[test]
     fn a_404_is_absence_only_when_it_is_the_keys() {
-        let bucket = r#"<?xml version="1.0" encoding="UTF-8"?>
-<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message><BucketName>gone</BucketName></Error>"#;
-        let key = r#"<?xml version="1.0" encoding="UTF-8"?>
-<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Key>alice/local/_pack/a</Key></Error>"#;
-        assert!(
-            matches!(not_found(bucket, "alice/local/_pack/a", "gone"), ObjectStorageError::BackendError(m) if m.contains("'gone' does not exist"))
-        );
-        assert!(matches!(not_found(key, "alice/local/_pack/a", "gone"), ObjectStorageError::NotFound(k) if k == "alice/local/_pack/a"));
-        assert!(matches!(not_found("", "alice/local/_pack/a", "gone"), ObjectStorageError::NotFound(_)));
+        let err = |code: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>{code}</Code><Message>m</Message></Error>"#
+            )
+        };
+        let k = "alice/local/_pack/a";
+        let refused = |r: ObjectStorageError, needle: &str| match r {
+            ObjectStorageError::BackendError(m) => {
+                assert!(m.contains(needle) && m.contains(k), "{m}")
+            }
+            other => panic!("expected a refusal naming {needle}, got {other:?}"),
+        };
+        // NoSuchKey: absence.
+        assert!(matches!(not_found(&err("NoSuchKey"), k, "gone", false), ObjectStorageError::NotFound(x) if x == k));
+        // NoSuchBucket: refusal naming the bucket.
+        refused(not_found(&err("NoSuchBucket"), k, "gone", false), "'gone' does not exist");
+        // An unknown code: refusal naming the code.
+        refused(not_found(&err("SlowDown"), k, "gone", false), "SlowDown");
+        // An unparseable body: refusal.
+        refused(not_found("<html>not found", k, "gone", false), "an unreadable 404");
+        // An empty body on a GET: refusal; on a HEAD: absence.
+        refused(not_found("", k, "gone", false), "an unreadable 404");
+        assert!(matches!(not_found("", k, "gone", true), ObjectStorageError::NotFound(_)));
     }
 
     /// The wrong secret is refused by the server, and the refusal is the
