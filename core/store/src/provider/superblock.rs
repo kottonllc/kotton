@@ -26,10 +26,14 @@
 //! kept and adoptable, so there is no moment with a single copy in flight.
 //! "Adoptable" is the caller's to judge: with nothing passed over, the two
 //! newest generations are kept ([`retirable_superblocks`]); the pack layer
-//! keeps two generations it does not hold *beside* every held one, since a
+//! keeps two generations it can count on *beside* every held one, since a
 //! held generation is kept but cannot be adopted (`crate::packed`'s
-//! `retire_superseded`, kotton #316). Neither yet discounts a superblock
-//! that does not open: a torn one counts toward the two (kotton #368).
+//! `retire_superseded`, kotton #316). After a commit it judges only from what
+//! it knows of each key as written, never by re-reading a manifest at commit
+//! time (kotton #319), and keeps any generation it does not know for
+//! compaction to decide. Compaction judges from its own check, within its
+//! pass, and that check still counts a superblock that does not open toward
+//! the two (kotton #368).
 //!
 //! A generation whose superblock opens but whose **state does not decode** is
 //! passed over the same way ([`load_adopted_superblock`]): the pack layer's
@@ -230,6 +234,8 @@ fn open_superblock(k_pack: &[u8; 32], key: &str, blob: &[u8]) -> ObjectStorageRe
 pub struct Adopted<T> {
     /// The superblock adopted.
     pub superblock: Superblock,
+    /// Its storage key.
+    pub key: String,
     /// What `adopt` made of it.
     pub state: T,
     /// Each generation passed over because its state was refused, newest
@@ -326,6 +332,7 @@ where
             Ok(state) => {
                 return Ok(Some(Adopted {
                     superblock: sb,
+                    key,
                     state,
                     passed_over,
                 }))
@@ -375,7 +382,8 @@ where
 ///
 /// This counts every superblock as a fallback. The pack layer does not use
 /// it: a generation it holds is kept but is no fallback, so it keeps two
-/// generations beside the held ones (`crate::packed`'s `retire_superseded`).
+/// generations beside the held ones, and keeps what it has not classified
+/// (`crate::packed`'s `retire_superseded`).
 pub async fn retirable_superblocks<S>(store: &S) -> ObjectStorageResult<Vec<String>>
 where
     S: SealedObjectAccess + ?Sized,
