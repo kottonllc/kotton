@@ -795,10 +795,10 @@ async fn dispatch_inner(
         call.request,
         UserRequest::ContactPairStart { .. } | UserRequest::ContactPairJoin { .. }
     ) {
-        if let Some(refusal) =
-            super::dispatch::stream_entry_refusal(&ctx.sessions, &conn, &call.request)
+        if let super::dispatch::Entry::Refused(refusal) =
+            super::dispatch::stream_entry(&ctx.sessions, &conn, &call.request)
         {
-            return Inner::Frame(frame_json(ChannelFrame::once(id, refusal)));
+            return Inner::Frame(frame_json(ChannelFrame::once(id, *refusal)));
         }
         // A stream with nowhere to go must not start. The channel's frames go
         // out its own direction and nowhere else, so on a channel with no
