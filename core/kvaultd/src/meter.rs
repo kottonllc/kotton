@@ -497,9 +497,10 @@ mod tests {
     }
 
     /// **The meter descends only into directory keys it admitted** (kotton
-    /// #352). A filesystem shelf rebuilds each key from a file's name,
-    /// decoding `%2F` to `/`, so a directory named `..%2Fx` is listed as
-    /// `../x`. The walk refuses it where the listing enters, before it asks
+    /// #352). A filesystem shelf no longer lists a directory named `..%2Fx`
+    /// as `../x`, since its encoding never writes that name (kotton #349),
+    /// but a bucket's listing can name `../x`, as this one does, and the
+    /// admission stands for it. The walk refuses it where the listing enters, before it asks
     /// the shelf for anything under it: the store is asked at the root and
     /// under `a` only, and the bytes counted are the root's leaf and the leaf
     /// under `a`, none from outside the tree.

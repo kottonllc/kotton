@@ -827,20 +827,27 @@ fn names_under(dir: &std::path::Path, skip: &std::path::Path) -> BTreeSet<PathBu
 /// **A key the serving side lists that is not canonical is refused, and no
 /// path is built from it** (kotton #265). A sync pass takes the remote's
 /// listing as the keys it reads and writes, so the listing is what a hostile
-/// drive controls. Here the serving side lists `../x`, `./_pack/i-1`,
-/// `/_pack/i-1` and `_pack/`: a local-directory remote stands in for the
-/// drive, holding files whose names percent-decode to those keys (a listing
-/// rebuilds each key from a file's name, decoding `%2F` to `/`), and a file
-/// beside its tree at `x`, so a read of `../x` finds bytes to hand over. The
-/// puller's code is the same whatever the remote is: it lists, then moves
-/// what was listed.
+/// drive controls. A local-directory remote stands in for the drive, and its
+/// files are named so their keys are not canonical. The puller's code is the
+/// same whatever the remote is: it lists, then moves what was listed.
 ///
-/// Before the admission, `../x` was written to the puller's `data/../x`,
-/// beside its mount; `./_pack/i-1` and `/_pack/i-1` named the pack directory
-/// under names the namespace rule reads as files. Now each is refused at the
-/// listing: nothing appears in the puller's tree outside its mount, nothing
-/// lands in its pack directory, nothing is pulled, and the pass completes,
-/// counting each refused key among those it did not move.
+/// Served: `..\x` and `_pack\i-1`, from files `..%5Cx` and `_pack%5Ci-1`,
+/// which the store's encoding writes and a listing decodes to keys holding a
+/// `\` — on a host that reads `\` as a separator, a path beside the mount
+/// and one under the pack directory. Each is refused at the listing: nothing
+/// appears in the puller's tree outside its mount, nothing lands in its pack
+/// directory, nothing is pulled, and the pass completes, counting each
+/// refused key among those it did not move.
+///
+/// Not served: `../x`, `./_pack/i-1`, `/_pack/i-1` and `_pack/`, from files
+/// whose names hold `%2F`, beside a file at `x` that a read of `../x` would
+/// find. Before the admission `../x` was written to the puller's `data/../x`,
+/// and the two pack keys named the pack directory under names the namespace
+/// rule reads as files. The store's encoding never writes `%2F`, so a local
+/// listing no longer names them (kotton #349): the remote's own listing holds
+/// none of them, and the pass neither moves nor counts them. A bucket's or a
+/// peer's listing can still name them, and the admission stands for those;
+/// serving them end to end wants a fixture that does so directly.
 #[tokio::test]
 async fn a_served_key_that_is_not_canonical_is_refused_before_any_path_is_built() {
     let served = tempfile::tempdir().expect("served tempdir");
@@ -860,9 +867,30 @@ async fn a_served_key_that_is_not_canonical_is_refused_before_any_path_is_built(
         .sync_mount("alice", "local", "backup", Some(SyncDirection::Pull))
         .await
         .expect("a pass over an empty tree");
-    let hostile = ["../x", "./_pack/i-1", "/_pack/i-1", "_pack/"];
+    let hostile = ["..\\x", "_pack\\i-1"];
     for key in hostile {
-        std::fs::write(backup_path.join(key.replace('/', "%2F")), b"served").expect("plant a served key");
+        std::fs::write(backup_path.join(key.replace('\\', "%5C")), b"served").expect("plant a served key");
+    }
+    let unserved = ["../x", "./_pack/i-1", "/_pack/i-1", "_pack/"];
+    for key in unserved {
+        std::fs::write(backup_path.join(key.replace('/', "%2F")), b"served").expect("plant a key no listing names");
+    }
+    {
+        use kotton_sys::store::ObjectStorage as _;
+        let remote = kotton_store::LocalObjectStorage::new(backup_path.clone(), kotton_fs::OsFilesystem);
+        let served: Vec<String> = remote
+            .list(std::path::Path::new(""))
+            .await
+            .expect("the remote lists")
+            .into_iter()
+            .map(|e| e.key)
+            .collect();
+        for key in hostile {
+            assert!(served.iter().any(|k| k == key), "the remote does not serve {key:?}: {served:?}");
+        }
+        for key in unserved {
+            assert!(!served.iter().any(|k| k == key), "the remote serves {key:?}, a name its store never writes: {served:?}");
+        }
     }
 
     let rt = env.users.get("alice").expect("alice runtime");
@@ -889,6 +917,6 @@ async fn a_served_key_that_is_not_canonical_is_refused_before_any_path_is_built(
     assert_eq!(
         result.skipped as usize,
         held + hostile.len(),
-        "each refused key is counted among those the pass did not move: {result:?}"
+        "each refused key, and none the remote does not serve, is counted among those the pass did not move: {result:?}"
     );
 }

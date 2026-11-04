@@ -167,9 +167,10 @@ impl<S: ObjectStorage + 'static> BlindedObjectStorage<S> {
     /// **Every listed key is admitted where the listing enters** (kotton
     /// #357). The keys this walk descends into and the leaves it hands back
     /// are the ones the inner store listed, and a listing is what the store's
-    /// contents spell: a filesystem store rebuilds each key from a file's
-    /// name, decoding `%2F` to `/`, so a directory named `..%2Fx` is listed as
-    /// `../x`, and a bucket's keys are whatever was written to it. So each
+    /// contents spell: a filesystem store names only what its encoding writes
+    /// (kotton #349), so no longer `../x`, but those names can still decode
+    /// to a key holding a `\`, and a bucket's or a peer's keys are whatever
+    /// was written to it, `../x` among them. So each
     /// listed key, directory or leaf, is parsed into a [`StorageKey`] before
     /// anything is built from it: the inner store is asked to list only
     /// `root` or an admitted directory key, and every caller reads, writes
@@ -658,9 +659,10 @@ mod tests {
     }
 
     /// **Every walk asks the inner store only for keys it admitted** (kotton
-    /// #357). A filesystem store rebuilds each key from a file's name,
-    /// decoding `%2F` to `/`, so a directory named `..%2Fx` is listed as
-    /// `../x`; beside it the root lists a leaf `../y`. All three walks over
+    /// #357). A filesystem store no longer lists a directory named `..%2Fx`
+    /// as `../x` (kotton #349), but a bucket's or a peer's listing can name
+    /// it, as this one does: a directory `../x`, and beside it at the root a
+    /// leaf `../y`. All three walks over
     /// the listing — the logical `list`, the packer's `list_loose` and the
     /// blinding migration — refuse both where the listing enters: the store is
     /// never asked to list under `../x` nor to read, write or delete `../y`,
