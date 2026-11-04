@@ -30,6 +30,7 @@
 //! decision and the coexistence window that has not closed yet.
 
 use kotton_wire::ipc::{RelayReadout, RelayState};
+use crate::door::PeerHandler;
 use crate::nat::NatNetworkConfig;
 use crate::rendezvous;
 use crate::relay_keys::{relay_id, RelayId};
@@ -41,21 +42,9 @@ use kotton_net::transport::{RelayClient, RelayedInbound};
 use kotton_net::QuicTransport;
 use kotton_sys::net::{Address, Listener, Transport};
 use std::collections::HashSet;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-
-/// Type-erased async handler for inbound peer requests.
-///
-/// The daemon builds one of these (capturing its database and runtime) and hands
-/// it to whatever is listening. The first argument is the connecting peer's DID
-/// string (e.g. `did:key:z6Mk…`), derived from the peer's TLS certificate; the
-/// second is the raw request bytes.
-pub type PeerHandler = Arc<
-    dyn Fn(String, Vec<u8>) -> Pin<Box<dyn Future<Output = Vec<u8>> + Send>> + Send + Sync,
->;
 
 /// Re-push interval for the presence registrar. The relay TTL defaults to 60s, so
 /// re-pushing at ~ttl/2 keeps the entry continuously live.
@@ -587,7 +576,7 @@ impl Reachability {
                             cert_key: self.signing_key.clone(),
                             admit: Arc::clone(&self.paired_keys),
                             admission: self.admission(),
-                            handler: Arc::clone(&handler),
+                            handler: handler.clone(),
                         });
                     }
                 }
@@ -604,7 +593,7 @@ impl Reachability {
                 .read()
                 .unwrap()
                 .iter()
-                .map(|i| (i.own_identity.clone(), i.contact_pub, Arc::clone(&i.handler)))
+                .map(|i| (i.own_identity.clone(), i.contact_pub, i.handler.clone()))
                 .collect();
             let epoch = kotton_crypto::epoch_at(now);
             let live_epochs = [Some(epoch), epoch.checked_sub(1)];
@@ -612,7 +601,7 @@ impl Reachability {
             for (own_identity, contact_pub, inbox_handler) in &inboxes {
                 for e in live_epochs.iter().flatten() {
                     match rendezvous::dm_door(own_identity, contact_pub, *e) {
-                        Ok(k) => doors.push((*e, k.handle, k.admit, Arc::clone(inbox_handler))),
+                        Ok(k) => doors.push((*e, k.handle, k.admit, inbox_handler.clone())),
                         Err(err) => tracing::warn!(error = %err, "mailbox: no handle for a contact"),
                     }
                 }
@@ -626,7 +615,7 @@ impl Reachability {
                             signing_key: d.handle.signing_key.clone(),
                         },
                         d.admit,
-                        Arc::clone(&d.handler),
+                        d.handler.clone(),
                     ));
                 }
             }
@@ -663,7 +652,7 @@ impl Reachability {
                         // No admission-by-proof at a mailbox: the one key
                         // above is the whole of who may arrive.
                         admission: Admission::default(),
-                        handler: Arc::clone(door_handler),
+                        handler: door_handler.clone(),
                     });
                 }
             }
@@ -769,10 +758,10 @@ async fn hold_reservation(
     // Drain inbound circuits onto per-connection serve tasks. One consumer for
     // the task's lifetime: it ends when the last sender is dropped with it.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<RelayedInbound>(16);
-    let serve_handler = Arc::clone(&handler);
+    let serve_handler = handler.clone();
     tokio::spawn(async move {
         while let Some(conn) = rx.recv().await {
-            tokio::spawn(serve_relayed_conn(conn, Arc::clone(&serve_handler)));
+            tokio::spawn(serve_relayed_conn(conn, serve_handler.clone()));
         }
     });
 
@@ -820,10 +809,10 @@ async fn hold_reservation(
 async fn serve_relayed_conn(conn: RelayedInbound, handler: PeerHandler) {
     let peer_did = conn.peer_did().to_string();
     loop {
-        let h = Arc::clone(&handler);
+        let h = handler.clone();
         let pd = peer_did.clone();
         match conn
-            .serve_one_request(move |req| async move { h(pd, req).await })
+            .serve_one_request(move |req| async move { h.serve(pd, req).await })
             .await
         {
             Ok(true) => {}      // served one request; continue

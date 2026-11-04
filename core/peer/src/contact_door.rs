@@ -11,8 +11,7 @@
 //! arrived. Everything that would otherwise be enforced at runtime, or not at
 //! all, between two acceptors wearing one name is one implementation.
 
-use crate::door::PeerDoor;
-use crate::PeerHandler;
+use crate::door::{PeerDoor, PeerHandler};
 use kotton_wire::ipc::{ContactRequest, ContactResponse};
 use std::future::Future;
 
