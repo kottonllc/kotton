@@ -2139,14 +2139,9 @@ async fn answer_request(
 
         // Confined extensions. Separate verbs from the
         // app ones on purpose: different consent story, different world.
-        //
-        // All three act as the gate's user, and their `user_id` field is not
-        // read: these verbs have no `target_user_id` arm, so the guard never
-        // held the field to the session, and reading it put one person's
-        // extensions in another's database and signed their grant with the
-        // other's key (#428).
+        // `user_id` is held to the session's user by `target_user_id`.
         UserRequest::ExtensionInstall {
-            user_id: _,
+            user_id,
             manifest_toml,
             wasm_bytes,
         } => {
@@ -2154,7 +2149,7 @@ async fn answer_request(
             handlers::extensions::extension_install(
                 &user_db,
                 base,
-                handed(&session_user)?.as_str(),
+                &user_id,
                 manifest_toml,
                 wasm_bytes,
                 runtime.secrets(),

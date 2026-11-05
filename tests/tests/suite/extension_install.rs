@@ -8,7 +8,10 @@
 use crate::common::cli::{said, Cli};
 use crate::common::TestEnv;
 
-const USER: &str = "";
+/// The user `TestEnv::spawn_authed` creates and authenticates as. The
+/// extension verbs name the session's own user, as every client sends them:
+/// a request naming another user, or none, is refused (#428).
+const USER: &str = "owner";
 
 /// Enough bytes to be stored; the daemon validates the component model at
 /// *load*, not install, so the structural checks under test do not need a real

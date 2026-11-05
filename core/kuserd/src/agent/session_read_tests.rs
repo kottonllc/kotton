@@ -175,23 +175,39 @@ async fn a_query_from_a_session_that_has_gone_is_refused_with_nothing_of_another
     assert!(!format!("{resp:?}").contains("bob"), "the refusal carries bob's data: {resp:?}");
 }
 
-/// **A session verb is answered from the gate's user's database, whatever the
-/// request names and whoever is loaded.**
+/// A connection holding `token`, at local-operator origin.
+fn a_connection(token: &str) -> Arc<Mutex<Option<ConnSessionData>>> {
+    let principal = Principal::LocalOperator;
+    Arc::new(Mutex::new(Some(ConnSessionData {
+        origin: principal.trust_origin(),
+        token: token.to_string(),
+        scope: None,
+        cek_available: true,
+        principal,
+        browser_key: None,
+    })))
+}
+
+/// `request` from alice's live session, through the door's one-frame path.
+async fn from_alice(ctx: &super::super::AgentContext, request: UserRequest) -> UserResponse {
+    handle_request(ctx, request, Caller::anonymous(), alices_connection())
+        .await
+        .expect("answered")
+}
+
+/// **A request naming another user is refused (#428).**
 ///
-/// `ExtensionList` requires a session and has no `target_user_id` arm, so the
-/// guard does not hold its `user_id` to the session. Its arm handed that field
-/// to the per-user database, which read an empty one as "no user" and fell back
-/// to any loaded user, and read `"bob"` as bob. The registry holds bob alone
-/// here so that fallback's pick is bob, not a coin toss over a map's order;
-/// alice's session is live throughout. Neither request is answered with bob's
-/// extension.
+/// The Extension verbs name a user and require a session, so the session
+/// guard holds the name to the session's user (`target_user_id`), as it does
+/// every other such verb. From alice's session, naming bob or naming nobody
+/// is the guard's refusal, and nothing of bob's is answered; naming alice is
+/// answered from her own database.
 #[tokio::test]
-async fn a_session_verb_is_answered_from_its_own_users_database_never_another_loaded_users() {
+async fn a_request_naming_another_user_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let daemon = alice_and_bob(dir.path()).await;
     let ctx = daemon.agent_context();
     let bobs = db_of(&ctx, "bob").await;
-    db_of(&ctx, "alice").await;
     crate::db::extension_registry_db::insert_extension(
         &bobs,
         &crate::db::extension_registry_db::ExtensionRow {
@@ -211,25 +227,111 @@ async fn a_session_verb_is_answered_from_its_own_users_database_never_another_lo
     .await
     .expect("bob's extension is registered");
     sessions::insert(&ctx.sessions, ALICE_SESSION.to_string(), "alice".to_string());
-    ctx.users.remove("alice");
-    assert_eq!(ctx.users.ids(), vec!["bob".to_string()], "the registry holds bob alone");
 
     for named in ["", "bob"] {
+        for request in [
+            UserRequest::ExtensionList { user_id: named.into() },
+            UserRequest::ExtensionRemove { user_id: named.into(), extension_id: "org.bob.fetcher".into() },
+            UserRequest::ExtensionInstall { user_id: named.into(), manifest_toml: String::new(), wasm_bytes: vec![] },
+        ] {
+            let verb = request.variant_name();
+            let resp = from_alice(&ctx, request).await;
+            assert!(
+                matches!(resp, UserResponse::NoActiveSession),
+                "{verb} naming {named:?} from alice's session is refused: {resp:?}"
+            );
+        }
+    }
+    let kept = crate::db::extension_registry_db::list_extensions(&bobs).await.expect("bob's list reads");
+    assert_eq!(kept.len(), 1, "bob's extension is still registered");
+
+    let own = from_alice(&ctx, UserRequest::ExtensionList { user_id: "alice".into() }).await;
+    assert!(
+        matches!(own, UserResponse::ExtensionList { ref extensions } if extensions.is_empty()),
+        "alice's own (empty) list: {own:?}"
+    );
+}
+
+/// **`AddRecoveryPhrase` naming another user is refused, and that user's key
+/// log is unchanged.**
+#[tokio::test]
+async fn add_recovery_phrase_naming_another_user_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = alice_and_bob(dir.path()).await;
+    let ctx = daemon.agent_context();
+    sessions::insert(&ctx.sessions, ALICE_SESSION.to_string(), "alice".to_string());
+    let chain_len = || kotton_identity::kel_store::load_chain(&ctx.base, "bob").expect("bob's log reads").len();
+    let before = chain_len();
+
+    let resp = from_alice(&ctx, UserRequest::AddRecoveryPhrase { user_id: "bob".into() }).await;
+    assert!(matches!(resp, UserResponse::NoActiveSession), "refused: {resp:?}");
+    assert_eq!(chain_len(), before, "bob's key log was appended to");
+}
+
+/// **`StorageReload` naming another user is refused** by the session guard,
+/// which answers before any handler runs, so nothing is reloaded.
+#[tokio::test]
+async fn storage_reload_naming_another_user_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = alice_and_bob(dir.path()).await;
+    let ctx = daemon.agent_context();
+    sessions::insert(&ctx.sessions, ALICE_SESSION.to_string(), "alice".to_string());
+
+    let resp = from_alice(&ctx, UserRequest::StorageReload { user_id: "bob".into() }).await;
+    assert!(matches!(resp, UserResponse::NoActiveSession), "refused: {resp:?}");
+}
+
+/// **A contact ceremony naming another user is refused, and no contact is
+/// admitted.** Both verbs are answered as a stream; the refusal is the
+/// stream's one frame, the opening never runs, so no ceremony waits on a
+/// confirmation and bob's contacts are as they were.
+#[tokio::test]
+async fn a_contact_ceremony_naming_another_user_is_refused() {
+    use super::super::streamed::{answer, VfsWatchSource};
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = alice_and_bob(dir.path()).await;
+    let ctx = daemon.agent_context();
+    sessions::insert(&ctx.sessions, ALICE_SESSION.to_string(), "alice".to_string());
+    sessions::insert(&ctx.sessions, "bob-session".to_string(), "bob".to_string());
+    let bobs_contacts = || async {
         let resp = handle_request(
             &ctx,
-            UserRequest::ExtensionList { user_id: named.into() },
+            UserRequest::ContactList { user_id: "bob".into() },
             Caller::anonymous(),
-            alices_connection(),
+            a_connection("bob-session"),
         )
-        .await;
-        let said = format!("{resp:?}");
-        assert!(
-            !said.contains("org.bob.fetcher"),
-            "alice's ExtensionList naming {named:?} was answered from bob's database: {said}"
+        .await
+        .expect("answered");
+        format!("{resp:?}")
+    };
+    let before = bobs_contacts().await;
+
+    let (changes, _) = tokio::sync::broadcast::channel(16);
+    let (_watching, watcher) = tokio::sync::watch::channel(kotton_sync::engine::FsWatchState::Watching);
+    for request in [
+        UserRequest::ContactPairStart { user_id: "bob".into(), as_name: None, ttl_seconds: 60 },
+        UserRequest::ContactPairJoin {
+            user_id: "bob".into(),
+            code: kotton_wire::ipc::SecretText::new("ABCD-EFGH"),
+            as_name: None,
+        },
+    ] {
+        let verb = request.variant_name();
+        let vfs = VfsWatchSource { changes: &changes, watcher: &watcher };
+        let mut stream = answer(&ctx, &request, &alices_connection(), vfs)
+            .await
+            .unwrap_or_else(|| panic!("{verb}: answered as a stream"))
+            .unwrap_or_else(|e| panic!("{verb}: {e}"));
+        let mut frames = vec![];
+        while let Ok(Some(frame)) = tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv()).await {
+            frames.push(frame);
+        }
+        assert_eq!(
+            format!("{frames:?}"),
+            format!("{:?}", vec![UserResponse::NoActiveSession]),
+            "{verb} naming bob from alice's session is refused"
         );
-        assert!(
-            matches!(resp, Ok(UserResponse::ExtensionList { ref extensions }) if extensions.is_empty()),
-            "alice's own (empty) list, naming {named:?}: {said}"
-        );
+        assert!(ctx.pending_confirms.lock().await.is_empty(), "{verb}: a ceremony is waiting");
     }
+    assert_eq!(bobs_contacts().await, before, "bob's contacts changed");
 }

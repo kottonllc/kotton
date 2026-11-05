@@ -174,8 +174,9 @@ fn opening<'a>(
             *posture,
         )),
         // A contact ceremony: two people, a spoken code, this node's relay.
-        // Both need the session of the user pairing, which the gate reads — a
-        // contact is admitted on their word.
+        // Both require a session, and the gate holds the `user_id` they name
+        // to that session's user (`target_user_id`), so a contact is admitted
+        // only into the store of the person whose session asked.
         UserRequest::ContactPairStart {
             user_id,
             as_name,

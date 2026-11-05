@@ -2740,6 +2740,20 @@ impl UserRequest {
     pub fn target_user_id(&self) -> Option<&str> {
         match self {
             Self::LogoutUser { user_id } => Some(user_id),
+            // Each of these names a user and requires a session, and had no arm
+            // here, so the session guard did not hold the name to the session's
+            // user (#428). Every verb that names a user and requires a session
+            // has an arm; the variants carrying a `user_id` that do not are
+            // session-less (`CreateUser`, `LoginWithRecoveryKey`), checked
+            // against their own token (`BrowserFrame`), or refused on this door
+            // whoever asks (the vault and peer-only verbs).
+            Self::AddRecoveryPhrase { user_id } => Some(user_id),
+            Self::StorageReload { user_id } => Some(user_id),
+            Self::ExtensionInstall { user_id, .. } => Some(user_id),
+            Self::ExtensionList { user_id } => Some(user_id),
+            Self::ExtensionRemove { user_id, .. } => Some(user_id),
+            Self::ContactPairStart { user_id, .. } => Some(user_id),
+            Self::ContactPairJoin { user_id, .. } => Some(user_id),
             Self::ReadFile { user_id, .. } => Some(user_id),
             Self::WriteFile { user_id, .. } => Some(user_id),
             Self::ListFiles { user_id, .. } => Some(user_id),
