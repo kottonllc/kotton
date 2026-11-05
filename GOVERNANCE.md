@@ -28,9 +28,9 @@ not rest on one person either.
   pull request, landed only through the loop. Silence never merges anything. An objection says
   why, in writing, on the proposal.
 - **When maintainers disagree,** the proposal stays open and its default is not built. It is
-  settled by a maintainer's written answer that the others accept, or by a merge a maintainer
-  makes; a choice that would keep the ownership bar ([`CLAUDE.md`](CLAUDE.md)) less strong than
-  the other is never the one taken.
+  settled by a maintainer's written answer that the others accept; no maintainer merges over
+  another's open objection, and a choice that would keep the ownership bar
+  ([`CLAUDE.md`](CLAUDE.md)) less strong than the other is never the one taken.
 - **Where a decision is kept.** A design decision is recorded where the design is: the
   protocol documents in kotton-protocol, or the module docs it governs. Code cites it by name,
   never by number.
@@ -43,18 +43,20 @@ not rest on one person either.
 
 ## Merging into `main`
 
-A pull request lands only after its assessor, its reviewer and the gate have passed it. It is
-merged by a maintainer, or by a driver acting under a maintainer's standing direction once all
+A pull request lands only after its assessor, its reviewer and the gate have passed it; no one,
+maintainer or driver, merges around them. It is merged by a maintainer, or by a driver acting
+under a maintainer's standing direction, given in writing and withdrawn the same way, once all
 three have passed. A change to [`CLAUDE.md`](CLAUDE.md), [`CONTRIBUTING.md`](CONTRIBUTING.md) or
 this page also needs a maintainer's written approval on the pull request; its own rules do not
 ratify it.
 
 ## Reserved to a maintainer
 
-Only a maintainer may: merge a pull request outside the loop, or a change to the rules above
-without written approval; tag or publish a release; change a repository setting, a required
-check, a branch rule or a milestone's order; hold or rotate a signing or release key; add or
-remove a maintainer. A driver asks for these and does not do them.
+Only a maintainer may: give or withdraw a driver's standing direction to merge; approve in
+writing a change to [`CLAUDE.md`](CLAUDE.md), [`CONTRIBUTING.md`](CONTRIBUTING.md) or this page;
+tag or publish a release; change a repository setting, a required check, a branch rule or a
+milestone's order; hold or rotate a signing or release key; add or remove a maintainer. A driver
+asks for these and does not do them.
 
 ## Changing this page
 
