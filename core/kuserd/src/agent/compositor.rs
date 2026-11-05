@@ -19,11 +19,15 @@
 //! ## Which user an event belongs to
 //!
 //! [`user_db_for_compositor`](super::dispatch::user_db_for_compositor), which
-//! takes the principal fallback by name
+//! takes the one loaded principal by name
 //! ([`user_db_for_principal`](super::dispatch::user_db_for_principal)): the
 //! single resident user — on a one-user node, the same user a session of kuid's
-//! would name. No verb that requires a session reaches that fallback (#428);
-//! this channel has no session to hand on.
+//! would name. No verb that requires a session reaches it (#428); this channel
+//! has no session to hand on. With two users loaded it names nobody, and so do
+//! the infer and records hosts built beside it (#432): a compositor cannot know
+//! whose screen it is, so it opens neither person's database rather than guess.
+//! What that leaves the channel is in `launch_designated_shell` and
+//! `compositor_input`.
 //!
 //! It is deliberately *not* read from the event. An `app_id` arriving over a
 //! channel cannot vouch for whose app it is, and a compositor that could name
@@ -275,10 +279,10 @@ impl DeviceDaemon {
         let infer = super::infer_host::infer_host(
             &self.runtime,
             &self.record_stores,
-            self.users.any(),
+            self.users.the_one_loaded(),
             &self.infer_proxy,
         );
-        let records = super::record_access::records_host(&self.runtime, &self.users, &self.base, &self.record_stores, super::record_access::the_one_loaded(self.users.ids()));
+        let records = super::record_access::records_host(&self.runtime, &self.users, &self.base, &self.record_stores, self.users.the_one_loaded());
         if let Err(e) = kotton_app::daemon::apps::app_windows_changed(
             &super::app_host::app_host(
                 self.runtime.event_bus(),
@@ -332,20 +336,20 @@ impl DeviceDaemon {
         // `world occupant`, and an app that is not has no `auth` import to call.
         let occupant = self.occupant_host();
 
-        // Whoever is resident. A guest calling `infer` from an input event must
-        // get the same answer it would from any other frame, so this is built
-        // here rather than passed as `None`.
+        // The one resident, or nobody with two (#432). A guest calling `infer`
+        // from an input event must get the same answer it would from any other
+        // frame, so this is built here rather than passed as `None`.
         let infer = super::infer_host::infer_host(
             &self.runtime,
             &self.record_stores,
-            self.users.any(),
+            self.users.the_one_loaded(),
             &self.infer_proxy,
         );
         // The person's kept records (`schema.kept`): any app may hold
-        // `schema.read`, so this is not occupant-gated. Not `users.any()`, as
-        // infer is built above — with two people loaded that is a guess over
+        // `schema.read`, so this is not occupant-gated. The one loaded, as
+        // infer is above: with two people loaded anything else is a guess over
         // whose records an app is handed, so this path hands none.
-        let records = super::record_access::records_host(&self.runtime, &self.users, &self.base, &self.record_stores, super::record_access::the_one_loaded(self.users.ids()));
+        let records = super::record_access::records_host(&self.runtime, &self.users, &self.base, &self.record_stores, self.users.the_one_loaded());
 
         // **Who lives here, read before the event is delivered.**
         //
@@ -357,11 +361,12 @@ impl DeviceDaemon {
         //
         // Read from the registry rather than from a flag the occupant host sets,
         // because the registry is the daemon's own record of who exists and a
-        // flag would be a second one. `None` before means the running shell can
+        // flag would be a second one. Nobody before means the running shell can
         // only be the one `app_launch_system_shell` started — a resident-but-
-        // locked person answers `Some` here (loaded and unlocked are not the
-        // same thing), so an unlock does not take this branch.
-        let resident_before = self.users.any();
+        // locked person answers `true` here (loaded and unlocked are not the
+        // same thing), so an unlock does not take this branch. Presence only
+        // (`is_any_resident`): who was born is read below.
+        let anyone_resident_before = self.users.is_any_resident();
 
         if let Err(e) = kotton_app::daemon::apps::app_input_event(
             &super::app_host::app_host(
@@ -398,8 +403,13 @@ impl DeviceDaemon {
         //
         // The identity now exists, so the world the person is looking at is the
         // wrong one.
-        let born = if resident_before.is_none() {
-            self.users.any()
+        //
+        // Who was born is the one loaded, never any one of several: a create
+        // from nobody leaves exactly one, and if somebody else became resident
+        // across the same await there is no telling whose world this is, so
+        // the screen is left as it is (#432).
+        let born = if !anyone_resident_before {
+            self.users.the_one_loaded()
         } else {
             None
         };
@@ -651,20 +661,20 @@ impl DeviceDaemon {
     ) -> Option<kotton_wire::UserResponse> {
         let occupant = self.occupant_host();
 
-        // Whoever is resident. A guest calling `infer` must get the same answer
-        // whichever frame it asked from, so this is built beside the occupant
-        // host rather than passed as `None`.
+        // The one resident, or nobody with two (#432). A guest calling `infer`
+        // must get the same answer whichever frame it asked from, so this is
+        // built beside the occupant host rather than passed as `None`.
         let infer = super::infer_host::infer_host(
             &self.runtime,
             &self.record_stores,
-            self.users.any(),
+            self.users.the_one_loaded(),
             &self.infer_proxy,
         );
         // The person's kept records (`schema.kept`): any app may hold
-        // `schema.read`, so this is not occupant-gated. Not `users.any()`, as
-        // infer is built above — with two people loaded that is a guess over
+        // `schema.read`, so this is not occupant-gated. The one loaded, as
+        // infer is above: with two people loaded anything else is a guess over
         // whose records an app is handed, so this path hands none.
-        let records = super::record_access::records_host(&self.runtime, &self.users, &self.base, &self.record_stores, super::record_access::the_one_loaded(self.users.ids()));
+        let records = super::record_access::records_host(&self.runtime, &self.users, &self.base, &self.record_stores, self.users.the_one_loaded());
 
         // The seam, and it is checked here rather than inside either branch: a
         // resident user's own designation wins, always. The system-shell path
@@ -683,8 +693,10 @@ impl DeviceDaemon {
         // exist. The screen comes from that registry on both paths
         // (`push_shell_mode`), so this test decides only whose designation is
         // consultable.
-        let resident = self.users.any();
-        if resident.is_none() {
+        //
+        // Presence only (`is_any_resident`); whose designation, when somebody
+        // is resident, is `user_db_for_compositor`'s one-loaded rule below.
+        if !self.users.is_any_resident() {
             match kotton_app::daemon::apps::app_launch_system_shell(
                 &super::app_host::app_host(
                     self.runtime.event_bus(),
@@ -700,7 +712,8 @@ impl DeviceDaemon {
                 Some(&occupant),
                 Some(&infer),
                 Some(&records),
-                resident.as_deref(),
+                // Nobody is resident on this branch.
+                None,
             )
             .await
             {
@@ -732,7 +745,7 @@ impl DeviceDaemon {
                 //
                 // **Locked is recoverable, so it gets a surface.** A resident user can be
                 // locked at the same time, which is why this is reached at all
-                // rather than the branch above: `users.any()` answers *loaded*, not
+                // rather than the branch above: `is_any_resident` answers *loaded*, not
                 // *unlocked*. The system shell needs no user database to start, and
                 // `app_launch_system_shell` routes it to the unlock screen — the host sets
                 // `mode=locked` and hands it the registered users whenever nobody holds a

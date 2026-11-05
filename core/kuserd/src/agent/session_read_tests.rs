@@ -18,7 +18,7 @@ const PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
 const ALICE_SESSION: &str = "alice-session";
 
 /// A daemon booted at `base` holding alice and bob, both unlocked.
-async fn alice_and_bob(base: &Path) -> super::super::DeviceDaemon {
+pub(super) async fn alice_and_bob(base: &Path) -> super::super::DeviceDaemon {
     let keychain: Arc<dyn kotton_sys::secret::SecretsStore + Send + Sync> =
         Arc::new(kotton_secret::MemorySecrets::new());
     let runtime = DeviceRuntime::new_with_secrets(
@@ -176,7 +176,7 @@ async fn a_query_from_a_session_that_has_gone_is_refused_with_nothing_of_another
 }
 
 /// A connection holding `token`, at local-operator origin.
-fn a_connection(token: &str) -> Arc<Mutex<Option<ConnSessionData>>> {
+pub(super) fn a_connection(token: &str) -> Arc<Mutex<Option<ConnSessionData>>> {
     let principal = Principal::LocalOperator;
     Arc::new(Mutex::new(Some(ConnSessionData {
         origin: principal.trust_origin(),
