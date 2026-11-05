@@ -2736,10 +2736,22 @@ impl UserRequest {
     /// user, or `None` for device-level and public operations and for the
     /// named exceptions below.
     ///
-    /// **Every variant is classified.** The match has no catch-all, so a new
-    /// variant does not compile until it is given an arm here: `Some(user_id)`
-    /// if the session guard must hold the user it names to the session's user,
-    /// or `None` beside its reason (#431).
+    /// **Every variant is classified, and the rule is held in two halves.**
+    ///
+    /// - *Placement* is the compiler's: the match has no catch-all, so a new
+    ///   variant does not compile until it is given an arm here. That holds that
+    ///   it is placed, not that it is placed correctly: a variant naming a user
+    ///   compiles just as well in the `None` group as in a `Some` arm.
+    /// - *Correctness* is the recording's: `target_user_id_tests` reads every
+    ///   variant that records a `user_id` field in `core/wire/wire-surface.txt`
+    ///   (which `cargo xtask wire-check` keeps in step with this enum) and fails
+    ///   unless each is in its `held` list (this returns `Some(user_id)`) or its
+    ///   `not_held` list (this returns `None`). `not_held` is the
+    ///   named-exception list, and each of its variants has its reason beside
+    ///   its arm here.
+    ///
+    /// A user named under a field not called `user_id` is forced through the
+    /// match, but the recording test does not see it (#431).
     ///
     /// Used by the daemon's central auth guard to enforce session ownership
     /// before dispatching to a handler.
@@ -2949,7 +2961,8 @@ impl UserRequest {
             // Each carries a `user_id` and is answered `None` on purpose, with its
             // reason. Adding a variant that names a user means classifying it
             // here: there is no catch-all, so the compiler refuses it until it
-            // has an arm (#431).
+            // has an arm, and a variant recording `user_id` placed here must
+            // also join `target_user_id_tests`'s `not_held` list (#431).
             //
             // Session-less bootstrap: these mint the identity and its first
             // session, so there is no session yet to hold the name to.
@@ -4770,9 +4783,13 @@ mod secret_debug_tests {
 }
 
 /// `target_user_id` answers every request as it did when the match ended in a
-/// catch-all. The match itself is the rule for a new variant (the compiler
-/// refuses one until it is classified); these hold the classification of the
-/// ones there are to what it was.
+/// catch-all, and every request that records a `user_id` is either held to the
+/// session's user or a named exception.
+///
+/// The compiler holds that each variant is placed in the match; these hold
+/// that each is placed correctly. `held` answers its user and `not_held` (the
+/// named exceptions) answers `None`, and together they are exactly the
+/// variants the recorded surface gives a `user_id` field.
 #[cfg(test)]
 mod target_user_id_tests {
     use super::*;
@@ -4992,7 +5009,6 @@ mod target_user_id_tests {
     #[test]
     fn every_request_held_to_the_session_answers_the_user_it_names() {
         let held = held();
-        assert_eq!(held.len(), 142);
         for request in &held {
             assert_eq!(
                 request.target_user_id(),
@@ -5006,7 +5022,6 @@ mod target_user_id_tests {
     #[test]
     fn every_request_naming_a_user_the_guard_does_not_hold_answers_none() {
         let not_held = not_held();
-        assert_eq!(not_held.len(), 14);
         for request in &not_held {
             assert_eq!(
                 request.target_user_id(),
@@ -5015,5 +5030,41 @@ mod target_user_id_tests {
                 request.variant_name()
             );
         }
+    }
+
+    /// The variants `held` and `not_held` classify are exactly those whose
+    /// block in `core/wire/wire-surface.txt` has a field named `user_id`. The
+    /// recording is wire-check's, held to the enum, so a variant added with a
+    /// `user_id` and placed in the match's `None` group fails here until it is
+    /// named in `not_held`, the exception list, or moved to a `Some` arm and
+    /// `held`.
+    ///
+    /// The residual: a variant that names its user under another field name
+    /// is forced through the match by the compiler, but this test does not
+    /// see it.
+    #[test]
+    fn every_request_recording_a_user_id_is_held_or_a_named_exception() {
+        use std::collections::BTreeSet;
+        let blocks = crate::recorded_surface::read(include_str!("../../wire-surface.txt"))
+            .unwrap_or_else(|e| panic!("the request surface cannot be read as a recording: {e}"));
+        let recorded: BTreeSet<&str> = blocks
+            .iter()
+            .filter(|block| {
+                block
+                    .lines
+                    .iter()
+                    .any(|line| line.text.trim().split_once(": ").is_some_and(|(name, _)| name == "user_id"))
+            })
+            .map(|block| block.name)
+            .collect();
+        let classified: BTreeSet<&str> =
+            held().iter().chain(not_held().iter()).map(UserRequest::variant_name).collect();
+        let unclassified: Vec<_> = recorded.difference(&classified).collect();
+        let unrecorded: Vec<_> = classified.difference(&recorded).collect();
+        assert!(
+            unclassified.is_empty() && unrecorded.is_empty(),
+            "recorded with a user_id but in neither held nor not_held: {unclassified:?}; \
+             classified but recording no user_id: {unrecorded:?}"
+        );
     }
 }

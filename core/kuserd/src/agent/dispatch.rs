@@ -5,10 +5,15 @@
 //! one-frame path [`handle_request`] reads [`request_entry`] (the scope
 //! allow-list, the mint-only rule, the trust floor and the CEK guard); on the
 //! streaming path `super::streamed` reads [`stream_entry`] (the mint-only rule
-//! and the trust floor). Both end in [`session_entry`], which reads the session
-//! once, refuses a request whose session is missing or does not own the user it
-//! names (`UserRequest::requires_session` and `UserRequest::target_user_id`),
-//! and answers an [`Entry`]: refused, a [`SessionUser`] to hand the verb, or
+//! and the trust floor). [`stream_entry`] has two other readers: the
+//! connection closure in `agent/mod.rs`, for a verb answered in one frame,
+//! before it reaches `BrowserFrame` or [`handle_request`]; and
+//! `browser_channel`, for the contact ceremonies a browser starts over its
+//! sealed channel. [`request_entry`] and [`stream_entry`] both end in
+//! [`session_entry`], which reads the session once, refuses a request whose
+//! session is missing or does not own the user it names
+//! (`UserRequest::requires_session` and `UserRequest::target_user_id`), and
+//! answers an [`Entry`]: refused, a [`SessionUser`] to hand the verb, or
 //! session-less. The verb is answered by the private `answer_request`, so
 //! nothing reaches it around the gate.
 //!
