@@ -147,22 +147,15 @@ impl DeviceDaemon {
                     );
                     return;
                 }
+                // Whose instance it was, read before it is torn down: the
+                // instance is the one record of whom it was launched for.
+                let launched_for = dying.as_ref().and_then(|i| i.launched_for().map(str::to_owned));
                 if let Some(mut instance) = dying {
                     kotton_app::daemon::apps::terminate_long_lived_instance(&mut instance).await;
                 }
                 // The instance exited, so its `while_open` grants end with it: a
-                // later launch does not inherit them. Resolve the resident user's db the same way
-                // input delivery does (`None` → the single resident user).
-                if let Ok(user_db) = super::dispatch::user_db_for_compositor(
-                    &self.runtime,
-                    &self.users,
-                    &self.user_dbs,
-                    &self.base,
-                )
-                .await
-                {
-                    kotton_app::daemon::apps::app_closed(&user_db, &app_id).await;
-                }
+                // later launch does not inherit them.
+                self.sweep_while_open(&app_id, launched_for.as_deref()).await;
             }
             // **Recorded, and the designated app told to ask again.** The report is the
             // compositor saying what the app stack now holds, and the designated app reads
@@ -220,6 +213,35 @@ impl DeviceDaemon {
             // An answer that reached this arm had nobody waiting.
             CompositorEvent::PromptAnswered { id, .. } => {
                 tracing::debug!(id, "kuserd: a prompt's answer reached the drain with no one waiting");
+            }
+        }
+    }
+
+    /// End `app_id`'s `while_open` grants, because its instance has closed.
+    ///
+    /// For the user the instance was launched for, when it was launched for
+    /// somebody. Otherwise — no live instance (`live_instances` is keyed by
+    /// `app_id` device-wide, so there was none for anyone), or one launched for
+    /// nobody — in every loaded user's database. That fails closed and picks
+    /// nobody: no instance of the app is live, so no person has a `while_open`
+    /// grant of it that is still open. It never asks the compositor's
+    /// one-loaded rule, which with two people loaded is nobody, and a sweep
+    /// skipped is a grant that outlives its window (#432).
+    ///
+    /// A database that will not open (a locked account) is logged and left:
+    /// its grants are swept by the next close of the app once it opens.
+    pub(super) async fn sweep_while_open(&self, app_id: &str, launched_for: Option<&str>) {
+        let whose = match launched_for {
+            Some(user) => vec![user.to_owned()],
+            None => self.users.ids(),
+        };
+        for user in whose {
+            match super::dispatch::user_db_named(&self.runtime, &self.user_dbs, &self.base, &user).await {
+                Ok(user_db) => kotton_app::daemon::apps::app_closed(&user_db, app_id).await,
+                Err(e) => tracing::warn!(
+                    %app_id, user_id = %user, error = %e,
+                    "kuserd: could not open a user database to end an app's while-open grants"
+                ),
             }
         }
     }

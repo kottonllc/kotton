@@ -1472,6 +1472,17 @@ impl LongLivedInstance {
             designated: self.designated,
         }
     }
+
+    /// The user this instance was launched for, or `None` for one launched for
+    /// nobody (no data mount, so no [`PersonalReach`]).
+    ///
+    /// The instance is the one place that answer survives the launch, so a
+    /// caller that must act for the instance's person after it ends — the
+    /// `while_open` sweep when its last surface closes — reads it here rather
+    /// than guessing from who is loaded.
+    pub fn launched_for(&self) -> Option<&str> {
+        self.personal.as_ref().map(|p| p.user_id.as_str())
+    }
 }
 
 /// Hard wall-clock budget for a single `kotton-runner` invocation. A guest that

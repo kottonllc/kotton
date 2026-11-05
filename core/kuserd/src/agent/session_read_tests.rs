@@ -65,7 +65,7 @@ pub(super) async fn alice_and_bob(base: &Path) -> super::super::DeviceDaemon {
 }
 
 /// `user`'s own agent database, opened by name.
-async fn db_of(ctx: &super::super::AgentContext, user: &str) -> Arc<SqlitePool> {
+pub(super) async fn db_of(ctx: &super::super::AgentContext, user: &str) -> Arc<SqlitePool> {
     crate::db::user_db::user_agent_db(
         &ctx.user_dbs,
         &ctx.base,

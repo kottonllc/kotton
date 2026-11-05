@@ -862,6 +862,7 @@ async fn answer_request(
         browser_desks: _,
         browser_channels: _,
         ceremonies,
+        web_shell_setting,
     } = ctx;
     let started_at = *started_at;
     let base = base.as_path();
@@ -1817,14 +1818,18 @@ async fn answer_request(
             allow,
         } => {
             // A session verb: the gateway it starts acts for the gate's user,
-            // never for whichever user is loaded (#432). While it serves
-            // somebody else, this person's request is refused, naming whom it
-            // serves, before anything is written: the configuration is that
-            // person's gateway's, and a second person neither restarts it as
-            // themselves nor reconfigures it under them.
+            // never for whichever user is loaded (#432). The gateway's
+            // settings are its holder's: while somebody holds it, every
+            // `WebShellSet` from anyone else is refused, naming the holder,
+            // before anything is written, whether or not it switches the
+            // gateway on. The check, the write and the claim are made under
+            // one lock (`WebShellSetting`), so there is no window between
+            // them. With nobody holding it, the setter becomes the holder
+            // only by switching the gateway on.
             let user = handed(&session_user)?.as_str();
-            if let Some(serving) = super::khttpd_acts_for(sidecar_states).filter(|s| s != user) {
-                return Ok(web_shell_serves_another(&serving));
+            let _setting = web_shell_setting.lock().await;
+            if let Some(holder) = super::khttpd_acts_for(sidecar_states).filter(|h| h != user) {
+                return Ok(web_shell_serves_another(&holder));
             }
             let switched_on = enabled == Some(true);
             let resp = handlers::device_config::web_shell_set(
@@ -1833,12 +1838,11 @@ async fn answer_request(
             .await?;
             // The setting takes effect now, not at the next boot.
             if switched_on && matches!(resp, UserResponse::Ok) {
-                // Claimed under the lock, so a second person's request that
-                // passed the check above in the same moment starts nothing and
-                // is told here. Its configuration write has landed by then:
-                // the one window the check above leaves, and named here.
-                if let super::Gateway::ServesAnother(serving) = super::ensure_khttpd(ctx, Some(user)).await {
-                    return Ok(web_shell_serves_another(&serving));
+                // Under the same lock as the check above, so the gateway is
+                // either unclaimed or this user's here; anything else is a
+                // supervisor this lock does not cover, and is refused all the same.
+                if let super::Gateway::ServesAnother(holder) = super::ensure_khttpd(ctx, Some(user)).await {
+                    return Ok(web_shell_serves_another(&holder));
                 }
             }
             Ok(resp)

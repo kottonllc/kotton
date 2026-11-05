@@ -247,6 +247,11 @@ pub(super) struct AgentContext {
     /// shell. Held here because a ceremony outlives the
     /// host call that starts it — see `agent::ceremony`.
     pub(super) ceremonies: ceremony::Ceremonies,
+    /// The one lock every change to the web-shell gateway is made under:
+    /// `WebShellSet`'s holder check and its write of the device-wide
+    /// `web-shell.*` settings, and the claim [`ensure_khttpd`] takes. See
+    /// [`WebShellSetting`].
+    pub(super) web_shell_setting: WebShellSetting,
     pub(super) sidecar_states: Arc<RwLock<HashMap<String, SidecarState>>>,
     pub(super) ipc_sessions: Arc<RwLock<HashMap<String, IpcSessionRecord>>>,
     pub(super) connected_peers: Arc<RwLock<HashSet<String>>>,
@@ -349,6 +354,8 @@ pub struct DeviceDaemon {
     /// Contact ceremonies in flight. One per daemon,
     /// because a ceremony outlives the host call that starts it.
     ceremonies: ceremony::Ceremonies,
+    /// See [`AgentContext::web_shell_setting`].
+    web_shell_setting: WebShellSetting,
     /// Browser channels reached through a gateway device over the relay,
     /// keyed by gateway and channel name.
     browser_channels: browser_channel::BrowserChannels,
@@ -808,6 +815,7 @@ impl DeviceDaemon {
         );
         Ok(Self {
             ceremonies,
+            web_shell_setting: WebShellSetting::default(),
             users: users.clone(),
             record_stores: record_stores.clone(),
             runtime: Arc::clone(&runtime),
@@ -1120,6 +1128,7 @@ impl DeviceDaemon {
         );
         Ok(Self {
             ceremonies,
+            web_shell_setting: WebShellSetting::default(),
             users: users.clone(),
             record_stores: record_stores.clone(),
             runtime: Arc::clone(&runtime),
@@ -1474,7 +1483,11 @@ impl DeviceDaemon {
         }
         // ── Spawn khttpd sidecar if web-shell.enabled = "true" ─────────────
         // A boot names no user, so this is the one loaded, or nobody (#432).
-        ensure_khttpd(&this.agent_context(), None).await;
+        {
+            let ctx = this.agent_context();
+            let _setting = ctx.web_shell_setting.lock().await;
+            ensure_khttpd(&ctx, None).await;
+        }
 
         // ── Spawn kinferd if inference.enabled = "true" ─────────────────────
         //
@@ -1800,6 +1813,7 @@ impl DeviceDaemon {
             browser_desks: Arc::clone(&this.browser_desks),
             browser_channels: Arc::clone(&this.browser_channels),
             ceremonies: this.ceremonies.clone(),
+            web_shell_setting: this.web_shell_setting.clone(),
         }
     }
 
@@ -3262,7 +3276,9 @@ async fn supervise_kquicd(
 /// second person's `WebShellSet` while it serves somebody is answered
 /// [`Gateway::ServesAnother`], naming them, and nothing is started or changed.
 /// The claim is taken under the state map's write lock before the supervisor
-/// is spawned, so two requests cannot both start one.
+/// is spawned, and every caller holds [`WebShellSetting`]'s lock across the
+/// call, so two requests cannot both start one and no setting lands between a
+/// holder check and a claim.
 pub(super) async fn ensure_khttpd(ctx: &AgentContext, for_user: Option<&str>) -> Gateway {
     let enabled = kotton_device::config::db::get_key(ctx.device_db.as_ref(), "web-shell.enabled")
         .await
@@ -3308,6 +3324,25 @@ pub(super) async fn ensure_khttpd(ctx: &AgentContext, for_user: Option<&str>) ->
         Arc::clone(&ctx.device_db),
     ));
     Gateway::Started(user_id)
+}
+
+/// The lock the web-shell gateway's holder and its settings are changed under.
+///
+/// The settings are device-wide rows in `device_db` (`web-shell.port`, `.bind`,
+/// `.allow`, `.static_dir`), and `supervise_khttpd` re-reads them on every
+/// spawn, so whoever writes them is configuring the running gateway. They are
+/// its holder's alone (#432): a `WebShellSet` checks who holds the gateway and
+/// writes under this one lock, so no other person's write can land between
+/// the check and the write, or between the write and a claim. Async, because
+/// the write is; one per daemon.
+#[derive(Clone, Default)]
+pub(super) struct WebShellSetting(Arc<tokio::sync::Mutex<()>>);
+
+impl WebShellSetting {
+    /// Hold the lock. [`ensure_khttpd`] is called with it held.
+    pub(super) async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.0.lock().await
+    }
 }
 
 /// What [`ensure_khttpd`] did.
