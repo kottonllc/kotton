@@ -128,21 +128,6 @@ pub struct DaemonRecordsHost<'a> {
     user_id: Option<String>,
 }
 
-/// The one person loaded on this device, or nobody — never a guess between two.
-///
-/// The compositor's paths have no session to name the person whose instance an
-/// input or a launch belongs to, and `UserRegistry::any` answers *any one loaded
-/// user*, in no defined order: on a device with two people loaded that is a coin
-/// toss over whose records an app is handed. So those paths ask this, and with
-/// two people loaded the records host has nobody and says so; the paths that do
-/// carry a session pass its user straight through.
-pub(crate) fn the_one_loaded(ids: Vec<String>) -> Option<String> {
-    match <[String; 1]>::try_from(ids) {
-        Ok([only]) => Some(only),
-        Err(_) => None,
-    }
-}
-
 /// Build the records host for whoever the instance was launched for.
 pub fn records_host<'a>(
     runtime: &'a kotton_device::DeviceRuntime,
@@ -441,16 +426,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(still.len(), 1);
-    }
-
-    /// **The compositor never guesses whose records an app is handed.** One
-    /// person loaded is that person; nobody, or two, is nobody — never whichever
-    /// the registry's map happens to yield first.
-    #[test]
-    fn the_compositor_hands_records_only_to_the_one_person_loaded() {
-        assert_eq!(super::the_one_loaded(vec!["alice".into()]), Some("alice".into()));
-        assert_eq!(super::the_one_loaded(vec![]), None);
-        assert_eq!(super::the_one_loaded(vec!["alice".into(), "bob".into()]), None);
     }
 
     /// **`schema.kept` answers the schema's rows in every root the person is

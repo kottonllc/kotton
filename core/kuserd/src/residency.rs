@@ -16,8 +16,8 @@
 //! crate, every daemon handler needing to find a user would name that crate to
 //! do it, because serving a user begins by resolving which user.
 //!
-//! Every direct reach from the daemon asks *which* users, *how many*, or *any
-//! one* — and none wants the `Arc<UserStore>`. The device/daemon boundary shows
+//! Every direct reach from the daemon asks *which* users, *how many*, *the one*,
+//! or *whether anyone* — and none wants the `Arc<UserStore>`. The device/daemon boundary shows
 //! up in the access pattern as well as in the types.
 //!
 //! ## On the name
@@ -93,10 +93,10 @@ impl UserRegistry {
 
     /// Which users are loaded.
     ///
-    /// This and the two below are the *machine's* view, and they are the whole
+    /// This and the three below are the *machine's* view, and they are the whole
     /// of what callers outside this crate want: every direct reach into the
-    /// map from the daemon asks which users, how many, or any one — and **none
-    /// wants the `Arc<UserStore>`**. That is the device/daemon boundary showing
+    /// map from the daemon asks which users, how many, the one, or whether
+    /// anyone — and **none wants the `Arc<UserStore>`**. That is the device/daemon boundary showing
     /// up in the access pattern.
     pub fn ids(&self) -> Vec<String> {
         self.runtimes.read().unwrap().keys().cloned().collect()
@@ -107,13 +107,39 @@ impl UserRegistry {
         self.runtimes.read().unwrap().len()
     }
 
-    /// Any one loaded user, for callers that need a subject and have no other
-    /// way to choose one.
+    /// The one user loaded, or nobody: never a choice between two.
     ///
-    /// Deliberately not `first`: a `HashMap`'s iteration order is unspecified,
-    /// so "first" would name a determinism this does not have.
-    pub fn any(&self) -> Option<String> {
-        self.runtimes.read().unwrap().keys().next().cloned()
+    /// The rule for every caller that acts for a user it was not given: the
+    /// boot sidecars, the web-shell gateway at boot, the compositor channel and
+    /// the system install (#432). Under supervision by `kdeviced` exactly one
+    /// user is loaded, the process's principal, so this names them. With none
+    /// loaded, or two, it is `None`, and the caller refuses rather than guess:
+    /// a `HashMap` has no order, so "any one of two" is a coin toss over whose
+    /// principal, store or registry is used.
+    ///
+    /// Read under one lock, so the count and the name cannot disagree.
+    pub fn the_one_loaded(&self) -> Option<String> {
+        only(self.runtimes.read().unwrap().keys())
+    }
+
+    /// Whether anybody is loaded at all. **Presence only**: it answers `bool`,
+    /// so it cannot name a user, and nothing can act for one by it.
+    ///
+    /// This replaced `any() -> Option<String>`, "any one loaded user", which
+    /// let a caller that only meant *is anyone here* also take the answer as
+    /// *whom to act for* (#432). Its callers, each a presence check:
+    ///
+    /// - `DeviceDaemon::compositor_input` (`agent/compositor.rs`), read before
+    ///   an input event: nobody resident means the running shell is the
+    ///   pre-identity one, so a user who exists after the event was just
+    ///   created there. Who that user is comes from [`Self::the_one_loaded`].
+    /// - `DeviceDaemon::launch_designated_shell` (`agent/compositor.rs`):
+    ///   nobody resident means there is no designation to consult, so the
+    ///   system shell starts. Whose designation it is, when somebody is,
+    ///   comes from [`Self::the_one_loaded`], through
+    ///   `dispatch::user_db_for_compositor`.
+    pub fn is_any_resident(&self) -> bool {
+        !self.runtimes.read().unwrap().is_empty()
     }
 
     /// Every loaded runtime, for a caller that must act on all of them —
@@ -132,16 +158,39 @@ impl UserRegistry {
     }
 }
 
+/// The one id `ids` holds, or `None` for none or several:
+/// [`UserRegistry::the_one_loaded`]'s rule, apart from the lock.
+fn only<'a>(mut ids: impl Iterator<Item = &'a String>) -> Option<String> {
+    match (ids.next(), ids.next()) {
+        (Some(one), None) => Some(one.clone()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Nothing that acts for a user it was not given guesses between two.**
+    /// One person loaded is that person; nobody, or two, is nobody — never
+    /// whichever the registry's map happens to yield first. (Moved here from
+    /// `record_access`, whose compositor records host was its first reader.)
+    #[test]
+    fn the_one_loaded_names_one_user_and_never_chooses_between_two() {
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(only(ids(&["alice"]).iter()), Some("alice".into()));
+        assert_eq!(only(ids(&[]).iter()), None);
+        assert_eq!(only(ids(&["alice", "bob"]).iter()), None);
+        assert_eq!(only(ids(&["alice", "bob", "carol"]).iter()), None);
+    }
 
     #[test]
     fn an_empty_registry_answers_all_three_questions_without_panicking() {
         let reg = UserRegistry::new();
         assert!(reg.ids().is_empty());
         assert_eq!(reg.count(), 0);
-        assert!(reg.any().is_none());
+        assert!(!reg.is_any_resident());
+        assert!(reg.the_one_loaded().is_none());
         assert!(reg.get("nobody").is_none());
         assert!(reg.all().is_empty());
     }

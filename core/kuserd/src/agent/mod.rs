@@ -141,7 +141,7 @@ impl ConnSessionData {
 ///
 /// `pub` rather than `pub(crate)`: `supervise_kinferd` takes the map, and the
 /// integration suite runs that supervisor rather than a copy of it. Every field
-/// here already crosses the wire as `SidecarInfo`, so
+/// here but `acts_for` already crosses the wire as `SidecarInfo`, so
 /// this widens no fact — only who may name the struct carrying it.
 #[derive(Debug, Clone)]
 pub struct SidecarState {
@@ -168,6 +168,14 @@ pub struct SidecarState {
     pub restart_count: u32,
     /// Unix timestamp (seconds) of the most recent successful spawn.
     pub started_at: Option<i64>,
+    /// **Whom this sidecar's token acts for, while it is supervised**, and only
+    /// for a sidecar that can be started for more than one person: the web-shell
+    /// gateway, which a session's `WebShellSet` starts ([`ensure_khttpd`]).
+    /// Set when supervision is claimed and cleared when it ends, so a second
+    /// person's `WebShellSet` can be told whose gateway it is rather than start
+    /// one acting for somebody else (#432). Not on the wire: `SidecarInfo` does
+    /// not carry it, and `kotton sidecars` names no user.
+    pub acts_for: Option<String>,
 }
 
 /// Per-connection session record for `IpcSessions` introspection.
@@ -239,6 +247,11 @@ pub(super) struct AgentContext {
     /// shell. Held here because a ceremony outlives the
     /// host call that starts it — see `agent::ceremony`.
     pub(super) ceremonies: ceremony::Ceremonies,
+    /// The one lock every change to the web-shell gateway is made under:
+    /// `WebShellSet`'s holder check and its write of the device-wide
+    /// `web-shell.*` settings, and the claim [`ensure_khttpd`] takes. See
+    /// [`WebShellSetting`].
+    pub(super) web_shell_setting: WebShellSetting,
     pub(super) sidecar_states: Arc<RwLock<HashMap<String, SidecarState>>>,
     pub(super) ipc_sessions: Arc<RwLock<HashMap<String, IpcSessionRecord>>>,
     pub(super) connected_peers: Arc<RwLock<HashSet<String>>>,
@@ -341,6 +354,8 @@ pub struct DeviceDaemon {
     /// Contact ceremonies in flight. One per daemon,
     /// because a ceremony outlives the host call that starts it.
     ceremonies: ceremony::Ceremonies,
+    /// See [`AgentContext::web_shell_setting`].
+    web_shell_setting: WebShellSetting,
     /// Browser channels reached through a gateway device over the relay,
     /// keyed by gateway and channel name.
     browser_channels: browser_channel::BrowserChannels,
@@ -535,14 +550,23 @@ impl DeviceDaemon {
         self.users.clone()
     }
 
-    /// The user this daemon's sidecars act for.
+    /// The user this daemon's boot sidecars (ksyncd, kquicd) act for: the one
+    /// loaded, or nobody.
     ///
     /// Under supervision by `kdeviced` exactly one user is loaded — the
-    /// process's principal — so this is deterministic. On a legacy unsupervised
-    /// boot it is an arbitrary loaded user, which is no worse than a machine-wide
-    /// `SELECT DISTINCT user_id FROM paired_nodes` pick would be.
+    /// process's principal — so this names them. On an unsupervised boot
+    /// holding two identities there is no principal, and it is `None`: no
+    /// sidecar starts, and the boot says why, rather than act for whichever
+    /// user the registry yields first (#432).
     fn sidecar_user(&self) -> Option<String> {
-        self.users.any()
+        let one = self.users.the_one_loaded();
+        if one.is_none() && self.users.count() > 1 {
+            tracing::info!(
+                loaded = self.users.count(),
+                "several users are loaded and a boot names none of them; no boot sidecar starts"
+            );
+        }
+        one
     }
 
     /// Create a new system daemon, initialising DeviceRuntime from the platform base directory.
@@ -791,6 +815,7 @@ impl DeviceDaemon {
         );
         Ok(Self {
             ceremonies,
+            web_shell_setting: WebShellSetting::default(),
             users: users.clone(),
             record_stores: record_stores.clone(),
             runtime: Arc::clone(&runtime),
@@ -831,6 +856,7 @@ impl DeviceDaemon {
                         restart_count: 0,
                         started_at: Some(now),
                         failed: None,
+                        acts_for: None,
                     },
                 );
                 Arc::new(RwLock::new(map))
@@ -1102,6 +1128,7 @@ impl DeviceDaemon {
         );
         Ok(Self {
             ceremonies,
+            web_shell_setting: WebShellSetting::default(),
             users: users.clone(),
             record_stores: record_stores.clone(),
             runtime: Arc::clone(&runtime),
@@ -1145,6 +1172,7 @@ impl DeviceDaemon {
                         restart_count: 0,
                         started_at: Some(now),
                         failed: None,
+                        acts_for: None,
                     },
                 );
                 Arc::new(RwLock::new(map))
@@ -1454,7 +1482,12 @@ impl DeviceDaemon {
             }
         }
         // ── Spawn khttpd sidecar if web-shell.enabled = "true" ─────────────
-        ensure_khttpd(&this.agent_context()).await;
+        // A boot names no user, so this is the one loaded, or nobody (#432).
+        {
+            let ctx = this.agent_context();
+            let _setting = ctx.web_shell_setting.lock().await;
+            ensure_khttpd(&ctx, None).await;
+        }
 
         // ── Spawn kinferd if inference.enabled = "true" ─────────────────────
         //
@@ -1500,6 +1533,7 @@ impl DeviceDaemon {
                         restart_count: 0,
                         started_at: None,
                         failed: None,
+                        acts_for: None,
                     },
                 );
             }
@@ -1779,6 +1813,7 @@ impl DeviceDaemon {
             browser_desks: Arc::clone(&this.browser_desks),
             browser_channels: Arc::clone(&this.browser_channels),
             ceremonies: this.ceremonies.clone(),
+            web_shell_setting: this.web_shell_setting.clone(),
         }
     }
 
@@ -3042,6 +3077,7 @@ async fn supervise_ksyncd(
                 restart_count: 0,
                 started_at: None,
                 failed: None,
+                acts_for: None,
             });
             entry.running = true;
             entry.pid = None;
@@ -3147,6 +3183,7 @@ async fn supervise_kquicd(
                 restart_count: 0,
                 started_at: None,
                 failed: None,
+                acts_for: None,
             });
             entry.running = true;
             entry.pid = None;
@@ -3230,7 +3267,19 @@ async fn supervise_kquicd(
 ///
 /// Switching it *off* live is not yet honoured: the supervision loop keeps the
 /// process it holds until restart. Named here rather than hidden.
-pub(super) async fn ensure_khttpd(ctx: &AgentContext) {
+///
+/// **Whom it acts for** (#432). `for_user` is the user it was given: the
+/// session's, from `WebShellSet`, whose gate handed it on. At boot nobody is
+/// given, and it acts for the one loaded user; with several loaded and none
+/// given it starts nothing and says why, rather than act for whichever user
+/// the registry yields first. One gateway runs at a time, for one person: a
+/// second person's `WebShellSet` while it serves somebody is answered
+/// [`Gateway::ServesAnother`], naming them, and nothing is started or changed.
+/// The claim is taken under the state map's write lock before the supervisor
+/// is spawned, and every caller holds [`WebShellSetting`]'s lock across the
+/// call, so two requests cannot both start one and no setting lands between a
+/// holder check and a claim.
+pub(super) async fn ensure_khttpd(ctx: &AgentContext, for_user: Option<&str>) -> Gateway {
     let enabled = kotton_device::config::db::get_key(ctx.device_db.as_ref(), "web-shell.enabled")
         .await
         .ok()
@@ -3238,27 +3287,34 @@ pub(super) async fn ensure_khttpd(ctx: &AgentContext) {
         .map(|v| v == "true")
         .unwrap_or(false);
     if !enabled {
-        return;
+        return Gateway::Off;
     }
-    if ctx
-        .sidecar_states
-        .read()
-        .unwrap()
-        .get("khttpd")
-        .is_some_and(|s| s.running)
-    {
-        return;
-    }
-    // The daemon's own user, not an arbitrary user_id out of the
-    // machine-wide paired_nodes.
-    let Some(user_id) = ctx.users.any() else {
-        tracing::info!("web shell is on but no user is resident yet; the gateway waits for one");
-        return;
+    // The user it was given, or at boot the one loaded: never a pick between two.
+    let user_id = match for_user {
+        Some(user) => user.to_owned(),
+        None => match ctx.users.the_one_loaded() {
+            Some(user) => user,
+            None if ctx.users.count() == 0 => {
+                tracing::info!("web shell is on but no user is resident yet; the gateway waits for one");
+                return Gateway::NobodyToServe;
+            }
+            None => {
+                tracing::info!(
+                    loaded = ctx.users.count(),
+                    "web shell is on but several users are loaded and a boot names none of them; \
+                     the gateway starts when one of them switches it on (WebShellSet)"
+                );
+                return Gateway::NobodyToServe;
+            }
+        },
     };
+    if let Some(serving) = claim_khttpd(&ctx.sidecar_states, &user_id) {
+        return serving;
+    }
     let token = sidecar_token::SidecarToken::new(
         Arc::clone(&ctx.sessions),
         Some(Arc::clone(&ctx.gateway_tokens)),
-        user_id,
+        user_id.clone(),
     );
     // khttpd is a gateway → its sessions are Remote.
     tokio::spawn(supervise_khttpd(
@@ -3267,6 +3323,86 @@ pub(super) async fn ensure_khttpd(ctx: &AgentContext) {
         Arc::clone(&ctx.sidecar_states),
         Arc::clone(&ctx.device_db),
     ));
+    Gateway::Started(user_id)
+}
+
+/// The lock the web-shell gateway's holder and its settings are changed under.
+///
+/// The settings are device-wide rows in `device_db` (`web-shell.port`, `.bind`,
+/// `.allow`, `.static_dir`), and `supervise_khttpd` re-reads them on every
+/// spawn, so whoever writes them is configuring the running gateway. They are
+/// its holder's alone (#432): a `WebShellSet` checks who holds the gateway and
+/// writes under this one lock, so no other person's write can land between
+/// the check and the write, or between the write and a claim. Async, because
+/// the write is; one per daemon.
+#[derive(Clone, Default)]
+pub(super) struct WebShellSetting(Arc<tokio::sync::Mutex<()>>);
+
+impl WebShellSetting {
+    /// Hold the lock. [`ensure_khttpd`] is called with it held.
+    pub(super) async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.0.lock().await
+    }
+}
+
+/// What [`ensure_khttpd`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Gateway {
+    /// The web shell is switched off, so nothing is started.
+    Off,
+    /// Nobody was given and there is not exactly one user loaded.
+    NobodyToServe,
+    /// Supervision started, for this user.
+    Started(String),
+    /// Already supervised for this same user; nothing changed.
+    AlreadyServing(String),
+    /// Supervised for this other user; nothing started or changed.
+    ServesAnother(String),
+}
+
+/// Whom the web-shell gateway is supervised for, if anyone.
+pub(super) fn khttpd_acts_for(
+    sidecar_states: &RwLock<HashMap<String, SidecarState>>,
+) -> Option<String> {
+    sidecar_states.read().unwrap().get("khttpd").and_then(|s| s.acts_for.clone())
+}
+
+/// Claim the gateway's supervision for `user_id`, or say whom it already serves.
+///
+/// `None` means the claim is taken and the caller spawns the supervisor; it is
+/// taken under the write lock, so a second caller sees it at once rather than
+/// after the supervisor's first iteration.
+fn claim_khttpd(
+    sidecar_states: &RwLock<HashMap<String, SidecarState>>,
+    user_id: &str,
+) -> Option<Gateway> {
+    let mut states = sidecar_states.write().unwrap();
+    let entry = states.entry("khttpd".to_string()).or_insert(SidecarState {
+        enabled: true,
+        running: false,
+        pid: None,
+        port: None,
+        restart_count: 0,
+        started_at: None,
+        failed: None,
+        acts_for: None,
+    });
+    match entry.acts_for.clone() {
+        Some(serving) if serving == user_id => Some(Gateway::AlreadyServing(serving)),
+        Some(serving) => Some(Gateway::ServesAnother(serving)),
+        None => {
+            entry.acts_for = Some(user_id.to_owned());
+            None
+        }
+    }
+}
+
+/// Supervision of the gateway has ended: nobody is served, so the next
+/// `WebShellSet` may start it again, for whoever asks.
+fn release_khttpd(sidecar_states: &RwLock<HashMap<String, SidecarState>>) {
+    if let Some(state) = sidecar_states.write().unwrap().get_mut("khttpd") {
+        state.acts_for = None;
+    }
 }
 
 async fn supervise_khttpd(
@@ -3306,6 +3442,7 @@ async fn supervise_khttpd(
                 restart_count: 0,
                 started_at: None,
                 failed: None,
+                acts_for: None,
             });
             entry.running = true;
             entry.pid = None;
@@ -3366,6 +3503,7 @@ async fn supervise_khttpd(
         match &result {
             Ok(status) if status.success() => {
                 tracing::info!("khttpd exited cleanly; stopping supervision");
+                release_khttpd(&sidecar_states);
                 return;
             }
             Ok(status) => {
@@ -3386,6 +3524,7 @@ async fn supervise_khttpd(
 
         if let Some(reason) = liveness.exited(started.elapsed(), &result) {
             give_up("khttpd", &sidecar_states, reason);
+            release_khttpd(&sidecar_states);
             return;
         }
         tokio::time::sleep(backoff).await;
@@ -3488,6 +3627,7 @@ async fn supervise_kuid(
                 restart_count: 0,
                 started_at: None,
                 failed: None,
+                acts_for: None,
             });
             entry.running = true;
             entry.pid = None;
@@ -3675,6 +3815,7 @@ pub async fn supervise_kinferd(
                 restart_count: 0,
                 started_at: None,
                 failed: None,
+                acts_for: None,
             });
             entry.running = true;
             entry.pid = None;

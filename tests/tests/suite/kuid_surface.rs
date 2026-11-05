@@ -1421,7 +1421,7 @@ async fn a_second_boot_with_a_registered_identity_opens_the_lock_screen() {
     // arm changes under this test and the test should say so rather than keep
     // passing for a different reason.
     assert_eq!(
-        daemon.users().any().as_deref(),
+        daemon.users().the_one_loaded().as_deref(),
         Some("owner"),
         "a boot loads the registered user — loaded, and locked, are not exclusive"
     );

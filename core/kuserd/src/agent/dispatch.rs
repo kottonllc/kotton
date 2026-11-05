@@ -23,7 +23,8 @@
 //! alone; [`user_db_named`] (and [`user_db_for_user`], for the browser channel)
 //! for a user the daemon itself names, with no fallback; and
 //! [`user_db_for_principal`] (and [`user_db_for_compositor`]) for a caller with
-//! no user to name, which takes the loaded principal and is called by name.
+//! no user to name, which takes the one loaded principal, refuses when two are
+//! loaded, and is called by name.
 //!
 //! It also provides [`handle_subscribe`] and [`handle_vfs_watch`].
 use super::app_host::app_host;
@@ -310,24 +311,32 @@ pub(super) async fn user_db_for_session(
     user_db_named(runtime, user_dbs, base, user.as_str()).await
 }
 
-/// The **principal fallback**: the database of the daemon's loaded principal,
-/// for a caller that has no session user and no user to name.
+/// The database of the daemon's **one loaded principal**, for a caller that has
+/// no session user and no user to name; refused when there is not exactly one.
 ///
-/// Under supervision exactly one user is loaded, the process's principal; on a
-/// legacy unsupervised boot it is an arbitrary loaded user (`UserRegistry::any`),
-/// the same rule the sidecar picks use. That is why nothing that requires a
-/// session reaches this: its callers are the session-less system install
-/// (`AppInstall` with an empty `user_id`) and the compositor channel
-/// ([`user_db_for_compositor`]), and each is named at its call site.
+/// Under supervision exactly one user is loaded, the process's principal, and
+/// this is theirs. With none loaded, or two, it refuses rather than guess
+/// ([`UserRegistry::the_one_loaded`](crate::residency::UserRegistry::the_one_loaded),
+/// the rule every caller that is not given a user shares): on an unsupervised
+/// boot holding two identities, "any loaded user" was whichever one the map
+/// yielded first, and a system install or a compositor event landed in that
+/// person's database (#432). Nothing that requires a session reaches this:
+/// its callers are the session-less system install (`AppInstall` with an
+/// empty `user_id`) and the compositor channel ([`user_db_for_compositor`]),
+/// and each is named at its call site.
 pub(super) async fn user_db_for_principal(
     runtime: &DeviceRuntime,
     users: &crate::residency::UserRegistry,
     user_dbs: &crate::db::user_db::UserDbMap,
     base: &Path,
 ) -> io::Result<Arc<SqlitePool>> {
-    let uid = users
-        .any()
-        .ok_or_else(|| io::Error::other("no user loaded on this daemon"))?;
+    let uid = users.the_one_loaded().ok_or_else(|| match users.count() {
+        0 => io::Error::other("no user is loaded on this daemon, so there is no principal to act for"),
+        n => io::Error::other(format!(
+            "{n} users are loaded on this daemon and this caller names none of them, \
+             so it acts for nobody rather than guess whose principal it is"
+        )),
+    })?;
     user_db_named(runtime, user_dbs, base, &uid).await
 }
 
@@ -344,8 +353,10 @@ pub(super) async fn user_db_for_user(
 ///
 /// The compositor channel is authorised by possession of a handed descriptor,
 /// not by a token naming a user, so there is no session user to hand on. It
-/// takes the principal fallback: the same user the old session-derived path
-/// resolved to on any one-user node.
+/// takes the one loaded principal: the same user the old session-derived path
+/// resolved to on any one-user node. With two loaded it refuses, because a
+/// compositor cannot know whose screen it is; its records and infer hosts
+/// follow the same rule and hand nobody.
 ///
 /// A separate name rather than a bare fallback at the call site, because the
 /// two carry different claims: a session verb is answered as the user the gate
@@ -357,6 +368,16 @@ pub(super) async fn user_db_for_compositor(
     base: &Path,
 ) -> io::Result<Arc<SqlitePool>> {
     user_db_for_principal(runtime, users, user_dbs, base).await
+}
+
+/// `WebShellSet`'s refusal while the gateway serves `serving`, another person.
+fn web_shell_serves_another(serving: &str) -> UserResponse {
+    UserResponse::Error {
+        message: format!(
+            "the web shell's gateway is running for {serving}; one gateway serves one person \
+             at a time, so it was not started or changed for you"
+        ),
+    }
 }
 
 /// The trust-origin floor: `origin(conn) >= required_trust(op)`, over three
@@ -841,6 +862,7 @@ async fn answer_request(
         browser_desks: _,
         browser_channels: _,
         ceremonies,
+        web_shell_setting,
     } = ctx;
     let started_at = *started_at;
     let base = base.as_path();
@@ -1795,6 +1817,20 @@ async fn answer_request(
             static_dir,
             allow,
         } => {
+            // A session verb: the gateway it starts acts for the gate's user,
+            // never for whichever user is loaded (#432). The gateway's
+            // settings are its holder's: while somebody holds it, every
+            // `WebShellSet` from anyone else is refused, naming the holder,
+            // before anything is written, whether or not it switches the
+            // gateway on. The check, the write and the claim are made under
+            // one lock (`WebShellSetting`), so there is no window between
+            // them. With nobody holding it, the setter becomes the holder
+            // only by switching the gateway on.
+            let user = handed(&session_user)?.as_str();
+            let _setting = web_shell_setting.lock().await;
+            if let Some(holder) = super::khttpd_acts_for(sidecar_states).filter(|h| h != user) {
+                return Ok(web_shell_serves_another(&holder));
+            }
             let switched_on = enabled == Some(true);
             let resp = handlers::device_config::web_shell_set(
                 device_db, enabled, port, bind, static_dir, allow,
@@ -1802,7 +1838,12 @@ async fn answer_request(
             .await?;
             // The setting takes effect now, not at the next boot.
             if switched_on && matches!(resp, UserResponse::Ok) {
-                super::ensure_khttpd(ctx).await;
+                // Under the same lock as the check above, so the gateway is
+                // either unclaimed or this user's here; anything else is a
+                // supervisor this lock does not cover, and is refused all the same.
+                if let super::Gateway::ServesAnother(holder) = super::ensure_khttpd(ctx, Some(user)).await {
+                    return Ok(web_shell_serves_another(&holder));
+                }
             }
             Ok(resp)
         }
@@ -2134,8 +2175,9 @@ async fn answer_request(
         } => {
             // An empty `user_id` is the system/bundled install, the one form of
             // this verb that requires no session (`requires_session`), so it has
-            // no user handed on and takes the principal fallback, by name. A
-            // named install requires the session, and is the gate's user's.
+            // no user handed on and takes the one loaded principal, by name, and
+            // is refused with two loaded (#432). A named install requires the
+            // session, and is the gate's user's.
             let user_db = if user_id.is_empty() {
                 user_db_for_principal(runtime, users, user_dbs, base).await?
             } else {
@@ -3547,3 +3589,7 @@ mod vfs_watch_opening_frame_tests {
 #[cfg(test)]
 #[path = "session_read_tests.rs"]
 mod session_read_tests;
+
+#[cfg(test)]
+#[path = "principal_choice_tests.rs"]
+mod principal_choice_tests;
