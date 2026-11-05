@@ -28,13 +28,27 @@
 //! `drive-<hex>`, whose name a device sealed and the vault keeps. A tree's
 //! name is the vault's word for it, minted fresh for each vault, so it is a key
 //! within one person's record on one vault and joins nothing across vaults or
-//! persons; the person's name for a drive keys nothing at all. The first drive
-//! is what this device's own tree syncs with, at each vault; a made drive has
-//! no tree on a device yet (drive paths, kotton #58, and the first drive among
-//! others, #124; what a device keeps of the first is its pins,
-//! `kotton_device::users::pins`), so
-//! [`list`] — what every reader below that asks *which nodes are drives* reads
-//! — is the first drive on each vault, and [`all`] is every drive.
+//! persons; the person's name for a drive keys nothing at all. [`list`] —
+//! what every reader below that asks *which nodes are drives* reads — is each
+//! vault's own tree, one row per vault the person keeps drives on, and [`all`]
+//! is every row.
+//!
+//! **The first drive lives at one vault** (kotton #124). This device's own
+//! tree syncs with one drive, the person's first ([`first`]), and with no
+//! other: a made drive has no tree on a device yet (drive paths, kotton #58;
+//! what a device keeps of the first is its pins, `kotton_device::users::pins`).
+//! Until it is moved, the first drive is the tenancy's own tree at the vault
+//! recorded first; a vault enrolled after that is a place for drives, and its
+//! own tree is not a second copy of anything. `drive move personal` carries it
+//! as any drive is carried, into a made tree at the other vault under a name
+//! sealed with [`FIRST_DRIVE_ID`]
+//! (`kotton_device::users::drive_verbs::move_to`), and from then on the first
+//! drive is the made drive whose sealed id is that one, wherever it is. A
+//! vault's own tree that is not the first drive is left as it was: the move
+//! does not empty it, since no verb retires a tenancy's own tree, and what it
+//! holds of an earlier `personal` is said in `status` as no longer synced
+//! ([`earlier_copies`]). [`kept`] is every drive the person has: the first
+//! where it lives, and every made one.
 //!
 //! **The drive's id, beside the vault's tree** (kotton #171; kotton-protocol
 //! #26). A tree id is the vault's and differs at every vault a drive is kept
@@ -44,8 +58,9 @@
 //! (`kotton_device::users::drive_verbs::plan_move`). The record keeps it as the
 //! device opened it from the sealed name ([`reconcile`], [`Listed`]); the
 //! tenancy's own tree has no sealed name and its id is
-//! [`FIRST_DRIVE_ID`] on every device. It is never sent to a vault, so no
-//! vault or relay sees a key it could join two landlords' trees by.
+//! [`FIRST_DRIVE_ID`] on every device, and the first drive keeps that id when
+//! a move seals it a name. It is never sent to a vault, so no vault or relay
+//! sees a key it could join two landlords' trees by.
 //!
 //! **What keys a whole-keeper claim.** A device that keeps a drive whole
 //! writes one sealed claim record in that drive, keyed by the device and the
@@ -118,11 +133,12 @@
 //! make them disagree, and the record, not the posture, is what readers
 //! believe.
 //!
-//! **Who reads it.** [`list`] and [`is_drive`] answer *which nodes are drives*
-//! for every caller — introducing and withdrawing a device at the person's
+//! **Who reads it.** [`first`] answers *which drive this device's tree syncs
+//! with*, for the sync engine's targets and the packs it fetches on demand
+//! (`kotton_sync::engine`). [`list`] and [`is_drive`] answer *which nodes are
+//! drives* for every other caller — introducing and withdrawing a device at the person's
 //! drives (`kotton_device::users::drive_devices`), handing the drives to a
-//! device that joins (`kotton_device::users::pairing::drives_to_hand`), the
-//! sync engine's targets (`kotton_sync::engine`), handing a vault the doors it
+//! device that joins (`kotton_device::users::pairing::drives_to_hand`), handing a vault the doors it
 //! holds (`kuserd::agent::vault_doors`), and delivering the phrase-sealed
 //! recovery copy (`kuserd`'s `deliver_recovery_copy`). None of them reads a
 //! row's posture for it: a row with no posture is a vault added by address or
@@ -181,12 +197,16 @@ pub struct Drive {
     pub id: Option<String>,
     /// The paired node the drive is reached through.
     pub node: PairedNode,
+    /// The sealed bytes the vault said it holds in the tree, at the last
+    /// listing this device followed ([`note_held`]); `None` before one.
+    pub held: Option<u64>,
 }
 
 impl Drive {
-    /// Whether this is the tenancy's own tree on its vault — the drive this
-    /// device's own tree syncs with (module doc).
-    pub fn is_first(&self) -> bool {
+    /// Whether this is the tenancy's own tree on its vault: the first drive
+    /// there until a move carries it away, a place for drives otherwise
+    /// (module doc). Which tree is the first drive is [`first`]'s.
+    pub fn is_tenancy_tree(&self) -> bool {
         self.tree == FIRST_DRIVE_TREE
     }
 }
@@ -359,9 +379,11 @@ fn tenancy_of(user_id: &str) -> &str {
     user_id
 }
 
-/// Every drive `user_id` has, each with the node it is reached through, in the
-/// order they were recorded — the first drive on each vault and every drive
-/// made beside it. The node is the person's row carrying the vault's key,
+/// Every drive `user_id` records, each with the node it is reached through, in
+/// the order they were recorded — the tenancy's own tree on each vault and
+/// every drive made beside it, whether or not that own tree is the first drive
+/// ([`kept`] leaves out the ones that are not). The node is the person's row
+/// carrying the vault's key,
 /// found by that key: the record's `node_id` is the label that row is shown
 /// under, and a label keys no row. A record no row of theirs carries the key
 /// of is not a drive this device can reach, and is not listed.
@@ -369,22 +391,105 @@ pub async fn all(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<Drive>> 
     read(db, user_id, false).await
 }
 
-/// The first drive on each vault `user_id` keeps drives on — the tenancy's
-/// own tree, one per vault and tenancy, the drive this device's own tree syncs
-/// with — each with the node it is reached through, in the order recorded.
-/// What every reader that asks *which nodes are drives* reads (module doc);
-/// [`all`] is every drive.
+/// The tenancy's own tree on each vault `user_id` keeps drives on — one per
+/// vault and tenancy — each with the node it is reached through, in the order
+/// recorded: the vaults that are the person's, which is what every reader
+/// that asks *which nodes are drives* reads (module doc). Which of them, if
+/// any, holds the first drive is [`first`]'s; [`all`] is every row.
 pub async fn list(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<Drive>> {
     read(db, user_id, true).await
 }
 
-async fn read(db: &Arc<SqlitePool>, user_id: &str, first_only: bool) -> io::Result<Vec<Drive>> {
+/// **The drive this device's own tree syncs with: the person's first drive,
+/// where it lives** (module doc). A copy of it a move sealed a name for, if
+/// this device records one; else the tenancy's own tree at the vault recorded
+/// first. `None` when the person keeps drives on no vault this device reaches.
+///
+/// *First recorded* is by when the row was written and then by the order it
+/// was written in, never by a label: the drives a join hands over are recorded
+/// in one second, in the order the admitting device recorded them, so both
+/// devices take the same one. A copy a move made is preferred wherever it is,
+/// so a device that has followed the vault a move carried the drive to syncs
+/// there, whatever it recorded first. Two such copies — a move cut off between
+/// naming the copy and retiring the source — are one drive kept twice; the one
+/// recorded first is taken until the next move of it retires the other.
+pub async fn first(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Option<Drive>> {
     let rows = sqlx::query(
-        "SELECT vault_key, tenancy, tree, name, drive_id FROM drives WHERE user_id = ? AND (? = 0 OR tree = ?) \
+        "SELECT vault_key, tenancy, tree, name, drive_id, held FROM drives WHERE user_id = ? \
+         AND (tree = ? OR drive_id = ?) \
+         ORDER BY CASE WHEN tree = ? THEN 1 ELSE 0 END, recorded_at, rowid",
+    )
+    .bind(user_id)
+    .bind(FIRST_DRIVE_TREE)
+    .bind(FIRST_DRIVE_ID)
+    .bind(FIRST_DRIVE_TREE)
+    .fetch_all(db.as_ref())
+    .await
+    .map_err(db_err)?;
+    for row in rows {
+        if let Some(drive) = drive_of(db, user_id, &row).await? {
+            return Ok(Some(drive));
+        }
+    }
+    Ok(None)
+}
+
+/// Every drive `user_id` has, as their devices describe them to them (module
+/// doc): the first drive where it lives ([`first`]), any other copy a move
+/// left of it, and every made drive. A vault's own tree that is not the first
+/// drive is a place for drives, not a drive, and is not among them; what it
+/// holds of an earlier first drive is [`earlier_copies`]'.
+pub async fn kept(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<Drive>> {
+    let first = first(db, user_id).await?;
+    Ok(all(db, user_id)
+        .await?
+        .into_iter()
+        .filter(|d| !d.is_tenancy_tree() || first.as_ref().is_some_and(|f| f.is_tenancy_tree() && f.vault_key == d.vault_key))
+        .collect())
+}
+
+/// The vaults' own trees that hold something and are not the first drive
+/// (module doc): what a vault kept of `personal` when every vault was synced
+/// with it, or what the vault the first drive was moved away from still holds.
+/// Each is left as it was, since no verb retires a tenancy's own tree, and is
+/// synced by no device; `status` says so. A tree whose vault has not said
+/// what it holds, or said nothing, is not one.
+pub async fn earlier_copies(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<Drive>> {
+    let first = first(db, user_id).await?;
+    Ok(list(db, user_id)
+        .await?
+        .into_iter()
+        .filter(|d| d.held.unwrap_or(0) > 0)
+        .filter(|d| !first.as_ref().is_some_and(|f| f.is_tenancy_tree() && f.vault_key == d.vault_key))
+        .collect())
+}
+
+/// Note what the vault `vault_key` said it holds in each of `user_id`'s trees
+/// there (`held`, by tree), as its listing said it; a tree this device does
+/// not record is passed over. Read by [`earlier_copies`] and kept nowhere
+/// else: a size the vault already knows, said back to the person it is about.
+pub async fn note_held(db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32], held: &[(String, u64)]) -> io::Result<()> {
+    for (tree, bytes) in held {
+        sqlx::query("UPDATE drives SET held = ? WHERE user_id = ? AND vault_key = ? AND tenancy = ? AND tree = ?")
+            .bind(i64::try_from(*bytes).unwrap_or(i64::MAX))
+            .bind(user_id)
+            .bind(vault_key.as_slice())
+            .bind(tenancy_of(user_id))
+            .bind(tree)
+            .execute(db.as_ref())
+            .await
+            .map_err(db_err)?;
+    }
+    Ok(())
+}
+
+async fn read(db: &Arc<SqlitePool>, user_id: &str, tenancy_trees_only: bool) -> io::Result<Vec<Drive>> {
+    let rows = sqlx::query(
+        "SELECT vault_key, tenancy, tree, name, drive_id, held FROM drives WHERE user_id = ? AND (? = 0 OR tree = ?) \
          ORDER BY recorded_at, node_id, tenancy, tree != ?, tree",
     )
     .bind(user_id)
-    .bind(first_only as i64)
+    .bind(tenancy_trees_only as i64)
     .bind(FIRST_DRIVE_TREE)
     .bind(FIRST_DRIVE_TREE)
     .fetch_all(db.as_ref())
@@ -392,23 +497,32 @@ async fn read(db: &Arc<SqlitePool>, user_id: &str, first_only: bool) -> io::Resu
     .map_err(db_err)?;
     let mut drives = Vec::with_capacity(rows.len());
     for row in rows {
-        let vault_key: [u8; 32] = row
-            .get::<Vec<u8>, _>("vault_key")
-            .try_into()
-            .map_err(|_| io::Error::other("corrupt vault_key length in drives"))?;
-        let Some(node) = super::db::paired_node_for_key(db, user_id, &vault_key).await? else {
-            continue;
-        };
-        drives.push(Drive {
-            vault_key,
-            tenancy: row.get("tenancy"),
-            tree: row.get("tree"),
-            name: row.get("name"),
-            id: row.get("drive_id"),
-            node,
-        });
+        if let Some(drive) = drive_of(db, user_id, &row).await? {
+            drives.push(drive);
+        }
     }
     Ok(drives)
+}
+
+/// One row of the record as a drive, with the node it is reached through, or
+/// `None` when no row of the person's carries its vault's key.
+async fn drive_of(db: &Arc<SqlitePool>, user_id: &str, row: &sqlx::sqlite::SqliteRow) -> io::Result<Option<Drive>> {
+    let vault_key: [u8; 32] = row
+        .get::<Vec<u8>, _>("vault_key")
+        .try_into()
+        .map_err(|_| io::Error::other("corrupt vault_key length in drives"))?;
+    let Some(node) = super::db::paired_node_for_key(db, user_id, &vault_key).await? else {
+        return Ok(None);
+    };
+    Ok(Some(Drive {
+        vault_key,
+        tenancy: row.get("tenancy"),
+        tree: row.get("tree"),
+        name: row.get("name"),
+        id: row.get("drive_id"),
+        node,
+        held: row.get::<Option<i64>, _>("held").map(|h| h.max(0) as u64),
+    }))
 }
 
 /// The nodes `user_id`'s drives are reached through, one per node.
@@ -635,6 +749,49 @@ mod tests {
         assert!(network_db::delete_paired_node(&db, "alice", &did(&key(9))).await.unwrap());
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap();
         assert_eq!(left, 0, "revoking the vault left a drive recorded at it");
+    }
+
+    /// **The first drive lives at one vault, and a move carries it** (kotton
+    /// #124). Two vaults recorded: the first drive is the tenancy's own tree at
+    /// the one recorded first, and the second is a place for drives — not
+    /// among the drives, and not an earlier copy while it holds nothing. A
+    /// listing of the second that names a made tree sealed with the first
+    /// drive's id — what `drive move personal` leaves — makes that tree the
+    /// first drive, and the vault it left, which still holds what it held,
+    /// an earlier copy. A copy a move made wins even recorded after, and a
+    /// device whose rows were written in one second takes the first written.
+    #[tokio::test]
+    async fn the_first_drive_lives_at_one_vault_and_a_move_carries_it() {
+        let (_dir, db) = machine_db().await;
+        pair(&db, "zz-home", key(9), None).await;
+        pair(&db, "aa-office", key(4), None).await;
+        // One second for both, as a join records the drives it is handed:
+        // the order written decides, not the labels.
+        record(&db, "alice", &key(9)).await.unwrap();
+        record(&db, "alice", &key(4)).await.unwrap();
+        sqlx::query("UPDATE drives SET recorded_at = 7").execute(db.as_ref()).await.unwrap();
+        let first_at = |d: Option<Drive>| d.map(|d| (d.node.id, d.tree));
+        assert_eq!(first_at(first(&db, "alice").await.unwrap()), Some(("zz-home".into(), FIRST_DRIVE_TREE.into())));
+        let names = |drives: Vec<Drive>| -> Vec<(String, String)> { drives.into_iter().map(|d| (d.node.id, d.name)).collect() };
+        assert_eq!(names(kept(&db, "alice").await.unwrap()), [("zz-home".to_string(), "personal".to_string())], "the second vault is a drive");
+        assert_eq!(list(&db, "alice").await.unwrap().len(), 2, "the second vault is not one of the person's");
+        note_held(&db, "alice", &key(4), &[(FIRST_DRIVE_TREE.into(), 0)]).await.unwrap();
+        assert!(earlier_copies(&db, "alice").await.unwrap().is_empty(), "an empty own tree is said to hold an earlier copy");
+
+        // The move: the second vault lists a made tree sealed as the first drive.
+        let moved = Listed { tree: "drive-01".into(), name: "personal".into(), id: FIRST_DRIVE_ID.into() };
+        reconcile(&db, "alice", &key(4), &[moved]).await.unwrap();
+        note_held(&db, "alice", &key(9), &[(FIRST_DRIVE_TREE.into(), 900)]).await.unwrap();
+        assert_eq!(first_at(first(&db, "alice").await.unwrap()), Some(("aa-office".into(), "drive-01".into())));
+        assert_eq!(names(kept(&db, "alice").await.unwrap()), [("aa-office".to_string(), "personal".to_string())]);
+        let earlier: Vec<(String, Option<u64>)> = earlier_copies(&db, "alice").await.unwrap().into_iter().map(|d| (d.node.id, d.held)).collect();
+        assert_eq!(earlier, [("zz-home".to_string(), Some(900))], "the vault the first drive left");
+
+        // The copy retired — moved on again, to a vault not yet followed —
+        // and the first recorded own tree is the first drive again.
+        reconcile(&db, "alice", &key(4), &[]).await.unwrap();
+        assert_eq!(first_at(first(&db, "alice").await.unwrap()), Some(("zz-home".into(), FIRST_DRIVE_TREE.into())));
+        assert!(first(&db, "bob").await.unwrap().is_none(), "alice's first drive is bob's");
     }
 
     /// **A drive recorded before ids existed is given its id by the next

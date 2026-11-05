@@ -809,9 +809,10 @@ pub const FIRST_DRIVE_TREE: &str = "local";
 /// reads this one for it, as it reads [`FIRST_DRIVE_NAME`]. It is never sent to
 /// a vault; it keys the person's own records about the drive (a whole-keeper
 /// claim, `kotton_device::users::pins`) and this device's record of it. It
-/// cannot be a made drive's id, which is thirty-two hex digits. When the first
-/// drive becomes a made drive (kotton #124) it is minted an id like any other,
-/// and the claims keyed by this one move to it.
+/// cannot be a made drive's id, which is thirty-two hex digits. When a move
+/// carries the first drive into a made tree (kotton #124) its name is sealed
+/// with this id, so every device reads that copy as the first drive and its
+/// claims and pins keep their key; it is not minted a fresh one.
 pub const FIRST_DRIVE_ID: &str = "first";
 
 /// A drive made on a vault after the first, by the id the device that made it
@@ -889,7 +890,7 @@ pub struct DriveDescriptor {
     /// The drive's own id, the same for every copy a move makes of it and on
     /// every device of the person's: thirty-two hex digits minted at `drive
     /// create` and sealed with the name, or [`FIRST_DRIVE_ID`] for the
-    /// tenancy's own tree until it becomes a made drive (kotton #124). What
+    /// person's first drive, wherever it is kept (kotton #124). What
     /// tells two copies of one drive from two drives of one name. `None` for a
     /// made drive this device recorded before ids existed, until its vault's
     /// next listing. It is the device's answer to its own person and is never
@@ -1063,6 +1064,11 @@ pub enum PinNotice {
     /// want. `settings` are the settings that keep more than fits, each as
     /// `pin` names it, so the person can set one to keep less.
     ShortOfRoom { drive: String, settings: Vec<String>, held: u64, budget: Option<u64>, wanted: u64 },
+    /// The vault labelled `vault` keeps, in its own tree for the person, an
+    /// earlier copy of `drive` — the first drive — that no device syncs with
+    /// any longer: kept there when every vault was synced with it, or left
+    /// there by a move. It is left as it was (kotton #124).
+    NotSynced { drive: String, vault: String },
 }
 
 impl PinNotice {
@@ -1092,6 +1098,10 @@ impl PinNotice {
                      pins want {wanted}; {less}"
                 )
             }
+            PinNotice::NotSynced { drive, vault } => format!(
+                "'{vault}' keeps an earlier copy of '{drive}' that no device of yours syncs with any longer: \
+                 '{drive}' lives on one vault, and your devices sync with it there. The copy is left as it was"
+            ),
         }
     }
 }

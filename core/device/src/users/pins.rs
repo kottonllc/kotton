@@ -73,14 +73,15 @@
 //! nothing a setting or a claim says can withhold the index.
 //!
 //! **Where claims live, today: the first drive.** A device keeps a tree of the
-//! person's first drive and of no made drive yet (drive paths, kotton #58; the
-//! first drive becoming one drive among others, #124), so a device keeps, and
-//! claims, only the first drive, under `kotton_wire::ipc::FIRST_DRIVE_ID`; its
-//! claims ride the person's record log in that drive. A setting for a made
+//! person's first drive and of no made drive yet (drive paths, kotton #58), so
+//! a device keeps, and claims, only the first drive, under
+//! `kotton_wire::ipc::FIRST_DRIVE_ID`, wherever it lives — a move carries it
+//! into a made tree under that id (kotton #124) — and its claims ride the
+//! person's record log in that drive, so a move carries them too. A setting for a made
 //! drive is refused, and no claim names one, so `status` says of every made
 //! drive that only its vault holds it — which is true. **Seam, not built:** the
 //! creating device's claim at `drive create` is written once a device keeps a
-//! tree of a made drive (#58, #124); and a person's claims in a drive are to be
+//! tree of a made drive (#58); and a person's claims in a drive are to be
 //! sealed under that person's key and under no key a drive's holders would
 //! share, which today's record log is (one person per log) and a shared drive
 //! must keep.
@@ -457,10 +458,12 @@ pub fn whole_on(claims: &[Claim], devices: &[(String, String)], drive: Option<&s
         .collect()
 }
 
-/// The person's drives, by name, once each, in the order recorded.
+/// The person's drives, by name, once each, in the order recorded: the first
+/// drive where it lives, and every made one
+/// (`kotton_peer::daemon::drives::kept`).
 pub async fn drive_names(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<String>> {
     let mut names: Vec<String> = Vec::new();
-    for d in kotton_peer::daemon::drives::all(db, user_id).await? {
+    for d in kotton_peer::daemon::drives::kept(db, user_id).await? {
         if !names.contains(&d.name) {
             names.push(d.name);
         }
@@ -474,7 +477,7 @@ pub async fn drive_names(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<
 pub async fn notices(db: &Arc<SqlitePool>, user_id: &str, claims: &[Claim], devices: &[(String, String)]) -> io::Result<Vec<PinNotice>> {
     let mut out = Vec::new();
     let mut told: Vec<(String, Option<String>)> = Vec::new();
-    for d in kotton_peer::daemon::drives::all(db, user_id).await? {
+    for d in kotton_peer::daemon::drives::kept(db, user_id).await? {
         let key = (d.name.clone(), d.id.clone());
         if told.contains(&key) {
             continue;
@@ -594,10 +597,15 @@ impl Read {
     }
 
     /// `status`: what this device keeps of each drive, the devices that claim
-    /// each whole, and the notices.
+    /// each whole, and the notices — with, beside them, each vault's own tree
+    /// that holds an earlier copy of the first drive no device syncs with any
+    /// longer (`kotton_peer::daemon::drives::earlier_copies`; kotton #124).
     pub async fn status(&self, db: &Arc<SqlitePool>, user_id: &str, last_sync_at: Option<i64>) -> io::Result<DeviceStatus> {
-        let readout = self.readout(db, user_id).await?;
-        let recorded = kotton_peer::daemon::drives::all(db, user_id).await?;
+        let mut readout = self.readout(db, user_id).await?;
+        for earlier in kotton_peer::daemon::drives::earlier_copies(db, user_id).await? {
+            readout.notices.push(PinNotice::NotSynced { drive: FIRST_DRIVE_NAME.into(), vault: earlier.node.id });
+        }
+        let recorded = kotton_peer::daemon::drives::kept(db, user_id).await?;
         let mut drives = Vec::new();
         for name in drive_names(db, user_id).await? {
             let copies: Vec<_> = recorded.iter().filter(|d| d.name == name).collect();
