@@ -518,15 +518,20 @@ pub(super) fn stream_entry(
 /// [`stream_entry`] and [`request_entry`] each end here.
 ///
 /// The read is kept: a verb that requires a session is handed the user the
-/// guard just passed, so none reads it a second time and none has a window of
-/// its own in which the session has gone.
+/// guard just passed, so no verb reads it a second time and none has a window of
+/// its own in which the session has gone. (A stream's driver reads it again, by
+/// `streamed::while_live`, only to end the stream.)
 fn session_entry(sessions: &sessions::SessionMap, token: Option<&str>, request: &UserRequest) -> Entry {
     let session_user = token.and_then(|tok| sessions::live_user(sessions, tok));
     if let Some(refusal) = session_refusal(session_user.as_deref(), request) {
         return Entry::Refused(Box::new(refusal));
     }
     match session_user {
-        Some(user) if request.requires_session() => Entry::Session(SessionUser(user)),
+        Some(user) if request.requires_session() => Entry::Session(SessionUser {
+            user,
+            // `session_user` is `Some` only for a token that resolved.
+            token: token.unwrap_or_default().to_owned(),
+        }),
         _ => Entry::Sessionless,
     }
 }
@@ -549,16 +554,39 @@ pub(super) enum Entry {
 /// session guard checked: never a second read, never a name taken from the
 /// request, and never "whichever user is loaded". It is what
 /// [`user_db_for_session`] takes, and that takes nothing else.
-#[derive(Debug, Clone)]
-pub(super) struct SessionUser(String);
+///
+/// It also keeps the token the user was read from, so that what the session
+/// opened can ask whether that session is still the one it was
+/// ([`SessionUser::is_still_live`]): a stream lives only as long as the
+/// session that opened it (#397). The token is never handed out and never
+/// printed; `Debug` shows the user alone.
+#[derive(Clone)]
+pub(super) struct SessionUser {
+    user: String,
+    token: String,
+}
+
+impl std::fmt::Debug for SessionUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SessionUser").field(&self.user).finish()
+    }
+}
 
 impl SessionUser {
     pub(super) fn as_str(&self) -> &str {
-        &self.0
+        &self.user
     }
 
     pub(super) fn into_string(self) -> String {
-        self.0
+        self.user
+    }
+
+    /// Whether the session the gate read is still live and still this user's:
+    /// the same [`sessions::live_user`] the gate read, so a token revoked
+    /// (removed from the map) and a token past its expiry are both `false`,
+    /// and there is no second notion of "live" to disagree with the first.
+    pub(super) fn is_still_live(&self, sessions: &sessions::SessionMap) -> bool {
+        sessions::live_user(sessions, &self.token).as_deref() == Some(self.user.as_str())
     }
 }
 

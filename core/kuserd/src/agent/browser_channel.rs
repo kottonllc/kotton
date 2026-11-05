@@ -795,11 +795,17 @@ async fn dispatch_inner(
         call.request,
         UserRequest::ContactPairStart { .. } | UserRequest::ContactPairJoin { .. }
     ) {
-        if let super::dispatch::Entry::Refused(refusal) =
-            super::dispatch::stream_entry(&ctx.sessions, &conn, &call.request)
-        {
-            return Inner::Frame(frame_json(ChannelFrame::once(id, *refusal)));
-        }
+        // The session the gate passed, which the ceremony's stream is held to
+        // as every streamed verb's is (`streamed::while_live`, #397): a browser
+        // device revoked mid-ceremony ends the ceremony's stream, not the
+        // ceremony, which runs on to its next send or its ttl (#436).
+        let session = match super::dispatch::stream_entry(&ctx.sessions, &conn, &call.request) {
+            super::dispatch::Entry::Refused(refusal) => {
+                return Inner::Frame(frame_json(ChannelFrame::once(id, *refusal)));
+            }
+            super::dispatch::Entry::Session(session) => Some(session),
+            super::dispatch::Entry::Sessionless => None,
+        };
         // A stream with nowhere to go must not start. The channel's frames go
         // out its own direction and nowhere else, so on a channel with no
         // outbound side the ceremony would run to completion talking to a
@@ -854,7 +860,13 @@ async fn dispatch_inner(
             _ => unreachable!("the match above admits exactly these two"),
         };
         return match started {
-            Ok(rx) => Inner::Stream(id, rx),
+            Ok(rx) => Inner::Stream(
+                id,
+                match session {
+                    Some(session) => super::streamed::while_live(std::sync::Arc::clone(&ctx.sessions), session, rx),
+                    None => rx,
+                },
+            ),
             Err(e) => Inner::Frame(err_frame(id, &e.to_string())),
         };
     }
