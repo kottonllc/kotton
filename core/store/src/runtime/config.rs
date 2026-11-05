@@ -45,6 +45,22 @@ impl Default for UserConfig {
     }
 }
 
+impl UserConfig {
+    /// Each mount resting on the node's own shelves, as this configuration
+    /// names it: its name, and the path recorded for it. A configuration that
+    /// names none — the default an absent `config.toml` reads as — rests on
+    /// no shelf.
+    pub fn shelf_mounts(&self) -> Vec<(String, std::path::PathBuf)> {
+        self.remotes
+            .iter()
+            .filter_map(|(name, remote)| match &remote.backend {
+                RemoteBackend::Local { path } => Some((name.clone(), path.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 /// Load user configuration from disk.
 ///
 /// An absent `config.toml` is not an error — it is a user who has configured
