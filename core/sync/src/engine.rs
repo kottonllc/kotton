@@ -79,16 +79,21 @@
 //! In both paths a running-set prevents two concurrent passes for the same
 //! drive (the vault's key and the tenancy).
 //!
-//! **One drive, wherever it lives** (kotton #124). This device's tree syncs
-//! with the person's first drive and with nothing else: the tenancy's own tree
-//! at the vault recorded first, until `drive move personal` carries it into a
-//! made tree at another vault, and that tree after. A vault enrolled later is a
-//! place for drives and receives no copy of the tree. So that every device
-//! follows a move of it, a pass first reads every vault's listing
-//! ([`SyncEngine::follow_every_vault`]) — as many dials as when every vault was
-//! a target, and only the listing — and then takes the first drive the record
-//! names; a vault that does not answer leaves its record as it was, so a pass
-//! never falls back to a tree the drive was moved away from.
+//! **One drive, wherever it lives** (RFC 0002, *A drive is where things live
+//! and a device keeps what its person chose*; kotton #124). This device's tree
+//! syncs with `personal` and with nothing else: the made tree its vaults list
+//! sealed with the first drive's id, made at the first vault the person
+//! enrolled and carried by `drive move` like any drive. A vault enrolled later
+//! is a place for drives and receives no copy of the tree. So that every
+//! device follows a move of it, a pass first reads every vault's listing
+//! ([`SyncEngine::follow_every_vault`]), and only the listing, and then takes
+//! the drive the record says those listings name
+//! (`kotton_peer::daemon::drives::first`). A vault that does not answer leaves
+//! its record as it was, so a pass never falls back to a tree the drive was
+//! moved away from; with no listing naming `personal`, a pass syncs nothing
+//! and guesses no vault, and with two it keeps the one this device synced with
+//! before ([`sync_drive_with_outcome`] marks it), or syncs neither; `status`
+//! says which (`kotton_device::users::pins`).
 //!
 //! # Tier note
 //! This module lives in `06_daemon` for the `device_sync` sprint. The sync
@@ -1028,9 +1033,9 @@ async fn sync_drive_with_outcome(
     // under one, and two passes must not share a remote.
     let remote_name: String =
         std::iter::once("__sync_bg__".to_string()).chain(target.drive.vault_key.iter().map(|b| format!("{b:02x}"))).collect();
-    // The tree the drive is kept under there: the tenancy's own, or the made
-    // tree a move carried the first drive into (module doc).
-    let client = if target.drive.is_tenancy_tree() { client } else { client.with_remote_mount(target.drive.tree.clone()) };
+    // The tree the drive is kept under there: `personal`'s made tree (module
+    // doc). The tenancy's own tree is no drive's, and is never a target.
+    let client = client.with_remote_mount(target.drive.tree.clone());
     let client = Arc::new(client);
     let storage = Arc::clone(&client) as Arc<dyn kotton_sys::store::SyncableStore>;
     let config = RemoteConfig {
@@ -1066,6 +1071,12 @@ async fn sync_drive_with_outcome(
         "sync_engine: drive pass complete",
     );
     let bytes: u64 = r.transfers.iter().map(|(_, _, b)| *b).sum();
+
+    // The copy of `personal` this device's tree synced with: the one it keeps
+    // syncing with should another tree be listed as it (module doc).
+    if let Err(e) = kotton_peer::daemon::drives::mark_synced(db, user_id, &target.drive.vault_key, &target.drive.tree).await {
+        tracing::warn!(user_id, drive = %node_id, error = %e, "sync_engine: the drive synced with was not marked");
+    }
 
     // What the vault keeps of the person's drives beside this one: a drive
     // another device made there, or moved there or away, is followed here at
@@ -1296,7 +1307,7 @@ impl kotton_store::fetch::PackSource for DrivePacks {
             let store = self.resources.user_store(user_id);
             let reached = tokio::time::timeout(FETCH_WITHIN, async {
                 let client = self.resources.open_peer_client(drive.node.clone(), user_id, store.as_deref()).await?;
-                let client = if drive.is_tenancy_tree() { client } else { client.with_remote_mount(drive.tree.clone()) };
+                let client = client.with_remote_mount(drive.tree.clone());
                 Ok::<_, anyhow::Error>(client.get_sealed(std::path::Path::new(key)).await)
             })
             .await;
@@ -2060,10 +2071,9 @@ mod drive_target_tests {
         Drive {
             vault_key: [seed; 32],
             tenancy: "alice".into(),
-            tree: kotton_wire::ipc::FIRST_DRIVE_TREE.into(),
+            tree: kotton_wire::ipc::MadeDrive([seed; 16]).tree(),
             name: kotton_wire::ipc::FIRST_DRIVE_NAME.into(),
             id: Some(kotton_wire::ipc::FIRST_DRIVE_ID.into()),
-            held: None,
             node: PairedNode {
                 id: label.into(),
                 device_did: kotton_wire::did::Did::parse("did:key:z6MkqQEvkQX8axm6AzW37ZT5bSEJwFnRS7PgYhbrvzKVc4B2").unwrap(),
@@ -2261,6 +2271,12 @@ mod drive_packs_tests {
         .await
         .unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &vault_key).await.unwrap();
+        let personal = kotton_peer::daemon::drives::Listed {
+            tree: kotton_wire::ipc::MadeDrive([1; 16]).tree(),
+            name: kotton_wire::ipc::FIRST_DRIVE_NAME.into(),
+            id: kotton_wire::ipc::FIRST_DRIVE_ID.into(),
+        };
+        kotton_peer::daemon::drives::reconcile(&db, "alice", &vault_key, &[personal]).await.unwrap();
         let vault = Arc::new(APoolNotResident { asked: Mutex::new(0) });
         slot.lend(Arc::new(DrivePacks { db, resources: Arc::new(Host { vault: vault.clone() }) }));
 

@@ -1886,8 +1886,8 @@ impl DeviceDaemon {
     }
 
     /// Every drive this device records for `user_id`
-    /// ([`kotton_peer::daemon::drives::all`]): each vault's first drive and
-    /// each made beside it. For a caller that holds the daemon — an
+    /// ([`kotton_peer::daemon::drives::all`]): each vault's own row and each
+    /// drive made there, `personal` among them. For a caller that holds the daemon — an
     /// integration test that asks what enrolment, recovery, or following a
     /// vault's listing recorded.
     pub async fn drives(&self, user_id: &str) -> io::Result<Vec<kotton_peer::daemon::drives::Drive>> {

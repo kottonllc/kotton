@@ -4,9 +4,9 @@
 //! <vault> [--from <vault>]`, over the several drives a person may keep on one vault or many.
 //!
 //! **A drive is a sealed tree a vault keeps for its tenant** (`kvaultd::drives`):
-//! the tenancy's own tree, `local` — the pool every vault kept before, the
-//! person's first drive there, which every device calls `personal` — and each
-//! drive made beside it. What this device records of them is the drive record
+//! each a tree made in the tenant's pool, `personal` among them; the
+//! tenancy's own tree, `local`, is the pool's own mount and no drive. What
+//! this device records of them is the drive record
 //! ([`kotton_peer::daemon::drives`]), one row per vault, tenancy and tree.
 //!
 //! **Names are sealed, and the vault is where every device reads them.** A
@@ -138,35 +138,37 @@
 //! (`kvaultd::drives::retire`). What no device-local lock can hold is another
 //! device: two devices moving one drive at once, two making one name at once,
 //! or a pass another device runs into a made drive while this one moves it.
-//! Today no device writes into a made drive but the first drive once moved —
-//! a device keeps no tree of one until drive paths (kotton #58) — and what
-//! another device's pass writes into the first drive while it is moved is
-//! still held by that device, whose next pass sends it where the drive went
-//! (below); so the last loses nothing, and the first two are resolved afterwards by
+//! Today no device writes into a made drive but `personal` — a device keeps
+//! no tree of any other until drive paths (kotton #58) — and what another
+//! device's pass writes into `personal` while it is moved is still held by
+//! that device, whose next pass sends it where the drive went (below); so the
+//! last loses nothing, and the first two are resolved afterwards by
 //! the next move as above. Making them exclusive needs a lease or a sequence
 //! the vault keeps, which is a design of its own and is filed as one.
 //!
-//! **The first drive moves like any other** (kotton #124). This device's own
-//! tree syncs with one drive, the person's first, where it lives
-//! ([`record::first`]): the tenancy's own tree at the vault recorded first,
-//! until it is moved. `drive move personal --to <vault>` carries it as it
-//! carries a made drive — into a tree made at the other vault under a name
-//! sealed unfinished, copied, checked and named finished — and the name it
-//! seals is `personal` with [`kotton_wire::ipc::FIRST_DRIVE_ID`], so every
-//! device that follows that vault's listing reads the copy as the first drive
-//! and syncs its tree there (`kotton_sync::engine`). From then on the first
-//! drive is a made drive like the others, its name sealed and its tree the
-//! vault's id for it, and a later move retires it where it was. Its first
-//! move cannot: the tenancy's own tree is retired by no verb, so it is left
-//! as it was, synced by no device, and `status` says so
-//! (`crate::users::pins`). The id stays `first` rather than one minted here:
-//! it is what every device knows the first drive by, and what its pins and
-//! claims are keyed by. A move of it holds this device's tree for the whole
-//! of it, as a pass does, so this device writes nothing into the vault it
-//! leaves meanwhile; another device's pass that lands there between the copy
-//! and its next listing is not lost, since that device still holds what it
-//! wrote and its next pass, at the vault the drive moved to, sends it there.
-//! A device keeping a made drive's files is the drive paths' (kotton #58).
+//! **The first drive is made at the first vault, and moves like any other**
+//! (kotton-protocol's *A drive is where things live and a device keeps what its person
+//! chose*; kotton #124). `personal` is a made drive whose sealed name carries
+//! [`kotton_wire::ipc::FIRST_DRIVE_ID`]. The device that enrols the person's
+//! first vault makes it there, with no verb from the person ([`make_first`]):
+//! only when every vault it records answers and no listing carries that id,
+//! so a later vault holds nothing until a drive is made or moved there, and a
+//! device that cannot tell makes none rather than a second. It keeps it whole
+//! until told otherwise, as the device that makes a drive does
+//! (`crate::users::pins`). Every device's own tree syncs with it where it
+//! lives ([`record::first`], `kotton_sync::engine`). `drive move personal
+//! --to <vault>` carries it as it carries any drive, and every device follows
+//! it at its next listing. A move of it holds this device's tree for the
+//! whole of it, as a pass does, so this device writes nothing into the vault
+//! it leaves meanwhile; another device's pass that lands there between the
+//! copy and its next listing is not lost, since that device still holds what
+//! it wrote and its next pass, at the vault the drive moved to, sends it
+//! there. **Two trees sealed `first`** — a move cut off before it retired its
+//! source, or two devices apart that each made one — are not resolved by a
+//! move: a move retires every copy but one, and the other may hold what this
+//! one does not, so `move` refuses and names both; `status` says which this
+//! device keeps syncing with (`crate::users::pins`). Choosing between them is
+//! the person's, by a verb not built yet.
 //!
 //! **Which devices keep a drive whole: its claims, and nothing else.** What a
 //! device keeps of a drive is its pin settings, which are its own and stay in
@@ -187,8 +189,8 @@
 //! name, the vault that keeps it, its size as that vault last said, the
 //! devices that claim it whole, and whether it is a move's unfinished tree.
 //! The id is the record's ([`kotton_peer::daemon::drives::Drive::id`]) —
-//! [`kotton_wire::ipc::FIRST_DRIVE_ID`] for the first drive, wherever it is
-//! kept — and an unfinished tree's is the id sealed with it, so copies of
+//! [`kotton_wire::ipc::FIRST_DRIVE_ID`] for `personal` — and an unfinished
+//! tree's is the id sealed with it, so copies of
 //! one drive show one id and two drives of one name show two. A descriptor is
 //! this device's answer to its own person over its own IPC; no descriptor,
 //! and so no id, is sent to a vault or a relay.
@@ -204,7 +206,7 @@ use kotton_store::runtime::user::UserStore;
 use kotton_store::{NotCanonical, StorageKey};
 use kotton_sys::store::SealedObjectAccess as _;
 use kotton_wire::ipc::{
-    DriveDescriptor, MadeDrive, TenantDrive, UserResponse, VaultPeerRequest, FIRST_DRIVE_ID, FIRST_DRIVE_NAME, FIRST_DRIVE_TREE,
+    DriveDescriptor, MadeDrive, TenantDrive, UserResponse, VaultPeerRequest, FIRST_DRIVE_ID, FIRST_DRIVE_NAME, TENANCY_TREE,
 };
 use kotton_wire::peer::PairedNode;
 use serde::{Deserialize, Serialize};
@@ -323,7 +325,7 @@ impl Seen {
 
 /// Ask `client`, a vault `user_id` keeps drives on, for every drive it keeps
 /// for them, and take its listing as what this device records of the drives
-/// made there. Returns every copy it listed, the first drive among them.
+/// made there. Returns every copy it listed, `personal` among them.
 ///
 /// A name that does not open under the person's key — a vault that altered
 /// it, or one sealed for another tree — names no drive: a drive this device
@@ -351,12 +353,10 @@ pub async fn follow(
     let copies = read_listing(store, user_id, vault_key, &listed, &recorded);
     let made: Vec<record::Listed> = copies
         .iter()
-        .filter(|c| c.finished && c.tree != FIRST_DRIVE_TREE)
+        .filter(|c| c.finished)
         .map(|c| record::Listed { tree: c.tree.clone(), name: c.name.clone(), id: c.id.clone() })
         .collect();
     record::reconcile(db, user_id, vault_key, &made).await?;
-    let held: Vec<(String, u64)> = listed.iter().map(|d| (d.tree.clone(), d.held)).collect();
-    record::note_held(db, user_id, vault_key, &held).await?;
     for copy in copies.iter().filter(|c| c.sealed_before_ids && c.finished) {
         if let Err(e) = seal_with_id(store, user_id, client, copy).await {
             tracing::warn!(user_id, tree = %copy.tree, error = %e, "a drive's name sealed before ids was not sealed again with its id");
@@ -381,10 +381,10 @@ async fn seal_with_id(store: &UserStore, user_id: &str, client: &KottonPeerObjec
     }
 }
 
-/// A vault's listing, read as copies: the first drive, named as every device
-/// names it; each made drive whose name opens, finished or not; and a made
-/// drive whose name does not open, under the name `recorded` has for its tree
-/// if any, or not at all.
+/// A vault's listing, read as copies: each made drive whose name opens,
+/// finished or not, and a made drive whose name does not open, under the name
+/// `recorded` has for its tree if any, or not at all. The tenancy's own tree
+/// is no drive and no copy of one (module doc), whatever the vault lists of it.
 fn read_listing(
     store: &UserStore,
     user_id: &str,
@@ -404,8 +404,7 @@ fn read_listing(
             finished,
             sealed_before_ids,
         };
-        if drive.tree == FIRST_DRIVE_TREE {
-            copies.push(copy(FIRST_DRIVE_NAME.to_string(), FIRST_DRIVE_ID.to_string(), true, false));
+        if drive.tree == TENANCY_TREE {
             continue;
         }
         let opened = store
@@ -486,9 +485,9 @@ async fn pins_now(runtime: &DeviceRuntime, records: &SqliteRecordStore, store: &
 /// by the person's name for the drive, which a move does not change — its tree
 /// does, at every vault it is carried to. Anything on this device that writes
 /// into a made drive takes it too (kotton #55's last comment; a device keeps
-/// no tree of a made drive yet, kotton #58). The first drive, once moved, is
-/// the one made drive a pass writes into, and a move of it also holds the
-/// tree the pass holds ([`move_to`]).
+/// no tree of a made drive yet, kotton #58). `personal` is the one made drive
+/// a pass writes into, and a move of it also holds the tree the pass holds
+/// ([`move_to`]).
 pub fn drive_lock(name: &str) -> String {
     format!("drive:{name}")
 }
@@ -605,8 +604,12 @@ pub async fn create(
     let drive = MadeDrive(rand::random());
     let tree = drive.tree();
     // The drive's id, minted once, here, and sealed with every copy a move
-    // makes; the tree's id is the vault's and is minted fresh at each.
-    let sealed_name = SealedName { name: name.clone(), id: mint_id() }.seal(store, &tree, true)?;
+    // makes; the tree's id is the vault's and is minted fresh at each. A
+    // `personal` made here — no vault listed one, as every vault answered —
+    // is the first drive, which [`make_first`] makes at enrolment, and takes
+    // its id.
+    let id = if name == FIRST_DRIVE_NAME { FIRST_DRIVE_ID.to_string() } else { mint_id() };
+    let sealed_name = SealedName { name: name.clone(), id }.seal(store, &tree, true)?;
     match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
         UserResponse::Ok => {}
         UserResponse::Error { message } => return refused(format!("drive create: the vault '{}' refused: {message}", vault.node.id)),
@@ -627,8 +630,77 @@ pub async fn create(
     // so would silence the
     // telling that only the vault holds it (`crate::users::pins`), which is
     // the truth.
+    if name == FIRST_DRIVE_NAME {
+        made_here(db, user_id, &made).await?;
+    }
     tracing::info!(user_id, vault = %vault.node.id, "made a drive");
     Ok(UserResponse::Drives { drives: vec![describe(&made, &sizes, &pins_now(runtime, records, store, db, user_id).await?)] })
+}
+
+/// What [`make_first`] did at an enrolment.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MadeFirst {
+    /// `personal` was made at the vault just enrolled.
+    Made,
+    /// A listing carries it already: the vault just enrolled is a place for
+    /// drives and holds nothing.
+    Kept,
+    /// These vaults did not answer, so whether `personal` is kept at one of
+    /// them cannot be told; none was made.
+    Unanswered(Vec<String>),
+}
+
+/// **Make `personal` at the vault `vault_key` just enrolled, if it is the
+/// first** (module doc; kotton-protocol's storage model): with no verb from the person, only when
+/// every vault this device records answers and no listing carries
+/// [`FIRST_DRIVE_ID`]. Its name is sealed there as any drive's, with that id,
+/// and this device keeps it whole until told otherwise ([`made_here`]). A
+/// vault enrolled after it holds nothing until a drive is made or moved there.
+pub async fn make_first(runtime: &DeviceRuntime, store: &UserStore, db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32]) -> io::Result<MadeFirst> {
+    let seen = follow_every_vault(runtime, store, db, user_id).await?;
+    if !seen.unanswered.is_empty() {
+        return Ok(MadeFirst::Unanswered(seen.unanswered));
+    }
+    if seen.copies.iter().any(|c| c.id == FIRST_DRIVE_ID) {
+        return Ok(MadeFirst::Kept);
+    }
+    let vault = record::list(db, user_id)
+        .await?
+        .into_iter()
+        .find(|v| v.vault_key == *vault_key)
+        .ok_or_else(|| io::Error::other("the vault just enrolled is not recorded"))?;
+    let client = dial(runtime, &vault.node, user_id).await?;
+    let drive = MadeDrive(rand::random());
+    let tree = drive.tree();
+    let sealed_name = SealedName { name: FIRST_DRIVE_NAME.to_string(), id: FIRST_DRIVE_ID.to_string() }.seal(store, &tree, true)?;
+    match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
+        UserResponse::Ok => {}
+        UserResponse::Error { message } => return Err(io::Error::other(format!("the vault '{}' refused it: {message}", vault.node.id))),
+        other => return Err(io::Error::other(format!("the vault '{}' answered {other:?}", vault.node.id))),
+    }
+    follow(store, db, user_id, vault_key, &client).await?;
+    let made = record::all(db, user_id)
+        .await?
+        .into_iter()
+        .find(|d| d.vault_key == *vault_key && d.tree == tree)
+        .ok_or_else(|| io::Error::other("the vault made the drive but did not list it"))?;
+    made_here(db, user_id, &made).await?;
+    tracing::info!(user_id, vault = %vault.node.id, "made the first drive at the first vault");
+    Ok(MadeFirst::Made)
+}
+
+/// `personal`, made by this device at `made`: the copy its tree syncs with
+/// ([`record::mark_synced`]), kept whole here until told otherwise — a drive
+/// setting written only when this device's settings would not keep it whole
+/// already, as a device that joined defaults to on demand. The claim that says
+/// so is written by the pass that carries this device's tree to it, which is
+/// the first time the drive can hold it (`crate::users::pins::claim`).
+async fn made_here(db: &Arc<SqlitePool>, user_id: &str, made: &Drive) -> io::Result<()> {
+    record::mark_synced(db, user_id, &made.vault_key, &made.tree).await?;
+    if !pins::keeps_whole(&pins::settings(db, user_id).await?, FIRST_DRIVE_NAME) {
+        pins::write(db, user_id, &kotton_wire::ipc::PinScope::Drive { drive: FIRST_DRIVE_NAME.into() }, Some(kotton_wire::ipc::PinValue::Whole)).await?;
+    }
+    Ok(())
 }
 
 /// `drive list`: every drive, after asking each vault what it keeps, and
@@ -825,18 +897,15 @@ pub fn refused_events(user_id: &str, name: &str, from: &str, refused: &[NotCanon
 
 /// Copy the drive, check it, name it finished at `to`, then retire it at
 /// `from` — and, if any step before the naming fails, retire the unfinished
-/// tree at `to` (module doc). `from_id` is the made drive the copy is read
-/// from, or `None` for the tenancy's own tree, which the first drive is
-/// carried from on its first move: no verb retires that tree, so it is left
-/// as it was and the move is [`Carried::Moved`] once the copy is named. `to`
-/// was made under a name sealed unfinished; `finished_name` is the drive's
-/// name sealed finished for `to_id`. Each key `from` lists is admitted before
-/// anything is read or written under it ([`admit_listing`]); those refused are
-/// handed to `record` then, before anything is copied, and are in the answer.
+/// tree at `to` (module doc). `to` was made under a name sealed unfinished;
+/// `finished_name` is the drive's name sealed finished for `to_id`. Each key
+/// `from` lists is admitted before anything is read or written under it
+/// ([`admit_listing`]); those refused are handed to `record` then, before
+/// anything is copied, and are in the answer.
 pub async fn carry_and_settle(
     user_id: &str,
     from: &dyn VaultEnd,
-    from_id: Option<MadeDrive>,
+    from_id: MadeDrive,
     to: &dyn VaultEnd,
     to_id: MadeDrive,
     finished_name: Vec<u8>,
@@ -878,12 +947,9 @@ pub async fn carry_and_settle(
             Err(left) => Carried::NotMovedTreeLeft { why, left },
         }
     } else {
-        match from_id {
-            None => Carried::Moved,
-            Some(from_id) => match retire(from, user_id, from_id).await {
-                Ok(()) => Carried::Moved,
-                Err(e) => Carried::SourceKept(e),
-            },
+        match retire(from, user_id, from_id).await {
+            Ok(()) => Carried::Moved,
+            Err(e) => Carried::SourceKept(e),
         }
     };
     Settled { carried, refused }
@@ -911,10 +977,6 @@ fn refused_said(refused: &[NotCanonical], src: &str) -> String {
 pub enum Plan {
     /// No drive is called that (at `--from`, when named).
     NoSuch,
-    /// The person's first drive, not moved yet: the tenancy's own tree at the
-    /// vault it lives on ([`record::first`]), which a move carries from and
-    /// leaves as it was, since no verb retires it (module doc).
-    First,
     /// Copies of that name with more than one id: drives no move made.
     Ambiguous(Vec<Copy>),
     /// The drive is at the vault already; the other copies of it are retired.
@@ -932,10 +994,6 @@ pub fn plan_move(copies: &[Copy], name: &str, dest: &[u8; 32], from: Option<&[u8
     if named.is_empty() {
         return Plan::NoSuch;
     }
-    if named.iter().all(|c| c.tree == FIRST_DRIVE_TREE) {
-        return Plan::First;
-    }
-    let named: Vec<&Copy> = named.into_iter().filter(|c| c.tree != FIRST_DRIVE_TREE).collect();
     // `--from` names the drive by the vault one of its copies is at: the
     // copies of its id, wherever they are.
     let ids: Vec<&str> = match from {
@@ -977,7 +1035,7 @@ pub async fn move_to(
     // Another device's move, or a pass another device runs into the drive,
     // this lock does not see; that needs a lease the vault keeps (module doc).
     let _held = runtime.lock_mount(user_id, &drive_lock(name)).await;
-    // The first drive is what this device's own tree syncs with, wherever it
+    // `personal` is what this device's own tree syncs with, wherever it
     // lives, so its move also holds the tree as a pass does
     // (`kotton_sync::engine::sync_mount_with_records`): no pass of this
     // device's writes into the vault it leaves while it is being copied.
@@ -1003,24 +1061,21 @@ pub async fn move_to(
             seen.unanswered.join(", ")
         ));
     }
+    // Two trees sealed as `personal`: a move would retire all but one, and the
+    // other may hold what this one does not (module doc).
+    let firsts: Vec<&Copy> = seen.copies.iter().filter(|c| c.finished && c.id == FIRST_DRIVE_ID).collect();
+    if name == FIRST_DRIVE_NAME && firsts.len() > 1 {
+        return refused(format!(
+            "drive move: you have {} drives called '{name}' ({}); a move keeps one and retires the rest, and each may \
+             hold what the other does not, so none is moved until you choose which is '{name}'. `status` says which \
+             this device syncs with",
+            firsts.len(),
+            firsts.iter().map(|c| format!("on '{}'", label(&c.vault_key))).collect::<Vec<_>>().join(", ")
+        ));
+    }
     let plan = plan_move(&seen.copies, name, &dest.vault_key, from_vault.as_ref().map(|v| &v.vault_key));
     let (source, retire_after) = match plan {
         Plan::NoSuch => return refused(format!("drive move: you have no drive called '{name}'{}", from.map(|f| format!(" on '{f}'")).unwrap_or_default())),
-        Plan::First => {
-            let Some(live) = record::first(db, user_id).await? else {
-                return refused(format!("drive move: you have no drive called '{name}'"));
-            };
-            if let Some(f) = from_vault.as_ref().filter(|f| f.vault_key != live.vault_key) {
-                return refused(format!("drive move: '{name}' lives on '{}', not on '{}'", live.node.id, f.node.id));
-            }
-            if live.vault_key == dest.vault_key {
-                return refused(format!("drive move: '{name}' lives on '{}' already", dest.node.id));
-            }
-            let Some(source) = seen.copies.iter().find(|c| c.vault_key == live.vault_key && c.tree == FIRST_DRIVE_TREE).cloned() else {
-                return refused(format!("drive move: '{}' did not list '{name}', which lives there", live.node.id));
-            };
-            (source, Vec::new())
-        }
         Plan::Ambiguous(copies) => {
             return refused(format!(
                 "drive move: you have {} drives called '{name}' that no move made ({}); name the one you mean with \
@@ -1051,12 +1106,9 @@ pub async fn move_to(
         }
         Plan::Carry { source, retire_after } => (source, retire_after),
     };
-    // A made drive is retired where it was once the copy is named; the first
-    // drive's first move is read from the tenancy's own tree, which is left.
-    let from_id = source.made();
-    if from_id.is_none() && source.tree != FIRST_DRIVE_TREE {
+    let Some(from_id) = source.made() else {
         return refused(format!("drive move: '{name}' is kept under {}, which is no drive's tree", source.tree));
-    }
+    };
     let Some(source_vault) = vaults.iter().find(|v| v.vault_key == source.vault_key).cloned() else {
         return refused(format!("drive move: the vault '{name}' is on is not one this device reaches"));
     };
@@ -1281,7 +1333,7 @@ mod tests {
     }
 
     async fn settle(from: &Fake, to: &Fake) -> Carried {
-        let settled = carry_and_settle("alice", from, Some(FROM), to, TO, b"finished".to_vec(), &|_| {}).await;
+        let settled = carry_and_settle("alice", from, FROM, to, TO, b"finished".to_vec(), &|_| {}).await;
         assert!(settled.refused.is_empty(), "a source of canonical keys had one refused: {settled:?}");
         settled.carried
     }
@@ -1303,7 +1355,7 @@ mod tests {
             let reads = from.reads.lock().unwrap().len();
             recorded.lock().unwrap().extend(refused.iter().map(|not| (not.key.clone(), reads)));
         };
-        let settled = carry_and_settle("alice", &from, Some(FROM), &to, TO, b"finished".to_vec(), &record).await;
+        let settled = carry_and_settle("alice", &from, FROM, &to, TO, b"finished".to_vec(), &record).await;
         assert_eq!(settled.carried, Carried::Moved, "{settled:?}");
         let refused: Vec<&str> = settled.refused.iter().map(|r| r.key.as_str()).collect();
         assert_eq!(refused, hostile, "each key that is not canonical is refused, and only those");
@@ -1371,21 +1423,6 @@ mod tests {
         assert_eq!(to.keys(), ["p/one", "p/two"]);
         assert_eq!(to.told(), ["TenantDriveName"]);
         assert_eq!(from.told(), ["TenantDriveRetire"]);
-    }
-
-    /// **The first drive's first move is carried from the tenancy's own tree,
-    /// and leaves it** (kotton #124): copied and named finished in the same
-    /// order, and the tree it was read from is told nothing — no verb retires
-    /// a tenancy's own tree — and keeps every object. The move is done.
-    #[tokio::test]
-    async fn the_first_drive_is_carried_from_the_tenancys_own_tree_and_leaves_it() {
-        let (from, to) = (source(), Fake::default());
-        let settled = carry_and_settle("alice", &from, None, &to, TO, b"finished".to_vec(), &|_| {}).await;
-        assert_eq!(settled.carried, Carried::Moved);
-        assert_eq!(to.keys(), ["p/one", "p/two"]);
-        assert_eq!(to.told(), ["TenantDriveName"]);
-        assert!(from.told().is_empty(), "the tenancy's own tree was told {:?}", from.told());
-        assert_eq!(from.keys(), ["p/one", "p/two"], "the tree the first drive left lost what it held");
     }
 
     /// **A destination that lists a key at the wrong size, or not at all,
@@ -1563,21 +1600,13 @@ mod tests {
         assert_eq!(plan_move(&copies, "photos", &V2, Some(&V3)), Plan::NoSuch);
     }
 
-    /// The first drive not moved yet is planned as such — a move carries it
-    /// from the tenancy's own tree ([`move_to`]); a name no copy has is no
-    /// drive; and an unfinished tree is no copy of the drive.
+    /// `personal` is planned as any made drive is (kotton #124): carried from
+    /// the tree its name is sealed for, and retired there. A name no copy has
+    /// is no drive; and an unfinished tree is no copy of the drive.
     #[test]
-    fn the_first_drive_and_a_name_nothing_has_are_planned_as_such() {
-        let first = Copy {
-            vault_key: V1,
-            tree: FIRST_DRIVE_TREE.into(),
-            name: "personal".into(),
-            id: FIRST_DRIVE_ID.into(),
-            held: 1,
-            finished: true,
-            sealed_before_ids: false,
-        };
-        assert_eq!(plan_move(&[first], "personal", &V2, None), Plan::First);
+    fn personal_and_a_name_nothing_has_are_planned_as_such() {
+        let first = Copy { name: "personal".into(), id: FIRST_DRIVE_ID.into(), ..a_copy(V1, 1, "personal", 7) };
+        assert_eq!(plan_move(std::slice::from_ref(&first), "personal", &V2, None), Plan::Carry { source: first, retire_after: vec![] });
         let unfinished = Copy { finished: false, ..a_copy(V2, 2, "photos", 7) };
         assert_eq!(plan_move(&[unfinished], "photos", &V2, None), Plan::NoSuch);
     }
@@ -1599,7 +1628,8 @@ mod tests {
 
     /// **A listing, read**: a name sealed finished is a drive with the id it
     /// carries; one sealed unfinished is a move's tree; one that does not open
-    /// keeps the name and id this device has for its tree, or names nothing.
+    /// keeps the name and id this device has for its tree, or names nothing;
+    /// and the tenancy's own tree is no drive, whatever the vault says of it.
     #[test]
     fn a_listing_reads_drives_their_ids_and_unfinished_moves() {
         let dir = tempfile::tempdir().unwrap();
@@ -1610,7 +1640,7 @@ mod tests {
             SealedName { name: "photos".into(), id: id.into() }.seal(&store, &tree(t), finished).unwrap()
         };
         let listed = vec![
-            TenantDrive { tree: FIRST_DRIVE_TREE.into(), sealed_name: vec![], held: 1 },
+            TenantDrive { tree: TENANCY_TREE.into(), sealed_name: vec![], held: 1 },
             TenantDrive { tree: tree(1), sealed_name: seal(1, &photos, true), held: 1 },
             TenantDrive { tree: tree(2), sealed_name: seal(2, &photos, false), held: 1 },
             TenantDrive { tree: tree(3), sealed_name: b"altered".to_vec(), held: 1 },
@@ -1623,7 +1653,6 @@ mod tests {
         assert_eq!(
             said,
             [
-                (FIRST_DRIVE_TREE.to_string(), "personal".to_string(), true, FIRST_DRIVE_ID.to_string(), false),
                 (tree(1), "photos".into(), true, photos.clone(), false),
                 (tree(2), "photos".into(), false, photos, false),
                 (tree(3), "work".into(), true, work, false),
@@ -1697,9 +1726,10 @@ mod tests {
     /// at `home` and `office`. `photos` is recorded at `home`; a move of it to
     /// `office` left an unfinished tree there, sealed with the same id; and a
     /// second `photos`, made at `office` by a `create` that raced, carries an
-    /// id of its own. The descriptors say the first drive is
-    /// [`FIRST_DRIVE_ID`], the raced drive's id differs from the recorded one,
-    /// and the unfinished copy carries the recorded one.
+    /// id of its own; `personal` lives at `home`. The descriptors say
+    /// `personal` is [`FIRST_DRIVE_ID`] and is described once, the raced
+    /// drive's id differs from the recorded one, and the unfinished copy
+    /// carries the recorded one.
     #[tokio::test]
     async fn copies_of_one_drive_describe_with_one_id_and_two_drives_of_one_name_with_two() {
         use kotton_peer::daemon::db as network_db;
@@ -1714,7 +1744,8 @@ mod tests {
         }
         let (recorded, raced) = ("ab".repeat(16), "cd".repeat(16));
         let listed = |tree: String, id: &str| record::Listed { tree, name: "photos".into(), id: id.into() };
-        record::reconcile(&db, "alice", &key(9), &[listed(MadeDrive([1; 16]).tree(), &recorded)]).await.unwrap();
+        let personal = record::Listed { tree: MadeDrive([5; 16]).tree(), name: FIRST_DRIVE_NAME.into(), id: FIRST_DRIVE_ID.into() };
+        record::reconcile(&db, "alice", &key(9), &[listed(MadeDrive([1; 16]).tree(), &recorded), personal]).await.unwrap();
         record::reconcile(&db, "alice", &key(4), &[listed(MadeDrive([2; 16]).tree(), &raced)]).await.unwrap();
         let seen = Seen {
             copies: vec![Copy {
@@ -1729,15 +1760,14 @@ mod tests {
             unanswered: Vec::new(),
         };
         let pins = pins::Read { settings: Vec::new(), claims: Vec::new(), devices: Vec::new() };
-        let described: Vec<DriveDescriptor> = record::all(&db, "alice").await.unwrap().iter().map(|d| describe(d, &HashMap::new(), &pins)).collect();
+        let described: Vec<DriveDescriptor> = record::kept(&db, "alice").await.unwrap().iter().map(|d| describe(d, &HashMap::new(), &pins)).collect();
         let id_at = |vault: &str, name: &str| -> Option<String> {
             let found: Vec<_> = described.iter().filter(|d| d.vault == vault && d.name == name).collect();
             assert_eq!(found.len(), 1, "{vault}/{name}: {described:?}");
             found[0].id.clone()
         };
-        for vault in ["home", "office"] {
-            assert_eq!(id_at(vault, kotton_wire::ipc::FIRST_DRIVE_NAME).as_deref(), Some(FIRST_DRIVE_ID), "the first drive at {vault}");
-        }
+        assert_eq!(id_at("home", FIRST_DRIVE_NAME).as_deref(), Some(FIRST_DRIVE_ID), "personal at home");
+        assert_eq!(described.iter().filter(|d| d.name == FIRST_DRIVE_NAME).count(), 1, "personal is described where it is not: {described:?}");
         assert_eq!(id_at("home", "photos"), Some(recorded.clone()));
         assert_eq!(id_at("office", "photos"), Some(raced.clone()));
         assert_ne!(id_at("home", "photos"), id_at("office", "photos"), "two drives of one name describe with one id");

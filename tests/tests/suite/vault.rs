@@ -544,9 +544,25 @@ async fn a_vault_on_a_bucket_keeps_what_a_device_pushes_and_gives_it_back_from_t
     assert_eq!(recs[0]["title"], "survives");
 }
 
-/// Everything a vault holds for `user` in its pool, as `(key, length)`.
+/// Everything a vault holds for `user` in its pool, as `(key, length)`: in
+/// the tenancy's own tree, and in each drive made there, `personal` among
+/// them (kotton #124), each key relative to the tree it rests in.
 fn pool_of(vault: &RunningVault, user: &str) -> Vec<(String, u64)> {
-    let pool = vault.base_path.join("users").join(user).join("data");
+    let person = vault.base_path.join("users").join(user);
+    let mut trees = vec![person.join("data")];
+    if let Ok(made) = std::fs::read_dir(person.join("drives")) {
+        trees.extend(made.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+    }
+    let mut held: Vec<(String, u64)> = Vec::new();
+    for tree in trees {
+        held.extend(tree_of(&tree));
+    }
+    held
+}
+
+/// Every file under `pool`, as `(key, length)`, the key relative to it.
+fn tree_of(pool: &std::path::Path) -> Vec<(String, u64)> {
+    let pool = pool.to_path_buf();
     let mut held: Vec<(String, u64)> = Vec::new();
     let mut pending = vec![pool.clone()];
     while let Some(dir) = pending.pop() {
@@ -680,7 +696,20 @@ async fn files_the_engine_syncs_rest_at_the_vault_only_in_packs() {
         assert!(outcome.files >= 1, "the engine pushed something: {outcome:?}");
     }
     the_pool_holds_only_packs(&vault, "alice");
-    every_sized_file_comes_back(&phrase, "alice", &identity).await;
+    // The engine's pass went to `personal`, the drive made at this first
+    // enrolment (kotton #124), so a phrase-only device takes them back from
+    // it by its own engine's pass.
+    let (_cold_device, mut cold) = recover_from(&phrase, "alice", &identity).await;
+    let (job, drives) = cold.sync_drives("alice").await.expect("the cold device's sync");
+    assert_eq!(drives, 1, "the cold device finds no personal at the vault");
+    cold.sync_await("alice", job, 120).await.expect("the cold device's pass");
+    for (name, len) in SIZED {
+        assert_eq!(
+            cold.read_file("alice", name).await.unwrap_or_else(|e| panic!("{name} from the vault: {e}")),
+            vec![0x5a; len],
+            "{name} came back whole"
+        );
+    }
 }
 
 /// A vault answers its verbs and nothing else — at its door, and over the

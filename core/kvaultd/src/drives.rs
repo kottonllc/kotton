@@ -3,19 +3,20 @@
 //! person may have several, on one vault or many.
 //!
 //! **What a drive is here: a sealed tree of its own in the tenant's pool.**
-//! The pool a vault kept for each tenant before is the tenancy's own tree, the
-//! mount `local` — the person's first drive here, migrated in place by being
-//! read as one: nothing moved, and a vault that never saw a made drive answers
-//! exactly as it did. Every drive made after it is another mount of the same
-//! pool, kept beside it:
+//! Each drive is a mount of the tenant's pool made for it, the person's first
+//! drive, `personal`, among them (kotton-protocol's *A drive is where things live and
+//! a device keeps what its person chose*): a device makes it at the first
+//! vault the person enrols, with the same verb as any other, so nothing here
+//! sets it apart. The tenancy's own tree, the mount `local`, is the pool's own
+//! and no drive; this vault keeps it, lists it, and is never asked to name it:
 //!
-//! | Drive | Mount (the tree the sealed verbs name) | On the disk | Its name |
+//! | Tree | Mount (the tree the sealed verbs name) | On the disk | Its name |
 //! |---|---|---|---|
-//! | the tenancy's own | `local` | `users/<id>/data/` | none sealed; every device calls it `personal` |
+//! | the tenancy's own | `local` | `users/<id>/data/` | none: no drive |
 //! | each made one | `drive-<32 hex>` (`MadeDrive::tree`) | `users/<id>/drives/<tree>/` | sealed, in `tenant_drives` |
 //!
 //! On a bucket each is `<prefix>/<id>/<tree>/`, through the same `Shelves`
-//! seam the first drive rests on. Each tree pins its own key domain at its
+//! seam the tenancy's own tree rests on. Each tree pins its own key domain at its
 //! first sealed write (`sealed_mount_domain(<id>, <tree>)`), as `local` does,
 //! so a write in another domain is refused per drive.
 //!
@@ -61,7 +62,7 @@
 use crate::peer::PeerContext;
 use kotton_common::crypto::kdf_labels;
 use kotton_device::users::residency::Residency as _;
-use kotton_wire::ipc::{MadeDrive, TenantDrive, UserResponse, FIRST_DRIVE_TREE};
+use kotton_wire::ipc::{MadeDrive, TenantDrive, UserResponse, TENANCY_TREE};
 use sqlx::{Row as _, SqlitePool};
 use std::io;
 
@@ -184,12 +185,12 @@ pub async fn list(ctx: &PeerContext, user_id: &str) -> io::Result<UserResponse> 
         .await
         .map_err(io::Error::other)?;
     let mut trees: Vec<String> = pool.shelf_mounts().into_iter().map(|(mount, _)| mount).collect();
-    trees.sort_by_key(|t| (t != FIRST_DRIVE_TREE, t.clone()));
+    trees.sort_by_key(|t| (t != TENANCY_TREE, t.clone()));
     let mut drives = Vec::with_capacity(trees.len());
     for tree in trees {
-        // A mount of the pool that is neither the first drive nor a made one is
+        // A mount of the pool that is neither the tenancy's own tree nor a made one is
         // nothing a tenant's verb made, and is not one of their drives.
-        if tree != FIRST_DRIVE_TREE && MadeDrive::from_tree(&tree).is_none() {
+        if tree != TENANCY_TREE && MadeDrive::from_tree(&tree).is_none() {
             continue;
         }
         let Some(shelf) = pool.get_remote(&tree) else { continue };
@@ -385,10 +386,10 @@ mod tests {
             other => panic!("one id was made twice: {other:?}"),
         }
 
-        write(&ctx, "alice", FIRST_DRIVE_TREE, "x/first", b"first").await;
+        write(&ctx, "alice", TENANCY_TREE, "x/first", b"first").await;
         write(&ctx, "alice", &photos.tree(), "x/photo", b"a photo").await;
         write(&ctx, "alice", &work.tree(), "x/memo", b"memo").await;
-        assert_eq!(keys(&ctx, "alice", FIRST_DRIVE_TREE).await, ["x/first"]);
+        assert_eq!(keys(&ctx, "alice", TENANCY_TREE).await, ["x/first"]);
         assert_eq!(keys(&ctx, "alice", &photos.tree()).await, ["x/photo"]);
         assert_eq!(keys(&ctx, "alice", &work.tree()).await, ["x/memo"]);
 
@@ -397,7 +398,7 @@ mod tests {
         assert_eq!(
             said,
             [
-                (FIRST_DRIVE_TREE.to_string(), vec![]),
+                (TENANCY_TREE.to_string(), vec![]),
                 (photos.tree(), b"sealed photos".to_vec()),
                 (work.tree(), b"sealed work".to_vec()),
             ]
@@ -407,10 +408,10 @@ mod tests {
         assert!(dir.path().join("vault/users/alice/drives").join(photos.tree()).is_dir());
 
         assert!(matches!(retire(&ctx, "alice", work).await.unwrap(), UserResponse::Ok));
-        assert_eq!(listed(&ctx, "alice").await.iter().map(|d| d.tree.clone()).collect::<Vec<_>>(), [FIRST_DRIVE_TREE.to_string(), photos.tree()]);
+        assert_eq!(listed(&ctx, "alice").await.iter().map(|d| d.tree.clone()).collect::<Vec<_>>(), [TENANCY_TREE.to_string(), photos.tree()]);
         assert!(!dir.path().join("vault/users/alice/drives").join(work.tree()).exists(), "the retired tree is on the disk");
         assert_eq!(keys(&ctx, "alice", &photos.tree()).await, ["x/photo"], "retiring one drive touched another");
-        assert_eq!(keys(&ctx, "alice", FIRST_DRIVE_TREE).await, ["x/first"]);
+        assert_eq!(keys(&ctx, "alice", TENANCY_TREE).await, ["x/first"]);
         assert_eq!(
             ctx.meter.held("alice"),
             Some(listed(&ctx, "alice").await.iter().map(|d| d.held).sum::<u64>()),
@@ -501,7 +502,7 @@ mod tests {
         }
         assert!(ctx.reassembly.lock().await.is_empty(), "the retired drive's part was kept");
         assert!(!dir.path().join("vault/users/alice/drives").join(photos.tree()).exists(), "the retired tree is on the disk");
-        assert!(write_into(&ctx, "alice", FIRST_DRIVE_TREE).await.unwrap().is_none(), "the first drive took a hold");
+        assert!(write_into(&ctx, "alice", TENANCY_TREE).await.unwrap().is_none(), "the first drive took a hold");
     }
 
     /// A sealed name past the bound is refused, and no tree is made for it.
@@ -629,7 +630,7 @@ mod tests {
         let ctx = a_vault(dir.path()).await;
         let photos = MadeDrive([5; 16]);
         assert!(matches!(make(&ctx, "alice", photos, b"sealed".to_vec()).await.unwrap(), UserResponse::Ok));
-        write(&ctx, "alice", FIRST_DRIVE_TREE, "x/first", b"first").await;
+        write(&ctx, "alice", TENANCY_TREE, "x/first", b"first").await;
         write(&ctx, "alice", &photos.tree(), "x/photo", b"a photo").await;
         let tree = tree_dir(&ctx, "alice", &photos.tree());
         let planted = plant_what_no_device_wrote(&ctx, "alice", &photos.tree()).await;
@@ -644,8 +645,8 @@ mod tests {
         }
         assert!(!tree.exists(), "the retired tree, or the file it refused, is on the disk");
         assert_eq!(std::fs::read(&planted.beside).unwrap(), b"beside the tree", "the retire reached outside the tree");
-        assert_eq!(listed(&ctx, "alice").await.iter().map(|d| d.tree.clone()).collect::<Vec<_>>(), [FIRST_DRIVE_TREE]);
-        assert_eq!(keys(&ctx, "alice", FIRST_DRIVE_TREE).await, ["x/first"], "the retire touched another drive");
+        assert_eq!(listed(&ctx, "alice").await.iter().map(|d| d.tree.clone()).collect::<Vec<_>>(), [TENANCY_TREE]);
+        assert_eq!(keys(&ctx, "alice", TENANCY_TREE).await, ["x/first"], "the retire touched another drive");
     }
 
     /// **The walk counts what it refused, and deletes it by no key.** On the
@@ -694,10 +695,10 @@ mod tests {
         crate::carry::init(&ctx.db).await.unwrap();
         let photos = MadeDrive([6; 16]);
         assert!(matches!(make(&ctx, "alice", photos, b"sealed".to_vec()).await.unwrap(), UserResponse::Ok));
-        write(&ctx, "alice", FIRST_DRIVE_TREE, "x/first", b"first").await;
+        write(&ctx, "alice", TENANCY_TREE, "x/first", b"first").await;
         write(&ctx, "alice", &photos.tree(), "x/photo", b"a photo").await;
-        write(&ctx, "bob", FIRST_DRIVE_TREE, "x/bobs", b"bob's").await;
-        let first = plant_what_no_device_wrote(&ctx, "alice", FIRST_DRIVE_TREE).await;
+        write(&ctx, "bob", TENANCY_TREE, "x/bobs", b"bob's").await;
+        let first = plant_what_no_device_wrote(&ctx, "alice", TENANCY_TREE).await;
         let made = plant_what_no_device_wrote(&ctx, "alice", &photos.tree()).await;
 
         let sessions = kotton_session::service::tokens::SessionMap::default();
@@ -711,7 +712,7 @@ mod tests {
         }
         assert!(!dir.path().join("vault/users/alice").exists(), "alice's directory is on the disk");
         assert!(ctx.pools.get("alice").is_none());
-        assert_eq!(keys(&ctx, "bob", FIRST_DRIVE_TREE).await, ["x/bobs"], "the drop touched bob's pool");
+        assert_eq!(keys(&ctx, "bob", TENANCY_TREE).await, ["x/bobs"], "the drop touched bob's pool");
     }
 
     /// **A name the vault keeps only a number for is dropped** (kotton #430).
@@ -729,7 +730,7 @@ mod tests {
         crate::doors::init(&ctx.db).await.unwrap();
         crate::carry::init(&ctx.db).await.unwrap();
         ctx.meter.set_pool_quota(&ctx.db, "priya", 1 << 20).await.unwrap();
-        write(&ctx, "alice", FIRST_DRIVE_TREE, "x/alices", b"alice's").await;
+        write(&ctx, "alice", TENANCY_TREE, "x/alices", b"alice's").await;
         assert!(crate::tenancy::names(&ctx).await.unwrap().contains("priya"), "the vault does not keep priya's number");
         assert!(!dir.path().join("vault/users/priya").exists(), "an invite made priya a directory");
 
@@ -742,7 +743,7 @@ mod tests {
         assert_eq!(logged.field("dropped a tenant", "objects").as_deref(), Some("0"));
         assert!(!crate::tenancy::names(&ctx).await.unwrap().contains("priya"), "the drop left priya's number");
         assert!(!dir.path().join("vault/users/priya").exists(), "the drop made priya a directory");
-        assert_eq!(keys(&ctx, "alice", FIRST_DRIVE_TREE).await, ["x/alices"], "the drop touched alice's pool");
+        assert_eq!(keys(&ctx, "alice", TENANCY_TREE).await, ["x/alices"], "the drop touched alice's pool");
         assert!(ctx.pools.get("bob").is_some(), "the drop took bob's pool");
     }
 
@@ -758,7 +759,7 @@ mod tests {
         crate::meter::init(&ctx.db).await.unwrap();
         crate::doors::init(&ctx.db).await.unwrap();
         crate::carry::init(&ctx.db).await.unwrap();
-        write(&ctx, "alice", FIRST_DRIVE_TREE, "x/alices", b"alice's").await;
+        write(&ctx, "alice", TENANCY_TREE, "x/alices", b"alice's").await;
         assert!(ctx.pools.remove("alice"));
 
         let sessions = kotton_session::service::tokens::SessionMap::default();

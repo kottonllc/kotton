@@ -793,26 +793,26 @@ mod tenant_device_tests {
 // `DriveDescriptor` below, and the `Drive*` and `TenantDrive*` variants of
 // `UserRequest` — and move as one when those crates exist.
 
-/// The name a device gives the tenancy's own tree on a vault: the pool a vault
-/// kept for each tenant before a person could have several drives on one, which
-/// is that person's first drive there. A vault holds no key, so it cannot keep a
-/// sealed name for a tree it made before names existed; every device reads this
-/// one for it, so they all agree without having been told.
+/// The name of the person's first drive (RFC 0002, *A drive is where things
+/// live and a device keeps what its person chose*): a made drive whose name is
+/// sealed like any drive's, made at the first vault the person enrols by the
+/// device that enrols it, with [`FIRST_DRIVE_ID`] as its id.
 pub const FIRST_DRIVE_NAME: &str = "personal";
 
-/// The mount a vault keeps the tenancy's own tree under — the first drive.
-pub const FIRST_DRIVE_TREE: &str = "local";
+/// The mount a vault keeps the tenancy's own tree under: the pool's own
+/// mount, a place for drives and no drive (kotton #124). No device's tree
+/// syncs with it, and no verb over made drives can name it.
+pub const TENANCY_TREE: &str = "local";
 
-/// The id every device gives the tenancy's own tree (kotton-protocol #26's
-/// "the drive's id"): a made drive's id is minted at random at `drive create`
-/// and sealed with its name, and this tree has no sealed name, so every device
-/// reads this one for it, as it reads [`FIRST_DRIVE_NAME`]. It is never sent to
-/// a vault; it keys the person's own records about the drive (a whole-keeper
-/// claim, `kotton_device::users::pins`) and this device's record of it. It
-/// cannot be a made drive's id, which is thirty-two hex digits. When a move
-/// carries the first drive into a made tree (kotton #124) its name is sealed
-/// with this id, so every device reads that copy as the first drive and its
-/// claims and pins keep their key; it is not minted a fresh one.
+/// The id of the person's first drive (kotton-protocol #26's "the drive's
+/// id"; RFC 0002): a made drive's id is minted at random at `drive create`,
+/// and the first drive's is this one constant, sealed inside its name as every
+/// id is and opened by no vault, so that every device of the person's finds
+/// from a vault's listing alone which drive its own tree is a view of. It keys
+/// the person's own records about the drive (a whole-keeper claim,
+/// `kotton_device::users::pins`) and this device's record of it, and every
+/// copy a move makes carries it. It cannot be a made drive's random id, which
+/// is thirty-two hex digits.
 pub const FIRST_DRIVE_ID: &str = "first";
 
 /// A drive made on a vault after the first, by the id the device that made it
@@ -845,7 +845,7 @@ impl MadeDrive {
     }
 
     /// The made drive a tree's name is, or `None` for one that is not —
-    /// [`FIRST_DRIVE_TREE`] among them.
+    /// [`TENANCY_TREE`] among them.
     pub fn from_tree(tree: &str) -> Option<Self> {
         let hex = tree.strip_prefix(Self::TREE_PREFIX)?;
         if hex.len() != 32 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
@@ -868,7 +868,7 @@ impl MadeDrive {
 /// is called.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantDrive {
-    /// The tree: [`FIRST_DRIVE_TREE`] for the tenancy's own, or a
+    /// The tree: [`TENANCY_TREE`] for the tenancy's own, or a
     /// [`MadeDrive::tree`].
     pub tree: String,
     /// The drive's name, sealed under the person's key by the device that made
@@ -890,7 +890,7 @@ pub struct DriveDescriptor {
     /// The drive's own id, the same for every copy a move makes of it and on
     /// every device of the person's: thirty-two hex digits minted at `drive
     /// create` and sealed with the name, or [`FIRST_DRIVE_ID`] for the
-    /// person's first drive, wherever it is kept (kotton #124). What
+    /// person's first drive, sealed the same way (kotton #124). What
     /// tells two copies of one drive from two drives of one name. `None` for a
     /// made drive this device recorded before ids existed, until its vault's
     /// next listing. It is the device's answer to its own person and is never
@@ -1064,11 +1064,17 @@ pub enum PinNotice {
     /// want. `settings` are the settings that keep more than fits, each as
     /// `pin` names it, so the person can set one to keep less.
     ShortOfRoom { drive: String, settings: Vec<String>, held: u64, budget: Option<u64>, wanted: u64 },
-    /// The vault labelled `vault` keeps, in its own tree for the person, an
-    /// earlier copy of `drive` — the first drive — that no device syncs with
-    /// any longer: kept there when every vault was synced with it, or left
-    /// there by a move. It is left as it was (kotton #124).
-    NotSynced { drive: String, vault: String },
+    /// No vault the person keeps drives on has listed `drive` — the first
+    /// drive — to this device, so this device's tree syncs with nothing
+    /// (RFC 0002; kotton #124): it never guesses a vault.
+    NotFound { drive: String },
+    /// Two or more of the person's vaults, labelled `vaults`, list a tree
+    /// sealed as `drive` — the first drive — with its one id (RFC 0002): a
+    /// move under way, or two devices that each made one apart from each
+    /// other. `synced` is the vault this device's tree keeps syncing with,
+    /// the one it synced with before, or `None`: it syncs with neither until
+    /// the person chooses (kotton #124).
+    Twice { drive: String, vaults: Vec<String>, synced: Option<String> },
 }
 
 impl PinNotice {
@@ -1076,8 +1082,8 @@ impl PinNotice {
     pub fn said(&self) -> String {
         match self {
             PinNotice::NoWholeDevice { drive } if drive == FIRST_DRIVE_NAME => format!(
-                "no device of yours keeps '{drive}' whole; only the drive holds all of it. \
-                 `pin {drive} whole` on a device keeps it there"
+                "no device of yours keeps '{drive}' whole: only the vault it lives on holds all of it, and if \
+                 that vault is lost, what no device keeps is lost with it. `pin {drive} whole` on a device keeps it there"
             ),
             PinNotice::NoWholeDevice { drive } => format!(
                 "no device of yours keeps '{drive}' whole; only the drive holds all of it. A device keeps \
@@ -1098,10 +1104,25 @@ impl PinNotice {
                      pins want {wanted}; {less}"
                 )
             }
-            PinNotice::NotSynced { drive, vault } => format!(
-                "'{vault}' keeps an earlier copy of '{drive}' that no device of yours syncs with any longer: \
-                 '{drive}' lives on one vault, and your devices sync with it there. The copy is left as it was"
+            PinNotice::NotFound { drive } => format!(
+                "none of your vaults has listed '{drive}' to this device, so this device's files sync with \
+                 nothing; `sync` asks them again, and if none keeps it, `drive create {drive} --on <vault>` \
+                 makes it there"
             ),
+            PinNotice::Twice { drive, vaults, synced } => {
+                let at = vaults.iter().map(|v| format!("'{v}'")).collect::<Vec<_>>().join(" and ");
+                match synced {
+                    Some(v) => format!(
+                        "{at} each keep a drive called '{drive}': a move of it that has not finished, or two \
+                         made apart. This device keeps syncing with the one at '{v}', which it synced with before"
+                    ),
+                    None => format!(
+                        "{at} each keep a drive called '{drive}', and this device has synced with neither: it \
+                         syncs with neither until you choose which is '{drive}'. A move of it that has not \
+                         finished ends this when it does"
+                    ),
+                }
+            }
         }
     }
 }
@@ -1216,7 +1237,7 @@ mod made_drive_tests {
         let tree = id.tree();
         assert_eq!(tree, format!("drive-{}", "ab".repeat(16)));
         assert_eq!(MadeDrive::from_tree(&tree), Some(id));
-        for not in [FIRST_DRIVE_TREE, "drive-", "drive-AB", "drive-../x", &format!("drive-{}", "AB".repeat(16)), &format!("{tree}0")] {
+        for not in [TENANCY_TREE, "drive-", "drive-AB", "drive-../x", &format!("drive-{}", "AB".repeat(16)), &format!("{tree}0")] {
             assert_eq!(MadeDrive::from_tree(not), None, "{not}");
         }
     }
