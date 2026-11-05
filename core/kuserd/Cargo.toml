@@ -94,6 +94,11 @@ tempfile = "3.8"
 env_logger = "0.11"
 # Enable MemorySecrets (feature-gated) for the enrollment handler tests.
 kotton-secret = { path = "../secret", features = ["test-utils"] }
+# A relay at a loopback port, for the contact ceremony tests that end a
+# ceremony with its stream (`ceremony_ends_tests`): the version kotton-net
+# speaks to a relay with.
+tokio-tungstenite = "0.21"
+futures = "0.3"
 
 [lints]
 workspace = true

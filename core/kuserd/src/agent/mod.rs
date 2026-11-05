@@ -3891,6 +3891,9 @@ mod peer_key_tests;
 #[cfg(test)]
 mod co_member_tests;
 
+#[cfg(test)]
+mod ceremony_ends_tests;
+
 /// **The two gestures, told apart by the one fact that distinguishes them.**
 ///
 /// Quitting Kotton stops the daemon; closing the window does not. kuid
