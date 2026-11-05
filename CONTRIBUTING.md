@@ -32,38 +32,49 @@ first.
 ## What goes next
 
 The sprint is the queue. Its milestone holds the sprint's scope items (label `scope`), in the
-order the roadmap gives, and a finish line; a found defect joins it only as a `blocker`. Whoever
+milestone's order, and a finish line; a found defect joins it only as a `blocker`. Whoever
 drives the loop takes the top scope item; a maintainer ([`GOVERNANCE.md`](GOVERNANCE.md)) may
 reorder it at any time, and nothing waits for one to.
 
 - **A blocker goes next; nothing else interrupts.** A blocker is a defect on a path the sprint's
-  finish line exercises or the last tag ships, and it does one of these: loses, or leaves
-  unopenable, data the system acknowledged writing; lets one identity reach another's data or
-  keys; carries a key across a process boundary; writes a durable identifier that joins
+  finish line exercises or a released tag ships (none yet), and it does one of these: loses, or
+  leaves unopenable, data the system acknowledged writing; lets one identity reach another's
+  data or keys; carries a key across a process boundary; writes a durable identifier that joins
   observations across devices, vaults or time; lets a grant reach past what was granted; or
-  breaks, on such a path, what a named recent pull request's green test held. A red check on
-  `main`, and a check that should hold `main` but does not run or cannot fail, are blockers on
-  any path: the loop stands on them. A blocker issue names its clause, its path and its
-  reproduction in its first lines; without all three it is a `defect`. It goes next after the
-  pull request in hand lands or is parked, not inside that pull request.
-- **Severity is the finder's to propose and the reviewer's to settle.** `blocker`, `defect` or
-  `hygiene` is set at filing by whoever found it, with the clause it meets. The driver records it
-  and neither raises nor lowers it; a dispute goes to the next reviewer.
+  breaks, on such a path, what a named pull request landed in this sprint or the last held with
+  a green test. A red check on `main`, and a check that should hold `main` but does not run or
+  cannot fail, are blockers on any path: the loop stands on them. A blocker issue names its
+  clause, its path and its reproduction in its first lines; without all three it is a `defect`.
+  A blocker that is a vulnerability is reported privately per [`SECURITY.md`](SECURITY.md),
+  never as a public issue; it still goes next, and its public record, after the fix lands,
+  names only its clause. A blocker goes next after the pull request in hand lands or is parked,
+  not inside that pull request.
+- **Severity is the finder's to propose and a maintainer's or the next reviewer's to settle.**
+  `blocker`, `defect` or `hygiene` is set at filing by whoever found it, with the clause it
+  meets. When the driver is the finder, a `blocker` it files is confirmed by the next reviewer
+  before it goes next, and a `hygiene` it files is not closed as not taken without a
+  maintainer's look. Otherwise the driver records severity and neither raises nor lowers it.
 - **A choice an issue leaves open is a `decision`, not a wait.** The issue states the choice and
-  a default. If no maintainer objects within 72 hours, the default stands and is built; a design
-  decision is then recorded where the design is (kotton-protocol's RFCs, or the module docs). A
-  reversal after that is a new proposal, not a quiet change.
+  a default, and mentions the person who directed the work and the maintainers. If no
+  maintainer objects within 72 hours of the last change to the choice or its default, the
+  default stands and is built through the loop, unless it is one
+  [`GOVERNANCE.md`](GOVERNANCE.md) says is not decided this way. A design decision is then
+  recorded where the design is (kotton-protocol's documents, or the module docs). A reversal
+  after that is a new proposal, not a quiet change.
 - **Defects are budgeted when a sprint opens.** One or two `defect` issues are taken into the
-  sprint and named in its milestone; no others are taken mid-sprint. A `hygiene` issue no sprint
-  takes by the end of the next is closed as not taken.
+  sprint and named in its milestone; no others are taken mid-sprint. A `hygiene` issue that no
+  sprint takes by the end of the next sprint is closed as not taken, with a comment citing this
+  rule.
 - **A pull request is the size of its issue's done-when.** A finding outside it is filed, not
   fixed there, unless the diff itself introduces it. At most one follow-up issue per review;
   wording and test-shape notes are review comments, not issues.
-- **When a pull request lands, its issue closes**, naming the pull request, or says in it what is
-  left and under which issue.
-- **Report, do not ask.** Before a blocker, name its clause and go; before anything off the
-  queue, say why in one line and go. Only what [`GOVERNANCE.md`](GOVERNANCE.md) reserves to a
-  maintainer waits for one.
+- **When a pull request lands, its issue closes**, once its assessor has confirmed the
+  done-when was met, naming the pull request; or it says what is left and under which issue.
+- **Report, do not ask, within the queue.** Before a blocker, name its clause and go. Work off
+  the queue is a `decision` under the rule above, not something a driver starts on its own
+  word. A driver does not close, relabel or delete what another person opened, delete a branch
+  it did not make, or reorder the milestone; it asks for these, as it asks for what
+  [`GOVERNANCE.md`](GOVERNANCE.md) reserves to a maintainer.
 
 ## Every commit is signed off
 
