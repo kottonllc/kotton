@@ -484,7 +484,7 @@ fn vault_keeps_line(node_id: &str, keeps: Option<&Kept>) -> String {
              to copy data to it."
         ),
         Some(k) if !k.personal_anywhere => {
-            kotton_wire::ipc::PinNotice::NotFound { drive: personal.to_string() }.said().replacen("none of", "it holds nothing yet, and none of", 1)
+            kotton_wire::ipc::PinNotice::NotFound { drive: personal.to_string() }.said_after_enrol()
         }
         Some(k) if k.here.is_empty() => format!(
             "it holds nothing of yours until a drive is made or moved there: `drive create <name> --on {node_id}` \

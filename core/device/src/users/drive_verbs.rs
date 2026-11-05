@@ -166,16 +166,20 @@
 //! it at its next listing. A move of it holds this device's tree for the
 //! whole of it, as a pass does, so this device writes nothing into the vault
 //! it leaves meanwhile, and once the copy is named finished this device syncs
-//! with the copy. A write another device's pass makes there mid-move is
-//! kotton #143's to hold (above). **Two trees sealed `first`** are either the
+//! with the copy. A write another device's pass makes there while the move
+//! is running, not cut off, is kotton #143's to hold (above). **Two trees sealed `first`** are either the
 //! two a move of it left, cut off between naming the copy and retiring the
 //! source, or two that devices apart from each other each made, which no move
 //! may resolve: a move retires every copy but one, and the other may hold
 //! what this one does not. This device tells them apart by its own record of
 //! the move it began ([`record::MoveBegun`], kept on this device and sent
 //! nowhere): when that record names exactly the two listed, running the move
-//! again to the same vault is let through and finishes it as any drive's
-//! interrupted move is finished ([`twice`]); otherwise `move` refuses and
+//! again to the same vault is let through ([`twice`]) and finishes it. While
+//! it was cut off, the person's other devices kept syncing with the tree it
+//! left, so before that tree is retired the rerun carries into the copy every
+//! object the copy does not list, and checks the copy lists each, as a move
+//! checks ([`top_up_and_settle`]); an object both list is left as the copy
+//! holds it, since this device has synced with the copy since. Otherwise `move` refuses and
 //! names both, and `status` says which this device keeps syncing with
 //! (`crate::users::pins`). Choosing between two made apart is the person's,
 //! by a verb not built yet.
@@ -972,6 +976,60 @@ pub async fn carry_and_settle(
     Settled { carried, refused }
 }
 
+/// **Finish a move cut off after it named its copy at `to`**: carry from
+/// `from`, the tree the move left, every object the copy does not list —
+/// what another device's pass wrote there after the copy was made — check that
+/// the copy lists each at the size sent and every key `from` lists, and then
+/// retire `from`. An object both list is left as the copy holds it, since a
+/// pass that synced with the copy may have written it since (module doc).
+/// Keys are admitted as [`carry_and_settle`] admits them. Nothing here
+/// retires the copy, which is named finished already: a failure leaves both
+/// trees as they are, [`Carried::SourceKept`], and the move is run again.
+pub async fn top_up_and_settle(
+    user_id: &str,
+    from: &dyn VaultEnd,
+    from_id: MadeDrive,
+    to: &dyn VaultEnd,
+    record: &(dyn Fn(&[NotCanonical]) + Sync),
+) -> Settled {
+    let mut refused = Vec::new();
+    let topped = async {
+        let listed = from.objects().await.map_err(|e| format!("the tree it left could not be listed: {e}"))?;
+        let (wanted, not_canonical) = admit_listing(listed);
+        if !not_canonical.is_empty() {
+            record(&not_canonical);
+        }
+        refused = not_canonical;
+        let held: Vec<(String, u64)> = to.objects().await.map_err(|e| format!("the copy could not be listed: {e}"))?;
+        let lacking: Vec<&(StorageKey, u64)> = wanted.iter().filter(|(k, _)| !held.iter().any(|(h, _)| h == k.as_str())).collect();
+        for (key, _) in &lacking {
+            let blob = from.read(key).await.map_err(|e| format!("reading {key}: {e}"))?;
+            to.write(key, &blob).await.map_err(|e| format!("writing {key}: {e}"))?;
+        }
+        let landed = to.objects().await.map_err(|e| format!("the copy could not list what it took: {e}"))?;
+        // Each key the tree it left lists is at the copy; each one sent is
+        // there at the size it was sent.
+        let sent = |k: &StorageKey| lacking.iter().any(|(l, _)| l == k);
+        let missing = wanted
+            .iter()
+            .filter(|(k, size)| !landed.iter().any(|(l, s)| l == k.as_str() && (!sent(k) || s == size)))
+            .count();
+        if missing > 0 {
+            return Err(format!("the copy does not list {missing} of the objects the tree it left holds, at the size they were sent"));
+        }
+        Ok(())
+    }
+    .await;
+    let carried = match topped {
+        Err(why) => Carried::SourceKept(why),
+        Ok(()) => match retire(from, user_id, from_id).await {
+            Ok(()) => Carried::Moved,
+            Err(e) => Carried::SourceKept(e),
+        },
+    };
+    Settled { carried, refused }
+}
+
 /// The clause a refused move's answer adds when the vault it left listed keys
 /// it refused ([`admit_listing`]); empty when it listed none. A count, said as
 /// the shell's note says it ([`NotCanonical::counted`]), as the answer to a
@@ -1117,6 +1175,7 @@ pub async fn move_to(
     // Two trees sealed as `personal`: a move would retire all but one, and the
     // other may hold what this one does not, unless they are the two this
     // device's own move left (module doc).
+    let mut finishing_own_move = false;
     if name == FIRST_DRIVE_NAME {
         let firsts = finished_firsts(&seen.copies);
         let begun = record::move_begun(db, user_id).await?;
@@ -1128,7 +1187,7 @@ pub async fn move_to(
                     record::end_move(db, user_id).await?;
                 }
             }
-            Twice::OwnMove => {}
+            Twice::OwnMove => finishing_own_move = true,
             Twice::OwnMoveElsewhere(to) => {
                 return refused(format!(
                     "drive move: this device's move of '{name}' to '{}' has not finished, and '{name}' is on both \
@@ -1163,6 +1222,54 @@ pub async fn move_to(
         Plan::AtDestination { keep, retire: rest } if rest.is_empty() => {
             let _ = keep;
             return refused(format!("drive move: '{name}' lives on '{}' already", dest.node.id));
+        }
+        Plan::AtDestination { keep, retire: rest } if finishing_own_move => {
+            // This device's own move of `personal`, cut off after it named the
+            // copy here. Other devices kept syncing with the tree it left, so
+            // what they wrote there since is carried into the copy before that
+            // tree is retired ([`top_up_and_settle`]).
+            let Some(domain) = runtime.user_cek_domain_id(user_id, Some(store)) else {
+                return refused("drive move: this device holds no key for you, so it cannot carry a drive");
+            };
+            let bus = runtime.event_bus();
+            let mut keys_refused = 0usize;
+            for left in &rest {
+                let Some(left_id) = left.made() else {
+                    return refused(format!("drive move: '{name}' is also kept under {}, which is no drive's tree", left.tree));
+                };
+                let Some(left_vault) = vaults.iter().find(|v| v.vault_key == left.vault_key).cloned() else {
+                    return refused(format!("drive move: a vault '{name}' is also on is not one this device reaches"));
+                };
+                let src_label = left_vault.node.id.clone();
+                let record = |refused: &[NotCanonical]| {
+                    for event in refused_events(user_id, name, &src_label, refused) {
+                        let _ = bus.publish(event);
+                    }
+                };
+                let from_end = PeerEnd(dial(runtime, &left_vault.node, user_id).await?.with_remote_mount(left.tree.clone()).with_domain_id(domain.clone()));
+                let to_end = PeerEnd(dial(runtime, &dest.node, user_id).await?.with_remote_mount(keep.tree.clone()).with_domain_id(domain.clone()));
+                let Settled { carried, refused: not_carried } = top_up_and_settle(user_id, &from_end, left_id, &to_end, &record).await;
+                keys_refused += not_carried.len();
+                let also = refused_said(&not_carried, &src_label);
+                if let Carried::SourceKept(e) = carried {
+                    refollow(runtime, store, db, user_id, &vaults, &rest, &dest).await;
+                    return refused(format!(
+                        "drive move: '{name}' is on '{}', and this device syncs with it there, but '{src_label}' still \
+                         keeps the copy it left ({e}). Run `drive move {name} --to {}` again on this device to finish \
+                         it{also}",
+                        dest.node.id, dest.node.id
+                    ));
+                }
+            }
+            refollow(runtime, store, db, user_id, &vaults, &rest, &dest).await;
+            record::end_move(db, user_id).await?;
+            record::mark_synced(db, user_id, &keep.vault_key, &keep.tree).await?;
+            let sizes = Seen { copies: vec![keep.clone()], unanswered: vec![] }.sizes();
+            let moved = record::all(db, user_id).await?.into_iter().find(|d| d.vault_key == keep.vault_key && d.tree == keep.tree);
+            let moved = moved.ok_or_else(|| io::Error::other("the drive's copy at the vault was not recorded"))?;
+            tracing::info!(user_id, to = %dest.node.id, keys_refused, "finished an interrupted move of personal");
+            let keys_refused = u32::try_from(keys_refused).unwrap_or(u32::MAX);
+            return Ok(UserResponse::DriveMoved { drives: vec![describe(&moved, &sizes, &pins)], keys_refused });
         }
         Plan::AtDestination { keep, retire: rest } => {
             // A move cut off after it named the copy here: finish it.
@@ -1674,7 +1781,11 @@ mod tests {
     /// move: the copy kept, the source retired, and the record forgotten.
     /// Without that record the two are trees no move of this device's left,
     /// and no move retires either; with it, a move to a third vault is sent
-    /// to finish this one first.
+    /// to finish this one first. What another device wrote at the tree the
+    /// move left while it was cut off is carried into the copy before that
+    /// tree is retired ([`top_up_and_settle`]); what this device wrote at the
+    /// copy meanwhile is kept as it is; and a top-up that fails retires
+    /// nothing.
     #[tokio::test]
     async fn a_cut_off_move_of_personal_is_finished_by_running_it_again() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -1710,10 +1821,40 @@ mod tests {
             }
             other => panic!("the rerun of personal's move did not finish it: {other:?}"),
         }
+        // While it was cut off, another device kept syncing with the tree
+        // the move left and wrote there, and this device synced with the copy
+        // and wrote there, a new object and a newer form of one both hold.
+        let written = |end: &Fake, key: &str, blob: &[u8]| end.objects.lock().unwrap().push((key.to_string(), blob.to_vec()));
+        written(&from, "p/three", b"written on B at the tree the move left");
+        written(&to, "p/four", b"written on A at the copy");
+        to.objects.lock().unwrap().iter_mut().find(|(k, _)| k == "p/one").unwrap().1 = b"one, newer".to_vec();
+
+        // A top-up that cannot write leaves both trees as they are.
+        let failing = Fake { objects: Mutex::new(to.objects.lock().unwrap().clone()), fail_write: Some("p/three"), ..Fake::default() };
+        let settled = top_up_and_settle("alice", &from, FROM, &failing, &|_| {}).await;
+        assert!(matches!(&settled.carried, Carried::SourceKept(why) if why.contains("writing p/three")), "{settled:?}");
+        assert!(from.keys().contains(&"p/three".to_string()), "a failed top-up lost B's write");
+        assert!(failing.told().is_empty(), "a failed top-up told the copy {:?}", failing.told());
+
+        // The rerun carries B's write into the copy, keeps A's, and only then
+        // retires the tree it left.
         from.refuse_retire.store(false, Ordering::SeqCst);
-        assert_eq!(retire(&from, "alice", FROM).await, Ok(()));
+        let settled = top_up_and_settle("alice", &from, FROM, &to, &|_| {}).await;
+        assert_eq!(settled.carried, Carried::Moved, "{settled:?}");
         assert!(from.keys().is_empty(), "the source still keeps personal");
-        assert_eq!(to.keys(), ["p/one", "p/two"], "the copy lost an object");
+        let mut held = to.objects.lock().unwrap().clone();
+        held.sort();
+        assert_eq!(
+            held,
+            [
+                ("p/four".to_string(), b"written on A at the copy".to_vec()),
+                ("p/one".to_string(), b"one, newer".to_vec()),
+                ("p/three".to_string(), b"written on B at the tree the move left".to_vec()),
+                ("p/two".to_string(), b"two two".to_vec()),
+            ],
+            "the rerun lost a write, or put an older form over a newer one"
+        );
+        assert_eq!(to.told(), ["TenantDriveName"], "the rerun told the copy more: it is named finished already");
         record::end_move(&db, "alice").await.unwrap();
         assert_eq!(record::move_begun(&db, "alice").await.unwrap(), None);
         assert_eq!(twice(&finished_firsts(&[at_dest]), None, &V2), Twice::No);

@@ -550,7 +550,7 @@ pub struct EnrolCommand;
 #[async_trait::async_trait]
 impl Command for EnrolCommand {
     fn help_text(&self) -> &'static str {
-        "enrol <line> [<line>…] — paste the line each relay or vault of your own printed when it was created, space-separated or one per row, in any order, or the one line a host printed, which names both: each completes the key minted for it, and says what it names, whether it is reached from here and whether its key matched; a vault's then keeps your things, sealed, as one of your drives — `sync` syncs them there when you ask — and this device stands at the relay the same enrol kept; a relay's keeps them at each vault it stands that does not keep them yet. mint and enrol make one; relay and vault operate one"
+        "enrol <line> [<line>…] — paste the line each relay or vault of your own printed when it was created, space-separated or one per row, in any order, or the one line a host printed, which names both: each completes the key minted for it, and says what it names, whether it is reached from here and whether its key matched; a vault's then keeps drives for you, sealed: the first vault you enrol keeps `personal`, the drive this device's files sync with when you ask, and a vault enrolled after it holds nothing of yours until a drive is made or moved there; this device stands at the relay the same enrol kept; a relay's enrols you, the same way, at each vault it stands that does not keep drives for you yet. mint and enrol make one; relay and vault operate one"
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
