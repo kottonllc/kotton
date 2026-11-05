@@ -23,7 +23,6 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
 /// The two ends of the ceremony share everything but who waits.
 #[derive(Clone, Copy)]
@@ -174,41 +173,46 @@ async fn run(
         if tx.send(opening).await.is_err() {
             return;
         }
-        let confirmer = StreamingConfirmer {
-            tx: tx.clone(),
-            token: Uuid::new_v4().to_string(),
-            pending,
-            ttl: Duration::from_secs(ttl_seconds),
-        };
+        let confirmer = StreamingConfirmer::new(tx.clone(), pending, Duration::from_secs(ttl_seconds));
         // The ceremony has its own windows (the wait for a joiner, the dial, the
         // human's verdict); this is the hard ceiling over all of them, so a peer
         // that stalls mid-handshake cannot hold a ceremony task open forever.
         let ceiling = Duration::from_secs(ttl_seconds.saturating_add(30));
-        let result = match side {
-            Side::Start => {
-                tokio::time::timeout(
-                    ceiling,
-                    contact_pairing::run_issuer(
-                        &relay_url,
-                        &code,
-                        &ours,
-                        &key,
-                        &confirmer,
-                        Duration::from_secs(ttl_seconds),
-                        &admission,
-                    ),
-                )
-                .await
+        let ceremony = async {
+            match side {
+                Side::Start => {
+                    tokio::time::timeout(
+                        ceiling,
+                        contact_pairing::run_issuer(
+                            &relay_url,
+                            &code,
+                            &ours,
+                            &key,
+                            &confirmer,
+                            Duration::from_secs(ttl_seconds),
+                            &admission,
+                        ),
+                    )
+                    .await
+                }
+                Side::Join => {
+                    tokio::time::timeout(
+                        ceiling,
+                        contact_pairing::run_joiner(&relay_url, &code, &ours, &key, &confirmer, &admission),
+                    )
+                    .await
+                }
             }
-            Side::Join => {
-                tokio::time::timeout(
-                    ceiling,
-                    contact_pairing::run_joiner(&relay_url, &code, &ours, &key, &confirmer, &admission),
-                )
-                .await
-            }
-        }
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("the ceremony did not finish in time")));
+        };
+        // The ceremony ends with its stream until the person's yes (#436):
+        // dropped here, it drops the relay reservation (the issuer's
+        // advertisement) or the circuit, and the parked confirmation, and
+        // nothing is admitted. After the yes it runs to its end.
+        let Some(result) = confirmer.unless_abandoned(ceremony).await else {
+            tracing::info!("contact pairing ended with the stream that started it");
+            return;
+        };
+        let result = result.unwrap_or_else(|_| Err(anyhow::anyhow!("the ceremony did not finish in time")));
         let frame = match result {
             Ok(contact) => match admit(&runtime, users.as_ref(), &user_id, &contact).await {
                 Ok(()) => UserResponse::ContactPaired {

@@ -498,13 +498,10 @@ pub async fn handle_device_add(
         {
             return;
         }
-        let confirmer = StreamingConfirmer {
-            tx: tx.clone(),
-            token: Uuid::new_v4().to_string(),
-            pending,
-            ttl: std::time::Duration::from_secs(ttl_seconds),
-        };
-        let result = run_enroll_issuer_committed(
+        let confirmer = StreamingConfirmer::new(tx.clone(), pending, std::time::Duration::from_secs(ttl_seconds));
+        // Ended with its stream until the person's yes (#436); see
+        // `StreamingConfirmer::unless_abandoned`.
+        let Some(result) = confirmer.unless_abandoned(run_enroll_issuer_committed(
             &identity_key,
             sid,
             data_keys,
@@ -518,8 +515,10 @@ pub async fn handle_device_add(
             issuer_recovery_bundle,
             handed_drives,
             &confirmer,
-        )
-        .await;
+        )).await else {
+            tracing::info!("device add ended with the stream that started it");
+            return;
+        };
         let frame = match result {
             Ok(enrolled) => {
                 let _ = tx.send(UserResponse::PairTransferring).await;
@@ -617,13 +616,10 @@ pub async fn handle_gateway_enroll(
         if tx.send(UserResponse::PairConnecting).await.is_err() {
             return;
         }
-        let confirmer = StreamingConfirmer {
-            tx: tx.clone(),
-            token: Uuid::new_v4().to_string(),
-            pending,
-            ttl: std::time::Duration::from_secs(ttl_seconds),
-        };
-        let result = run_enroll_issuer_dialing(
+        let confirmer = StreamingConfirmer::new(tx.clone(), pending, std::time::Duration::from_secs(ttl_seconds));
+        // Ended with its stream until the person's yes (#436); see
+        // `StreamingConfirmer::unless_abandoned`.
+        let Some(result) = confirmer.unless_abandoned(run_enroll_issuer_dialing(
             &identity_key,
             &op_key,
             sid,
@@ -636,8 +632,10 @@ pub async fn handle_gateway_enroll(
             Vec::new(),
             Some(handout),
             &confirmer,
-        )
-        .await;
+        )).await else {
+            tracing::info!("gateway enrolment ended with the stream that started it");
+            return;
+        };
         let frame = match result {
             Ok(enrolled) => {
                 let _ = tx.send(UserResponse::PairTransferring).await;
@@ -804,15 +802,12 @@ pub async fn handle_device_join(
         if tx.send(UserResponse::PairConnecting).await.is_err() {
             return;
         }
-        let confirmer = StreamingConfirmer {
-            tx: tx.clone(),
-            token: Uuid::new_v4().to_string(),
-            pending,
-            ttl: std::time::Duration::from_secs(ttl_seconds),
-        };
+        let confirmer = StreamingConfirmer::new(tx.clone(), pending, std::time::Duration::from_secs(ttl_seconds));
         // Rung 1 (mDNS/code + human SAS): the SAS comparison authenticates, so no
         // out-of-band key is pinned. Rungs 2/4 will pass the pinned issuer key.
-        let result = run_enroll_join_committed(
+        // Ended with its stream until the person's yes (#436); see
+        // `StreamingConfirmer::unless_abandoned`.
+        let Some(result) = confirmer.unless_abandoned(run_enroll_join_committed(
             &node_key,
             &warm_key,
             sid,
@@ -821,8 +816,10 @@ pub async fn handle_device_join(
             peer_listen_addr,
             &confirmer,
             None,
-        )
-        .await;
+        )).await else {
+            tracing::info!("device join ended with the stream that started it");
+            return;
+        };
         let frame = match result {
             Ok((joined, answer))
                 if policy == JoinPolicy::BlindOnly
@@ -891,11 +888,17 @@ pub struct PinnedVault {
 /// is handed over if that key is not the pinned one, so a node between the two
 /// cannot pass however the digits are answered. Emits no frame — there is
 /// nothing for a person to read, and never a code to fall back to.
-struct TheKeyConfirms;
+///
+/// It holds the stream's confirmer only to mark the yes on it
+/// ([`StreamingConfirmer::confirmed_by_key`]): past the key's yes the payload
+/// crosses, and the ceremony is held to the same rule as one a person
+/// confirmed — not abandoned when its stream closes (#436).
+struct TheKeyConfirms<'a>(&'a StreamingConfirmer);
 
 #[async_trait::async_trait]
-impl kotton_peer::pair_channel::SasConfirmer for TheKeyConfirms {
+impl kotton_peer::pair_channel::SasConfirmer for TheKeyConfirms<'_> {
     async fn confirm(&self, _sas: u32, _peer_label: Option<&str>) -> bool {
+        self.0.confirmed_by_key();
         true
     }
 }
@@ -1106,17 +1109,16 @@ pub async fn handle_device_admit(
         if tx.send(UserResponse::PairConnecting).await.is_err() {
             return;
         }
-        let streaming = StreamingConfirmer {
-            tx: tx.clone(),
-            token: Uuid::new_v4().to_string(),
-            pending,
-            ttl: std::time::Duration::from_secs(ttl_seconds),
-        };
+        let streaming = StreamingConfirmer::new(tx.clone(), pending, std::time::Duration::from_secs(ttl_seconds));
+        let by_key = TheKeyConfirms(&streaming);
         let confirmer: &dyn kotton_peer::pair_channel::SasConfirmer = match &pinned {
-            Some(_) => &TheKeyConfirms,
+            Some(_) => &by_key,
             None => &streaming,
         };
-        let result = match &admit {
+        // Ended with its stream until the comparison is answered yes, by the
+        // person or by the pinned key (#436); see
+        // `StreamingConfirmer::unless_abandoned`.
+        let ceremony = async { match &admit {
             AdmitCode::Invite(inv) => {
                 // What the ceremony's one dial presents: at this device's own
                 // relay by its own records — the relay it stands at, or a
@@ -1169,6 +1171,10 @@ pub async fn handle_device_admit(
                 )
                 .await
             }
+        } };
+        let Some(result) = streaming.unless_abandoned(ceremony).await else {
+            tracing::info!("admit by code ended with the stream that started it");
+            return;
         };
         let frame = match result {
             Ok(enrolled) => {
@@ -1526,13 +1532,10 @@ pub async fn handle_device_invite(
         {
             return;
         }
-        let confirmer = StreamingConfirmer {
-            tx: tx.clone(),
-            token: Uuid::new_v4().to_string(),
-            pending,
-            ttl: std::time::Duration::from_secs(ttl_seconds),
-        };
-        let result = run_enroll_join_relayed(
+        let confirmer = StreamingConfirmer::new(tx.clone(), pending, std::time::Duration::from_secs(ttl_seconds));
+        // Ended with its stream until the person's yes (#436); see
+        // `StreamingConfirmer::unless_abandoned`.
+        let Some(result) = confirmer.unless_abandoned(run_enroll_join_relayed(
             &invite,
             reserved,
             &warm_key,
@@ -1541,8 +1544,10 @@ pub async fn handle_device_invite(
             &self_name,
             peer_listen_addr,
             &confirmer,
-        )
-        .await;
+        )).await else {
+            tracing::info!("invite ended with the stream that started it");
+            return;
+        };
         let frame = match result {
             Ok((joined, answer))
                 if policy == JoinPolicy::BlindOnly
@@ -2362,5 +2367,99 @@ mod admit_tests {
         let after = recorded(&db, &paired_keys, &members).await;
         assert!(after.row && after.allowed && after.members > 0, "the vault was not recorded");
         assert_eq!(after.drives, 1, "the vault was not recorded as a drive");
+    }
+}
+
+#[cfg(test)]
+mod ends_with_its_stream_tests {
+    use super::{handle_device_admit, PendingConfirms};
+    use kotton_common::crypto::kdf_labels;
+    use kotton_schemas::membership::Posture;
+    use kotton_sys::secret::SecretsStore as _;
+    use kotton_wire::ipc::UserResponse;
+    use std::collections::HashSet;
+    use std::sync::{Arc, RwLock};
+    use std::time::{Duration, Instant};
+
+    struct NobodyResident;
+    impl crate::users::residency::Residency for NobodyResident {
+        fn insert(&self, _: String, _: Arc<kotton_store::runtime::user::UserStore>) {}
+        fn get(&self, _: &str) -> Option<Arc<kotton_store::runtime::user::UserStore>> {
+            None
+        }
+    }
+
+    /// **An admit ends when its stream closes, not at its own timeout (#436).**
+    ///
+    /// Alice admits by a connection code whose address is a loopback UDP socket
+    /// held open and read by nobody, so the ceremony sits in its dial, which
+    /// waits up to five seconds (`PAIR_DIAL_ATTEMPT_TIMEOUT`) for an answer.
+    /// Her client goes away as soon as the ceremony says it is connecting. The
+    /// ceremony task ends with the stream: everything it held is let go — here
+    /// read off the paired-key set's count, which the task holds a share of.
+    ///
+    /// Platform: every one; it binds loopback only (the silent socket, and the
+    /// dial's client endpoint, which `outbound_bind_addr` narrows to loopback
+    /// for a loopback address). The bound is three seconds where the fixed
+    /// code takes milliseconds.
+    ///
+    /// Red before #436: the task dialled on behind the closed stream until its
+    /// own five seconds ran out.
+    #[tokio::test]
+    async fn an_admit_whose_client_goes_away_ends_with_its_stream() {
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("a socket nobody answers on");
+        let code = kotton_peer::pairing::encode_connection_code(&[7; 16], silent.local_addr().unwrap());
+
+        let temp = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(kotton_secret::MemorySecrets::new());
+        let seed = [4u8; 32];
+        secrets
+            .set_secret(&kdf_labels::identity_signing_key("alice"), &hex::encode(kotton_crypto::derive_identity_key(&seed)))
+            .unwrap();
+        secrets.set_secret(&kdf_labels::device_operational_key(), &hex::encode([5u8; 32])).unwrap();
+        let runtime = Arc::new(
+            crate::runtime::DeviceRuntime::new_with_secrets(
+                temp.path().to_path_buf(),
+                crate::config::RuntimeConfig::default(),
+                secrets,
+            )
+            .await
+            .unwrap(),
+        );
+        let db = Arc::new(crate::db::open_machine_db(temp.path().join("agent.db")).await.unwrap());
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let pending: PendingConfirms = Default::default();
+
+        let mut stream = handle_device_admit(
+            runtime,
+            Arc::new(NobodyResident),
+            Arc::clone(&db),
+            Arc::clone(&db),
+            Arc::clone(&paired_keys),
+            Arc::clone(&pending),
+            "alice".into(),
+            code,
+            60,
+            Posture::BlindStorage,
+            None,
+        )
+        .await
+        .expect("the admit starts");
+        let first = tokio::time::timeout(Duration::from_secs(10), stream.recv()).await.expect("a first frame");
+        assert!(matches!(first, Some(UserResponse::PairConnecting)), "expected the connecting frame, got {first:?}");
+        assert!(Arc::strong_count(&paired_keys) > 1, "the ceremony task holds no share: nothing here can see it end");
+
+        drop(stream);
+        let closed = Instant::now();
+        while Arc::strong_count(&paired_keys) > 1 {
+            assert!(
+                closed.elapsed() < Duration::from_secs(3),
+                "the admit was still running {:?} after its stream closed",
+                closed.elapsed()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(pending.lock().await.is_empty(), "nothing was ever shown, and something is parked");
+        assert_eq!(Arc::strong_count(&pending), 1, "the ended ceremony still holds the confirmation table");
     }
 }

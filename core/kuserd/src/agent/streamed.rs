@@ -133,8 +133,9 @@ pub(super) const LIVENESS_TICK: std::time::Duration = std::time::Duration::from_
 /// expiry, ends the stream with the gate's refusal, `NoActiveSession`, as its
 /// one last frame: the frame that was waiting is not delivered, and the verb's
 /// receiver is dropped, so its sender sees the stream has ended. The verb's own
-/// task is not ended, only told: a ceremony runs on to its next send or its
-/// ttl, and ending a ceremony with its session is #436.
+/// task is not ended from here, only told, and what it does on being told is
+/// its own: every ceremony ends on its sender closing, before the yes
+/// (`StreamingConfirmer::unless_abandoned`, #436), and a web-shell desk closes.
 ///
 /// The frame is checked as it is taken, not as it was made, and the outgoing
 /// channel holds one, so nothing is passed on that was taken after the
@@ -374,6 +375,20 @@ fn opening<'a>(
             // Announce the desk is registered before any browser could reach
             // it, so a caller need not race the insertion.
             let _ = tx.send(UserResponse::WebShellPairReady).await;
+            // The desk closes with its stream (#436): revoked, expired or gone,
+            // nobody is at the screen, so no new browser may be admitted at
+            // it. A browser already comparing digits at it is declined by its
+            // confirmer, which watches the same sender.
+            let desks = Arc::clone(&ctx.browser_desks);
+            let user_id = user_id.clone();
+            tokio::spawn(async move {
+                tx.closed().await;
+                let mut desks = desks.lock().await;
+                // Only this desk: a later `WebShellPair` may have replaced it.
+                if desks.get(&user_id).is_some_and(|open| open.same_channel(&tx)) {
+                    desks.remove(&user_id);
+                }
+            });
             Ok(rx)
         }),
         // The channel's other direction. This connection becomes the side that
@@ -870,6 +885,32 @@ mod tests {
             "an idle stream outlived its session by {:?}",
             revoked.elapsed()
         );
+    }
+
+    /// **A desk closes with its stream (#436).** Alice opens a web-shell desk,
+    /// and it is registered; her session is revoked, the stream ends with the
+    /// gate's refusal, and the desk is gone with it, so no new browser can be
+    /// admitted at a screen nobody is watching. Red before #436: the desk's
+    /// sender stayed in the table after its stream had ended.
+    #[tokio::test]
+    async fn a_revoked_session_closes_its_desk() {
+        let dir = a_dir();
+        let daemon = a_daemon(dir.path()).await;
+        let ctx = daemon.agent_context();
+        let conn_session = alices_connection(&ctx);
+        let mut stream = opened(&ctx, &conn_session, &UserRequest::WebShellPair { user_id: "alice".into(), ttl_seconds: 60 }).await;
+        let ready = tokio::time::timeout(Duration::from_secs(5), stream.recv()).await.expect("a first frame");
+        assert!(matches!(ready, Some(UserResponse::WebShellPairReady)), "{ready:?}");
+        assert!(ctx.browser_desks.lock().await.contains_key("alice"), "the desk is open");
+
+        sessions::remove_user(&ctx.sessions, "alice");
+        let frames = to_the_end(stream).await;
+        assert_eq!(format!("{frames:?}"), format!("{:?}", vec![UserResponse::NoActiveSession]));
+        let closed = std::time::Instant::now();
+        while ctx.browser_desks.lock().await.contains_key("alice") {
+            assert!(closed.elapsed() < Duration::from_secs(5), "the desk outlived its stream");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// **A session-less streamed verb is not held to a session.** An invite is

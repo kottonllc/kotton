@@ -668,12 +668,10 @@ async fn admit(
             ));
         };
         let sas = channel.issuer.sas().unwrap_or(0);
-        let confirmer = StreamingConfirmer {
-            tx: desk,
-            token: uuid::Uuid::new_v4().to_string(),
-            pending: Arc::clone(pending_confirms),
-            ttl: std::time::Duration::from_secs(300),
-        };
+        // The desk's stream is the confirmer's: a desk whose stream closed —
+        // its session revoked or expired, or its screen gone — ends the wait
+        // and declines (#436).
+        let confirmer = StreamingConfirmer::new(desk, Arc::clone(pending_confirms), std::time::Duration::from_secs(300));
         use kotton_peer::pair_channel::SasConfirmer as _;
         if !confirmer.confirm(sas, Some(&name)).await {
             return Out::terminal(refused("the person at the node did not confirm the code"));

@@ -1201,13 +1201,114 @@ pub type PendingConfirms = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
 
 /// Bridges the tier-05 [`SasConfirmer`] seam to the IPC stream: emits a
 /// `PairShowCode` frame and blocks on the human's verdict, delivered out-of-band
-/// by a `PairConfirmCode` request via [`PendingConfirms`]. A timeout or a dropped
-/// stream is treated as a decline — fail safe.
+/// by a `PairConfirmCode` request via [`PendingConfirms`]. A timeout, a dropped
+/// stream, or the stream closing while the verdict is awaited is treated as a
+/// decline — fail safe.
+///
+/// **A ceremony ends with the stream that started it (#436).** The stream's
+/// sender is the one thing that closes whatever ended the stream: a revoked or
+/// expired session (`while_live` drops the verb's receiver), or a client that
+/// went away. So the confirmer races its wait against [`mpsc::Sender::closed`],
+/// and [`Self::unless_abandoned`] is what each ceremony runner drives its
+/// ceremony through, so the same signal ends it in every other step too. The
+/// confirmer's parked entry goes with it, on every ending, so a later
+/// `PairConfirmCode` for its token finds nothing.
 pub struct StreamingConfirmer {
-    pub tx: mpsc::Sender<UserResponse>,
-    pub token: String,
-    pub pending: PendingConfirms,
-    pub ttl: std::time::Duration,
+    tx: mpsc::Sender<UserResponse>,
+    token: String,
+    pending: PendingConfirms,
+    ttl: std::time::Duration,
+    /// Set once the human's yes has been taken, before anything is handed
+    /// over: the point after which the ceremony is not abandoned (see
+    /// [`Self::unless_abandoned`]).
+    said_yes: std::sync::atomic::AtomicBool,
+}
+
+/// A confirmation parked in [`PendingConfirms`], removed when it is dropped:
+/// the verdict was taken, the wait timed out, the stream closed, or the
+/// ceremony holding it was dropped mid-wait. One home for the removal, so no
+/// ending leaves a token a later `PairConfirmCode` could find.
+struct Parked {
+    pending: PendingConfirms,
+    token: String,
+}
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        // Uncontended in practice: the table is held only for an insert or a
+        // remove. If it is held now, the removal is handed to the runtime; the
+        // verdict's receiver is dropped with the ceremony either way, so an
+        // entry not yet removed can fire nothing.
+        if let Ok(mut parked) = self.pending.try_lock() {
+            parked.remove(&self.token);
+            return;
+        }
+        let (pending, token) = (Arc::clone(&self.pending), std::mem::take(&mut self.token));
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                pending.lock().await.remove(&token);
+            });
+        }
+    }
+}
+
+/// `work`, unless `tx`'s stream closes first: `None` then, and `work` is
+/// dropped where it stood. Whatever ended the stream — a revoked or expired
+/// session, or a client gone away — this is the one signal (#436).
+pub async fn until_closed<M, T>(tx: &mpsc::Sender<M>, work: impl std::future::Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = tx.closed() => None,
+        out = work => Some(out),
+    }
+}
+
+impl StreamingConfirmer {
+    /// A confirmer for the stream `tx` feeds, parking its verdict under a
+    /// fresh token in `pending` for up to `ttl`.
+    pub fn new(tx: mpsc::Sender<UserResponse>, pending: PendingConfirms, ttl: std::time::Duration) -> Self {
+        Self {
+            tx,
+            token: Uuid::new_v4().to_string(),
+            pending,
+            ttl,
+            said_yes: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Mark the comparison as answered yes by something other than a person
+    /// — a pinned key ([`SasConfirmer`] implementations that confirm by key)
+    /// — so the ceremony past this point is held to the same rule as one a
+    /// person confirmed.
+    pub fn confirmed_by_key(&self) {
+        self.said_yes.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// `ceremony`, ended if its stream closes before the comparison is
+    /// answered yes (#436).
+    ///
+    /// Before the yes, nothing has been handed over: the issuer is waiting
+    /// for a joiner (and is advertised at the relay or on the LAN), dialling,
+    /// or waiting on the verdict. Dropping the ceremony there drops its
+    /// listener, its relay reservation and its parked confirmation, and admits
+    /// nothing. After the yes, the payload crosses and each side records what
+    /// it kept; dropping it there could leave this side without a record of a
+    /// device that holds what it was handed. So the stream closing after the
+    /// yes does not end the ceremony: it runs to its own end, bounded by its
+    /// own windows, and records what it was told to.
+    pub async fn unless_abandoned<T>(&self, ceremony: impl std::future::Future<Output = T>) -> Option<T> {
+        let abandoned = async {
+            self.tx.closed().await;
+            if self.said_yes.load(std::sync::atomic::Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            biased;
+            () = abandoned => None,
+            out = ceremony => Some(out),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -1218,6 +1319,10 @@ impl SasConfirmer for StreamingConfirmer {
             .lock()
             .await
             .insert(self.token.clone(), verdict_tx);
+        let parked = Parked {
+            pending: Arc::clone(&self.pending),
+            token: self.token.clone(),
+        };
 
         if self
             .tx
@@ -1229,16 +1334,18 @@ impl SasConfirmer for StreamingConfirmer {
             .await
             .is_err()
         {
-            self.pending.lock().await.remove(&self.token);
             return false;
         }
 
+        // The verdict, the ttl, or the stream closing, whichever is first: a
+        // stream that closed has nobody behind it to have answered.
         let verdict = matches!(
-            tokio::time::timeout(self.ttl, verdict_rx).await,
-            Ok(Ok(true))
+            until_closed(&self.tx, tokio::time::timeout(self.ttl, verdict_rx)).await,
+            Some(Ok(Ok(true)))
         );
-        self.pending.lock().await.remove(&self.token);
+        drop(parked);
         if verdict {
+            self.said_yes.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = self.tx.send(UserResponse::PairAwaitingPeer).await;
         }
         verdict
@@ -1246,7 +1353,11 @@ impl SasConfirmer for StreamingConfirmer {
 }
 
 /// Deliver a human's SAS verdict to a parked ceremony (the `PairConfirmCode`
-/// handler). A late/duplicate/unknown token is a no-op, not an error.
+/// handler). A late/duplicate/unknown token is a no-op, not an error — and so
+/// is the token of a ceremony that ended with its stream (#436): its entry
+/// went with it, so the verdict reaches nothing and admits nothing. The
+/// answer is the same `PairConfirmAck` either way: it says the request was
+/// read, never that a ceremony took it.
 pub async fn confirm_code(
     pending: &PendingConfirms,
     token: String,
@@ -1611,5 +1722,83 @@ mod allowlist_rebuild {
         let said = node_revoke(&NoMembers, &db, "bob".into(), did.clone(), &paired_keys).await.unwrap();
         assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
         assert!(!paired_keys.read().unwrap().contains(&key), "a key no row pairs is still admitted");
+    }
+}
+
+#[cfg(test)]
+mod streaming_confirmer {
+    use super::*;
+    use std::time::Duration;
+
+    fn a_confirmer() -> (StreamingConfirmer, mpsc::Receiver<UserResponse>, PendingConfirms) {
+        let (tx, rx) = mpsc::channel(16);
+        let pending = PendingConfirms::default();
+        (StreamingConfirmer::new(tx, Arc::clone(&pending), Duration::from_secs(60)), rx, pending)
+    }
+
+    async fn token_shown(rx: &mut mpsc::Receiver<UserResponse>) -> String {
+        match rx.recv().await {
+            Some(UserResponse::PairShowCode { token, .. }) => token.expose().to_string(),
+            other => panic!("expected the digits, got {other:?}"),
+        }
+    }
+
+    /// **A confirmer whose stream closes while it waits declines, and parks
+    /// nothing (#436).** The digits are shown, the stream's receiver is
+    /// dropped, and the wait ends at once — not at the 60 s ttl — as a no;
+    /// the token is gone, so a later yes for it reaches nothing.
+    #[tokio::test]
+    async fn a_closed_stream_declines_the_wait_and_unparks_its_token() {
+        let (confirmer, mut rx, pending) = a_confirmer();
+        let waiting = tokio::spawn(async move { confirmer.confirm(123_456, None).await });
+        let token = token_shown(&mut rx).await;
+        assert!(pending.lock().await.contains_key(&token), "the shown token is parked");
+
+        drop(rx);
+        let said = tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .expect("the wait outlived its stream")
+            .unwrap();
+        assert!(!said, "a closed stream was taken as a yes");
+        assert!(pending.lock().await.is_empty(), "the token is still parked");
+        let ack = confirm_code(&pending, token, true).await.unwrap();
+        assert!(matches!(ack, UserResponse::PairConfirmAck), "{ack:?}");
+    }
+
+    /// **A ceremony is abandoned with its stream before the yes, and run to
+    /// its end after it.** Before the yes nothing has crossed, so the stream
+    /// closing ends it there; after the yes the payload crosses and each side
+    /// records what it kept, so it is not dropped part-way.
+    #[tokio::test]
+    async fn a_ceremony_is_abandoned_before_the_yes_and_not_after() {
+        let (confirmer, rx, _) = a_confirmer();
+        drop(rx);
+        let ended = tokio::time::timeout(
+            Duration::from_secs(10),
+            confirmer.unless_abandoned(std::future::pending::<()>()),
+        )
+        .await
+        .expect("a ceremony before its yes outlived its stream");
+        assert!(ended.is_none(), "an abandoned ceremony said it finished");
+
+        let (confirmer, mut rx, pending) = a_confirmer();
+        let confirmer = Arc::new(confirmer);
+        let asked = Arc::clone(&confirmer);
+        let ceremony = tokio::spawn(async move {
+            asked
+                .unless_abandoned(async {
+                    assert!(asked.confirm(123_456, None).await, "the yes was not taken");
+                    // The stream closes past the yes, while the payload would cross.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    "recorded"
+                })
+                .await
+        });
+        let token = token_shown(&mut rx).await;
+        confirm_code(&pending, token, true).await.unwrap();
+        assert!(matches!(rx.recv().await, Some(UserResponse::PairAwaitingPeer)));
+        drop(rx);
+        let finished = tokio::time::timeout(Duration::from_secs(10), ceremony).await.expect("ran").unwrap();
+        assert_eq!(finished, Some("recorded"), "a ceremony past its yes was dropped part-way");
     }
 }

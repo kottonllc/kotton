@@ -900,6 +900,7 @@ mod tests {
     #[test]
     fn a_socket_joined_onto_the_temp_dir_asks_whether_it_fits() {
         const ALLOWED: &[(&str, &str)] = &[
+            ("core/kuserd/src/agent/ceremony_ends_tests.rs", "`alice_at` hands a daemon `kuserd.sock` under its tempdir base and never calls `run`, the one place the daemon listens: nothing binds the path"),
             ("core/kuserd/src/agent/co_member_tests.rs", "`alice_unlocked` hands a daemon `kuserd.sock` under its tempdir base and never calls `run`, the one place the daemon listens: nothing binds the path"),
             ("core/kuserd/src/agent/handlers/device_config.rs", "`construct` hands a daemon `kuserd.sock` under its tempdir base and never serves it: nothing in the file listens, so nothing binds the path"),
             ("core/kuserd/src/agent/message_open_tests.rs", "`alice_unlocked` hands a daemon `kuserd.sock` under its tempdir base and never calls `run`, the one place the daemon listens: nothing binds the path"),
