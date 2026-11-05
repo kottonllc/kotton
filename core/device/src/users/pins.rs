@@ -525,8 +525,9 @@ pub async fn notices(db: &Arc<SqlitePool>, user_id: &str, claims: &[Claim], devi
 /// this device alone (`kotton_peer::daemon::drives::first`): nothing when one
 /// tree is sealed as it; [`PinNotice::NotFound`] when the person keeps drives
 /// on a vault and none lists it, so this device's tree syncs with nothing; and
-/// [`PinNotice::Twice`] when two or more do, naming them and the one this
-/// device keeps syncing with, if any. A person with no vault yet is told
+/// [`PinNotice::Twice`] when two or more do, naming them, the one this
+/// device keeps syncing with, if any, and the vault this device's own
+/// unfinished move of it went to, when they are that move's two. A person with no vault yet is told
 /// nothing: `personal` is made at the first one.
 async fn where_personal_is(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<PinNotice>> {
     use kotton_peer::daemon::drives as record;
@@ -539,7 +540,13 @@ async fn where_personal_is(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Ve
         1 => Vec::new(),
         _ => {
             let synced = record::first(db, user_id).await?.map(|d| d.node.id);
-            vec![PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults: found.into_iter().map(|d| d.node.id).collect(), synced }]
+            // This device's own unfinished move, when the two are its two.
+            let trees: Vec<record::TreeAt> = found.iter().map(|d| (d.vault_key, d.tree.clone())).collect();
+            let moving = record::move_begun(db, user_id)
+                .await?
+                .filter(|b| b.names_exactly(&trees))
+                .and_then(|b| found.iter().find(|d| d.vault_key == b.to.0 && d.tree == b.to.1).map(|d| d.node.id.clone()));
+            vec![PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults: found.into_iter().map(|d| d.node.id).collect(), synced, moving }]
         }
     })
 }
@@ -1068,10 +1075,20 @@ mod tests {
         let vaults: Vec<String> = vaults.into_iter().map(|(_, label)| label).collect();
         let claims = [claimed("did:key:z6Mkme", FIRST_DRIVE_ID)];
         let told = notices(&f.db, "alice", &claims, &devices).await.unwrap();
-        assert_eq!(told, [PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults: vaults.clone(), synced: None }]);
+        assert_eq!(told, [PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults: vaults.clone(), synced: None, moving: None }]);
         record::mark_synced(&f.db, "alice", &office, &personal_at(3).tree).await.unwrap();
         let told = notices(&f.db, "alice", &claims, &devices).await.unwrap();
-        assert_eq!(told, [PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults, synced: Some("office".into()) }]);
+        assert_eq!(told, [PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults: vaults.clone(), synced: Some("office".into()), moving: None }]);
+        // The two are what this device's own move to the office left: the
+        // notice names where to rerun it.
+        let begun = record::MoveBegun { from: (home, personal_at(1).tree), to: (office, personal_at(3).tree) };
+        record::begin_move(&f.db, "alice", &begun).await.unwrap();
+        let told = notices(&f.db, "alice", &claims, &devices).await.unwrap();
+        assert_eq!(
+            told,
+            [PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults, synced: Some("office".into()), moving: Some("office".into()) }]
+        );
+        assert!(told[0].said().contains("`drive move personal --to office` on this device finishes the move"), "{}", told[0].said());
     }
 
     /// The record is the claim, field for field — the device and the drive

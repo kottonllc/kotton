@@ -1070,11 +1070,13 @@ pub enum PinNotice {
     NotFound { drive: String },
     /// Two or more of the person's vaults, labelled `vaults`, list a tree
     /// sealed as `drive` — the first drive — with its one id (RFC 0002): a
-    /// move under way, or two devices that each made one apart from each
-    /// other. `synced` is the vault this device's tree keeps syncing with,
-    /// the one it synced with before, or `None`: it syncs with neither until
-    /// the person chooses (kotton #124).
-    Twice { drive: String, vaults: Vec<String>, synced: Option<String> },
+    /// move cut off between naming its copy and retiring its source, or two
+    /// devices that each made one apart from each other. `synced` is the vault
+    /// this device's tree keeps syncing with, the one it synced with before,
+    /// or `None`: it syncs with neither. `moving` is the vault this device's
+    /// own unfinished move of it went to, when the two are exactly what that
+    /// move left, so rerunning it here finishes it (kotton #124).
+    Twice { drive: String, vaults: Vec<String>, synced: Option<String>, moving: Option<String> },
 }
 
 impl PinNotice {
@@ -1106,20 +1108,27 @@ impl PinNotice {
             }
             PinNotice::NotFound { drive } => format!(
                 "none of your vaults has listed '{drive}' to this device, so this device's files sync with \
-                 nothing; `sync` asks them again, and if none keeps it, `drive create {drive} --on <vault>` \
-                 makes it there"
+                 nothing. If you kept '{drive}' on a vault this device does not reach yet, add or enrol that \
+                 vault first and `sync`; only if no vault of yours holds it, `drive create {drive} --on <vault>` \
+                 makes it, and a second '{drive}' made beside one this device cannot see is a drive of its own"
             ),
-            PinNotice::Twice { drive, vaults, synced } => {
+            PinNotice::Twice { drive, vaults, synced, moving } => {
                 let at = vaults.iter().map(|v| format!("'{v}'")).collect::<Vec<_>>().join(" and ");
-                match synced {
-                    Some(v) => format!(
-                        "{at} each keep a drive called '{drive}': a move of it that has not finished, or two \
-                         made apart. This device keeps syncing with the one at '{v}', which it synced with before"
+                let syncs = match synced {
+                    Some(v) => format!("This device syncs with the one at '{v}'"),
+                    None => "This device has synced with neither, and syncs with neither".to_string(),
+                };
+                match moving {
+                    Some(to) => format!(
+                        "{at} each keep a drive called '{drive}': this device moved it to '{to}' and has not yet \
+                         retired the copy it left. {syncs}. `drive move {drive} --to {to}` on this device finishes \
+                         the move"
                     ),
                     None => format!(
-                        "{at} each keep a drive called '{drive}', and this device has synced with neither: it \
-                         syncs with neither until you choose which is '{drive}'. A move of it that has not \
-                         finished ends this when it does"
+                        "{at} each keep a drive called '{drive}', and this device began no move between them. \
+                         {syncs}. If another of your devices began moving it, running that move again there \
+                         finishes it; if they were made apart, each is kept as it is, and choosing which is \
+                         '{drive}' is not yet something a verb does"
                     ),
                 }
             }

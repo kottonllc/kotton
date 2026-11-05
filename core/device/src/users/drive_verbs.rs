@@ -139,12 +139,14 @@
 //! device: two devices moving one drive at once, two making one name at once,
 //! or a pass another device runs into a made drive while this one moves it.
 //! Today no device writes into a made drive but `personal` — a device keeps
-//! no tree of any other until drive paths (kotton #58) — and what another
-//! device's pass writes into `personal` while it is moved is still held by
-//! that device, whose next pass sends it where the drive went (below); so the
-//! last loses nothing, and the first two are resolved afterwards by
-//! the next move as above. Making them exclusive needs a lease or a sequence
-//! the vault keeps, which is a design of its own and is filed as one.
+//! no tree of any other until drive paths (kotton #58). This device writes
+//! nothing into `personal` while it moves it (below); a write another device's
+//! pass makes into it mid-move is not held by anything here, and holding it
+//! is kotton #143's, the lease the vault keeps so one device at a time moves
+//! or makes a drive. The first two are resolved afterwards by the next move
+//! as above. A `drive create` holds the drive's name on this device for the
+//! listing and the make ([`drive_lock`]), so two creates of one name here make
+//! one drive.
 //!
 //! **The first drive is made at the first vault, and moves like any other**
 //! (kotton-protocol's *A drive is where things live and a device keeps what its person
@@ -153,22 +155,30 @@
 //! first vault makes it there, with no verb from the person ([`make_first`]):
 //! only when every vault it records answers and no listing carries that id,
 //! so a later vault holds nothing until a drive is made or moved there, and a
-//! device that cannot tell makes none rather than a second. It keeps it whole
+//! device that cannot tell makes none rather than a second. It holds
+//! `personal`'s [`drive_lock`] across the listing, the make and the mark, as
+//! `drive create personal` does, so two enrolments at once on this device make
+//! one. It keeps it whole
 //! until told otherwise, as the device that makes a drive does
 //! (`crate::users::pins`). Every device's own tree syncs with it where it
 //! lives ([`record::first`], `kotton_sync::engine`). `drive move personal
 //! --to <vault>` carries it as it carries any drive, and every device follows
 //! it at its next listing. A move of it holds this device's tree for the
 //! whole of it, as a pass does, so this device writes nothing into the vault
-//! it leaves meanwhile; another device's pass that lands there between the
-//! copy and its next listing is not lost, since that device still holds what
-//! it wrote and its next pass, at the vault the drive moved to, sends it
-//! there. **Two trees sealed `first`** — a move cut off before it retired its
-//! source, or two devices apart that each made one — are not resolved by a
-//! move: a move retires every copy but one, and the other may hold what this
-//! one does not, so `move` refuses and names both; `status` says which this
-//! device keeps syncing with (`crate::users::pins`). Choosing between them is
-//! the person's, by a verb not built yet.
+//! it leaves meanwhile, and once the copy is named finished this device syncs
+//! with the copy. A write another device's pass makes there mid-move is
+//! kotton #143's to hold (above). **Two trees sealed `first`** are either the
+//! two a move of it left, cut off between naming the copy and retiring the
+//! source, or two that devices apart from each other each made, which no move
+//! may resolve: a move retires every copy but one, and the other may hold
+//! what this one does not. This device tells them apart by its own record of
+//! the move it began ([`record::MoveBegun`], kept on this device and sent
+//! nowhere): when that record names exactly the two listed, running the move
+//! again to the same vault is let through and finishes it as any drive's
+//! interrupted move is finished ([`twice`]); otherwise `move` refuses and
+//! names both, and `status` says which this device keeps syncing with
+//! (`crate::users::pins`). Choosing between two made apart is the person's,
+//! by a verb not built yet.
 //!
 //! **Which devices keep a drive whole: its claims, and nothing else.** What a
 //! device keeps of a drive is its pin settings, which are its own and stay in
@@ -594,6 +604,10 @@ pub async fn create(
         Ok(v) => v,
         Err(e) => return refused(format!("drive create: {e}")),
     };
+    // Held across the listing and the make, so two creates of one name on
+    // this device, or a create of `personal` beside an enrolment's
+    // [`make_first`], make one drive: the second reads the first's.
+    let _held = runtime.lock_mount(user_id, &drive_lock(&name)).await;
     // Every vault, not this one alone: a drive of this name made on another
     // by another device is taken whatever this device's record says.
     let seen = follow_every_vault(runtime, store, db, user_id).await?;
@@ -657,6 +671,9 @@ pub enum MadeFirst {
 /// and this device keeps it whole until told otherwise ([`made_here`]). A
 /// vault enrolled after it holds nothing until a drive is made or moved there.
 pub async fn make_first(runtime: &DeviceRuntime, store: &UserStore, db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32]) -> io::Result<MadeFirst> {
+    // Held across the listing, the make and the mark: two enrolments at once
+    // on this device make one `personal`, the second reading the first's.
+    let _held = runtime.lock_mount(user_id, &drive_lock(FIRST_DRIVE_NAME)).await;
     let seen = follow_every_vault(runtime, store, db, user_id).await?;
     if !seen.unanswered.is_empty() {
         return Ok(MadeFirst::Unanswered(seen.unanswered));
@@ -1018,6 +1035,42 @@ pub fn plan_move(copies: &[Copy], name: &str, dest: &[u8; 32], from: Option<&[u8
     Plan::Carry { source, retire_after }
 }
 
+/// Every finished tree the vaults listed sealed with [`FIRST_DRIVE_ID`], by
+/// vault and tree.
+pub fn finished_firsts(copies: &[Copy]) -> Vec<record::TreeAt> {
+    copies.iter().filter(|c| c.finished && c.id == FIRST_DRIVE_ID).map(|c| (c.vault_key, c.tree.clone())).collect()
+}
+
+/// What two finished trees sealed `first` are to a move of `personal`
+/// (module doc).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Twice {
+    /// One, or none: nothing to tell apart.
+    No,
+    /// The two this device's own move left, to the vault it is asked to move
+    /// to: the move runs again, and finishes ([`Plan::AtDestination`]).
+    OwnMove,
+    /// The two this device's own move left, to another vault than the one
+    /// asked: that move is finished first.
+    OwnMoveElsewhere([u8; 32]),
+    /// Two this device began no move between: another device's move, or two
+    /// made apart. No move retires either.
+    Apart,
+}
+
+/// Tell what `firsts` (every finished tree sealed `first`) are, given the move
+/// this device began, if any, and the vault a move is asked to go to.
+pub fn twice(firsts: &[record::TreeAt], begun: Option<&record::MoveBegun>, dest: &[u8; 32]) -> Twice {
+    if firsts.len() <= 1 {
+        return Twice::No;
+    }
+    match begun {
+        Some(b) if b.names_exactly(firsts) && b.to.0 == *dest => Twice::OwnMove,
+        Some(b) if b.names_exactly(firsts) => Twice::OwnMoveElsewhere(b.to.0),
+        _ => Twice::Apart,
+    }
+}
+
 /// `drive move <name> --to <vault> [--from <vault>]` (module doc).
 #[allow(clippy::too_many_arguments)]
 pub async fn move_to(
@@ -1062,16 +1115,39 @@ pub async fn move_to(
         ));
     }
     // Two trees sealed as `personal`: a move would retire all but one, and the
-    // other may hold what this one does not (module doc).
-    let firsts: Vec<&Copy> = seen.copies.iter().filter(|c| c.finished && c.id == FIRST_DRIVE_ID).collect();
-    if name == FIRST_DRIVE_NAME && firsts.len() > 1 {
-        return refused(format!(
-            "drive move: you have {} drives called '{name}' ({}); a move keeps one and retires the rest, and each may \
-             hold what the other does not, so none is moved until you choose which is '{name}'. `status` says which \
-             this device syncs with",
-            firsts.len(),
-            firsts.iter().map(|c| format!("on '{}'", label(&c.vault_key))).collect::<Vec<_>>().join(", ")
-        ));
+    // other may hold what this one does not, unless they are the two this
+    // device's own move left (module doc).
+    if name == FIRST_DRIVE_NAME {
+        let firsts = finished_firsts(&seen.copies);
+        let begun = record::move_begun(db, user_id).await?;
+        match twice(&firsts, begun.as_ref(), &dest.vault_key) {
+            Twice::No => {
+                if begun.is_some() && firsts.len() <= 1 {
+                    // A move this device began that is over: finished at
+                    // another device, or by a listing that no longer has two.
+                    record::end_move(db, user_id).await?;
+                }
+            }
+            Twice::OwnMove => {}
+            Twice::OwnMoveElsewhere(to) => {
+                return refused(format!(
+                    "drive move: this device's move of '{name}' to '{}' has not finished, and '{name}' is on both \
+                     vaults until it does: run `drive move {name} --to {}` first",
+                    label(&to),
+                    label(&to)
+                ))
+            }
+            Twice::Apart => {
+                return refused(format!(
+                    "drive move: you have {} drives called '{name}' ({}), and this device began no move between them. \
+                     If another of your devices began moving it, run that move again there to finish it; otherwise \
+                     they were made apart, and a move, which keeps one and retires the rest, would lose what only the \
+                     other holds, so none is moved. `status` says which this device syncs with",
+                    firsts.len(),
+                    firsts.iter().map(|(k, _)| format!("on '{}'", label(k))).collect::<Vec<_>>().join(", ")
+                ))
+            }
+        }
     }
     let plan = plan_move(&seen.copies, name, &dest.vault_key, from_vault.as_ref().map(|v| &v.vault_key));
     let (source, retire_after) = match plan {
@@ -1094,6 +1170,10 @@ pub async fn move_to(
             refollow(runtime, store, db, user_id, &vaults, &rest, &dest).await;
             if let Some(left) = left {
                 return refused(format!("drive move: '{name}' is on '{}', and {left}; run the move again to retire it", dest.node.id));
+            }
+            if name == FIRST_DRIVE_NAME {
+                record::end_move(db, user_id).await?;
+                record::mark_synced(db, user_id, &keep.vault_key, &keep.tree).await?;
             }
             let sizes = Seen { copies: vec![keep.clone()], unanswered: vec![] }.sizes();
             let moved = record::all(db, user_id).await?.into_iter().find(|d| d.vault_key == keep.vault_key && d.tree == keep.tree);
@@ -1141,6 +1221,12 @@ pub async fn move_to(
         UserResponse::Error { message } => return refused(format!("drive move: '{}' refused the drive: {message}", dest.node.id)),
         other => return refused(format!("drive move: '{}' answered {other:?}", dest.node.id)),
     }
+    // What lets a rerun of this move through, should it be cut off between
+    // naming the copy finished and retiring the source (module doc).
+    if name == FIRST_DRIVE_NAME {
+        let begun = record::MoveBegun { from: (source.vault_key, source.tree.clone()), to: (dest.vault_key, to_tree.clone()) };
+        record::begin_move(db, user_id, &begun).await?;
+    }
     let from_end = PeerEnd(from_client.with_remote_mount(source.tree.clone()).with_domain_id(domain.clone()));
     let to_end = PeerEnd(dest_client.with_remote_mount(to_tree.clone()).with_domain_id(domain));
     // The keys the move refuses are named in the person's own log as the
@@ -1165,6 +1251,18 @@ pub async fn move_to(
         }
     }
     refollow(runtime, store, db, user_id, &vaults, &retire_after, &dest).await;
+    if name == FIRST_DRIVE_NAME {
+        match &carried {
+            // The copy is named finished: this device's tree syncs with it
+            // from now on, and writes nothing more into the tree it left.
+            Carried::Moved | Carried::SourceKept(_) => record::mark_synced(db, user_id, &dest.vault_key, &to_tree).await?,
+            Carried::NotMoved(_) | Carried::NotMovedTreeLeft { .. } => {}
+        }
+        // The record stays only while the source is kept beside the copy.
+        if !matches!(carried, Carried::SourceKept(_)) {
+            record::end_move(db, user_id).await?;
+        }
+    }
     let (src, dst) = (source_vault.node.id.as_str(), dest.node.id.as_str());
     let also = refused_said(&not_carried, src);
     match carried {
@@ -1175,6 +1273,13 @@ pub async fn move_to(
                 "drive move: '{name}' was not moved, and is still on '{src}': {why}. '{dst}' also keeps an unfinished \
                  copy of it under {to_tree}, which it did not retire ({left}): `drive list` shows it as unfinished, \
                  and moving '{name}' to '{dst}' again retires it first{also}"
+            ))
+        }
+        Carried::SourceKept(e) if name == FIRST_DRIVE_NAME => {
+            return refused(format!(
+                "drive move: '{name}' is on '{dst}' now, and this device syncs with it there, but '{src}' still keeps \
+                 the copy it left: it did not retire it ({e}). Run `drive move {name} --to {dst}` again on this \
+                 device to retire it; until then your other devices may say two drives are called '{name}'{also}"
             ))
         }
         Carried::SourceKept(e) => {
@@ -1559,6 +1664,59 @@ mod tests {
         assert_eq!(retire(&from, "alice", FROM).await, Ok(()));
         assert!(from.keys().is_empty(), "the source still keeps the drive");
         assert_eq!(to.keys(), ["p/one", "p/two"], "the copy lost an object");
+    }
+
+    /// **A move of `personal` cut off after the naming is finished by running
+    /// it again on the device that began it** (kotton #124). The source
+    /// refuses its retire, so two finished trees carry the first drive's id.
+    /// The move this device recorded names exactly those two, so a rerun to
+    /// the same vault is let through and planned as any drive's interrupted
+    /// move: the copy kept, the source retired, and the record forgotten.
+    /// Without that record the two are trees no move of this device's left,
+    /// and no move retires either; with it, a move to a third vault is sent
+    /// to finish this one first.
+    #[tokio::test]
+    async fn a_cut_off_move_of_personal_is_finished_by_running_it_again() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db = Arc::new(kotton_record::open_sqlite(&temp.path().join("machine.db")).await.unwrap());
+        crate::db::MIGRATOR.run(db.as_ref()).await.unwrap();
+        let personal = |vault: [u8; 32], tree: u8| Copy { name: FIRST_DRIVE_NAME.into(), id: FIRST_DRIVE_ID.into(), ..a_copy(vault, tree, "personal", 7) };
+        let (at_source, at_dest) = (personal(V1, 1), personal(V2, 2));
+
+        // The move begins: its record is written once the copy's tree is
+        // made, and the source refuses its retire.
+        let begun = record::MoveBegun { from: (V1, at_source.tree.clone()), to: (V2, at_dest.tree.clone()) };
+        record::begin_move(&db, "alice", &begun).await.unwrap();
+        let (from, to) = (source(), Fake::default());
+        from.refuse_retire.store(true, Ordering::SeqCst);
+        assert!(matches!(settle(&from, &to).await, Carried::SourceKept(_)));
+
+        // Both vaults list a finished `personal` now.
+        let copies = [at_source.clone(), at_dest.clone()];
+        let firsts = finished_firsts(&copies);
+        let recorded = record::move_begun(&db, "alice").await.unwrap();
+        assert_eq!(recorded.as_ref(), Some(&begun), "the move this device began was not kept");
+        assert_eq!(twice(&firsts, None, &V2), Twice::Apart, "two trees no move of this device left were let through");
+        assert_eq!(twice(&firsts, recorded.as_ref(), &V3), Twice::OwnMoveElsewhere(V2));
+        let stranger = record::MoveBegun { from: (V1, at_source.tree.clone()), to: (V3, at_dest.tree.clone()) };
+        assert_eq!(twice(&firsts, Some(&stranger), &V2), Twice::Apart, "a record of another move let these two through");
+
+        // The rerun.
+        assert_eq!(twice(&firsts, recorded.as_ref(), &V2), Twice::OwnMove);
+        match plan_move(&copies, FIRST_DRIVE_NAME, &V2, None) {
+            Plan::AtDestination { keep, retire: rest } => {
+                assert_eq!(keep, at_dest);
+                assert_eq!(rest, [at_source]);
+            }
+            other => panic!("the rerun of personal's move did not finish it: {other:?}"),
+        }
+        from.refuse_retire.store(false, Ordering::SeqCst);
+        assert_eq!(retire(&from, "alice", FROM).await, Ok(()));
+        assert!(from.keys().is_empty(), "the source still keeps personal");
+        assert_eq!(to.keys(), ["p/one", "p/two"], "the copy lost an object");
+        record::end_move(&db, "alice").await.unwrap();
+        assert_eq!(record::move_begun(&db, "alice").await.unwrap(), None);
+        assert_eq!(twice(&finished_firsts(&[at_dest]), None, &V2), Twice::No);
     }
 
     /// **Two devices moving one drive at once leave two finished copies of one

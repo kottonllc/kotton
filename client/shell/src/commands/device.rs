@@ -454,40 +454,56 @@ fn issuer_complete_line(remote: &str) -> String {
 /// What the ceremony says under the greeting when a vault is admitted: its
 /// posture in words, then what it keeps ([`vault_keeps_line`]). One function,
 /// so the test holds what `run_ceremony` prints and not a constant beside it.
-fn vault_complete_lines(node_id: &str, keeps: Option<&[String]>) -> Vec<String> {
+fn vault_complete_lines(node_id: &str, keeps: Option<&Kept>) -> Vec<String> {
     vec![VAULT_POSTURE_LINE.to_string(), vault_keeps_line(node_id, keeps)]
 }
 
-/// What a vault just enrolled keeps of the person's (RFC 0002; kotton #124),
-/// from `drive list`'s answer: `keeps`, the names of the drives it lists, or
-/// `None` when the list was not answered. The first vault the person enrols
-/// is where `personal` is made, and the line says so; a vault enrolled after
-/// it holds nothing until a drive is made or moved there, and the line says
-/// that, with the two verbs that do it.
-fn vault_keeps_line(node_id: &str, keeps: Option<&[String]>) -> String {
+/// What a vault just enrolled keeps of the person's (kotton-protocol's
+/// storage model; kotton #124), as `drive list` answers on a connection of its
+/// own ([`kept_at`]), or `None` when it did not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Kept {
+    /// The names of the drives this vault lists.
+    here: Vec<String>,
+    /// Whether any vault lists `personal`.
+    personal_anywhere: bool,
+}
+
+/// The line after a vault's enrolment ([`Kept`]). The first vault the person
+/// enrols is where `personal` is made, and the line says so; a vault enrolled
+/// after it holds nothing until a drive is made or moved there, and the line
+/// says that, with the two verbs that do it. When no vault lists `personal` —
+/// it could not be made at this, the first, because a vault did not answer —
+/// the line says what `status` says of it, not that the vault holds nothing.
+fn vault_keeps_line(node_id: &str, keeps: Option<&Kept>) -> String {
     let personal = kotton_wire::ipc::FIRST_DRIVE_NAME;
     match keeps {
         None => format!("`drive list` says what '{node_id}' keeps of yours."),
-        Some(names) if names.iter().any(|n| n == personal) => format!(
+        Some(k) if k.here.iter().any(|n| n == personal) => format!(
             "it keeps `{personal}`, your first drive: this device's files sync with it there. run `sync` when you want \
              to copy data to it."
         ),
-        Some([]) => format!(
+        Some(k) if !k.personal_anywhere => {
+            kotton_wire::ipc::PinNotice::NotFound { drive: personal.to_string() }.said().replacen("none of", "it holds nothing yet, and none of", 1)
+        }
+        Some(k) if k.here.is_empty() => format!(
             "it holds nothing of yours until a drive is made or moved there: `drive create <name> --on {node_id}` \
              makes one, and `drive move <name> --to {node_id}` moves one."
         ),
-        Some(names) => format!("it keeps {}.", names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")),
+        Some(k) => format!("it keeps {}.", k.here.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")),
     }
 }
 
-/// The names of the drives the vault `node` keeps, as `drive list` answers on
-/// a connection of its own, or `None` when it does not answer.
-async fn kept_at(client: &KottonClient, user: &str, node: &kotton_wire::peer::PairedNode) -> Option<Vec<String>> {
+/// What the vault `node` keeps, and whether any vault lists `personal`, as
+/// `drive list` answers on a connection of its own, or `None` when it does
+/// not answer.
+async fn kept_at(client: &KottonClient, user: &str, node: &kotton_wire::peer::PairedNode) -> Option<Kept> {
     let at: String = node.public_key.iter().map(|b| format!("{b:02x}")).collect();
     let listed = client.drive_list_beside(user).await.ok()?;
-    let mut names: Vec<String> = listed.into_iter().filter(|d| d.vault_key == at && !d.unfinished).map(|d| d.name).collect();
-    names.dedup();
-    Some(names)
+    let personal_anywhere = listed.iter().any(|d| !d.unfinished && d.name == kotton_wire::ipc::FIRST_DRIVE_NAME);
+    let mut here: Vec<String> = listed.into_iter().filter(|d| d.vault_key == at && !d.unfinished).map(|d| d.name).collect();
+    here.dedup();
+    Some(Kept { here, personal_anywhere })
 }
 
 /// What the ceremony says when the admit offered the relay the vault was met
@@ -657,14 +673,14 @@ pub(crate) async fn run_ceremony_to(
                     Role::Vault => {
                         ui::greet("added to your identity,", &node.id);
                         let keeps = kept_at(client, user, &node).await;
-                        for line in vault_complete_lines(&node.id, keeps.as_deref()) {
+                        for line in vault_complete_lines(&node.id, keeps.as_ref()) {
                             ui::body(&line);
                         }
                     }
                     Role::OwnVault => {
                         ui::greet("you keep at your own vault now —", &node.id);
                         let keeps = kept_at(client, user, &node).await;
-                        ui::body(&vault_keeps_line(&node.id, keeps.as_deref()));
+                        ui::body(&vault_keeps_line(&node.id, keeps.as_ref()));
                     }
                     Role::Joiner => {
                         ui::greet("you're in — paired with", &node.id);
@@ -1011,7 +1027,7 @@ fn prompt_line(label: &str) -> Result<String> {
 mod tests {
     use super::{
         digits_only, format_sas, human_since, is_yes, issuer_complete_line, join_args,
-        relay_offer_lines, short_did, vault_complete_lines, vault_keeps_line, DeviceCommand, Role, ADMIT_ROLE,
+        relay_offer_lines, short_did, vault_complete_lines, vault_keeps_line, DeviceCommand, Kept, Role, ADMIT_ROLE,
         AS_WORD, BROWSER_WORD, VAULT_POSTURE_LINE,
     };
     use super::{parse_add, Add};
@@ -1195,7 +1211,7 @@ mod tests {
         // The admit runs the vault's ceremony, and that ceremony's success says the
         // posture before what to do next.
         assert!(ADMIT_ROLE == Role::Vault, "`drive enrol` must run the vault's ceremony");
-        let said = vault_complete_lines("did:key:zV", Some(&[]));
+        let said = vault_complete_lines("did:key:zV", Some(&Kept { here: vec![], personal_anywhere: true }));
         assert_eq!(said.first().map(String::as_str), Some(VAULT_POSTURE_LINE), "{said:?}");
         assert_eq!(said.len(), 2, "{said:?}");
     }
@@ -1207,15 +1223,22 @@ mod tests {
     /// that did not answer sends the person to `drive list`, claiming nothing.
     #[test]
     fn the_line_after_enrol_says_a_later_vault_holds_nothing_until_a_drive_is_put_there() {
-        let first = vault_keeps_line("home", Some(&["personal".to_string()]));
+        let kept = |here: &[&str], personal_anywhere: bool| Kept { here: here.iter().map(|n| n.to_string()).collect(), personal_anywhere };
+        let first = vault_keeps_line("home", Some(&kept(&["personal"], true)));
         assert!(first.contains("keeps `personal`") && first.contains("sync"), "{first}");
-        let later = vault_keeps_line("office", Some(&[]));
+        let later = vault_keeps_line("office", Some(&kept(&[], true)));
         assert!(later.starts_with("it holds nothing of yours until a drive is made or moved there"), "{later}");
         assert!(later.contains("`drive create <name> --on office`") && later.contains("`drive move <name> --to office`"), "{later}");
         assert!(!later.contains("sync"), "a vault that holds nothing is offered a sync: {later}");
         let unknown = vault_keeps_line("office", None);
         assert!(unknown.contains("`drive list`") && !unknown.contains("holds nothing"), "{unknown}");
-        assert_eq!(vault_keeps_line("office", Some(&["photos".to_string()])), "it keeps `photos`.");
+        assert_eq!(vault_keeps_line("office", Some(&kept(&["photos"], true))), "it keeps `photos`.");
+        // The first enrolment could not make `personal`: what `status` says
+        // of it, never that a drive made or moved there is all it lacks.
+        let unmade = vault_keeps_line("home", Some(&kept(&[], false)));
+        assert!(unmade.starts_with("it holds nothing yet, and none of your vaults has listed 'personal'"), "{unmade}");
+        assert!(unmade.contains("add or enrol that vault first") && unmade.contains("only if no vault of yours holds it"), "{unmade}");
+        assert!(!unmade.contains("until a drive is made or moved there"), "{unmade}");
     }
 
     /// **An admit that offered the meeting relay says so, and names the one

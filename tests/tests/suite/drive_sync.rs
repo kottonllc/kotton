@@ -921,6 +921,65 @@ async fn a_fresh_install_makes_personal_at_its_first_vault_and_a_later_vault_rec
     assert_eq!(unkept(&answer.notices), None, "{:?}", answer.notices);
 }
 
+/// **Two makings of `personal` at once on one device make one** (kotton
+/// #124). Alice's device records a vault that cannot answer it — a key no
+/// vault holds, at a vault's address — so her first enrolment cannot tell
+/// whether `personal` is kept there, makes none, and `status` says it is not
+/// found and how to make it. With that vault revoked, two makings of it run at
+/// once, as two enrolments finishing together would: the second waits on the
+/// first, reads its listing, and makes nothing, so the vault keeps one tree
+/// sealed `first`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_makings_of_personal_at_once_on_one_device_make_one() {
+    use kotton_device::users::drive_verbs::{make_first, MadeFirst};
+    use kotton_wire::ipc::{PinNotice, FIRST_DRIVE_ID, FIRST_DRIVE_NAME, TENANCY_TREE};
+    init_crypto();
+    let first = spawn_vault("vault").await;
+    let elsewhere = spawn_vault("elsewhere").await;
+    let a = spawn_device("device A").await;
+    let mut client_a = connect_when_ready(&a.ipc, "client A").await;
+    client_a.create_user(USER, crate::common::TEST_PASSPHRASE).await.expect("create_user on A");
+
+    // A vault of hers that does not answer: a key no vault holds, so the
+    // handshake at that address fails at once.
+    let ghost = ed25519_dalek::SigningKey::from_bytes(&[42; 32]).verifying_key().to_bytes();
+    let ghost_did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&ghost).unwrap().to_string();
+    let at = elsewhere.vault.runtime().peer_listen_addr().expect("the vault listens");
+    a.daemon.insert_paired_node(USER, &ghost_did, ghost, at).await.expect("the unanswering vault");
+    kotton_peer::daemon::drives::record(&a.daemon.machine_db(), USER, &ghost).await.expect("recorded as a vault");
+
+    let (mut client_a, first_id) = enrol_vault_from(client_a, "device-a", &first, USER, "vault").await;
+    assert_eq!(trees_at(&first), [TENANCY_TREE.to_string()], "a drive was made though a vault did not answer");
+    let status = client_a.status(USER).await.expect("status");
+    let not_found = status.notices.first().expect("status says nothing of personal");
+    assert_eq!(not_found, &PinNotice::NotFound { drive: FIRST_DRIVE_NAME.into() }, "{:?}", status.notices);
+    assert!(not_found.said().contains("add or enrol that vault first"), "{}", not_found.said());
+
+    client_a.revoke_node(USER, &ghost_did).await.expect("revoke the unanswering vault");
+    let (runtime, db) = (a.daemon.runtime(), a.daemon.machine_db());
+    let store = a.daemon.users().get(USER).expect("alice is resident");
+    let key: [u8; 32] = hex::decode(&first_id.pubkey_hex).unwrap().try_into().unwrap();
+    let (one, two) = tokio::join!(
+        make_first(&runtime, &store, &db, USER, &key),
+        make_first(&runtime, &store, &db, USER, &key)
+    );
+    let mut said = [one.expect("the first making"), two.expect("the second making")];
+    said.sort_by_key(|m| matches!(m, MadeFirst::Kept));
+    assert_eq!(said, [MadeFirst::Made, MadeFirst::Kept], "two makings at once did not make exactly one");
+    let made: Vec<String> = trees_at(&first).into_iter().filter(|t| t != TENANCY_TREE).collect();
+    assert_eq!(made.len(), 1, "the vault keeps more than one personal: {made:?}");
+    let listed = client_a.drive_list(USER).await.expect("drive list");
+    let personal: Vec<_> = listed.iter().filter(|d| d.name == FIRST_DRIVE_NAME).collect();
+    assert_eq!(personal.len(), 1, "{listed:?}");
+    assert_eq!(personal[0].id.as_deref(), Some(FIRST_DRIVE_ID));
+    let status = client_a.status(USER).await.expect("status");
+    assert!(
+        !status.notices.iter().any(|n| matches!(n, PinNotice::NotFound { .. } | PinNotice::Twice { .. })),
+        "{:?}",
+        status.notices
+    );
+}
+
 /// **Every device finds the same `personal`, however it came to the person**
 /// (RFC 0002; kotton #124, done-when 2). Alice's device A enrols two vaults;
 /// B joins A, C joins A after it, and R recovers from the vault holding

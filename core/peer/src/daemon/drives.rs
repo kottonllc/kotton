@@ -54,7 +54,10 @@
 //! one it synced with before, which its own passes mark ([`mark_synced`]), or
 //! with neither until its person chooses, and `status` says so
 //! (`kotton_device::users::pins`). A move finishes by retiring its source, so
-//! its two become one again at every device's next listing.
+//! its two become one again at every device's next listing; one cut off
+//! before that is finished by running it again on the device that began it,
+//! which alone records the two trees its move left ([`MoveBegun`]) and so can
+//! tell them from two made apart.
 //!
 //! **The drive's id, beside the vault's tree** (kotton #171; kotton-protocol
 //! #26). A tree id is the vault's and differs at every vault a drive is kept
@@ -468,6 +471,76 @@ pub async fn mark_synced(db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 3
     .execute(db.as_ref())
     .await
     .map_err(db_err)?;
+    Ok(())
+}
+
+/// A tree of a vault's, by the vault's key and the vault's own word for the
+/// tree: what [`MoveBegun`] names.
+pub type TreeAt = ([u8; 32], String);
+
+/// **The move of `personal` this device began and has not finished**
+/// (module doc; migration 0032): the tree it read and the tree it named
+/// finished. While both are listed, two trees carry the first drive's id
+/// because of this device's own move, not because two devices each made one,
+/// so running the move again may retire the first
+/// (`kotton_device::users::drive_verbs::move_to`). This device's own, and
+/// never sent anywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveBegun {
+    pub from: TreeAt,
+    pub to: TreeAt,
+}
+
+impl MoveBegun {
+    /// Whether `trees`, every finished tree sealed `first` that the vaults
+    /// list, are exactly this move's two.
+    pub fn names_exactly(&self, trees: &[TreeAt]) -> bool {
+        trees.len() == 2 && trees.contains(&self.from) && trees.contains(&self.to)
+    }
+}
+
+/// Write the move of `personal` this device began, replacing any earlier one.
+pub async fn begin_move(db: &Arc<SqlitePool>, user_id: &str, begun: &MoveBegun) -> io::Result<()> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO personal_move (user_id, tenancy, from_vault, from_tree, to_vault, to_tree) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(user_id)
+    .bind(tenancy_of(user_id))
+    .bind(begun.from.0.as_slice())
+    .bind(&begun.from.1)
+    .bind(begun.to.0.as_slice())
+    .bind(&begun.to.1)
+    .execute(db.as_ref())
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+/// The move of `personal` this device began and has not finished, if any.
+pub async fn move_begun(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Option<MoveBegun>> {
+    let row: Option<(Vec<u8>, String, Vec<u8>, String)> = sqlx::query_as(
+        "SELECT from_vault, from_tree, to_vault, to_tree FROM personal_move WHERE user_id = ? AND tenancy = ?",
+    )
+    .bind(user_id)
+    .bind(tenancy_of(user_id))
+    .fetch_optional(db.as_ref())
+    .await
+    .map_err(db_err)?;
+    let Some((from_vault, from_tree, to_vault, to_tree)) = row else { return Ok(None) };
+    let key = |k: Vec<u8>| -> io::Result<[u8; 32]> { k.try_into().map_err(|_| io::Error::other("corrupt vault key in personal_move")) };
+    Ok(Some(MoveBegun { from: (key(from_vault)?, from_tree), to: (key(to_vault)?, to_tree) }))
+}
+
+/// Forget the move of `personal` this device began: it was finished, or it
+/// never named a copy finished.
+pub async fn end_move(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<()> {
+    sqlx::query("DELETE FROM personal_move WHERE user_id = ? AND tenancy = ?")
+        .bind(user_id)
+        .bind(tenancy_of(user_id))
+        .execute(db.as_ref())
+        .await
+        .map_err(db_err)?;
     Ok(())
 }
 
