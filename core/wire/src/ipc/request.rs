@@ -2733,7 +2733,13 @@ pub enum UserRequest {
 
 impl UserRequest {
     /// Returns the `user_id` for requests that operate on behalf of a specific
-    /// user, or `None` for device-level and public operations.
+    /// user, or `None` for device-level and public operations and for the
+    /// named exceptions below.
+    ///
+    /// **Every variant is classified.** The match has no catch-all, so a new
+    /// variant does not compile until it is given an arm here: `Some(user_id)`
+    /// if the session guard must hold the user it names to the session's user,
+    /// or `None` beside its reason (#431).
     ///
     /// Used by the daemon's central auth guard to enforce session ownership
     /// before dispatching to a handler.
@@ -2744,9 +2750,7 @@ impl UserRequest {
             // here, so the session guard did not hold the name to the session's
             // user (#428). Every verb that names a user and requires a session
             // has an arm; the variants carrying a `user_id` that do not are
-            // session-less (`CreateUser`, `LoginWithRecoveryKey`), checked
-            // against their own token (`BrowserFrame`), or refused on this door
-            // whoever asks (the vault and peer-only verbs).
+            // classified at the end of this match, each with its reason.
             Self::AddRecoveryPhrase { user_id } => Some(user_id),
             Self::StorageReload { user_id } => Some(user_id),
             Self::ExtensionInstall { user_id, .. } => Some(user_id),
@@ -2921,7 +2925,7 @@ impl UserRequest {
             // QUIC gateway (RFC-0015) — user-scoped operations
             Self::GetAuthorizedClients { user_id } => Some(user_id),
             Self::GetDeviceCert { user_id } => Some(user_id),
-            // HTTP gateway (RFC-0016) u{2014} user-scoped operations
+            // HTTP gateway (RFC-0016) — user-scoped operations
             Self::WebShellPair { user_id, .. } => Some(user_id),
             Self::BrowserDeviceList { user_id } => Some(user_id),
             Self::BrowserDeviceRevoke { user_id, .. } => Some(user_id),
@@ -2941,8 +2945,75 @@ impl UserRequest {
             Self::SyncStatus { user_id } => Some(user_id),
             Self::NetworkStatus { user_id } => Some(user_id),
             Self::ReachStatus { user_id } => Some(user_id),
-            // Device-level and public operations - no session required.
-            _ => None,
+            // ── Names a user, and the guard does not hold it to the session ──
+            // Each carries a `user_id` and is answered `None` on purpose, with its
+            // reason. Adding a variant that names a user means classifying it
+            // here: there is no catch-all, so the compiler refuses it until it
+            // has an arm (#431).
+            //
+            // Session-less bootstrap: these mint the identity and its first
+            // session, so there is no session yet to hold the name to.
+            Self::CreateUser { .. } | Self::LoginWithRecoveryKey { .. } => None,
+            // Checked against its own token: the bootstrap token names the person
+            // on the local path, and a frame naming another is refused there.
+            Self::BrowserFrame { .. } => None,
+            // Refused on this door whoever asks: the vault's landlord verbs
+            // (a device has no tenants) and the peer-only sync notifications
+            // (local IPC callers cannot send them).
+            Self::SetQuota { .. }
+            | Self::DropTenant { .. }
+            | Self::InviteDigits { .. }
+            | Self::SyncAvailable { .. }
+            | Self::RecordSyncAvailable { .. } => None,
+            // ── Names no user ──
+            // Device-level, control-plane and public operations. Whether each
+            // needs a session at all is `requires_session`'s question.
+            Self::ListUsers
+            | Self::Authenticate { .. }
+            | Self::CallerInfo
+            | Self::GetActiveSession
+            | Self::LockSession
+            | Self::Tenants
+            | Self::StandAt { .. }
+            | Self::GetNodeIdentity
+            | Self::RendezvousSet { .. }
+            | Self::RendezvousStatus
+            | Self::ConfigStatus
+            | Self::TurnSet { .. }
+            | Self::InferenceSet { .. }
+            | Self::LocalDoor { .. }
+            | Self::QuicGatewaySet { .. }
+            | Self::QuicGatewayStatus
+            | Self::WebShellSet { .. }
+            | Self::WebShellStatus
+            | Self::SchemaGrantList { .. }
+            | Self::SchemaGrantSet { .. }
+            | Self::SchemaGrantRevoke { .. }
+            | Self::SchemaQuotaSet { .. }
+            | Self::RegisterHandler { .. }
+            | Self::UnregisterHandler { .. }
+            | Self::GetHandlerFor { .. }
+            | Self::ListHandlers
+            | Self::SetDefaultHandler { .. }
+            | Self::AppGrants { .. }
+            | Self::AppUninstall { .. }
+            | Self::AppVerify { .. }
+            | Self::AppList
+            | Self::AppRegisterBundle { .. }
+            | Self::AppGetBundlePath { .. }
+            | Self::AppLaunch { .. }
+            | Self::AppMessage { .. }
+            | Self::AppGetRole { .. }
+            | Self::AppSetRole { .. }
+            | Self::QueryEvents { .. }
+            | Self::SubscribeEvents { .. }
+            | Self::DaemonSidecars
+            | Self::IpcSessions
+            | Self::VfsReport { .. }
+            | Self::DaemonStatus
+            | Self::WindowOpened { .. }
+            | Self::WindowClosed { .. }
+            | Self::WindowList => None,
         }
     }
 
@@ -4695,5 +4766,254 @@ mod secret_debug_tests {
             assert!(seen >= at_least, "the {which} surface names {seen} secret fields; the parser no longer reads it");
         }
         assert!(plain.is_empty(), "secret fields that print through Debug: {plain:?}");
+    }
+}
+
+/// `target_user_id` answers every request as it did when the match ended in a
+/// catch-all. The match itself is the rule for a new variant (the compiler
+/// refuses one until it is classified); these hold the classification of the
+/// ones there are to what it was.
+#[cfg(test)]
+mod target_user_id_tests {
+    use super::*;
+
+    const USER: &str = "alice";
+
+    fn u() -> String {
+        USER.to_string()
+    }
+
+    fn s() -> String {
+        String::new()
+    }
+
+    fn secret() -> crate::ipc::SecretText {
+        crate::ipc::SecretText::new("")
+    }
+
+    fn tenant_device_change() -> crate::ipc::TenantDeviceChange {
+        crate::ipc::TenantDeviceChange {
+            act: crate::ipc::TenantDeviceAct::Admit,
+            device_did: s(),
+            public_key: [0; 32],
+            said_at_ms: 0,
+        }
+    }
+
+    fn model_manifest() -> kotton_schemas::ModelManifest {
+        kotton_schemas::ModelManifest {
+            name: s(),
+            version: s(),
+            weights: s(),
+            format: kotton_schemas::ModelFormat::Gguf,
+            kind: kotton_schemas::ModelKind::Chat,
+            parameters: 0,
+            quantisation: s(),
+            size: 0,
+            context_window: 0,
+            template: s(),
+            licence: kotton_schemas::Licence { spdx: s(), text_hash: s() },
+            publisher: None,
+        }
+    }
+
+    // One value of every variant that names a user and that the guard holds to
+    // the session's user: `target_user_id` must answer it with that user.
+    fn held() -> Vec<UserRequest> {
+        vec![
+            UserRequest::AddRecoveryPhrase { user_id: u() },
+            UserRequest::LogoutUser { user_id: u() },
+            UserRequest::RotateIdentity { user_id: u(), recovery_key: secret(), credential: None },
+            UserRequest::Recover { user_id: u(), recovery_key: secret(), passphrase: secret(), vault_line: s() },
+            UserRequest::ReadFile { user_id: u(), path: s(), offset: 0, length: 0 },
+            UserRequest::WriteFile { user_id: u(), path: s(), data: vec![], offset: 0, total_size: 0, content_hash: s() },
+            UserRequest::ListFiles { user_id: u(), prefix: s() },
+            UserRequest::DeleteFile { user_id: u(), path: s() },
+            UserRequest::ListConflicts { user_id: u() },
+            UserRequest::ResolveConflict { user_id: u(), path: s(), keep: None },
+            UserRequest::PurgeFile { user_id: u(), path: s() },
+            UserRequest::MintPrincipalSession { user_id: u(), evidence: PrincipalEvidence::VerifiedPeerKey { pubkey_hex: s() } },
+            UserRequest::GatewayEnroll { user_id: u(), code: secret(), ttl_seconds: 0 },
+            UserRequest::DeviceAdmit { user_id: u(), code: secret(), ttl_seconds: 0, posture: Default::default(), operator_of: None },
+            UserRequest::DeviceInvite { user_id: u(), ttl_seconds: 0, as_name: None },
+            UserRequest::OperatorMint { user_id: u(), service: crate::ipc::OperatedService::Vault, name: None, rule: None },
+            UserRequest::OperatorMints { user_id: u() },
+            UserRequest::OperatorHeld { user_id: u(), service: crate::ipc::OperatedService::Vault },
+            UserRequest::OperatorForget { user_id: u(), service: crate::ipc::OperatedService::Vault, name: s() },
+            UserRequest::OperatorEnrol { user_id: u(), credential: secret() },
+            UserRequest::OperatorEnrolLines { user_id: u(), lines: vec![] },
+            UserRequest::AsOperator { user_id: u(), name: s(), verb: crate::ipc::OperatorVerb::Pools },
+            UserRequest::ReadSealed { user_id: u(), mount: s(), path: s(), offset: 0, length: 0 },
+            UserRequest::RecoveryFetch { user_id: u() },
+            UserRequest::RecoveryStore { user_id: u(), bundle: s(), kel: vec![] },
+            UserRequest::HoldDoors { user_id: u(), doors: vec![] },
+            UserRequest::TakeDeliveries { user_id: u(), ack: vec![] },
+            UserRequest::CarryFrame { user_id: u(), messages: vec![], drop: vec![] },
+            UserRequest::TenantDevice { user_id: u(), change: tenant_device_change(), signature: vec![] },
+            UserRequest::TenantDriveMake { user_id: u(), drive: crate::ipc::MadeDrive([0; 16]), sealed_name: vec![] },
+            UserRequest::TenantDrives { user_id: u() },
+            UserRequest::TenantDriveName { user_id: u(), drive: crate::ipc::MadeDrive([0; 16]), sealed_name: vec![] },
+            UserRequest::TenantDriveRetire { user_id: u(), drive: crate::ipc::MadeDrive([0; 16]) },
+            UserRequest::DriveCreate { user_id: u(), name: s(), on: None },
+            UserRequest::DriveList { user_id: u() },
+            UserRequest::DriveShow { user_id: u(), name: s() },
+            UserRequest::DriveMove { user_id: u(), name: s(), to: s(), from: None },
+            UserRequest::PinSet { user_id: u(), scope: crate::ipc::PinScope::Default, value: None },
+            UserRequest::PinList { user_id: u() },
+            UserRequest::Status { user_id: u() },
+            UserRequest::ListSealed { user_id: u(), mount: s(), prefix: s() },
+            UserRequest::WriteSealed { user_id: u(), mount: s(), path: s(), blob: vec![], domain_id: s(), offset: 0, total_size: 0, content_hash: s() },
+            UserRequest::RemoteAdd { user_id: u(), name: s(), backend: RemoteBackend::Local { path: Default::default() }, credentials: None },
+            UserRequest::RemoteRemove { user_id: u(), name: s() },
+            UserRequest::RemoteList { user_id: u() },
+            UserRequest::RemoteCacheClear { user_id: u(), name: s() },
+            UserRequest::RemoteCredentialsSet { user_id: u(), name: s(), credentials: crate::ipc::SecretValue::new(serde_json::Value::Null) },
+            UserRequest::StorageReload { user_id: u() },
+            UserRequest::SyncMount { user_id: u(), mount: s(), remote: s(), direction: None },
+            UserRequest::PairNodeEphemeral { user_id: u(), label: s(), paths: vec![], permissions: SessionPermissions::Read, ttl_seconds: 0, guest_ephemeral_pubkey: None },
+            UserRequest::DeviceAdd { user_id: u(), as_name: None, ttl_seconds: 0, port: 0, posture: Default::default() },
+            UserRequest::PairConfirmCode { user_id: u(), token: secret(), matches: false },
+            UserRequest::NodeList { user_id: u() },
+            UserRequest::NodeRelay { user_id: u() },
+            UserRequest::Introduce { user_id: u(), addr: s(), token: secret(), router: None },
+            UserRequest::VaultCapacity { user_id: u() },
+            UserRequest::NodeRevoke { user_id: u(), node_id: s() },
+            UserRequest::FrostSignRound { user_id: u(), payload: s() },
+            UserRequest::ThresholdSign { user_id: u(), message_hex: s() },
+            UserRequest::PeerAdd { user_id: u(), label: s(), peer_did: s(), peer_pubkey_hex: s(), peer_addr: ([127, 0, 0, 1], 1).into() },
+            UserRequest::SyncConfigure { user_id: u(), drive: s(), direction: None, watch: false },
+            UserRequest::SyncRuleList { user_id: u() },
+            UserRequest::SyncRuleRemove { user_id: u(), drive: s() },
+            UserRequest::SyncDrives { user_id: u() },
+            UserRequest::SyncAwait { user_id: u(), job_id: s(), timeout_secs: 0 },
+            UserRequest::MountPath { user_id: u(), node_id: s(), remote_path: s(), local_path: s(), cache_budget_bytes: None, pins: vec![] },
+            UserRequest::MountList { user_id: u() },
+            UserRequest::MountEvict { user_id: u(), node_id: s(), local_path: s() },
+            UserRequest::SessionList { user_id: u() },
+            UserRequest::SessionEnd { user_id: u(), session_id: s() },
+            UserRequest::RelayStand { user_id: u(), code: secret() },
+            UserRequest::ModelAdd { user_id: u(), manifest: model_manifest() },
+            UserRequest::ModelWeights { user_id: u(), data: vec![], offset: 0, total_size: 0, content_hash: s() },
+            UserRequest::ModelList { user_id: u() },
+            UserRequest::ModelRemove { user_id: u(), model: s() },
+            UserRequest::ModelUse { user_id: u(), model: s(), rebuild_index: false },
+            UserRequest::GetAuthorizedClients { user_id: u() },
+            UserRequest::GetDeviceCert { user_id: u() },
+            UserRequest::WebShellPair { user_id: u(), ttl_seconds: 0 },
+            UserRequest::BrowserDeviceList { user_id: u() },
+            UserRequest::BrowserDeviceRevoke { user_id: u(), name: s() },
+            UserRequest::RecordInsert { user_id: u(), schema_nsid: s(), record: serde_json::Value::Null, root: None, app_id: None },
+            UserRequest::RecordQuery { user_id: u(), schema_nsid: s(), field_eq: vec![], limit: None, offset: None, root: None, app_id: None },
+            UserRequest::RecordSearch { user_id: u(), nsid: None, text: None, limit: None, app_id: None },
+            UserRequest::RecordDelete { user_id: u(), schema_nsid: s(), record_id: s(), root: None, app_id: None },
+            UserRequest::RecordOpen { user_id: u(), url: s() },
+            UserRequest::Import { user_id: u(), format: ImportFormat::Ics, source_name: s(), content: vec![] },
+            UserRequest::SchemaList { user_id: u() },
+            UserRequest::SchemaRegister { user_id: u(), definition_json: s(), app_id: None },
+            UserRequest::SchemaGet { user_id: u(), nsid: s() },
+            UserRequest::AppInstall { user_id: u(), manifest_toml: s(), wasm_bytes: vec![], approved: vec![], bindings: vec![] },
+            UserRequest::AppInstallPreview { user_id: u(), manifest_toml: s(), wasm_bytes: vec![] },
+            UserRequest::ExtensionInstall { user_id: u(), manifest_toml: s(), wasm_bytes: vec![] },
+            UserRequest::ExtensionList { user_id: u() },
+            UserRequest::ExtensionRemove { user_id: u(), extension_id: s() },
+            UserRequest::TrustAdd { user_id: u(), org_did: s() },
+            UserRequest::TrustRemove { user_id: u(), org_did: s() },
+            UserRequest::TrustList { user_id: u() },
+            UserRequest::GrantRevoke { user_id: u(), envelope_id: s() },
+            UserRequest::GrantImport { user_id: u(), envelope_json: s() },
+            UserRequest::OrgNew { user_id: u(), name: s() },
+            UserRequest::OrgShow { user_id: u(), org_did: s() },
+            UserRequest::OrgList { user_id: u() },
+            UserRequest::OrgGrantIssue { user_id: u(), org_did: s(), member_did: s(), caps: vec![], ttl_secs: None, node_did: None },
+            UserRequest::OrgGrantList { user_id: u(), org_did: s() },
+            UserRequest::OrgMemberRemove { user_id: u(), org_did: s(), member_did: s() },
+            UserRequest::OrgRootCreate { user_id: u(), org_did: s(), name: s() },
+            UserRequest::OrgRootInvite { user_id: u(), root: s(), member: s() },
+            UserRequest::OrgFrostNew { user_id: u(), name: s(), threshold: 0, total: 0 },
+            UserRequest::OrgFrostJoin { user_id: u(), name: s(), org_did: s(), share_hex: secret(), participant_idx: 0 },
+            UserRequest::OrgFrostSignBegin { user_id: u(), org_did: s(), member_did: s(), caps: vec![], ttl_secs: None, node_did: None },
+            UserRequest::OrgFrostSignContribute { user_id: u(), session_id: s(), org_did: s(), message_hex: s(), coordinator_id_hex: s(), coordinator_commitment_hex: s() },
+            UserRequest::OrgFrostSignFinalize { user_id: u(), session_id: s(), cosigner_id_hex: s(), cosigner_commitment_hex: s(), cosigner_share_hex: secret() },
+            UserRequest::VerifyEventLog { user_id: u() },
+            UserRequest::VfsWatch { user_id: u(), paths: vec![] },
+            UserRequest::SyncStatus { user_id: u() },
+            UserRequest::NetworkStatus { user_id: u() },
+            UserRequest::ReachStatus { user_id: u() },
+            UserRequest::SetLockPolicy { user_id: u(), mode: Default::default(), auto_lock_minutes: 0, pin: None },
+            UserRequest::GetLockPolicy { user_id: u() },
+            UserRequest::LockCustody { user_id: u() },
+            UserRequest::BindDeviceHardware { user_id: u(), credential: secret() },
+            UserRequest::ContactAdd { user_id: u(), contact_did: s() },
+            UserRequest::ContactPairStart { user_id: u(), as_name: None, ttl_seconds: 0 },
+            UserRequest::ContactPairJoin { user_id: u(), code: secret(), as_name: None },
+            UserRequest::ContactList { user_id: u() },
+            UserRequest::ConfirmMnemonic { user_id: u() },
+            UserRequest::GetRecoveryStatus { user_id: u() },
+            UserRequest::GetKeyHealth { user_id: u() },
+            UserRequest::MessageSend { user_id: u(), recipient_did: s(), body: s(), thread_id: None },
+            UserRequest::MessageChannelSend { user_id: u(), channel_did: s(), body: s() },
+            UserRequest::MessageChannelCreate { user_id: u(), channel_did: s() },
+            UserRequest::MessageChannelGrantKey { user_id: u(), channel_did: s(), member_did: s(), backfill: false },
+            UserRequest::MessageChannelRemoveMember { user_id: u(), channel_did: s(), member_did: s() },
+            UserRequest::MessageChannelLeave { user_id: u(), channel_did: s() },
+            UserRequest::MessageChannelHistory { user_id: u(), channel_did: s(), before_id: None, limit: 0 },
+            UserRequest::MessagePollInbox { user_id: u() },
+            UserRequest::MessageDeliveries { user_id: u(), peer_did: s() },
+            UserRequest::MessageUnreadCount { user_id: u() },
+            UserRequest::MessageMarkRead { user_id: u(), peer_did: s(), filed_at: 0, message_id: s() },
+            UserRequest::MessageDecryptDm { user_id: u(), body: s(), nonce: s(), ephemeral_pub: s() },
+            UserRequest::MessageDecryptChannel { user_id: u(), channel_did: s(), body: s(), nonce: s() },
+        ]
+    }
+
+    // One value of every variant that names a user and that the guard does not
+    // hold to it, each for the reason its arm gives, and `AppInstall` and
+    // `AppInstallPreview` with the empty name of a system install.
+    fn not_held() -> Vec<UserRequest> {
+        vec![
+            UserRequest::CreateUser { user_id: u(), passphrase: secret() },
+            UserRequest::LoginWithRecoveryKey { recovery_key: secret(), device_name: None, user_id: Some(u()) },
+            UserRequest::BrowserFrame { bytes: vec![], user_id: Some(u()), channel: None },
+            UserRequest::SetQuota { user_id: u(), quota: 0 },
+            UserRequest::DropTenant { user_id: u() },
+            UserRequest::InviteDigits { user_id: u() },
+            UserRequest::DeviceJoin { user_id: u(), code: secret(), as_name: None },
+            UserRequest::UnlockWithPin { user_id: u(), pin: secret(), repair: false },
+            UserRequest::GetUnlockMethods { user_id: u() },
+            UserRequest::GetUnlockState { user_id: u() },
+            UserRequest::SyncAvailable { user_id: u(), paths: vec![] },
+            UserRequest::RecordSyncAvailable { user_id: u(), nsids: vec![] },
+            UserRequest::AppInstall { user_id: s(), manifest_toml: s(), wasm_bytes: vec![], approved: vec![], bindings: vec![] },
+            UserRequest::AppInstallPreview { user_id: s(), manifest_toml: s(), wasm_bytes: vec![] },
+        ]
+    }
+
+
+    #[test]
+    fn every_request_held_to_the_session_answers_the_user_it_names() {
+        let held = held();
+        assert_eq!(held.len(), 142);
+        for request in &held {
+            assert_eq!(
+                request.target_user_id(),
+                Some(USER),
+                "{} names {USER} and is held to the session's user",
+                request.variant_name()
+            );
+        }
+    }
+
+    #[test]
+    fn every_request_naming_a_user_the_guard_does_not_hold_answers_none() {
+        let not_held = not_held();
+        assert_eq!(not_held.len(), 14);
+        for request in &not_held {
+            assert_eq!(
+                request.target_user_id(),
+                None,
+                "{} is not held to the session's user",
+                request.variant_name()
+            );
+        }
     }
 }

@@ -1,7 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Request dispatch functions extracted from \gent/mod.rs\.
+//! The local IPC door's dispatch, split out of `agent/mod.rs`.
 //!
-//! Provides [handle_request] and [handle_subscribe].
+//! **The gate.** Every request passes one gate before its verb runs. On the
+//! one-frame path [`handle_request`] reads [`request_entry`] (the scope
+//! allow-list, the mint-only rule, the trust floor and the CEK guard); on the
+//! streaming path `super::streamed` reads [`stream_entry`] (the mint-only rule
+//! and the trust floor). Both end in [`session_entry`], which reads the session
+//! once, refuses a request whose session is missing or does not own the user it
+//! names (`UserRequest::requires_session` and `UserRequest::target_user_id`),
+//! and answers an [`Entry`]: refused, a [`SessionUser`] to hand the verb, or
+//! session-less. The verb is answered by the private `answer_request`, so
+//! nothing reaches it around the gate.
+//!
+//! **Whose database.** A verb's per-user database comes from one of the
+//! `user_db_*` functions, each a different claim about whose it is:
+//! [`user_db_for_session`] for a session verb, from the gate's [`SessionUser`]
+//! alone; [`user_db_named`] (and [`user_db_for_user`], for the browser channel)
+//! for a user the daemon itself names, with no fallback; and
+//! [`user_db_for_principal`] (and [`user_db_for_compositor`]) for a caller with
+//! no user to name, which takes the loaded principal and is called by name.
+//!
+//! It also provides [`handle_subscribe`] and [`handle_vfs_watch`].
 use super::app_host::app_host;
 use super::custody_window;
 use super::file_host::file_host;
