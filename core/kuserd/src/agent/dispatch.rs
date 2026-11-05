@@ -518,8 +518,9 @@ pub(super) fn stream_entry(
 /// [`stream_entry`] and [`request_entry`] each end here.
 ///
 /// The read is kept: a verb that requires a session is handed the user the
-/// guard just passed, so none reads it a second time and none has a window of
-/// its own in which the session has gone.
+/// guard just passed, so no verb reads it a second time and none has a window of
+/// its own in which the session has gone. (A stream's driver reads it again, by
+/// `streamed::while_live`, only to end the stream.)
 fn session_entry(sessions: &sessions::SessionMap, token: Option<&str>, request: &UserRequest) -> Entry {
     let session_user = token.and_then(|tok| sessions::live_user(sessions, tok));
     if let Some(refusal) = session_refusal(session_user.as_deref(), request) {

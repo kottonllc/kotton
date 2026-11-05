@@ -797,7 +797,8 @@ async fn dispatch_inner(
     ) {
         // The session the gate passed, which the ceremony's stream is held to
         // as every streamed verb's is (`streamed::while_live`, #397): a browser
-        // device revoked mid-ceremony ends it.
+        // device revoked mid-ceremony ends the ceremony's stream, not the
+        // ceremony, which runs on to its next send or its ttl (#436).
         let session = match super::dispatch::stream_entry(&ctx.sessions, &conn, &call.request) {
             super::dispatch::Entry::Refused(refusal) => {
                 return Inner::Frame(frame_json(ChannelFrame::once(id, *refusal)));

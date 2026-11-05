@@ -35,8 +35,9 @@
 //! ([`dispatch::Entry::Session`]) or the refusal. The two verbs that act as
 //! that user, `SubscribeEvents` and `BrowserOutbound`, take it from the gate
 //! as an [`Opening::AsUser`], built from that user once the gate has passed it;
-//! neither reads the session again, so neither has an answer of its own for a
-//! session that ended between two reads, because there is no second read.
+//! neither verb reads the session again, so neither has an answer of its own
+//! for a session that ended between two reads. The stream's driver does read it
+//! again, by `while_live`, to end the stream when the session ends.
 //!
 //! **A stream lives as long as the session that opened it (#397).** The gate's
 //! read decides whether a stream opens; it cannot decide whether one that
@@ -131,7 +132,9 @@ pub(super) const LIVENESS_TICK: std::time::Duration = std::time::Duration::from_
 /// the gate's own `live_user`). A session that has gone, revoked or past its
 /// expiry, ends the stream with the gate's refusal, `NoActiveSession`, as its
 /// one last frame: the frame that was waiting is not delivered, and the verb's
-/// receiver is dropped, so its sender sees the stream has ended.
+/// receiver is dropped, so its sender sees the stream has ended. The verb's own
+/// task is not ended, only told: a ceremony runs on to its next send or its
+/// ttl, and ending a ceremony with its session is #436.
 ///
 /// The frame is checked as it is taken, not as it was made, and the outgoing
 /// channel holds one, so nothing is passed on that was taken after the
