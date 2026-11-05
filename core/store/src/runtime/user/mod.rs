@@ -261,16 +261,7 @@ impl UserStore {
     /// opens each through its `Shelves` and deletes what it finds there, which
     /// on a bucket is the only way the objects go.
     pub fn shelf_mounts(&self) -> Vec<(String, std::path::PathBuf)> {
-        self.config
-            .read()
-            .unwrap()
-            .remotes
-            .iter()
-            .filter_map(|(name, remote)| match &remote.backend {
-                kotton_wire::remote::RemoteBackend::Local { path } => Some((name.clone(), path.clone())),
-                _ => None,
-            })
-            .collect()
+        self.config.read().unwrap().shelf_mounts()
     }
 
     /// The vaults this device has already enrolled, as roots may target them.

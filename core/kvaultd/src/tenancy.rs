@@ -301,11 +301,18 @@ pub async fn drop_tenant(
     {
         aids.insert(tip.aid.to_string());
     }
-    // Where their pool rests. A vault makes one mount per pool, "local"; a
-    // pool that is not resident is read as that one.
+    // Where their pool rests, as the pool's own configuration says: the
+    // resident pool's, or for one not resident the `config.toml` its join
+    // saved. A name the vault keeps only a number for — invited and never
+    // joined — has no pool and no configuration, so it rests on no shelf and
+    // there is nothing to walk. The walk is never sent
+    // to a shelf no pool made: its root is missing, and a listing there is
+    // refused, rightly, rather than read as empty (kotton #412, #430).
     let mounts = match ctx.pools.get(user_id) {
         Some(store) => store.shelf_mounts(),
-        None => vec![("local".to_string(), base.join("users").join(user_id).join("data"))],
+        None => kotton_store::runtime::load_config(&base.join("users").join(user_id))
+            .map_err(|e| io::Error::other(format!("where {user_id}'s pool rests could not be read: {e:#}")))?
+            .shelf_mounts(),
     };
 
     // 1. Standing: every row keyed by them, then what memory projects.

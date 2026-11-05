@@ -713,4 +713,60 @@ mod tests {
         assert!(ctx.pools.get("alice").is_none());
         assert_eq!(keys(&ctx, "bob", FIRST_DRIVE_TREE).await, ["x/bobs"], "the drop touched bob's pool");
     }
+
+    /// **A name the vault keeps only a number for is dropped** (kotton #430).
+    /// Priya was invited with a quota and never joined: the vault keeps a
+    /// `pool_quotas` row for her and nothing else, no pool and no shelf. The
+    /// drop takes the row and answers her readout. It walks no shelf for her,
+    /// since no pool made one: a walk of `users/priya/data` would be refused
+    /// by the missing root (kotton #412), and rightly. Alice's and Bob's
+    /// pools are untouched.
+    #[tokio::test]
+    async fn a_name_kept_only_by_its_quota_is_dropped_without_walking_a_shelf_no_pool_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = a_vault(dir.path()).await;
+        crate::meter::init(&ctx.db).await.unwrap();
+        crate::doors::init(&ctx.db).await.unwrap();
+        crate::carry::init(&ctx.db).await.unwrap();
+        ctx.meter.set_pool_quota(&ctx.db, "priya", 1 << 20).await.unwrap();
+        write(&ctx, "alice", FIRST_DRIVE_TREE, "x/alices", b"alice's").await;
+        assert!(crate::tenancy::names(&ctx).await.unwrap().contains("priya"), "the vault does not keep priya's number");
+        assert!(!dir.path().join("vault/users/priya").exists(), "an invite made priya a directory");
+
+        let sessions = kotton_session::service::tokens::SessionMap::default();
+        let (logged, _logging) = Logged::start();
+        let dropped = crate::tenancy::drop_tenant(&ctx, &sessions, "priya")
+            .await
+            .unwrap_or_else(|e| panic!("the drop refused a name kept only by its quota: {e}"));
+        assert_eq!((dropped.user_id.as_str(), dropped.quota, dropped.held), ("priya", Some(1 << 20), 0));
+        assert_eq!(logged.field("dropped a tenant", "objects").as_deref(), Some("0"));
+        assert!(!crate::tenancy::names(&ctx).await.unwrap().contains("priya"), "the drop left priya's number");
+        assert!(!dir.path().join("vault/users/priya").exists(), "the drop made priya a directory");
+        assert_eq!(keys(&ctx, "alice", FIRST_DRIVE_TREE).await, ["x/alices"], "the drop touched alice's pool");
+        assert!(ctx.pools.get("bob").is_some(), "the drop took bob's pool");
+    }
+
+    /// **A pool that is not resident is walked where its configuration says it
+    /// rests** (kotton #430). Alice's pool holds an object and is taken out of
+    /// residency, as a vault that could not load it would have it; her
+    /// `config.toml` still names her mount. The drop walks that shelf, deletes
+    /// the object, and her directory goes.
+    #[tokio::test]
+    async fn a_pool_not_resident_is_walked_where_its_configuration_says_it_rests() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = a_vault(dir.path()).await;
+        crate::meter::init(&ctx.db).await.unwrap();
+        crate::doors::init(&ctx.db).await.unwrap();
+        crate::carry::init(&ctx.db).await.unwrap();
+        write(&ctx, "alice", FIRST_DRIVE_TREE, "x/alices", b"alice's").await;
+        assert!(ctx.pools.remove("alice"));
+
+        let sessions = kotton_session::service::tokens::SessionMap::default();
+        let (logged, _logging) = Logged::start();
+        let dropped = crate::tenancy::drop_tenant(&ctx, &sessions, "alice").await;
+        assert!(dropped.is_ok(), "the drop refused a pool that is not resident: {:?}", dropped.err());
+        assert_eq!(logged.field("dropped a tenant", "objects").as_deref(), Some("1"), "the drop did not walk alice's shelf");
+        assert!(!dir.path().join("vault/users/alice").exists(), "alice's directory is on the disk");
+        assert!(ctx.pools.get("bob").is_some(), "the drop took bob's pool");
+    }
 }
