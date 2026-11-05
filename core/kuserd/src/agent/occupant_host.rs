@@ -1500,7 +1500,7 @@ impl DaemonOccupantHost<'_> {
     /// This person's own database, where their admitted browsers are — the
     /// one `BrowserDeviceList` reads.
     async fn user_db(&self, user_id: &str) -> Result<Arc<SqlitePool>, String> {
-        super::dispatch::user_db_for(self.runtime, self.users, self.user_dbs, self.base, Some(user_id))
+        super::dispatch::user_db_named(self.runtime, self.user_dbs, self.base, user_id)
             .await
             .map_err(|e| format!("opening {user_id}'s database: {e}"))
     }

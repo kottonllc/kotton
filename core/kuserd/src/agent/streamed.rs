@@ -24,7 +24,8 @@
 //! `MintPrincipalSession` session satisfied them, so a `Remote` origin could
 //! reach `Local`-tier `DeviceAdd`. The rule now lives in
 //! [`dispatch::stream_entry`], the same functions `handle_request`
-//! reads, and it is read here once, before the verb's opening runs. The opening
+//! reads (both end in one session guard, `dispatch::session_entry`), and it is
+//! read here once, before the verb's opening runs. The opening
 //! is a future that has not been polled when the gate reads the request, so a
 //! refused verb does nothing at all: no desk is registered, no relay is read,
 //! no ceremony reserves a code.
@@ -84,11 +85,14 @@ pub(super) async fn answer(
         // Dropped unpolled: the verb's opening never ran.
         (Entry::Refused(refusal), _) => Ok(one_frame(*refusal)),
         (_, Opening::Ready(run)) => run.await,
-        (Entry::Session(user), Opening::AsUser(run)) => run(user).await,
+        (Entry::Session(user), Opening::AsUser(run)) => run(user.into_string()).await,
         // Impossible: both `AsUser` verbs are `requires_session()`, so the gate
         // passes them as `Session` or refuses them (pinned by
         // `the_gate_hands_a_session_verb_the_user_it_read`). An error for the
-        // door to frame, not a second answer to a missing session.
+        // door to frame, not a second answer to a missing session. Not made
+        // unrepresentable: whether a verb requires a session is a property of
+        // the request's value (`requires_session`, and `AppInstall` turns on a
+        // field), not of a type the opening could be written against.
         (Entry::Sessionless, Opening::AsUser(_)) => {
             Err(io::Error::other("the gate handed no session user to a verb that requires one"))
         }
@@ -103,8 +107,10 @@ fn one_frame(frame: UserResponse) -> mpsc::Receiver<UserResponse> {
 /// What each streamed verb does once the gate has passed it, and `None` for a
 /// request that is not one of them.
 ///
-/// Building an arm runs nothing: each is an `async` block, which does no work
-/// until [`answer`] awaits it.
+/// Building an arm runs nothing. Each is an `async` block or an `async fn`'s
+/// future, which does no work until [`answer`] awaits it; the two `AsUser`
+/// arms are closures that return one, built only once the gate has handed
+/// them the user.
 fn opening<'a>(
     ctx: &'a AgentContext,
     request: &'a UserRequest,
@@ -168,8 +174,9 @@ fn opening<'a>(
             *posture,
         )),
         // A contact ceremony: two people, a spoken code, this node's relay.
-        // Both need the session of the user pairing, which the gate reads — a
-        // contact is admitted on their word.
+        // Both require a session, and the gate holds the `user_id` they name
+        // to that session's user (`target_user_id`), so a contact is admitted
+        // only into the store of the person whose session asked.
         UserRequest::ContactPairStart {
             user_id,
             as_name,
@@ -370,8 +377,9 @@ mod tests {
     }
 
     /// A gateway acting as itself: its token is mint-only, so the gate refuses
-    /// it every verb here but `BrowserOutbound`, which the verb itself refuses
-    /// for want of a live session.
+    /// it every verb here but `BrowserOutbound`, which is on the mint-only list
+    /// and which the gate's session guard then refuses, for want of a live
+    /// session.
     fn a_gateway() -> ConnSessionData {
         let principal = Principal::Gateway;
         ConnSessionData {
@@ -650,7 +658,7 @@ mod tests {
             UserRequest::BrowserOutbound { channel: "c".into() },
         ] {
             match dispatch::stream_entry(&ctx.sessions, &session("alice-session"), &request) {
-                dispatch::Entry::Session(user) => assert_eq!(user, "alice", "{}", request.variant_name()),
+                dispatch::Entry::Session(user) => assert_eq!(user.as_str(), "alice", "{}", request.variant_name()),
                 _ => panic!("{}: the gate did not hand on the session user", request.variant_name()),
             }
             let gone = dispatch::stream_entry(&ctx.sessions, &session("no-such-session"), &request);

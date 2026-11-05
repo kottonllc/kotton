@@ -243,72 +243,96 @@ pub(super) async fn handle_vfs_watch(
     rx
 }
 
-/// Resolve the per-user agent database for a verb.
+/// The per-user agent database of a user named by the daemon itself: no
+/// fallback.
 ///
-/// `None` — and `Some("")`, the wire's long-standing "no user named" spelling
-/// that `target_user_id()` reads the same way — is the **principal fallback**,
-/// for verbs that predate a user field (`AppList`, `AppLaunch`, the role and
-/// handler verbs, …): the daemon's own loaded principal under supervision, an
-/// arbitrary loaded user on legacy unsupervised boots — the same rule the
-/// sidecar picks use. The fields are deliberately not added to the wire: once
-/// the process is the principal, `user_id` comes off every user verb, so
-/// widening the format would be churn against the destination.
-pub(super) async fn user_db_for(
+/// An empty name is refused rather than read as "no user named": an empty
+/// `user_id` was once the wire's spelling of the principal fallback, and a
+/// fallback here is how one person's request came to be answered from another
+/// person's database (#428). A caller with no user to name says so by calling
+/// [`user_db_for_principal`], by name.
+pub(super) async fn user_db_named(
     runtime: &DeviceRuntime,
-    users: &crate::residency::UserRegistry,
     user_dbs: &crate::db::user_db::UserDbMap,
     base: &Path,
-    user_id: Option<&str>,
+    user_id: &str,
 ) -> io::Result<Arc<SqlitePool>> {
-    let uid = match user_id {
-        Some(u) if !u.is_empty() => u.to_string(),
-        _ => users
-            .any()
-            .ok_or_else(|| io::Error::other("no user loaded on this daemon"))?,
-    };
+    if user_id.is_empty() {
+        return Err(io::Error::other("no user named for a per-user database"));
+    }
     crate::db::user_db::user_agent_db(
         user_dbs,
         base,
         runtime.secrets(),
-        &uid,
+        user_id,
         &runtime.schema_registry,
     )
     .await
 }
 
-/// [`user_db_for`] for a caller that has no session at all.
+/// The database of the user the gate handed a verb that requires a session.
 ///
-/// The compositor channel is authorised by possession of a handed descriptor,
-/// not by a token naming a user, so there is no `session_user` to pass. `None`
-/// takes the existing single-resident-user fallback — the same user the old
-/// session-derived path resolved to on any one-user node.
+/// Every session verb's per-user database is resolved here, from the gate's
+/// [`SessionUser`] and nothing else: not a second read of the session, not the
+/// request's own `user_id` (which the guard has already held to this user
+/// wherever a verb names one), and never [`user_db_for_principal`]'s fallback.
+/// It cannot be called without a user, because it takes no `Option`.
+pub(super) async fn user_db_for_session(
+    runtime: &DeviceRuntime,
+    user_dbs: &crate::db::user_db::UserDbMap,
+    base: &Path,
+    user: &SessionUser,
+) -> io::Result<Arc<SqlitePool>> {
+    user_db_named(runtime, user_dbs, base, user.as_str()).await
+}
+
+/// The **principal fallback**: the database of the daemon's loaded principal,
+/// for a caller that has no session user and no user to name.
 ///
-/// A separate name rather than a `None` at the call site, because the two carry
-/// different claims: a dispatch arm passing `None` is saying *this request did
-/// not name a user*, and this is saying *this channel cannot*.
+/// Under supervision exactly one user is loaded, the process's principal; on a
+/// legacy unsupervised boot it is an arbitrary loaded user (`UserRegistry::any`),
+/// the same rule the sidecar picks use. That is why nothing that requires a
+/// session reaches this: its callers are the session-less system install
+/// (`AppInstall` with an empty `user_id`) and the compositor channel
+/// ([`user_db_for_compositor`]), and each is named at its call site.
+pub(super) async fn user_db_for_principal(
+    runtime: &DeviceRuntime,
+    users: &crate::residency::UserRegistry,
+    user_dbs: &crate::db::user_db::UserDbMap,
+    base: &Path,
+) -> io::Result<Arc<SqlitePool>> {
+    let uid = users
+        .any()
+        .ok_or_else(|| io::Error::other("no user loaded on this daemon"))?;
+    user_db_named(runtime, user_dbs, base, &uid).await
+}
+
 /// The per-user database for `user_id`, for a caller outside the dispatch table
 /// (the browser channel) that already knows which user it is acting for.
 pub(super) async fn user_db_for_user(
     ctx: &super::AgentContext,
     user_id: &str,
 ) -> io::Result<Arc<SqlitePool>> {
-    user_db_for(
-        &ctx.runtime,
-        &ctx.users,
-        &ctx.user_dbs,
-        ctx.base.as_path(),
-        Some(user_id),
-    )
-    .await
+    user_db_named(&ctx.runtime, &ctx.user_dbs, ctx.base.as_path(), user_id).await
 }
 
+/// [`user_db_for_principal`] for a caller that has no session at all.
+///
+/// The compositor channel is authorised by possession of a handed descriptor,
+/// not by a token naming a user, so there is no session user to hand on. It
+/// takes the principal fallback: the same user the old session-derived path
+/// resolved to on any one-user node.
+///
+/// A separate name rather than a bare fallback at the call site, because the
+/// two carry different claims: a session verb is answered as the user the gate
+/// handed it, and this is saying *this channel cannot name one*.
 pub(super) async fn user_db_for_compositor(
     runtime: &DeviceRuntime,
     users: &crate::residency::UserRegistry,
     user_dbs: &crate::db::user_db::UserDbMap,
     base: &Path,
 ) -> io::Result<Arc<SqlitePool>> {
-    user_db_for(runtime, users, user_dbs, base, None).await
+    user_db_for_principal(runtime, users, user_dbs, base).await
 }
 
 /// The trust-origin floor: `origin(conn) >= required_trust(op)`, over three
@@ -487,39 +511,248 @@ pub(super) fn stream_entry(
     if let Some(refusal) = origin_refusal(origin, request) {
         return Entry::Refused(Box::new(refusal));
     }
-    let session_user = token
-        .as_deref()
-        .and_then(|tok| sessions::live_user(sessions, tok));
+    session_entry(sessions, token.as_deref(), request)
+}
+
+/// The session guard, and the one read of the session, for both paths:
+/// [`stream_entry`] and [`request_entry`] each end here.
+///
+/// The read is kept: a verb that requires a session is handed the user the
+/// guard just passed, so none reads it a second time and none has a window of
+/// its own in which the session has gone.
+fn session_entry(sessions: &sessions::SessionMap, token: Option<&str>, request: &UserRequest) -> Entry {
+    let session_user = token.and_then(|tok| sessions::live_user(sessions, tok));
     if let Some(refusal) = session_refusal(session_user.as_deref(), request) {
         return Entry::Refused(Box::new(refusal));
     }
-    // The one read of the session, kept: a verb that requires a session is
-    // handed the user the guard just passed, so none reads it a second time
-    // and none has a window of its own in which the session has gone.
     match session_user {
-        Some(user) if request.requires_session() => Entry::Session(user),
+        Some(user) if request.requires_session() => Entry::Session(SessionUser(user)),
         _ => Entry::Sessionless,
     }
 }
 
-/// What [`stream_entry`] answers a request: the refusal, or what it hands on.
+/// What the gate answers a request, on either path: the refusal, or what it
+/// hands on.
 pub(super) enum Entry {
     /// The gate refuses the request; this is its one answer.
     Refused(Box<UserResponse>),
     /// The verb requires a session, and this is its live user: the one the
     /// guard passed, read once.
-    Session(String),
+    Session(SessionUser),
     /// The verb does not require a session; the gate has nothing to hand on.
     Sessionless,
 }
 
+/// The live session user the gate read and passed, handed on to the verb.
+///
+/// Only [`session_entry`] makes one, so a verb holding one holds the user the
+/// session guard checked: never a second read, never a name taken from the
+/// request, and never "whichever user is loaded". It is what
+/// [`user_db_for_session`] takes, and that takes nothing else.
+#[derive(Debug, Clone)]
+pub(super) struct SessionUser(String);
+
+impl SessionUser {
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(super) fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// The gate's user, for a verb that requires a session.
+///
+/// The gate hands every such verb its user ([`Entry::Session`]) or refuses it,
+/// so `None` here is a verb asking for a user the gate did not hand it: an error
+/// for the door to frame, never a fallback to another user.
+fn handed(session_user: &Option<SessionUser>) -> io::Result<&SessionUser> {
+    session_user
+        .as_ref()
+        .ok_or_else(|| io::Error::other("the gate handed no session user to a verb that requires one"))
+}
+
 /// The door's one-frame answer to `request`. The eleven verbs whose clients
 /// read a stream never arrive here: `super::streamed` answers them first.
+///
+/// The gate ([`request_entry`]) reads the session once, and what it passes it
+/// hands to the verb: a verb that requires a session is answered as the user
+/// the guard checked, never from a second read and never from whichever user
+/// happens to be loaded (#428).
 pub(super) async fn handle_request(
     ctx: &super::AgentContext,
     request: UserRequest,
     caller: Caller,
     conn_session: Arc<Mutex<Option<ConnSessionData>>>,
+) -> io::Result<UserResponse> {
+    let session_user = match request_entry(ctx, &request, &conn_session) {
+        Entry::Refused(refusal) => return Ok(*refusal),
+        Entry::Session(user) => Some(user),
+        Entry::Sessionless => None,
+    };
+    answer_request(ctx, request, caller, conn_session, session_user).await
+}
+
+/// The gate [`handle_request`] reads: the trust floor and scope, the CEK guard,
+/// and the session guard, which reads the session once ([`session_entry`]).
+fn request_entry(
+    ctx: &super::AgentContext,
+    request: &UserRequest,
+    conn_session: &Mutex<Option<ConnSessionData>>,
+) -> Entry {
+    let super::AgentContext {
+        sessions,
+        ipc_sessions,
+        ..
+    } = ctx;
+    // â”€â”€ Scope guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // If the connection authenticated with a non-empty scope allow-list,
+    // reject any request whose variant is not in that list.
+    // `Authenticate` and `CallerInfo` are always permitted (a client must be
+    // able to authenticate; gateways may need CallerInfo to introspect).
+    {
+        // Trust-origin floor + least-privilege scope (no denylist, and no
+        // forgeable `explicitly_scoped` carve-out).
+        let (origin, scope, principal) = {
+            let g = conn_session.lock().unwrap();
+            match g.as_ref() {
+                Some(s) => (Some(s.origin), s.scope.clone(), Some(s.principal.clone())),
+                None => (None, None, None),
+            }
+        };
+
+        // A gateway's own bootstrap token is **mint-only**. It may
+        // exchange evidence about a third party for a session minted for that
+        // party, and do nothing else.
+        //
+        // This is what turns an *informed* deputy into a *disarmed* one. Binding a
+        // principal without the mint-only rule would leave the blanket authority sitting there for
+        // any handler that forgot to consult it — a convention, not a guarantee.
+        // With it there is no ambient authority left to forget about.
+        if let Some(refusal) = mint_only_refusal(principal.as_ref(), request) {
+            return Entry::Refused(Box::new(refusal));
+        }
+
+        if let Some(origin) = origin {
+            let variant = request.variant_name();
+            // A client must always be able to authenticate / introspect itself.
+            if variant != "Authenticate" && variant != "CallerInfo" {
+                // The floor: `origin(conn) >= required_trust(op)`. Origin is bound at
+                // Authenticate from the credential, so a Remote (gateway) connection
+                // can never reach a Local-tier op even if it names the op in its own
+                // scope. This runs on origin, not scope-presence, so a
+                // gateway with no declared scope is floored too (the old denylist was
+                // gated on scope presence and silently skipped for scope-less gateways).
+                //
+                // It is an ordering comparison rather than an equality, which is
+                // what lets `Paired` sit between the two without touching this
+                // line: a browser clears the contact-pairing verbs and is
+                // still floored out of everything `Local`.
+                // Trust-origin floor: a Remote conn reaching for a
+                // Local-tier op. Distinct from a scope miss — no scope re-opens it.
+                // Read through `origin_refusal` so the streaming path, which
+                // cannot reach this function, applies the identical rule.
+                if let Some(refusal) = origin_refusal(Some(origin), request) {
+                    return Entry::Refused(Box::new(refusal));
+                }
+                // Least-privilege scope allow-list, on top (unchanged semantics).
+                if let Some(ref allowed) = scope {
+                    if !allowed.is_empty() && !allowed.iter().any(|a| a == variant) {
+                        return Entry::Refused(Box::new(UserResponse::NotInScope));
+                    }
+                }
+            }
+        }
+    }
+
+    // â”€â”€ NoCek guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Blind relay nodes (paired via PairingPayload::BlindRelay) have no CEK.
+    // Reject requests that require decryption before the auth guard so the
+    // error is clear and does not disclose auth state.
+    {
+        let cek_available = conn_session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.cek_available)
+            .unwrap_or(true); // if not yet authenticated, let auth guard handle it
+        if !cek_available {
+            let requires_cek = matches!(
+                request,
+                UserRequest::ReadFile { .. }
+                    | UserRequest::WriteFile { .. }
+                    | UserRequest::RecordInsert { .. }
+                    | UserRequest::RecordQuery { .. }
+                    | UserRequest::RecordSearch { .. }
+                    | UserRequest::RecordOpen { .. }
+                    | UserRequest::RecordDelete { .. }
+                    // A model is a sealed object and a sealed record. A
+                    // blind relay holds neither key and must refuse rather
+                    // than half-perform: a keyless node never runs a model
+                    // and has no business holding one.
+                    | UserRequest::ModelAdd { .. }
+                    | UserRequest::ModelWeights { .. }
+                    | UserRequest::ModelList { .. }
+                    | UserRequest::ModelRemove { .. }
+                    | UserRequest::ModelUse { .. }
+                    // Import writes sealed records, so it needs the key that
+                    // seals them. A blind relay must refuse it rather than
+                    // half-perform it.
+                    | UserRequest::Import { .. }
+            );
+            if requires_cek {
+                return Entry::Refused(Box::new(UserResponse::Error {
+                    message: "NoCek: this node has no content encryption key \u{2014} \
+                              it was paired as a blind relay and cannot decrypt user data"
+                        .to_string(),
+                }));
+            }
+        }
+    }
+    // ── Session guard (positive, default-deny — audit C2) ────────────────────
+    // Every request requires an authenticated session on this connection except
+    // the explicit pre-auth set (see `UserRequest::requires_session`). Previously
+    // this gate fired only for requests whose `target_user_id()` was `Some`, so
+    // the entire control plane (SchemaGrantSet, AppSetRole, RendezvousSet, …) —
+    // which carries no `user_id` — dispatched with no session at all, even while
+    // locked. For a request that *does* name a user, the session must own it.
+    //
+    // Read once, and what passes is handed on: the user the guard checked is the
+    // user the verb is answered as. Two things need it, the guard and any handler
+    // whose subject is the caller (every per-user database, and the window verbs,
+    // where a client naming its own owner could claim `WindowOwner::System`).
+    // Reading it a second time for the handler was #428: a session ending between
+    // the reads passed the guard and then reached the handler with no user.
+    // Same rule, one implementation, shared with the streaming path.
+    let token = conn_session.lock().unwrap().as_ref().map(|s| s.token.clone());
+    let entry = session_entry(sessions, token.as_deref(), request);
+    if matches!(entry, Entry::Refused(_)) {
+        return entry;
+    }
+
+    // -- Request-count increment for authenticated sessions -------------------
+    if let Some(ref tok) = token {
+        if let Some(record) = ipc_sessions.read().unwrap().get(tok) {
+            record
+                .request_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    entry
+}
+
+/// The verb's answer, once [`request_entry`] has passed it.
+///
+/// `session_user` is what the gate handed on: `Some` for every verb that
+/// requires a session, `None` for one that does not. Private, so the only way
+/// here is through the gate.
+async fn answer_request(
+    ctx: &super::AgentContext,
+    request: UserRequest,
+    caller: Caller,
+    conn_session: Arc<Mutex<Option<ConnSessionData>>>,
+    session_user: Option<SessionUser>,
 ) -> io::Result<UserResponse> {
     // Destructured rather than referenced field-by-field through the body: this
     // function is 1,700 lines and every one of them already names these
@@ -560,162 +793,13 @@ pub(super) async fn handle_request(
     let started_at = *started_at;
     let base = base.as_path();
     let live_instances = Arc::clone(live_instances);
-    // â”€â”€ Scope guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // If the connection authenticated with a non-empty scope allow-list,
-    // reject any request whose variant is not in that list.
-    // `Authenticate` and `CallerInfo` are always permitted (a client must be
-    // able to authenticate; gateways may need CallerInfo to introspect).
-    {
-        // Trust-origin floor + least-privilege scope (no denylist, and no
-        // forgeable `explicitly_scoped` carve-out).
-        let (origin, scope, principal) = {
-            let g = conn_session.lock().unwrap();
-            match g.as_ref() {
-                Some(s) => (Some(s.origin), s.scope.clone(), Some(s.principal.clone())),
-                None => (None, None, None),
-            }
-        };
-
-        // A gateway's own bootstrap token is **mint-only**. It may
-        // exchange evidence about a third party for a session minted for that
-        // party, and do nothing else.
-        //
-        // This is what turns an *informed* deputy into a *disarmed* one. Binding a
-        // principal without the mint-only rule would leave the blanket authority sitting there for
-        // any handler that forgot to consult it — a convention, not a guarantee.
-        // With it there is no ambient authority left to forget about.
-        if let Some(refusal) = mint_only_refusal(principal.as_ref(), &request) {
-            return Ok(refusal);
-        }
-
-        if let Some(origin) = origin {
-            let variant = request.variant_name();
-            // A client must always be able to authenticate / introspect itself.
-            if variant != "Authenticate" && variant != "CallerInfo" {
-                // The floor: `origin(conn) >= required_trust(op)`. Origin is bound at
-                // Authenticate from the credential, so a Remote (gateway) connection
-                // can never reach a Local-tier op even if it names the op in its own
-                // scope. This runs on origin, not scope-presence, so a
-                // gateway with no declared scope is floored too (the old denylist was
-                // gated on scope presence and silently skipped for scope-less gateways).
-                //
-                // It is an ordering comparison rather than an equality, which is
-                // what lets `Paired` sit between the two without touching this
-                // line: a browser clears the contact-pairing verbs and is
-                // still floored out of everything `Local`.
-                // Trust-origin floor: a Remote conn reaching for a
-                // Local-tier op. Distinct from a scope miss — no scope re-opens it.
-                // Read through `origin_refusal` so the streaming path, which
-                // cannot reach this function, applies the identical rule.
-                if let Some(refusal) = origin_refusal(Some(origin), &request) {
-                    return Ok(refusal);
-                }
-                // Least-privilege scope allow-list, on top (unchanged semantics).
-                if let Some(ref allowed) = scope {
-                    if !allowed.is_empty() && !allowed.iter().any(|a| a == variant) {
-                        return Ok(UserResponse::NotInScope);
-                    }
-                }
-            }
-        }
-    }
-
-    // â”€â”€ NoCek guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // Blind relay nodes (paired via PairingPayload::BlindRelay) have no CEK.
-    // Reject requests that require decryption before the auth guard so the
-    // error is clear and does not disclose auth state.
-    {
-        let cek_available = conn_session
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|s| s.cek_available)
-            .unwrap_or(true); // if not yet authenticated, let auth guard handle it
-        if !cek_available {
-            let requires_cek = matches!(
-                &request,
-                UserRequest::ReadFile { .. }
-                    | UserRequest::WriteFile { .. }
-                    | UserRequest::RecordInsert { .. }
-                    | UserRequest::RecordQuery { .. }
-                    | UserRequest::RecordSearch { .. }
-                    | UserRequest::RecordOpen { .. }
-                    | UserRequest::RecordDelete { .. }
-                    // A model is a sealed object and a sealed record. A
-                    // blind relay holds neither key and must refuse rather
-                    // than half-perform: a keyless node never runs a model
-                    // and has no business holding one.
-                    | UserRequest::ModelAdd { .. }
-                    | UserRequest::ModelWeights { .. }
-                    | UserRequest::ModelList { .. }
-                    | UserRequest::ModelRemove { .. }
-                    | UserRequest::ModelUse { .. }
-                    // Import writes sealed records, so it needs the key that
-                    // seals them. A blind relay must refuse it rather than
-                    // half-perform it.
-                    | UserRequest::Import { .. }
-            );
-            if requires_cek {
-                return Ok(UserResponse::Error {
-                    message: "NoCek: this node has no content encryption key \u{2014} \
-                              it was paired as a blind relay and cannot decrypt user data"
-                        .to_string(),
-                });
-            }
-        }
-    }
-    // ── Session guard (positive, default-deny — audit C2) ────────────────────
-    // Every request requires an authenticated session on this connection except
-    // the explicit pre-auth set (see `UserRequest::requires_session`). Previously
-    // this gate fired only for requests whose `target_user_id()` was `Some`, so
-    // the entire control plane (SchemaGrantSet, AppSetRole, RendezvousSet, …) —
-    // which carries no `user_id` — dispatched with no session at all, even while
-    // locked. For a request that *does* name a user, the session must own it.
-    // Resolved once and kept, because two things need it: the guard below, and
-    // any handler whose subject is the caller rather than an argument (the window
-    // verbs). A handler must never take that from the request — a client naming
-    // its own owner could claim `WindowOwner::System`.
-    let session_user: Option<String> = {
-        let token_opt = conn_session
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|s| s.token.clone());
-        token_opt
-            .as_deref()
-            .and_then(|tok| sessions::live_user(sessions, tok))
+    // Every session verb's per-user database: the gate's user's own, and only
+    // that (#428). A verb that does not require a session has no user handed
+    // on, and asking for one is `handed`'s error, never another user's data.
+    let handed_user = &session_user;
+    let session_db = move || async move {
+        user_db_for_session(runtime, user_dbs, base, handed(handed_user)?).await
     };
-
-    // Same rule, one implementation, shared with the streaming path.
-    if let Some(refusal) = session_refusal(session_user.as_deref(), &request) {
-        return Ok(refusal);
-    }
-
-    // -- Request-count increment for authenticated sessions -------------------
-    {
-        let token_opt = conn_session
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|s| s.token.clone());
-        if let Some(ref tok) = token_opt {
-            if let Some(record) = ipc_sessions.read().unwrap().get(tok) {
-                record
-                    .request_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-    }
-
-    // The connection's authenticated user, for verbs that carry no user field:
-    // the per-user database resolution is verb's user_id
-    // → this session user → sole loaded user, in that order. "Who is asking"
-    // comes from the session, not from a map iteration order.
-    let session_user: Option<String> = conn_session
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|s| sessions::live_user(sessions, &s.token));
 
     let request_name = request.variant_name();
     match request {
@@ -1061,7 +1145,7 @@ pub(super) async fn handle_request(
         UserRequest::MintPrincipalSession { user_id, evidence } => {
             // Resolving the store is the residency check: a name nobody here
             // holds mints nothing, and the error says so.
-            let _resident = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let _resident = session_db().await?;
             handlers::device_config::mint_principal_session(
                 sessions,
                 principal_sessions,
@@ -1214,7 +1298,7 @@ pub(super) async fn handle_request(
             ttl_seconds,
             guest_ephemeral_pubkey,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             let Some(user_rt) = users.get(&user_id) else {
                 return Ok(UserResponse::Error {
                     message: format!("user runtime '{user_id}' is not loaded"),
@@ -1366,15 +1450,15 @@ pub(super) async fn handle_request(
             direction,
             watch,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_peer::daemon::drive_rules::configure(db, &user_db, user_id, drive, direction, watch).await
         }
         UserRequest::SyncRuleList { user_id } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_peer::daemon::drive_rules::list(db, &user_db, user_id).await
         }
         UserRequest::SyncRuleRemove { user_id, drive } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_peer::daemon::drive_rules::remove(db, &user_db, user_id, drive).await
         }
         // The drive's verbs: this device asks the person's vaults,
@@ -1481,7 +1565,7 @@ pub(super) async fn handle_request(
             cache_budget_bytes,
             pins,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_peer::daemon::nodes::mount_path(
                 &user_db,
                 user_id,
@@ -1494,7 +1578,7 @@ pub(super) async fn handle_request(
             .await
         }
         UserRequest::MountList { user_id } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_peer::daemon::nodes::mount_list(&user_db, user_id).await
         }
         UserRequest::MountEvict {
@@ -1502,18 +1586,18 @@ pub(super) async fn handle_request(
             node_id,
             local_path,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_peer::daemon::nodes::mount_evict(&user_db, user_id, node_id, local_path).await
         }
         UserRequest::SessionList { user_id } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_peer::daemon::nodes::session_list(&user_db, user_id).await
         }
         UserRequest::SessionEnd {
             user_id,
             session_id,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_peer::daemon::nodes::session_end(&user_db, user_id, session_id, revoked_sessions)
                 .await
         }
@@ -1691,7 +1775,7 @@ pub(super) async fn handle_request(
             root,
             app_id,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             // The record store is `record`'s type, resolved from the machine here
             // so the handler never names it.
             let store =
@@ -1727,7 +1811,7 @@ pub(super) async fn handle_request(
             source_name,
             content,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             let store =
                 match record_stores.get_or_open(runtime.base_dir(), &user_id, runtime.secrets()) {
                     Ok(s) => s,
@@ -1761,7 +1845,7 @@ pub(super) async fn handle_request(
             root,
             app_id,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             // The record store is `record`'s type, resolved from the machine here
             // so the handler never names it.
             let store =
@@ -1796,7 +1880,7 @@ pub(super) async fn handle_request(
             root,
             app_id,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             // The record store is `record`'s type, resolved from the machine here
             // so the handler never names it.
             let store =
@@ -1860,7 +1944,7 @@ pub(super) async fn handle_request(
             definition_json,
             app_id,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             // The record store is `record`'s type, resolved from the machine here
             // so the handler never names it.
             let store =
@@ -1906,7 +1990,7 @@ pub(super) async fn handle_request(
         // -- Schema grant management ------------------------------------------
         UserRequest::SchemaGrantList { app_id } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_grant::daemon::schema_grants::schema_grant_list(&user_db, app_id).await
         }
         UserRequest::SchemaGrantSet {
@@ -1917,7 +2001,7 @@ pub(super) async fn handle_request(
             can_register,
         } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_grant::daemon::schema_grants::schema_grant_set(
                 &user_db,
                 app_id,
@@ -1930,7 +2014,7 @@ pub(super) async fn handle_request(
         }
         UserRequest::SchemaGrantRevoke { app_id, nsid } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_grant::daemon::schema_grants::schema_grant_revoke(&user_db, app_id, nsid).await
         }
         UserRequest::SchemaQuotaSet {
@@ -1940,7 +2024,7 @@ pub(super) async fn handle_request(
             byte_quota,
         } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_grant::daemon::schema_grants::schema_quota_set(
                 &user_db,
                 app_id,
@@ -1954,34 +2038,34 @@ pub(super) async fn handle_request(
         // -- Handler registry -------------------------------------------------
         UserRequest::RegisterHandler { app_id, nsid } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::handlers_registry::handler_register(&user_db, app_id, nsid).await
         }
         UserRequest::UnregisterHandler { app_id, nsid } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::handlers_registry::handler_unregister(&user_db, app_id, nsid).await
         }
         UserRequest::GetHandlerFor { nsid } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::handlers_registry::handler_get_for(&user_db, nsid).await
         }
         UserRequest::ListHandlers => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::handlers_registry::handler_list(&user_db).await
         }
         UserRequest::SetDefaultHandler { app_id, nsid } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::handlers_registry::handler_set_default(&user_db, app_id, nsid).await
         }
 
         // -- App lifecycle ----------------------------------------------------
         UserRequest::AppGrants { app_id } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::apps::app_grants(&user_db, base, app_id).await
         }
         UserRequest::AppInstallPreview {
@@ -1996,7 +2080,15 @@ pub(super) async fn handle_request(
             approved,
             bindings,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            // An empty `user_id` is the system/bundled install, the one form of
+            // this verb that requires no session (`requires_session`), so it has
+            // no user handed on and takes the principal fallback, by name. A
+            // named install requires the session, and is the gate's user's.
+            let user_db = if user_id.is_empty() {
+                user_db_for_principal(runtime, users, user_dbs, base).await?
+            } else {
+                session_db().await?
+            };
             // Resolve bindings against the daemon's own reading of the manifest.
             // The client named shapes and paths; the grants are built here, so a
             // capability the app never declared has no way in — there is no
@@ -2036,23 +2128,24 @@ pub(super) async fn handle_request(
                 kotton_app::daemon::apps::terminate_long_lived_instance(&mut instance).await;
             }
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::apps::app_uninstall(&user_db, base, app_id).await
         }
         UserRequest::AppVerify { app_id } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::apps::app_verify(&user_db, base, &app_id).await
         }
 
         // Confined extensions. Separate verbs from the
         // app ones on purpose: different consent story, different world.
+        // `user_id` is held to the session's user by `target_user_id`.
         UserRequest::ExtensionInstall {
             user_id,
             manifest_toml,
             wasm_bytes,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             handlers::extensions::extension_install(
                 &user_db,
                 base,
@@ -2063,22 +2156,22 @@ pub(super) async fn handle_request(
             )
             .await
         }
-        UserRequest::ExtensionList { user_id } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+        UserRequest::ExtensionList { user_id: _ } => {
+            let user_db = session_db().await?;
             handlers::extensions::extension_list(&user_db).await
         }
         UserRequest::ExtensionRemove {
-            user_id,
+            user_id: _,
             extension_id,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             handlers::extensions::extension_remove(&user_db, base, &extension_id).await
         }
         UserRequest::AppList => {
             let live_ids: std::collections::HashSet<String> =
                 live_instances.lock().await.keys().cloned().collect();
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::apps::app_list(&user_db, &live_ids).await
         }
         UserRequest::AppRegisterBundle {
@@ -2090,7 +2183,7 @@ pub(super) async fn handle_request(
             dev,
         } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::apps::app_register_bundle(
                 &user_db,
                 app_id,
@@ -2104,25 +2197,25 @@ pub(super) async fn handle_request(
         }
         UserRequest::AppGetBundlePath { app_id } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::apps::app_get_bundle_path(&user_db, app_id).await
         }
         UserRequest::AppGetRole { role } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::apps::app_get_role(&user_db, role).await
         }
         UserRequest::AppSetRole { role, app_id } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_app::daemon::apps::app_set_role(&user_db, role, app_id).await
         }
         UserRequest::AppLaunch {
             app_id,
             launch_args,
         } => {
-            let user_id = session_user.clone();
-            let user_db = user_db_for(runtime, users, user_dbs, base, user_id.as_deref()).await?;
+            let user_id = Some(handed(&session_user)?.as_str().to_owned());
+            let user_db = session_db().await?;
             // The occupant host is built unconditionally and handed to every
             // one of these arms. It is not the gate: `apps.rs` reads the
             // user's own `app_roles` designation to decide whether *this* app
@@ -2172,8 +2265,8 @@ pub(super) async fn handle_request(
             .await
         }
         UserRequest::AppMessage { app_id, msg } => {
-            let user_id = session_user.clone();
-            let user_db = user_db_for(runtime, users, user_dbs, base, user_id.as_deref()).await?;
+            let user_id = Some(handed(&session_user)?.as_str().to_owned());
+            let user_db = session_db().await?;
             // The occupant host is built unconditionally and handed to every
             // one of these arms. It is not the gate: `apps.rs` reads the
             // user's own `app_roles` designation to decide whether *this* app
@@ -2229,7 +2322,7 @@ pub(super) async fn handle_request(
             limit,
         } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             let events = crate::db::event_log_db::query_events(
                 &user_db,
                 category.as_deref(),
@@ -2256,7 +2349,7 @@ pub(super) async fn handle_request(
                 }),
                 Some(hmac_key) => {
                     let user_db =
-                        user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+                        session_db().await?;
                     match crate::db::event_log_db::verify_event_log(&user_db, &hmac_key).await {
                         Ok((ok, first_broken_at)) => Ok(UserResponse::EventLogIntegrity {
                             ok,
@@ -2593,7 +2686,7 @@ pub(super) async fn handle_request(
             let uptime_secs = started_at.elapsed().as_secs();
             let user_count = users.count() as u32;
             let app_count =
-                match user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await {
+                match session_db().await {
                     Ok(user_db) => app_registry_db::count_apps(&user_db).await.unwrap_or(0),
                     Err(_) => 0,
                 };
@@ -2601,7 +2694,7 @@ pub(super) async fn handle_request(
             // daemon with no resolvable user reports zeros rather than erroring
             // a status probe.
             let (event_count, error_count, last_event_ts) =
-                match user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await {
+                match session_db().await {
                     Ok(user_db) => (
                         crate::db::event_log_db::count_events(&user_db)
                             .await
@@ -2693,9 +2786,7 @@ pub(super) async fn handle_request(
                 // client that could name its own owner could claim
                 // WindowOwner::System and draw something the shell renders as a
                 // login prompt.
-                let Some(uid) = session_user.clone() else {
-                    return Ok(UserResponse::NoActiveSession);
-                };
+                let uid = handed(&session_user)?.as_str().to_owned();
                 kotton_surface::window_opened(
                     &**window_registry,
                     kotton_surface::WindowOwner::User(uid),
@@ -2711,9 +2802,7 @@ pub(super) async fn handle_request(
         },
         UserRequest::WindowClosed { instance_id } => match uuid::Uuid::parse_str(&instance_id) {
             Ok(id) => {
-                let Some(uid) = session_user.clone() else {
-                    return Ok(UserResponse::NoActiveSession);
-                };
+                let uid = handed(&session_user)?.as_str().to_owned();
                 kotton_surface::window_closed(
                     &**window_registry,
                     &kotton_surface::WindowOwner::User(uid),
@@ -2727,9 +2816,7 @@ pub(super) async fn handle_request(
         },
         UserRequest::WindowList => {
             use kotton_wire::ipc::WindowStateDto;
-            let Some(uid) = session_user.clone() else {
-                return Ok(UserResponse::NoActiveSession);
-            };
+            let uid = handed(&session_user)?.as_str().to_owned();
             let windows = kotton_surface::window_list(
                 &**window_registry,
                 &kotton_surface::WindowOwner::User(uid),
@@ -2750,42 +2837,42 @@ pub(super) async fn handle_request(
         // -- Trust registry + grant management (Step 8 / identity_model) ------
         UserRequest::TrustAdd { org_did, .. } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_grant::daemon::grants::trust_add(&user_db, org_did).await
         }
         UserRequest::TrustRemove { org_did, .. } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_grant::daemon::grants::trust_remove(&user_db, org_did).await
         }
         UserRequest::TrustList { .. } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_grant::daemon::grants::trust_list(&user_db).await
         }
         UserRequest::GrantRevoke { envelope_id, .. } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_grant::daemon::grants::grant_revoke(&user_db, envelope_id).await
         }
         UserRequest::GrantImport { envelope_json, .. } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_grant::daemon::grants::grant_import(&user_db, db, envelope_json).await
         }
 
         // -- Org identity â€” single-key (Step 9 / identity_model) -------------
         UserRequest::OrgNew { user_id, name } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_org::daemon::orgs::org_new(&user_db, &user_id, name, runtime.secrets()).await
         }
         UserRequest::OrgShow { org_did, .. } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_org::daemon::orgs::org_show(&user_db, org_did).await
         }
         UserRequest::OrgList { user_id } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_org::daemon::orgs::org_list(&user_db, &user_id, runtime.secrets()).await
         }
         UserRequest::OrgGrantIssue {
@@ -2796,7 +2883,7 @@ pub(super) async fn handle_request(
             ttl_secs,
             node_did,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_org::daemon::orgs::org_grant_issue(
                 &user_db,
                 &user_id,
@@ -2811,7 +2898,7 @@ pub(super) async fn handle_request(
         }
         UserRequest::OrgGrantList { org_did, .. } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             kotton_org::daemon::orgs::org_grant_list(&user_db, org_did).await
         }
         UserRequest::OrgMemberRemove {
@@ -2820,7 +2907,7 @@ pub(super) async fn handle_request(
             ..
         } => {
             let user_db =
-                user_db_for(runtime, users, user_dbs, base, session_user.as_deref()).await?;
+                session_db().await?;
             // Two authorities, in the order the combined version used: `org`
             // says which envelopes the member holds, `grant` revokes them, then
             // `org` forgets the tracking rows. A failed revoke leaves those rows
@@ -2842,7 +2929,7 @@ pub(super) async fn handle_request(
 
         // -- A root an org owns: an organisation's records are imported into a root
         UserRequest::OrgRootCreate { user_id, org_did, name } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             let (own_aid, mut set) = match super::org_roots::open_roots(users, base, &user_id) {
                 Ok(opened) => opened,
                 Err(message) => return Ok(UserResponse::Error { message }),
@@ -2859,7 +2946,7 @@ pub(super) async fn handle_request(
             .await
         }
         UserRequest::OrgRootInvite { user_id, root, member } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             let (own_aid, mut set) = match super::org_roots::open_roots(users, base, &user_id) {
                 Ok(opened) => opened,
                 Err(message) => return Ok(UserResponse::Error { message }),
@@ -2884,7 +2971,7 @@ pub(super) async fn handle_request(
             threshold,
             total,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_org::daemon::frost_orgs::org_frost_new(
                 &user_db,
                 &user_id,
@@ -2902,7 +2989,7 @@ pub(super) async fn handle_request(
             share_hex,
             participant_idx,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_org::daemon::frost_orgs::org_frost_join(
                 &user_db,
                 &user_id,
@@ -2922,7 +3009,7 @@ pub(super) async fn handle_request(
             ttl_secs,
             node_did,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_org::daemon::frost_orgs::org_frost_sign_begin(
                 &user_db,
                 &user_id,
@@ -2943,7 +3030,7 @@ pub(super) async fn handle_request(
             coordinator_id_hex,
             coordinator_commitment_hex,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_org::daemon::frost_orgs::org_frost_sign_contribute(
                 &user_db,
                 &user_id,
@@ -2962,7 +3049,7 @@ pub(super) async fn handle_request(
             cosigner_commitment_hex,
             cosigner_share_hex,
         } => {
-            let user_db = user_db_for(runtime, users, user_dbs, base, Some(&user_id)).await?;
+            let user_db = session_db().await?;
             kotton_org::daemon::frost_orgs::org_frost_sign_finalize(
                 &user_db,
                 &user_id,
@@ -3213,12 +3300,12 @@ pub(super) async fn handle_request(
         // (Article IV). Both `Local`; the revoke ends the browser's
         // live channel as well as its row — `browser_channel::revoke` says how.
         UserRequest::BrowserDeviceList { user_id } => {
-            let db = user_db_for_user(ctx, &user_id).await?;
+            let db = session_db().await?;
             let browsers = kotton_device::config::ops::list_browser_devices(&db, &user_id).await?;
             Ok(UserResponse::BrowserDevices { browsers })
         }
         UserRequest::BrowserDeviceRevoke { user_id, name } => {
-            let db = user_db_for_user(ctx, &user_id).await?;
+            let db = session_db().await?;
             match super::browser_channel::revoke(&ctx.browser_admissions(), &db, &user_id, &name)
                 .await?
             {
@@ -3404,3 +3491,7 @@ mod vfs_watch_opening_frame_tests {
     }
 }
 
+
+#[cfg(test)]
+#[path = "session_read_tests.rs"]
+mod session_read_tests;
