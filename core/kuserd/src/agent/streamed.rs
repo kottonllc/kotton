@@ -37,6 +37,15 @@
 //! as an [`Opening::AsUser`], built from that user once the gate has passed it;
 //! neither reads the session again, so neither has an answer of its own for a
 //! session that ended between two reads, because there is no second read.
+//!
+//! **A stream lives as long as the session that opened it (#397).** The gate's
+//! read decides whether a stream opens; it cannot decide whether one that
+//! opened may go on. So every stream the gate passed with a session is driven
+//! through [`while_live`], whatever the verb, and that reads the session again
+//! before each frame and on a tick while none is passing. A revoked or expired
+//! session ends the stream with the gate's own refusal, `NoActiveSession`.
+//! A session-less verb (bootstrap) was passed no session and has none to
+//! outlive.
 
 use super::{browser_channel, dispatch, AgentContext, ConnSessionData};
 use kotton_ipc::HandlerOutput;
@@ -81,11 +90,12 @@ pub(super) async fn answer(
 ) -> Option<io::Result<mpsc::Receiver<UserResponse>>> {
     use dispatch::Entry;
     let opening = opening(ctx, request, vfs)?;
-    Some(match (dispatch::stream_entry(&ctx.sessions, conn_session, request), opening) {
+    let (session, run) = match (dispatch::stream_entry(&ctx.sessions, conn_session, request), opening) {
         // Dropped unpolled: the verb's opening never ran.
-        (Entry::Refused(refusal), _) => Ok(one_frame(*refusal)),
-        (_, Opening::Ready(run)) => run.await,
-        (Entry::Session(user), Opening::AsUser(run)) => run(user.into_string()).await,
+        (Entry::Refused(refusal), _) => return Some(Ok(one_frame(*refusal))),
+        (Entry::Sessionless, Opening::Ready(run)) => (None, run),
+        (Entry::Session(user), Opening::Ready(run)) => (Some(user), run),
+        (Entry::Session(user), Opening::AsUser(run)) => (Some(user.clone()), run(user.into_string())),
         // Impossible: both `AsUser` verbs are `requires_session()`, so the gate
         // passes them as `Session` or refuses them (pinned by
         // `the_gate_hands_a_session_verb_the_user_it_read`). An error for the
@@ -94,9 +104,71 @@ pub(super) async fn answer(
         // the request's value (`requires_session`, and `AppInstall` turns on a
         // field), not of a type the opening could be written against.
         (Entry::Sessionless, Opening::AsUser(_)) => {
-            Err(io::Error::other("the gate handed no session user to a verb that requires one"))
+            return Some(Err(io::Error::other(
+                "the gate handed no session user to a verb that requires one",
+            )))
         }
+    };
+    let stream = run.await;
+    Some(match session {
+        // A session-less verb (bootstrap) was passed no session, so it has
+        // none to outlive.
+        None => stream,
+        Some(session) => stream.map(|frames| while_live(Arc::clone(&ctx.sessions), session, frames)),
     })
+}
+
+/// How long an idle stream may outlive its session: the period at which
+/// [`while_live`] reads the session when no frame is passing.
+pub(super) const LIVENESS_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `frames`, for as long as the session that opened them is live (#397).
+///
+/// The one rule for a streamed verb's lifetime, and the one place it is
+/// applied: every stream a session opens is driven through here, whatever
+/// the verb. Before each frame is passed on, and every [`LIVENESS_TICK`] while
+/// none is, the session is read again ([`dispatch::SessionUser::is_still_live`],
+/// the gate's own `live_user`). A session that has gone, revoked or past its
+/// expiry, ends the stream with the gate's refusal, `NoActiveSession`, as its
+/// one last frame: the frame that was waiting is not delivered, and the verb's
+/// receiver is dropped, so its sender sees the stream has ended.
+///
+/// The frame is checked as it is taken, not as it was made, and the outgoing
+/// channel holds one, so nothing is passed on that was taken after the
+/// session ended. The client going away ends it too, and drops the verb's
+/// receiver as the door dropping it directly did.
+pub(super) fn while_live(
+    sessions: kotton_session::service::tokens::SessionMap,
+    session: dispatch::SessionUser,
+    mut frames: mpsc::Receiver<UserResponse>,
+) -> mpsc::Receiver<UserResponse> {
+    let (tx, rx) = mpsc::channel::<UserResponse>(1);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(LIVENESS_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            let frame = tokio::select! {
+                frame = frames.recv() => frame,
+                _ = tick.tick() => {
+                    if session.is_still_live(&sessions) {
+                        continue;
+                    }
+                    let _ = tx.send(UserResponse::NoActiveSession).await;
+                    return;
+                }
+                () = tx.closed() => return,
+            };
+            let Some(frame) = frame else { return };
+            if !session.is_still_live(&sessions) {
+                let _ = tx.send(UserResponse::NoActiveSession).await;
+                return;
+            }
+            if tx.send(frame).await.is_err() {
+                return;
+            }
+        }
+    });
+    rx
 }
 
 /// `frame`, and then the end of the stream.
@@ -672,5 +744,151 @@ mod tests {
         let invite = UserRequest::DeviceInvite { user_id: "alice".into(), ttl_seconds: 60, as_name: None };
         let passed = dispatch::stream_entry(&ctx.sessions, &Mutex::new(None), &invite);
         assert!(matches!(passed, dispatch::Entry::Sessionless), "a session-less verb hands nothing on");
+    }
+
+    /// Alice's connection, holding her live session: the token the gate reads.
+    fn alices_connection(ctx: &AgentContext) -> ConnSession {
+        sessions::insert(&ctx.sessions, "alice-session".to_string(), "alice".to_string());
+        let principal = Principal::LocalOperator;
+        Arc::new(Mutex::new(Some(ConnSessionData {
+            origin: principal.trust_origin(),
+            token: "alice-session".to_string(),
+            scope: None,
+            cek_available: true,
+            principal,
+            browser_key: None,
+        })))
+    }
+
+    /// `request` answered on `conn_session` as a stream, opened.
+    async fn opened(ctx: &AgentContext, conn_session: &ConnSession, request: &UserRequest) -> mpsc::Receiver<UserResponse> {
+        let (changes, _) = broadcast::channel(16);
+        let (_watching, watcher) = watch::channel(kotton_sync::engine::FsWatchState::Watching);
+        let vfs = VfsWatchSource { changes: &changes, watcher: &watcher };
+        answer(ctx, request, conn_session, vfs)
+            .await
+            .expect("answered as a stream")
+            .expect("opened")
+    }
+
+    /// The frames `stream` carries to its end, or a panic if it had not ended
+    /// within five seconds.
+    async fn to_the_end(mut stream: mpsc::Receiver<UserResponse>) -> Vec<UserResponse> {
+        let mut frames = vec![];
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), stream.recv()).await {
+                Ok(Some(frame)) => frames.push(frame),
+                Ok(None) => return frames,
+                Err(_) => panic!("the stream had not ended 5 s after {frames:?}"),
+            }
+        }
+    }
+
+    /// One of alice's own events, which her live stream would carry.
+    fn publish_one_of_alices(ctx: &AgentContext) {
+        use kotton_diag::service::{Event, EventCategory, EventLevel};
+        ctx.runtime
+            .event_bus()
+            .publish(Event::for_user("alice", EventCategory::System, EventLevel::Info, "alice's event"))
+            .expect("published");
+    }
+
+    /// **A revoked session ends the streams it opened (#397).**
+    ///
+    /// Alice subscribes to her events, then logs out (`remove_user`, the path
+    /// that drops every token she holds), and one of her own events is
+    /// published. The session was checked when the stream opened and is gone
+    /// now, so the stream carries the gate's one refusal and ends: the event
+    /// is not delivered.
+    #[tokio::test]
+    async fn a_revoked_session_ends_its_event_stream_without_delivering() {
+        let dir = a_dir();
+        let daemon = a_daemon(dir.path()).await;
+        let ctx = daemon.agent_context();
+        let conn_session = alices_connection(&ctx);
+        let stream = opened(&ctx, &conn_session, &UserRequest::SubscribeEvents { category: None, level: None }).await;
+
+        sessions::remove_user(&ctx.sessions, "alice");
+        publish_one_of_alices(&ctx);
+
+        let frames = to_the_end(stream).await;
+        assert_eq!(
+            format!("{frames:?}"),
+            format!("{:?}", vec![UserResponse::NoActiveSession]),
+            "a stream whose session was revoked delivered past it"
+        );
+    }
+
+    /// **An expired session ends the streams it opened, as a revoked one does.**
+    ///
+    /// The clock passing a session's expiry is what `live_user` reads as
+    /// expired, so the session's `expires_at` is moved into the past rather
+    /// than waiting twelve hours for it.
+    #[tokio::test]
+    async fn an_expired_session_ends_its_event_stream_without_delivering() {
+        let dir = a_dir();
+        let daemon = a_daemon(dir.path()).await;
+        let ctx = daemon.agent_context();
+        let conn_session = alices_connection(&ctx);
+        let stream = opened(&ctx, &conn_session, &UserRequest::SubscribeEvents { category: None, level: None }).await;
+
+        ctx.sessions.write().unwrap().get_mut("alice-session").expect("alice's session").expires_at =
+            Some(kotton_common::time::now_secs() - 1);
+        publish_one_of_alices(&ctx);
+
+        let frames = to_the_end(stream).await;
+        assert_eq!(
+            format!("{frames:?}"),
+            format!("{:?}", vec![UserResponse::NoActiveSession]),
+            "a stream whose session expired delivered past it"
+        );
+    }
+
+    /// **An idle stream ends too, within the liveness tick.** The stream sits
+    /// open and live past its first tick, then the session is revoked and
+    /// nothing is published, so no frame is pending for a check to ride on;
+    /// the stream still ends with the refusal, within a tick and a margin.
+    #[tokio::test]
+    async fn a_revoked_session_ends_an_idle_stream() {
+        let dir = a_dir();
+        let daemon = a_daemon(dir.path()).await;
+        let ctx = daemon.agent_context();
+        let conn_session = alices_connection(&ctx);
+        let stream = opened(&ctx, &conn_session, &UserRequest::SubscribeEvents { category: None, level: None }).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        sessions::remove_user(&ctx.sessions, "alice");
+        let revoked = std::time::Instant::now();
+
+        let frames = to_the_end(stream).await;
+        assert_eq!(format!("{frames:?}"), format!("{:?}", vec![UserResponse::NoActiveSession]));
+        assert!(
+            revoked.elapsed() < LIVENESS_TICK + Duration::from_secs(2),
+            "an idle stream outlived its session by {:?}",
+            revoked.elapsed()
+        );
+    }
+
+    /// **A session-less streamed verb is not held to a session.** An invite is
+    /// session-less bootstrap. Opened on a connection that happens to hold
+    /// alice's session, which is then revoked, it still says its own answer
+    /// (no relay, here) and not the session's refusal: the rule follows the
+    /// session the gate passed, and the gate passed this verb none.
+    #[tokio::test]
+    async fn a_sessionless_streamed_verb_is_not_ended_by_a_revoked_session() {
+        let dir = a_dir();
+        let daemon = a_daemon(dir.path()).await;
+        let ctx = daemon.agent_context();
+        let conn_session = alices_connection(&ctx);
+        let request = UserRequest::DeviceInvite { user_id: "alice".into(), ttl_seconds: 60, as_name: None };
+        let stream = opened(&ctx, &conn_session, &request).await;
+
+        sessions::remove_user(&ctx.sessions, "alice");
+
+        let frames = to_the_end(stream).await;
+        let [UserResponse::Error { message }] = frames.as_slice() else {
+            panic!("expected the invite's own one answer, got {frames:?}");
+        };
+        assert_eq!(message, super::super::NO_RELAY_FOR_AN_INVITE);
     }
 }
