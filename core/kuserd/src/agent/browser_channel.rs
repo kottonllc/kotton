@@ -42,7 +42,30 @@ use super::{AgentContext, ConnSessionData};
 /// One user's parked `WebShellPair` streams, by a token the stream owns. A
 /// browser with an unknown key is admitted only if a desk is open here — i.e.
 /// a human is watching this node's screen.
-pub type BrowserDesks = Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<UserResponse>>>>;
+pub type BrowserDesks = Arc<tokio::sync::Mutex<HashMap<String, Desk>>>;
+
+/// An open desk: the sender of its stream, and what tells the desk's watcher
+/// it has left the table.
+///
+/// The watcher (the `WebShellPair` arm) removes a desk whose stream closed
+/// (#436), and holds a sender to wait on that. It must not be what keeps the
+/// stream open once the desk is replaced or removed: the table's sender was
+/// the stream's only one, and dropping it is how a replaced desk's screen
+/// learns it is over. So the entry holds `_left`, held only to be dropped
+/// with the entry, and the watcher ends — dropping its sender — on whichever comes
+/// first.
+pub struct Desk {
+    pub tx: mpsc::Sender<UserResponse>,
+    _left: tokio::sync::oneshot::Sender<()>,
+}
+
+impl Desk {
+    /// A desk for `tx`, and what resolves once the desk leaves the table.
+    pub fn open(tx: mpsc::Sender<UserResponse>) -> (Self, tokio::sync::oneshot::Receiver<()>) {
+        let (left, gone) = tokio::sync::oneshot::channel();
+        (Self { tx, _left: left }, gone)
+    }
+}
 
 /// Every live browser channel, by a name the gateway gives it.
 ///
@@ -661,7 +684,7 @@ async fn admit(
     if !channel.known {
         // A new key: a human on the node's screen must compare the digits. Find
         // the operator's desk; without one, nobody is watching, so refuse.
-        let desk = desks.lock().await.get(user_id).cloned();
+        let desk = desks.lock().await.get(user_id).map(|d| d.tx.clone());
         let Some(desk) = desk else {
             return Out::terminal(refused(
                 "this node is not accepting a new browser right now — open “add a device” on a trusted screen first",

@@ -371,7 +371,8 @@ fn opening<'a>(
         // desk is open, and only a `Local` origin can open one.
         UserRequest::WebShellPair { user_id, .. } => Box::pin(async move {
             let (tx, rx) = mpsc::channel::<UserResponse>(16);
-            ctx.browser_desks.lock().await.insert(user_id.clone(), tx.clone());
+            let (desk, left) = browser_channel::Desk::open(tx.clone());
+            ctx.browser_desks.lock().await.insert(user_id.clone(), desk);
             // Announce the desk is registered before any browser could reach
             // it, so a caller need not race the insertion.
             let _ = tx.send(UserResponse::WebShellPairReady).await;
@@ -379,14 +380,23 @@ fn opening<'a>(
             // nobody is at the screen, so no new browser may be admitted at
             // it. A browser already comparing digits at it is declined by its
             // confirmer, which watches the same sender.
+            //
+            // The watcher's sender must not outlive the desk's place in the
+            // table: a desk replaced by a later `WebShellPair` ends its stream
+            // by losing the table's sender, so the watcher ends too, then
+            // (`left`), and drops its own.
             let desks = Arc::clone(&ctx.browser_desks);
             let user_id = user_id.clone();
             tokio::spawn(async move {
-                tx.closed().await;
-                let mut desks = desks.lock().await;
-                // Only this desk: a later `WebShellPair` may have replaced it.
-                if desks.get(&user_id).is_some_and(|open| open.same_channel(&tx)) {
-                    desks.remove(&user_id);
+                tokio::select! {
+                    () = tx.closed() => {
+                        let mut desks = desks.lock().await;
+                        // Only this desk: a later `WebShellPair` may have replaced it.
+                        if desks.get(&user_id).is_some_and(|open| open.tx.same_channel(&tx)) {
+                            desks.remove(&user_id);
+                        }
+                    }
+                    _ = left => {}
                 }
             });
             Ok(rx)
@@ -911,6 +921,32 @@ mod tests {
             assert!(closed.elapsed() < Duration::from_secs(5), "the desk outlived its stream");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// **A replaced desk ends its stream.** Alice opens desk A, then desk B,
+    /// which takes A's place in the table. A's stream ends, as it did when
+    /// the table held A's only sender, so the screen that opened A is not
+    /// left waiting on a desk nobody can reach; B stays open. Red on the
+    /// first commit for #436: the watcher that closes a desk with its stream
+    /// held a sender of its own, and kept A's stream open for good.
+    #[tokio::test]
+    async fn a_replaced_desk_ends_its_stream() {
+        let dir = a_dir();
+        let daemon = a_daemon(dir.path()).await;
+        let ctx = daemon.agent_context();
+        let conn_session = alices_connection(&ctx);
+        let request = UserRequest::WebShellPair { user_id: "alice".into(), ttl_seconds: 60 };
+        let mut a = opened(&ctx, &conn_session, &request).await;
+        let ready = tokio::time::timeout(Duration::from_secs(5), a.recv()).await.expect("a first frame");
+        assert!(matches!(ready, Some(UserResponse::WebShellPairReady)), "{ready:?}");
+        let mut b = opened(&ctx, &conn_session, &request).await;
+        let ready = tokio::time::timeout(Duration::from_secs(5), b.recv()).await.expect("a first frame");
+        assert!(matches!(ready, Some(UserResponse::WebShellPairReady)), "{ready:?}");
+
+        let frames = to_the_end(a).await;
+        assert!(frames.is_empty(), "the replaced desk said {frames:?}");
+        let desk = ctx.browser_desks.lock().await.get("alice").map(|d| d.tx.clone()).expect("B is open");
+        assert!(!desk.is_closed(), "the desk that replaced it was closed");
     }
 
     /// **A session-less streamed verb is not held to a session.** An invite is
