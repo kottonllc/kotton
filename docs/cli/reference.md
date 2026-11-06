@@ -39,7 +39,6 @@ This document contains the help content for the `Kotton` command-line program.
 * [`Kotton handler list`↴](#Kotton-handler-list)
 * [`Kotton handler set-default`↴](#Kotton-handler-set-default)
 * [`Kotton record`↴](#Kotton-record)
-* [`Kotton record open`↴](#Kotton-record-open)
 * [`Kotton records`↴](#Kotton-records)
 * [`Kotton records init`↴](#Kotton-records-init)
 * [`Kotton records invite`↴](#Kotton-records-invite)
@@ -126,7 +125,7 @@ Kotton - Your data sovereignty platform
 * `device` — Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon
 * `schema` — Schema management (list, show, register)
 * `handler` — Handler registry (register, unregister, get, list, set-default)
-* `record` — Record addressing — open records by kotton:// URL
+* `record` — Your records — list, get, put, rm, each by `--schema <nsid>` — the REPL's `record`, one parser for both
 * `records` — The project's records in a root its org owns — init, invite, import, export
 * `import` — Bring your history with you — read an export (.ics) into your own records
 * `sync` — Sync this device's drives, now — the REPL's `sync`, one parser for both
@@ -636,31 +635,55 @@ Override the default handler for a schema NSID
 
 ## `Kotton record`
 
-Record addressing — open records by kotton:// URL
+Your records — list, get, put, rm, each by `--schema <nsid>` — the REPL's `record`, one parser for both
 
-**Usage:** `Kotton record <COMMAND>`
+**Usage:** `Kotton record [OPTIONS] [ARGS]...`
 
-###### **Subcommands:**
+```text
+record — your records: typed, sealed, read from every device
 
-* `open` — Open a record by its kotton:// URL and print its JSON body
+USAGE:
+  record list --schema <nsid> [--json]   every record of a schema: its id and its fields
+  record get --schema <nsid> <id>        one record, as JSON on stdout
+  record put --schema <nsid> <json>      write a record; prints its id
+  record rm --schema <nsid> <id>         remove a record
 
+A record is a JSON object of a schema's fields, kept on this device and
+sealed into your first drive, `personal`, at each sync: a record put on one
+device is read on another after a `sync` on each, and wherever `personal` is
+moved. The vault keeps it sealed under your key and can read none of it: not
+its fields, its id, or its schema's name. A schema is named by its NSID
+(`sh.kotton.notes`); this device must know it, as a core schema or one
+`schema register` added.
 
+`put` with an `id` among the fields writes that record again; without one it
+makes a new record and prints the id it was given. `rm` removes it on every
+device at their next sync.
 
-## `Kotton record open`
+FLAGS:
+  --schema <nsid>  the schema the record is of; every verb needs it
+  --json           `list`: the records the daemon answered, as JSON on stdout
 
-Open a record by its kotton:// URL and print its JSON body.
+Exit 0 when done, 1 when refused or when no record has the id (the reason on
+stderr), 2 for a line that is not one of the above.
 
-Example: kotton record open kotton://records/sh.kotton.notes/019612ab-e3f2-7000-abcd-1234567890ab
+EXAMPLES:
+  record put --schema sh.kotton.notes '{"title":"milk","body":"two pints"}'
+  record list --schema sh.kotton.notes
+  record get --schema sh.kotton.notes <id>
+  record rm --schema sh.kotton.notes <id>
 
-**Usage:** `Kotton record open --user <USER> <URL>`
+RETIRED:
+  record open              gone: type `record get`
+```
 
 ###### **Arguments:**
 
-* `<URL>` — The full `kotton://records/<nsid>/<id>` URL
+* `<ARGS>` — Arguments: `list --schema <nsid> [--json]` | `get --schema <nsid> <id>` | `put --schema <nsid> <json>` | `rm --schema <nsid> <id>`
 
 ###### **Options:**
 
-* `--user <USER>` — Identity that owns the record (defaults to the active identity / KOTTON_USER)
+* `--user <USER>` — Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
 
 
 

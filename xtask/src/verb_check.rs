@@ -46,11 +46,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The nouns the command-tree decision's rewrite has reached: their verbs are held both ways.
-pub const HELD: &[&str] = &["drive", "pin", "sync"];
+pub const HELD: &[&str] = &["drive", "pin", "record", "sync"];
 
 /// Verbs of a held noun the Decision names and the binary does not have yet, each with why.
-pub const DEFERRED: &[(&str, &str, &str)] =
-    &[("drive", "export", "the command-tree decision names it; the binary does not have it yet (#182)")];
+pub const DEFERRED: &[(&str, &str, &str)] = &[
+    ("drive", "export", "the command-tree decision names it; the binary does not have it yet (#182)"),
+    ("record", "export", "the command-tree decision names it; the binary does not have it yet (#38's follow-up)"),
+    ("record", "import", "the command-tree decision names it; the binary does not have it yet (#38's follow-up)"),
+];
 
 /// Names a tree registers that the command-tree decision gives no place, each with the issue
 /// that will.
@@ -560,6 +563,9 @@ whole` is \"collect all my things\". `sync` syncs this device's drives, now.
 
 **Files.** `ls` · `cat` · `cp` · `find [path] [-name <glob>]` · `trash list|restore|empty`.
 
+**Records and schemas.** `record list|get|put|rm --schema <name>` · `record import|export
+--schema <name> <path>` (a calendar comes in this way) · `schema list|show|register`.
+
 **Contacts and messages.** `contact pair` · `join <code>` · `list` · `message send <contact> <text>` · `inbox`.
 
 ### Where it runs
@@ -579,6 +585,7 @@ whole` is \"collect all my things\". `sync` syncs this device's drives, now.
 | `sync now [--node <id>] [--no-wait]` | `sync` |
 | `sync [--push\\|--pull] <remote>` | `sync` |
 | `host:` | kept in the REPL only |
+| `records import/export`, `import` (`.ics`), `record open` | `record import/export`, `record get` |
 
 - after the table.
 ";
@@ -593,6 +600,7 @@ whole` is \"collect all my things\". `sync` syncs this device's drives, now.
         assert_eq!(rfc.decision("drive"), set(&["create", "list", "show", "move", "export", "enrol"]));
         assert_eq!(rfc.decision("pin"), set(&["default", "<drive>", "list"]));
         assert_eq!(rfc.decision("sync"), set(&[""]));
+        assert_eq!(rfc.decision("record"), set(&["list", "get", "put", "rm", "import", "export"]));
         // A verb after a noun of its own stays the paragraph's: the reading is permissive
         // there, and exact for the held nouns, whose paragraphs are one noun each.
         assert_eq!(rfc.decision("contact"), set(&["pair", "join", "list", "inbox"]));
@@ -619,13 +627,14 @@ whole` is \"collect all my things\". `sync` syncs this device's drives, now.
     /// from each door.
     fn trees() -> Trees {
         let tables = crate::verb_tables::tables();
-        let mut clap: BTreeMap<String, bool> = ["drive", "pin", "sync", "device", "keep"].iter().map(|n| (n.to_string(), true)).collect();
+        let mut clap: BTreeMap<String, bool> =
+            ["drive", "pin", "record", "sync", "device", "keep"].iter().map(|n| (n.to_string(), true)).collect();
         for (name, _) in UNPLACED {
             clap.insert(name.to_string(), false);
         }
         Trees {
             clap,
-            repl: set(&["drive", "pin", "sync", "device", "keep", "cat", "ls"]),
+            repl: set(&["drive", "pin", "record", "sync", "device", "keep", "cat", "ls"]),
             repl_tables: tables.clone(),
             clap_tables: tables,
         }

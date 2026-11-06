@@ -570,7 +570,7 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 }
 
 /// The sealed objects a vault keeps for `USER` in `tree`, by key, with their bytes.
-async fn sealed_in(vault: &RunningVault, tree: &str) -> Vec<(String, Vec<u8>)> {
+pub(crate) async fn sealed_in(vault: &RunningVault, tree: &str) -> Vec<(String, Vec<u8>)> {
     use kotton_device::users::residency::Residency as _;
     let pool = vault.vault.pools().get(USER).expect("the vault keeps a pool for the person");
     let mut out = Vec::new();
@@ -583,7 +583,7 @@ async fn sealed_in(vault: &RunningVault, tree: &str) -> Vec<(String, Vec<u8>)> {
 }
 
 /// The drives a vault keeps for `USER`, by tree.
-fn trees_at(vault: &RunningVault) -> Vec<String> {
+pub(crate) fn trees_at(vault: &RunningVault) -> Vec<String> {
     use kotton_device::users::residency::Residency as _;
     let pool = vault.vault.pools().get(USER).expect("the vault keeps a pool for the person");
     let mut trees: Vec<String> = pool.shelf_mounts().into_iter().map(|(tree, _)| tree).collect();
@@ -603,7 +603,7 @@ fn domain_at(vault: &RunningVault, tree: &str) -> String {
 }
 
 /// The one tree `device` records `personal` under, at the vault `vault_key`.
-async fn personal_tree(device: &RunningDevice, vault_key: &str) -> String {
+pub(crate) async fn personal_tree(device: &RunningDevice, vault_key: &str) -> String {
     let at: Vec<(String, String)> = where_recorded(device, kotton_wire::ipc::FIRST_DRIVE_NAME).await;
     assert_eq!(at.len(), 1, "personal is not recorded at one vault: {at:?}");
     assert_eq!(at[0].0, vault_key, "personal is recorded at another vault: {at:?}");
@@ -611,7 +611,7 @@ async fn personal_tree(device: &RunningDevice, vault_key: &str) -> String {
 }
 
 /// Where the device records the drive `name`: each vault's key and the tree.
-async fn where_recorded(device: &RunningDevice, name: &str) -> Vec<(String, String)> {
+pub(crate) async fn where_recorded(device: &RunningDevice, name: &str) -> Vec<(String, String)> {
     device
         .daemon
         .drives(USER)

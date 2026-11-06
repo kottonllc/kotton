@@ -321,51 +321,54 @@ async fn every_queried_row_carries_its_id() {
 
 // ── from the terminal ─────────────────────────────────────────────────────────
 
-/// **`kotton record open` reads the record as the person it names, from the terminal.** A
-/// fresh `kotton` process, holding only Bob's cached session, opens his note by its URL.
+/// **`kotton record get` reads the record as the person it names, from the terminal.** A
+/// fresh `kotton` process, holding only Bob's cached session, reads his note by its schema
+/// and its id, and prints it as JSON on stdout.
 #[tokio::test]
-async fn a_record_is_opened_from_the_terminal_as_its_owner() {
-    let mut env = TestEnv::spawn_cli_reachable().await;
-    env.client.create_user(USER, crate::common::TEST_PASSPHRASE).await.expect("create_user");
-    let id = env
-        .client
-        .record_insert(USER, NOTES, serde_json::json!({ "title": "Opened", "body": "from a terminal" }))
-        .await
-        .expect("insert");
-    let cli = Cli::for_env(&env);
-    cli.seed_session(USER, env.client.session_token.as_deref().expect("bob logged in"));
-
-    let url = format!("kotton://records/{NOTES}/{id}");
-    let opened = cli.run(&["record", "open", &url, "--user", USER]);
-    assert!(opened.status.success(), "`kotton record open` failed.\n{}", said(&opened));
-    let stdout = String::from_utf8_lossy(&opened.stdout).into_owned();
-    assert_eq!(stdout.lines().next(), Some(format!("nsid: {NOTES}").as_str()), "{}", said(&opened));
-    assert!(stdout.contains("\"title\": \"Opened\""), "the note's body is printed.\n{}", said(&opened));
-}
-
-/// **A bare `kotton record open <url>` opens as the user `KOTTON_USER` names**, the way
-/// `--user` does: a person who has set it in their shell does not name themselves again.
-#[tokio::test]
-async fn a_record_is_opened_from_the_terminal_as_the_user_the_environment_names() {
-    let (env, cli, url) = a_note_and_a_terminal_holding_only_its_owners_session().await;
-    let opened = cli.run_with_env(&["record", "open", &url], &[("KOTTON_USER", USER)]);
-    assert_opened_as_its_owner(&opened);
+async fn a_record_is_read_from_the_terminal_as_its_owner() {
+    let (env, cli, id) = a_note_and_a_terminal_holding_only_its_owners_session().await;
+    let got = cli.run(&["record", "--user", USER, "get", "--schema", NOTES, &id]);
+    assert_got_as_its_owner(&got, &id);
     drop(env);
 }
 
-/// **A bare `kotton record open <url>` opens as the active identity** when neither
-/// `--user` nor `KOTTON_USER` is given, the identity `kotton id use` made active.
+/// **A bare `kotton record get` reads as the user `KOTTON_USER` names**, the way `--user`
+/// does: a person who has set it in their shell does not name themselves again.
 #[tokio::test]
-async fn a_record_is_opened_from_the_terminal_as_the_active_identity() {
-    let (env, cli, url) = a_note_and_a_terminal_holding_only_its_owners_session().await;
+async fn a_record_is_read_from_the_terminal_as_the_user_the_environment_names() {
+    let (env, cli, id) = a_note_and_a_terminal_holding_only_its_owners_session().await;
+    let got = cli.run_with_env(&["record", "get", "--schema", NOTES, &id], &[("KOTTON_USER", USER)]);
+    assert_got_as_its_owner(&got, &id);
+    drop(env);
+}
+
+/// **A bare `kotton record get` reads as the active identity** when neither `--user` nor
+/// `KOTTON_USER` is given, the identity `kotton id use` made active.
+#[tokio::test]
+async fn a_record_is_read_from_the_terminal_as_the_active_identity() {
+    let (env, cli, id) = a_note_and_a_terminal_holding_only_its_owners_session().await;
     let used = cli.run(&["id", "use", USER]);
     assert!(used.status.success(), "`kotton id use {USER}` failed.\n{}", said(&used));
-    let opened = cli.run(&["record", "open", &url]);
-    assert_opened_as_its_owner(&opened);
+    let got = cli.run(&["record", "get", "--schema", NOTES, &id]);
+    assert_got_as_its_owner(&got, &id);
     drop(env);
 }
 
-/// Bob's note, and a CLI holding only Bob's cached session.
+/// **A missing id exits 1 at the terminal, and a retired word exits 2.** `kotton record get`
+/// of an id no record has is a refusal, with the reason on stderr and nothing on stdout;
+/// the word the command-tree decision's table retired for `get` is refused before any session.
+#[tokio::test]
+async fn a_missing_id_exits_one_and_the_retired_word_exits_two_at_the_terminal() {
+    let (env, cli, _id) = a_note_and_a_terminal_holding_only_its_owners_session().await;
+    let missing = cli.run(&["record", "--user", USER, "get", "--schema", NOTES, "no-such-record"]);
+    assert_eq!(missing.status.code(), Some(1), "{}", said(&missing));
+    assert!(missing.stdout.is_empty(), "a missing record printed a payload.\n{}", said(&missing));
+    let retired = cli.run(&["record", "--user", USER, "open", &format!("kotton://records/{NOTES}/x")]);
+    assert_eq!(retired.status.code(), Some(2), "{}", said(&retired));
+    drop(env);
+}
+
+/// Bob's note, and a CLI holding only Bob's cached session. Returns the note's id.
 async fn a_note_and_a_terminal_holding_only_its_owners_session() -> (TestEnv, Cli, String) {
     let mut env = TestEnv::spawn_cli_reachable().await;
     env.client.create_user(USER, crate::common::TEST_PASSPHRASE).await.expect("create_user");
@@ -376,12 +379,14 @@ async fn a_note_and_a_terminal_holding_only_its_owners_session() -> (TestEnv, Cl
         .expect("insert");
     let cli = Cli::for_env(&env);
     cli.seed_session(USER, env.client.session_token.as_deref().expect("bob logged in"));
-    (env, cli, format!("kotton://records/{NOTES}/{id}"))
+    (env, cli, id)
 }
 
-fn assert_opened_as_its_owner(opened: &std::process::Output) {
-    assert!(opened.status.success(), "`kotton record open` failed.\n{}", said(opened));
-    let stdout = String::from_utf8_lossy(&opened.stdout).into_owned();
-    assert_eq!(stdout.lines().next(), Some(format!("nsid: {NOTES}").as_str()), "{}", said(opened));
-    assert!(stdout.contains("\"title\": \"Opened\""), "the note's body is printed.\n{}", said(opened));
+/// What `record get` printed is Bob's note, as JSON on stdout.
+fn assert_got_as_its_owner(got: &std::process::Output, id: &str) {
+    assert!(got.status.success(), "`kotton record get` failed.\n{}", said(got));
+    let body: serde_json::Value = serde_json::from_slice(&got.stdout)
+        .unwrap_or_else(|e| panic!("stdout is not the record as JSON: {e}\n{}", said(got)));
+    assert_eq!(body["title"], "Opened", "{}", said(got));
+    assert_eq!(body["_id"], id, "{}", said(got));
 }

@@ -46,7 +46,7 @@ async fn run() -> io::Result<()> {
         Commands::Device { args, .. } => kotton_cli::commands::device::reset(&args[1..]).await,
         Commands::Schema(cmd) => cmd.execute().await,
         Commands::Handler(cmd) => cmd.execute().await,
-        Commands::Record(cmd) => cmd.execute().await,
+        Commands::Record { user, args } => kotton_cli::bridge::run_verb(user, "record", args, json).await,
         Commands::Records(cmd) => cmd.execute().await,
         Commands::Import(cmd) => cmd.execute().await,
         Commands::Sync { user, args } => kotton_cli::bridge::run_verb(user, "sync", args, json).await,
