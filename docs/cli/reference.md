@@ -656,6 +656,10 @@ its fields, its id, or its schema's name. A schema is named by its NSID
 (`sh.kotton.notes`); this device must know it, as a core schema or one
 `schema register` added.
 
+These are your own records, in Personal: a record in another root you are a
+member of, such as an organisation's project, is not listed, read, written or
+removed here.
+
 `put` with an `id` among the fields writes that record again; without one it
 makes a new record and prints the id it was given. `rm` removes it on every
 device at their next sync.

@@ -799,6 +799,14 @@ mod tenant_device_tests {
 /// device that enrols it, with [`FIRST_DRIVE_ID`] as its id.
 pub const FIRST_DRIVE_NAME: &str = "personal";
 
+/// The word a record request's `root` takes for the person's Personal root, so
+/// a caller can keep to Personal without holding its id (kotton #38): a root's
+/// id is durable, and a caller that needs only "mine" has no use for one. It is
+/// never an id: a root's local id is sixteen random bytes in hex, and this word
+/// is not hex. Personal's records ride in [`FIRST_DRIVE_NAME`], hence the one
+/// word for both.
+pub const PERSONAL_ROOT: &str = "personal";
+
 /// The mount a vault keeps the tenancy's own tree under: the pool's own
 /// mount, a place for drives and no drive (kotton #124). No device's tree
 /// syncs with it, and no verb over made drives can name it.
