@@ -288,6 +288,8 @@ mod drive;
 #[cfg(feature = "cli")]
 mod pin;
 #[cfg(feature = "cli")]
+mod record;
+#[cfg(feature = "cli")]
 mod status;
 #[cfg(feature = "cli")]
 mod id;
@@ -358,6 +360,8 @@ pub use doctor::DoctorCommand;
 pub use drive::DriveCommand;
 #[cfg(feature = "cli")]
 pub use pin::PinCommand;
+#[cfg(feature = "cli")]
+pub use record::RecordCommand;
 #[cfg(feature = "cli")]
 pub use status::StatusCommand;
 #[cfg(feature = "cli")]

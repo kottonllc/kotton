@@ -3,7 +3,7 @@
 //! one fixture for both, held to the live registry.
 //!
 //! Each noun here is a table `client/shell/src/commands/` declares (`drive.rs`, `pin.rs`,
-//! `sync.rs`, `device.rs`), in its declared order. The fixture is the unit tests' copy, so
+//! `record.rs`, `sync.rs`, `device.rs`), in its declared order. The fixture is the unit tests' copy, so
 //! they run without building the command trees; [`tests::the_fixture_is_the_live_registrys_tables`]
 //! (under the `cli-docs` feature, which builds them) holds it equal to what
 //! `kotton_cli::bridge::repl_executor`'s registry declares, read the way `verb-check` reads it
@@ -29,6 +29,16 @@ pub fn tables() -> BTreeMap<String, Vec<(String, Is)>> {
         ]),
     );
     t.insert("pin".to_string(), table(&[("default", Is::Current), ("<drive>", Is::Current), ("list", Is::Current)]));
+    t.insert(
+        "record".to_string(),
+        table(&[
+            ("list", Is::Current),
+            ("get", Is::Current),
+            ("put", Is::Current),
+            ("rm", Is::Current),
+            ("open", Is::Gone("record get".into())),
+        ]),
+    );
     t.insert(
         "sync".to_string(),
         table(&[
