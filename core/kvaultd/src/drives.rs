@@ -127,12 +127,19 @@ fn refused(message: impl Into<String>) -> UserResponse {
 pub const LEASE_FOR: Duration = Duration::from_secs(60);
 
 /// One lock per made drive a tenant keeps at this vault, and the leases its
-/// devices hold here ([`PeerContext::trees`]; module doc).
+/// devices hold here ([`PeerContext::trees`]; module doc). An entry is made
+/// only for a tree this vault keeps, and goes with the tree at its retire, so
+/// the maps are as large as the drives kept and the leases held, however many
+/// ids requests name.
 pub struct Trees {
     locks: std::sync::Mutex<HashMap<(String, String), TreeLock>>,
     leases: std::sync::Mutex<HashMap<(String, Held), Lease>>,
     lasts: Duration,
-    /// How far this vault's clock has been moved on, by a test alone.
+    /// A test's clock: frozen at `base`, and moved on only by [`Self::pass`],
+    /// so no lease test reads the time that really passes.
+    #[cfg(test)]
+    base: Instant,
+    #[cfg(test)]
     passed: std::sync::Mutex<Duration>,
 }
 
@@ -177,6 +184,9 @@ impl Trees {
             locks: Default::default(),
             leases: Default::default(),
             lasts,
+            #[cfg(test)]
+            base: Instant::now(),
+            #[cfg(test)]
             passed: Default::default(),
         }
     }
@@ -186,8 +196,15 @@ impl Trees {
         held.entry((user_id.to_string(), tree.to_string())).or_default().clone()
     }
 
+    /// This vault's monotonic clock; a test's own, frozen, under test.
+    #[cfg(not(test))]
     fn now(&self) -> Instant {
-        Instant::now() + *self.passed.lock().unwrap()
+        Instant::now()
+    }
+
+    #[cfg(test)]
+    fn now(&self) -> Instant {
+        self.base + *self.passed.lock().unwrap()
     }
 
     /// Move this vault's lease clock on by `by`, as if that long had passed.
@@ -298,18 +315,53 @@ pub async fn write_into(
     if MadeDrive::from_tree(mount).is_none() {
         return Ok(None);
     }
-    let held = ctx.trees.of(user_id, mount).read_owned().await;
-    let kept = ctx.pools.get(user_id).is_some_and(|pool| pool.get_remote(mount).is_some());
-    if !kept {
+    let Some(held) = read_kept(ctx, user_id, mount).await else {
         return Err(Box::new(refused(format!(
             "this vault keeps no drive for '{user_id}' under {mount}: it was retired, or never made here, so the write \
              was refused"
         ))));
-    }
+    };
     if let Some(theirs) = ctx.trees.held_against(user_id, &Held::Tree(mount.to_string()), caller) {
         return Err(Box::new(theirs));
     }
     Ok(Some(held))
+}
+
+/// Whether this vault keeps `user_id`'s tree `tree`.
+fn kept(ctx: &PeerContext, user_id: &str, tree: &str) -> bool {
+    ctx.pools.get(user_id).is_some_and(|pool| pool.get_remote(tree).is_some())
+}
+
+/// `tree`'s lock, held for reading, while this vault keeps the tree; `None`
+/// for one it does not, and then no entry is left for it ([`Trees`] holds
+/// one per tree kept, and a request naming any other id adds none).
+async fn read_kept(ctx: &PeerContext, user_id: &str, tree: &str) -> Option<tokio::sync::OwnedRwLockReadGuard<()>> {
+    if !kept(ctx, user_id, tree) {
+        return None;
+    }
+    let held = ctx.trees.of(user_id, tree).read_owned().await;
+    if kept(ctx, user_id, tree) {
+        return Some(held);
+    }
+    // Retired while this waited: the retire forgot the entry, and this one's
+    // `of` may have made it again.
+    drop(held);
+    ctx.trees.forget(user_id, tree);
+    None
+}
+
+/// [`read_kept`], for writing.
+async fn write_kept(ctx: &PeerContext, user_id: &str, tree: &str) -> Option<tokio::sync::OwnedRwLockWriteGuard<()>> {
+    if !kept(ctx, user_id, tree) {
+        return None;
+    }
+    let held = ctx.trees.of(user_id, tree).write_owned().await;
+    if kept(ctx, user_id, tree) {
+        return Some(held);
+    }
+    drop(held);
+    ctx.trees.forget(user_id, tree);
+    None
 }
 
 /// `TenantDriveHold`: take, or renew, a lease for `caller` on what `holding`
@@ -324,12 +376,20 @@ pub async fn hold(ctx: &PeerContext, user_id: &str, caller: &str, holding: Holdi
     let Held::Tree(tree) = &held else {
         return Ok(ctx.trees.take(user_id, &held, caller, lease));
     };
-    let _writes = ctx.trees.of(user_id, tree).write_owned().await;
-    if pool.get_remote(tree).is_none() {
-        return Ok(refused(format!("this vault keeps no drive for '{user_id}' under {tree}, so it holds no lease on one")));
+    let unkept = || refused(format!("this vault keeps no drive for '{user_id}' under {tree}, so it holds no lease on one"));
+    // A renewal waits for nothing: the writes it would wait for are the
+    // holder's own, or were refused since the take.
+    if lease.is_some() {
+        if pool.get_remote(tree).is_none() {
+            return Ok(unkept());
+        }
+        return Ok(ctx.trees.take(user_id, &held, caller, lease));
     }
+    let Some(_writes) = write_kept(ctx, user_id, tree).await else {
+        return Ok(unkept());
+    };
     let answer = ctx.trees.take(user_id, &held, caller, lease);
-    if lease.is_none() && matches!(answer, UserResponse::DriveHold { .. }) {
+    if matches!(answer, UserResponse::DriveHold { .. }) {
         // A write whose first parts came before the take is refused at its
         // next part; what it left being reassembled goes now.
         let reassembling = format!("sealed:{tree}");
@@ -435,6 +495,11 @@ pub async fn name(ctx: &PeerContext, user_id: &str, caller: &str, drive: MadeDri
         )));
     }
     let tree = drive.tree();
+    // Held for reading, as a write is, so a take or a retire waits for it and
+    // it reads the lease as the take left it.
+    let Some(_naming) = read_kept(ctx, user_id, &tree).await else {
+        return Ok(refused(format!("this vault keeps no drive for '{user_id}' under {tree}")));
+    };
     if let Some(theirs) = ctx.trees.held_against(user_id, &Held::Tree(tree.clone()), caller) {
         return Ok(theirs);
     }
@@ -912,12 +977,46 @@ mod tests {
             _ = std::future::ready(()) => {}
         }
         drop(writing);
-        the_lease(taking.await);
+        let lease = the_lease(taking.await);
         assert!(ctx.reassembly.lock().await.is_empty(), "the write's first part outlived the take");
         match write_into(&ctx, "alice", &photos.tree(), B).await {
             Err(refusal) => held_by(&refusal, A),
             Ok(_) => panic!("the write's next part was let in"),
         }
+
+        // A renewal waits for nothing: with the holder's own write in flight,
+        // it is answered at its first poll.
+        let _holders = write_into(&ctx, "alice", &photos.tree(), A).await.unwrap();
+        let mut renewing = Box::pin(take(&ctx, A, Holding::Drive(photos), Some(lease)));
+        tokio::select! {
+            biased;
+            answer = &mut renewing => assert_eq!(the_lease(answer), lease),
+            _ = std::future::ready(()) => panic!("a renewal waited behind a write in flight"),
+        }
+    }
+
+    /// **A request naming a tree the vault does not keep leaves nothing
+    /// behind** (kotton #143; #155's review). A write into, a naming of, a
+    /// take of, a renewal on and a retire of a made drive's id this vault
+    /// never made are each refused or answered, and its lock and lease maps
+    /// hold no entry for that id afterwards; nor for a drive once retired.
+    #[tokio::test]
+    async fn a_request_naming_a_tree_not_kept_leaves_no_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = a_vault(dir.path()).await;
+        let never = MadeDrive([11; 16]);
+        assert!(write_into(&ctx, "alice", &never.tree(), A).await.is_err());
+        refused_saying(&name(&ctx, "alice", A, never, b"x".to_vec()).await.unwrap(), "keeps no drive");
+        refused_saying(&take(&ctx, A, Holding::Drive(never), None).await, "keeps no drive");
+        refused_saying(&take(&ctx, A, Holding::Drive(never), Some(DriveLease([1; 16]))).await, "keeps no drive");
+        assert!(matches!(retire(&ctx, "alice", A, never, None).await.unwrap(), UserResponse::Ok));
+        let photos = MadeDrive([12; 16]);
+        let lease = made(&ctx, "alice", photos, b"sealed".to_vec()).await;
+        drop(write_into(&ctx, "alice", &photos.tree(), DEVICE).await.unwrap());
+        assert!(matches!(retire(&ctx, "alice", DEVICE, photos, Some(lease)).await.unwrap(), UserResponse::Ok));
+        assert!(write_into(&ctx, "alice", &photos.tree(), DEVICE).await.is_err());
+        assert!(ctx.trees.locks.lock().unwrap().is_empty(), "an entry was left for a tree not kept");
+        assert!(ctx.trees.leases.lock().unwrap().is_empty(), "a lease was left for a tree not kept");
     }
 
     /// A sealed name past the bound is refused, and no tree is made for it.
