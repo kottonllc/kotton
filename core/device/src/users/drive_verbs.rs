@@ -141,8 +141,9 @@
 //! lease the vault keeps (`kvaultd::drives`) on every tree it touches: the
 //! drive where it is, before it lists it, read again once held, since
 //! another device may have moved it meanwhile; the copy, whose lease the
-//! vault gives with the tree (`TenantDriveMake`); each other finished copy it
-//! retires; and an unfinished tree an earlier move left. A lease id is one
+//! vault gives with the tree (`TenantDriveMake`), or, finishing a move cut
+//! off, the copy it tops up; each other finished copy it retires; and an
+//! unfinished tree an earlier move left. A lease id is one
 //! vault's and is never sent to another. While a tree is held, no other
 //! device's pass writes into it, names it, retires it or moves it: each is
 //! refused with `DriveHeld`, which names the holding device, and a pass so
@@ -500,8 +501,11 @@ async fn dial(runtime: &DeviceRuntime, node: &PairedNode, user_id: &str) -> io::
 }
 
 /// How often a lease this device holds is renewed while it holds it
-/// ([`Leased`]): a third of the time a vault keeps one (`kvaultd::drives`), so
-/// two renewals may be lost before it lapses.
+/// ([`Leased`]): a third of the time a vault keeps one (`kvaultd::drives`).
+/// One renewal that fails or goes unanswered within [`EACH_VAULT`] marks the
+/// lease lost and stops what holds it: this device never acts on a lease it
+/// cannot show the vault still holds, so the slack is in its favour only
+/// when a renewal is slow, not when one is lost.
 const RENEW_EVERY: Duration = Duration::from_secs(20);
 
 /// Another device of the person's holds a lease at a vault (`DriveHeld`): its
@@ -512,16 +516,28 @@ pub struct HeldBy {
     pub for_secs: u32,
 }
 
+/// The person's devices, by key and this device's name for each
+/// (`pins::devices`): what a sentence naming a holding device reads.
+type Names = Arc<Vec<(String, String)>>;
+
+/// The person's devices as `store` lists them, this one among them.
+async fn device_names(runtime: &DeviceRuntime, store: &UserStore) -> Names {
+    Arc::new(pins::devices(store, &runtime.operational_did()).await)
+}
+
+/// `did`, under this device's name for it: `this device`, the person's own
+/// label for another of theirs, or its key when this device knows none.
+fn named_in(names: &[(String, String)], did: &str) -> String {
+    match names.iter().find(|(d, _)| d == did) {
+        Some((_, name)) => format!("'{name}'"),
+        None => format!("another of your devices ({did})"),
+    }
+}
+
 impl HeldBy {
-    /// The holding device, under this device's name for it: `this device`,
-    /// the person's own label for another of theirs, or its key when this
-    /// device knows none.
+    /// The holding device, under this device's name for it ([`named_in`]).
     async fn named(&self, runtime: &DeviceRuntime, store: &UserStore) -> String {
-        let devices = pins::devices(store, &runtime.operational_did()).await;
-        match devices.into_iter().find(|(did, _)| *did == self.device_did) {
-            Some((_, name)) => format!("'{name}'"),
-            None => format!("another of your devices ({})", self.device_did),
-        }
+        named_in(&device_names(runtime, store).await, &self.device_did)
     }
 
     /// The sentence a verb refused by it says, after `what` (`"'photos' is
@@ -535,13 +551,14 @@ impl HeldBy {
     }
 }
 
-/// Renew `lease` on `holding` at the vault `client` reaches.
-async fn renew_lease(client: &KottonPeerObjectStorage, user_id: &str, holding: Holding, lease: DriveLease) -> Result<(), String> {
+/// Renew `lease` on `holding` at the vault `client` reaches; a refusal names
+/// the holding device among `names`.
+async fn renew_lease(client: &KottonPeerObjectStorage, user_id: &str, holding: Holding, lease: DriveLease, names: &[(String, String)]) -> Result<(), String> {
     let asked = VaultPeerRequest::TenantDriveHold { user_id: user_id.to_string(), holding, lease: Some(lease) };
     match ask(client, asked).await.map_err(|e| e.to_string())? {
         UserResponse::DriveHold { lease: renewed, .. } if renewed == lease => Ok(()),
         UserResponse::DriveHeld { device_did, for_secs } => {
-            Err(format!("another of your devices ({device_did}) holds it now, for {for_secs}s more"))
+            Err(format!("{} holds it now, for {for_secs}s more", named_in(names, &device_did)))
         }
         UserResponse::Error { message } => Err(message),
         other => Err(format!("the vault answered {other:?}")),
@@ -564,6 +581,7 @@ pub struct Leased {
     holding: Holding,
     lease: DriveLease,
     client: KottonPeerObjectStorage,
+    names: Names,
     lost: Arc<std::sync::Mutex<Option<String>>>,
     renewing: tokio::task::JoinHandle<()>,
 }
@@ -577,11 +595,11 @@ impl Drop for Leased {
 impl Leased {
     /// Take `holding` at `node`, on a connection of its own. `Ok(Err)` is
     /// another device holding it.
-    async fn take(runtime: &DeviceRuntime, node: &PairedNode, user_id: &str, holding: Holding) -> io::Result<Result<Arc<Self>, HeldBy>> {
+    async fn take(runtime: &DeviceRuntime, names: &Names, node: &PairedNode, user_id: &str, holding: Holding) -> io::Result<Result<Arc<Self>, HeldBy>> {
         let client = dial(runtime, node, user_id).await?;
         let asked = VaultPeerRequest::TenantDriveHold { user_id: user_id.to_string(), holding, lease: None };
         match ask(&client, asked).await? {
-            UserResponse::DriveHold { lease, .. } => Ok(Ok(Self::holding(client, user_id, holding, lease))),
+            UserResponse::DriveHold { lease, .. } => Ok(Ok(Self::holding(client, names, user_id, holding, lease))),
             UserResponse::DriveHeld { device_did, for_secs } => Ok(Err(HeldBy { device_did, for_secs })),
             UserResponse::Error { message } => Err(io::Error::other(format!("the vault '{}' gave no lease: {message}", node.id))),
             other => Err(io::Error::other(format!("the vault '{}' answered {other:?} to TenantDriveHold", node.id))),
@@ -589,15 +607,20 @@ impl Leased {
     }
 
     /// The lease a vault gave (`DriveHold`), kept and renewed from here on,
-    /// on `client`, a connection nothing else uses.
-    fn holding(client: KottonPeerObjectStorage, user_id: &str, holding: Holding, lease: DriveLease) -> Arc<Self> {
+    /// on `client`. A move's leases are each given a connection nothing else
+    /// uses ([`Self::take`], and the copy's dialled for it), so a renewal
+    /// never waits behind the copy. The new tree's lease `drive create` and
+    /// [`make_first`] are given rides the connection they made the tree on,
+    /// which they read one listing on before they let it go: nothing long is
+    /// sent there for a renewal to wait behind.
+    fn holding(client: KottonPeerObjectStorage, names: &Names, user_id: &str, holding: Holding, lease: DriveLease) -> Arc<Self> {
         let lost = Arc::new(std::sync::Mutex::new(None));
         let renewing = tokio::spawn({
-            let (client, user_id, lost) = (client.clone(), user_id.to_string(), Arc::clone(&lost));
+            let (client, user_id, lost, names) = (client.clone(), user_id.to_string(), Arc::clone(&lost), Arc::clone(names));
             async move {
                 loop {
                     tokio::time::sleep(RENEW_EVERY).await;
-                    if let Err(e) = renew_lease(&client, &user_id, holding, lease).await {
+                    if let Err(e) = renew_lease(&client, &user_id, holding, lease, &names).await {
                         tracing::warn!(user_id, error = %e, "a lease on a drive was lost; what holds it stops");
                         *lost.lock().unwrap() = Some(e);
                         return;
@@ -605,7 +628,7 @@ impl Leased {
                 }
             }
         });
-        Arc::new(Self { user_id: user_id.to_string(), holding, lease, client, lost, renewing })
+        Arc::new(Self { user_id: user_id.to_string(), holding, lease, client, names: Arc::clone(names), lost, renewing })
     }
 
     /// Why the lease was lost, once it was.
@@ -618,7 +641,7 @@ impl Leased {
         if let Some(why) = self.lost() {
             return Err(why);
         }
-        renew_lease(&self.client, &self.user_id, self.holding, self.lease).await.inspect_err(|e| {
+        renew_lease(&self.client, &self.user_id, self.holding, self.lease, &self.names).await.inspect_err(|e| {
             *self.lost.lock().unwrap() = Some(e.clone());
         })
     }
@@ -669,7 +692,7 @@ async fn take_making(
     holds: &Holds,
 ) -> io::Result<Result<Option<Arc<Leased>>, String>> {
     let Some(vault) = making_vault(db, user_id).await? else { return Ok(Ok(None)) };
-    match Leased::take(runtime, &vault.node, user_id, Holding::Making).await? {
+    match Leased::take(runtime, &device_names(runtime, store).await, &vault.node, user_id, Holding::Making).await? {
         Ok(making) => {
             holds.keep(&making);
             Ok(Ok(Some(making)))
@@ -887,7 +910,7 @@ async fn create_holding(
     let sealed_name = SealedName { name: name.clone(), id }.seal(store, &tree, true)?;
     match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
         // The new tree's lease, which nothing here holds it under: let go.
-        UserResponse::DriveHold { lease, .. } => holds.keep(&Leased::holding(client.clone(), user_id, Holding::Drive(drive), lease)),
+        UserResponse::DriveHold { lease, .. } => holds.keep(&Leased::holding(client.clone(), &device_names(runtime, store).await, user_id, Holding::Drive(drive), lease)),
         UserResponse::Error { message } => return refused(format!("drive create: the vault '{}' refused: {message}", vault.node.id)),
         other => return refused(format!("drive create: the vault answered {other:?}")),
     }
@@ -981,7 +1004,7 @@ async fn make_first_holding(
     let tree = drive.tree();
     let sealed_name = SealedName { name: FIRST_DRIVE_NAME.to_string(), id: FIRST_DRIVE_ID.to_string() }.seal(store, &tree, true)?;
     match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
-        UserResponse::DriveHold { lease, .. } => holds.keep(&Leased::holding(client.clone(), user_id, Holding::Drive(drive), lease)),
+        UserResponse::DriveHold { lease, .. } => holds.keep(&Leased::holding(client.clone(), &device_names(runtime, store).await, user_id, Holding::Drive(drive), lease)),
         UserResponse::Error { message } => return Err(io::Error::other(format!("the vault '{}' refused it: {message}", vault.node.id))),
         other => return Err(io::Error::other(format!("the vault '{}' answered {other:?}", vault.node.id))),
     }
@@ -1112,7 +1135,11 @@ impl VaultEnd for PeerEnd {
         match ask(&self.0, request).await.map_err(|e| e.to_string())? {
             UserResponse::Ok => Ok(()),
             UserResponse::DriveHeld { device_did, for_secs } => {
-                Err(format!("another of your devices ({device_did}) holds the drive there, for {for_secs}s more"))
+                let holder = match &self.1 {
+                    Some(leased) => named_in(&leased.names, &device_did),
+                    None => format!("another of your devices ({device_did})"),
+                };
+                Err(format!("{holder} holds the drive there, for {for_secs}s more"))
             }
             UserResponse::Error { message } => Err(message),
             other => Err(format!("the vault answered {other:?}")),
@@ -1524,6 +1551,11 @@ async fn move_holding(
     let vaults = record::list(db, user_id).await?;
     let label = |key: &[u8; 32]| vaults.iter().find(|v| v.vault_key == *key).map(|v| v.node.id.clone()).unwrap_or_else(|| hex::encode(key));
     let seen = follow_every_vault(runtime, store, db, user_id).await?;
+    // Where a test pauses a move, to put another device's between its
+    // listing and its first lease (debug builds only; kotton #143).
+    #[cfg(debug_assertions)]
+    runtime.test_hooks.move_listed().await;
+    let names = device_names(runtime, store).await;
     if !seen.unanswered.is_empty() {
         return refused(format!(
             "drive move: {} did not answer, so where every copy of '{name}' is cannot be told; try again when it does",
@@ -1589,8 +1621,25 @@ async fn move_holding(
             // — another device's pass kept writing there — is carried into
             // the copy before each is retired, under a lease on each
             // ([`settle_copies`]). For `personal` this is only ever this
-            // device's own move ([`twice`] refused any other above).
-            let into = PeerEnd(dial(runtime, &dest.node, user_id).await?.with_remote_mount(keep.tree.clone()).with_domain_id(domain.clone()), None);
+            // device's own move ([`twice`] refused any other above). The copy
+            // it writes into is held too, as every tree a move touches is.
+            let Some(keep_id) = keep.made() else {
+                return refused(format!("drive move: '{name}' is kept under {}, which is no drive's tree", keep.tree));
+            };
+            let keep_held = match Leased::take(runtime, &names, &dest.node, user_id, Holding::Drive(keep_id)).await {
+                Ok(Ok(held)) => {
+                    holds.keep(&held);
+                    held
+                }
+                Ok(Err(held)) => {
+                    return refused(format!(
+                        "drive move: {}",
+                        held.said(runtime, store, &format!("'{name}' is being moved"), &dest.node.id).await
+                    ))
+                }
+                Err(e) => return refused(format!("drive move: '{name}' could not be held on '{}' to finish its move ({e}); try again", dest.node.id)),
+            };
+            let into = PeerEnd(dial(runtime, &dest.node, user_id).await?.with_remote_mount(keep.tree.clone()).with_domain_id(domain.clone()), Some(keep_held));
             let settled = settle_copies(runtime, store, &vaults, user_id, name, &rest, &into, &domain, holds).await?;
             refollow(runtime, store, db, user_id, &vaults, &rest, &dest).await;
             let also = refused_said(&settled.refused, &settled.from);
@@ -1629,7 +1678,7 @@ async fn move_holding(
     // The drive is held where it is before it is listed, and to its retire
     // (module doc): no other device writes into it, names it, retires it or
     // moves it meanwhile.
-    let source_held = match Leased::take(runtime, &source_vault.node, user_id, Holding::Drive(from_id)).await {
+    let source_held = match Leased::take(runtime, &names, &source_vault.node, user_id, Holding::Drive(from_id)).await {
         Ok(Ok(held)) => {
             holds.keep(&held);
             held
@@ -1663,7 +1712,7 @@ async fn move_holding(
     // retired under a lease of its own.
     for stale in seen.copies.iter().filter(|c| !c.finished && c.vault_key == dest.vault_key && c.name == name) {
         let Some(id) = stale.made() else { continue };
-        let held = match Leased::take(runtime, &dest.node, user_id, Holding::Drive(id)).await {
+        let held = match Leased::take(runtime, &names, &dest.node, user_id, Holding::Drive(id)).await {
             Ok(Ok(held)) => {
                 holds.keep(&held);
                 Some(held)
@@ -1697,7 +1746,7 @@ async fn move_holding(
     // dialled before the tree is made so a failed dial leaves nothing there.
     let renews_copy = dial(runtime, &dest.node, user_id).await?;
     let dest_held = match ask(&dest_client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive: to_id, sealed_name: unfinished_name }).await? {
-        UserResponse::DriveHold { lease, .. } => Leased::holding(renews_copy, user_id, Holding::Drive(to_id), lease),
+        UserResponse::DriveHold { lease, .. } => Leased::holding(renews_copy, &names, user_id, Holding::Drive(to_id), lease),
         UserResponse::Error { message } => return refused(format!("drive move: '{}' refused the drive: {message}", dest.node.id)),
         other => return refused(format!("drive move: '{}' answered {other:?}", dest.node.id)),
     };
@@ -1824,6 +1873,7 @@ async fn settle_copies(
     holds: &Holds,
 ) -> io::Result<SettledCopies> {
     let bus = runtime.event_bus();
+    let names = device_names(runtime, store).await;
     let mut settled = SettledCopies { refused: Vec::new(), from: String::new(), left: None };
     let mut left = Vec::new();
     for copy in copies {
@@ -1835,7 +1885,7 @@ async fn settle_copies(
             left.push(format!("a vault '{name}' is also on is not one this device reaches"));
             continue;
         };
-        let held = match Leased::take(runtime, &vault.node, user_id, Holding::Drive(id)).await {
+        let held = match Leased::take(runtime, &names, &vault.node, user_id, Holding::Drive(id)).await {
             Ok(Ok(held)) => {
                 holds.keep(&held);
                 held

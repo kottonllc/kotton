@@ -1210,15 +1210,18 @@ async fn a_pass_into_a_drive_another_device_is_moving_is_refused_and_its_write_r
 
 /// **Two devices moving one drive at once end with one finished copy**
 /// (kotton #143, done-when (b)). While A holds `photos` where it lives, B's
-/// move of it is refused, naming the drive as being moved. Then A and B each
-/// move it at once, to the second vault: however the two interleave, the
-/// vaults list exactly one finished copy of its id afterwards, holding every
-/// object, and the first vault keeps none; each move answered that it moved
-/// the drive or with a sentence.
+/// move of it is refused, naming the drive as being moved. Then B's move is
+/// paused once it has listed every vault and planned to carry `photos` from
+/// the first vault (`TestHooks::pause_next_move_after_listing`), and A's
+/// whole move to the second vault runs meanwhile. Let go, B's move goes to
+/// hold the source it planned on, which A's move retired: the vault refuses
+/// the take, and B is refused with a sentence. The vaults list exactly one
+/// finished copy of the drive's id, holding every object, and the first vault
+/// keeps none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_devices_moving_one_drive_at_once_end_with_one_finished_copy() {
     use kotton_wire::ipc::{Holding, MadeDrive};
-    let (first, first_id, second, _second_id, a, mut client_a, _b, mut client_b) = two_devices_and_two_vaults().await;
+    let (first, first_id, second, _second_id, a, mut client_a, b, mut client_b) = two_devices_and_two_vaults().await;
     client_a.drive_create(USER, "photos", Some("vault")).await.expect("drive create");
     let tree = where_recorded(&a, "photos").await[0].1.clone();
     let domain = domain_at(&first, &personal_tree(&a, &first_id.pubkey_hex).await);
@@ -1246,11 +1249,18 @@ async fn two_devices_moving_one_drive_at_once_end_with_one_finished_copy() {
     let let_go = VaultPeerRequest::TenantDriveLetGo { user_id: USER.into(), holding: Holding::Drive(photos), lease };
     assert!(matches!(as_device(&a, &first_id, &let_go).await, UserResponse::Ok));
 
-    let (by_a, by_b) = tokio::join!(
-        client_a.drive_move(USER, "photos", "vault-2", None),
-        client_b.drive_move(USER, "photos", "vault-2", None)
-    );
-    assert!(by_a.is_ok() || by_b.is_ok(), "neither move moved the drive: {by_a:?} {by_b:?}");
+    let (reached, release) = b.daemon.runtime().test_hooks.pause_next_move_after_listing();
+    let moving_b = tokio::spawn(async move {
+        let by_b = client_b.drive_move(USER, "photos", "vault-2", None).await;
+        (client_b, by_b)
+    });
+    reached.await.expect("B's move reached its pause after listing");
+    let by_a = client_a.drive_move(USER, "photos", "vault-2", None).await.expect("A's move, while B's waited");
+    assert_eq!(by_a.drives.len(), 1, "{by_a:?}");
+    release.send(()).expect("B's move is waiting");
+    let (_client_b, by_b) = moving_b.await.expect("B's move ran to its end");
+    let refused = by_b.expect_err("B moved a drive A moved while B's move waited");
+    assert!(refused.to_string().contains("'photos' could not be held on 'vault'"), "{refused}");
     let shown = client_a.drive_show(USER, "photos").await.expect("drive show");
     let finished: Vec<_> = shown.iter().filter(|d| !d.unfinished).collect();
     assert_eq!(finished.len(), 1, "two moves at once left {} finished copies: {shown:?}", finished.len());
@@ -1289,4 +1299,44 @@ async fn two_devices_creating_one_name_at_once_end_with_one_drive_and_one_refusa
         let listed = client_a.drive_list(USER).await.expect("drive list");
         assert_eq!(listed.iter().filter(|d| d.name == name).count(), 1, "{listed:?}");
     }
+}
+
+/// **(a) with B keeping `personal` on demand** (kotton #143). An on-demand
+/// device keeps a file's content only until a pass has sent it, so a pass
+/// refused mid-move must not let it go. B is set on demand and writes a file
+/// of several hundred kilobytes while A holds `personal` where it lives. B's
+/// pass is refused, and the vault holds none of it. B still reads the whole
+/// file, and the vault never had it, so that read is from what B kept. A
+/// moves `personal`, B's next pass sends the file to the moved copy, and A
+/// reads it from there, byte for byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_on_demand_device_keeps_what_a_refused_pass_did_not_send_and_it_reaches_the_moved_copy() {
+    use kotton_wire::ipc::{Holding, MadeDrive, PinScope, PinValue, FIRST_DRIVE_NAME};
+    let (first, first_id, _second, second_id, a, mut client_a, _b, mut client_b) = two_devices_and_two_vaults().await;
+    client_b
+        .pin_set(USER, PinScope::Drive { drive: FIRST_DRIVE_NAME.into() }, Some(PinValue::OnDemand))
+        .await
+        .expect("pin personal on-demand on B");
+    synced(&mut client_b, "B").await;
+    let at_first = personal_tree(&a, &first_id.pubkey_hex).await;
+    let personal = MadeDrive::from_tree(&at_first).expect("personal is a made drive");
+    let hold = VaultPeerRequest::TenantDriveHold { user_id: USER.into(), holding: Holding::Drive(personal), lease: None };
+    let lease = the_lease(as_device(&a, &first_id, &hold).await);
+    let held = sealed_in(&first, &at_first).await;
+
+    let body: Vec<u8> = (0..600_000u32).map(|i| (i % 251) as u8).collect();
+    client_b.write_file(USER, "big-during.bin", &body).await.expect("write on B");
+    let (job, _) = client_b.sync_drives(USER).await.expect("B's sync");
+    let refused = client_b.sync_await(USER, job, 120).await.expect_err("B's pass wrote into a drive A holds");
+    assert!(refused.to_string().contains("is moving this drive"), "{refused}");
+    assert_eq!(sealed_in(&first, &at_first).await, held, "the vault took a write into a drive another device holds");
+    assert_eq!(client_b.read_file(USER, "big-during.bin").await.expect("read on B"), body, "B let go of what it had not sent");
+
+    let let_go = VaultPeerRequest::TenantDriveLetGo { user_id: USER.into(), holding: Holding::Drive(personal), lease };
+    assert!(matches!(as_device(&a, &first_id, &let_go).await, UserResponse::Ok));
+    let moved = client_a.drive_move(USER, FIRST_DRIVE_NAME, "vault-2", None).await.expect("drive move personal");
+    assert_eq!(moved.drives[0].vault_key, second_id.pubkey_hex);
+    synced(&mut client_b, "B").await;
+    synced(&mut client_a, "A").await;
+    assert_eq!(client_a.read_file(USER, "big-during.bin").await.expect("read on A"), body);
 }
