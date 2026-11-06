@@ -3387,7 +3387,9 @@ async fn answer_request(
         UserRequest::TenantDriveMake { .. }
         | UserRequest::TenantDrives { .. }
         | UserRequest::TenantDriveName { .. }
-        | UserRequest::TenantDriveRetire { .. } => Ok(UserResponse::Error {
+        | UserRequest::TenantDriveRetire { .. }
+        | UserRequest::TenantDriveHold { .. }
+        | UserRequest::TenantDriveLetGo { .. } => Ok(UserResponse::Error {
             message: format!("{request_name} is a vault's verb, served only over a peer connection"),
         }),
         // The browsers a person admitted, and the revoke that un-admits one

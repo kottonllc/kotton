@@ -659,8 +659,10 @@ pub enum UserRequest {
     /// tree and every drive made before it. `sealed_name` is the drive's name,
     /// sealed under the person's key by the device that made it and bound to
     /// the tree; the vault keeps it, cannot open it, and hands it back in
-    /// `TenantDrives`. Answered `Ok`, or refused when the tenant already has a
-    /// drive under that id.
+    /// `TenantDrives`. Answered with `DriveHold`, the lease the making device
+    /// now holds on the new tree (kotton #143): a move holds it while it
+    /// copies into the tree, and a create lets it go at once. Refused when the
+    /// tenant already has a drive under that id.
     ///
     /// Peer-only, from a paired device of the person's. A vault verb.
     TenantDriveMake {
@@ -696,12 +698,46 @@ pub enum UserRequest {
     /// from once the vault it moved to holds every object. A made drive only:
     /// the tenancy's own tree is no [`crate::ipc::MadeDrive`], so it cannot be
     /// named here. Idempotent: a made drive the vault no longer keeps is
-    /// answered `Ok`.
+    /// answered `Ok`, with or without a lease. One it keeps is retired only
+    /// under `lease`, the lease the asking device holds on it
+    /// (`TenantDriveHold`), as a fencing token: a lease that has lapsed, been
+    /// let go or been taken since is refused, and so is none.
     ///
     /// Peer-only, from a paired device of the person's. A vault verb.
     TenantDriveRetire {
         user_id: String,
         drive: crate::ipc::MadeDrive,
+        #[serde(default)]
+        lease: Option<crate::ipc::DriveLease>,
+    },
+    /// Take, or renew, a lease at this vault on what `holding` names: a made
+    /// drive's tree, which a device holds while it moves the drive, or the
+    /// tenant's making of a drive (kotton #143). With `lease` `None` it is
+    /// taken afresh, under an id the vault mints; with the id of a lease the
+    /// asking device holds and that has not lapsed, it is renewed. Answered
+    /// with `DriveHold` or `DriveHeld`: the lease and how long it lasts, or
+    /// the device that holds it and for how much longer, when another does;
+    /// or refused, for a tree the vault does not keep or a lease it no longer
+    /// holds. While
+    /// a tree is held, no other device writes into it, names it or retires it.
+    /// The vault keeps leases in memory alone.
+    ///
+    /// Peer-only, from a paired device of the person's. A vault verb.
+    TenantDriveHold {
+        user_id: String,
+        holding: crate::ipc::Holding,
+        #[serde(default)]
+        lease: Option<crate::ipc::DriveLease>,
+    },
+    /// Let go of a lease `TenantDriveHold` gave, so another device may take it
+    /// at once rather than when it lapses. Answered `Ok`, whether or not the
+    /// vault still held it.
+    ///
+    /// Peer-only, from a paired device of the person's. A vault verb.
+    TenantDriveLetGo {
+        user_id: String,
+        holding: crate::ipc::Holding,
+        lease: crate::ipc::DriveLease,
     },
     /// `drive create <name> [--on <vault>]`: make a drive called `name` on one
     /// of the person's vaults — `on`, a vault's label, DID or key, or the one
@@ -2813,6 +2849,8 @@ impl UserRequest {
             Self::TenantDrives { user_id } => Some(user_id),
             Self::TenantDriveName { user_id, .. } => Some(user_id),
             Self::TenantDriveRetire { user_id, .. } => Some(user_id),
+            Self::TenantDriveHold { user_id, .. } => Some(user_id),
+            Self::TenantDriveLetGo { user_id, .. } => Some(user_id),
             Self::DriveCreate { user_id, .. } => Some(user_id),
             Self::DriveList { user_id } => Some(user_id),
             Self::DriveShow { user_id, .. } => Some(user_id),
@@ -3115,6 +3153,8 @@ impl UserRequest {
             Self::TenantDrives { .. } => "TenantDrives",
             Self::TenantDriveName { .. } => "TenantDriveName",
             Self::TenantDriveRetire { .. } => "TenantDriveRetire",
+            Self::TenantDriveHold { .. } => "TenantDriveHold",
+            Self::TenantDriveLetGo { .. } => "TenantDriveLetGo",
             Self::DriveCreate { .. } => "DriveCreate",
             Self::DriveList { .. } => "DriveList",
             Self::DriveShow { .. } => "DriveShow",
@@ -3637,7 +3677,9 @@ impl UserRequest {
             Self::TenantDriveMake { .. }
             | Self::TenantDrives { .. }
             | Self::TenantDriveName { .. }
-            | Self::TenantDriveRetire { .. } => Local,
+            | Self::TenantDriveRetire { .. }
+            | Self::TenantDriveHold { .. }
+            | Self::TenantDriveLetGo { .. } => Local,
             // The drive's verbs (RFC 0003): `create` and `move` mint and
             // retire sealed trees at the person's vaults, and every one of the
             // four dials them under this device's key; said at the machine.
@@ -4870,7 +4912,9 @@ mod target_user_id_tests {
             UserRequest::TenantDriveMake { user_id: u(), drive: crate::ipc::MadeDrive([0; 16]), sealed_name: vec![] },
             UserRequest::TenantDrives { user_id: u() },
             UserRequest::TenantDriveName { user_id: u(), drive: crate::ipc::MadeDrive([0; 16]), sealed_name: vec![] },
-            UserRequest::TenantDriveRetire { user_id: u(), drive: crate::ipc::MadeDrive([0; 16]) },
+            UserRequest::TenantDriveRetire { user_id: u(), drive: crate::ipc::MadeDrive([0; 16]), lease: None },
+            UserRequest::TenantDriveHold { user_id: u(), holding: crate::ipc::Holding::Making, lease: None },
+            UserRequest::TenantDriveLetGo { user_id: u(), holding: crate::ipc::Holding::Making, lease: crate::ipc::DriveLease([0; 16]) },
             UserRequest::DriveCreate { user_id: u(), name: s(), on: None },
             UserRequest::DriveList { user_id: u() },
             UserRequest::DriveShow { user_id: u(), name: s() },

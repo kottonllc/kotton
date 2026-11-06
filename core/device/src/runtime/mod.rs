@@ -22,6 +22,8 @@ pub use crate::config;
 pub(crate) use crate::identity;
 pub(crate) mod lifecycle;
 mod provisioning;
+#[cfg(feature = "test-support")]
+pub mod test_hooks;
 #[cfg(test)]
 mod multi_transport_tests;
 #[cfg(test)]
@@ -132,6 +134,12 @@ pub struct DeviceRuntime {
     /// a vault does, when its landlord has a bucket. Decided once, here, and
     /// never named below this type.
     pub(crate) shelves: Arc<dyn kotton_sys::store::Shelves>,
+
+    /// Pauses a test sets, to order two devices' verbs (under the
+    /// `test-support` feature;
+    /// [`test_hooks`]).
+    #[cfg(feature = "test-support")]
+    pub test_hooks: test_hooks::TestHooks,
 
     /// The same object as [`Self::secrets`], typed, so the credential-gated
     /// operations can reach `adopt_root` / `lock`.
@@ -305,6 +313,8 @@ impl DeviceRuntime {
             started: Arc::new(RwLock::new(false)),
             secrets,
             shelves,
+            #[cfg(feature = "test-support")]
+            test_hooks: Default::default(),
             custody,
         };
 

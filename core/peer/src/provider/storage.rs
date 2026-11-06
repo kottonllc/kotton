@@ -45,6 +45,10 @@ use std::sync::Arc;
 /// The **sealed** view is different and keeps `remote_mount`: replication
 /// addresses a specific store by design, which is why it is exempt.
 /// scenarios).
+///
+/// A clone shares the connection: what is sent on one waits behind the other
+/// where the link sends one request at a time (a relayed link).
+#[derive(Clone)]
 pub struct KottonPeerObjectStorage {
     channel: Arc<dyn PeerChannel>,
     /// Peer node record — kept for logging; nothing reads it yet.
@@ -288,6 +292,16 @@ impl ObjectStorage for KottonPeerObjectStorage {
             };
             match self.send(&req).await.map_err(Self::io_err)? {
                 UserResponse::Ok => {}
+                // Another device of the person's holds the drive at the vault,
+                // to move it (kotton #143): the write is refused there and kept
+                // here, and the next pass sends it where the drive is then.
+                UserResponse::DriveHeld { device_did, for_secs } => {
+                    return Err(ObjectStorageError::BackendError(format!(
+                        "peer refused sealed write at {path}: another of your devices ({device_did}) is \
+                         moving this drive and holds it for {for_secs}s more; what was written is kept on \
+                         this device and sent again at the next pass"
+                    )));
+                }
                 UserResponse::Error { message } => {
                     return Err(ObjectStorageError::BackendError(message))
                 }
@@ -505,6 +519,16 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                     return Err(ObjectStorageError::BackendError(format!(
                         "peer refused sealed write at {path}: it holds key domain {expected}, we \
                          sent {got}"
+                    )));
+                }
+                // Another device of the person's holds the drive at the vault,
+                // to move it (kotton #143): the write is refused there and kept
+                // here, and the next pass sends it where the drive is then.
+                UserResponse::DriveHeld { device_did, for_secs } => {
+                    return Err(ObjectStorageError::BackendError(format!(
+                        "peer refused sealed write at {path}: another of your devices ({device_did}) is \
+                         moving this drive and holds it for {for_secs}s more; what was written is kept on \
+                         this device and sent again at the next pass"
                     )));
                 }
                 UserResponse::Error { message } => {
