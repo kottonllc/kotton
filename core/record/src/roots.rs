@@ -109,7 +109,8 @@ impl RootAccess {
     /// nobody at all.
     ///
     /// **[`PERSONAL_ROOT`] is Personal by the one word**, for a caller that
-    /// keeps to Personal without holding its id: the same selection as its id,
+    /// means "mine" and should not have to round-trip Personal's id to say it:
+    /// the same selection as its id (never the word itself, which no row stores),
     /// and Personal's unmarked rows alone where its id is not known.
     pub fn read(&self, root: Option<&str>) -> Result<RootSelection, NotAMember> {
         match root {
