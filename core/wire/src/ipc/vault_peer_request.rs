@@ -20,7 +20,7 @@
 //! copy fetched and kept, and where the node reserves — and nothing else. A
 //! device's peer answers plaintext file verbs, sync wakes, an introduction,
 //! a cosigner's round and a gateway's frame; a vault answers none of those and
-//! fifteen a device does not. One type for both would put each acceptor's
+//! seventeen a device does not. One type for both would put each acceptor's
 //! verbs on the other's wire, which is the widening this type exists to undo.
 //!
 //! **What reaches the vault here, by kind.** Who may say which is decided by
@@ -35,7 +35,7 @@
 //! | `VaultCapacity` | a tenant's device | the meter's readout for its own pool |
 //! | `HoldDoors`, `TakeDeliveries`, `CarryFrame` | a tenant's device | the doors held for the person, what arrived at them, and what the vault carries while the person's devices sleep |
 //! | `TenantDevice` | a tenant's device, under the identity's signature | which of the person's devices the vault admits |
-//! | `TenantDriveMake`, `TenantDrives`, `TenantDriveName`, `TenantDriveRetire` | a tenant's device | the person's drives kept here (the drive decision) |
+//! | `TenantDriveMake`, `TenantDrives`, `TenantDriveName`, `TenantDriveRetire`, `TenantDriveHold`, `TenantDriveLetGo` | a tenant's device | the person's drives kept here (the drive decision), and the lease one device at a time holds on one, or on making one (kotton #143) |
 //! | `DeviceInvite`, `InviteDigits`, `Tenants`, `SetQuota`, `DropTenant`, `StandAt` | the vault's operator key | the landlord's acts over pools, and where the vault stands |
 //!
 //! **Two sets, split after the decode** (kotton #254). The last row is the
@@ -179,6 +179,21 @@ pub enum VaultPeerRequest {
     TenantDriveRetire {
         user_id: String,
         drive: crate::ipc::MadeDrive,
+        #[serde(default)]
+        lease: Option<crate::ipc::DriveLease>,
+    },
+    /// [`UserRequest::TenantDriveHold`].
+    TenantDriveHold {
+        user_id: String,
+        holding: crate::ipc::Holding,
+        #[serde(default)]
+        lease: Option<crate::ipc::DriveLease>,
+    },
+    /// [`UserRequest::TenantDriveLetGo`].
+    TenantDriveLetGo {
+        user_id: String,
+        holding: crate::ipc::Holding,
+        lease: crate::ipc::DriveLease,
     },
 
     // -- The landlord's, under the vault's operator key ------------------------------
@@ -229,6 +244,8 @@ impl VaultPeerRequest {
             Self::TenantDrives { .. } => "TenantDrives",
             Self::TenantDriveName { .. } => "TenantDriveName",
             Self::TenantDriveRetire { .. } => "TenantDriveRetire",
+            Self::TenantDriveHold { .. } => "TenantDriveHold",
+            Self::TenantDriveLetGo { .. } => "TenantDriveLetGo",
             Self::DeviceInvite { .. } => "DeviceInvite",
             Self::InviteDigits { .. } => "InviteDigits",
             Self::Tenants => "Tenants",
@@ -247,13 +264,13 @@ impl VaultPeerRequest {
 /// takes that set and cannot be handed the other (see the module note).
 #[derive(Debug, Clone)]
 pub enum VaultVerb {
-    /// One of the fifteen a tenant's device says to its own pool.
+    /// One of the seventeen a tenant's device says to its own pool.
     Tenant(TenantVerb),
     /// One of the six the vault's operator key says.
     Landlord(LandlordVerb),
 }
 
-/// The fifteen verbs a tenant's device says to its own pool, field for field
+/// The seventeen verbs a tenant's device says to its own pool, field for field
 /// the [`VaultPeerRequest`] variant of the same name.
 #[derive(Debug, Clone)]
 pub enum TenantVerb {
@@ -327,6 +344,17 @@ pub enum TenantVerb {
     TenantDriveRetire {
         user_id: String,
         drive: crate::ipc::MadeDrive,
+        lease: Option<crate::ipc::DriveLease>,
+    },
+    TenantDriveHold {
+        user_id: String,
+        holding: crate::ipc::Holding,
+        lease: Option<crate::ipc::DriveLease>,
+    },
+    TenantDriveLetGo {
+        user_id: String,
+        holding: crate::ipc::Holding,
+        lease: crate::ipc::DriveLease,
     },
 }
 
@@ -442,7 +470,9 @@ impl VaultPeerRequest {
                 drive,
                 sealed_name,
             }),
-            Self::TenantDriveRetire { user_id, drive } => Tenant(T::TenantDriveRetire { user_id, drive }),
+            Self::TenantDriveRetire { user_id, drive, lease } => Tenant(T::TenantDriveRetire { user_id, drive, lease }),
+            Self::TenantDriveHold { user_id, holding, lease } => Tenant(T::TenantDriveHold { user_id, holding, lease }),
+            Self::TenantDriveLetGo { user_id, holding, lease } => Tenant(T::TenantDriveLetGo { user_id, holding, lease }),
             Self::DeviceInvite {
                 user_id,
                 ttl_seconds,
@@ -516,7 +546,11 @@ mod tests {
             UserRequest::TenantDriveMake { user_id: user_id(), drive, sealed_name: vec![4] },
             UserRequest::TenantDrives { user_id: user_id() },
             UserRequest::TenantDriveName { user_id: user_id(), drive, sealed_name: vec![5] },
-            UserRequest::TenantDriveRetire { user_id: user_id(), drive },
+            UserRequest::TenantDriveRetire { user_id: user_id(), drive, lease: None },
+            UserRequest::TenantDriveRetire { user_id: user_id(), drive, lease: Some(crate::ipc::DriveLease([8; 16])) },
+            UserRequest::TenantDriveHold { user_id: user_id(), holding: crate::ipc::Holding::Drive(drive), lease: None },
+            UserRequest::TenantDriveHold { user_id: user_id(), holding: crate::ipc::Holding::Making, lease: Some(crate::ipc::DriveLease([8; 16])) },
+            UserRequest::TenantDriveLetGo { user_id: user_id(), holding: crate::ipc::Holding::Drive(drive), lease: crate::ipc::DriveLease([8; 16]) },
             UserRequest::DeviceInvite { user_id: user_id(), ttl_seconds: 60, as_name: Some("n".into()) },
             UserRequest::DeviceInvite { user_id: user_id(), ttl_seconds: 60, as_name: None },
             UserRequest::InviteDigits { user_id: user_id() },

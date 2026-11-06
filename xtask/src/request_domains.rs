@@ -125,6 +125,10 @@ const DOMAINS: &[(&str, &[&str])] = &[
             "TenantDrives",
             "TenantDriveName",
             "TenantDriveRetire",
+            // The lease one device at a time holds on a drive, or on making
+            // one, at a vault (kotton #143).
+            "TenantDriveHold",
+            "TenantDriveLetGo",
             "DriveCreate",
             "DriveList",
             "DriveShow",

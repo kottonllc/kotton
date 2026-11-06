@@ -629,7 +629,7 @@ pub async fn create(
     let id = if name == FIRST_DRIVE_NAME { FIRST_DRIVE_ID.to_string() } else { mint_id() };
     let sealed_name = SealedName { name: name.clone(), id }.seal(store, &tree, true)?;
     match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
-        UserResponse::Ok => {}
+        UserResponse::Ok | UserResponse::DriveHold { .. } => {}
         UserResponse::Error { message } => return refused(format!("drive create: the vault '{}' refused: {message}", vault.node.id)),
         other => return refused(format!("drive create: the vault answered {other:?}")),
     }
@@ -695,7 +695,7 @@ pub async fn make_first(runtime: &DeviceRuntime, store: &UserStore, db: &Arc<Sql
     let tree = drive.tree();
     let sealed_name = SealedName { name: FIRST_DRIVE_NAME.to_string(), id: FIRST_DRIVE_ID.to_string() }.seal(store, &tree, true)?;
     match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
-        UserResponse::Ok => {}
+        UserResponse::Ok | UserResponse::DriveHold { .. } => {}
         UserResponse::Error { message } => return Err(io::Error::other(format!("the vault '{}' refused it: {message}", vault.node.id))),
         other => return Err(io::Error::other(format!("the vault '{}' answered {other:?}", vault.node.id))),
     }
@@ -812,7 +812,7 @@ impl VaultEnd for PeerEnd {
 /// ask that acted and whose answer was lost is answered `Ok` the second time;
 /// an `Err` from the second is the vault saying it still keeps the tree.
 pub async fn retire(end: &dyn VaultEnd, user_id: &str, drive: MadeDrive) -> Result<(), String> {
-    let ask = || end.tell(VaultPeerRequest::TenantDriveRetire { user_id: user_id.to_string(), drive });
+    let ask = || end.tell(VaultPeerRequest::TenantDriveRetire { user_id: user_id.to_string(), drive, lease: None });
     match ask().await {
         Ok(()) => Ok(()),
         Err(_) => ask().await,
@@ -1324,7 +1324,7 @@ pub async fn move_to(
     let unfinished_name = carried_name.seal(store, &to_tree, false)?;
     let finished_name = carried_name.seal(store, &to_tree, true)?;
     match ask(&dest_client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive: to_id, sealed_name: unfinished_name }).await? {
-        UserResponse::Ok => {}
+        UserResponse::Ok | UserResponse::DriveHold { .. } => {}
         UserResponse::Error { message } => return refused(format!("drive move: '{}' refused the drive: {message}", dest.node.id)),
         other => return refused(format!("drive move: '{}' answered {other:?}", dest.node.id)),
     }

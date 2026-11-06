@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! What a vault answers on the authenticated peer transport.
 //!
-//! Twenty-one verbs, and nothing else exists here to be reached. Fifteen are a
+//! Twenty-three verbs, and nothing else exists here to be reached. Seventeen are a
 //! tenant's: sealed read, write and list; the recovery packet, kept and
 //! returned; where this vault reserves; how much it keeps; the doors held
 //! for a person, what arrived at them, and what the vault carries for them;
 //! the person's other devices, admitted and withdrawn under their
 //! identity's signature (`TenantDevice`, `crate::devices`); and the person's
 //! drives here, made, listed, named and retired (`TenantDriveMake`,
-//! `TenantDrives`, `TenantDriveName`, `TenantDriveRetire`, `crate::drives`).
+//! `TenantDrives`, `TenantDriveName`, `TenantDriveRetire`, `crate::drives`),
+//! and the lease one device at a time holds on one, or on making one
+//! (`TenantDriveHold`, `TenantDriveLetGo`).
 //! Six are the
 //! landlord's — an invite and its digits, the tenants, one pool's quota,
 //! dropping one pool, and where the vault stands — and are reached by one
@@ -20,7 +22,7 @@
 //!
 //! **Absent at the decoder, not refused by an arm.** The acceptor
 //! (`crate::Vault::peer_handler`) decodes a peer's bytes as
-//! [`VaultPeerRequest`], which holds the twenty-one and nothing else, so
+//! [`VaultPeerRequest`], which holds the twenty-three and nothing else, so
 //! `ReadFile`, `RecordInsert` and every other verb of a device's door is an
 //! unknown variant there and never reaches [`handle`]. Until kotton #239 it
 //! decoded the device's whole `UserRequest` and [`handle`] refused by arm what
@@ -45,7 +47,7 @@
 //! the decision.** A standing is what `peer_standing` says the connection is to
 //! the pool it names; the table says what each standing may say:
 //!
-//! | standing | the fifteen a tenant says | the landlord's six |
+//! | standing | the seventeen a tenant says | the landlord's six |
 //! |---|---|---|
 //! | `Paired` — a tenant's device, to its own pool | yes | no |
 //! | `Claim` — a phrase-only device | `RecoveryFetch` of its own identity only | no |
@@ -145,6 +147,8 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: VaultPeer
         | VaultPeerRequest::TenantDrives { user_id }
         | VaultPeerRequest::TenantDriveName { user_id, .. }
         | VaultPeerRequest::TenantDriveRetire { user_id, .. }
+        | VaultPeerRequest::TenantDriveHold { user_id, .. }
+        | VaultPeerRequest::TenantDriveLetGo { user_id, .. }
         | VaultPeerRequest::DeviceInvite { user_id, .. }
         | VaultPeerRequest::InviteDigits { user_id }
         | VaultPeerRequest::SetQuota { user_id, .. }
@@ -267,10 +271,11 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: VaultPeer
             // A write into a made drive holds the drive here for the whole of
             // the request, and a drive being retired, or retired, takes none:
             // it is refused by name rather than landing in a tree on its way
-            // out (`crate::drives::retire`).
-            let _tree = match crate::drives::write_into(ctx, &user_id, &mount).await {
+            // out (`crate::drives::retire`); nor does one another device
+            // holds a lease on, to move it (`DriveHeld`, `crate::drives`).
+            let _tree = match crate::drives::write_into(ctx, &user_id, &mount, peer_did).await {
                 Ok(held) => held,
-                Err(message) => return UserResponse::Error { message },
+                Err(refusal) => return *refusal,
             };
             // The meter's one decision, made before any byte is buffered: does
             // the whole object fit? Checked on the first chunk, so a large
@@ -377,13 +382,23 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: VaultPeer
         // by a device of theirs. Paired standing was checked above; a made
         // drive is named by its id, so the tenancy's own tree is beyond reach.
         TenantVerb::TenantDriveMake { user_id, drive, sealed_name } => {
-            crate::drives::make(ctx, &user_id, drive, sealed_name).await
+            crate::drives::make(ctx, &user_id, peer_did, drive, sealed_name).await
         }
         TenantVerb::TenantDrives { user_id } => crate::drives::list(ctx, &user_id).await,
         TenantVerb::TenantDriveName { user_id, drive, sealed_name } => {
-            crate::drives::name(ctx, &user_id, drive, sealed_name).await
+            crate::drives::name(ctx, &user_id, peer_did, drive, sealed_name).await
         }
-        TenantVerb::TenantDriveRetire { user_id, drive } => crate::drives::retire(ctx, &user_id, drive).await,
+        TenantVerb::TenantDriveRetire { user_id, drive, lease } => {
+            crate::drives::retire(ctx, &user_id, peer_did, drive, lease).await
+        }
+        // The lease one device at a time holds on a drive here, or on making
+        // one (kotton #143), held by the key the connection authenticated as.
+        TenantVerb::TenantDriveHold { user_id, holding, lease } => {
+            crate::drives::hold(ctx, &user_id, peer_did, holding, lease).await
+        }
+        TenantVerb::TenantDriveLetGo { user_id, holding, lease } => {
+            Ok(crate::drives::let_go(ctx, &user_id, holding, lease))
+        }
     };
     result.unwrap_or_else(|e| UserResponse::Error {
         message: e.to_string(),
@@ -501,7 +516,7 @@ pub async fn capacity(ctx: &PeerContext, user_id: &str) -> UserResponse {
 mod tests {
     use super::*;
 
-    /// One of each verb a tenant's device says to its pool — the fifteen.
+    /// One of each verb a tenant's device says to its pool — the seventeen.
     fn tenant_verbs() -> Vec<VaultPeerRequest> {
         let u = || "alice".to_string();
         vec![
@@ -572,6 +587,17 @@ mod tests {
             VaultPeerRequest::TenantDriveRetire {
                 user_id: u(),
                 drive: kotton_wire::ipc::MadeDrive([1; 16]),
+                lease: None,
+            },
+            VaultPeerRequest::TenantDriveHold {
+                user_id: u(),
+                holding: kotton_wire::ipc::Holding::Making,
+                lease: None,
+            },
+            VaultPeerRequest::TenantDriveLetGo {
+                user_id: u(),
+                holding: kotton_wire::ipc::Holding::Making,
+                lease: kotton_wire::ipc::DriveLease([0; 16]),
             },
         ]
     }
@@ -606,7 +632,7 @@ mod tests {
     /// The standing table, row by row (the module note's): the operator
     /// reaches the landlord's six and not one verb a tenant's standing
     /// reaches — no sealed read, no write, no recovery packet; a tenant's
-    /// device reaches its fifteen and none of the six; a claim reaches the
+    /// device reaches its seventeen and none of the six; a claim reaches the
     /// recovery fetch alone; a stranger reaches nothing. Each verb's set is
     /// the enum's own split (`VaultPeerRequest::split`), not this test's
     /// lists, and the verbs exercised are counted against the enum's recorded
