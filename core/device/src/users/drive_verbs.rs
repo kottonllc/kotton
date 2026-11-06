@@ -1552,8 +1552,9 @@ async fn move_holding(
     let label = |key: &[u8; 32]| vaults.iter().find(|v| v.vault_key == *key).map(|v| v.node.id.clone()).unwrap_or_else(|| hex::encode(key));
     let seen = follow_every_vault(runtime, store, db, user_id).await?;
     // Where a test pauses a move, to put another device's between its
-    // listing and its first lease (debug builds only; kotton #143).
-    #[cfg(debug_assertions)]
+    // listing and its first lease (under the `test-support` feature; kotton
+    // #143).
+    #[cfg(feature = "test-support")]
     runtime.test_hooks.move_listed().await;
     let names = device_names(runtime, store).await;
     if !seen.unanswered.is_empty() {

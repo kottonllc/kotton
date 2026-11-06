@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Pauses a test sets on a runtime it holds, to put two devices' verbs in an
-//! order it chooses (kotton #143). Debug builds only: a release build has no
-//! field, no type and no call for them. Nothing reaches them over any wire;
+//! order it chooses (kotton #143). Under the `test-support` feature only,
+//! which the integration suite turns on and no daemon's build does: without
+//! it there is no field, no type and no call for them. Nothing reaches them over any wire;
 //! only in-process code holding the [`DeviceRuntime`](super::DeviceRuntime)
 //! does, which is a test's.
 

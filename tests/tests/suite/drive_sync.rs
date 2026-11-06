@@ -1301,14 +1301,20 @@ async fn two_devices_creating_one_name_at_once_end_with_one_drive_and_one_refusa
     }
 }
 
-/// **(a) with B keeping `personal` on demand** (kotton #143). An on-demand
-/// device keeps a file's content only until a pass has sent it, so a pass
-/// refused mid-move must not let it go. B is set on demand and writes a file
-/// of several hundred kilobytes while A holds `personal` where it lives. B's
-/// pass is refused, and the vault holds none of it. B still reads the whole
-/// file, and the vault never had it, so that read is from what B kept. A
-/// moves `personal`, B's next pass sends the file to the moved copy, and A
-/// reads it from there, byte for byte.
+/// **(a) with B keeping `personal` on demand, in less room than the file**
+/// (kotton #143). An on-demand device short of room lets go of content once a
+/// pass has sent it, so a pass refused mid-move must not let go of what it did
+/// not send. B is set on demand and given a budget of 100 kB for both vaults'
+/// drives (the mount's `--budget`), so every pass of B's that reaches its
+/// keep step evicts down to it; then it writes a 600 kB file while A holds
+/// `personal` where it lives. B's pass is refused at its push, and the vault
+/// holds none of it. B still reads the whole file, and the vault never had
+/// it, so that read is from what B kept over its budget. A moves `personal`;
+/// B's next pass, under the same budget, sends the file to the moved copy
+/// before it evicts anything, and A reads it from there, byte for byte. A
+/// pass's push comes before its keep step, and the keep step lets go only of
+/// content the drive lists (`kotton_store::runtime::user::sync::keep_whole`),
+/// which is what this holds end to end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_on_demand_device_keeps_what_a_refused_pass_did_not_send_and_it_reaches_the_moved_copy() {
     use kotton_wire::ipc::{Holding, MadeDrive, PinScope, PinValue, FIRST_DRIVE_NAME};
@@ -1317,6 +1323,9 @@ async fn an_on_demand_device_keeps_what_a_refused_pass_did_not_send_and_it_reach
         .pin_set(USER, PinScope::Drive { drive: FIRST_DRIVE_NAME.into() }, Some(PinValue::OnDemand))
         .await
         .expect("pin personal on-demand on B");
+    for vault in ["vault", "vault-2"] {
+        client_b.mount(USER, vault, "/", "/", Some(100_000), vec![]).await.expect("B's budget for the drive");
+    }
     synced(&mut client_b, "B").await;
     let at_first = personal_tree(&a, &first_id.pubkey_hex).await;
     let personal = MadeDrive::from_tree(&at_first).expect("personal is a made drive");

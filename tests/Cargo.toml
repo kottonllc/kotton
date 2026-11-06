@@ -23,7 +23,7 @@ kotton-cli = { path = "../client/cli" }
 kotton-sys = { path = "../core/sys" }
 # The runtime crate dissolved on 2026-08-22 (RFC-0080); these are the crates its
 # re-exports pointed at all along.
-kotton-device = { path = "../core/device" }
+kotton-device = { path = "../core/device", features = ["test-support"] }
 kotton-identity = { path = "../core/identity" }
 kotton-peer = { path = "../core/peer" }
 kotton-org = { path = "../core/org" }

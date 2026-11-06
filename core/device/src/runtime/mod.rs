@@ -22,7 +22,7 @@ pub use crate::config;
 pub(crate) use crate::identity;
 pub(crate) mod lifecycle;
 mod provisioning;
-#[cfg(debug_assertions)]
+#[cfg(feature = "test-support")]
 pub mod test_hooks;
 #[cfg(test)]
 mod multi_transport_tests;
@@ -135,9 +135,10 @@ pub struct DeviceRuntime {
     /// never named below this type.
     pub(crate) shelves: Arc<dyn kotton_sys::store::Shelves>,
 
-    /// Pauses a test sets, to order two devices' verbs (debug builds only;
+    /// Pauses a test sets, to order two devices' verbs (under the
+    /// `test-support` feature;
     /// [`test_hooks`]).
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "test-support")]
     pub test_hooks: test_hooks::TestHooks,
 
     /// The same object as [`Self::secrets`], typed, so the credential-gated
@@ -312,7 +313,7 @@ impl DeviceRuntime {
             started: Arc::new(RwLock::new(false)),
             secrets,
             shelves,
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "test-support")]
             test_hooks: Default::default(),
             custody,
         };
