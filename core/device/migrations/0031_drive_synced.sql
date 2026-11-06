@@ -1,0 +1,12 @@
+-- kotton #124: the person's first drive lives at one vault (RFC 0002).
+--
+-- **Which copy of the first drive this device's tree last synced with**: 1 on
+-- that one row, 0 on every other. Every device finds `personal` from the
+-- vaults' listings alone, as the finished tree sealed with the id `first`. Two
+-- such trees are a move under way, or two devices apart from each other that
+-- each made one; either way a device keeps syncing with the one it synced with
+-- before, or with neither until its person chooses
+-- (`kotton_peer::daemon::drives::first`). This column is what "before" reads:
+-- a fact of this device's own passes, set by the pass that synced and by the
+-- device that made the drive, and never the order a row was recorded in.
+ALTER TABLE drives ADD COLUMN synced INTEGER NOT NULL DEFAULT 0;

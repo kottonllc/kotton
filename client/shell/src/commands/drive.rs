@@ -305,7 +305,10 @@ USAGE:
 
 A drive is a sealed tree a vault keeps for you; a vault keeps as many as you
 make. Its name is sealed under your key: the vault cannot read it. Your first
-drive on each vault is `personal`, the tree this device syncs with.
+drive is `personal`: one drive, at one vault, made at the first vault you
+enrol, and the one this device's files sync with wherever it lives. A vault
+you enrol after that holds nothing of yours until a drive is made or moved
+there.
 
 A move copies every sealed object to the other vault under the same key, and
 retires the drive where it was only once the other vault holds all of it.
@@ -314,7 +317,8 @@ drive where it was; a copy the other vault would not take back is listed as an
 unfinished move, and moving the drive there again clears it. A move cut off
 after the other vault has the drive is finished by running it again. A key the
 vault lists that is not a storage key is refused, not carried, and noted in the
-move's answer; `logs --level warn` names it. `personal` does not move.
+move's answer; `logs --level warn` names it. `personal` moves like any drive,
+and every device's files follow it there.
 
 `enrol` takes the invite a vault's landlord gave you (`vault invite <name>`
 at theirs): this device meets the vault at the invite's relay, and you type

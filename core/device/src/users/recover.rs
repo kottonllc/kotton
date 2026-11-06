@@ -158,11 +158,11 @@ pub async fn recover(
             );
         }
     };
-    // The phrase proved: the vault the person's line names is their drive.
+    // The phrase proved: the vault the person's line names is one of theirs.
     done.drive_not_recorded = kotton_peer::daemon::drives::record(db, user_id, &vault_key)
         .await
         .err()
-        .map(|e| format!("the vault at '{}' was not recorded as your drive ({e})", vault.label));
+        .map(|e| format!("the vault at '{}' was not recorded as one of yours ({e})", vault.label));
     Ok(done)
 }
 

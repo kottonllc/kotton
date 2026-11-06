@@ -22,11 +22,34 @@ impl Command for StatusCommand {
         let user_id = state.user_id.clone();
         let mut client = state.client.lock().await;
         let status = client.status(&user_id).await.map_err(|e| anyhow::anyhow!("status: {e}"))?;
+        Ok(CommandOutput::shapes(said(&status)))
+    }
+
+    fn help_text(&self) -> &'static str {
+        "status — when this device last synced, what it keeps of each drive, and the notices: a drive no device of yours keeps whole, and this device short of room\n\nUSAGE:\n  status"
+    }
+}
+
+/// What `status` says, in order: first what the person must know of
+/// `personal` (kotton-protocol's storage model; kotton #124) — that it is not found, or found twice,
+/// or that no device keeps it whole, so losing the one vault it lives on loses
+/// it — then when this device last synced, what it keeps of each drive, and
+/// every other notice.
+fn said(status: &kotton_wire::ipc::DeviceStatus) -> Vec<Out> {
+    use kotton_wire::ipc::{PinNotice, FIRST_DRIVE_NAME};
+    let first = |n: &PinNotice| match n {
+        PinNotice::NotFound { .. } | PinNotice::Twice { .. } => true,
+        PinNotice::NoWholeDevice { drive } => drive == FIRST_DRIVE_NAME,
+        PinNotice::ShortOfRoom { .. } => false,
+    };
+    let (prominent, rest): (Vec<PinNotice>, Vec<PinNotice>) = status.notices.iter().cloned().partition(first);
+    let mut out = super::pin::notices(&prominent);
+    {
         let synced = status.last_sync_at.map_or_else(|| "not since the daemon started".to_string(), |t| format!("at {t} (unix seconds)"));
-        let mut out = vec![Out::Record(vec![
+        out.push(Out::Record(vec![
             ("last synced".into(), synced),
             ("keeps by default".into(), status.default.said().to_string()),
-        ])];
+        ]));
         out.push(Out::Table {
             columns: vec!["drive".into(), "on".into(), "this device keeps".into(), "kept whole on".into()],
             rows: status
@@ -48,11 +71,34 @@ impl Command for StatusCommand {
                 })
                 .collect(),
         });
-        out.extend(super::pin::notices(&status.notices));
-        Ok(CommandOutput::shapes(out))
+        out.extend(super::pin::notices(&rest));
     }
+    out
+}
 
-    fn help_text(&self) -> &'static str {
-        "status — when this device last synced, what it keeps of each drive, and the notices: a drive no device of yours keeps whole, and this device short of room\n\nUSAGE:\n  status"
+#[cfg(test)]
+mod tests {
+    use super::said;
+    use crate::out::Out;
+    use kotton_wire::ipc::{DeviceStatus, PinNotice, PinValue};
+
+    /// **`status` leads with what the person must know of `personal`**
+    /// (kotton #124): that no device keeps it whole is said before the
+    /// readout, ahead of another drive's notice, which stays after it.
+    #[test]
+    fn status_leads_with_personal_kept_whole_by_no_device() {
+        let status = DeviceStatus {
+            last_sync_at: None,
+            default: PinValue::Whole,
+            drives: Vec::new(),
+            notices: vec![
+                PinNotice::NoWholeDevice { drive: "photos".into() },
+                PinNotice::NoWholeDevice { drive: "personal".into() },
+            ],
+        };
+        let out = said(&status);
+        assert!(matches!(&out[0], Out::Warn { what, .. } if what == "no device keeps 'personal' whole"), "{out:?}");
+        assert!(matches!(&out[1], Out::Record(_)), "{out:?}");
+        assert!(matches!(out.last(), Some(Out::Warn { what, .. }) if what == "no device keeps 'photos' whole"), "{out:?}");
     }
 }

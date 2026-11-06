@@ -549,6 +549,11 @@ pub async fn handle_device_add(
                         if posture == Posture::Full {
                             crate::users::drive_devices::introduce(&runtime, &db, &user_id, &node).await;
                         }
+                        if posture == Posture::BlindStorage {
+                            if let Some(store) = users.get(&user_id) {
+                                first_drive_at(&runtime, &store, &db, &user_id, &node).await;
+                            }
+                        }
                         UserResponse::PairingComplete {
                             node,
                             session_token: None,
@@ -1207,6 +1212,9 @@ pub async fn handle_device_admit(
                         if posture == Posture::Full {
                             crate::users::drive_devices::introduce(&runtime, &db, &user_id, &node).await;
                         }
+                        if posture == Posture::BlindStorage {
+                            first_drive_at(&runtime, &store, &db, &user_id, &node).await;
+                        }
                         UserResponse::PairingComplete {
                             node,
                             session_token: None,
@@ -1234,6 +1242,28 @@ pub async fn handle_device_admit(
         let _ = tx.send(frame).await;
     });
     Ok(rx)
+}
+
+/// **The person's first drive, at the vault just enrolled, if it is the
+/// first** (kotton-protocol's storage model; [`crate::users::drive_verbs::make_first`]): made by this
+/// device, the one that enrols it, before the enrolment answers, so the
+/// person runs no verb for it. A vault enrolled after the first is a place for
+/// drives and is given nothing. What it did is logged; an enrolment it could
+/// not make `personal` at still stands, and `status` then says `personal` is
+/// not found (`crate::users::pins`).
+async fn first_drive_at(runtime: &DeviceRuntime, store: &kotton_store::runtime::user::UserStore, db: &Arc<SqlitePool>, user_id: &str, node: &kotton_wire::peer::PairedNode) {
+    use crate::users::drive_verbs::{make_first, MadeFirst};
+    match make_first(runtime, store, db, user_id, &node.public_key).await {
+        Ok(MadeFirst::Made) => tracing::info!(user_id, vault = %node.id, "personal is made at the first vault"),
+        Ok(MadeFirst::Kept) => tracing::info!(user_id, vault = %node.id, "personal lives on another vault; this one is a place for drives"),
+        Ok(MadeFirst::Unanswered(vaults)) => tracing::warn!(
+            user_id,
+            vault = %node.id,
+            unanswered = %vaults.join(", "),
+            "a vault did not answer, so whether personal is kept there cannot be told; none was made"
+        ),
+        Err(e) => tracing::warn!(user_id, vault = %node.id, error = %e, "personal was not made at the vault just enrolled"),
+    }
 }
 
 /// Keep the vault an admit's ceremony enrolled — **after** its rule is read,
@@ -1590,11 +1620,11 @@ pub async fn handle_device_invite(
 }
 
 
-/// The person's drives this device records — the first drive on each vault,
-/// one per vault ([`kotton_peer::daemon::drives::list`]) — as the handout a
-/// joiner is given at the join (`PairingPayload::FrostShare::drives`). The
-/// drives made beside them the joiner learns from the vaults themselves at its
-/// first pass (`drive_verbs::follow`), so the payload is unchanged. Whether a join is handed
+/// The vaults this device records the person keeps drives on — one row per
+/// vault ([`kotton_peer::daemon::drives::list`]) — as the handout a joiner is
+/// given at the join (`PairingPayload::FrostShare::drives`). The drives in
+/// them, `personal` among them, the joiner learns from the vaults themselves
+/// at its first pass (`drive_verbs::follow`), so the payload is unchanged. Whether a join is handed
 /// them is the ceremony's to decide (`kotton_peer::pairing::issuer_over`
 /// hands them to a `Full` joiner only); this says what they are. A record that
 /// does not read is a join that hands no drive, and is logged, never a failed

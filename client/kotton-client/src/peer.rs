@@ -540,6 +540,25 @@ impl KottonClient {
         }
     }
 
+    /// `drive list` asked on a fresh authenticated connection of its own, for
+    /// a caller that holds this client shared while a ceremony's stream is
+    /// open — the line a vault's enrolment ends on, which says whether the
+    /// vault keeps a drive (kotton #124). As [`Self::drive_list`] otherwise.
+    pub async fn drive_list_beside(&self, user_id: &str) -> io::Result<Vec<kotton_wire::ipc::DriveDescriptor>> {
+        let token = self
+            .session_token
+            .as_deref()
+            .ok_or_else(|| io::Error::other("not authenticated"))?
+            .to_owned();
+        let mut raw = self.fresh_connection().await?;
+        authenticate_raw(&mut raw, &token).await?;
+        match raw.send(&UserRequest::DriveList { user_id: user_id.to_string() }).await? {
+            UserResponse::Drives { drives } => Ok(drives),
+            UserResponse::Error { message } => Err(io::Error::other(message)),
+            got => Err(crate::protocol::unexpected(got)),
+        }
+    }
+
     /// Deliver the human's SAS verdict for a parked ceremony (`token` from the
     /// `PairShowCode` frame). Sent on a fresh single-shot connection while the
     /// ceremony stream is still open.

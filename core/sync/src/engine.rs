@@ -12,8 +12,9 @@
 //! way of a drive.
 //!
 //! **What a pass can name.** [`targets`] is the whole of the engine's
-//! targeting, and it takes the drives the drive record holds
-//! (`kotton_peer::daemon::drives`) and this device's rules for them
+//! targeting, and it takes the drive the drive record says this device's tree
+//! syncs with — the person's first drive, where it lives, and no other
+//! (`kotton_peer::daemon::drives::first`; kotton #124) — and this device's rules for it
 //! (`kotton_peer::daemon::drive_rules`) — a rule names a drive and this
 //! device's direction for it, never a node. So what the engine can reach is
 //! exactly what the drive record holds, and the record is as good as its
@@ -58,7 +59,7 @@
 //! it is read ([`DrivePacks`], lent to every resident store). A pass short of
 //! room says so in `status` and names the setting that keeps less. Pins are
 //! over the tree a device keeps of the person's first drive, `local`; a made
-//! drive has no tree on a device yet (kotton #58, #124). Until #91 closes, the
+//! drive has no tree on a device yet (kotton #58). Until #91 closes, the
 //! sidecar's change-triggered pass is the asked-for one, so it syncs every
 //! drive both ways — and now keeps only what the pins keep, so a device paired
 //! later no longer pulls a drive whole on its first change.
@@ -77,6 +78,22 @@
 //!
 //! In both paths a running-set prevents two concurrent passes for the same
 //! drive (the vault's key and the tenancy).
+//!
+//! **One drive, wherever it lives** (RFC 0002, *A drive is where things live
+//! and a device keeps what its person chose*; kotton #124). This device's tree
+//! syncs with `personal` and with nothing else: the made tree its vaults list
+//! sealed with the first drive's id, made at the first vault the person
+//! enrolled and carried by `drive move` like any drive. A vault enrolled later
+//! is a place for drives and receives no copy of the tree. So that every
+//! device follows a move of it, a pass first reads every vault's listing
+//! ([`SyncEngine::follow_every_vault`]), and only the listing, and then takes
+//! the drive the record says those listings name
+//! (`kotton_peer::daemon::drives::first`). A vault that does not answer leaves
+//! its record as it was, so a pass never falls back to a tree the drive was
+//! moved away from; with no listing naming `personal`, a pass syncs nothing
+//! and guesses no vault, and with two it keeps the one this device synced with
+//! before ([`sync_drive_with_outcome`] marks it), or syncs neither; `status`
+//! says which (`kotton_device::users::pins`).
 //!
 //! # Tier note
 //! This module lives in `06_daemon` for the `device_sync` sprint. The sync
@@ -353,17 +370,12 @@ impl SyncEngine {
         HandOverSignal(Arc::clone(self))
     }
 
-    /// The drives a pass for `user_id` syncs ([`targets`]): the drive record's,
-    /// with this device's rules from the person's own database. A record or a
-    /// rule that cannot be read is a pass that syncs nothing, not a crash.
+    /// The drive a pass for `user_id` syncs ([`targets`]): the person's first
+    /// drive, where the record says it lives once every vault's listing has
+    /// been read ([`Self::follow_every_vault`]), with this device's rules from
+    /// the person's own database. A record or a rule that cannot be read is a
+    /// pass that syncs nothing, not a crash.
     async fn drive_targets(&self, user_id: &str, background: bool) -> Vec<DriveTarget> {
-        let drives = match kotton_peer::daemon::drives::list(&self.db, user_id).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(user_id, error = %e, "sync_engine: the drive record does not read");
-                return Vec::new();
-            }
-        };
         let rules = match self.user_pool(user_id).await {
             Some(pool) => kotton_peer::daemon::drive_rules::rules(&pool, user_id).await.unwrap_or_else(|e| {
                 tracing::warn!(user_id, error = %e, "sync_engine: failed to load sync rules");
@@ -371,7 +383,56 @@ impl SyncEngine {
             }),
             None => Vec::new(),
         };
-        targets(&drives, &rules, background)
+        // A background pass with nothing to watch dials nothing.
+        if background && !rules.iter().any(|r| r.watch) {
+            return Vec::new();
+        }
+        self.follow_every_vault(user_id).await;
+        let first = match kotton_peer::daemon::drives::first(&self.db, user_id).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(user_id, error = %e, "sync_engine: the drive record does not read");
+                return Vec::new();
+            }
+        };
+        targets(first.as_slice(), &rules, background)
+    }
+
+    /// Read what every vault `user_id` keeps drives on lists of their drives
+    /// there (`kotton_device::users::drive_verbs::follow`), so a drive another
+    /// device moved — the first drive among them — is followed before a pass
+    /// chooses where to sync. Best-effort: a vault that does not answer, or a
+    /// person whose store is not open, leaves the record as it was.
+    async fn follow_every_vault(&self, user_id: &str) {
+        let Some(store) = self.resources.user_store(user_id) else { return };
+        let vaults = match kotton_peer::daemon::drives::list(&self.db, user_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(user_id, error = %e, "sync_engine: the drive record does not read");
+                return;
+            }
+        };
+        for vault in vaults {
+            let reached = tokio::time::timeout(
+                FETCH_WITHIN,
+                self.resources.open_peer_client(vault.node.clone(), user_id, Some(store.as_ref())),
+            )
+            .await;
+            let client = match reached {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    tracing::debug!(user_id, drive = %vault.node.id, error = %e, "sync_engine: a vault was not reached to follow");
+                    continue;
+                }
+                Err(_) => {
+                    tracing::debug!(user_id, drive = %vault.node.id, "sync_engine: a vault did not answer in time to follow");
+                    continue;
+                }
+            };
+            if let Err(e) = kotton_device::users::drive_verbs::follow(&store, &self.db, user_id, &vault.vault_key, &client).await {
+                tracing::debug!(user_id, drive = %vault.node.id, error = %e, "sync_engine: the vault's drives were not followed");
+            }
+        }
     }
 
     /// Sync `user_id`'s drives now — every drive this device has, each in the
@@ -972,6 +1033,9 @@ async fn sync_drive_with_outcome(
     // under one, and two passes must not share a remote.
     let remote_name: String =
         std::iter::once("__sync_bg__".to_string()).chain(target.drive.vault_key.iter().map(|b| format!("{b:02x}"))).collect();
+    // The tree the drive is kept under there: `personal`'s made tree (module
+    // doc). The tenancy's own tree is no drive's, and is never a target.
+    let client = client.with_remote_mount(target.drive.tree.clone());
     let client = Arc::new(client);
     let storage = Arc::clone(&client) as Arc<dyn kotton_sys::store::SyncableStore>;
     let config = RemoteConfig {
@@ -1007,6 +1071,12 @@ async fn sync_drive_with_outcome(
         "sync_engine: drive pass complete",
     );
     let bytes: u64 = r.transfers.iter().map(|(_, _, b)| *b).sum();
+
+    // The copy of `personal` this device's tree synced with: the one it keeps
+    // syncing with should another tree be listed as it (module doc).
+    if let Err(e) = kotton_peer::daemon::drives::mark_synced(db, user_id, &target.drive.vault_key, &target.drive.tree).await {
+        tracing::warn!(user_id, drive = %node_id, error = %e, "sync_engine: the drive synced with was not marked");
+    }
 
     // What the vault keeps of the person's drives beside this one: a drive
     // another device made there, or moved there or away, is followed here at
@@ -1216,8 +1286,9 @@ async fn keep_for(
 }
 
 /// Where a pack this device does not keep is fetched from when something reads
-/// it (`kotton_store::fetch`): the person's first drive on each vault they keep
-/// drives on, in the order recorded, the first that holds it.
+/// it (`kotton_store::fetch`): the person's first drive, where it lives
+/// (`kotton_peer::daemon::drives::first`) — the one drive this device's tree
+/// syncs with, and so the one that holds what the tree's index names.
 pub struct DrivePacks {
     db: Arc<SqlitePool>,
     resources: Arc<dyn crate::SyncHost>,
@@ -1231,10 +1302,12 @@ impl kotton_store::fetch::PackSource for DrivePacks {
     async fn fetch(&self, user_id: &str, key: &str) -> anyhow::Result<Option<kotton_store::fetch::Bytes>> {
         use kotton_sys::store::SealedObjectAccess as _;
         let mut last: Option<anyhow::Error> = None;
-        for drive in kotton_peer::daemon::drives::list(&self.db, user_id).await? {
+        let first: Vec<Drive> = kotton_peer::daemon::drives::first(&self.db, user_id).await?.into_iter().collect();
+        for drive in first {
             let store = self.resources.user_store(user_id);
             let reached = tokio::time::timeout(FETCH_WITHIN, async {
                 let client = self.resources.open_peer_client(drive.node.clone(), user_id, store.as_deref()).await?;
+                let client = client.with_remote_mount(drive.tree.clone());
                 Ok::<_, anyhow::Error>(client.get_sealed(std::path::Path::new(key)).await)
             })
             .await;
@@ -1998,7 +2071,7 @@ mod drive_target_tests {
         Drive {
             vault_key: [seed; 32],
             tenancy: "alice".into(),
-            tree: kotton_wire::ipc::FIRST_DRIVE_TREE.into(),
+            tree: kotton_wire::ipc::MadeDrive([seed; 16]).tree(),
             name: kotton_wire::ipc::FIRST_DRIVE_NAME.into(),
             id: Some(kotton_wire::ipc::FIRST_DRIVE_ID.into()),
             node: PairedNode {
@@ -2198,6 +2271,12 @@ mod drive_packs_tests {
         .await
         .unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &vault_key).await.unwrap();
+        let personal = kotton_peer::daemon::drives::Listed {
+            tree: kotton_wire::ipc::MadeDrive([1; 16]).tree(),
+            name: kotton_wire::ipc::FIRST_DRIVE_NAME.into(),
+            id: kotton_wire::ipc::FIRST_DRIVE_ID.into(),
+        };
+        kotton_peer::daemon::drives::reconcile(&db, "alice", &vault_key, &[personal]).await.unwrap();
         let vault = Arc::new(APoolNotResident { asked: Mutex::new(0) });
         slot.lend(Arc::new(DrivePacks { db, resources: Arc::new(Host { vault: vault.clone() }) }));
 

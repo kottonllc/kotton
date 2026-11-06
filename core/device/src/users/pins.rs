@@ -4,7 +4,8 @@
 //! keeps; the whole-keeper claims a device publishes in a drive; and the two
 //! notices, read from them.
 //!
-//! The protocol's storage model (kotton-protocol #26), on
+//! The protocol's storage model (kotton-protocol's *A drive is where things live
+//! and a device keeps what its person chose*; kotton-protocol #26), on
 //! what a person's devices keep: every device of the person's sees every
 //! drive; each device has one default for the drives it has not been told
 //! about, and a drive or a folder is set the other way on that device; the
@@ -72,15 +73,21 @@
 //! (`kotton_store::runtime::user::sync::UserStore::sync_mount_keeping`). So
 //! nothing a setting or a claim says can withhold the index.
 //!
-//! **Where claims live, today: the first drive.** A device keeps a tree of the
-//! person's first drive and of no made drive yet (drive paths, kotton #58; the
-//! first drive becoming one drive among others, #124), so a device keeps, and
-//! claims, only the first drive, under `kotton_wire::ipc::FIRST_DRIVE_ID`; its
-//! claims ride the person's record log in that drive. A setting for a made
-//! drive is refused, and no claim names one, so `status` says of every made
-//! drive that only its vault holds it — which is true. **Seam, not built:** the
-//! creating device's claim at `drive create` is written once a device keeps a
-//! tree of a made drive (#58, #124); and a person's claims in a drive are to be
+//! **Where claims live, today: `personal`.** A device keeps a tree of the
+//! person's first drive and of no other made drive yet (drive paths, kotton
+//! #58), so a device keeps, and claims, only `personal`, under
+//! `kotton_wire::ipc::FIRST_DRIVE_ID`, wherever it lives (kotton-protocol's storage model; kotton
+//! #124), and its claims ride the person's record log in that drive, so a move
+//! carries them too. The device that makes `personal`, at the first vault it
+//! enrols, keeps it whole until told otherwise
+//! (`crate::users::drive_verbs::make_first`): a drive setting is written there
+//! when its settings would not keep it whole already, and its claim is written
+//! by the pass that first carries its tree to the drive. A setting for another
+//! made drive is refused, and no claim names one, so `status` says of every
+//! such drive that only its vault holds it — which is true. **Seam, not
+//! built:** the creating device's claim at `drive create` of another drive is
+//! written once a device keeps a tree of a made drive (#58); and a person's
+//! claims in a drive are to be
 //! sealed under that person's key and under no key a drive's holders would
 //! share, which today's record log is (one person per log) and a shared drive
 //! must keep.
@@ -457,10 +464,12 @@ pub fn whole_on(claims: &[Claim], devices: &[(String, String)], drive: Option<&s
         .collect()
 }
 
-/// The person's drives, by name, once each, in the order recorded.
+/// The person's drives, by name, once each, in the order recorded: every
+/// drive their vaults list, `personal` among them
+/// (`kotton_peer::daemon::drives::kept`).
 pub async fn drive_names(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<String>> {
     let mut names: Vec<String> = Vec::new();
-    for d in kotton_peer::daemon::drives::all(db, user_id).await? {
+    for d in kotton_peer::daemon::drives::kept(db, user_id).await? {
         if !names.contains(&d.name) {
             names.push(d.name);
         }
@@ -468,13 +477,17 @@ pub async fn drive_names(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<
     Ok(names)
 }
 
-/// Every notice: each drive this device records that no device claims whole,
-/// and each drive this device's last pass found short of room. A drive kept at
-/// several vaults is one drive, by its id, and told of once.
+/// Every notice, `personal`'s first (kotton-protocol's storage model; kotton #124): where it is not
+/// found, or found twice; that no device keeps it whole, since losing the one
+/// vault it lives on then loses it; then each other drive this device records
+/// that no device claims whole, and each drive this device's last pass found
+/// short of room. A drive kept at several vaults is one drive, by its id, and
+/// told of once.
 pub async fn notices(db: &Arc<SqlitePool>, user_id: &str, claims: &[Claim], devices: &[(String, String)]) -> io::Result<Vec<PinNotice>> {
-    let mut out = Vec::new();
+    use kotton_peer::daemon::drives as record;
+    let mut out = where_personal_is(db, user_id).await?;
     let mut told: Vec<(String, Option<String>)> = Vec::new();
-    for d in kotton_peer::daemon::drives::all(db, user_id).await? {
+    for d in record::kept(db, user_id).await? {
         let key = (d.name.clone(), d.id.clone());
         if told.contains(&key) {
             continue;
@@ -482,7 +495,11 @@ pub async fn notices(db: &Arc<SqlitePool>, user_id: &str, claims: &[Claim], devi
         told.push(key);
         let notice = PinNotice::NoWholeDevice { drive: d.name.clone() };
         if whole_on(claims, devices, d.id.as_deref()).is_empty() && !out.contains(&notice) {
-            out.push(notice);
+            if d.id.as_deref() == Some(FIRST_DRIVE_ID) {
+                out.insert(0, notice);
+            } else {
+                out.push(notice);
+            }
         }
     }
     let rows: Vec<(String, i64, Option<i64>, i64, String)> = sqlx::query_as(
@@ -502,6 +519,36 @@ pub async fn notices(db: &Arc<SqlitePool>, user_id: &str, claims: &[Claim], devi
         });
     }
     Ok(out)
+}
+
+/// What `status` says of where `personal` is, from what the vaults listed to
+/// this device alone (`kotton_peer::daemon::drives::first`): nothing when one
+/// tree is sealed as it; [`PinNotice::NotFound`] when the person keeps drives
+/// on a vault and none lists it, so this device's tree syncs with nothing; and
+/// [`PinNotice::Twice`] when two or more do, naming them, the one this
+/// device keeps syncing with, if any, and the vault this device's own
+/// unfinished move of it went to, when they are that move's two. A person with no vault yet is told
+/// nothing: `personal` is made at the first one.
+async fn where_personal_is(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<PinNotice>> {
+    use kotton_peer::daemon::drives as record;
+    if record::list(db, user_id).await?.is_empty() {
+        return Ok(Vec::new());
+    }
+    let found = record::firsts(db, user_id).await?;
+    Ok(match found.len() {
+        0 => vec![PinNotice::NotFound { drive: FIRST_DRIVE_NAME.into() }],
+        1 => Vec::new(),
+        _ => {
+            let synced = record::first(db, user_id).await?.map(|d| d.node.id);
+            // This device's own unfinished move, when the two are its two.
+            let trees: Vec<record::TreeAt> = found.iter().map(|d| (d.vault_key, d.tree.clone())).collect();
+            let moving = record::move_begun(db, user_id)
+                .await?
+                .filter(|b| b.names_exactly(&trees))
+                .and_then(|b| found.iter().find(|d| d.vault_key == b.to.0 && d.tree == b.to.1).map(|d| d.node.id.clone()));
+            vec![PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults: found.into_iter().map(|d| d.node.id).collect(), synced, moving }]
+        }
+    })
 }
 
 /// Keep what a pass of `drive` found of the room: a row while it is short, and
@@ -594,10 +641,10 @@ impl Read {
     }
 
     /// `status`: what this device keeps of each drive, the devices that claim
-    /// each whole, and the notices.
+    /// each whole, and the notices, `personal`'s first ([`notices`]).
     pub async fn status(&self, db: &Arc<SqlitePool>, user_id: &str, last_sync_at: Option<i64>) -> io::Result<DeviceStatus> {
         let readout = self.readout(db, user_id).await?;
-        let recorded = kotton_peer::daemon::drives::all(db, user_id).await?;
+        let recorded = kotton_peer::daemon::drives::kept(db, user_id).await?;
         let mut drives = Vec::new();
         for name in drive_names(db, user_id).await? {
             let copies: Vec<_> = recorded.iter().filter(|d| d.name == name).collect();
@@ -750,7 +797,7 @@ mod tests {
     }
 
     /// A daemon, its records and its machine database, for one person, with a
-    /// vault recorded as their drive.
+    /// vault recorded as theirs and `personal` listed there.
     struct Fixture {
         _temp: tempfile::TempDir,
         rt: crate::DeviceRuntime,
@@ -774,7 +821,18 @@ mod tests {
         let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&vault).unwrap().to_string();
         kotton_peer::daemon::db::insert_paired_node(&db, "vault", "alice", &did, &vault, "[]", 0, None).await.unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &vault).await.unwrap();
+        kotton_peer::daemon::drives::reconcile(&db, "alice", &vault, &[personal_at(1)]).await.unwrap();
         Fixture { _temp: temp, rt, store, records, db }
+    }
+
+    /// `personal` as a vault lists it: a made tree sealed with the first
+    /// drive's id.
+    fn personal_at(tree: u8) -> kotton_peer::daemon::drives::Listed {
+        kotton_peer::daemon::drives::Listed {
+            tree: kotton_wire::ipc::MadeDrive([tree; 16]).tree(),
+            name: FIRST_DRIVE_NAME.into(),
+            id: FIRST_DRIVE_ID.into(),
+        }
     }
 
     impl Fixture {
@@ -977,6 +1035,60 @@ mod tests {
         assert_eq!(told, [PinNotice::NoWholeDevice { drive: FIRST_DRIVE_NAME.into() }], "{told:?}");
         let claims = vec![claimed("did:key:z6Mkme", FIRST_DRIVE_ID)];
         assert!(notices(&f.db, "alice", &claims, &devices).await.unwrap().is_empty());
+    }
+
+    /// **`personal`'s notices come first** (kotton-protocol's storage model; kotton #124): that no
+    /// device keeps it whole is said before another drive's, since losing the
+    /// one vault it lives on then loses it; a person whose vaults list no
+    /// `personal` is told it is not found, as this device's tree then syncs
+    /// with nothing; and two vaults listing a tree sealed as it are named,
+    /// with the one this device keeps syncing with when it synced with one
+    /// before, and none when it did not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn personal_is_told_of_first_where_it_is_not_found_found_twice_or_kept_whole_by_none() {
+        use kotton_peer::daemon::drives as record;
+        let f = fixture().await;
+        let home = ed25519_dalek::SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
+        let photos = record::Listed { tree: kotton_wire::ipc::MadeDrive([2; 16]).tree(), name: "photos".into(), id: "ab".repeat(16) };
+        record::reconcile(&f.db, "alice", &home, &[photos.clone(), personal_at(1)]).await.unwrap();
+        let devices = vec![("did:key:z6Mkme".to_string(), THIS_DEVICE.to_string())];
+        let told = notices(&f.db, "alice", &[], &devices).await.unwrap();
+        assert_eq!(
+            told,
+            [PinNotice::NoWholeDevice { drive: FIRST_DRIVE_NAME.into() }, PinNotice::NoWholeDevice { drive: "photos".into() }],
+            "personal is not told of first"
+        );
+
+        record::reconcile(&f.db, "alice", &home, &[photos]).await.unwrap();
+        let told = notices(&f.db, "alice", &[claimed("did:key:z6Mkme", FIRST_DRIVE_ID)], &devices).await.unwrap();
+        assert_eq!(told[0], PinNotice::NotFound { drive: FIRST_DRIVE_NAME.into() }, "{told:?}");
+
+        // A second vault, and personal at both.
+        let office = ed25519_dalek::SigningKey::from_bytes(&[4; 32]).verifying_key().to_bytes();
+        let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&office).unwrap().to_string();
+        kotton_peer::daemon::db::insert_paired_node(&f.db, "office", "alice", &did, &office, "[]", 0, None).await.unwrap();
+        record::record(&f.db, "alice", &office).await.unwrap();
+        record::reconcile(&f.db, "alice", &home, &[personal_at(1)]).await.unwrap();
+        record::reconcile(&f.db, "alice", &office, &[personal_at(3)]).await.unwrap();
+        let mut vaults = vec![(home, "vault".to_string()), (office, "office".to_string())];
+        vaults.sort();
+        let vaults: Vec<String> = vaults.into_iter().map(|(_, label)| label).collect();
+        let claims = [claimed("did:key:z6Mkme", FIRST_DRIVE_ID)];
+        let told = notices(&f.db, "alice", &claims, &devices).await.unwrap();
+        assert_eq!(told, [PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults: vaults.clone(), synced: None, moving: None }]);
+        record::mark_synced(&f.db, "alice", &office, &personal_at(3).tree).await.unwrap();
+        let told = notices(&f.db, "alice", &claims, &devices).await.unwrap();
+        assert_eq!(told, [PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults: vaults.clone(), synced: Some("office".into()), moving: None }]);
+        // The two are what this device's own move to the office left: the
+        // notice names where to rerun it.
+        let begun = record::MoveBegun { from: (home, personal_at(1).tree), to: (office, personal_at(3).tree) };
+        record::begin_move(&f.db, "alice", &begun).await.unwrap();
+        let told = notices(&f.db, "alice", &claims, &devices).await.unwrap();
+        assert_eq!(
+            told,
+            [PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults, synced: Some("office".into()), moving: Some("office".into()) }]
+        );
+        assert!(told[0].said().contains("`drive move personal --to office` on this device finishes the move"), "{}", told[0].said());
     }
 
     /// The record is the claim, field for field — the device and the drive

@@ -68,6 +68,8 @@ pub(crate) fn notices(notices: &[PinNotice]) -> Vec<Out> {
             what: match n {
                 PinNotice::NoWholeDevice { drive } => format!("no device keeps '{drive}' whole"),
                 PinNotice::ShortOfRoom { drive, .. } => format!("short of room for '{drive}'"),
+                PinNotice::NotFound { drive } => format!("'{drive}' is not found at your vaults"),
+                PinNotice::Twice { drive, vaults, .. } => format!("{} drives are called '{drive}'", vaults.len()),
             },
             consequence: n.said(),
         })
