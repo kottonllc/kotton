@@ -15,7 +15,8 @@
 
 use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto};
 use crate::drive_sync::{personal_tree, sealed_in, trees_at};
-use crate::vault::{enrol_vault_from, spawn_device, spawn_vault, RunningDevice, RunningVault};
+use crate::vault::{enrol_vault_from, spawn_device, spawn_vault, RunningVault};
+use kotton_sys::ipc::IpcEndpoint;
 use kotton_schemas::membership::Posture;
 use kotton_shell::{ExitCode, ShellState};
 use kotton_wire::ipc::{PinValue, FIRST_DRIVE_NAME};
@@ -47,10 +48,10 @@ struct Said {
     text: String,
 }
 
-/// `words`, typed at the REPL of `device` as the person whose session `token` is. Each line
+/// `words`, typed at the REPL of the daemon at `door` as the person whose session `token` is. Each line
 /// is written to the test's output, as the transcript.
-async fn typed(device: &RunningDevice, who: &str, token: &str, words: &[&str]) -> Said {
-    let mut client = kotton::KottonClient::connect_to(device.ipc.clone()).await.expect("a REPL connection");
+async fn typed(door: &IpcEndpoint, who: &str, token: &str, words: &[&str]) -> Said {
+    let mut client = kotton::KottonClient::connect_to(door.clone()).await.expect("a REPL connection");
     client.authenticate(token).await.expect("the REPL's identity");
     let mut state = ShellState::new(USER.to_string(), std::sync::Arc::new(tokio::sync::Mutex::new(client)));
     let words: Vec<String> = words.iter().map(|w| w.to_string()).collect();
@@ -76,14 +77,14 @@ async fn typed(device: &RunningDevice, who: &str, token: &str, words: &[&str]) -
 
 /// One of alice's devices, at its REPL.
 struct At<'a> {
-    device: &'a RunningDevice,
+    door: &'a IpcEndpoint,
     who: &'static str,
     token: String,
 }
 
 impl At<'_> {
     async fn line(&self, words: &[&str]) -> Said {
-        typed(self.device, self.who, &self.token, words).await
+        typed(self.door, self.who, &self.token, words).await
     }
 
     /// A line that must be done: exit 0.
@@ -133,11 +134,23 @@ fn note(marker: &str) -> serde_json::Value {
     serde_json::json!({ "title": "a note", "body": marker })
 }
 
+/// What a scan of a vault's disk read and found.
+struct Scan {
+    /// Each needle found, and the file it was found in.
+    found: Vec<String>,
+    /// Files and bytes read under the vault's directory.
+    files: usize,
+    bytes: usize,
+    /// Files and bytes read under `users/<user>/drives/<tree>`, the tree the vault keeps the
+    /// drive in (`kvaultd::drives`), when one was named.
+    in_drive: (usize, usize),
+}
+
 /// Every needle any file under `vault`'s directory holds, in its bytes or in its path. Each
 /// needle is looked for as it is written and, for a record's id, as the sixteen bytes of the
-/// UUID it spells, so a binary copy of the id is found too. Returns, with the findings, how
-/// many files and bytes were read, so a scan that read nothing cannot pass.
-fn readable_at(vault: &RunningVault, needles: &[&str]) -> (Vec<String>, usize, usize) {
+/// UUID it spells, so a binary copy of the id is found too. What was read under the drive's
+/// own tree, `tree`, is counted apart, so the caller can show the scan read the drive.
+fn readable_at(vault: &RunningVault, tree: Option<&str>, needles: &[&str]) -> Scan {
     let mut forms: Vec<(String, Vec<u8>)> = Vec::new();
     for n in needles {
         forms.push((n.to_string(), n.as_bytes().to_vec()));
@@ -148,7 +161,8 @@ fn readable_at(vault: &RunningVault, needles: &[&str]) -> (Vec<String>, usize, u
             }
         }
     }
-    let (mut found, mut files, mut bytes) = (Vec::new(), 0usize, 0usize);
+    let drive = tree.map(|t| vault.base_path.join("users").join(USER).join("drives").join(t));
+    let mut scan = Scan { found: Vec::new(), files: 0, bytes: 0, in_drive: (0, 0) };
     let mut pending = vec![vault.base_path.clone()];
     while let Some(dir) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -159,26 +173,45 @@ fn readable_at(vault: &RunningVault, needles: &[&str]) -> (Vec<String>, usize, u
                 continue;
             }
             let Ok(held) = std::fs::read(&path) else { continue };
-            files += 1;
-            bytes += held.len();
+            scan.files += 1;
+            scan.bytes += held.len();
+            if drive.as_ref().is_some_and(|d| path.starts_with(d)) {
+                scan.in_drive.0 += 1;
+                scan.in_drive.1 += held.len();
+            }
             let name = path.to_string_lossy().into_owned();
             for (said, form) in &forms {
                 if held.windows(form.len()).any(|w| w == form.as_slice()) || name.as_bytes().windows(form.len()).any(|w| w == form.as_slice()) {
-                    found.push(format!("{said} in {name}"));
+                    scan.found.push(format!("{said} in {name}"));
                 }
             }
         }
     }
-    (found, files, bytes)
+    scan
 }
 
-/// Neither vault holds any of `needles` where its disk can be read.
-fn neither_vault_reads(vaults: &[&RunningVault], needles: &[&str]) {
-    for vault in vaults {
-        let (found, files, bytes) = readable_at(vault, needles);
-        assert!(files > 0 && bytes > 0, "the scan of {} read nothing", vault.base_path.display());
-        assert!(found.is_empty(), "a vault can read a record: {found:?}");
-    }
+/// `vault` keeps `personal` in `tree`, and its disk holds none of `needles`. The scan is
+/// shown to have read the drive: at least as many files under its tree as the vault lists
+/// sealed objects in it, and at least their bytes.
+async fn the_vault_keeping_it_reads_none_of(vault: &RunningVault, tree: &str, needles: &[&str]) {
+    let sealed = sealed_in(vault, tree).await;
+    assert!(!sealed.is_empty(), "personal at {} holds nothing to scan", vault.base_path.display());
+    let held: usize = sealed.iter().map(|(_, b)| b.len()).sum();
+    let scan = readable_at(vault, Some(tree), needles);
+    assert!(
+        scan.in_drive.0 >= sealed.len() && scan.in_drive.1 >= held,
+        "the scan did not read the drive: {:?} of {} objects, {held} bytes",
+        scan.in_drive,
+        sealed.len()
+    );
+    assert!(scan.found.is_empty(), "the vault can read a record: {:?}", scan.found);
+}
+
+/// A vault `personal` has left holds none of `needles` anywhere on its disk.
+fn the_vault_it_left_reads_none_of(vault: &RunningVault, needles: &[&str]) {
+    let scan = readable_at(vault, None, needles);
+    assert!(scan.files > 0 && scan.bytes > 0, "the scan of {} read nothing", vault.base_path.display());
+    assert!(scan.found.is_empty(), "the vault personal left can read a record: {:?}", scan.found);
 }
 
 /// **A record put on one device is read on another by way of `personal`, and still after
@@ -198,8 +231,8 @@ async fn a_record_put_on_one_device_is_read_on_another_by_way_of_personal_wherev
     let client_b = connect_when_ready(&b.ipc, "client B").await;
     let (client_a, client_b, _node_b) =
         enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", Posture::Full).await;
-    let on_a = At { device: &a, who: "A", token: client_a.session_token.clone().expect("A's session") };
-    let on_b = At { device: &b, who: "B", token: client_b.session_token.clone().expect("B's session") };
+    let on_a = At { door: &a.ipc, who: "A", token: client_a.session_token.clone().expect("A's session") };
+    let on_b = At { door: &b.ipc, who: "B", token: client_b.session_token.clone().expect("B's session") };
 
     // A keeps personal whole, as the device that made it does; B, which learns personal
     // from the vaults' listings at its first pass, keeps it on demand.
@@ -238,6 +271,14 @@ async fn a_record_put_on_one_device_is_read_on_another_by_way_of_personal_wherev
     // A second record, put on A and synced to the first vault; then personal moves.
     let two = on_a.put(note("records-drive-marker-two")).await;
     on_a.sync().await;
+    // Before the move: the vault that keeps personal holds both records, sealed, and reads
+    // none of either.
+    the_vault_keeping_it_reads_none_of(
+        &vault,
+        &at_first,
+        &["records-drive-marker-one", "records-drive-marker-two", &one, &two, NOTES],
+    )
+    .await;
     on_a.done(&["drive", "move", FIRST_DRIVE_NAME, "--to", "vault-2"]).await;
     let at_second = personal_tree(&a, &second.pubkey_hex).await;
     assert!(!trees_at(&vault).contains(&at_first), "the first vault still keeps the tree personal left");
@@ -262,19 +303,67 @@ async fn a_record_put_on_one_device_is_read_on_another_by_way_of_personal_wherev
     want.sort();
     assert_eq!(on_a.listed().await, want, "A's list after the move");
     assert_eq!(on_b.listed().await, want, "B's list after the move");
-    assert!(!sealed_in(&vault_2, &at_second).await.is_empty(), "personal at the second vault holds nothing");
 
-    // Neither vault reads a byte of any record: its fields, its id, or its schema's NSID.
-    neither_vault_reads(
-        &[&vault, &vault_2],
-        &[
-            "records-drive-marker-one",
-            "records-drive-marker-two",
-            "records-drive-marker-three",
-            &one,
-            &two,
-            &three,
-            NOTES,
-        ],
+    // After it: the vault that keeps personal now reads none of any record, and the one it
+    // left reads none either.
+    let needles = [
+        "records-drive-marker-one",
+        "records-drive-marker-two",
+        "records-drive-marker-three",
+        one.as_str(),
+        two.as_str(),
+        three.as_str(),
+        NOTES,
+    ];
+    the_vault_keeping_it_reads_none_of(&vault_2, &at_second, &needles).await;
+    the_vault_it_left_reads_none_of(&vault, &needles);
+}
+
+/// **The `record` verbs keep to Personal** (kotton #38, decision (b): records live in
+/// `personal` only). Alice is a member of her org's project root, made as `kotton records
+/// init` makes it, and a record of the schema is kept there. At her REPL, `record list` names
+/// only the record she put; `record get` and `record rm` of the project's record exit 1 as a
+/// missing id does; and the project's record is still there, in its root, untombstoned.
+#[tokio::test]
+async fn the_record_verbs_reach_personal_and_no_other_root_the_person_is_in() {
+    let mut env = crate::common::TestEnv::spawn().await;
+    env.client.create_user(USER, crate::common::TEST_PASSPHRASE).await.expect("create_user");
+    let recovery = env.client.add_recovery_phrase(USER).await.expect("add_recovery_phrase");
+    env.client.login_with_recovery_key(&recovery, Some(USER.to_string()), None).await.expect("login");
+    let org = env.client.org_new(USER, "kotton").await.expect("org create");
+    let root = env.client.org_root_create(USER, &org, "kotton").await.expect("records init").root;
+    knows_the_schema(&mut env.client).await;
+
+    let theirs = env
+        .client
+        .record_insert_in(USER, Some(&root), None, NOTES, note("in-the-project-root"))
+        .await
+        .expect("a record in the project's root");
+    let in_root = |rows: Vec<serde_json::Value>| -> Vec<String> {
+        rows.iter().map(|r| r["_id"].as_str().expect("a row's id").to_string()).collect()
+    };
+    let at = At { door: &env.endpoint, who: "alice", token: env.client.session_token.clone().expect("alice's session") };
+
+    let mine = at.put(note("in-personal")).await;
+    assert_eq!(at.listed().await, std::slice::from_ref(&mine), "`record list` reached past Personal");
+    at.get_is_missing(&theirs).await;
+    let rm = at.line(&["record", "rm", "--schema", NOTES, &theirs]).await;
+    assert_eq!(rm.exit, ExitCode::Code(1), "`record rm` reached the project's root: {}", rm.text);
+
+    let kept = env.client.record_query_in(USER, Some(&root), None, NOTES, vec![], None, None).await.expect("the root's rows");
+    assert_eq!(in_root(kept), std::slice::from_ref(&theirs), "the project's record is gone from its root");
+
+    // A schema this device does not know is refused by name, exit 1: it is not a missing id.
+    let unknown = at.line(&["record", "get", "--schema", "com.example.nobody-registered", &mine]).await;
+    assert_eq!(unknown.exit, ExitCode::Code(1), "{}", unknown.text);
+    assert!(
+        unknown.text.contains("unknown schema: com.example.nobody-registered") && !unknown.text.contains("no record"),
+        "an unknown schema was said as a missing record: {}",
+        unknown.text
     );
+
+    // And Personal's own record is the verbs' to remove.
+    at.done(&["record", "rm", "--schema", NOTES, &mine]).await;
+    at.get_is_missing(&mine).await;
+    assert!(at.listed().await.is_empty(), "Personal still lists the record removed");
 }

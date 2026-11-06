@@ -2,6 +2,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use kotton_schemas::nsid::Nsid;
+use kotton_wire::ipc::PERSONAL_ROOT;
 
 use super::{retired, Command, CommandOutput, Verb};
 use crate::out::Out;
@@ -18,10 +19,12 @@ use crate::state::ShellState;
 /// ```
 ///
 /// The command-tree decision's "Records and schemas" line, but `import` and `export`, which
-/// wait for a follow-up. Each verb is one request the daemon already answers (`RecordQuery`,
-/// `RecordOpen`, `RecordInsert`, `RecordDelete`), so the noun adds no reach: what it reads and
-/// writes is the person's own records, in Personal, which ride sealed in the record log of
-/// the tree this device keeps of `personal` (`kotton_record::replication`). A record put here
+/// wait for #454. Each verb is one request the daemon already answers (`RecordQuery`, `get`
+/// by the id, `RecordInsert`, `RecordDelete`), so the noun adds no reach. **Each names
+/// Personal** ([`PERSONAL_ROOT`]): it reads, writes and removes the person's own records in
+/// Personal and none in another root they are a member of, such as an organisation's. Those
+/// ride sealed in the record log of the tree this device keeps of `personal`
+/// (`kotton_record::replication`). A record put here
 /// is read on another device after a `sync` on each, wherever `personal` lives. A schema is
 /// cited by its NSID; this device must know it (a core schema, or one `schema register`ed).
 ///
@@ -112,7 +115,13 @@ fn parse(args: &[String]) -> Result<Line, CommandOutput> {
             None => usage(format!("record rm: '{id}' is not a record's id")),
         },
         ("put", [body]) => match serde_json::from_str::<serde_json::Value>(body) {
-            Ok(body) if body.is_object() => Ok(Line::Put { schema, body }),
+            Ok(body) if body.is_object() => match body.get("id") {
+                None => Ok(Line::Put { schema, body }),
+                Some(serde_json::Value::String(id)) if id_word(id).is_some() => Ok(Line::Put { schema, body }),
+                Some(id) => usage(format!(
+                    "record put: the `id` {id} is not a record's id: a string, not empty, not starting with `-`, without `/`"
+                )),
+            },
             _ => usage("record put: the record is one JSON object, quoted as one word".into()),
         },
         _ => usage(format!("record {verb}: unexpected words")),
@@ -148,7 +157,10 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
     let refused = |verb: &str, e: std::io::Error| CommandOutput::fail(format!("record {verb}: {e}"), None);
     match line {
         Line::List { schema, json } => {
-            let records = match client.record_query(&user_id, schema.as_str(), vec![], None, None).await {
+            let records = match client
+                .record_query_in(&user_id, Some(PERSONAL_ROOT), None, schema.as_str(), vec![], None, None)
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => return Ok(refused("list", e)),
             };
@@ -158,23 +170,31 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
             Ok(CommandOutput::shapes(vec![table(&records)]))
         }
         Line::Get { schema, id } => {
-            let url = format!("kotton://records/{schema}/{id}");
-            match client.record_open(&user_id, &url).await {
-                Ok(Some((_, record))) => {
-                    Ok(CommandOutput::shapes(vec![Out::Data(serde_json::to_string_pretty(&record)?)]))
+            // By the id, in Personal: `RecordOpen` names no root, and would reach a record in
+            // any root the person is in. An unknown schema is the daemon's refusal, said as it.
+            let by_id = vec![("id".to_string(), serde_json::json!(id))];
+            match client.record_query_in(&user_id, Some(PERSONAL_ROOT), None, schema.as_str(), by_id, Some(1), None).await {
+                Ok(found) if !found.is_empty() => {
+                    Ok(CommandOutput::shapes(vec![Out::Data(serde_json::to_string_pretty(&found[0])?)]))
                 }
-                Ok(None) => Ok(CommandOutput::fail(
+                Ok(_) => Ok(CommandOutput::fail(
                     format!("no record '{id}' under {schema}"),
                     Some(format!("`record list --schema {schema}` lists the ids")),
                 )),
                 Err(e) => Ok(refused("get", e)),
             }
         }
-        Line::Put { schema, body } => match client.record_insert(&user_id, schema.as_str(), body).await {
+        Line::Put { schema, body } => match client
+            .record_insert_in(&user_id, Some(PERSONAL_ROOT), None, schema.as_str(), body)
+            .await
+        {
             Ok(id) => Ok(CommandOutput::shapes(vec![Out::Data(id)])),
             Err(e) => Ok(refused("put", e)),
         },
-        Line::Rm { schema, id } => match client.record_delete(&user_id, schema.as_str(), &id).await {
+        Line::Rm { schema, id } => match client
+            .record_delete_in(&user_id, Some(PERSONAL_ROOT), None, schema.as_str(), &id)
+            .await
+        {
             Ok(()) => Ok(CommandOutput::shapes(vec![Out::Confirm {
                 action: "record removed; your other devices see it gone after their next sync".into(),
                 subject: id,
@@ -242,6 +262,10 @@ moved. The vault keeps it sealed under your key and can read none of it: not
 its fields, its id, or its schema's name. A schema is named by its NSID
 (`sh.kotton.notes`); this device must know it, as a core schema or one
 `schema register` added.
+
+These are your own records, in Personal: a record in another root you are a
+member of, such as an organisation's project, is not listed, read, written or
+removed here.
 
 `put` with an `id` among the fields writes that record again; without one it
 makes a new record and prints the id it was given. `rm` removes it on every
@@ -330,6 +354,21 @@ mod tests {
             let refused = parse(&words(line)).expect_err(line);
             assert_eq!(refused.exit_code, ExitCode::Code(2), "`record {line}`");
         }
+    }
+
+    /// `put` takes an `id` field only as a record's id: a string `get` and `rm` could name.
+    /// Anything else is usage, exit 2, before any session.
+    #[test]
+    fn put_refuses_an_id_that_is_not_a_records_id() {
+        let put = |body: &str| vec!["put".to_string(), "--schema".into(), NOTES.into(), body.into()];
+        for body in [r#"{"id":42}"#, r#"{"id":null}"#, r#"{"id":""}"#, r#"{"id":"a/b"}"#, r#"{"id":"-x"}"#, r#"{"id":["a"]}"#] {
+            let refused = parse(&put(body)).expect_err(body);
+            assert_eq!(refused.exit_code, ExitCode::Code(2), "{body}");
+        }
+        assert_eq!(
+            parse(&put(r#"{"id":"r1","title":"t"}"#)).ok(),
+            Some(Line::Put { schema: notes(), body: serde_json::json!({ "id": "r1", "title": "t" }) })
+        );
     }
 
     /// `record open` is gone for `record get`: refused, exit 2, with the line naming it.
