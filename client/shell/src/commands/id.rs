@@ -72,7 +72,7 @@ const USAGE: &str = "usage: id list | id use <name> | id lock | id add-recovery 
 #[async_trait]
 impl Command for IdCommand {
     fn help_text(&self) -> &'static str {
-        "id — your identities: list, switch, lock your vault, set up recovery, rotate, recover\n\nUSAGE:\n  id list            list identities on this device (`*` marks current)\n  id use <name>      switch this session to another identity\n  id lock            close your vault now; your passphrase opens it again\n  id add-recovery    mint a 24-word recovery phrase for this identity, printed once\n                     with the line of each vault that keeps a copy\n  id rotate          retire this identity's key for a new one; asks for the phrase\n                     and your passphrase at hidden prompts\n  id recover         bring this identity back onto this device from the vault that keeps\n                     your data; asks for the phrase, the vault's line and a new passphrase\n                     for this device before it begins, and records that vault as your drive\n\nWhat you type at a hidden prompt is not shown and is not kept in the shell's history.\nThe other `kotton id` verbs (create, join, rm, login, set-passphrase, bind-device, unlock)\nare answered with the one-shot form to run outside the shell.\n"
+        "id — your identities: list, switch, lock your vault, set up recovery, rotate, recover\n\nUSAGE:\n  id list            list identities on this device (`*` marks current)\n  id use <name>      switch this session to another identity\n  id lock            close your vault now; your passphrase opens it again\n  id add-recovery    mint a 24-word recovery phrase for this identity, printed once\n                     with the line of each vault that keeps a copy\n  id rotate          retire this identity's key for a new one; asks for the phrase\n                     and your passphrase at hidden prompts\n  id recover         bring this identity back onto this device from the vault that keeps\n                     your data; asks for the phrase, the vault's line and a new passphrase\n                     for this device before it begins, and records that vault as one of yours\n\nWhat you type at a hidden prompt is not shown and is not kept in the shell's history.\nThe other `kotton id` verbs (create, join, rm, login, set-passphrase, bind-device, unlock)\nare answered with the one-shot form to run outside the shell.\n"
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
@@ -331,7 +331,7 @@ async fn recover(rest: &[&str], state: &mut ShellState) -> Result<CommandOutput>
         None => said.push(Out::Hint("`sync` brings your files and records back from your drive".to_string())),
         Some(why) => said.push(Out::Warn {
             what: why,
-            consequence: "this device does not yet treat the vault as your drive; do not recover again".to_string(),
+            consequence: "this device does not yet treat the vault as one of yours; do not recover again".to_string(),
         }),
     }
     Ok(CommandOutput::shapes(said))

@@ -66,7 +66,7 @@ pub enum IdCommand {
     /// Then it claims the name here, adds the vault the line names, fetches your
     /// identity and sealed keys from it, proves the words against them, makes this
     /// machine's key yours, seals your keys here under the passphrase, records the
-    /// vault as your drive, makes the identity the one this machine acts as, and
+    /// vault as one of yours, makes the identity the one this machine acts as, and
     /// syncs your things back. Words that
     /// do not prove the identity are refused: a machine that held nothing of the name
     /// holds nothing of it after, unless the refusal names lines to run, in order, to

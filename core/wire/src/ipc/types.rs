@@ -1079,7 +1079,28 @@ pub enum PinNotice {
     Twice { drive: String, vaults: Vec<String>, synced: Option<String>, moving: Option<String> },
 }
 
+/// What [`PinNotice::NotFound`] says of `drive`, from its first word.
+fn not_found(drive: &str) -> String {
+    format!(
+        "none of your vaults has listed '{drive}' to this device, so this device's files sync with \
+         nothing. If you kept '{drive}' on a vault this device does not reach yet, add or enrol that \
+         vault first and `sync`; only if no vault of yours holds it, `drive create {drive} --on <vault>` \
+         makes it, and a second '{drive}' made beside one this device cannot see is a drive of its own"
+    )
+}
+
 impl PinNotice {
+    /// The notice as the line after a vault's enrolment says it, of the vault
+    /// just enrolled: [`PinNotice::NotFound`] there means the vault holds
+    /// nothing yet because `personal` could not be made at it. Every other
+    /// notice is said as [`Self::said`] says it.
+    pub fn said_after_enrol(&self) -> String {
+        match self {
+            PinNotice::NotFound { drive } => format!("it holds nothing yet, and {}", not_found(drive)),
+            other => other.said(),
+        }
+    }
+
     /// The notice as the person reads it.
     pub fn said(&self) -> String {
         match self {
@@ -1106,12 +1127,7 @@ impl PinNotice {
                      pins want {wanted}; {less}"
                 )
             }
-            PinNotice::NotFound { drive } => format!(
-                "none of your vaults has listed '{drive}' to this device, so this device's files sync with \
-                 nothing. If you kept '{drive}' on a vault this device does not reach yet, add or enrol that \
-                 vault first and `sync`; only if no vault of yours holds it, `drive create {drive} --on <vault>` \
-                 makes it, and a second '{drive}' made beside one this device cannot see is a drive of its own"
-            ),
+            PinNotice::NotFound { drive } => not_found(drive),
             PinNotice::Twice { drive, vaults, synced, moving } => {
                 let at = vaults.iter().map(|v| format!("'{v}'")).collect::<Vec<_>>().join(" and ");
                 let syncs = match synced {

@@ -230,7 +230,7 @@ Identity management — your identities on this device (list, use, create, recov
 * `add-recovery` — Set up recovery: mint a 24-word phrase and commit it as an authority
 * `login` — Recover an account with a 24-word recovery phrase (prompted, hidden)
 * `rotate` — Rotate your identity key with your recovery phrase (survive key compromise). Your identity (DID) stays the same; the old key stops working. The phrase is prompted (hidden), never taken on the command line
-* `recover` — Make this machine yours again, from the words and the line `id add-recovery` printed. Asks for your name (unless given), the twenty-four words at a hidden prompt, the vault's line, and a passphrase for this machine, before it begins. Then it claims the name here, adds the vault the line names, fetches your identity and sealed keys from it, proves the words against them, makes this machine's key yours, seals your keys here under the passphrase, records the vault as your drive, makes the identity the one this machine acts as, and syncs your things back. Words that do not prove the identity are refused: a machine that held nothing of the name holds nothing of it after, unless the refusal names lines to run, in order, to remove what it could not take back; and one that held it keeps it
+* `recover` — Make this machine yours again, from the words and the line `id add-recovery` printed. Asks for your name (unless given), the twenty-four words at a hidden prompt, the vault's line, and a passphrase for this machine, before it begins. Then it claims the name here, adds the vault the line names, fetches your identity and sealed keys from it, proves the words against them, makes this machine's key yours, seals your keys here under the passphrase, records the vault as one of yours, makes the identity the one this machine acts as, and syncs your things back. Words that do not prove the identity are refused: a machine that held nothing of the name holds nothing of it after, unless the refusal names lines to run, in order, to remove what it could not take back; and one that held it keeps it
 * `set-passphrase` — Set your daily unlock passphrase, so you unlock with it — not your recovery phrase
 * `bind-device` — Bind this identity to this device's hardware, so the vault opens only here
 * `lock` — Lock your vault now — your keys leave memory until your passphrase opens it again
@@ -323,7 +323,7 @@ Rotate your identity key with your recovery phrase (survive key compromise). You
 
 ## `Kotton id recover`
 
-Make this machine yours again, from the words and the line `id add-recovery` printed. Asks for your name (unless given), the twenty-four words at a hidden prompt, the vault's line, and a passphrase for this machine, before it begins. Then it claims the name here, adds the vault the line names, fetches your identity and sealed keys from it, proves the words against them, makes this machine's key yours, seals your keys here under the passphrase, records the vault as your drive, makes the identity the one this machine acts as, and syncs your things back. Words that do not prove the identity are refused: a machine that held nothing of the name holds nothing of it after, unless the refusal names lines to run, in order, to remove what it could not take back; and one that held it keeps it
+Make this machine yours again, from the words and the line `id add-recovery` printed. Asks for your name (unless given), the twenty-four words at a hidden prompt, the vault's line, and a passphrase for this machine, before it begins. Then it claims the name here, adds the vault the line names, fetches your identity and sealed keys from it, proves the words against them, makes this machine's key yours, seals your keys here under the passphrase, records the vault as one of yours, makes the identity the one this machine acts as, and syncs your things back. Words that do not prove the identity are refused: a machine that held nothing of the name holds nothing of it after, unless the refusal names lines to run, in order, to remove what it could not take back; and one that held it keeps it
 
 **Usage:** `Kotton id recover [USERNAME]`
 
@@ -823,7 +823,10 @@ USAGE:
 
 A drive is a sealed tree a vault keeps for you; a vault keeps as many as you
 make. Its name is sealed under your key: the vault cannot read it. Your first
-drive on each vault is `personal`, the tree this device syncs with.
+drive is `personal`: one drive, at one vault, made at the first vault you
+enrol, and the one this device's files sync with wherever it lives. A vault
+you enrol after that holds nothing of yours until a drive is made or moved
+there.
 
 A move copies every sealed object to the other vault under the same key, and
 retires the drive where it was only once the other vault holds all of it.
@@ -832,7 +835,8 @@ drive where it was; a copy the other vault would not take back is listed as an
 unfinished move, and moving the drive there again clears it. A move cut off
 after the other vault has the drive is finished by running it again. A key the
 vault lists that is not a storage key is refused, not carried, and noted in the
-move's answer; `logs --level warn` names it. `personal` does not move.
+move's answer; `logs --level warn` names it. `personal` moves like any drive,
+and every device's files follow it there.
 
 `enrol` takes the invite a vault's landlord gave you (`vault invite <name>`
 at theirs): this device meets the vault at the invite's relay, and you type
@@ -1148,7 +1152,7 @@ Complete a key `mint` made, from the line its relay or vault printed when it was
 **Usage:** `Kotton enrol [OPTIONS] [ARGS]...`
 
 ```text
-enrol <line> [<line>…] — paste the line each relay or vault of your own printed when it was created, space-separated or one per row, in any order, or the one line a host printed, which names both: each completes the key minted for it, and says what it names, whether it is reached from here and whether its key matched; a vault's then keeps your things, sealed, as one of your drives — `sync` syncs them there when you ask — and this device stands at the relay the same enrol kept; a relay's keeps them at each vault it stands that does not keep them yet. mint and enrol make one; relay and vault operate one
+enrol <line> [<line>…] — paste the line each relay or vault of your own printed when it was created, space-separated or one per row, in any order, or the one line a host printed, which names both: each completes the key minted for it, and says what it names, whether it is reached from here and whether its key matched; a vault's then keeps drives for you, sealed: the first vault you enrol keeps `personal`, the drive this device's files sync with when you ask, and a vault enrolled after it holds nothing of yours until a drive is made or moved there; this device stands at the relay the same enrol kept; a relay's enrols you, the same way, at each vault it stands that does not keep drives for you yet. mint and enrol make one; relay and vault operate one
 ```
 
 ###### **Arguments:**
