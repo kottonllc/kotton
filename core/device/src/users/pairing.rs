@@ -1262,6 +1262,7 @@ async fn first_drive_at(runtime: &DeviceRuntime, store: &kotton_store::runtime::
             unanswered = %vaults.join(", "),
             "a vault did not answer, so whether personal is kept there cannot be told; none was made"
         ),
+        Ok(MadeFirst::Making(why)) => tracing::info!(user_id, vault = %node.id, why, "another device is making a drive; this one made none, and follows what it makes at its next pass"),
         Err(e) => tracing::warn!(user_id, vault = %node.id, error = %e, "personal was not made at the vault just enrolled"),
     }
 }

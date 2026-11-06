@@ -49,13 +49,14 @@
 //! such keys gets [`NAMED_AT_MOST`] of them named and one event counting the
 //! rest, not a log the vault can fill. They are published as the listing is
 //! admitted, before anything is copied, so a move cut off afterwards has
-//! already handed them to the log. That is what covers **finishing an
-//! interrupted move** ([`Plan::AtDestination`]): the finish reads no listing,
-//! so it refuses nothing and answers `keys_refused: 0`; the keys the cut-off
-//! move refused were counted in that move's own refusal when it answered one
-//! ([`Carried::SourceKept`]'s), and named in the log either way, including
-//! when the device died between naming the copy and retiring the source and
-//! nothing answered. What this does not hold: a log not open for the person
+//! already handed them to the log. **Finishing an interrupted move**
+//! ([`Plan::AtDestination`]) reads the listing of each copy it retires, to top
+//! the drive up from it (below), and admits that listing the same way: what
+//! it refuses there it names in the log and counts in its answer; the keys
+//! the cut-off move refused were counted in that move's own refusal when it
+//! answered one ([`Carried::SourceKept`]'s), and named in the log either way,
+//! including when the device died between naming the copy and retiring the
+//! source and nothing answered. What this does not hold: a log not open for the person
 //! (no subscriber) takes nothing, and a daemon that dies in the moment between
 //! publishing and the log's write loses the names; the count in the answer is
 //! unaffected. The alternative, the names carried in the answer itself, is a
@@ -94,14 +95,15 @@
 //! ([`kotton_peer::daemon::drives::Drive::id`]). Two finished copies that share
 //! an id are one drive kept twice: a move whose source retire failed, or a
 //! device that died between naming the copy and retiring the source, or two
-//! devices moving the same drive at once. **`drive move <name> --to <vault>`
+//! devices' moves of it whose leases crossed (below). **`drive move <name> --to <vault>`
 //! resolves that state by the id** ([`plan_move`]): if `<vault>` holds a copy,
-//! it keeps that one and retires the others, and answers that the drive moved
-//! — the interrupted move, finished; if it holds none, it moves one copy there
-//! and then retires the rest. Two copies of one name with *different* ids are
-//! two drives that no move made — two `create`s that raced — and are left
-//! alone: `move` refuses and names both, and `--from <vault>` names the one
-//! meant.
+//! it keeps that one, tops it up from the others, and retires them, and
+//! answers that the drive moved — the interrupted move, finished; if it holds
+//! none, it moves one copy there and then does the same with the rest. Two
+//! copies of one name with *different* ids are two drives that no move made —
+//! two `create`s that raced apart, which the making lease (below) rules out
+//! among devices that record the same vaults — and are left alone: `move`
+//! refuses and names both, and `--from <vault>` names the one meant.
 //!
 //! **A name sealed before ids, migrated in place.** kotton #155 sealed a
 //! drive's *origin* (the vault and tree it was first made as) where the id now
@@ -130,23 +132,58 @@
 //! lost by it, because the retire comes only after the other vault holds and
 //! names every object, and the record is rebuilt from the vaults' listings.
 //!
-//! **What a move holds: the drive, on this device.** A move takes the drive's
-//! lock on this device ([`drive_lock`], a [`DeviceRuntime::lock_mount`] keyed by
-//! the drive's name) for the whole of it, so two moves of one drive on one
-//! device are one after the other, and the second reads where the first left
-//! it. A vault refuses a write into a tree it is retiring
-//! (`kvaultd::drives::retire`). What no device-local lock can hold is another
-//! device: two devices moving one drive at once, two making one name at once,
-//! or a pass another device runs into a made drive while this one moves it.
-//! Today no device writes into a made drive but `personal` — a device keeps
-//! no tree of any other until drive paths (kotton #58). This device writes
-//! nothing into `personal` while it moves it (below); a write another device's
-//! pass makes into it mid-move is not held by anything here, and holding it
-//! is kotton #143's, the lease the vault keeps so one device at a time moves
-//! or makes a drive. The first two are resolved afterwards by the next move
-//! as above. A `drive create` holds the drive's name on this device for the
-//! listing and the make ([`drive_lock`]), so two creates of one name here make
-//! one drive.
+//! **What a move holds: the drive, on this device and at every vault it
+//! touches** (kotton #143). A move takes the drive's lock on this device
+//! ([`drive_lock`], a [`DeviceRuntime::lock_mount`] keyed by the drive's name)
+//! for the whole of it, so two moves of one drive on one device are one after
+//! the other, and the second reads where the first left it. What no
+//! device-local lock can hold is another device, so a move also takes a
+//! lease the vault keeps (`kvaultd::drives`) on every tree it touches: the
+//! drive where it is, before it lists it, read again once held, since
+//! another device may have moved it meanwhile; the copy, whose lease the
+//! vault gives with the tree (`TenantDriveMake`); each other finished copy it
+//! retires; and an unfinished tree an earlier move left. A lease id is one
+//! vault's and is never sent to another. While a tree is held, no other
+//! device's pass writes into it, names it, retires it or moves it: each is
+//! refused with `DriveHeld`, which names the holding device, and a pass so
+//! refused fails as any failed pass does, keeps what it wrote, and sends it
+//! where the drive is at its next pass. Every retire names the lease it is
+//! under, and the vault refuses one that has lapsed or been taken since: a
+//! fencing token. A lease is renewed every [`RENEW_EVERY`] on a connection of
+//! its own, so a large object copied on the move's connection never holds a
+//! renewal back, and again right before the copy is named finished and before
+//! each retire; a renewal that fails stops the copy at its next object, and
+//! the drive stays where it is ([`Leased`]). Every lease is let go when the
+//! move ends, the copy's above all, which the person's other devices write
+//! into once it is named.
+//!
+//! **One state a lease does not rule out.** A lease that lapses between its
+//! last renewal and the naming — a device stalled there for a minute — can
+//! be taken by another device's move of the same drive, and both may name a
+//! copy finished. The first device's retire of the source is then refused,
+//! its lease being gone, and the second's retires it; what is left is two
+//! finished copies with one id and no source, which the next move resolves by
+//! that id as it resolves any drive kept twice ([`plan_move`];
+//! `two_copies_of_one_drive_two_movers_made_resolve_on_the_next_move`).
+//! Nothing is lost: each copy was named finished only once it held every
+//! object, and the next move tops up the one it retires.
+//!
+//! **Finishing a move tops up first, for every drive.** Retiring a finished
+//! copy other than the one the drive now lives at — the source of a move cut
+//! off after it named the copy, or a copy left by an earlier move — first
+//! carries into the copy everything it lists that the copy does not, under a
+//! lease on it, so what another device's pass wrote there meanwhile is not
+//! lost ([`settle_copies`], [`top_up_and_settle`]).
+//!
+//! **One device at a time makes a drive.** `drive create` and the enrolment's
+//! [`make_first`] take the person's *making* lease at one vault, the lowest
+//! keyed among those the device records ([`making_vault`]), across the
+//! listing and the make, and also hold the drive's name on this device
+//! ([`drive_lock`]). So two devices creating one name at once, on one vault
+//! or two, make one drive and refuse the other, which names the device
+//! making one. The lease names no drive: the vault learns that some device of
+//! the person's is making one, as the make tells it a moment later. It
+//! coordinates the person's own devices, and is not a defence against them.
 //!
 //! **The first drive is made at the first vault, and moves like any other**
 //! (kotton-protocol's *A drive is where things live and a device keeps what its person
@@ -167,7 +204,8 @@
 //! whole of it, as a pass does, so this device writes nothing into the vault
 //! it leaves meanwhile, and once the copy is named finished this device syncs
 //! with the copy. A write another device's pass makes there while the move
-//! is running, not cut off, is kotton #143's to hold (above). **Two trees sealed `first`** are either the
+//! runs is refused by the move's lease, and sent to the copy at that device's
+//! next pass (above). **Two trees sealed `first`** are either the
 //! two a move of it left, cut off between naming the copy and retiring the
 //! source, or two that devices apart from each other each made, which no move
 //! may resolve: a move retires every copy but one, and the other may hold
@@ -220,7 +258,8 @@ use kotton_store::runtime::user::UserStore;
 use kotton_store::{NotCanonical, StorageKey};
 use kotton_sys::store::SealedObjectAccess as _;
 use kotton_wire::ipc::{
-    DriveDescriptor, MadeDrive, TenantDrive, UserResponse, VaultPeerRequest, FIRST_DRIVE_ID, FIRST_DRIVE_NAME, TENANCY_TREE,
+    DriveDescriptor, DriveLease, Holding, MadeDrive, TenantDrive, UserResponse, VaultPeerRequest, FIRST_DRIVE_ID, FIRST_DRIVE_NAME,
+    TENANCY_TREE,
 };
 use kotton_wire::peer::PairedNode;
 use serde::{Deserialize, Serialize};
@@ -390,6 +429,13 @@ async fn seal_with_id(store: &UserStore, user_id: &str, client: &KottonPeerObjec
     let sealed_name = SealedName { name: copy.name.clone(), id: copy.id.clone() }.seal(store, &copy.tree, true)?;
     match ask(client, VaultPeerRequest::TenantDriveName { user_id: user_id.to_string(), drive, sealed_name }).await? {
         UserResponse::Ok => Ok(()),
+        // Another device holds the tree, to move it (kotton #143): the name is
+        // sealed again by whichever device next reads it unmoved, or the move
+        // carries the tree away. Skipped, not failed.
+        UserResponse::DriveHeld { .. } => {
+            tracing::debug!(user_id, tree = %copy.tree, "a drive's name was not sealed again: another device holds it");
+            Ok(())
+        }
         UserResponse::Error { message } => Err(io::Error::other(message)),
         other => Err(io::Error::other(format!("the vault answered {other:?} to TenantDriveName"))),
     }
@@ -451,6 +497,185 @@ async fn dial(runtime: &DeviceRuntime, node: &PairedNode, user_id: &str) -> io::
         .await
         .map_err(|_| io::Error::other(format!("the vault '{}' did not answer in time", node.id)))?
         .map_err(|e| io::Error::other(format!("the vault '{}' did not answer: {e}", node.id)))
+}
+
+/// How often a lease this device holds is renewed while it holds it
+/// ([`Leased`]): a third of the time a vault keeps one (`kvaultd::drives`), so
+/// two renewals may be lost before it lapses.
+const RENEW_EVERY: Duration = Duration::from_secs(20);
+
+/// Another device of the person's holds a lease at a vault (`DriveHeld`): its
+/// key, as the vault admitted it, and how long the lease has left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldBy {
+    pub device_did: String,
+    pub for_secs: u32,
+}
+
+impl HeldBy {
+    /// The holding device, under this device's name for it: `this device`,
+    /// the person's own label for another of theirs, or its key when this
+    /// device knows none.
+    async fn named(&self, runtime: &DeviceRuntime, store: &UserStore) -> String {
+        let devices = pins::devices(store, &runtime.operational_did()).await;
+        match devices.into_iter().find(|(did, _)| *did == self.device_did) {
+            Some((_, name)) => format!("'{name}'"),
+            None => format!("another of your devices ({})", self.device_did),
+        }
+    }
+
+    /// The sentence a verb refused by it says, after `what` (`"'photos' is
+    /// being moved"`, `"a drive is being made"`).
+    async fn said(&self, runtime: &DeviceRuntime, store: &UserStore, what: &str, vault: &str) -> String {
+        format!(
+            "{what} by {} now; try again when it is done (its hold on '{vault}' lasts {}s more unless that device renews it)",
+            self.named(runtime, store).await,
+            self.for_secs
+        )
+    }
+}
+
+/// Renew `lease` on `holding` at the vault `client` reaches.
+async fn renew_lease(client: &KottonPeerObjectStorage, user_id: &str, holding: Holding, lease: DriveLease) -> Result<(), String> {
+    let asked = VaultPeerRequest::TenantDriveHold { user_id: user_id.to_string(), holding, lease: Some(lease) };
+    match ask(client, asked).await.map_err(|e| e.to_string())? {
+        UserResponse::DriveHold { lease: renewed, .. } if renewed == lease => Ok(()),
+        UserResponse::DriveHeld { device_did, for_secs } => {
+            Err(format!("another of your devices ({device_did}) holds it now, for {for_secs}s more"))
+        }
+        UserResponse::Error { message } => Err(message),
+        other => Err(format!("the vault answered {other:?}")),
+    }
+}
+
+/// **A lease this device holds at one vault** (kotton #143;
+/// `kvaultd::drives`): on a made drive's tree while a move touches it, or on
+/// the person's making of a drive. It is renewed every [`RENEW_EVERY`] on a
+/// connection of its own, so a large object copied on another connection —
+/// or a relayed one, whose requests go one at a time — never holds a renewal
+/// back; and right before a move names a copy finished and before each
+/// retire ([`VaultEnd::renew`]). A renewal that fails marks it lost, and a
+/// move whose lease is lost stops at its next read or write
+/// ([`PeerEnd`]): the renewal cancels the copy. Dropped, it stops renewing,
+/// and the vault lets it go when it lapses; [`Self::let_go`] lets it go at
+/// once.
+pub struct Leased {
+    user_id: String,
+    holding: Holding,
+    lease: DriveLease,
+    client: KottonPeerObjectStorage,
+    lost: Arc<std::sync::Mutex<Option<String>>>,
+    renewing: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Leased {
+    fn drop(&mut self) {
+        self.renewing.abort();
+    }
+}
+
+impl Leased {
+    /// Take `holding` at `node`, on a connection of its own. `Ok(Err)` is
+    /// another device holding it.
+    async fn take(runtime: &DeviceRuntime, node: &PairedNode, user_id: &str, holding: Holding) -> io::Result<Result<Arc<Self>, HeldBy>> {
+        let client = dial(runtime, node, user_id).await?;
+        let asked = VaultPeerRequest::TenantDriveHold { user_id: user_id.to_string(), holding, lease: None };
+        match ask(&client, asked).await? {
+            UserResponse::DriveHold { lease, .. } => Ok(Ok(Self::holding(client, user_id, holding, lease))),
+            UserResponse::DriveHeld { device_did, for_secs } => Ok(Err(HeldBy { device_did, for_secs })),
+            UserResponse::Error { message } => Err(io::Error::other(format!("the vault '{}' gave no lease: {message}", node.id))),
+            other => Err(io::Error::other(format!("the vault '{}' answered {other:?} to TenantDriveHold", node.id))),
+        }
+    }
+
+    /// The lease a vault gave (`DriveHold`), kept and renewed from here on,
+    /// on `client`, a connection nothing else uses.
+    fn holding(client: KottonPeerObjectStorage, user_id: &str, holding: Holding, lease: DriveLease) -> Arc<Self> {
+        let lost = Arc::new(std::sync::Mutex::new(None));
+        let renewing = tokio::spawn({
+            let (client, user_id, lost) = (client.clone(), user_id.to_string(), Arc::clone(&lost));
+            async move {
+                loop {
+                    tokio::time::sleep(RENEW_EVERY).await;
+                    if let Err(e) = renew_lease(&client, &user_id, holding, lease).await {
+                        tracing::warn!(user_id, error = %e, "a lease on a drive was lost; what holds it stops");
+                        *lost.lock().unwrap() = Some(e);
+                        return;
+                    }
+                }
+            }
+        });
+        Arc::new(Self { user_id: user_id.to_string(), holding, lease, client, lost, renewing })
+    }
+
+    /// Why the lease was lost, once it was.
+    fn lost(&self) -> Option<String> {
+        self.lost.lock().unwrap().clone()
+    }
+
+    /// Renew it now, or say why it is lost.
+    async fn renew(&self) -> Result<(), String> {
+        if let Some(why) = self.lost() {
+            return Err(why);
+        }
+        renew_lease(&self.client, &self.user_id, self.holding, self.lease).await.inspect_err(|e| {
+            *self.lost.lock().unwrap() = Some(e.clone());
+        })
+    }
+
+    /// Let it go at the vault, so another device may take it at once.
+    /// Best-effort: a lease not let go lapses.
+    async fn let_go(&self) {
+        self.renewing.abort();
+        let asked = VaultPeerRequest::TenantDriveLetGo { user_id: self.user_id.clone(), holding: self.holding, lease: self.lease };
+        if let Err(e) = ask(&self.client, asked).await {
+            tracing::debug!(user_id = %self.user_id, error = %e, "a lease was not let go; it lapses");
+        }
+    }
+}
+
+/// Every lease a verb took, let go together when it ends, however it ends.
+#[derive(Default)]
+struct Holds(std::sync::Mutex<Vec<Arc<Leased>>>);
+
+impl Holds {
+    fn keep(&self, leased: &Arc<Leased>) {
+        self.0.lock().unwrap().push(Arc::clone(leased));
+    }
+
+    async fn let_go(&self) {
+        let held: Vec<Arc<Leased>> = std::mem::take(&mut *self.0.lock().unwrap());
+        for leased in held {
+            leased.let_go().await;
+        }
+    }
+}
+
+/// The vault a device takes the person's making lease at: the one with the
+/// lowest key among those it records (module doc), so every device of theirs
+/// that records the same vaults asks the same one.
+async fn making_vault(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Option<Drive>> {
+    Ok(record::list(db, user_id).await?.into_iter().min_by_key(|v| v.vault_key))
+}
+
+/// Take the person's making lease at [`making_vault`], kept in `holds`.
+/// `Ok(Err)` is the sentence for another device holding it; `Ok(Ok(None))` a
+/// device that records no vault, which makes nothing anyway.
+async fn take_making(
+    runtime: &DeviceRuntime,
+    store: &UserStore,
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    holds: &Holds,
+) -> io::Result<Result<Option<Arc<Leased>>, String>> {
+    let Some(vault) = making_vault(db, user_id).await? else { return Ok(Ok(None)) };
+    match Leased::take(runtime, &vault.node, user_id, Holding::Making).await? {
+        Ok(making) => {
+            holds.keep(&making);
+            Ok(Ok(Some(making)))
+        }
+        Err(held) => Ok(Err(held.said(runtime, store, "a drive is being made", &vault.node.id).await)),
+    }
 }
 
 /// Ask every vault `user_id` keeps drives on, following each that answers.
@@ -612,11 +837,43 @@ pub async fn create(
     // this device, or a create of `personal` beside an enrolment's
     // [`make_first`], make one drive: the second reads the first's.
     let _held = runtime.lock_mount(user_id, &drive_lock(&name)).await;
+    // And the person's making lease, across their devices (module doc).
+    let holds = Holds::default();
+    let made = create_holding(runtime, store, records, db, user_id, &name, &vault, &holds).await;
+    holds.let_go().await;
+    made
+}
+
+/// [`create`], once the name is held on this device: the making lease taken,
+/// the name found free at every vault, and the drive made.
+#[allow(clippy::too_many_arguments)]
+async fn create_holding(
+    runtime: &DeviceRuntime,
+    store: &UserStore,
+    records: &SqliteRecordStore,
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    name: &str,
+    vault: &Drive,
+    holds: &Holds,
+) -> io::Result<UserResponse> {
+    let name = name.to_string();
+    let making = match take_making(runtime, store, db, user_id, holds).await? {
+        Ok(making) => making,
+        Err(why) => return refused(format!("drive create: {why}")),
+    };
     // Every vault, not this one alone: a drive of this name made on another
     // by another device is taken whatever this device's record says.
     let seen = follow_every_vault(runtime, store, db, user_id).await?;
     if let Err(e) = name_is_free(&seen, &name) {
         return refused(format!("drive create: {e}"));
+    }
+    // Still held when the drive is made: a listing slow enough to outlast it
+    // may have let another device make the name meanwhile.
+    if let Some(making) = &making {
+        if let Err(e) = making.renew().await {
+            return refused(format!("drive create: this device's hold on making a drive was lost while it listed your drives ({e}); try again"));
+        }
     }
     let client = dial(runtime, &vault.node, user_id).await?;
     let drive = MadeDrive(rand::random());
@@ -629,7 +886,8 @@ pub async fn create(
     let id = if name == FIRST_DRIVE_NAME { FIRST_DRIVE_ID.to_string() } else { mint_id() };
     let sealed_name = SealedName { name: name.clone(), id }.seal(store, &tree, true)?;
     match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
-        UserResponse::Ok | UserResponse::DriveHold { .. } => {}
+        // The new tree's lease, which nothing here holds it under: let go.
+        UserResponse::DriveHold { lease, .. } => holds.keep(&Leased::holding(client.clone(), user_id, Holding::Drive(drive), lease)),
         UserResponse::Error { message } => return refused(format!("drive create: the vault '{}' refused: {message}", vault.node.id)),
         other => return refused(format!("drive create: the vault answered {other:?}")),
     }
@@ -666,6 +924,9 @@ pub enum MadeFirst {
     /// These vaults did not answer, so whether `personal` is kept at one of
     /// them cannot be told; none was made.
     Unanswered(Vec<String>),
+    /// Another device of the person's is making a drive now (its making
+    /// lease, kotton #143), so this one made none: the sentence says which.
+    Making(String),
 }
 
 /// **Make `personal` at the vault `vault_key` just enrolled, if it is the
@@ -678,9 +939,34 @@ pub async fn make_first(runtime: &DeviceRuntime, store: &UserStore, db: &Arc<Sql
     // Held across the listing, the make and the mark: two enrolments at once
     // on this device make one `personal`, the second reading the first's.
     let _held = runtime.lock_mount(user_id, &drive_lock(FIRST_DRIVE_NAME)).await;
+    // And across the person's devices, as `drive create` holds it.
+    let holds = Holds::default();
+    let made = make_first_holding(runtime, store, db, user_id, vault_key, &holds).await;
+    holds.let_go().await;
+    made
+}
+
+/// [`make_first`], once `personal` is held on this device.
+async fn make_first_holding(
+    runtime: &DeviceRuntime,
+    store: &UserStore,
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    vault_key: &[u8; 32],
+    holds: &Holds,
+) -> io::Result<MadeFirst> {
+    let making = match take_making(runtime, store, db, user_id, holds).await? {
+        Ok(making) => making,
+        Err(why) => return Ok(MadeFirst::Making(why)),
+    };
     let seen = follow_every_vault(runtime, store, db, user_id).await?;
     if !seen.unanswered.is_empty() {
         return Ok(MadeFirst::Unanswered(seen.unanswered));
+    }
+    if let Some(making) = &making {
+        if let Err(e) = making.renew().await {
+            return Ok(MadeFirst::Making(format!("this device's hold on making a drive was lost while it listed ({e})")));
+        }
     }
     if seen.copies.iter().any(|c| c.id == FIRST_DRIVE_ID) {
         return Ok(MadeFirst::Kept);
@@ -695,7 +981,7 @@ pub async fn make_first(runtime: &DeviceRuntime, store: &UserStore, db: &Arc<Sql
     let tree = drive.tree();
     let sealed_name = SealedName { name: FIRST_DRIVE_NAME.to_string(), id: FIRST_DRIVE_ID.to_string() }.seal(store, &tree, true)?;
     match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
-        UserResponse::Ok | UserResponse::DriveHold { .. } => {}
+        UserResponse::DriveHold { lease, .. } => holds.keep(&Leased::holding(client.clone(), user_id, Holding::Drive(drive), lease)),
         UserResponse::Error { message } => return Err(io::Error::other(format!("the vault '{}' refused it: {message}", vault.node.id))),
         other => return Err(io::Error::other(format!("the vault '{}' answered {other:?}", vault.node.id))),
     }
@@ -781,38 +1067,82 @@ pub trait VaultEnd: Send + Sync {
     async fn write(&self, key: &StorageKey, blob: &[u8]) -> Result<(), String>;
     /// A tenant verb the vault answers `Ok` to, or why not.
     async fn tell(&self, request: VaultPeerRequest) -> Result<(), String>;
+    /// Renew the lease this device holds on the tree (kotton #143), or say
+    /// why it is lost. A tree held under no lease has none to renew.
+    async fn renew(&self) -> Result<(), String> {
+        Ok(())
+    }
+    /// The lease this device holds on the tree, which a retire of it names.
+    fn lease(&self) -> Option<DriveLease> {
+        None
+    }
 }
 
-/// A vault reached over the peer link, its sealed verbs pointed at one tree.
-struct PeerEnd(KottonPeerObjectStorage);
+/// A vault reached over the peer link, its sealed verbs pointed at one tree,
+/// and the lease this device holds on that tree there, if it holds one: a
+/// read or write once the lease is lost is refused here, so a move stops
+/// ([`Leased`]).
+struct PeerEnd(KottonPeerObjectStorage, Option<Arc<Leased>>);
+
+impl PeerEnd {
+    fn still_held(&self) -> Result<(), String> {
+        match self.1.as_ref().and_then(|l| l.lost()) {
+            Some(why) => Err(format!("this device's hold on the drive there was lost ({why}), so the move stopped")),
+            None => Ok(()),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl VaultEnd for PeerEnd {
     async fn objects(&self) -> Result<Vec<(String, u64)>, String> {
+        self.still_held()?;
         let listed = self.0.list_sealed(Path::new("")).await.map_err(|e| e.to_string())?;
         Ok(listed.into_iter().map(|o| (o.key, o.size)).collect())
     }
     async fn read(&self, key: &StorageKey) -> Result<Vec<u8>, String> {
+        self.still_held()?;
         self.0.get_sealed(key.as_path()).await.map(|b| b.to_vec()).map_err(|e| e.to_string())
     }
     async fn write(&self, key: &StorageKey, blob: &[u8]) -> Result<(), String> {
+        self.still_held()?;
         self.0.put_sealed(key.as_path(), blob).await.map_err(|e| e.to_string())
     }
     async fn tell(&self, request: VaultPeerRequest) -> Result<(), String> {
         match ask(&self.0, request).await.map_err(|e| e.to_string())? {
             UserResponse::Ok => Ok(()),
+            UserResponse::DriveHeld { device_did, for_secs } => {
+                Err(format!("another of your devices ({device_did}) holds the drive there, for {for_secs}s more"))
+            }
             UserResponse::Error { message } => Err(message),
             other => Err(format!("the vault answered {other:?}")),
         }
     }
+    async fn renew(&self) -> Result<(), String> {
+        match &self.1 {
+            Some(leased) => leased.renew().await,
+            None => Ok(()),
+        }
+    }
+    fn lease(&self) -> Option<DriveLease> {
+        self.1.as_ref().map(|l| l.lease)
+    }
 }
 
-/// Retire the made drive `drive` at `end`, asking a second time only when the
-/// first answer was not `Ok`. A retire is idempotent at the vault, so a first
-/// ask that acted and whose answer was lost is answered `Ok` the second time;
-/// an `Err` from the second is the vault saying it still keeps the tree.
+/// Retire the made drive `drive` at `end`, under the lease this device holds
+/// on it there, renewed first (kotton #143), asking a second time only when
+/// the first answer was not `Ok`. A retire is idempotent at the vault, so a
+/// first ask that acted and whose answer was lost is answered `Ok` the second
+/// time, lease or none; an `Err` from the second is the vault saying it still
+/// keeps the tree — among the reasons, that the lease lapsed or another device
+/// took it, which the vault refuses as a fencing token. The renewal is
+/// best-effort: the vault's answer to the retire is the one that counts.
 pub async fn retire(end: &dyn VaultEnd, user_id: &str, drive: MadeDrive) -> Result<(), String> {
-    let ask = || end.tell(VaultPeerRequest::TenantDriveRetire { user_id: user_id.to_string(), drive, lease: None });
+    if let Err(e) = end.renew().await {
+        tracing::debug!(user_id, error = %e, "a lease was not renewed before a retire; the vault decides");
+    }
+    let lease = end.lease();
+    let ask = || end.tell(VaultPeerRequest::TenantDriveRetire { user_id: user_id.to_string(), drive, lease });
     match ask().await {
         Ok(()) => Ok(()),
         Err(_) => ask().await,
@@ -957,6 +1287,11 @@ pub async fn carry_and_settle(
                 wanted.len()
             ));
         }
+        // Both holds renewed right before the naming (kotton #143): a source
+        // this device no longer holds may have taken a write since it was
+        // listed, and a copy it no longer holds may be another move's.
+        from.renew().await.map_err(|e| format!("this device's hold on the drive where it is was lost: {e}"))?;
+        to.renew().await.map_err(|e| format!("this device's hold on the copy was lost: {e}"))?;
         to.tell(VaultPeerRequest::TenantDriveName { user_id: user_id.to_string(), drive: to_id, sealed_name: finished_name })
             .await
             .map_err(|e| format!("the other vault did not name the drive: {e}"))
@@ -1144,13 +1479,36 @@ pub async fn move_to(
     // The drive is held on this device for the whole move ([`drive_lock`]):
     // a second move of it here waits, and then reads where the first left it.
     // Another device's move, or a pass another device runs into the drive,
-    // this lock does not see; that needs a lease the vault keeps (module doc).
+    // this lock does not see; the leases the vaults keep do (module doc).
     let _held = runtime.lock_mount(user_id, &drive_lock(name)).await;
     // `personal` is what this device's own tree syncs with, wherever it
     // lives, so its move also holds the tree as a pass does
     // (`kotton_sync::engine::sync_mount_with_records`): no pass of this
     // device's writes into the vault it leaves while it is being copied.
     let _tree_held = if name == FIRST_DRIVE_NAME { Some(runtime.lock_mount(user_id, kotton_common::LOCAL_MOUNT).await) } else { None };
+    // Every lease the move takes, let go when it ends, however it ends: the
+    // copy's above all, which other devices' passes write into once it is
+    // named finished.
+    let holds = Holds::default();
+    let moved = move_holding(runtime, store, records, db, user_id, name, to, from, &holds).await;
+    holds.let_go().await;
+    moved
+}
+
+/// [`move_to`], once the drive is held on this device; every lease it takes
+/// is kept in `holds`.
+#[allow(clippy::too_many_arguments)]
+async fn move_holding(
+    runtime: &DeviceRuntime,
+    store: &UserStore,
+    records: &SqliteRecordStore,
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    name: &str,
+    to: &str,
+    from: Option<&str>,
+    holds: &Holds,
+) -> io::Result<UserResponse> {
     let pins = pins_now(runtime, records, store, db, user_id).await?;
     let dest = match vault_named(db, user_id, Some(to), "--to").await? {
         Ok(v) => v,
@@ -1175,7 +1533,6 @@ pub async fn move_to(
     // Two trees sealed as `personal`: a move would retire all but one, and the
     // other may hold what this one does not, unless they are the two this
     // device's own move left (module doc).
-    let mut finishing_own_move = false;
     if name == FIRST_DRIVE_NAME {
         let firsts = finished_firsts(&seen.copies);
         let begun = record::move_begun(db, user_id).await?;
@@ -1187,7 +1544,7 @@ pub async fn move_to(
                     record::end_move(db, user_id).await?;
                 }
             }
-            Twice::OwnMove => finishing_own_move = true,
+            Twice::OwnMove => {}
             Twice::OwnMoveElsewhere(to) => {
                 return refused(format!(
                     "drive move: this device's move of '{name}' to '{}' has not finished, and '{name}' is on both \
@@ -1208,6 +1565,9 @@ pub async fn move_to(
             }
         }
     }
+    let Some(domain) = runtime.user_cek_domain_id(user_id, Some(store)) else {
+        return refused("drive move: this device holds no key for you, so it cannot carry a drive");
+    };
     let plan = plan_move(&seen.copies, name, &dest.vault_key, from_vault.as_ref().map(|v| &v.vault_key));
     let (source, retire_after) = match plan {
         Plan::NoSuch => return refused(format!("drive move: you have no drive called '{name}'{}", from.map(|f| format!(" on '{f}'")).unwrap_or_default())),
@@ -1223,60 +1583,27 @@ pub async fn move_to(
             let _ = keep;
             return refused(format!("drive move: '{name}' lives on '{}' already", dest.node.id));
         }
-        Plan::AtDestination { keep, retire: rest } if finishing_own_move => {
-            // This device's own move of `personal`, cut off after it named the
-            // copy here. Other devices kept syncing with the tree it left, so
-            // what they wrote there since is carried into the copy before that
-            // tree is retired ([`top_up_and_settle`]).
-            let Some(domain) = runtime.user_cek_domain_id(user_id, Some(store)) else {
-                return refused("drive move: this device holds no key for you, so it cannot carry a drive");
-            };
-            let bus = runtime.event_bus();
-            let mut keys_refused = 0usize;
-            for left in &rest {
-                let Some(left_id) = left.made() else {
-                    return refused(format!("drive move: '{name}' is also kept under {}, which is no drive's tree", left.tree));
-                };
-                let Some(left_vault) = vaults.iter().find(|v| v.vault_key == left.vault_key).cloned() else {
-                    return refused(format!("drive move: a vault '{name}' is also on is not one this device reaches"));
-                };
-                let src_label = left_vault.node.id.clone();
-                let record = |refused: &[NotCanonical]| {
-                    for event in refused_events(user_id, name, &src_label, refused) {
-                        let _ = bus.publish(event);
-                    }
-                };
-                let from_end = PeerEnd(dial(runtime, &left_vault.node, user_id).await?.with_remote_mount(left.tree.clone()).with_domain_id(domain.clone()));
-                let to_end = PeerEnd(dial(runtime, &dest.node, user_id).await?.with_remote_mount(keep.tree.clone()).with_domain_id(domain.clone()));
-                let Settled { carried, refused: not_carried } = top_up_and_settle(user_id, &from_end, left_id, &to_end, &record).await;
-                keys_refused += not_carried.len();
-                let also = refused_said(&not_carried, &src_label);
-                if let Carried::SourceKept(e) = carried {
-                    refollow(runtime, store, db, user_id, &vaults, &rest, &dest).await;
-                    return refused(format!(
-                        "drive move: '{name}' is on '{}', and this device syncs with it there, but '{src_label}' still \
-                         keeps the copy it left ({e}). Run `drive move {name} --to {}` again on this device to finish \
-                         it{also}",
-                        dest.node.id, dest.node.id
-                    ));
-                }
-            }
-            refollow(runtime, store, db, user_id, &vaults, &rest, &dest).await;
-            record::end_move(db, user_id).await?;
-            record::mark_synced(db, user_id, &keep.vault_key, &keep.tree).await?;
-            let sizes = Seen { copies: vec![keep.clone()], unanswered: vec![] }.sizes();
-            let moved = record::all(db, user_id).await?.into_iter().find(|d| d.vault_key == keep.vault_key && d.tree == keep.tree);
-            let moved = moved.ok_or_else(|| io::Error::other("the drive's copy at the vault was not recorded"))?;
-            tracing::info!(user_id, to = %dest.node.id, keys_refused, "finished an interrupted move of personal");
-            let keys_refused = u32::try_from(keys_refused).unwrap_or(u32::MAX);
-            return Ok(UserResponse::DriveMoved { drives: vec![describe(&moved, &sizes, &pins)], keys_refused });
-        }
         Plan::AtDestination { keep, retire: rest } => {
-            // A move cut off after it named the copy here: finish it.
-            let left = retire_copies(runtime, &vaults, user_id, &rest).await;
+            // A move cut off after it named the copy here, this device's own
+            // or another's: finish it. Whatever the copies it left took since
+            // — another device's pass kept writing there — is carried into
+            // the copy before each is retired, under a lease on each
+            // ([`settle_copies`]). For `personal` this is only ever this
+            // device's own move ([`twice`] refused any other above).
+            let into = PeerEnd(dial(runtime, &dest.node, user_id).await?.with_remote_mount(keep.tree.clone()).with_domain_id(domain.clone()), None);
+            let settled = settle_copies(runtime, store, &vaults, user_id, name, &rest, &into, &domain, holds).await?;
             refollow(runtime, store, db, user_id, &vaults, &rest, &dest).await;
-            if let Some(left) = left {
-                return refused(format!("drive move: '{name}' is on '{}', and {left}; run the move again to retire it", dest.node.id));
+            let also = refused_said(&settled.refused, &settled.from);
+            if let Some(left) = settled.left {
+                return refused(if name == FIRST_DRIVE_NAME {
+                    format!(
+                        "drive move: '{name}' is on '{}', and this device syncs with it there, but {left}. Run \
+                         `drive move {name} --to {}` again on this device to finish it{also}",
+                        dest.node.id, dest.node.id
+                    )
+                } else {
+                    format!("drive move: '{name}' is on '{}', and {left}; run the move again to retire it{also}", dest.node.id)
+                });
             }
             if name == FIRST_DRIVE_NAME {
                 record::end_move(db, user_id).await?;
@@ -1285,11 +1612,10 @@ pub async fn move_to(
             let sizes = Seen { copies: vec![keep.clone()], unanswered: vec![] }.sizes();
             let moved = record::all(db, user_id).await?.into_iter().find(|d| d.vault_key == keep.vault_key && d.tree == keep.tree);
             let moved = moved.ok_or_else(|| io::Error::other("the drive's copy at the vault was not recorded"))?;
-            tracing::info!(user_id, to = %dest.node.id, "finished an interrupted drive move");
-            // Finishing reads no listing, so it refuses no key; what the
-            // cut-off move refused it named in the person's event log as it
-            // read its listing (module doc).
-            return Ok(UserResponse::DriveMoved { drives: vec![describe(&moved, &sizes, &pins)], keys_refused: 0 });
+            let keys_refused = settled.refused.len();
+            tracing::info!(user_id, to = %dest.node.id, keys_refused, "finished an interrupted drive move");
+            let keys_refused = u32::try_from(keys_refused).unwrap_or(u32::MAX);
+            return Ok(UserResponse::DriveMoved { drives: vec![describe(&moved, &sizes, &pins)], keys_refused });
         }
         Plan::Carry { source, retire_after } => (source, retire_after),
     };
@@ -1299,16 +1625,60 @@ pub async fn move_to(
     let Some(source_vault) = vaults.iter().find(|v| v.vault_key == source.vault_key).cloned() else {
         return refused(format!("drive move: the vault '{name}' is on is not one this device reaches"));
     };
-    let Some(domain) = runtime.user_cek_domain_id(user_id, Some(store)) else {
-        return refused("drive move: this device holds no key for you, so it cannot carry a drive");
-    };
 
+    // The drive is held where it is before it is listed, and to its retire
+    // (module doc): no other device writes into it, names it, retires it or
+    // moves it meanwhile.
+    let source_held = match Leased::take(runtime, &source_vault.node, user_id, Holding::Drive(from_id)).await {
+        Ok(Ok(held)) => {
+            holds.keep(&held);
+            held
+        }
+        Ok(Err(held)) => {
+            return refused(format!(
+                "drive move: {}",
+                held.said(runtime, store, &format!("'{name}' is being moved"), &source_vault.node.id).await
+            ))
+        }
+        Err(e) => {
+            return refused(format!(
+                "drive move: '{name}' could not be held on '{}' to move it ({e}); try again",
+                source_vault.node.id
+            ))
+        }
+    };
     let from_client = dial(runtime, &source_vault.node, user_id).await?;
+    // Read again now that it is held: another device's move may have taken it
+    // between this device's listing and its lease.
+    let relisted = follow(store, db, user_id, &source.vault_key, &from_client).await?;
+    if !relisted.iter().any(|c| c.finished && c.tree == source.tree && c.id == source.id) {
+        return refused(format!(
+            "drive move: '{name}' changed on '{}' as this move began (another of your devices moved or retired it); \
+             run the move again",
+            source_vault.node.id
+        ));
+    }
     let dest_client = dial(runtime, &dest.node, user_id).await?;
-    // An earlier move of this drive to this vault that left its tree there.
+    // An earlier move of this drive to this vault that left its tree there,
+    // retired under a lease of its own.
     for stale in seen.copies.iter().filter(|c| !c.finished && c.vault_key == dest.vault_key && c.name == name) {
         let Some(id) = stale.made() else { continue };
-        let end = PeerEnd(dial(runtime, &dest.node, user_id).await?);
+        let held = match Leased::take(runtime, &dest.node, user_id, Holding::Drive(id)).await {
+            Ok(Ok(held)) => {
+                holds.keep(&held);
+                Some(held)
+            }
+            Ok(Err(held)) => {
+                return refused(format!(
+                    "drive move: {}",
+                    held.said(runtime, store, &format!("'{name}' is being moved to '{}'", dest.node.id), &dest.node.id).await
+                ))
+            }
+            // Gone since it was listed, or the vault did not answer: the
+            // retire, idempotent, says which.
+            Err(_) => None,
+        };
+        let end = PeerEnd(dial(runtime, &dest.node, user_id).await?, held);
         if let Err(e) = retire(&end, user_id, id).await {
             return refused(format!(
                 "drive move: '{}' still keeps an unfinished copy of '{name}' under {}, from an earlier move, and did \
@@ -1323,19 +1693,23 @@ pub async fn move_to(
     let carried_name = SealedName { name: name.to_string(), id: source.id.clone() };
     let unfinished_name = carried_name.seal(store, &to_tree, false)?;
     let finished_name = carried_name.seal(store, &to_tree, true)?;
-    match ask(&dest_client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive: to_id, sealed_name: unfinished_name }).await? {
-        UserResponse::Ok | UserResponse::DriveHold { .. } => {}
+    // The copy's lease is renewed on a connection of its own (module doc),
+    // dialled before the tree is made so a failed dial leaves nothing there.
+    let renews_copy = dial(runtime, &dest.node, user_id).await?;
+    let dest_held = match ask(&dest_client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive: to_id, sealed_name: unfinished_name }).await? {
+        UserResponse::DriveHold { lease, .. } => Leased::holding(renews_copy, user_id, Holding::Drive(to_id), lease),
         UserResponse::Error { message } => return refused(format!("drive move: '{}' refused the drive: {message}", dest.node.id)),
         other => return refused(format!("drive move: '{}' answered {other:?}", dest.node.id)),
-    }
+    };
+    holds.keep(&dest_held);
     // What lets a rerun of this move through, should it be cut off between
     // naming the copy finished and retiring the source (module doc).
     if name == FIRST_DRIVE_NAME {
         let begun = record::MoveBegun { from: (source.vault_key, source.tree.clone()), to: (dest.vault_key, to_tree.clone()) };
         record::begin_move(db, user_id, &begun).await?;
     }
-    let from_end = PeerEnd(from_client.with_remote_mount(source.tree.clone()).with_domain_id(domain.clone()));
-    let to_end = PeerEnd(dest_client.with_remote_mount(to_tree.clone()).with_domain_id(domain));
+    let from_end = PeerEnd(from_client.with_remote_mount(source.tree.clone()).with_domain_id(domain.clone()), Some(source_held));
+    let to_end = PeerEnd(dest_client.with_remote_mount(to_tree.clone()).with_domain_id(domain.clone()), Some(dest_held));
     // The keys the move refuses are named in the person's own log as the
     // listing is admitted ([`refused_events`]). No subscriber (no log open)
     // drops them; the count is still in the answer.
@@ -1346,9 +1720,17 @@ pub async fn move_to(
             let _ = bus.publish(event);
         }
     };
-    let Settled { carried, refused: not_carried } =
+    let Settled { carried, refused: mut not_carried } =
         carry_and_settle(user_id, &from_end, from_id, &to_end, to_id, finished_name, &record).await;
-    let left = if carried == Carried::Moved { retire_copies(runtime, &vaults, user_id, &retire_after).await } else { None };
+    // The other copies of the drive, as the source was: each held, what it
+    // took since topped up into the copy, and retired ([`settle_copies`]).
+    let left = if carried == Carried::Moved && !retire_after.is_empty() {
+        let settled = settle_copies(runtime, store, &vaults, user_id, name, &retire_after, &to_end, &domain, holds).await?;
+        not_carried.extend(settled.refused);
+        settled.left
+    } else {
+        None
+    };
 
     let mut sizes = HashMap::new();
     for (vault, end) in [(&source_vault, &from_end), (&dest, &to_end)] {
@@ -1366,7 +1748,7 @@ pub async fn move_to(
             Carried::NotMoved(_) | Carried::NotMovedTreeLeft { .. } => {}
         }
         // The record stays only while the source is kept beside the copy.
-        if !matches!(carried, Carried::SourceKept(_)) {
+        if !matches!(carried, Carried::SourceKept(_)) && left.is_none() {
             record::end_move(db, user_id).await?;
         }
     }
@@ -1409,23 +1791,91 @@ pub async fn move_to(
     Ok(UserResponse::DriveMoved { drives: vec![describe(&moved, &sizes, &pins)], keys_refused })
 }
 
-/// Retire each of `copies` at its vault. `None` when every one went; else the
-/// sentence naming those that stay.
-async fn retire_copies(runtime: &DeviceRuntime, vaults: &[Drive], user_id: &str, copies: &[Copy]) -> Option<String> {
+/// What [`settle_copies`] did with the copies a move retires besides its
+/// source.
+struct SettledCopies {
+    /// The keys their listings held that were refused, each named in the
+    /// person's log as it was admitted.
+    refused: Vec<NotCanonical>,
+    /// The vault the last refused key was listed at, for the sentence.
+    from: String,
+    /// The sentence naming those that stay, when any does.
+    left: Option<String>,
+}
+
+/// **Retire each of `copies`, the other finished copies of the drive, at its
+/// vault, after carrying into `into` — the copy the drive now lives at —
+/// everything it holds that `into` does not** (kotton #143): another device's
+/// pass may have written there since the copy was made, as it may into the
+/// tree an interrupted move left. Each is held under a lease of its own
+/// first, so nothing more lands in it between the top-up's listing and its
+/// retire, and retired under that lease ([`top_up_and_settle`]). One another
+/// device holds is left, and said, as is one whose top-up or retire fails.
+#[allow(clippy::too_many_arguments)]
+async fn settle_copies(
+    runtime: &DeviceRuntime,
+    store: &UserStore,
+    vaults: &[Drive],
+    user_id: &str,
+    name: &str,
+    copies: &[Copy],
+    into: &dyn VaultEnd,
+    domain: &str,
+    holds: &Holds,
+) -> io::Result<SettledCopies> {
+    let bus = runtime.event_bus();
+    let mut settled = SettledCopies { refused: Vec::new(), from: String::new(), left: None };
     let mut left = Vec::new();
     for copy in copies {
-        let (Some(id), Some(vault)) = (copy.made(), vaults.iter().find(|v| v.vault_key == copy.vault_key)) else {
+        let Some(id) = copy.made() else {
+            left.push(format!("'{name}' is also kept under {}, which is no drive's tree", copy.tree));
             continue;
         };
-        let outcome = match dial(runtime, &vault.node, user_id).await {
-            Ok(client) => retire(&PeerEnd(client), user_id, id).await,
-            Err(e) => Err(e.to_string()),
+        let Some(vault) = vaults.iter().find(|v| v.vault_key == copy.vault_key) else {
+            left.push(format!("a vault '{name}' is also on is not one this device reaches"));
+            continue;
         };
-        if let Err(e) = outcome {
-            left.push(format!("'{}' still keeps a copy under {} ({e})", vault.node.id, copy.tree));
+        let held = match Leased::take(runtime, &vault.node, user_id, Holding::Drive(id)).await {
+            Ok(Ok(held)) => {
+                holds.keep(&held);
+                held
+            }
+            Ok(Err(held)) => {
+                left.push(format!("{} holds the copy on '{}' now, for {}s more", held.named(runtime, store).await, vault.node.id, held.for_secs));
+                continue;
+            }
+            Err(e) => {
+                // Gone since it was listed, or the vault did not answer: a
+                // retire, idempotent, says which, and needs no lease for a
+                // tree the vault no longer keeps.
+                let gone = match dial(runtime, &vault.node, user_id).await {
+                    Ok(client) => retire(&PeerEnd(client, None), user_id, id).await,
+                    Err(e) => Err(e.to_string()),
+                };
+                if gone.is_err() {
+                    left.push(format!("'{}' still keeps a copy under {} ({e})", vault.node.id, copy.tree));
+                }
+                continue;
+            }
+        };
+        let from = PeerEnd(dial(runtime, &vault.node, user_id).await?.with_remote_mount(copy.tree.clone()).with_domain_id(domain.to_string()), Some(held));
+        let label = vault.node.id.clone();
+        let record = |refused: &[NotCanonical]| {
+            for event in refused_events(user_id, name, &label, refused) {
+                let _ = bus.publish(event);
+            }
+        };
+        let Settled { carried, refused } = top_up_and_settle(user_id, &from, id, into, &record).await;
+        if !refused.is_empty() {
+            settled.from = vault.node.id.clone();
+        }
+        settled.refused.extend(refused);
+        if let Carried::SourceKept(e) = carried {
+            left.push(format!("'{}' still keeps the copy it left ({e})", vault.node.id));
         }
     }
-    (!left.is_empty()).then(|| left.join(", "))
+    settled.left = (!left.is_empty()).then(|| left.join(", "));
+    Ok(settled)
 }
 
 /// Follow the vaults `copies` were at, and `dest`, so this device's record
@@ -1484,6 +1934,12 @@ mod tests {
         refuse_retire: AtomicBool,
         /// Its next retire acts, and its answer is lost.
         lose_retire_answer: AtomicBool,
+        /// The lease this device holds on the tree, which its retire names.
+        lease: Option<DriveLease>,
+        /// Renewing that lease fails: another device took it, or it lapsed.
+        renew_fails: AtomicBool,
+        /// The lease each retire it was told named.
+        retired_under: Mutex<Vec<Option<DriveLease>>>,
     }
 
     impl Fake {
@@ -1523,6 +1979,9 @@ mod tests {
         }
         async fn tell(&self, request: VaultPeerRequest) -> Result<(), String> {
             self.told.lock().unwrap().push(request.variant_name());
+            if let VaultPeerRequest::TenantDriveRetire { lease, .. } = &request {
+                self.retired_under.lock().unwrap().push(*lease);
+            }
             match request {
                 VaultPeerRequest::TenantDriveRetire { .. } if self.refuse_retire.load(Ordering::SeqCst) => Err("the vault would not".into()),
                 VaultPeerRequest::TenantDriveRetire { .. } => {
@@ -1535,9 +1994,55 @@ mod tests {
                 _ => Ok(()),
             }
         }
+        async fn renew(&self) -> Result<(), String> {
+            match self.renew_fails.load(Ordering::SeqCst) {
+                true => Err("another of your devices holds it now".into()),
+                false => Ok(()),
+            }
+        }
+        fn lease(&self) -> Option<DriveLease> {
+            self.lease
+        }
     }
 
     const FROM: MadeDrive = MadeDrive([1; 16]);
+
+    /// **A move whose hold on the drive is lost names no copy** (kotton
+    /// #143). Its hold on the source is renewed right before the copy is
+    /// named finished; when it is lost — it lapsed, and another device took
+    /// it, and a pass may have written there since the listing — the copy is
+    /// retired unnamed and the drive stays where it is, whole. So is a hold on
+    /// the copy that is lost.
+    #[tokio::test]
+    async fn a_move_whose_hold_is_lost_names_no_copy_and_leaves_the_drive() {
+        for lost_at_source in [true, false] {
+            let (from, to) = (source(), Fake::default());
+            if lost_at_source { &from } else { &to }.renew_fails.store(true, Ordering::SeqCst);
+            match settle(&from, &to).await {
+                Carried::NotMoved(why) => assert!(why.contains("hold"), "{why}"),
+                other => panic!("a move whose hold was lost said {other:?}"),
+            }
+            assert_eq!(to.told(), ["TenantDriveRetire"], "the copy was named, or not retired");
+            assert!(from.told().is_empty(), "the drive was retired where it is");
+            assert_eq!(from.keys(), ["p/one", "p/two"]);
+        }
+    }
+
+    /// **Every retire names the lease its device holds on the tree** (kotton
+    /// #143): the source's under the source's, a copy cleaned up under the
+    /// copy's, and the vault fences each.
+    #[tokio::test]
+    async fn every_retire_names_the_lease_this_device_holds_on_the_tree() {
+        let (held_from, held_to) = (DriveLease([5; 16]), DriveLease([6; 16]));
+        let from = Fake { lease: Some(held_from), ..source() };
+        let to = Fake { lease: Some(held_to), ..Fake::default() };
+        assert_eq!(settle(&from, &to).await, Carried::Moved);
+        assert_eq!(*from.retired_under.lock().unwrap(), [Some(held_from)]);
+        let from = Fake { lease: Some(held_from), ..source() };
+        let to = Fake { lease: Some(held_to), hides: Some("p/two"), ..Fake::default() };
+        assert!(matches!(settle(&from, &to).await, Carried::NotMoved(_)));
+        assert_eq!(*to.retired_under.lock().unwrap(), [Some(held_to)]);
+    }
     const TO: MadeDrive = MadeDrive([2; 16]);
 
     fn source() -> Fake {
