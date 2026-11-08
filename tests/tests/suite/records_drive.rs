@@ -123,7 +123,12 @@ impl At<'_> {
     async fn listed(&self) -> Vec<String> {
         let said = self.done(&["record", "list", "--schema", NOTES, "--json"]).await;
         let rows: Vec<serde_json::Value> = serde_json::from_str(&said.data).expect("list --json is a JSON array");
-        let mut ids: Vec<String> = rows.iter().map(|r| r["_id"].as_str().expect("a row's id").to_string()).collect();
+        // The verbs print a record as the row holds it, `id` among its fields and none of the
+        // daemon's `_`-fields.
+        let mut ids: Vec<String> = rows.iter().map(|r| r["id"].as_str().expect("a row's id").to_string()).collect();
+        for row in &rows {
+            assert!(row.as_object().is_some_and(|o| o.keys().all(|k| !k.starts_with('_'))), "{}: list --json printed a daemon field: {row}", self.who);
+        }
         ids.sort();
         ids
     }

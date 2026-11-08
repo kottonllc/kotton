@@ -138,6 +138,19 @@ fn body_said(record: &serde_json::Value) -> String {
     body.to_string()
 }
 
+/// A record as `record get` and `record list --json` print it: as the row holds it, its `id`
+/// among its fields, without the fields the daemon adds to an answer (`_id`, `_filed_at`,
+/// `_root`). Every verb here names Personal, so `_root` would be Personal's id on every row
+/// this surface can show: no information, and a durable identifier written to a stream meant
+/// for piping, which `record put` of the printed record would then store as a field.
+fn as_held(record: &serde_json::Value) -> serde_json::Value {
+    let mut held = record.clone();
+    if let Some(obj) = held.as_object_mut() {
+        obj.retain(|k, _| !k.starts_with('_'));
+    }
+    held
+}
+
 /// A record's id as the daemon answered it: `_id`, which every queried row carries.
 fn id_said(record: &serde_json::Value) -> String {
     record["_id"].as_str().or_else(|| record["id"].as_str()).unwrap_or("-").to_string()
@@ -165,7 +178,8 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
                 Err(e) => return Ok(refused("list", e)),
             };
             if json {
-                return Ok(CommandOutput::shapes(vec![Out::Data(serde_json::to_string_pretty(&records)?)]));
+                let held: Vec<serde_json::Value> = records.iter().map(as_held).collect();
+                return Ok(CommandOutput::shapes(vec![Out::Data(serde_json::to_string_pretty(&held)?)]));
             }
             Ok(CommandOutput::shapes(vec![table(&records)]))
         }
@@ -175,7 +189,7 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
             let by_id = vec![("id".to_string(), serde_json::json!(id))];
             match client.record_query_in(&user_id, Some(PERSONAL_ROOT), None, schema.as_str(), by_id, Some(1), None).await {
                 Ok(found) if !found.is_empty() => {
-                    Ok(CommandOutput::shapes(vec![Out::Data(serde_json::to_string_pretty(&found[0])?)]))
+                    Ok(CommandOutput::shapes(vec![Out::Data(serde_json::to_string_pretty(&as_held(&found[0]))?)]))
                 }
                 Ok(_) => Ok(CommandOutput::fail(
                     format!("no record '{id}' under {schema}"),
@@ -383,14 +397,17 @@ mod tests {
     }
 
     /// `record list` names each record by the id the daemon answered and prints its fields
-    /// without the ones the daemon adds; `--json` carries the answer whole.
+    /// without the ones the daemon adds; `get` and `list --json` print the record as the row
+    /// holds it, `id` kept, and none of the daemon's fields: no `_root`, which is Personal's
+    /// id on every row these verbs can show.
     #[test]
     fn list_names_each_id_and_prints_the_fields_it_was_given() {
         let answered = serde_json::json!({
             "id": "r1", "title": "milk", "_id": "r1", "_filed_at": 7, "_root": "p0"
         });
-        let Out::Table { columns, rows } = table(&[answered]) else { panic!("record list is a table") };
+        let Out::Table { columns, rows } = table(std::slice::from_ref(&answered)) else { panic!("record list is a table") };
         assert_eq!(columns, ["id", "record"]);
         assert_eq!(rows, [["r1".to_string(), r#"{"title":"milk"}"#.to_string()]]);
+        assert_eq!(as_held(&answered), serde_json::json!({ "id": "r1", "title": "milk" }));
     }
 }

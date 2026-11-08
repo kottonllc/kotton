@@ -814,6 +814,12 @@ pub const FIRST_DRIVE_NAME: &str = "personal";
 /// path, would be in no selection any request can make, by the word or by any
 /// id. Personal's records ride in [`FIRST_DRIVE_NAME`], hence the one word for
 /// both.
+///
+/// **The word is the person's.** A request that identifies as an app names no
+/// root, so a request from an app that names the word is refused
+/// (`kotton_record::daemon::records`): an app that could ask for none and for
+/// the word would learn, row by row, which are Personal's and that the person
+/// is in some other root at all.
 pub const PERSONAL_ROOT: &str = "personal";
 
 /// The mount a vault keeps the tenancy's own tree under: the pool's own

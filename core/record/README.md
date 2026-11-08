@@ -44,10 +44,15 @@ and bytes the vault lists in the drive's tree (`users/<user>/drives/<tree>`), so
 to have read the drive. Nowhere does it find a record's fields, its id (as written or as
 bytes) or its schema's NSID.
 
-Records are in Personal, which rides in `personal`, for now. A write that names no root is
-Personal's (`roots::RootAccess::write`). A request may also name Personal by the word
+The log that rides in `personal` carries every root's rows this device holds, each with its
+root (`replication::log_records` exports the whole changeset): a record of an organisation's
+project written on this device rides there too, sealed under the person's `K_log`, readable by
+the person's own devices and never by the root's other members. Of those rows, Personal's are
+the `record` verbs' to reach. A write that names no root is Personal's
+(`roots::RootAccess::write`). A request may also name Personal by the word
 `kotton_wire::ipc::PERSONAL_ROOT` rather than by its id, and then reads, writes and deletes in
-Personal alone. A device must know a record's schema to merge it. One it does not know is
+Personal alone; the word is the person's, and a request from an app that names it is refused
+(`daemon::records`). A device must know a record's schema to merge it. One it does not know is
 carried and kept verbatim, not dropped (`replication::snapshot_records`).
 
 ## The `record` verbs
@@ -59,4 +64,8 @@ and for `get` by the record's id), `RecordInsert` and `RecordDelete`. **Each nam
 (`PERSONAL_ROOT`), so a record in another root the person is a member of, such as an
 organisation's project, is not listed, read, written or removed by them. A schema is cited by
 its NSID. An id no record has in Personal exits 1, and so does a schema this device does not
-know, by name. `record import|export` are not in the tree yet (#454).
+know, by name. `get` prints the record as the row holds it, its `id` among its fields, and
+`list --json` prints each row the same way; neither prints the fields the daemon adds to an
+answer (`_id`, `_filed_at`, `_root`), because every verb here names Personal and `_root` would
+be Personal's id, a durable identifier, on every row, and `record put` of a printed record would
+store it as a field. `record import|export` are not in the tree yet (#454).

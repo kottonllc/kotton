@@ -388,5 +388,6 @@ fn assert_got_as_its_owner(got: &std::process::Output, id: &str) {
     let body: serde_json::Value = serde_json::from_slice(&got.stdout)
         .unwrap_or_else(|e| panic!("stdout is not the record as JSON: {e}\n{}", said(got)));
     assert_eq!(body["title"], "Opened", "{}", said(got));
-    assert_eq!(body["_id"], id, "{}", said(got));
+    assert_eq!(body["id"], id, "{}", said(got));
+    assert!(body.get("_root").is_none() && body.get("_id").is_none(), "get printed a daemon field: {}", said(got));
 }

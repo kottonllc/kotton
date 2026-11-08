@@ -35,7 +35,7 @@ use sqlx::SqlitePool;
 use std::io;
 use std::sync::Arc;
 
-use kotton_wire::ipc::UserResponse;
+use kotton_wire::ipc::{UserResponse, PERSONAL_ROOT};
 
 // ── Record operations ─────────────────────────────────────────────────────────
 
@@ -65,6 +65,10 @@ pub async fn record_insert(
         }
     }
 
+    let root = match root_the_caller_may_name(root, &app_id) {
+        Ok(root) => root,
+        Err(message) => return Ok(UserResponse::Error { message }),
+    };
     let verb = match crate::record_cmds::Record::new(schema_registry, store)
         .within(access, root.as_deref())
     {
@@ -112,6 +116,10 @@ pub async fn record_query(
         }
     }
 
+    let root = match root_the_caller_may_name(root, &app_id) {
+        Ok(root) => root,
+        Err(message) => return Ok(UserResponse::Error { message }),
+    };
     let verb = match crate::record_cmds::Record::new(schema_registry, store)
         .within(access, root.as_deref())
     {
@@ -169,6 +177,10 @@ pub async fn record_delete(
         }
     }
 
+    let root = match root_the_caller_may_name(root, &app_id) {
+        Ok(root) => root,
+        Err(message) => return Ok(UserResponse::Error { message }),
+    };
     let verb = match crate::record_cmds::Record::new(schema_registry, store)
         .within(access, root.as_deref())
     {
@@ -193,6 +205,29 @@ pub async fn record_delete(
     }
 }
 
+/// The root a request names, as its caller may name it: the word for Personal
+/// is the person's, never an app's (kotton #38).
+///
+/// An app names no root: it cannot list them, so the only root it can name is
+/// none, every root the person is in ([`withhold_root_ids`]). Were
+/// [`PERSONAL_ROOT`] open to it, an app could ask for none and for the word and
+/// take the difference, learning which rows are Personal's and that the person
+/// is in some other root at all: one bit per row that the ruling below
+/// withholds. So a request from an app that names the word is refused, in a
+/// sentence, before any verb runs. A root named by its id is left to the
+/// membership check, as it was.
+fn root_the_caller_may_name(
+    root: Option<String>,
+    app_id: &Option<String>,
+) -> Result<Option<String>, String> {
+    match (&root, app_id) {
+        (Some(word), Some(_)) if word == PERSONAL_ROOT => {
+            Err(format!("an app names no root by the word `{PERSONAL_ROOT}`; name none"))
+        }
+        _ => Ok(root),
+    }
+}
+
 /// A root's local id is the person's, and never an app's to hold (RFC-0071 R17).
 ///
 /// The first design test, applied: a root id is random and never changes, so an
@@ -201,8 +236,10 @@ pub async fn record_delete(
 /// anything the app sends and join one disclosure to another (Article VII).
 /// An app has no use for it: it cannot list roots (that interface is the
 /// occupant's alone), so the only root it can name is none — every root the
-/// person is in. So a caller that identifies as an app gets its rows without
-/// the key, and the shell and the CLI, which are the person, keep it.
+/// person is in — and not Personal by its word either
+/// ([`root_the_caller_may_name`]). So a caller that identifies as an app gets
+/// its rows without the key, and the shell and the CLI, which are the person,
+/// keep it.
 ///
 /// `_filed_at` goes with it, for a neighbouring reason: it is not an
 /// identifier, but it is when this person's devices filed each row, which is
@@ -383,5 +420,29 @@ pub async fn record_open(
         Err(e) => Ok(UserResponse::Error {
             message: e.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The word for Personal is the person's to say. An app that says it is refused in a
+    /// sentence; an app that names no root, or a root by its id, goes on to the membership
+    /// check as before; the person may say the word.
+    #[test]
+    fn the_personal_word_is_refused_from_an_app_alone() {
+        let app = Some("app.example".to_owned());
+        let person = None;
+        let word = || Some(PERSONAL_ROOT.to_owned());
+        let id = || Some("0123456789abcdef0123456789abcdef".to_owned());
+
+        let message = root_the_caller_may_name(word(), &app).expect_err("an app naming the word is refused");
+        assert!(message.contains(PERSONAL_ROOT), "{message}");
+
+        assert_eq!(root_the_caller_may_name(None, &app).unwrap(), None);
+        assert_eq!(root_the_caller_may_name(id(), &app).unwrap(), id());
+        assert_eq!(root_the_caller_may_name(word(), &person).unwrap(), word());
+        assert_eq!(root_the_caller_may_name(None, &person).unwrap(), None);
     }
 }
