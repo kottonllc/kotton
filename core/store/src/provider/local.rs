@@ -112,9 +112,8 @@ impl LocalObjectStorage {
     /// device that reads a drive's absence as "not held" may delete what only
     /// that drive keeps. So the one operation that met ENOENT asks whether
     /// the root is there, and only then answers absence. A missing root is an
-    /// `IoError` naming it. Nothing is asked on the way in: a store is not
-    /// required to have a root before its first write, which makes one
-    /// (`put`), and a read that finds what it asked for never asks.
+    /// `IoError` naming it. A read that finds what it asked for never asks; a
+    /// write always does ([`Self::root_is_there`]).
     async fn answer(&self, e: ObjectStorageError) -> ObjectStorageError {
         let ObjectStorageError::NotFound(key) = e else {
             return e;
@@ -129,6 +128,33 @@ impl LocalObjectStorage {
                 "{root}: whether the store's root is there could not be read ({why}), so it cannot \
                  say whether it holds '{key}'"
             )),
+        }
+    }
+
+    /// Refuse a write under a root that is not there (kotton #415).
+    ///
+    /// The root is made once, by whoever makes the mount (`UserStore::create`
+    /// and `add_shelf_tree`, through `kotton_common::fs::create_dir_all_owner_only`),
+    /// and never by a write. A store whose root has gone refuses every read,
+    /// listing and delete ([`Self::answer`]); a write that made the root again,
+    /// as the next `WriteSealed` of any routine push would, would turn every
+    /// later read of what the old root held into a true `NotFound`, and a
+    /// device's compaction may then retire a generation only that drive kept.
+    /// So a `put` asks whether the root is there before it writes, refuses
+    /// naming the root when it is not, and makes only the parents below it.
+    async fn root_is_there(&self, key: &Path) -> ObjectStorageResult<()> {
+        let root = self.base_path.display();
+        let key = key.display();
+        match self.filesystem.dir_exists(&self.base_path).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(ObjectStorageError::IoError(format!(
+                "{root}: the store's root is missing, so '{key}' is not written under it; a write \
+                 makes no root"
+            ))),
+            Err(why) => Err(ObjectStorageError::IoError(format!(
+                "{root}: whether the store's root is there could not be read ({why}), so '{key}' \
+                 is not written under it"
+            ))),
         }
     }
 
@@ -284,7 +310,9 @@ impl ObjectStorage for LocalObjectStorage {
     async fn put(&self, key: &Path, data: &[u8]) -> ObjectStorageResult<()> {
         let abs_path = self.resolve_key(key)?;
 
-        // Ensure parent directory exists
+        // The root is there or the write is refused; only the parents below it
+        // are made here (kotton #415).
+        self.root_is_there(key).await?;
         if let Some(parent) = abs_path.parent() {
             self.filesystem
                 .create_dir_all(parent)
@@ -641,6 +669,43 @@ mod tests {
                 Err(ObjectStorageError::IoError(m)) => assert!(m.contains(&named), "the refusal does not name the root: {m}"),
                 other => panic!("a store whose root is gone answered {other:?}"),
             }
+        }
+    }
+
+    /// **A write does not make a missing root** (kotton #415). Once a shelf's
+    /// root is gone, a `put` is refused naming the root, the root is still
+    /// not there afterwards, and the next read still refuses rather than
+    /// answering absence: a routine push cannot turn "the root is missing"
+    /// into "the store holds nothing". Under a present root, a write still
+    /// makes the parents below it.
+    #[tokio::test]
+    async fn a_write_does_not_recreate_a_missing_root() {
+        let outer = TempDir::new().unwrap();
+        let root = outer.path().join("shelf");
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = LocalObjectStorage::new(root.clone(), OsFilesystem);
+        storage.put(Path::new("_pack/deep/held"), b"sealed").await.unwrap();
+        assert_eq!(storage.get(Path::new("_pack/deep/held")).await.unwrap().as_ref(), b"sealed");
+
+        std::fs::remove_dir_all(&root).unwrap();
+        let named = root.display().to_string();
+        for refused in [
+            storage.put(Path::new("_pack/next"), b"sealed").await,
+            storage.put_sealed(Path::new("_pack/next"), b"sealed").await,
+        ] {
+            match refused {
+                Err(ObjectStorageError::IoError(m)) => assert!(m.contains(&named), "the refusal does not name the root: {m}"),
+                other => panic!("a write under a missing root answered {other:?}"),
+            }
+        }
+        assert!(!root.exists(), "a write made the root");
+        match storage.get(Path::new("_pack/deep/held")).await {
+            Err(ObjectStorageError::IoError(m)) => assert!(m.contains(&named), "{m}"),
+            other => panic!("a read after the refused write answered {other:?}"),
+        }
+        match storage.get(Path::new("_pack/next")).await {
+            Err(ObjectStorageError::IoError(m)) => assert!(m.contains(&named), "{m}"),
+            other => panic!("a read of the refused key answered {other:?}"),
         }
     }
 
