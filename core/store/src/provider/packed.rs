@@ -131,13 +131,25 @@
 //!   above the state it cached, which a tear of that state's own superblock
 //!   does not change; a superblock that arrived since the state was cached,
 //!   such as a twin another device committed, it does not see.
-//! - **Compaction's own deletions are not covered.** Compaction deletes the
-//!   packs its base names, its manifest pack among them, after its check and
-//!   before its retirement. So the base it keeps as the second of the two can
-//!   already name a manifest that is gone, and a tear of compaction's own
-//!   commit then leaves no fallback that opens. Its check, read before those
-//!   deletions, cannot see this. That is kotton #423, a choice of design not
-//!   yet made.
+//! - **Compaction deletes nothing a generation it keeps names** (kotton
+//!   #423). After its pass, retirement keeps two adoptable generations: with a
+//!   rewrite, the commit it made and the base it rewrote from; with none, the
+//!   base and the adoptable generation below it. Every pack one of those
+//!   names stays on the shelf, whatever its live fraction, the base's own
+//!   manifest pack and the sparse packs a rewrite salvaged out of among them.
+//!   So the fallback the commit stands on is whole, and a tear of compaction's
+//!   own commit leaves the base, which opens and reads. What only the base
+//!   names is reclaimed by a later pass, once a newer commit has taken the
+//!   base's place as the fallback: space comes back one commit late, and a
+//!   pack dead to every kept generation, crash debris or one only a retired
+//!   generation named, goes at once. The check that reads every present
+//!   generation's manifest before the pass is what knows each one's packs,
+//!   so the rule costs no read. A superblock or a manifest of a version this
+//!   code does not read fails that check and refuses the pass
+//!   (`held_generation`), so a newer device's generation and the packs it
+//!   names are never swept by an older one; the load still passes such a
+//!   superblock over as one that does not open, and reads the generation
+//!   below it, as before.
 //!
 //! That is the concession: one bad ref costs the person the data only its
 //! generation names, readable again once the generation is repaired, and
@@ -178,7 +190,8 @@ use crate::manifest::{
 use crate::pack::{open_pack, read_chunk_from_plaintext, scan_chunks, ChunkRef};
 use crate::superblock::{
     commit_superblock, load_adopted_superblock, load_current_superblock, read_superblock,
-    superblock_keys, NotOpened, PassedOver, Superblock, SUPERBLOCK_PREFIX,
+    read_superblock_checked, superblock_keys, NotOpened, PassedOver, Superblock, WhyNotOpened,
+    SUPERBLOCK_PREFIX,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -910,6 +923,9 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         // further (`retire_superseded`). A read that fails otherwise
         // refuses the pass.
         let mut reading = ShelfReading { check: true, ..ShelfReading::default() };
+        // What each adoptable generation names, newest first, for the rule
+        // below: this pass deletes nothing a generation it keeps names.
+        let mut adoptable_named: Vec<(u64, BTreeSet<PackId>)> = Vec::new();
         for (generation, key) in superblock_keys(&*self.inner).await? {
             match held_generation(&*self.inner, &self.k_pack, &key).await? {
                 Checked::Held(why) => {
@@ -920,8 +936,9 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
                          until it is repaired"
                     )));
                 }
-                Checked::Adoptable => {
+                Checked::Adoptable(named) => {
                     reading.adoptable.insert(key);
+                    adoptable_named.push((generation, named));
                 }
                 Checked::Neither => {
                     reading.neither.insert(key);
@@ -998,14 +1015,13 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         // Nothing references these, so they need no manifest rewrite and no
         // commit; they are simply unlinked.
         //
-        // The pack holding the *current* manifest chunk has no live **data**
-        // bytes and must never be swept on that basis — it is the store's root
-        // pointer. It becomes collectable only once a newer manifest is
-        // committed, which the rewrite path below handles explicitly.
-        let dead: BTreeSet<PackId> = on_disk
+        // A pack with no live byte is dead *to the base*. Whether this pass
+        // may delete it is decided below, against every generation the pass
+        // keeps: the pack holding the base's own manifest chunk is the first
+        // case, with no live data bytes and the store's root pointer.
+        let unreferenced: BTreeSet<PackId> = on_disk
             .iter()
             .filter(|id| live_bytes.get(*id).copied().unwrap_or(0) == 0)
-            .filter(|id| *id != &sb.manifest.pack_id)
             .cloned()
             .collect();
 
@@ -1036,6 +1052,38 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         let salvage_bytes: usize = sparse.iter().filter_map(|id| live_bytes.get(id)).sum();
         let replacement_packs = salvage_bytes.div_ceil(capacity).max(1);
         let rewrite = replacement_packs < sparse.len();
+
+        // **This pass deletes nothing that a generation it keeps names**
+        // (kotton #423, the rule in the module doc). After it, retirement
+        // keeps two adoptable generations: with a rewrite, the commit this
+        // pass makes and the base, whose packs are then the fallback's; with
+        // none, the base and the adoptable generation below it. Every pack one
+        // of those names stays, whatever its live fraction: the base's own
+        // manifest pack, every sparse pack the rewrite salvages out of, and a
+        // pack only the fallback still names. What only the base names is
+        // reclaimed by a later pass, once a newer commit has taken its place
+        // as the fallback. The check above read each of these manifests, so
+        // no new read decides it. A twin at a kept generation's number,
+        // committed by another device, has its packs kept by this pass too;
+        // retirement counts superblocks, so the twin itself may go, and what
+        // only it named goes at the pass after.
+        let kept_after = if rewrite { 1 } else { 2 };
+        let mut kept_generations: Vec<u64> = Vec::new();
+        for (generation, _) in &adoptable_named {
+            if kept_generations.contains(generation) {
+                continue;
+            }
+            if kept_generations.len() == kept_after {
+                break;
+            }
+            kept_generations.push(*generation);
+        }
+        let protected: BTreeSet<PackId> = adoptable_named
+            .iter()
+            .filter(|(generation, _)| kept_generations.contains(generation))
+            .flat_map(|(_, named)| named.iter().cloned())
+            .collect();
+        let dead: BTreeSet<PackId> = unreferenced.difference(&protected).cloned().collect();
 
         // Sweeping needs no commit — this is the crash-debris path. With no
         // rewrite it happens now; with one it waits until the rewrite has
@@ -1217,19 +1265,15 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         )
         .await?;
 
-        // 4. Durable; now — and only now — reclaim. The pack that held the
-        //    superseded manifest goes too, if nothing live remains in it: it
-        //    was spared the sweep above only because it was the root pointer,
-        //    and the commit just replaced it.
-        for pack_id in to_retire.iter().chain(&dead) {
+        // 4. Durable; now — and only now — reclaim: what is dead to the base
+        //    and named by no generation this pass keeps. The packs salvaged
+        //    out of, and the pack that held the base's manifest, are the
+        //    base's, and the base is the fallback the commit just made stands
+        //    on, so they stay until a later pass finds the base no longer
+        //    kept (kotton #423). Nothing the commit names is in either set:
+        //    the check above refused the pass otherwise.
+        for pack_id in to_retire.iter().chain(&dead).filter(|p| !protected.contains(*p)) {
             self.inner.delete_sealed(pack_id.as_path()).await?;
-            packs_retired += 1;
-        }
-        let old_manifest_pack = &sb.manifest.pack_id;
-        if live_bytes.get(old_manifest_pack).copied().unwrap_or(0) == 0
-            && !to_retire.contains(old_manifest_pack)
-        {
-            self.inner.delete_sealed(old_manifest_pack.as_path()).await?;
             packs_retired += 1;
         }
         if let Err(e) = retire_superseded(&*self.inner, &self.k_pack, &self.known, &committed_key, &reading).await {
@@ -1506,12 +1550,21 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
     /// Both are found the same way — by kind tag inside the pack seal — because
     /// a peer's replication delivers packs, not an index. Nothing tells us which
     /// chunks arrived; we look.
+    ///
+    /// **A segment is one segment however many packs hold it.** Compaction
+    /// salvages a live segment into a fresh pack and leaves the pack it came
+    /// from until the generation naming it is no longer kept (kotton #423), so
+    /// a pack set routinely holds the same chunk twice, and a peer's shipment
+    /// carries both. A chunk is named by its digest, so the second copy is the
+    /// first: replaying it again would show every write as its own concurrent
+    /// twin (kotton #311).
     #[allow(clippy::type_complexity)]
     async fn scan_log_and_manifests(
         &self,
         k_log: &[u8; 32],
     ) -> ObjectStorageResult<(Vec<(PackChunkRef, Segment)>, Vec<Manifest>)> {
-        let mut segments = Vec::new();
+        let mut segments: Vec<(PackChunkRef, Segment)> = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut manifests = Vec::new();
         for pack_id in self.listed_packs("scan").await?.0 {
             // A content pack holds neither a segment nor a manifest
@@ -1528,13 +1581,18 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
             for (cref, framed) in scan_chunks(&plaintext) {
                 match unframe_chunk(framed) {
                     Ok((ChunkKind::HistorySegment, _)) => {
+                        let digest = chunk_digest(framed);
+                        if seen.contains(&digest) {
+                            continue;
+                        }
                         if let Ok(seg) = Segment::from_chunk(k_log, framed) {
+                            seen.insert(digest.clone());
                             segments.push((
                                 PackChunkRef {
                                     pack_id: pack_id.clone(),
                                     offset: cref.offset,
                                     length: cref.length,
-                                    digest: chunk_digest(framed),
+                                    digest,
                                 },
                                 seg,
                             ));
@@ -2165,12 +2223,36 @@ enum Checked {
     /// Its superblock opens and its manifest is refused for a pack id.
     /// Carries the refusal.
     Held(String),
-    /// Its superblock opens and its manifest decodes.
-    Adoptable,
+    /// Its superblock opens and its manifest decodes. Carries every pack
+    /// the generation names ([`packs_named`]), so that compaction leaves
+    /// whole each generation it keeps as one of the two adoptable ones
+    /// (kotton #423).
+    Adoptable(BTreeSet<PackId>),
     /// Its superblock is present and does not open, or the manifest pack it
     /// names is not found. It holds nothing and is no fallback, now; a
     /// reading of the shelf, kept by no one ([`ShelfReading`]).
     Neither,
+}
+
+/// Every pack the generation whose manifest is `manifest`, kept in
+/// `manifest_pack`, names: the packs its files, its retained losing versions,
+/// its kept versions and its history segments point into, and the pack the
+/// manifest itself is in. Delete any one of these and the generation names
+/// what is gone: it no longer opens as a fallback, or opens on a file it
+/// cannot read.
+fn packs_named(manifest: &Manifest, manifest_pack: &PackId) -> BTreeSet<PackId> {
+    let mut named: BTreeSet<PackId> = BTreeSet::new();
+    named.insert(manifest_pack.clone());
+    for entry in manifest.files.values() {
+        named.extend(entry.chunks.iter().map(|r| r.pack_id.clone()));
+    }
+    for entries in manifest.conflicts.values().chain(manifest.versions.values()) {
+        for entry in entries {
+            named.extend(entry.chunks.iter().map(|r| r.pack_id.clone()));
+        }
+    }
+    named.extend(manifest.log.iter().map(|r| r.pack_id.clone()));
+    named
 }
 
 /// Whether the generation whose superblock is `key` is **held**, adoptable,
@@ -2184,10 +2266,10 @@ enum Checked {
 /// superblock. A superblock that does not open, or whose manifest pack is
 /// gone (a superseded generation whose manifest compaction already retired),
 /// holds nothing, and is neither: not held, and no fallback either. A read
-/// that fails otherwise, or a manifest that is malformed or of a version
-/// this code does not read, is an error, not an answer, and refuses the
-/// pass: such a manifest may be a newer device's correct write, whose packs
-/// compaction must not delete.
+/// that fails otherwise, or a superblock or manifest of a version this code
+/// does not read, or a manifest that is malformed, is an error, not an
+/// answer, and refuses the pass: such a write may be a newer device's correct
+/// one, whose packs compaction must not delete (kotton #423).
 ///
 /// Gone means not found: on a fetching shelf, a pack no drive it reached
 /// holds. A fetch that failed, the drive unreachable or erroring, is a
@@ -2205,8 +2287,17 @@ async fn held_generation<S: SealedObjectAccess + ?Sized>(
     k_pack: &[u8; 32],
     key: &str,
 ) -> ObjectStorageResult<Checked> {
-    let Some(sb) = read_superblock(store, k_pack, key).await? else {
-        return Ok(Checked::Neither);
+    let sb = match read_superblock_checked(store, k_pack, key).await? {
+        Ok(sb) => sb,
+        Err(WhyNotOpened::Unopenable(_)) => return Ok(Checked::Neither),
+        // A newer device's write. Its state and the packs it names are not
+        // this device's to judge, so nothing that deletes runs beside it.
+        Err(WhyNotOpened::UnsupportedVersion(version)) => {
+            return Err(ObjectStorageError::BackendError(format!(
+                "compaction not run: generation {key} is of superblock version {version}, which this \
+                 device does not read; a newer device wrote it, and the packs it names are kept"
+            )))
+        }
     };
     let framed = match read_framed_chunk_from(store, k_pack, &sb.manifest).await {
         Ok(framed) => framed,
@@ -2214,7 +2305,7 @@ async fn held_generation<S: SealedObjectAccess + ?Sized>(
         Err(e) => return Err(e),
     };
     match Manifest::decode(&framed) {
-        Ok(_) => Ok(Checked::Adoptable),
+        Ok(manifest) => Ok(Checked::Adoptable(packs_named(&manifest, &sb.manifest.pack_id))),
         Err(refused @ ManifestDecodeError::PackIdRefused(_)) => Ok(Checked::Held(refused.to_string())),
         Err(ManifestDecodeError::Malformed(e)) => Err(e),
     }
@@ -2246,8 +2337,8 @@ enum Standing {
     /// learned by the pass that retires, never from this record: from its own
     /// reading ([`ShelfReading`]), and on every path from opening the
     /// superblocks it would count ([`superblock_opens`]). A manifest pack
-    /// retired since is seen by compaction's check alone; what compaction's
-    /// own deletions do to its base is kotton #423.
+    /// retired since is seen by compaction's check alone, and compaction
+    /// retires no manifest pack a generation it keeps names (kotton #423).
     Adoptable,
     /// Its manifest was refused for a pack id ([`held_generation`]): passed
     /// over in [`load_committed`], or found so by compaction's check. Carries
@@ -2423,9 +2514,10 @@ async fn superblock_opens<S: SealedObjectAccess + ?Sized>(
 /// generation it read as adoptable or neither is not known to the commits
 /// that follow. Of what compaction kept, that is at most the one superblock,
 /// the second of the two, counted from its reading alone, and any it read as
-/// neither, which stay until the next compaction decides them. What
-/// compaction's own deletions do to the base it keeps as the second of the
-/// two is kotton #423. Returns how many were deleted.
+/// neither, which stay until the next compaction decides them. The base
+/// compaction keeps as the second of the two is whole: compaction deletes no
+/// pack a generation it keeps names (kotton #423). Returns how many were
+/// deleted.
 async fn retire_superseded<S: SealedObjectAccess + ?Sized>(
     store: &S,
     k_pack: &[u8; 32],
@@ -4163,8 +4255,12 @@ mod tests {
         // also ends up holding a manifest that the second pass supersedes.
         s.put(Path::new("a/gone.txt"), b"delete me").await.unwrap();
         s.pack_loose().await.unwrap();
-        // Whatever this pass wrote holds the doomed file's only chunk.
-        let doomed = pack_ids(&s).await;
+        // The content pack this pass wrote holds the doomed file's only chunk.
+        // (This store keeps no history log, so its index pack holds only its
+        // manifest, which no later generation names; that one goes at the
+        // first pass.)
+        let doomed: BTreeSet<String> = pack_ids(&s).await.into_iter().filter(|p| is_content_pack(p)).collect();
+        assert_eq!(doomed.len(), 1, "{doomed:?}");
 
         s.put(Path::new("b/stay.txt"), b"keep me").await.unwrap();
         s.pack_loose().await.unwrap();
@@ -4178,6 +4274,18 @@ mod tests {
         let staged = pack_ids(&s).await;
         assert!(doomed.iter().all(|p| staged.contains(p)));
 
+        // Dead to the base, and still named by the generation before it, which
+        // is the fallback the base stands on: this pass keeps it (kotton #423).
+        s.compact().await.unwrap().unwrap();
+        let kept = pack_ids(&s).await;
+        for p in &doomed {
+            assert!(kept.contains(p), "a pack the fallback names was swept: {p}");
+        }
+
+        // One commit later nothing kept names it, and the next pass reclaims it.
+        s.put(Path::new("c/also.txt"), b"and me").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let staged = pack_ids(&s).await;
         let summary = s.compact().await.unwrap().unwrap();
         assert!(summary.packs_retired >= 1, "nothing reclaimed: {summary:?}");
 
@@ -4195,6 +4303,103 @@ mod tests {
             s.get(Path::new("a/gone.txt")).await,
             Err(ObjectStorageError::NotFound(_))
         ));
+    }
+
+    /// **A tear of compaction's own commit still reads** (kotton #423).
+    ///
+    /// Two of four files are deleted, so compaction rewrites: it salvages the
+    /// survivors into fresh packs and commits generation 3 on base 2. Under
+    /// the rule, it deletes nothing generation 2 names: not the sparse packs
+    /// it salvaged out of, not generation 2's manifest pack. So when
+    /// generation 3's superblock is torn, a fresh store opens on generation 2
+    /// and reads both survivors, and the deleted files are gone there too.
+    #[tokio::test]
+    async fn a_tear_of_compactions_own_commit_still_reads() {
+        let (s, backing) = store_with_backing();
+        s.put(Path::new("a_big.bin"), &noise(10 * 1024 * 1024, 1)).await.unwrap();
+        s.put(Path::new("b_small.bin"), &noise(2 * 1024 * 1024, 2)).await.unwrap();
+        s.put(Path::new("c_big.bin"), &noise(10 * 1024 * 1024, 3)).await.unwrap();
+        s.put(Path::new("d_small.bin"), &noise(2 * 1024 * 1024, 4)).await.unwrap();
+        s.pack_loose().await.unwrap();
+        let keep_b = s.get(Path::new("b_small.bin")).await.unwrap();
+        let keep_d = s.get(Path::new("d_small.bin")).await.unwrap();
+        s.delete(Path::new("a_big.bin")).await.unwrap();
+        s.delete(Path::new("c_big.bin")).await.unwrap();
+        assert_eq!(s.pack_loose().await.unwrap().unwrap().generation, Some(2));
+        // The content packs hold the survivors' chunks, so generation 2 names
+        // every one of them; they are what the rewrite salvages out of.
+        let sparse: BTreeSet<String> = pack_ids(&s).await.into_iter().filter(|p| is_content_pack(p)).collect();
+        assert!(sparse.len() >= 2, "test needs two sparse packs, got {sparse:?}");
+
+        let summary = s.compact().await.unwrap().unwrap();
+        assert_eq!(summary.packs_rewritten, sparse.len(), "the pass did not rewrite the sparse packs: {summary:?}");
+        assert_eq!(summary.generation, Some(3));
+        let after = pack_ids(&s).await;
+        for p in &sparse {
+            assert!(after.contains(p), "a pack generation 2 names was deleted by the pass that built on it: {p}");
+        }
+
+        let third = superblocks_of(&s, 3).await;
+        assert_eq!(third.len(), 1);
+        s.inner.put_sealed(Path::new(&third[0]), b"torn mid-write").await.unwrap();
+        let fresh = store_over(backing.clone());
+        assert_eq!(fresh.get(Path::new("b_small.bin")).await.expect("nothing opens once compaction's commit is torn"), keep_b);
+        assert_eq!(fresh.get(Path::new("d_small.bin")).await.unwrap(), keep_d);
+        assert!(matches!(fresh.get(Path::new("a_big.bin")).await, Err(ObjectStorageError::NotFound(_))));
+    }
+
+    /// **A compaction that does not rewrite keeps every pack the fallback
+    /// names** (kotton #423).
+    ///
+    /// `b` is written in generation 2 and deleted in generation 3, so its pack
+    /// is dead to the base and named by the fallback, generation 2. The pass
+    /// has nothing sparse enough to rewrite, so it only sweeps, and the sweep
+    /// leaves `b`'s pack. A tear of generation 3 then reads `a` and `b` from
+    /// 2. One commit later generation 2 is no longer kept, and the next pass
+    /// reclaims the pack.
+    #[tokio::test]
+    async fn a_compaction_that_does_not_rewrite_keeps_every_pack_the_fallback_names() {
+        let (s, backing) = store_with_backing();
+        s.put(Path::new("notes/a.md"), b"one").await.unwrap();
+        s.pack_loose().await.unwrap();
+        let before_b = pack_ids(&s).await;
+        s.put(Path::new("notes/b.md"), b"two").await.unwrap();
+        assert_eq!(s.pack_loose().await.unwrap().unwrap().generation, Some(2));
+        let b_packs: BTreeSet<String> = pack_ids(&s).await.difference(&before_b).cloned().collect();
+        assert!(!b_packs.is_empty(), "b was packed into no pack");
+        s.delete(Path::new("notes/b.md")).await.unwrap();
+        assert_eq!(s.pack_loose().await.unwrap().unwrap().generation, Some(3));
+
+        let summary = s.compact().await.unwrap().unwrap();
+        assert_eq!(summary.packs_rewritten, 0, "the pass rewrote: {summary:?}");
+        let after = pack_ids(&s).await;
+        for p in &b_packs {
+            assert!(after.contains(p), "a pack the fallback names was swept: {p}");
+        }
+
+        let third = superblocks_of(&s, 3).await;
+        assert_eq!(third.len(), 1);
+        let whole = s.inner.get_sealed(Path::new(&third[0])).await.unwrap();
+        s.inner.put_sealed(Path::new(&third[0]), b"torn mid-write").await.unwrap();
+        let fresh = store_over(backing.clone());
+        assert_eq!(fresh.get(Path::new("notes/a.md")).await.unwrap().as_ref(), b"one");
+        assert_eq!(fresh.get(Path::new("notes/b.md")).await.expect("generation 2 does not read").as_ref(), b"two");
+
+        // The superblock arrives whole after all, and one commit follows:
+        // generation 2 is then no longer one of the two kept, and the pack
+        // only it names goes with the next pass.
+        s.inner.put_sealed(Path::new(&third[0]), &whole).await.unwrap();
+        let again = store_over(backing.clone());
+        again.put(Path::new("notes/c.md"), b"three").await.unwrap();
+        assert_eq!(again.pack_loose().await.unwrap().unwrap().generation, Some(4));
+        again.compact().await.unwrap();
+        let after = pack_ids(&again).await;
+        for p in &b_packs {
+            assert!(!after.contains(p), "a pack no kept generation names survived: {p}");
+        }
+        assert_eq!(again.get(Path::new("notes/a.md")).await.unwrap().as_ref(), b"one");
+        assert_eq!(again.get(Path::new("notes/c.md")).await.unwrap().as_ref(), b"three");
+        assert!(matches!(again.get(Path::new("notes/b.md")).await, Err(ObjectStorageError::NotFound(_))));
     }
 
     #[tokio::test]
@@ -4265,13 +4470,18 @@ mod tests {
         s.delete(Path::new("a_big.bin")).await.unwrap();
         s.delete(Path::new("c_big.bin")).await.unwrap();
         s.pack_loose().await.unwrap();
+        let sparse: BTreeSet<String> = pack_ids(&s).await.into_iter().filter(|p| is_content_pack(p)).collect();
+        assert_eq!(sparse.len(), 2, "two sparse content packs, got {sparse:?}");
 
+        // The rewrite salvages the two survivors into one content pack. The
+        // two sparse packs stay: the base names them, and the base is the
+        // fallback the commit stands on (kotton #423).
         let summary = s.compact().await.unwrap().unwrap();
+        assert_eq!(summary.packs_rewritten, 2, "the sparse packs were not rewritten: {summary:?}");
         let after = pack_ids(&s).await;
-        assert!(
-            after.len() < before.len(),
-            "sparse packs were not merged: {before:?} → {after:?} ({summary:?})"
-        );
+        let fresh: BTreeSet<String> = after.iter().filter(|p| is_content_pack(p) && !sparse.contains(*p)).cloned().collect();
+        assert_eq!(fresh.len(), 1, "two sparse packs were not salvaged into one: {after:?} ({summary:?})");
+        assert!(sparse.iter().all(|p| after.contains(p)), "a pack the base names was deleted: {before:?} → {after:?}");
 
         // Verify-before-delete's whole point: the survivors are byte-identical afterwards.
         assert_eq!(s.get(Path::new("b_small.bin")).await.unwrap(), keep_b);
@@ -4280,6 +4490,17 @@ mod tests {
             s.get(Path::new("a_big.bin")).await,
             Err(ObjectStorageError::NotFound(_))
         ));
+
+        // One commit later the base is no longer kept, and the next pass
+        // reclaims the two sparse packs: fewer packs, one commit late.
+        s.put(Path::new("e_tiny.bin"), b"e").await.unwrap();
+        s.pack_loose().await.unwrap();
+        s.compact().await.unwrap().unwrap();
+        let after = pack_ids(&s).await;
+        assert!(sparse.iter().all(|p| !after.contains(p)), "the sparse packs were not reclaimed: {after:?}");
+        assert_eq!(s.get(Path::new("b_small.bin")).await.unwrap(), keep_b);
+        assert_eq!(s.get(Path::new("d_small.bin")).await.unwrap(), keep_d);
+        assert_eq!(s.get(Path::new("e_tiny.bin")).await.unwrap().as_ref(), b"e");
     }
 
     #[tokio::test]
@@ -4532,8 +4753,13 @@ mod tests {
             head_segment(&s).await.expect("log head survived compaction"),
             head_before
         );
-        // And the whole chain is still there, not just the head.
-        let after = all_segments(&s).await;
+        // And the whole chain is still there, not just the head. A segment
+        // the rewrite salvaged is in two packs until the pack it came from is
+        // reclaimed (kotton #423), and is one segment.
+        let after: Vec<(String, Segment)> = {
+            let mut seen = BTreeSet::new();
+            all_segments(&s).await.into_iter().filter(|(d, _)| seen.insert(d.clone())).collect()
+        };
         assert_eq!(after.len(), segments_before, "compaction collected history");
 
         // The surviving log still reproduces the store's state.
@@ -6963,6 +7189,39 @@ mod tests {
         assert!(fresh.list(Path::new("")).await.is_err(), "a newer format was listed past");
         assert!(fresh.compact().await.is_err(), "compaction ran past a newer format");
         assert_eq!(shelf_keys(&backing).await, before, "something was written or deleted");
+    }
+
+    /// **A superblock of a version this code does not read refuses
+    /// compaction** (kotton #423's second note). It is a newer device's
+    /// correct write, not a torn one: compaction's check names it and runs
+    /// nothing, so neither its superblock nor a pack only it names is
+    /// deleted, and the shelf is as it was. The load still passes it over and
+    /// reads the generation below.
+    #[tokio::test]
+    async fn a_superblock_of_an_unsupported_version_refuses_compaction_and_is_not_swept() {
+        let backing = MemoryObjectStorage::new();
+        let slot = crate::fetch::PackSlot::default();
+        let s = fetching(&backing, &slot);
+        s.put(Path::new("notes/a.md"), b"one").await.unwrap();
+        s.pack_loose().await.unwrap();
+        s.put(Path::new("notes/b.md"), b"two").await.unwrap();
+        s.pack_loose().await.unwrap();
+        s.delete(Path::new("notes/b.md")).await.unwrap();
+        s.pack_loose().await.unwrap();
+        let newest = superblocks_of(&s, 3).await;
+        assert_eq!(newest.len(), 1);
+        let current = read_superblock(&*s.inner, &derive_pack_key(&CEK), &newest[0]).await.unwrap().unwrap();
+        // A newer device's commit, in a format this code does not read.
+        let newer = Superblock { version: 2, generation: 4, manifest: current.manifest.clone() };
+        commit_superblock(&*s.inner, &derive_pack_key(&CEK), &newer).await.unwrap();
+        assert_eq!(superblocks_of(&s, 4).await.len(), 1);
+
+        let before = shelf_keys(&backing).await;
+        let fresh = fetching(&backing, &slot);
+        let err = fresh.compact().await.expect_err("compaction ran beside a newer device's superblock");
+        assert!(err.to_string().contains("superblock version 2"), "the refusal does not say why: {err}");
+        assert_eq!(shelf_keys(&backing).await, before, "compaction deleted or wrote something");
+        assert_eq!(fresh.get(Path::new("notes/a.md")).await.unwrap().as_ref(), b"one");
     }
 
     /// **A torn superblock does not count toward the two** (kotton #368).
