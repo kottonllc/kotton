@@ -24,6 +24,9 @@
 //! retained). Old generations are retired only after the commit's pack
 //! retirement completes, and the immediately-previous generation is always
 //! kept and adoptable, so there is no moment with a single copy in flight.
+//! That holds across a compaction too: compaction deletes no pack a
+//! generation it keeps names, so the base it keeps beside its own commit
+//! still opens and reads (`crate::packed`'s module doc, kotton #423).
 //! "Adoptable" is the caller's to judge: with nothing passed over, the two
 //! newest generations are kept ([`retirable_superblocks`]); the pack layer
 //! keeps two generations it can count on *beside* every held one, since a
