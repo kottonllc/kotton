@@ -17,7 +17,6 @@ mod message;
 mod model;
 mod net;
 mod org;
-mod record;
 mod records;
 mod repl;
 mod schema;
@@ -38,7 +37,6 @@ pub use message::MessageCommand;
 pub use model::ModelCommand;
 pub use net::NetCommand;
 pub use org::OrgCommand;
-pub use record::RecordCommand;
 pub use records::RecordsCommand;
 pub use repl::ReplCommand;
 pub use schema::SchemaCommand;
@@ -148,9 +146,16 @@ pub enum Commands {
     /// Handler registry (register, unregister, get, list, set-default)
     #[command(subcommand)]
     Handler(HandlerCommand),
-    /// Record addressing — open records by kotton:// URL
-    #[command(subcommand)]
-    Record(RecordCommand),
+    /// Your records — list, get, put, rm, each by `--schema <nsid>` — the REPL's `record`, one parser for both
+    #[command(after_help = shell_help("record"))]
+    Record {
+        /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
+        #[arg(long)]
+        user: Option<String>,
+        /// Arguments: `list --schema <nsid> [--json]` | `get --schema <nsid> <id>` | `put --schema <nsid> <json>` | `rm --schema <nsid> <id>`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
+        args: Vec<String>,
+    },
     /// The project's records in a root its org owns — init, invite, import, export
     #[command(subcommand)]
     Records(RecordsCommand),

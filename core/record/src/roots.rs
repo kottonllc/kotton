@@ -25,6 +25,7 @@
 //! member of — and nothing else crosses: no names, no targets, no key.
 
 use crate::record_store::RootSelection;
+use kotton_wire::ipc::PERSONAL_ROOT;
 
 /// What the daemon could establish about the person's roots, for one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,12 +107,24 @@ impl RootAccess {
     /// written by a version that stamped it. Such a row is Personal's, and a
     /// selection that admitted only the unmarked form would make it readable by
     /// nobody at all.
+    ///
+    /// **[`PERSONAL_ROOT`] is Personal by the one word**, for a caller that
+    /// means "mine" and should not have to round-trip Personal's id to say it:
+    /// the same selection as its id (never the word itself, which no row stores),
+    /// and Personal's unmarked rows alone where its id is not known.
     pub fn read(&self, root: Option<&str>) -> Result<RootSelection, NotAMember> {
         match root {
             None => Ok(RootSelection {
                 personal: self.in_personal(),
                 others: self.member_of.clone(),
             }),
+            Some(PERSONAL_ROOT) => {
+                if self.in_personal() {
+                    Ok(RootSelection { personal: true, others: self.personal.iter().cloned().collect() })
+                } else {
+                    Err(NotAMember)
+                }
+            }
             Some(r) if Some(r) == self.personal() => {
                 if self.in_personal() {
                     Ok(RootSelection { personal: true, others: vec![r.to_owned()] })
@@ -129,10 +142,12 @@ impl RootAccess {
     ///
     /// No root is **Personal** — so nothing existing moves, and every caller
     /// that predates roots writes where it always did.
+    ///
+    /// [`PERSONAL_ROOT`] is Personal, as `None` is.
     pub fn write(&self, root: Option<&str>) -> Result<Option<String>, NotAMember> {
         match root {
-            None if self.in_personal() => Ok(None),
-            None => Err(NotAMember),
+            None | Some(PERSONAL_ROOT) if self.in_personal() => Ok(None),
+            None | Some(PERSONAL_ROOT) => Err(NotAMember),
             Some(r) if Some(r) == self.personal() => {
                 if self.in_personal() {
                     Ok(None)
@@ -208,6 +223,23 @@ mod tests {
         assert_eq!(access.write(Some(PERSONAL)).unwrap(), None);
         assert_eq!(access.write(Some(FAMILY)).unwrap(), Some(FAMILY.to_owned()));
         assert_eq!(access.write(Some(THEIRS)), Err(NotAMember));
+    }
+
+    /// **The Personal word is Personal and nothing else** (kotton #38): the
+    /// selection its id makes, for a read, a delete and a write alike; Personal's
+    /// unmarked rows alone where its id is unknown; and never another root's row.
+    #[test]
+    fn the_personal_word_reaches_personal_alone() {
+        let access = family_member();
+        assert_eq!(access.read(Some(PERSONAL_ROOT)).unwrap(), access.read(Some(PERSONAL)).unwrap());
+        assert!(!access.read(Some(PERSONAL_ROOT)).unwrap().admits(Some(FAMILY)));
+        assert_eq!(access.write(Some(PERSONAL_ROOT)).unwrap(), None);
+        let unresolved = RootAccess::unresolved();
+        assert_eq!(unresolved.read(Some(PERSONAL_ROOT)).unwrap(), RootSelection::personal());
+        assert_eq!(unresolved.write(Some(PERSONAL_ROOT)).unwrap(), None);
+        let outside = RootAccess::new(PERSONAL, vec![FAMILY.into()]);
+        assert_eq!(outside.read(Some(PERSONAL_ROOT)), Err(NotAMember));
+        assert_eq!(outside.write(Some(PERSONAL_ROOT)), Err(NotAMember));
     }
 
     /// Where the daemon could not read the roots, the answer is what it was
