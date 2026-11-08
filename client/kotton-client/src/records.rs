@@ -154,6 +154,33 @@ impl KottonClient {
             got => Err(crate::protocol::unexpected(got)),
         }
     }
+
+    /// Tombstone the record `record_id` of `schema_nsid` in `root` alone, as `app_id` where one
+    /// is named. A record outside `root` is not reached: it is the refusal a missing id is.
+    pub async fn record_delete_in(
+        &mut self,
+        user_id: &str,
+        root: Option<&str>,
+        app_id: Option<&str>,
+        schema_nsid: &str,
+        record_id: &str,
+    ) -> io::Result<()> {
+        match self
+            .client
+            .send(&UserRequest::RecordDelete {
+                user_id: user_id.to_owned(),
+                schema_nsid: schema_nsid.to_owned(),
+                record_id: record_id.to_owned(),
+                root: root.map(str::to_owned),
+                app_id: app_id.map(str::to_owned),
+            })
+            .await?
+        {
+            UserResponse::RecordDeleted => Ok(()),
+            UserResponse::Error { message } => Err(io::Error::other(message)),
+            got => Err(crate::protocol::unexpected(got)),
+        }
+    }
 }
 
 /// Every row of [`NSID`] in `root`, read as [`PRINCIPAL`], a page at a time.

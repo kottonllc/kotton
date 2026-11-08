@@ -17,8 +17,8 @@ synchronise user data directly without a central cloud backend.
   calls.
 - `PeerChannel` — the transport abstraction trait (allows test doubles).
 
-**Relationship to `kotton-providers-object-storage`:**
-`kotton-providers-object-storage` handles cloud/local blob stores (S3, disk, etc.).
+**Relationship to `kotton-store`:**
+`kotton-store` is a person's sealed store of objects, on a directory or a bucket.
 This crate is the _inter-node transport_. The runtime's storage router decides
 which backend to write to; this crate is just the QUIC delivery mechanism.
 

@@ -533,7 +533,7 @@ mod tests {
     #[test]
     fn the_retired_words_are_the_tables_alias_and_gone_entries_but_placeholders() {
         let words: Vec<String> = retired(&tables()).expect("every bare replacement has a placeholder").iter().map(Retired::was).collect();
-        assert_eq!(words, ["device admit", "sync now", "sync add", "sync list", "sync remove"]);
+        assert_eq!(words, ["device admit", "record open", "sync now", "sync add", "sync list", "sync remove"]);
     }
 
     /// **The line #186 found**, as it stood: a daemon's error naming `device admit` and not

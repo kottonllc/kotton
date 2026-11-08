@@ -1447,7 +1447,8 @@ pub enum UserRequest {
         schema_nsid: String,
         /// JSON-encoded record body.
         record: serde_json::Value,
-        /// The root the record belongs to, by its local id (RFC-0071 R17).
+        /// The root the record belongs to, by its local id (RFC-0071 R17), or
+        /// [`PERSONAL_ROOT`](super::PERSONAL_ROOT) for Personal.
         /// `None` is *Personal*, so every caller that predates roots writes
         /// where it always did. A root the person is not a member of is
         /// refused (R12).
@@ -1472,7 +1473,8 @@ pub enum UserRequest {
         limit: Option<usize>,
         /// Number of results to skip (pagination).
         offset: Option<usize>,
-        /// Read one root only, by its local id (RFC-0071 R17). `None` reads
+        /// Read one root only, by its local id (RFC-0071 R17), or Personal
+        /// alone by [`PERSONAL_ROOT`](super::PERSONAL_ROOT). `None` reads
         /// every root the person is a member of — their own view across their
         /// roots — and never a root they are not in (R12).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1505,7 +1507,8 @@ pub enum UserRequest {
         user_id: String,
         schema_nsid: String,
         record_id: String,
-        /// Delete only from this root, by its local id (RFC-0071 R17). `None`
+        /// Delete only from this root, by its local id (RFC-0071 R17), or from
+        /// Personal alone by [`PERSONAL_ROOT`](super::PERSONAL_ROOT). `None`
         /// reaches every root the person is a member of and no other (R12).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
