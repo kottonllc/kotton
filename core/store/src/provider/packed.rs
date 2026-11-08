@@ -144,9 +144,12 @@
 //!   pack dead to every kept generation, crash debris or one only a retired
 //!   generation named, goes at once. The check that reads every present
 //!   generation's manifest before the pass is what knows each one's packs,
-//!   so the rule costs no read. A manifest of a version this code does not
-//!   read fails that check and refuses the pass, so a newer device's
-//!   generation and the packs it names are never swept by an older one.
+//!   so the rule costs no read. A superblock or a manifest of a version this
+//!   code does not read fails that check and refuses the pass
+//!   (`held_generation`), so a newer device's generation and the packs it
+//!   names are never swept by an older one; the load still passes such a
+//!   superblock over as one that does not open, and reads the generation
+//!   below it, as before.
 //!
 //! That is the concession: one bad ref costs the person the data only its
 //! generation names, readable again once the generation is repaired, and
@@ -187,7 +190,8 @@ use crate::manifest::{
 use crate::pack::{open_pack, read_chunk_from_plaintext, scan_chunks, ChunkRef};
 use crate::superblock::{
     commit_superblock, load_adopted_superblock, load_current_superblock, read_superblock,
-    superblock_keys, NotOpened, PassedOver, Superblock, SUPERBLOCK_PREFIX,
+    read_superblock_checked, superblock_keys, NotOpened, PassedOver, Superblock, WhyNotOpened,
+    SUPERBLOCK_PREFIX,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -1059,8 +1063,10 @@ impl<S: LooseObjectSource + 'static> PackedObjectStorage<S> {
         // pack only the fallback still names. What only the base names is
         // reclaimed by a later pass, once a newer commit has taken its place
         // as the fallback. The check above read each of these manifests, so
-        // no new read decides it. A generation with the same number as one
-        // kept, a twin another device committed, is kept whole with it.
+        // no new read decides it. A twin at a kept generation's number,
+        // committed by another device, has its packs kept by this pass too;
+        // retirement counts superblocks, so the twin itself may go, and what
+        // only it named goes at the pass after.
         let kept_after = if rewrite { 1 } else { 2 };
         let mut kept_generations: Vec<u64> = Vec::new();
         for (generation, _) in &adoptable_named {
@@ -2260,10 +2266,10 @@ fn packs_named(manifest: &Manifest, manifest_pack: &PackId) -> BTreeSet<PackId> 
 /// superblock. A superblock that does not open, or whose manifest pack is
 /// gone (a superseded generation whose manifest compaction already retired),
 /// holds nothing, and is neither: not held, and no fallback either. A read
-/// that fails otherwise, or a manifest that is malformed or of a version
-/// this code does not read, is an error, not an answer, and refuses the
-/// pass: such a manifest may be a newer device's correct write, whose packs
-/// compaction must not delete.
+/// that fails otherwise, or a superblock or manifest of a version this code
+/// does not read, or a manifest that is malformed, is an error, not an
+/// answer, and refuses the pass: such a write may be a newer device's correct
+/// one, whose packs compaction must not delete (kotton #423).
 ///
 /// Gone means not found: on a fetching shelf, a pack no drive it reached
 /// holds. A fetch that failed, the drive unreachable or erroring, is a
@@ -2281,8 +2287,17 @@ async fn held_generation<S: SealedObjectAccess + ?Sized>(
     k_pack: &[u8; 32],
     key: &str,
 ) -> ObjectStorageResult<Checked> {
-    let Some(sb) = read_superblock(store, k_pack, key).await? else {
-        return Ok(Checked::Neither);
+    let sb = match read_superblock_checked(store, k_pack, key).await? {
+        Ok(sb) => sb,
+        Err(WhyNotOpened::Unopenable(_)) => return Ok(Checked::Neither),
+        // A newer device's write. Its state and the packs it names are not
+        // this device's to judge, so nothing that deletes runs beside it.
+        Err(WhyNotOpened::UnsupportedVersion(version)) => {
+            return Err(ObjectStorageError::BackendError(format!(
+                "compaction not run: generation {key} is of superblock version {version}, which this \
+                 device does not read; a newer device wrote it, and the packs it names are kept"
+            )))
+        }
     };
     let framed = match read_framed_chunk_from(store, k_pack, &sb.manifest).await {
         Ok(framed) => framed,
@@ -4241,8 +4256,9 @@ mod tests {
         s.put(Path::new("a/gone.txt"), b"delete me").await.unwrap();
         s.pack_loose().await.unwrap();
         // The content pack this pass wrote holds the doomed file's only chunk.
-        // (Its index pack holds only its manifest, which no later generation
-        // names, so that one goes at the first pass.)
+        // (This store keeps no history log, so its index pack holds only its
+        // manifest, which no later generation names; that one goes at the
+        // first pass.)
         let doomed: BTreeSet<String> = pack_ids(&s).await.into_iter().filter(|p| is_content_pack(p)).collect();
         assert_eq!(doomed.len(), 1, "{doomed:?}");
 
@@ -7173,6 +7189,39 @@ mod tests {
         assert!(fresh.list(Path::new("")).await.is_err(), "a newer format was listed past");
         assert!(fresh.compact().await.is_err(), "compaction ran past a newer format");
         assert_eq!(shelf_keys(&backing).await, before, "something was written or deleted");
+    }
+
+    /// **A superblock of a version this code does not read refuses
+    /// compaction** (kotton #423's second note). It is a newer device's
+    /// correct write, not a torn one: compaction's check names it and runs
+    /// nothing, so neither its superblock nor a pack only it names is
+    /// deleted, and the shelf is as it was. The load still passes it over and
+    /// reads the generation below.
+    #[tokio::test]
+    async fn a_superblock_of_an_unsupported_version_refuses_compaction_and_is_not_swept() {
+        let backing = MemoryObjectStorage::new();
+        let slot = crate::fetch::PackSlot::default();
+        let s = fetching(&backing, &slot);
+        s.put(Path::new("notes/a.md"), b"one").await.unwrap();
+        s.pack_loose().await.unwrap();
+        s.put(Path::new("notes/b.md"), b"two").await.unwrap();
+        s.pack_loose().await.unwrap();
+        s.delete(Path::new("notes/b.md")).await.unwrap();
+        s.pack_loose().await.unwrap();
+        let newest = superblocks_of(&s, 3).await;
+        assert_eq!(newest.len(), 1);
+        let current = read_superblock(&*s.inner, &derive_pack_key(&CEK), &newest[0]).await.unwrap().unwrap();
+        // A newer device's commit, in a format this code does not read.
+        let newer = Superblock { version: 2, generation: 4, manifest: current.manifest.clone() };
+        commit_superblock(&*s.inner, &derive_pack_key(&CEK), &newer).await.unwrap();
+        assert_eq!(superblocks_of(&s, 4).await.len(), 1);
+
+        let before = shelf_keys(&backing).await;
+        let fresh = fetching(&backing, &slot);
+        let err = fresh.compact().await.expect_err("compaction ran beside a newer device's superblock");
+        assert!(err.to_string().contains("superblock version 2"), "the refusal does not say why: {err}");
+        assert_eq!(shelf_keys(&backing).await, before, "compaction deleted or wrote something");
+        assert_eq!(fresh.get(Path::new("notes/a.md")).await.unwrap().as_ref(), b"one");
     }
 
     /// **A torn superblock does not count toward the two** (kotton #368).
