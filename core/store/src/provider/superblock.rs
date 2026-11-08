@@ -191,7 +191,6 @@ where
     Ok(key)
 }
 
-/// Open one superblock blob stored at `key`.
 /// Why a superblock that is present did not open ([`open_superblock`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WhyNotOpened {
@@ -213,6 +212,7 @@ impl std::fmt::Display for WhyNotOpened {
     }
 }
 
+/// Open one superblock blob stored at `key`.
 fn open_superblock(k_pack: &[u8; 32], key: &str, blob: &[u8]) -> ObjectStorageResult<Superblock> {
     open_superblock_checked(k_pack, key, blob)
         .map_err(|why| ObjectStorageError::BackendError(why.to_string()))
