@@ -133,7 +133,9 @@
 //! names every object, and the record is rebuilt from the vaults' listings.
 //!
 //! **What a move holds: the drive, on this device and at every vault it
-//! touches** (kotton #143). A move takes the drive's lock on this device
+//! touches** (kotton-protocol's *A drive is where things live and a device keeps
+//! what its person chose*: a drive is moved or made by one device at a time;
+//! kotton #143 built it). A move takes the drive's lock on this device
 //! ([`drive_lock`], a [`DeviceRuntime::lock_mount`] keyed by the drive's name)
 //! for the whole of it, so two moves of one drive on one device are one after
 //! the other, and the second reads where the first left it. What no

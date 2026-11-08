@@ -58,7 +58,8 @@
 //! a move's — or refused, never landed in a directory being removed.
 //!
 //! **One device at a time moves or makes a drive: a lease this vault keeps**
-//! (kotton #143). A device takes a lease (`TenantDriveHold`) on every tree a
+//! (kotton-protocol's *A drive is where things live and a device keeps what its
+//! person chose*, which says so by name; kotton #143 built it). A device takes a lease (`TenantDriveHold`) on every tree a
 //! move of it touches here, before it lists or writes it, and holds it to the
 //! end; and a device making a drive takes the tenant's *making* lease at one
 //! vault, whatever the name. While a tree is held, a write into it

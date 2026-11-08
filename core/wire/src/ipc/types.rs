@@ -862,7 +862,9 @@ impl MadeDrive {
 /// A lease a vault keeps on one of a tenant's drives, or on their making of
 /// one, by the id the vault minted when a device of theirs took it: sixteen
 /// random bytes, fresh for every take, held in the vault's memory only and
-/// never sent to another vault (kotton #143). It is a fencing token: a retire
+/// never sent to another vault (kotton-protocol's *A drive is where things live
+/// and a device keeps what its person chose*, the lease the drive model names;
+/// kotton #143 built it). It is a fencing token: a retire
 /// of a made drive names the lease its device holds on it, and one that has
 /// lapsed, been let go or been taken by another device since is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
