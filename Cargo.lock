@@ -3501,6 +3501,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "blake3",
  "bytes",
  "chrono",
  "hex",
@@ -3535,6 +3536,8 @@ dependencies = [
 name = "kotton-schemas"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "bs58",
  "chrono",
  "kotton-common",
  "serde",

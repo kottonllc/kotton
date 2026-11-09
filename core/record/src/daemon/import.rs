@@ -3,9 +3,11 @@
 //!
 //! The same shape as [`crate::daemon::records`]: call the domain verb, wrap the
 //! result in a [`UserResponse`]. It declares the importer's shape first, through
-//! the same [`register_and_persist`] the `SchemaRegister` verb uses — registry
-//! and `app_schemas` in one step, so a shape declared by an import is still
-//! there after a restart and there is one description of what declaring means.
+//! [`declare_and_persist`], the `SchemaRegister` verb's [`register_and_persist`] less
+//! the signature check a request's definition gets — the shape is this tree's own,
+//! unsigned before the first tag as the core set is — so registry and `app_schemas`
+//! are one step, a shape declared by an import is still there after a restart and
+//! there is one description of what declaring means.
 //!
 //! ## Why the reader runs on a blocking thread
 //!
@@ -33,6 +35,7 @@
 //! that would require it rather than leaving it to whoever writes the next one.
 //!
 //! [`register_and_persist`]: crate::daemon::records::register_and_persist
+//! [`declare_and_persist`]: crate::daemon::records::declare_and_persist
 
 use std::io;
 use std::sync::{Arc, RwLock};
@@ -83,21 +86,13 @@ pub async fn import_ics(
     };
 
     // Declare the shape before writing anything under it. Idempotent: the second
-    // import of the day re-registers the same version, which joins the same owner
+    // import of the day declares the same revision, which joins the same owner
     // and changes nothing.
-    let definition = match serde_json::to_string(&crate::import_cmds::imported_calendar_schema()) {
-        Ok(json) => json,
-        Err(e) => {
-            return Ok(UserResponse::Error {
-                message: format!("serialize the import shape: {e}"),
-            })
-        }
-    };
-    if let Err(e) = crate::daemon::records::register_and_persist(
+    if let Err(e) = crate::daemon::records::declare_and_persist(
         schema_registry,
         store,
         user_db,
-        &definition,
+        crate::import_cmds::imported_calendar_schema(),
         &user_id,
     )
     .await

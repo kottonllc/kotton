@@ -136,7 +136,7 @@ async fn blind_relay_rejects_record_ops() {
         .inner()
         .send(&UserRequest::RecordQuery {
             user_id: user_id.clone(),
-            schema_nsid: "sh.kotton.notes".to_string(),
+            schema_nsid: kotton_common::namespace::NSID_NOTES.to_string(),
             field_eq: vec![],
             limit: None,
             offset: None,
@@ -172,7 +172,7 @@ async fn blind_relay_rejects_record_ops() {
         .inner()
         .send(&UserRequest::RecordDelete {
             user_id: user_id.clone(),
-            schema_nsid: "sh.kotton.notes".to_string(),
+            schema_nsid: kotton_common::namespace::NSID_NOTES.to_string(),
             record_id: "nonexistent".to_string(),
             root: None,
             app_id: None,
@@ -189,7 +189,7 @@ async fn blind_relay_rejects_record_ops() {
         .inner()
         .send(&UserRequest::RecordOpen {
             user_id: user_id.clone(),
-            url: "kotton://records/sh.kotton.notes/nonexistent".to_string(),
+            url: format!("kotton://records/{}/nonexistent", kotton_common::namespace::NSID_NOTES),
         })
         .await
         .expect("send RecordOpen");

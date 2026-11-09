@@ -20,7 +20,7 @@ use serde_json::Value;
 use crate::record_store::{RecordFilter, RecordStore as _};
 use crate::provider::sqlite_record_store::SqliteRecordStore;
 use crate::registry::SchemaRegistry;
-use kotton_schemas::nsid::Nsid;
+use kotton_schemas::SchemaId;
 
 /// The `record` domain, bound to one user's registry and store.
 ///
@@ -115,8 +115,8 @@ impl Record<'_> {
     schema_nsid: &str,
     record: Value,
 ) -> Result<String> {
-    let nsid =
-        Nsid::new(schema_nsid).map_err(|e| anyhow!("invalid schema NSID '{schema_nsid}': {e}"))?;
+    let nsid = SchemaId::parse(schema_nsid)
+        .map_err(|e| anyhow!("'{schema_nsid}' is not a schema identity: {e}"))?;
 
     // Look up the schema definition.
     let schema = {
@@ -150,8 +150,8 @@ impl Record<'_> {
     offset: Option<usize>,
     before_id: Option<String>,
 ) -> Result<Vec<Value>> {
-    let nsid =
-        Nsid::new(schema_nsid).map_err(|e| anyhow!("invalid schema NSID '{schema_nsid}': {e}"))?;
+    let nsid = SchemaId::parse(schema_nsid)
+        .map_err(|e| anyhow!("'{schema_nsid}' is not a schema identity: {e}"))?;
 
     // Verify schema is known.
     {
@@ -222,8 +222,8 @@ impl Record<'_> {
     schema_nsid: &str,
     record_id: &str,
 ) -> Result<()> {
-    let nsid =
-        Nsid::new(schema_nsid).map_err(|e| anyhow!("invalid schema NSID '{schema_nsid}': {e}"))?;
+    let nsid = SchemaId::parse(schema_nsid)
+        .map_err(|e| anyhow!("'{schema_nsid}' is not a schema identity: {e}"))?;
 
     {
         let reg = self.registry.read().unwrap();
@@ -238,7 +238,7 @@ impl Record<'_> {
     Ok(())
 }
 
-/// Open a single record by its `kotton://records/<nsid>/<id>` URL.
+/// Open a single record by its `kotton://records/<publisher>/<name>/<id>` URL.
 ///
 /// Parses the URL, looks up the schema, then queries the user's record store
 /// for the exact record ID.  Returns `Some((nsid_str, body))` if found, or
@@ -250,7 +250,7 @@ impl Record<'_> {
     let record_url =
         kotton_schemas::RecordUrl::parse(url).map_err(|e| anyhow!("invalid record URL: {e}"))?;
 
-    let nsid_str = record_url.nsid.as_str().to_owned();
+    let nsid_str = record_url.schema.to_string();
 
     let results = self.query(
         &nsid_str,
@@ -281,14 +281,14 @@ impl Record<'_> {
     limit: Option<u32>,
 ) -> Result<Vec<Value>> {
 
-    let nsids: Vec<Nsid> = {
+    let nsids: Vec<SchemaId> = {
         let reg = self.registry.read().unwrap();
         if let Some(nsid_str) = nsid_filter {
-            let nsid = Nsid::new(nsid_str)
-                .map_err(|e| anyhow!("invalid schema NSID '{nsid_str}': {e}"))?;
+            let nsid = SchemaId::parse(nsid_str)
+                .map_err(|e| anyhow!("'{nsid_str}' is not a schema identity: {e}"))?;
             vec![nsid]
         } else {
-            reg.list().into_iter().map(|def| def.nsid.clone()).collect()
+            reg.list().into_iter().map(|def| def.id()).collect()
         }
     };
 

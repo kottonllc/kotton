@@ -19,7 +19,7 @@
 //!     record_store::{RecordFilter, RecordStore},
 //!     sqlite_record_store::SqliteRecordStore,
 //! };
-//! use kotton_schemas::{core::CoreSchema, nsid::Nsid};
+//! use kotton_schemas::{core::CoreSchema, SchemaId};
 //! use std::path::Path;
 //!
 //! # #[tokio::main] async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,7 +27,7 @@
 //! let notes = CoreSchema::Notes.definition();
 //! store.create_table(&notes).await?;
 //!
-//! let nsid = Nsid::new("sh.kotton.notes")?;
+//! let nsid = SchemaId::from_static(kotton_common::namespace::NSID_NOTES);
 //! let id = store.insert(&nsid, serde_json::json!({"title": "Hello"})).await?;
 //! let records = store.query(&nsid, RecordFilter::new()).await?;
 //! # Ok(()) }

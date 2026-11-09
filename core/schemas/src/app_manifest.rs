@@ -12,11 +12,11 @@
 //! id = "com.acme.notes-pro"
 //! name = "Notes Pro"
 //! version = "1.0.0"
-//! handler_for = ["sh.kotton.notes"]
+//! handler_for = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]
 //!
 //! [capabilities]
-//! "schema.read"  = ["sh.kotton.notes"]
-//! "schema.write" = ["sh.kotton.notes"]
+//! "schema.read"  = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]
+//! "schema.write" = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]
 //! "files.read"   = ["/exports"]
 //! "network.fetch" = []   # presence enables outbound network; value list is ignored
 //! ```
@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use crate::{
     capability::CapabilitySet, CallDirection, CapabilityGrant, CapabilityKind, CapabilityTarget,
-    MediaDevice, MessageDirection, Nsid, NsidError,
+    AppId, AppIdError, MediaDevice, MessageDirection, SchemaId, SchemaIdError,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -43,17 +43,17 @@ pub enum ManifestError {
     #[error("unknown capability key {0:?}; expected schema.read, schema.write, files.read, files.write, network.fetch, media.microphone, media.camera, media.screen, call.initiate, call.receive, messages.send, messages.receive, events.subscribe, or ui.custom")]
     UnknownCapabilityKey(String),
 
-    /// An NSID in the manifest is invalid.
-    #[error("invalid NSID {0:?}: {1}")]
-    InvalidNsid(String, NsidError),
+    /// A schema named under `capabilities` is not a schema identity.
+    #[error("invalid schema identity {0:?}: {1}")]
+    InvalidSchemaId(String, SchemaIdError),
 
-    /// The app `id` field is not a valid NSID.
+    /// The app `id` field is not a valid app id.
     #[error("invalid app id {0:?}: {1}")]
-    InvalidAppId(String, NsidError),
+    InvalidAppId(String, AppIdError),
 
-    /// The `handler_for` list contains an invalid NSID.
+    /// The `handler_for` list names something that is not a schema identity.
     #[error("invalid handler_for entry {0:?}: {1}")]
-    InvalidHandlerNsid(String, NsidError),
+    InvalidHandlerSchema(String, SchemaIdError),
     /// A `[[capabilities]]` entry named a resource kind this host does not know.
     ///
     /// An error rather than a skip: a host that silently ignored an unknown
@@ -163,13 +163,13 @@ pub enum AppKind {
 #[derive(Debug, Clone)]
 pub struct AppMeta {
     /// Reverse-domain app identifier: `com.acme.notes-pro`.
-    pub id: Nsid,
+    pub id: AppId,
     /// Human-readable display name.
     pub name: String,
     /// Semver-like version string (stored as string, not parsed).
     pub version: String,
-    /// NSIDs this app registers as a handler for.
-    pub handler_for: Vec<Nsid>,
+    /// The schemas this app registers as a handler for, by identity.
+    pub handler_for: Vec<SchemaId>,
 }
 
 /// A parsed app manifest, ready for sandbox construction.
@@ -326,7 +326,7 @@ impl AppManifest {
         let raw: RawManifest = toml::from_str(src)?;
 
         // Validate app id
-        let id = Nsid::new(&raw.app.id)
+        let id = AppId::new(&raw.app.id)
             .map_err(|e| ManifestError::InvalidAppId(raw.app.id.clone(), e))?;
 
         // Validate handler_for entries
@@ -334,7 +334,7 @@ impl AppManifest {
             .app
             .handler_for
             .iter()
-            .map(|s| Nsid::new(s).map_err(|e| ManifestError::InvalidHandlerNsid(s.clone(), e)))
+            .map(|s| SchemaId::parse(s).map_err(|e| ManifestError::InvalidHandlerSchema(s.clone(), e)))
             .collect::<Result<Vec<_>, _>>()?;
 
         let meta = AppMeta {
@@ -410,17 +410,17 @@ impl AppManifest {
         for (key, values) in &flat {
             match key.as_str() {
                 "schema.read" => {
-                    for nsid_str in values {
-                        let nsid = Nsid::new(nsid_str)
-                            .map_err(|e| ManifestError::InvalidNsid(nsid_str.clone(), e))?;
-                        grants.push(CapabilityGrant::schema(CapabilityKind::Read, nsid));
+                    for id_str in values {
+                        let id = SchemaId::parse(id_str)
+                            .map_err(|e| ManifestError::InvalidSchemaId(id_str.clone(), e))?;
+                        grants.push(CapabilityGrant::schema(CapabilityKind::Read, id));
                     }
                 }
                 "schema.write" => {
-                    for nsid_str in values {
-                        let nsid = Nsid::new(nsid_str)
-                            .map_err(|e| ManifestError::InvalidNsid(nsid_str.clone(), e))?;
-                        grants.push(CapabilityGrant::schema(CapabilityKind::Write, nsid));
+                    for id_str in values {
+                        let id = SchemaId::parse(id_str)
+                            .map_err(|e| ManifestError::InvalidSchemaId(id_str.clone(), e))?;
+                        grants.push(CapabilityGrant::schema(CapabilityKind::Write, id));
                     }
                 }
                 "files.read" => {
@@ -541,11 +541,11 @@ mod tests {
 id = "com.acme.notes-pro"
 name = "Notes Pro"
 version = "1.0.0"
-handler_for = ["sh.kotton.notes"]
+handler_for = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]
 
 [capabilities]
-"schema.read"  = ["sh.kotton.notes"]
-"schema.write" = ["sh.kotton.notes"]
+"schema.read"  = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]
+"schema.write" = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]
 "files.read"   = ["/exports"]
 "#;
 
@@ -556,7 +556,7 @@ handler_for = ["sh.kotton.notes"]
         assert_eq!(m.app.name, "Notes Pro");
         assert_eq!(m.app.version, "1.0.0");
         assert_eq!(m.app.handler_for.len(), 1);
-        assert_eq!(m.app.handler_for[0].as_str(), "sh.kotton.notes");
+        assert_eq!(m.app.handler_for[0].to_string(), "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes");
         assert!(!m.network_fetch);
         assert_eq!(m.capabilities.len(), 3);
         assert!(m.publisher_did.is_none());
@@ -566,7 +566,7 @@ handler_for = ["sh.kotton.notes"]
     #[test]
     fn capability_set_allows() {
         let m = AppManifest::from_toml(EXAMPLE).unwrap();
-        let notes = Nsid::from_static("sh.kotton.notes");
+        let notes = SchemaId::from_static(kotton_common::namespace::NSID_NOTES);
         assert!(m.capabilities.allows(
             &CapabilityKind::Read,
             &CapabilityTarget::Schema {
@@ -579,7 +579,7 @@ handler_for = ["sh.kotton.notes"]
                 nsid: notes.clone()
             }
         ));
-        let contacts = Nsid::from_static("sh.kotton.contacts");
+        let contacts = SchemaId::from_static(kotton_common::namespace::NSID_CONTACTS);
         assert!(!m.capabilities.allows(
             &CapabilityKind::Read,
             &CapabilityTarget::Schema { nsid: contacts }
@@ -705,7 +705,7 @@ did = "did:key:z6MkTest"
 signature = "aGVsbG8="
 
 [capabilities]
-"schema.read" = ["sh.kotton.notes"]
+"schema.read" = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]
 "#;
         let m = AppManifest::from_toml(src).unwrap();
         assert_eq!(m.publisher_did.as_deref(), Some("did:key:z6MkTest"));
@@ -731,7 +731,7 @@ version = "1.0.0"
     fn invalid_app_id_is_rejected() {
         let src = r#"
 [app]
-id = "NotAnNsid"
+id = "NotAnAppId"
 name = "Bad"
 version = "1.0.0"
 "#;

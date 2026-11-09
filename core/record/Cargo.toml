@@ -44,6 +44,8 @@ uuid = { version = "1", features = ["v4"] }
 
 # Hex encoding for SQLCipher key
 hex = "0.4"
+# A schema's table is named by BLAKE3 over its identity (`sqlite_record_store::nsid_to_table`).
+blake3 = { workspace = true }
 
 [dev-dependencies]
 workspace-hack = { path = "../../tools/workspace-hack" }

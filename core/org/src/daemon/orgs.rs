@@ -22,7 +22,7 @@ use kotton_wire::{
     GrantEnvelope,
 };
 use kotton_crypto::DidKeyMethod;
-use kotton_schemas::{CapabilityGrant, CapabilityKind, Nsid};
+use kotton_schemas::{CapabilityGrant, CapabilityKind, SchemaId};
 use kotton_common::crypto::kdf_labels;
 use kotton_common::time::now_secs;
 use rand::rngs::OsRng;
@@ -304,7 +304,7 @@ fn load_org_key(org_did: &str, secrets: &dyn SecretsStore) -> Option<ed25519_dal
     Some(ed25519_dalek::SigningKey::from_bytes(&key_bytes))
 }
 
-/// Parse capability strings in display form (`"schema.read:sh.kotton.notes"`,
+/// Parse capability strings in display form (`"schema.read:<publisher>/<name>"`,
 /// `"vfs.read:/notes"`, `"org.invite:<root>"`) into `CapabilityGrant`s.
 pub fn parse_caps(caps: &[String]) -> Result<Vec<CapabilityGrant>, String> {
     caps.iter().map(|s| parse_cap(s)).collect()
@@ -312,7 +312,8 @@ pub fn parse_caps(caps: &[String]) -> Result<Vec<CapabilityGrant>, String> {
 
 fn parse_cap(s: &str) -> Result<CapabilityGrant, String> {
     // Format: `<domain>.<kind>:<target>`
-    // e.g. `schema.read:sh.kotton.notes` or `vfs.write:/notes`
+    // e.g. `schema.read:did:key:z6Mk…/notes` or `vfs.write:/notes`: the first `:` ends the
+    // prefix, and a schema identity's own colons are the target's.
     let (prefix, target_str) = s
         .split_once(':')
         .ok_or_else(|| format!("invalid capability string (missing ':'): {s:?}"))?;
@@ -341,8 +342,8 @@ fn parse_cap(s: &str) -> Result<CapabilityGrant, String> {
 
     match domain {
         "schema" => {
-            let nsid =
-                Nsid::new(target_str).map_err(|e| format!("invalid NSID {target_str:?}: {e}"))?;
+            let nsid = SchemaId::parse(target_str)
+                .map_err(|e| format!("{target_str:?} is not a schema identity: {e}"))?;
             Ok(CapabilityGrant::schema(kind, nsid))
         }
         "vfs" => Ok(CapabilityGrant::vfs(kind, target_str)),

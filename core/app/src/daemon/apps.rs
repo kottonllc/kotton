@@ -2040,9 +2040,9 @@ pub async fn app_install(
 
     // Register handler_for entries in the handler registry
     for nsid in &manifest.app.handler_for {
-        let existing = hrdb::count_for_nsid(user_db, nsid.as_str()).await?;
+        let existing = hrdb::count_for_nsid(user_db, &nsid.to_string()).await?;
         let is_default: i32 = if existing == 0 { 1 } else { 0 };
-        hrdb::upsert_handler(user_db, &app_id, nsid.as_str(), is_default).await?;
+        hrdb::upsert_handler(user_db, &app_id, &nsid.to_string(), is_default).await?;
     }
 
     // Build and sign a GrantEnvelope over the *approved* capabilities. Note what
@@ -6182,7 +6182,8 @@ mod host_call_tests {
         let spy = Spy::new();
         let ask = |verb| service_host_call(RunnerHostCall::Records { verb }, Some(&spy), None, None);
 
-        match ask(RunnerRecordVerb::List { root: "fam".into(), nsid: "sh.kotton.calendar".into() })
+        let calendar = kotton_common::namespace::NSID_CALENDAR;
+        match ask(RunnerRecordVerb::List { root: "fam".into(), nsid: calendar.into() })
             .await
             .unwrap()
         {
@@ -6191,7 +6192,7 @@ mod host_call_tests {
         }
         match ask(RunnerRecordVerb::Add {
             root: "fam".into(),
-            nsid: "sh.kotton.calendar".into(),
+            nsid: calendar.into(),
             data: "{\"title\":\"x\"}".into(),
         })
         .await
@@ -6202,7 +6203,7 @@ mod host_call_tests {
         }
         match ask(RunnerRecordVerb::List {
             root: "not-a-member".into(),
-            nsid: "sh.kotton.calendar".into(),
+            nsid: calendar.into(),
         })
         .await
         .unwrap()
@@ -6213,15 +6214,15 @@ mod host_call_tests {
         assert_eq!(
             spy.asked(),
             vec![
-                "root-records fam sh.kotton.calendar",
-                "root-add fam sh.kotton.calendar {\"title\":\"x\"}",
-                "root-records not-a-member sh.kotton.calendar",
+                format!("root-records fam {calendar}"),
+                format!("root-add fam {calendar} {{\"title\":\"x\"}}"),
+                format!("root-records not-a-member {calendar}"),
             ]
         );
 
         let err = service_host_call(
             RunnerHostCall::Records {
-                verb: RunnerRecordVerb::List { root: "fam".into(), nsid: "sh.kotton.calendar".into() },
+                verb: RunnerRecordVerb::List { root: "fam".into(), nsid: calendar.into() },
             },
             None,
             None,
@@ -6290,7 +6291,7 @@ mod host_call_tests {
         impl RecordsHost for Kept {
             async fn kept_records(&self, nsid: &str) -> Result<Vec<RunnerKeptRecord>, String> {
                 self.0.lock().unwrap().push(nsid.to_owned());
-                if nsid == "sh.kotton.refused" {
+                if nsid == "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76/refused" {
                     return Err("the store would not open".into());
                 }
                 Ok(vec![RunnerKeptRecord {
@@ -6302,7 +6303,7 @@ mod host_call_tests {
         }
         let kept = Kept(std::sync::Mutex::new(Vec::new()));
         let spy = Spy::new();
-        let nsid = "sh.kotton.governance.record";
+        let nsid = kotton_common::namespace::NSID_GOVERNANCE_RECORD;
 
         // No occupant: an ordinary app.
         match service_host_call(RunnerHostCall::Kept { nsid: nsid.into() }, None, None, Some(&kept))
@@ -6320,7 +6321,7 @@ mod host_call_tests {
             .expect("serviced");
         assert!(spy.asked().is_empty(), "the occupant host was asked for kept records");
         match service_host_call(
-            RunnerHostCall::Kept { nsid: "sh.kotton.refused".into() },
+            RunnerHostCall::Kept { nsid: "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76/refused".into() },
             None,
             None,
             Some(&kept),
@@ -6331,7 +6332,7 @@ mod host_call_tests {
             RunnerHostReply::RecordFailed { message } => assert!(message.contains("would not open")),
             other => panic!("unexpected: {other:?}"),
         }
-        assert_eq!(*kept.0.lock().unwrap(), vec![nsid, nsid, "sh.kotton.refused"]);
+        assert_eq!(*kept.0.lock().unwrap(), vec![nsid, nsid, "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76/refused"]);
 
         // Nobody's instance: no host, and an answer rather than a dropped instance.
         match service_host_call(RunnerHostCall::Kept { nsid: nsid.into() }, None, None, None)
@@ -8442,7 +8443,7 @@ desc    = "The folder this editor reads and saves files in."
             "Records",
             "2026-10-03T00:00:00Z",
             "[app]\nid = \"sh.kotton.records\"\nname = \"Records\"\nversion = \"0.1.0\"\n\n\
-             [capabilities]\n\"schema.read\" = [\"sh.kotton.governance.record\"]\n",
+             [capabilities]\n\"schema.read\" = [\"did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/governance.record\"]\n",
         )
         .await;
         install(
@@ -9361,7 +9362,7 @@ mod files_call_tests {
     /// the grant, on the launch path the sealed-store merge rebuilt.
     #[tokio::test]
     async fn a_schema_grant_alone_reaches_no_file() {
-        let nsid = kotton_schemas::Nsid::new("sh.kotton.governance.record").unwrap();
+        let nsid = kotton_schemas::SchemaId::from_static(kotton_common::namespace::NSID_GOVERNANCE_RECORD);
         let reach = PersonalReach::of(
             "sh.kotton.records",
             Some("owner"),

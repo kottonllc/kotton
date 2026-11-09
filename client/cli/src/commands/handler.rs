@@ -2,11 +2,11 @@
 //! `kotton handler` subcommands — schema handler registration.
 //!
 //! ```text
-//! kotton handler register <app-id> <nsid>     [--user <id>]
-//! kotton handler unregister <app-id> <nsid>   [--user <id>]
-//! kotton handler get <nsid>                   [--user <id>]
+//! kotton handler register <app-id> <schema>   [--user <id>]
+//! kotton handler unregister <app-id> <schema> [--user <id>]
+//! kotton handler get <schema>                 [--user <id>]
 //! kotton handler list                         [--user <id>]
-//! kotton handler set-default <app-id> <nsid>  [--user <id>]
+//! kotton handler set-default <app-id> <schema> [--user <id>]
 //! ```
 //!
 //! The registry is per person, so every verb acts as someone: `--user`, else `KOTTON_USER`,
@@ -18,29 +18,29 @@ use std::io;
 
 #[derive(Subcommand)]
 pub enum HandlerCommand {
-    /// Register an app as a handler for a schema NSID
+    /// Register an app as a handler for a schema
     Register {
         /// App identifier, e.g. `com.acme.notes-pro`
         app_id: String,
-        /// Schema NSID this app can render, e.g. `sh.kotton.notes`
+        /// The schema this app can render, `<publisher>/<name>`
         nsid: String,
         /// Identity to act as (defaults to the active identity / KOTTON_USER)
         #[arg(long, env = "KOTTON_USER")]
         user: String,
     },
-    /// Unregister an app as a handler for a schema NSID
+    /// Unregister an app as a handler for a schema
     Unregister {
         /// App identifier
         app_id: String,
-        /// Schema NSID
+        /// The schema, `<publisher>/<name>`
         nsid: String,
         /// Identity to act as (defaults to the active identity / KOTTON_USER)
         #[arg(long, env = "KOTTON_USER")]
         user: String,
     },
-    /// Print the default handler for a schema NSID
+    /// Print the default handler for a schema
     Get {
-        /// Schema NSID to look up, e.g. `sh.kotton.notes`
+        /// The schema to look up, `<publisher>/<name>`
         nsid: String,
         /// Identity to act as (defaults to the active identity / KOTTON_USER)
         #[arg(long, env = "KOTTON_USER")]
@@ -52,11 +52,11 @@ pub enum HandlerCommand {
         #[arg(long, env = "KOTTON_USER")]
         user: String,
     },
-    /// Override the default handler for a schema NSID
+    /// Override the default handler for a schema
     SetDefault {
         /// App identifier to make the default
         app_id: String,
-        /// Schema NSID
+        /// The schema, `<publisher>/<name>`
         nsid: String,
         /// Identity to act as (defaults to the active identity / KOTTON_USER)
         #[arg(long, env = "KOTTON_USER")]
@@ -108,7 +108,7 @@ impl HandlerCommand {
                 if entries.is_empty() {
                     println!("No handlers registered.");
                 } else {
-                    println!("{:<40} {:<8} APP", "NSID", "DEFAULT");
+                    println!("{:<40} {:<8} APP", "SCHEMA", "DEFAULT");
                     println!("{}", "-".repeat(72));
                     for e in &entries {
                         println!(

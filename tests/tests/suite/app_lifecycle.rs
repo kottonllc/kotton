@@ -35,8 +35,8 @@ name    = "Caps Test App"
 version = "0.2.0"
 
 [capabilities]
-"schema.read"  = ["sh.kotton.notes"]
-"schema.write" = ["sh.kotton.notes"]
+"schema.read"  = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]
+"schema.write" = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]
 "#;
 
 // ── install ───────────────────────────────────────────────────────────────────
@@ -55,11 +55,11 @@ async fn app_install_returns_correct_metadata() {
     assert_eq!(app_id, "sh.kotton.test-caps");
     assert_eq!(name, "Caps Test App");
     assert!(
-        caps.contains(&"schema.read:sh.kotton.notes".to_string()),
+        caps.contains(&format!("schema.read:{}", kotton_common::namespace::NSID_NOTES)),
         "expected schema.read cap in {caps:?}"
     );
     assert!(
-        caps.contains(&"schema.write:sh.kotton.notes".to_string()),
+        caps.contains(&format!("schema.write:{}", kotton_common::namespace::NSID_NOTES)),
         "expected schema.write cap in {caps:?}"
     );
 }

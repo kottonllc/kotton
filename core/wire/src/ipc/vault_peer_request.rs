@@ -658,7 +658,7 @@ mod tests {
     fn a_live_record_insert_is_unknown_on_the_vaults_peer_wire() {
         let insert = UserRequest::RecordInsert {
             user_id: "alice".into(),
-            schema_nsid: "sh.kotton.notes".into(),
+            schema_nsid: "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes".into(),
             record: serde_json::json!({ "title": "planted", "body": "planted" }),
             root: None,
             app_id: None,

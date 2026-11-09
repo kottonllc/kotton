@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! X25519 ECDH + ChaCha20-Poly1305 encryption for peer-to-peer and channel
-//! messages (`sh.kotton.message.v1`).
+//! messages (`message.v1`).
 //!
 //! ## DM encryption (ephemeral ECDH)
 //!
@@ -19,7 +19,7 @@
 //! ## Channel encryption (symmetric key)
 //!
 //! Channel messages use a 32-byte symmetric key pre-distributed to all members
-//! via `sh.kotton.channel.key-grant` records (each grant is a DM-encrypted
+//! via `channel.key-grant` records (each grant is a DM-encrypted
 //! copy of the channel key).
 //!
 //! The channel key is never sent to the hosting node in plaintext.
@@ -125,7 +125,7 @@ pub const DM_HKDF_INFO: &[u8] = b"kotton:dm:v1";
 /// `recipient_ed_pub`.
 ///
 /// Returns `(ciphertext, nonce_12, ephemeral_pub_32)`.  Store all three in
-/// the `sh.kotton.message.v1` record (base64-encoded).
+/// the `message.v1` record (base64-encoded).
 pub fn dm_encrypt(
     plaintext: &[u8],
     recipient_ed_pub: &[u8; 32],
@@ -253,7 +253,7 @@ pub const CHANNEL_KEY_WRAP_INFO: &[u8] = b"kotton:channel-key-wrap:v1";
 /// using ephemeral X25519 ECDH (same scheme as `dm_encrypt`).
 ///
 /// Returns `(encrypted_key, nonce_12, ephemeral_pub_32)`.  Store in a
-/// `sh.kotton.channel.key-grant` record (base64-encoded).
+/// `channel.key-grant` record (base64-encoded).
 pub fn channel_key_wrap(
     channel_key: &[u8; 32],
     recipient_ed_pub: &[u8; 32],
@@ -267,7 +267,7 @@ pub fn channel_key_wrap(
     Ok((enc_key, nonce, eph_pub.to_bytes()))
 }
 
-/// Unwrap a channel key received in a `sh.kotton.channel.key-grant` record.
+/// Unwrap a channel key received in a `channel.key-grant` record.
 pub fn channel_key_unwrap(
     enc_key: &[u8],
     nonce: &[u8; 12],

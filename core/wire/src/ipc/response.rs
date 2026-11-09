@@ -60,7 +60,7 @@ pub enum UserResponse {
 
     /// Encrypted message records returned from a history or inbox query.
     ///
-    /// Each value is a JSON object with the full `sh.kotton.message.v1` fields
+    /// Each value is a JSON object with the full `message.v1` fields
     /// (body, nonce, ephemeral_pub, etc. still base64-encoded).  The caller
     /// decrypts using the appropriate key.
     MessageHistory {
@@ -996,7 +996,7 @@ pub enum UserResponse {
     AppInstalled {
         app_id: String,
         name: String,
-        /// Human-readable capability list, e.g. `"schema.read:sh.kotton.notes"`.
+        /// Human-readable capability list, e.g. `"schema.read:<publisher>/<name>"`.
         capabilities: Vec<String>,
     },
     /// What an app package is asking for, before anything is minted or written.

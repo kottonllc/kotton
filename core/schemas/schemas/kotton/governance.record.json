@@ -1,0 +1,152 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "governance.record",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "name",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "kind",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "title",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "status",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "type",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "region",
+      "type": {
+        "list": "string"
+      },
+      "nullable": true
+    },
+    {
+      "name": "domains",
+      "type": {
+        "list": "string"
+      },
+      "nullable": true
+    },
+    {
+      "name": "blocked_by",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "built",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "evidence",
+      "type": {
+        "list": "string"
+      },
+      "nullable": true
+    },
+    {
+      "name": "authority",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "serves",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "security",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "opened",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "updated",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "header_rest",
+      "type": {
+        "list": {
+          "record": [
+            {
+              "name": "key",
+              "type": "string",
+              "nullable": false
+            },
+            {
+              "name": "value",
+              "type": "string",
+              "nullable": false
+            }
+          ]
+        }
+      },
+      "nullable": false
+    },
+    {
+      "name": "body",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "form",
+      "type": {
+        "record": [
+          {
+            "name": "lead",
+            "type": "string",
+            "nullable": true
+          },
+          {
+            "name": "lines",
+            "type": {
+              "list": {
+                "record": [
+                  {
+                    "name": "key",
+                    "type": "string",
+                    "nullable": false
+                  },
+                  {
+                    "name": "pad",
+                    "type": "string",
+                    "nullable": false
+                  },
+                  {
+                    "name": "tail",
+                    "type": "string",
+                    "nullable": false
+                  }
+                ]
+              }
+            },
+            "nullable": false
+          }
+        ]
+      },
+      "nullable": false
+    }
+  ],
+  "description": "A governance record: one record file as a row. The file is the wire format."
+}

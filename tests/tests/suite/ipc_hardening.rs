@@ -288,7 +288,7 @@ async fn control_plane_requires_a_session() {
 
     let grant = || UserRequest::SchemaGrantSet {
         app_id: "com.evil".to_string(),
-        nsid: "sh.kotton.contacts".to_string(),
+        nsid: kotton_common::namespace::NSID_CONTACTS.to_string(),
         can_read: true,
         can_write: true,
         can_register: false,

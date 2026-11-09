@@ -26,7 +26,7 @@ impl KottonClient {
 
     /// Create a new channel and generate + store its symmetric key for the creator.
     ///
-    /// The daemon generates a random 32-byte channel key, wraps it for the\n    /// creator's own DID, and stores a `sh.kotton.channel.key-grant` record.
+    /// The daemon generates a random 32-byte channel key, wraps it for the\n    /// creator's own DID, and stores a `channel.key-grant` record.
     /// Returns the record ID of the stored key-grant.
     pub async fn message_channel_create(
         &mut self,
@@ -126,7 +126,7 @@ impl KottonClient {
     }
 
     /// Encrypt `body` as a DM to `recipient_did` and store the ciphertext as a
-    /// `sh.kotton.message.v1` record.
+    /// `message.v1` record.
     ///
     /// Returns the stable record ID (`message_id`) of the stored message.
     pub async fn message_send(
@@ -235,11 +235,11 @@ impl KottonClient {
         }
     }
 
-    /// Return up to `limit` raw (still-encrypted) `sh.kotton.message.v1` records
+    /// Return up to `limit` raw (still-encrypted) `message.v1` records
     /// for `channel_did`, sorted by `sent_at` descending.
     ///
     /// Records are returned still-encrypted; callers must decrypt using the
-    /// channel key retrieved via `record_query` on `sh.kotton.channel.key-grant`.
+    /// channel key retrieved via `record_query` on `channel.key-grant`.
     pub async fn message_channel_history(
         &mut self,
         user_id: &str,
@@ -260,7 +260,7 @@ impl KottonClient {
         }
     }
 
-    /// Return the 50 most recent `sh.kotton.message.v1` records addressed to
+    /// Return the 50 most recent `message.v1` records addressed to
     /// `user_id`'s DID.
     ///
     /// Records are returned still-encrypted; callers decrypt using their own
@@ -303,7 +303,7 @@ impl KottonClient {
 
     /// Decrypt an encrypted channel message body using the channel key grant.
     ///
-    /// The daemon looks up the `sh.kotton.channel.key-grant` record for
+    /// The daemon looks up the `channel.key-grant` record for
     /// `user_id` + `channel_did`, unwraps the wrapped channel key, and decrypts
     /// `body` with it.  Returns the UTF-8 plaintext.
     pub async fn message_decrypt_channel(

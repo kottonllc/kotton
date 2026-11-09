@@ -1,0 +1,28 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "clipboard",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "source_schema",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "source_id",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "snapshot_json",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "copied_at",
+      "type": "datetime",
+      "nullable": false
+    }
+  ],
+  "description": "Clipboard entries — a structured snapshot of a record the user has copied, anchored to its source schema and record ID."
+}

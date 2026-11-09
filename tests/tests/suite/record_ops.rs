@@ -4,14 +4,14 @@
 //! Covers: record_insert, record_query (all + filter), record_delete,
 //! record_open (found), record_open (not found).
 //!
-//! Uses the built-in `sh.kotton.notes` core schema so no registration step
-//! is needed.
+//! Uses the built-in `notes` core schema so no registration step is needed.
 
 use crate::common::cli::{said, Cli};
-use crate::common::TestEnv;
+use crate::common::{suite_schema, TestEnv};
+use std::sync::LazyLock;
 
 const USER: &str = "bob";
-const NOTES: &str = "sh.kotton.notes";
+const NOTES: &str = kotton_common::namespace::NSID_NOTES;
 
 /// Helper — ensure user exists and return a `TestEnv`.
 async fn env_with_user() -> TestEnv {
@@ -239,19 +239,27 @@ async fn record_open_rejects_malformed_url() {
 
 // ── forks are not subtypes (DEC-0027) ─────────────────────────────────────────
 
-/// A fork of a core schema records where it came from and nothing else.
-const PINNABLE_NSID: &str = "com.test.pinnable-note";
-const PINNABLE_DEF: &str = r#"{
-    "nsid": "com.test.pinnable-note",
-    "version": 1,
-    "forked_from": "sh.kotton.notes",
-    "description": "A note, copied and given a pinned flag.",
-    "fields": [
-        { "name": "title",  "type": "string", "nullable": false },
-        { "name": "body",   "type": "string", "nullable": false },
-        { "name": "pinned", "type": "bool",   "nullable": false }
-    ]
-}"#;
+/// A fork of a core schema records where it came from and nothing else. Published and
+/// signed by the suite's key; the provenance is not under the signature.
+static PINNABLE_NSID: LazyLock<String> = LazyLock::new(|| suite_schema("pinnable-note"));
+static PINNABLE_DEF: LazyLock<String> = LazyLock::new(|| {
+    use kotton_schemas::{FieldType, SchemaDefinition, SchemaField, SchemaId};
+    // The description is under the digest, so it is written before the signature; the
+    // provenance is not, and could be written after.
+    let mut def = SchemaDefinition::new(
+        SchemaId::parse(&*PINNABLE_NSID).unwrap(),
+        1,
+        vec![
+            SchemaField::required("title", FieldType::String),
+            SchemaField::required("body", FieldType::String),
+            SchemaField::required("pinned", FieldType::Bool),
+        ],
+    )
+    .with_description("A note, copied and given a pinned flag.")
+    .with_forked_from(SchemaId::from_static(NOTES));
+    kotton_crypto::schema_signature::sign(&mut def, &crate::common::suite_publisher_key()).unwrap();
+    serde_json::to_string(&def).unwrap()
+});
 
 /// **The proof for `TASK-a-schema-grant-widens-to-subtypes`.**
 ///
@@ -264,13 +272,13 @@ async fn a_query_for_the_origin_does_not_return_records_of_a_fork() {
     let mut env = env_with_user().await;
 
     env.client
-        .schema_register(USER, PINNABLE_DEF)
+        .schema_register(USER, &PINNABLE_DEF)
         .await
         .expect("register the fork");
 
     let pinned = serde_json::json!({ "title": "Pinned", "body": "b", "pinned": true });
     env.client
-        .record_insert(USER, PINNABLE_NSID, pinned)
+        .record_insert(USER, &PINNABLE_NSID, pinned)
         .await
         .expect("insert under the fork");
 

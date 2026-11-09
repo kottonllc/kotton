@@ -490,7 +490,7 @@ Schema management (list, show, register)
 
 * `list` — List the schemas visible to you (core + your own registrations)
 * `show` — Print field definitions for a schema
-* `register` — Register an app schema from a JSON definition file
+* `register` — Register a schema from a JSON definition file, signed by its publisher
 
 
 
@@ -510,11 +510,11 @@ List the schemas visible to you (core + your own registrations)
 
 Print field definitions for a schema
 
-**Usage:** `Kotton schema show --user <USER> <NSID>`
+**Usage:** `Kotton schema show --user <USER> <SCHEMA>`
 
 ###### **Arguments:**
 
-* `<NSID>` — Schema NSID to inspect, e.g. `sh.kotton.notes`
+* `<SCHEMA>` — The schema to inspect, `<publisher>/<name>`
 
 ###### **Options:**
 
@@ -524,13 +524,13 @@ Print field definitions for a schema
 
 ## `Kotton schema register`
 
-Register an app schema from a JSON definition file
+Register a schema from a JSON definition file, signed by its publisher
 
 **Usage:** `Kotton schema register --user <USER> <FILE>`
 
 ###### **Arguments:**
 
-* `<FILE>` — Path to a JSON file containing a `SchemaDefinition`
+* `<FILE>` — Path to a JSON file containing a `SchemaDefinition`, its `signature` included
 
 ###### **Options:**
 
@@ -546,24 +546,24 @@ Handler registry (register, unregister, get, list, set-default)
 
 ###### **Subcommands:**
 
-* `register` — Register an app as a handler for a schema NSID
-* `unregister` — Unregister an app as a handler for a schema NSID
-* `get` — Print the default handler for a schema NSID
+* `register` — Register an app as a handler for a schema
+* `unregister` — Unregister an app as a handler for a schema
+* `get` — Print the default handler for a schema
 * `list` — List all registered handlers
-* `set-default` — Override the default handler for a schema NSID
+* `set-default` — Override the default handler for a schema
 
 
 
 ## `Kotton handler register`
 
-Register an app as a handler for a schema NSID
+Register an app as a handler for a schema
 
 **Usage:** `Kotton handler register --user <USER> <APP_ID> <NSID>`
 
 ###### **Arguments:**
 
 * `<APP_ID>` — App identifier, e.g. `com.acme.notes-pro`
-* `<NSID>` — Schema NSID this app can render, e.g. `sh.kotton.notes`
+* `<NSID>` — The schema this app can render, `<publisher>/<name>`
 
 ###### **Options:**
 
@@ -573,14 +573,14 @@ Register an app as a handler for a schema NSID
 
 ## `Kotton handler unregister`
 
-Unregister an app as a handler for a schema NSID
+Unregister an app as a handler for a schema
 
 **Usage:** `Kotton handler unregister --user <USER> <APP_ID> <NSID>`
 
 ###### **Arguments:**
 
 * `<APP_ID>` — App identifier
-* `<NSID>` — Schema NSID
+* `<NSID>` — The schema, `<publisher>/<name>`
 
 ###### **Options:**
 
@@ -590,13 +590,13 @@ Unregister an app as a handler for a schema NSID
 
 ## `Kotton handler get`
 
-Print the default handler for a schema NSID
+Print the default handler for a schema
 
 **Usage:** `Kotton handler get --user <USER> <NSID>`
 
 ###### **Arguments:**
 
-* `<NSID>` — Schema NSID to look up, e.g. `sh.kotton.notes`
+* `<NSID>` — The schema to look up, `<publisher>/<name>`
 
 ###### **Options:**
 
@@ -618,14 +618,14 @@ List all registered handlers
 
 ## `Kotton handler set-default`
 
-Override the default handler for a schema NSID
+Override the default handler for a schema
 
 **Usage:** `Kotton handler set-default --user <USER> <APP_ID> <NSID>`
 
 ###### **Arguments:**
 
 * `<APP_ID>` — App identifier to make the default
-* `<NSID>` — Schema NSID
+* `<NSID>` — The schema, `<publisher>/<name>`
 
 ###### **Options:**
 
@@ -643,18 +643,19 @@ Your records — list, get, put, rm, each by `--schema <nsid>` — the REPL's `r
 record — your records: typed, sealed, read from every device
 
 USAGE:
-  record list --schema <nsid> [--json]   every record of a schema: its id and its fields
-  record get --schema <nsid> <id>        one record, as JSON on stdout
-  record put --schema <nsid> <json>      write a record; prints its id
-  record rm --schema <nsid> <id>         remove a record
+  record list --schema <schema> [--json]   every record of a schema: its id and its fields
+  record get --schema <schema> <id>        one record, as JSON on stdout
+  record put --schema <schema> <json>      write a record; prints its id
+  record rm --schema <schema> <id>         remove a record
 
 A record is a JSON object of a schema's fields, kept on this device and
 sealed into your first drive, `personal`, at each sync: a record put on one
 device is read on another after a `sync` on each, and wherever `personal` is
 moved. The vault keeps it sealed under your key and can read none of it: not
-its fields, its id, or its schema's name. A schema is named by its NSID
-(`sh.kotton.notes`); this device must know it, as a core schema or one
-`schema register` added.
+its fields, its id, or its schema's name. A schema is named by the key that
+publishes it: `<publisher>/<name>`, the publisher being the `did:key` of that
+key, so Kotton's notes are `did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes`.
+This device must know the schema, as a core schema or one `schema register` added.
 
 These are your own records, in Personal: a record in another root you are a
 member of, such as an organisation's project, is not listed, read, written or
@@ -665,17 +666,17 @@ makes a new record and prints the id it was given. `rm` removes it on every
 device at their next sync.
 
 FLAGS:
-  --schema <nsid>  the schema the record is of; every verb needs it
+  --schema <schema>  the schema the record is of, `<publisher>/<name>`; every verb needs it
   --json           `list`: the records the daemon answered, as JSON on stdout
 
 Exit 0 when done, 1 when refused or when no record has the id (the reason on
 stderr), 2 for a line that is not one of the above.
 
 EXAMPLES:
-  record put --schema sh.kotton.notes '{"title":"milk","body":"two pints"}'
-  record list --schema sh.kotton.notes
-  record get --schema sh.kotton.notes <id>
-  record rm --schema sh.kotton.notes <id>
+  record put --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes '{"title":"milk","body":"two pints"}'
+  record list --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes
+  record get --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>
+  record rm --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>
 
 RETIRED:
   record open              gone: type `record get`
@@ -1661,7 +1662,7 @@ Prints the envelope JSON to stdout so you can share it out-of-band.
 
 * `--org <ORG>` — The org DID (`did:key:…`) that issues the grant
 * `--to <TO>` — The member DID (`did:key:…`) that receives the grant
-* `--cap <CAPS>` — Capabilities to grant, e.g. `schema.read:sh.kotton.notes`. Repeat for multiple capabilities
+* `--cap <CAPS>` — Capabilities to grant, e.g. `schema.read:<publisher>/<name>`. Repeat for multiple capabilities
 * `--ttl <TTL>` — Optional time-to-live in seconds
 * `--node <NODE>` — Optional node DID to restrict scope to a specific node
 * `--user <USER>` — User ID who owns the org key

@@ -5,28 +5,31 @@
 //! (app schema), schema_get (registered + not found).
 
 use crate::common::cli::{said, Cli};
-use crate::common::TestEnv;
+use crate::common::{signed_schema_json, suite_schema, TestEnv};
+use kotton_common::namespace as ns;
+use kotton_schemas::{FieldType, SchemaField};
+use std::sync::LazyLock;
 
-/// The six core schemas that every daemon must register at boot.
+/// Six of the core schemas that every daemon holds at boot.
 const CORE_SCHEMAS: &[&str] = &[
-    "sh.kotton.notes",
-    "sh.kotton.contacts",
-    "sh.kotton.calendar",
-    "sh.kotton.messages",
-    "sh.kotton.tasks",
-    "sh.kotton.clipboard",
+    ns::NSID_NOTES,
+    ns::NSID_CONTACTS,
+    ns::NSID_CALENDAR,
+    ns::NSID_MESSAGES,
+    ns::NSID_TASKS,
+    ns::NSID_CLIPBOARD,
 ];
 
-/// A minimal bookmark schema used for app-registration tests.
-const BOOKMARK_NSID: &str = "com.test.bookmark";
-const BOOKMARK_DEF: &str = r#"{
-  "nsid": "com.test.bookmark",
-  "version": 1,
-  "fields": [
-    { "name": "url",   "type": "string", "nullable": false },
-    { "name": "title", "type": "string", "nullable": true  }
-  ]
-}"#;
+/// A minimal bookmark schema used for app-registration tests, published and signed by the
+/// suite's key.
+static BOOKMARK_NSID: LazyLock<String> = LazyLock::new(|| suite_schema("bookmark"));
+static BOOKMARK_DEF: LazyLock<String> = LazyLock::new(|| {
+    signed_schema_json(
+        "bookmark",
+        1,
+        vec![SchemaField::required("url", FieldType::String), SchemaField::nullable("title", FieldType::String)],
+    )
+});
 
 // ── core schemas ──────────────────────────────────────────────────────────────
 
@@ -65,23 +68,23 @@ async fn schema_get_returns_json_for_core_schemas() {
         let parsed: serde_json::Value =
             serde_json::from_str(&json_str).expect("schema definition should be valid JSON");
         assert_eq!(
-            parsed["nsid"].as_str().unwrap_or(""),
+            format!("{}/{}", parsed["publisher"].as_str().unwrap_or(""), parsed["name"].as_str().unwrap_or("")),
             *nsid,
-            "nsid field in definition should match {nsid}"
+            "the definition's publisher and name should make {nsid}"
         );
     }
 }
 
 // ── schema_get not found ──────────────────────────────────────────────────────
 
-/// schema_get returns an error for an unregistered NSID.
+/// schema_get returns an error for an unregistered schema.
 #[tokio::test]
-async fn schema_get_unknown_nsid_errors() {
+async fn schema_get_unknown_schema_errors() {
     let mut env = TestEnv::spawn_authed().await;
-    let result = env.client.schema_get("owner", "com.unknown.schema").await;
+    let result = env.client.schema_get("owner", &suite_schema("unknown")).await;
     assert!(
         result.is_err(),
-        "schema_get for an unknown NSID should return an error"
+        "schema_get for an unknown schema should return an error"
     );
 }
 
@@ -93,14 +96,14 @@ async fn schema_register_appears_in_list() {
     let mut env = TestEnv::spawn_authed().await;
 
     env.client
-        .schema_register("owner", BOOKMARK_DEF)
+        .schema_register("owner", &BOOKMARK_DEF)
         .await
         .expect("schema_register");
 
     let schemas = env.client.schema_list("owner").await.expect("schema_list");
     assert!(
-        schemas.contains(&BOOKMARK_NSID.to_string()),
-        "registered schema '{BOOKMARK_NSID}' should appear in schema_list"
+        schemas.contains(&*BOOKMARK_NSID),
+        "registered schema '{}' should appear in schema_list", *BOOKMARK_NSID
     );
 }
 
@@ -110,20 +113,23 @@ async fn schema_register_then_get() {
     let mut env = TestEnv::spawn_authed().await;
 
     env.client
-        .schema_register("owner", BOOKMARK_DEF)
+        .schema_register("owner", &BOOKMARK_DEF)
         .await
         .expect("schema_register");
 
     let json_str = env
         .client
-        .schema_get("owner", BOOKMARK_NSID)
+        .schema_get("owner", &BOOKMARK_NSID)
         .await
         .expect("schema_get after register");
 
     let parsed: serde_json::Value =
         serde_json::from_str(&json_str).expect("definition should parse as JSON");
 
-    assert_eq!(parsed["nsid"].as_str().unwrap_or(""), BOOKMARK_NSID);
+    assert_eq!(
+        format!("{}/{}", parsed["publisher"].as_str().unwrap_or(""), parsed["name"].as_str().unwrap_or("")),
+        *BOOKMARK_NSID
+    );
 
     // The two registered fields must be present.
     let fields = parsed["fields"].as_array().expect("fields array");
@@ -153,13 +159,13 @@ async fn schema_register_idempotent() {
     let mut env = TestEnv::spawn_authed().await;
 
     env.client
-        .schema_register("owner", BOOKMARK_DEF)
+        .schema_register("owner", &BOOKMARK_DEF)
         .await
         .expect("first schema_register");
 
     // A second call with the same definition must not error.
     env.client
-        .schema_register("owner", BOOKMARK_DEF)
+        .schema_register("owner", &BOOKMARK_DEF)
         .await
         .expect("idempotent second schema_register");
 
@@ -167,7 +173,7 @@ async fn schema_register_idempotent() {
     let schemas = env.client.schema_list("owner").await.expect("schema_list");
     let count = schemas
         .iter()
-        .filter(|s| s.as_str() == BOOKMARK_NSID)
+        .filter(|s| **s == *BOOKMARK_NSID)
         .count();
     assert_eq!(
         count, 1,
@@ -186,7 +192,7 @@ async fn another_users_registration_is_invisible() {
     let mut env = TestEnv::spawn_authed().await; // session user: "owner"
 
     env.client
-        .schema_register("owner", BOOKMARK_DEF)
+        .schema_register("owner", &BOOKMARK_DEF)
         .await
         .expect("schema_register as owner");
 
@@ -198,11 +204,11 @@ async fn another_users_registration_is_invisible() {
 
     let their_list = other.schema_list("neighbor").await.expect("schema_list");
     assert!(
-        !their_list.contains(&BOOKMARK_NSID.to_string()),
+        !their_list.contains(&*BOOKMARK_NSID),
         "another user's registration must not appear in neighbor's list"
     );
 
-    let their_get = other.schema_get("neighbor", BOOKMARK_NSID).await;
+    let their_get = other.schema_get("neighbor", &BOOKMARK_NSID).await;
     let unknown_get = other.schema_get("neighbor", "com.never.registered").await;
     assert!(
         their_get.is_err() && unknown_get.is_err(),
@@ -236,7 +242,7 @@ async fn a_schema_is_registered_from_the_terminal_as_the_user_it_names() {
     env.client.create_user(OWNER, crate::common::TEST_PASSPHRASE).await.expect("create_user");
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("bookmark.json");
-    std::fs::write(&path, BOOKMARK_DEF).expect("write the definition");
+    std::fs::write(&path, BOOKMARK_DEF.as_bytes()).expect("write the definition");
     let cli = Cli::for_env(&env);
     cli.seed_session(OWNER, env.client.session_token.as_deref().expect("owner logged in"));
 
@@ -244,7 +250,7 @@ async fn a_schema_is_registered_from_the_terminal_as_the_user_it_names() {
     assert!(registered.status.success(), "`kotton schema register` failed.\n{}", said(&registered));
     let schemas = env.client.schema_list(OWNER).await.expect("schema_list");
     assert!(
-        schemas.contains(&BOOKMARK_NSID.to_string()),
+        schemas.contains(&*BOOKMARK_NSID),
         "the schema registered from the terminal is the owner's: {schemas:?}"
     );
 }

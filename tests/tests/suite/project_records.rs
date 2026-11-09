@@ -69,10 +69,8 @@ async fn project_on(mut env: TestEnv) -> Project {
     let org = env.client.org_new(ALICE, "kotton").await.expect("org create");
     let (_, _, did, _) = env.client.org_show(ALICE, &org).await.expect("org show");
     assert!(did.starts_with("did:key:") && aid.starts_with("did:kel:"), "{did} / {aid}");
-    env.client
-        .schema_register(ALICE, &schema::definition().to_string())
-        .await
-        .expect("the record schema registers");
+    // The record schema is core, on every device already: `records init` registers nothing.
+    assert_eq!(schema::definition()["name"], "governance.record");
     let made = env.client.org_root_create(ALICE, &org, "kotton").await.expect("records init");
     env.client
         .schema_grant_set(PRINCIPAL, NSID, true, true, false)

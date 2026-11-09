@@ -68,7 +68,7 @@ pub enum OrgGrantCommand {
         /// The member DID (`did:key:…`) that receives the grant.
         #[arg(long)]
         to: String,
-        /// Capabilities to grant, e.g. `schema.read:sh.kotton.notes`.
+        /// Capabilities to grant, e.g. `schema.read:<publisher>/<name>`.
         /// Repeat for multiple capabilities.
         #[arg(long = "cap", required = true)]
         caps: Vec<String>,

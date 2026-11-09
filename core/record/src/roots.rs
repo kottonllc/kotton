@@ -9,7 +9,7 @@
 //! ## Membership and grants are two questions, asked in two places
 //!
 //! A schema grant is *what an app may see* — `schema.read` on
-//! `sh.kotton.calendar` — and it is checked where it always was, by
+//! `calendar` — and it is checked where it always was, by
 //! `schema_grants_db` in the verbs, unchanged. Membership is *which roots the
 //! person is in*, and it is checked here. Neither widens the other: an app
 //! holding `schema.read` on calendar sees calendar rows in every root the

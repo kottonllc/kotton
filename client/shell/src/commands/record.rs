@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use anyhow::Result;
 use async_trait::async_trait;
-use kotton_schemas::nsid::Nsid;
+use kotton_schemas::SchemaId;
 use kotton_wire::ipc::PERSONAL_ROOT;
 
 use super::{retired, Command, CommandOutput, Verb};
@@ -12,10 +12,10 @@ use crate::state::ShellState;
 ///
 /// Usage:
 /// ```text
-///   record list --schema <nsid> [--json]
-///   record get --schema <nsid> <id>
-///   record put --schema <nsid> <json>
-///   record rm --schema <nsid> <id>
+///   record list --schema <publisher>/<name> [--json]
+///   record get --schema <publisher>/<name> <id>
+///   record put --schema <publisher>/<name> <json>
+///   record rm --schema <publisher>/<name> <id>
 /// ```
 ///
 /// The command-tree decision's "Records and schemas" line, but `import` and `export`, which
@@ -26,7 +26,8 @@ use crate::state::ShellState;
 /// ride sealed in the record log of the tree this device keeps of `personal`
 /// (`kotton_record::replication`). A record put here
 /// is read on another device after a `sync` on each, wherever `personal` lives. A schema is
-/// cited by its NSID; this device must know it (a core schema, or one `schema register`ed).
+/// cited by its identity, `<publisher>/<name>`, the publisher being the `did:key` of the key
+/// that publishes it; this device must know it (a core schema, or one `schema register`ed).
 ///
 /// `record open <url>` is gone for `record get`: the command-tree decision's table.
 ///
@@ -34,8 +35,8 @@ use crate::state::ShellState;
 /// the noun (`kotton_cli::bridge`), and the REPL hands it the same.
 pub struct RecordCommand;
 
-const USAGE: &str = "usage: record list --schema <nsid> [--json] | record get --schema <nsid> <id> | \
-                     record put --schema <nsid> <json> | record rm --schema <nsid> <id>";
+const USAGE: &str = "usage: record list --schema <schema> [--json] | record get --schema <schema> <id> | \
+                     record put --schema <schema> <json> | record rm --schema <schema> <id>";
 
 /// The verbs: the command-tree decision's "Records and schemas" line less `import` and
 /// `export`, and `open`, which its table retired for `get`.
@@ -48,24 +49,24 @@ const VERBS: &[Verb] = &[
 ];
 
 /// What `record open` is now, said where it is refused.
-const GET_IS: &str = "`record get --schema <nsid> <id>` reads one record, by its schema and its id";
+const GET_IS: &str = "`record get --schema <schema> <id>` reads one record, by its schema and its id";
 
 /// A line of `record`, parsed.
 #[derive(Debug, PartialEq)]
 enum Line {
-    List { schema: Nsid, json: bool },
-    Get { schema: Nsid, id: String },
-    Put { schema: Nsid, body: serde_json::Value },
-    Rm { schema: Nsid, id: String },
+    List { schema: SchemaId, json: bool },
+    Get { schema: SchemaId, id: String },
+    Put { schema: SchemaId, body: serde_json::Value },
+    Rm { schema: SchemaId, id: String },
 }
 
 /// A record's id as a word: not empty, not a flag, and without the `/` that would end it in
-/// the record's URL (`kotton://records/<nsid>/<id>`, which `get` asks by).
+/// the record's URL (`kotton://records/<publisher>/<name>/<id>`, which `get` asks by).
 fn id_word(word: &str) -> Option<String> {
     (!word.is_empty() && !word.starts_with('-') && !word.contains('/')).then(|| word.to_string())
 }
 
-/// The words after `record`, as a [`Line`], or the usage refusal (exit 2). `--schema <nsid>`
+/// The words after `record`, as a [`Line`], or the usage refusal (exit 2). `--schema <schema>`
 /// may stand anywhere after the verb; it is said once, and every verb needs it.
 fn parse(args: &[String]) -> Result<Line, CommandOutput> {
     let usage = |what: String| Err(CommandOutput::usage(what, Some(USAGE.into())));
@@ -85,13 +86,15 @@ fn parse(args: &[String]) -> Result<Line, CommandOutput> {
     while let Some(w) = it.next() {
         match w.as_str() {
             "--schema" => {
-                let Some(name) = it.next() else { return usage(format!("record {verb}: `--schema` needs an NSID")) };
+                let Some(name) = it.next() else {
+                    return usage(format!("record {verb}: `--schema` needs a schema, `<publisher>/<name>`"))
+                };
                 if schema.is_some() {
                     return usage(format!("record {verb}: `--schema` is said once"));
                 }
-                match Nsid::new(name) {
+                match SchemaId::parse(name) {
                     Ok(n) => schema = Some(n),
-                    Err(e) => return usage(format!("record {verb}: '{name}' is not an NSID: {e}")),
+                    Err(e) => return usage(format!("record {verb}: '{name}' is not a schema identity: {e}")),
                 }
             }
             "--json" => json = true,
@@ -99,7 +102,7 @@ fn parse(args: &[String]) -> Result<Line, CommandOutput> {
         }
     }
     let Some(schema) = schema else {
-        return usage(format!("record {verb}: needs --schema <nsid>"));
+        return usage(format!("record {verb}: needs --schema <publisher>/<name>"));
     };
     if json && verb != "list" {
         return usage("record: `--json` is for `record list`; `record get` prints the record as JSON".into());
@@ -171,7 +174,7 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
     match line {
         Line::List { schema, json } => {
             let records = match client
-                .record_query_in(&user_id, Some(PERSONAL_ROOT), None, schema.as_str(), vec![], None, None)
+                .record_query_in(&user_id, Some(PERSONAL_ROOT), None, &schema.to_string(), vec![], None, None)
                 .await
             {
                 Ok(r) => r,
@@ -187,7 +190,7 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
             // By the id, in Personal: `RecordOpen` names no root, and would reach a record in
             // any root the person is in. An unknown schema is the daemon's refusal, said as it.
             let by_id = vec![("id".to_string(), serde_json::json!(id))];
-            match client.record_query_in(&user_id, Some(PERSONAL_ROOT), None, schema.as_str(), by_id, Some(1), None).await {
+            match client.record_query_in(&user_id, Some(PERSONAL_ROOT), None, &schema.to_string(), by_id, Some(1), None).await {
                 Ok(found) if !found.is_empty() => {
                     Ok(CommandOutput::shapes(vec![Out::Data(serde_json::to_string_pretty(&as_held(&found[0]))?)]))
                 }
@@ -199,14 +202,14 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
             }
         }
         Line::Put { schema, body } => match client
-            .record_insert_in(&user_id, Some(PERSONAL_ROOT), None, schema.as_str(), body)
+            .record_insert_in(&user_id, Some(PERSONAL_ROOT), None, &schema.to_string(), body)
             .await
         {
             Ok(id) => Ok(CommandOutput::shapes(vec![Out::Data(id)])),
             Err(e) => Ok(refused("put", e)),
         },
         Line::Rm { schema, id } => match client
-            .record_delete_in(&user_id, Some(PERSONAL_ROOT), None, schema.as_str(), &id)
+            .record_delete_in(&user_id, Some(PERSONAL_ROOT), None, &schema.to_string(), &id)
             .await
         {
             Ok(()) => Ok(CommandOutput::shapes(vec![Out::Confirm {
@@ -264,18 +267,19 @@ pub(crate) const HELP: &str = "\
 record — your records: typed, sealed, read from every device
 
 USAGE:
-  record list --schema <nsid> [--json]   every record of a schema: its id and its fields
-  record get --schema <nsid> <id>        one record, as JSON on stdout
-  record put --schema <nsid> <json>      write a record; prints its id
-  record rm --schema <nsid> <id>         remove a record
+  record list --schema <schema> [--json]   every record of a schema: its id and its fields
+  record get --schema <schema> <id>        one record, as JSON on stdout
+  record put --schema <schema> <json>      write a record; prints its id
+  record rm --schema <schema> <id>         remove a record
 
 A record is a JSON object of a schema's fields, kept on this device and
 sealed into your first drive, `personal`, at each sync: a record put on one
 device is read on another after a `sync` on each, and wherever `personal` is
 moved. The vault keeps it sealed under your key and can read none of it: not
-its fields, its id, or its schema's name. A schema is named by its NSID
-(`sh.kotton.notes`); this device must know it, as a core schema or one
-`schema register` added.
+its fields, its id, or its schema's name. A schema is named by the key that
+publishes it: `<publisher>/<name>`, the publisher being the `did:key` of that
+key, so Kotton's notes are `did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes`.
+This device must know the schema, as a core schema or one `schema register` added.
 
 These are your own records, in Personal: a record in another root you are a
 member of, such as an organisation's project, is not listed, read, written or
@@ -286,31 +290,33 @@ makes a new record and prints the id it was given. `rm` removes it on every
 device at their next sync.
 
 FLAGS:
-  --schema <nsid>  the schema the record is of; every verb needs it
+  --schema <schema>  the schema the record is of, `<publisher>/<name>`; every verb needs it
   --json           `list`: the records the daemon answered, as JSON on stdout
 
 Exit 0 when done, 1 when refused or when no record has the id (the reason on
 stderr), 2 for a line that is not one of the above.
 
 EXAMPLES:
-  record put --schema sh.kotton.notes '{\"title\":\"milk\",\"body\":\"two pints\"}'
-  record list --schema sh.kotton.notes
-  record get --schema sh.kotton.notes <id>
-  record rm --schema sh.kotton.notes <id>";
+  record put --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes '{\"title\":\"milk\",\"body\":\"two pints\"}'
+  record list --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes
+  record get --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>
+  record rm --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>";
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::ExitCode;
 
-    fn words(line: &str) -> Vec<String> {
-        line.split_whitespace().map(str::to_string).collect()
+    const NOTES: &str = kotton_common::namespace::NSID_NOTES;
+    const TASKS: &str = kotton_common::namespace::NSID_TASKS;
+
+    fn notes() -> SchemaId {
+        SchemaId::from_static(NOTES)
     }
 
-    const NOTES: &str = "sh.kotton.notes";
-
-    fn notes() -> Nsid {
-        Nsid::new(NOTES).unwrap()
+    /// `line`, with `NOTES` and `TASKS` where the line says them, split into words.
+    fn words(line: &str) -> Vec<String> {
+        line.replace("NOTES", NOTES).replace("TASKS", TASKS).split_whitespace().map(str::to_string).collect()
     }
 
     /// Every current verb the table declares is a line this parser answers, so the table the
@@ -318,10 +324,10 @@ mod tests {
     #[test]
     fn every_declared_verb_parses() {
         for (verb, line) in [
-            ("list", "list --schema sh.kotton.notes"),
-            ("get", "get --schema sh.kotton.notes abc"),
-            ("put", r#"put --schema sh.kotton.notes {"title":"t"}"#),
-            ("rm", "rm --schema sh.kotton.notes abc"),
+            ("list", "list --schema NOTES"),
+            ("get", "get --schema NOTES abc"),
+            ("put", r#"put --schema NOTES {"title":"t"}"#),
+            ("rm", "rm --schema NOTES abc"),
         ] {
             assert!(VERBS.iter().any(|v| v.word == verb && v.is == crate::commands::VerbIs::Current), "{verb}");
             assert!(parse(&words(line)).is_ok(), "`record {line}` did not parse");
@@ -332,10 +338,10 @@ mod tests {
     /// `--schema` stands anywhere after the verb, and each verb reads what it names.
     #[test]
     fn each_verb_reads_its_schema_and_its_word() {
-        assert_eq!(parse(&words("list --schema sh.kotton.notes")).ok(), Some(Line::List { schema: notes(), json: false }));
-        assert_eq!(parse(&words("list --json --schema sh.kotton.notes")).ok(), Some(Line::List { schema: notes(), json: true }));
-        assert_eq!(parse(&words("get abc --schema sh.kotton.notes")).ok(), Some(Line::Get { schema: notes(), id: "abc".into() }));
-        assert_eq!(parse(&words("rm --schema sh.kotton.notes abc")).ok(), Some(Line::Rm { schema: notes(), id: "abc".into() }));
+        assert_eq!(parse(&words("list --schema NOTES")).ok(), Some(Line::List { schema: notes(), json: false }));
+        assert_eq!(parse(&words("list --json --schema NOTES")).ok(), Some(Line::List { schema: notes(), json: true }));
+        assert_eq!(parse(&words("get abc --schema NOTES")).ok(), Some(Line::Get { schema: notes(), id: "abc".into() }));
+        assert_eq!(parse(&words("rm --schema NOTES abc")).ok(), Some(Line::Rm { schema: notes(), id: "abc".into() }));
         let put = vec!["put".to_string(), "--schema".into(), NOTES.into(), r#"{"title": "two words"}"#.into()];
         assert_eq!(parse(&put).ok(), Some(Line::Put { schema: notes(), body: serde_json::json!({ "title": "two words" }) }));
     }
@@ -349,21 +355,22 @@ mod tests {
             "list",
             "get abc",
             "list --schema",
-            "list --schema not-an-nsid",
-            "list --schema sh.kotton.notes extra",
-            "list --schema sh.kotton.notes --schema sh.kotton.tasks",
-            "get --schema sh.kotton.notes",
-            "get --schema sh.kotton.notes a b",
-            "get --schema sh.kotton.notes --json abc",
-            "get --schema sh.kotton.notes -x",
-            "get --schema sh.kotton.notes a/b",
-            "rm --schema sh.kotton.notes",
-            "put --schema sh.kotton.notes",
-            "put --schema sh.kotton.notes not-json",
-            "put --schema sh.kotton.notes [1,2]",
-            "put --schema sh.kotton.notes --json {}",
-            "import --schema sh.kotton.notes x.ics",
-            "export --schema sh.kotton.notes out",
+            "list --schema not-a-schema",
+            "list --schema sh.kotton.notes",
+            "list --schema NOTES extra",
+            "list --schema NOTES --schema TASKS",
+            "get --schema NOTES",
+            "get --schema NOTES a b",
+            "get --schema NOTES --json abc",
+            "get --schema NOTES -x",
+            "get --schema NOTES a/b",
+            "rm --schema NOTES",
+            "put --schema NOTES",
+            "put --schema NOTES not-json",
+            "put --schema NOTES [1,2]",
+            "put --schema NOTES --json {}",
+            "import --schema NOTES x.ics",
+            "export --schema NOTES out",
         ] {
             let refused = parse(&words(line)).expect_err(line);
             assert_eq!(refused.exit_code, ExitCode::Code(2), "`record {line}`");
@@ -388,12 +395,12 @@ mod tests {
     /// `record open` is gone for `record get`: refused, exit 2, with the line naming it.
     #[test]
     fn open_is_gone_for_get() {
-        let refused = parse(&words("open kotton://records/sh.kotton.notes/abc")).expect_err("open");
+        let refused = parse(&words("open kotton://records/NOTES/abc")).expect_err("open");
         assert_eq!(refused.exit_code, ExitCode::Code(2));
         let Some(Out::Fail { what, try_ }) = refused.out.first() else { panic!("a refusal is a Fail") };
         // The retired word, built from its two words: a literal naming it is the sweep's to refuse.
         assert_eq!(*what, format!("`{}` is gone", ["record", "open"].join(" ")));
-        assert!(try_.as_deref().is_some_and(|t| t.contains("`record get --schema <nsid> <id>`")), "{try_:?}");
+        assert!(try_.as_deref().is_some_and(|t| t.contains("`record get --schema <schema> <id>`")), "{try_:?}");
     }
 
     /// `record list` names each record by the id the daemon answered and prints its fields

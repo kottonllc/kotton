@@ -1,26 +1,34 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Kotton namespace constants.
+//! Kotton's schema identities.
 //!
-//! All official Kotton schema NSIDs are rooted at [`NSID_PREFIX`]. Using these
-//! constants (rather than inline strings) means a domain change only requires
-//! editing this file.
+//! A schema is named by the key that publishes it: its identity is `<publisher>/<name>`,
+//! the publisher being the `did:key` of the key that publishes it and signs its definition
+//! (the protocol's decision *A schema is named by the key that publishes it*). Kotton's own
+//! schemas are published under Kotton's release key, the key that signs a release
+//! (`infra/release/allowed_signers`), which is [`NSID_PREFIX`]; every identity below is that
+//! key and a name. Nothing resolves, registers or reserves a name, and "core" means present
+//! on every device and nothing more.
+//!
+//! The constants keep the `NSID_` names they had when the identity was a reverse-domain
+//! string: forty files use them, and the rename is a hygiene pass of its own, after the
+//! identity itself has landed. Their values are the new identities.
 
-/// The reverse-domain prefix for all Kotton-official schemas and apps.
-///
-/// Derived from the primary domain `kotton.sh`.
-pub const NSID_PREFIX: &str = "sh.kotton";
+/// Kotton's publisher: the `did:key` of the release key, the public half the first line of
+/// `infra/release/allowed_signers` carries. A test in `kotton-crypto` derives it from that
+/// file.
+pub const NSID_PREFIX: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB";
 
 /// The primary Kotton domain (forward form).
 pub const APP_DOMAIN: &str = "kotton.sh";
 
-// ── Core schema NSIDs ─────────────────────────────────────────────────────────
+// ── Core schema identities ────────────────────────────────────────────────────
 
-pub const NSID_NOTES: &str = "sh.kotton.notes";
-pub const NSID_CONTACTS: &str = "sh.kotton.contacts";
-pub const NSID_CALENDAR: &str = "sh.kotton.calendar";
-pub const NSID_MESSAGES: &str = "sh.kotton.messages";
-pub const NSID_TASKS: &str = "sh.kotton.tasks";
-pub const NSID_CLIPBOARD: &str = "sh.kotton.clipboard";
+pub const NSID_NOTES: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes";
+pub const NSID_CONTACTS: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/contacts";
+pub const NSID_CALENDAR: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/calendar";
+pub const NSID_MESSAGES: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/messages";
+pub const NSID_TASKS: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/tasks";
+pub const NSID_CLIPBOARD: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/clipboard";
 
 /// Peer-to-peer and channel messages — encrypted transport envelope.
 ///
@@ -29,7 +37,7 @@ pub const NSID_CLIPBOARD: &str = "sh.kotton.clipboard";
 /// `nonce` (base64 12 bytes), `ephemeral_pub` (base64 X25519 32 bytes, null
 /// for channel messages using the channel symmetric key), `sent_at` (u64 unix
 /// seconds), `type` ("text" | "attachment_ref").
-pub const NSID_MESSAGE_V1: &str = "sh.kotton.message.v1";
+pub const NSID_MESSAGE_V1: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/message.v1";
 
 /// Channel key-grant envelope — distributes a channel's symmetric key to a member.
 ///
@@ -37,7 +45,8 @@ pub const NSID_MESSAGE_V1: &str = "sh.kotton.message.v1";
 /// decrypts them.  Body fields: `channel_did`, `to_did`, `enc_key` (base64
 /// X25519-ECDH-encrypted channel key), `nonce` (base64), `ephemeral_pub`
 /// (base64), `granted_at` (u64 unix seconds).
-pub const NSID_CHANNEL_KEY_GRANT: &str = "sh.kotton.channel.key-grant";
+pub const NSID_CHANNEL_KEY_GRANT: &str =
+    "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/channel.key-grant";
 
 /// An installed model's manifest — the record half of a model (RFC-0085,
 /// *The model as content*; `DEC-0073`).
@@ -47,15 +56,15 @@ pub const NSID_CHANNEL_KEY_GRANT: &str = "sh.kotton.channel.key-grant";
 /// answers, chosen by the person) and `installed_at`. Its record id is the
 /// weights hash, because that hash is what a model *is* — two manifests naming
 /// it describe the same model however they spell the name.
-pub const NSID_MODEL: &str = "sh.kotton.model";
+pub const NSID_MODEL: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/model";
 
 /// One pin setting as kotton #155 wrote it, a record in the person's drive.
 /// **Retired** (kotton #171, kotton-protocol #26): a pin setting is the
 /// device's own, kept in its own database, and nothing of it replicates. The
-/// NSID stays declared so the device that wrote such a record can read it once,
+/// identity stays declared so the device that wrote such a record can read it once,
 /// move it into its own database and delete it from the drive
 /// (`kotton_device::users::pins::migrate`).
-pub const NSID_PIN: &str = "sh.kotton.pin";
+pub const NSID_PIN: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/pin";
 
 /// A whole-keeper claim: that one of the person's devices keeps one drive
 /// whole (kotton #171; the protocol's storage model, kotton-protocol #26). A sealed record in that drive, written by that device alone and
@@ -63,13 +72,63 @@ pub const NSID_PIN: &str = "sh.kotton.pin";
 /// the drive's id, and nothing else. The daemon writes it, and every device of
 /// the person's reads every device's, which is why it is core: a device that
 /// has never seen a declaration skips the rows.
-pub const NSID_KEEPS_WHOLE: &str = "sh.kotton.keeps-whole";
+pub const NSID_KEEPS_WHOLE: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/keeps-whole";
 
-// ── Meta schema NSID (schema publication) ────────────────────────────────────
+/// A password or a token in the person's keychain (the protocol's `schemas/kotton/secret`):
+/// `label`, `value`, `kind` (`password` or `token`) and `note`. Published and not registered
+/// yet, so no record can be put under it and no grant reaches a row of it; the refusal of a
+/// grant on it and its exclusion from record search are #449 and #450, under the keychain's
+/// issue.
+pub const NSID_SECRET: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/secret";
 
-/// Well-known NSID for schema publication records.
+/// One thing a device's daemon was asked (the protocol's `schemas/kotton/access-log`):
+/// `device`, `at`, `asker`, `door`, `act` and `what`. Kept on that device, and in a drive
+/// only when the person pins the log there. Published and not registered yet, as `secret`:
+/// no record can be put under it and no grant reaches a row of it until #449 and #450, under
+/// the access log's issue.
+pub const NSID_ACCESS_LOG: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/access-log";
+
+/// A governance record: one record file of the project's board as a row (RFC-0088), the
+/// schema `client/record-file` converts to and from. Core because Kotton's own records app
+/// and converter read it on every device of a project's members, and a schema of Kotton's
+/// that must be on a device before the first tag can only travel compiled in.
+pub const NSID_GOVERNANCE_RECORD: &str =
+    "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/governance.record";
+
+// ── Meta schema identity (schema publication) ────────────────────────────────
+
+/// The identity of a schema publication record.
 ///
-/// A `sh.kotton.meta.schema` record body contains the full [`SchemaDefinition`]
-/// JSON for a third-party schema, signed by the publisher's DID. Index nodes
-/// store and serve these records for discovery.
-pub const NSID_META_SCHEMA: &str = "sh.kotton.meta.schema";
+/// A `meta.schema` record body contains the full `SchemaDefinition` JSON for a third-party
+/// schema, signed by its publisher. Declared and not defined: no definition of it is in the
+/// core set, and nothing writes one.
+pub const NSID_META_SCHEMA: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/meta.schema";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every identity is Kotton's publisher, a `/`, and a name.
+    #[test]
+    fn every_identity_is_under_kottons_publisher() {
+        for (id, name) in [
+            (NSID_NOTES, "notes"),
+            (NSID_CONTACTS, "contacts"),
+            (NSID_CALENDAR, "calendar"),
+            (NSID_MESSAGES, "messages"),
+            (NSID_TASKS, "tasks"),
+            (NSID_CLIPBOARD, "clipboard"),
+            (NSID_MESSAGE_V1, "message.v1"),
+            (NSID_CHANNEL_KEY_GRANT, "channel.key-grant"),
+            (NSID_MODEL, "model"),
+            (NSID_PIN, "pin"),
+            (NSID_KEEPS_WHOLE, "keeps-whole"),
+            (NSID_SECRET, "secret"),
+            (NSID_ACCESS_LOG, "access-log"),
+            (NSID_GOVERNANCE_RECORD, "governance.record"),
+            (NSID_META_SCHEMA, "meta.schema"),
+        ] {
+            assert_eq!(id, format!("{NSID_PREFIX}/{name}"));
+        }
+    }
+}

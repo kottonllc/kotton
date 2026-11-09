@@ -89,7 +89,7 @@ async fn remote_add_kotton_unknown_peer_returns_error() {
 /// makes this device's whole-keeper claims say what the device keeps
 /// (`kotton_device::users::pins::claim`, kotton #189; #155 wrote a default pin
 /// record at the same point), and the first device's default is whole, so its
-/// first pass writes one claim: an `sh.kotton.keeps-whole` record naming this
+/// first pass writes one claim: a `keeps-whole` record naming this
 /// device and the first drive. `log_records` then seals that record into the
 /// history log, which commits one **index pack** (`_pack/…`, not a content pack)
 /// and one **superblock** generation. Both are in the person's local mount by
@@ -648,7 +648,7 @@ async fn a_live_record_insert_from_a_paired_peer_leaves_no_record_on_the_device(
     use kotton_schemas::membership::Posture;
     use kotton_wire::ipc::{UserRequest, UserResponse};
 
-    const NOTES: &str = "sh.kotton.notes";
+    const NOTES: &str = kotton_common::namespace::NSID_NOTES;
     init_crypto();
     let a = spawn_device("device A").await;
     let b = spawn_device("device B").await;

@@ -10,6 +10,11 @@ client/record-file/tests/fixtures/** -text
 # The calendar fixture: read as bytes by the import tests and the ICS reader's.
 tests/fixtures/calendar/** -text
 
+# The core set's schema files: compiled in as they are committed, held by a test to their
+# definitions pretty-printed with LF, and by `cargo xtask schemas-check` to kotton-protocol's
+# files byte for byte.
+core/schemas/schemas/kotton/** -text
+
 # The pinned wire surfaces: `cargo xtask wire-check` compares them byte for byte with what
 # the enums generate, which is LF.
 core/wire/*-surface.txt text eol=lf

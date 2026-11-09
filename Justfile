@@ -359,6 +359,11 @@ lint:
     # `verb_tables::tests::the_fixture_is_the_live_registrys_tables`, is behind that feature:
     # run it by hand with `cargo test -p xtask --features cli-docs`.
     cargo xtask-docs verb-check
+    # The core set this tree compiles in is the protocol's: every file under
+    # core/schemas/schemas/kotton/ is the file of that name under kotton-protocol's schemas/kotton/,
+    # byte for byte, or is named as not yet published there. Reads kotton-protocol's checkout when
+    # there is one, and says so and passes when there is none.
+    cargo xtask schemas-check
     # Every `kotton` command README.md gives is one the binary has (held through the reference
     # above), and every script it runs from a checkout is in this tree. A page added later is
     # gated by naming it here: `cargo xtask claim-check <page>…`.

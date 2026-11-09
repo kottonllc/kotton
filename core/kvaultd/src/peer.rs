@@ -677,7 +677,7 @@ mod tests {
     fn a_plaintext_verb_is_not_a_request_on_the_vaults_peer_wire() {
         for bytes in [
             r#"{"ReadFile":{"user_id":"alice","path":"notes.txt","offset":0,"length":0}}"#,
-            r#"{"RecordInsert":{"user_id":"alice","schema_nsid":"sh.kotton.notes","record":{},"root":null,"app_id":null}}"#,
+            r#"{"RecordInsert":{"user_id":"alice","schema_nsid":"did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes","record":{},"root":null,"app_id":null}}"#,
         ] {
             let err = serde_json::from_str::<VaultPeerRequest>(bytes).expect_err("decoded on the vault's peer wire");
             assert!(err.to_string().contains("unknown variant"), "{err}");

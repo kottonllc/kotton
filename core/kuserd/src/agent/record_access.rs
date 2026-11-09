@@ -87,7 +87,7 @@ pub(crate) async fn kept(
     own_aid: &str,
     nsid: &str,
 ) -> Result<Vec<kotton_wire::runner::RunnerKeptRecord>, String> {
-    let parsed = kotton_schemas::Nsid::new(nsid).map_err(|e| format!("{nsid}: {e}"))?;
+    let parsed = kotton_schemas::SchemaId::parse(nsid).map_err(|e| format!("{nsid}: {e}"))?;
     if registry.read().map_err(|e| e.to_string())?.get(&parsed).is_none() {
         return Ok(Vec::new());
     }
@@ -187,7 +187,7 @@ mod tests {
 
     const AID: &str = "did:kel:z6MkPersonsOwnAid";
     const SOMEONE_ELSE: &str = "did:kel:z6MkSomeoneElse";
-    const CALENDAR: &str = "sh.kotton.calendar";
+    const CALENDAR: &str = kotton_common::namespace::NSID_CALENDAR;
     /// An app holding `schema.read` and `schema.write` on calendar and nothing
     /// else — the grant is what it may see, and it is not a membership.
     const APP: &str = "sh.kotton.shell";
@@ -374,7 +374,7 @@ mod tests {
         assert!(matches!(refused, UserResponse::Error { .. }), "{refused:?}");
 
         // Put a row there the way a replicated one would arrive.
-        let nsid = kotton_schemas::nsid::Nsid::new(CALENDAR).unwrap();
+        let nsid = kotton_schemas::SchemaId::from_static(CALENDAR);
         let def = p.registry.read().unwrap().get(&nsid).unwrap().clone();
         p.store.create_table(&def).await.unwrap();
         let id = p
@@ -450,7 +450,7 @@ mod tests {
         ));
         // A row in a root the person is not in, put there the way a replicated
         // one would arrive — no verb writes it.
-        let nsid = kotton_schemas::Nsid::new(CALENDAR).unwrap();
+        let nsid = kotton_schemas::SchemaId::from_static(CALENDAR);
         p.store
             .insert_in(&nsid, Some(p.theirs.clone()), json!({ "title": "their secret", "date": "2026-09-24" }))
             .await
@@ -482,7 +482,7 @@ mod tests {
             assert_ne!(r.root, personal.id, "a root id left the daemon");
         }
 
-        let none = super::kept(&p.registry, &p.store, &p.set, AID, "sh.kotton.nobody-registered")
+        let none = super::kept(&p.registry, &p.store, &p.set, AID, "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76/nobody-registered")
             .await
             .expect("an unregistered schema is an empty answer");
         assert!(none.is_empty());

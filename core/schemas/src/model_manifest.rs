@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! A model's manifest: the body of a `sh.kotton.model` record.
+//! A model's manifest: the body of a `model` record.
 //!
 //! *"A model is a hash-named, signed artifact with a manifest — its licence, its
 //! size, its prompt shape, what it can do — installed by the person and kept as
@@ -13,7 +13,7 @@
 //! (`kotton model add`), stores as a record and syncs to every device they own.
 //! That is the protocol's vocabulary — what crosses between processes and what
 //! is kept — so it lives beside the record schema it is the body of
-//! ([`crate::core`]'s `sh.kotton.model`), as [`crate::AppManifest`] and
+//! ([`crate::core`]'s `model`, under Kotton's publisher), as [`crate::AppManifest`] and
 //! [`crate::ExtensionManifest`] do. A test below holds the two field for field.
 //!
 //! The inference runtime (`kotton-infer`) keeps a manifest type of its own,
@@ -126,7 +126,7 @@ mod tests {
         }
     }
 
-    /// The record schema `sh.kotton.model` opens with this type's fields, name
+    /// The record schema `model` opens with this type's fields, name
     /// for name, and its `licence` facet is [`Licence`]'s: a record body
     /// deserialises straight back into a manifest.
     #[test]

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
-description = "User record schema definitions, NSID types, capability grants, and core schema vocabulary for the Kotton data layer."
+description = "User record schema definitions, the schema identity, capability grants, and the core schema vocabulary for the Kotton data layer."
 
 [features]
 # Enable TypeScript type generation for capability types.
@@ -15,6 +15,10 @@ kotton-common = { path = "../common" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+# A publisher is a `did:key`: base58btc (`bs58`) over an Ed25519 multicodec. A schema's version
+# is BLAKE3 over its canonical form.
+bs58 = "0.5"
+blake3 = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
 ts-rs = { version = "10", features = ["serde-compat"], optional = true }

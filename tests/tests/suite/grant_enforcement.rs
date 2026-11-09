@@ -37,7 +37,7 @@ version = "0.1.0"
 "files.write" = ["/notes"]
 "#;
 
-/// A minimal app manifest that declares `sh.kotton.notes` read capability.
+/// A minimal app manifest that declares read capability on the core `notes`.
 const NOTES_MANIFEST: &str = r#"
 [app]
 id      = "sh.kotton.test-notes"
@@ -45,7 +45,7 @@ name    = "Test Notes"
 version = "0.1.0"
 
 [capabilities]
-"schema.read" = ["sh.kotton.notes"]
+"schema.read" = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]
 "#;
 
 /// A manifest with no capabilities (useful for testing zero-grant install).
@@ -231,8 +231,8 @@ async fn install_reports_correct_capability_strings() {
         .expect("app_install");
 
     assert!(
-        caps.contains(&"schema.read:sh.kotton.notes".to_string()),
-        "expected 'schema.read:sh.kotton.notes' in capabilities; got: {caps:?}"
+        caps.contains(&format!("schema.read:{}", kotton_common::namespace::NSID_NOTES)),
+        "expected the schema.read on notes in capabilities; got: {caps:?}"
     );
 }
 
@@ -266,7 +266,7 @@ async fn a_preview_reports_what_is_asked_for_and_installs_nothing() {
         preview
             .requested_display
             .iter()
-            .any(|d| d.contains("sh.kotton.notes")),
+            .any(|d| d.contains(kotton_common::namespace::NSID_NOTES)),
         "the preview must name what it wants: {:?}",
         preview.requested_display
     );

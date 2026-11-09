@@ -712,19 +712,12 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
     // The schema must be registered on both — E to insert, N to build the table
     // from its own registry when it applies the segment.
     //
-    // In a namespace this test owns. It used to name `sh.kotton.notes` with a
+    // Under the suite's own key. It used to name the core `notes` with a
     // single field while that core schema has five; registration silently no-opped
     // and both devices used the core definition instead, so the two `schema_register`
     // calls below did nothing and the comment above was not true of them.
-    let schema = kotton_schemas::definition::SchemaDefinition::new(
-        kotton_schemas::nsid::Nsid::new("com.test.notes").unwrap(),
-        1,
-        vec![kotton_schemas::field::SchemaField::required(
-            "title",
-            kotton_schemas::field::FieldType::String,
-        )],
-    );
-    let schema_json = serde_json::to_string(&schema).unwrap();
+    let schema_json = crate::common::signed_title_schema_json("notes");
+    let notes = crate::common::suite_schema("notes");
     client_e.schema_register("alice", &schema_json).await.expect("schema on E");
     client_n.schema_register("alice", &schema_json).await.expect("schema on N");
 
@@ -732,7 +725,7 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
     client_e
         .record_insert(
             "alice",
-            "com.test.notes",
+            &notes,
             serde_json::json!({ "title": "reaches my phone" }),
         )
         .await
@@ -752,7 +745,7 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
 
     // N sees the record — carried as sealed segments in packs, no plaintext push.
     let recs = client_n
-        .record_query("alice", "com.test.notes", vec![], None, None)
+        .record_query("alice", &notes, vec![], None, None)
         .await
         .expect("record_query on N");
     assert_eq!(
@@ -1288,15 +1281,8 @@ async fn a_user_who_loses_every_device_recovers_everything_from_the_phrase() {
     let _task_b = tokio::spawn(async move { std::sync::Arc::new(daemon_b).run().await });
     wait_for_daemon(&ipc_b, "daemon B").await;
 
-    let schema = kotton_schemas::definition::SchemaDefinition::new(
-        kotton_schemas::nsid::Nsid::new("com.test.notes").unwrap(),
-        1,
-        vec![kotton_schemas::field::SchemaField::required(
-            "title",
-            kotton_schemas::field::FieldType::String,
-        )],
-    );
-    let schema_json = serde_json::to_string(&schema).unwrap();
+    let schema_json = crate::common::signed_title_schema_json("notes");
+    let notes = crate::common::suite_schema("notes");
 
     // ---- The user's only device, and everything they own --------------------
     let recovery_phrase;
@@ -1352,7 +1338,7 @@ async fn a_user_who_loses_every_device_recovers_everything_from_the_phrase() {
         client_e
             .record_insert(
                 "alice",
-                "com.test.notes",
+                &notes,
                 serde_json::json!({ "title": "survives the loss" }),
             )
             .await
@@ -1459,7 +1445,7 @@ async fn a_user_who_loses_every_device_recovers_everything_from_the_phrase() {
     );
 
     let recs = client_c
-        .record_query("alice", "com.test.notes", vec![], None, None)
+        .record_query("alice", &notes, vec![], None, None)
         .await
         .expect("record_query on C");
     assert_eq!(

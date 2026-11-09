@@ -123,13 +123,13 @@ mod tests {
     #[tokio::test]
     async fn first_registration_becomes_default() {
         let db = test_db().await;
-        let resp = handler_register(&db, "com.acme.app".into(), "sh.kotton.notes".into())
+        let resp = handler_register(&db, "com.acme.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         assert!(matches!(resp, UserResponse::HandlerRegistered));
 
         // The auto-default should be set.
-        let resp = handler_get_for(&db, "sh.kotton.notes".into())
+        let resp = handler_get_for(&db, kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         match resp {
@@ -144,15 +144,15 @@ mod tests {
     #[tokio::test]
     async fn second_registration_does_not_steal_default() {
         let db = test_db().await;
-        handler_register(&db, "com.first.app".into(), "sh.kotton.notes".into())
+        handler_register(&db, "com.first.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
-        handler_register(&db, "com.second.app".into(), "sh.kotton.notes".into())
+        handler_register(&db, "com.second.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
 
         // Default must still be the first app.
-        let resp = handler_get_for(&db, "sh.kotton.notes".into())
+        let resp = handler_get_for(&db, kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         match resp {
@@ -164,11 +164,11 @@ mod tests {
     #[tokio::test]
     async fn register_is_idempotent() {
         let db = test_db().await;
-        handler_register(&db, "com.acme.app".into(), "sh.kotton.notes".into())
+        handler_register(&db, "com.acme.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         // Second call must not error.
-        let resp = handler_register(&db, "com.acme.app".into(), "sh.kotton.notes".into())
+        let resp = handler_register(&db, "com.acme.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         assert!(matches!(resp, UserResponse::HandlerRegistered));
@@ -179,21 +179,21 @@ mod tests {
     #[tokio::test]
     async fn unregister_default_promotes_next() {
         let db = test_db().await;
-        handler_register(&db, "com.first.app".into(), "sh.kotton.notes".into())
+        handler_register(&db, "com.first.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
-        handler_register(&db, "com.second.app".into(), "sh.kotton.notes".into())
+        handler_register(&db, "com.second.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
 
         // Remove the default.
-        let resp = handler_unregister(&db, "com.first.app".into(), "sh.kotton.notes".into())
+        let resp = handler_unregister(&db, "com.first.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         assert!(matches!(resp, UserResponse::HandlerUnregistered));
 
         // The surviving handler should now be default.
-        let resp = handler_get_for(&db, "sh.kotton.notes".into())
+        let resp = handler_get_for(&db, kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         match resp {
@@ -208,14 +208,14 @@ mod tests {
     #[tokio::test]
     async fn unregister_last_handler_leaves_not_found() {
         let db = test_db().await;
-        handler_register(&db, "com.acme.app".into(), "sh.kotton.notes".into())
+        handler_register(&db, "com.acme.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
-        handler_unregister(&db, "com.acme.app".into(), "sh.kotton.notes".into())
+        handler_unregister(&db, "com.acme.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
 
-        let resp = handler_get_for(&db, "sh.kotton.notes".into())
+        let resp = handler_get_for(&db, kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         assert!(
@@ -229,7 +229,7 @@ mod tests {
     #[tokio::test]
     async fn get_unknown_nsid_returns_not_found() {
         let db = test_db().await;
-        let resp = handler_get_for(&db, "sh.kotton.notes".into())
+        let resp = handler_get_for(&db, kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         assert!(matches!(resp, UserResponse::HandlerNotFound { .. }));
@@ -240,13 +240,13 @@ mod tests {
     #[tokio::test]
     async fn list_returns_all_handlers() {
         let db = test_db().await;
-        handler_register(&db, "com.acme.app".into(), "sh.kotton.notes".into())
+        handler_register(&db, "com.acme.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
-        handler_register(&db, "com.acme.app".into(), "sh.kotton.contacts".into())
+        handler_register(&db, "com.acme.app".into(), kotton_common::namespace::NSID_CONTACTS.into())
             .await
             .unwrap();
-        handler_register(&db, "com.other.app".into(), "sh.kotton.notes".into())
+        handler_register(&db, "com.other.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
 
@@ -264,19 +264,19 @@ mod tests {
     #[tokio::test]
     async fn set_default_switches_handler() {
         let db = test_db().await;
-        handler_register(&db, "com.first.app".into(), "sh.kotton.notes".into())
+        handler_register(&db, "com.first.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
-        handler_register(&db, "com.second.app".into(), "sh.kotton.notes".into())
+        handler_register(&db, "com.second.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
 
-        let resp = handler_set_default(&db, "com.second.app".into(), "sh.kotton.notes".into())
+        let resp = handler_set_default(&db, "com.second.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         assert!(matches!(resp, UserResponse::DefaultHandlerSet));
 
-        let resp = handler_get_for(&db, "sh.kotton.notes".into())
+        let resp = handler_get_for(&db, kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         match resp {
@@ -288,11 +288,11 @@ mod tests {
     #[tokio::test]
     async fn set_default_unregistered_app_returns_error() {
         let db = test_db().await;
-        handler_register(&db, "com.first.app".into(), "sh.kotton.notes".into())
+        handler_register(&db, "com.first.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
 
-        let resp = handler_set_default(&db, "com.unknown.app".into(), "sh.kotton.notes".into())
+        let resp = handler_set_default(&db, "com.unknown.app".into(), kotton_common::namespace::NSID_NOTES.into())
             .await
             .unwrap();
         assert!(

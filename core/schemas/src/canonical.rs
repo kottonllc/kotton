@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! The JSON Canonicalization Scheme (RFC 8785), for what a schema's digest is taken over.
+//!
+//! A schema's version is BLAKE3 over its definition serialised this way (the protocol's
+//! decision *A schema is named by the key that publishes it*), so two implementations that
+//! hold the same definition write the same digest. The rules, as RFC 8785 gives them:
+//!
+//! - an object's members are sorted by their keys as sequences of UTF-16 code units
+//!   (section 3.2.3), and an array keeps its order;
+//! - no whitespace anywhere;
+//! - a string is escaped as section 3.2.2.2 says: `"` and `\` with a backslash, the five
+//!   control characters that have a short form as `\b`, `\t`, `\n`, `\f` and `\r`, every
+//!   other character below U+0020 as `\u00xx` with lowercase hex, and everything else,
+//!   non-ASCII included, written raw;
+//! - a number that is an integer within ±(2^53−1) is written as its decimal digits, with a
+//!   leading `-` when negative;
+//! - `true`, `false` and `null` as themselves.
+//!
+//! **A number that is not an integer is refused**, naming the member it sits in. RFC 8785
+//! writes a non-integer as ECMAScript's shortest round-tripping decimal, an algorithm this
+//! crate would otherwise carry only for a field whose default is a float, and the decision
+//! needs no float: a definition's own members are strings, an integer, booleans and lists of
+//! objects. A schema whose default is a float has no digest, and so no version, until the
+//! protocol says how one is written; the refusal is the honest answer, and it names the field.
+//!
+//! **So is an integer beyond ±(2^53−1)**, by its member too. RFC 8785 writes a number as an
+//! IEEE 754 double, which holds every integer only up to 2^53−1 in magnitude: past it, an
+//! implementation that reads JSON numbers as doubles (ECMAScript's, which the scheme is
+//! written for) rounds the integer before writing it, and the two digests differ. Writing the
+//! exact digits here would be a digest no such implementation agrees with.
+
+use serde_json::Value;
+use std::fmt::Write as _;
+use thiserror::Error;
+
+/// Why a value has no canonical form.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CanonicalError {
+    /// A number at `path` is not an integer (module doc).
+    #[error("`{path}` is {value}, not an integer: the canonical form (RFC 8785) of a non-integer is not written here, so the definition has no digest")]
+    NonInteger { path: String, value: String },
+    /// An integer at `path` is beyond ±(2^53−1), which a double does not hold exactly
+    /// (module doc).
+    #[error("`{path}` is {value}, beyond ±(2^53−1): the canonical form (RFC 8785) writes a number as a double, which does not hold it exactly, so the definition has no digest")]
+    BeyondExact { path: String, value: String },
+}
+
+/// The largest integer magnitude an IEEE 754 double holds exactly, with every integer below it:
+/// 2^53−1, ECMAScript's `Number.MAX_SAFE_INTEGER`.
+pub const MAX_EXACT_INTEGER: u64 = (1 << 53) - 1;
+
+/// The canonical form of `value`, as RFC 8785 writes it (module doc).
+pub fn canonical_json(value: &Value) -> Result<String, CanonicalError> {
+    let mut out = String::new();
+    write_value(value, &mut out, &mut String::from("$"))?;
+    Ok(out)
+}
+
+fn write_value(value: &Value, out: &mut String, path: &mut String) -> Result<(), CanonicalError> {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(true) => out.push_str("true"),
+        Value::Bool(false) => out.push_str("false"),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                if i.unsigned_abs() > MAX_EXACT_INTEGER {
+                    return Err(CanonicalError::BeyondExact { path: path.clone(), value: n.to_string() });
+                }
+                write!(out, "{i}").expect("writing to a String");
+            } else if n.is_u64() {
+                // Not an i64, so above i64::MAX, and beyond the bound.
+                return Err(CanonicalError::BeyondExact { path: path.clone(), value: n.to_string() });
+            } else {
+                return Err(CanonicalError::NonInteger { path: path.clone(), value: n.to_string() });
+            }
+        }
+        Value::String(s) => write_string(s, out),
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let len = path.len();
+                write!(path, "[{i}]").expect("writing to a String");
+                write_value(item, out, path)?;
+                path.truncate(len);
+            }
+            out.push(']');
+        }
+        Value::Object(members) => {
+            // Sorted by the key's UTF-16 code units, not its UTF-8 bytes: the two orders
+            // differ where a key holds a character above the Basic Multilingual Plane.
+            let mut keys: Vec<(&String, Vec<u16>)> =
+                members.keys().map(|k| (k, k.encode_utf16().collect())).collect();
+            keys.sort_by(|a, b| a.1.cmp(&b.1));
+            out.push('{');
+            for (i, (key, _)) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_string(key, out);
+                out.push(':');
+                let len = path.len();
+                write!(path, ".{key}").expect("writing to a String");
+                write_value(&members[*key], out, path)?;
+                path.truncate(len);
+            }
+            out.push('}');
+        }
+    }
+    Ok(())
+}
+
+/// A string as RFC 8785 section 3.2.2.2 escapes it.
+fn write_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => write!(out, "\\u{:04x}", c as u32).expect("writing to a String"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn members_are_sorted_by_utf16_code_units() {
+        // RFC 8785 section 3.2.3's example: the keys, in the order the scheme puts them.
+        let input = r#"{
+            "\u20ac": "Euro Sign",
+            "\r": "Carriage Return",
+            "\ufb33": "Hebrew Letter Dalet With Dagesh",
+            "1": "One",
+            "\ud83d\ude00": "Emoji: Grinning Face",
+            "\u0080": "Control",
+            "\u00f6": "Latin Small Letter O With Diaeresis"
+        }"#;
+        let value: Value = serde_json::from_str(input).unwrap();
+        let expected = "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\u{80}\":\"Control\",\"\u{f6}\":\"Latin Small Letter O With Diaeresis\",\"\u{20ac}\":\"Euro Sign\",\"\u{1f600}\":\"Emoji: Grinning Face\",\"\u{fb33}\":\"Hebrew Letter Dalet With Dagesh\"}";
+        assert_eq!(canonical_json(&value).unwrap(), expected);
+    }
+
+    #[test]
+    fn strings_are_escaped_as_the_scheme_says() {
+        let value = json!("a\"b\\c\u{8}\t\n\u{c}\r\u{1}\u{1f}\u{7f}\u{e9} \u{1f600}/");
+        assert_eq!(
+            canonical_json(&value).unwrap(),
+            "\"a\\\"b\\\\c\\b\\t\\n\\f\\r\\u0001\\u001f\u{7f}\u{e9} \u{1f600}/\""
+        );
+    }
+
+    #[test]
+    fn no_whitespace_and_arrays_keep_their_order() {
+        let value = json!({ "b": [3, 1, 2], "a": { "z": null, "y": true, "x": false }, "n": -7 });
+        assert_eq!(
+            canonical_json(&value).unwrap(),
+            r#"{"a":{"x":false,"y":true,"z":null},"b":[3,1,2],"n":-7}"#
+        );
+        assert_eq!(canonical_json(&json!([])).unwrap(), "[]");
+        assert_eq!(canonical_json(&json!({})).unwrap(), "{}");
+    }
+
+    #[test]
+    fn an_integer_beyond_what_a_double_holds_is_refused_by_its_member() {
+        let value = json!({ "fields": [{ "default": u64::MAX }] });
+        assert_eq!(
+            canonical_json(&value).unwrap_err(),
+            CanonicalError::BeyondExact {
+                path: "$.fields[0].default".into(),
+                value: "18446744073709551615".into()
+            }
+        );
+        let value = json!({ "x": i64::MIN });
+        assert_eq!(
+            canonical_json(&value).unwrap_err(),
+            CanonicalError::BeyondExact { path: "$.x".into(), value: "-9223372036854775808".into() }
+        );
+    }
+
+    #[test]
+    fn the_bound_is_two_to_the_fifty_three_less_one_either_way() {
+        let max = (1_i64 << 53) - 1;
+        assert_eq!(canonical_json(&json!(max)).unwrap(), "9007199254740991");
+        assert_eq!(canonical_json(&json!(-max)).unwrap(), "-9007199254740991");
+        assert!(matches!(
+            canonical_json(&json!(max + 1)),
+            Err(CanonicalError::BeyondExact { path, value }) if path == "$" && value == "9007199254740992"
+        ));
+        assert!(matches!(
+            canonical_json(&json!(-max - 1)),
+            Err(CanonicalError::BeyondExact { path, value }) if path == "$" && value == "-9007199254740992"
+        ));
+    }
+
+    #[test]
+    fn a_non_integer_is_refused_by_the_member_it_sits_in() {
+        let value = json!({ "fields": [{ "name": "ratio", "default": 0.5 }] });
+        let err = canonical_json(&value).unwrap_err();
+        assert_eq!(err, CanonicalError::NonInteger { path: "$.fields[0].default".into(), value: "0.5".into() });
+        // `1.0` parsed from text is a float to serde_json, and so to this.
+        let value: Value = serde_json::from_str(r#"{"x": 1.0}"#).unwrap();
+        assert!(matches!(canonical_json(&value), Err(CanonicalError::NonInteger { path, .. }) if path == "$.x"));
+        let value: Value = serde_json::from_str("1e3").unwrap();
+        assert!(matches!(canonical_json(&value), Err(CanonicalError::NonInteger { path, .. }) if path == "$"));
+    }
+}

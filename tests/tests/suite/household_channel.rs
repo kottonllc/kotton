@@ -498,7 +498,7 @@ async fn a_member_removed_later_cannot_read_later_messages_even_given_the_cipher
     use crate::contact_pairing::{mailbox_open, pair_as};
     use kotton_wire::ipc::Delivery;
     const JORDAN: &str = "jordan";
-    const GRANT: &str = "sh.kotton.channel.key-grant";
+    const GRANT: &str = kotton_common::namespace::NSID_CHANNEL_KEY_GRANT;
 
     let (relay, relay_addr) = common::relay::spawn().await;
     let (mut a, mut s, mut j) = (
@@ -663,7 +663,7 @@ async fn a_member_who_wrote_no_grant_removes_another_and_the_rest_read_on() {
     use kotton_wire::ipc::Delivery;
     const JORDAN: &str = "jordan";
     const PAT: &str = "pat";
-    const GRANT: &str = "sh.kotton.channel.key-grant";
+    const GRANT: &str = kotton_common::namespace::NSID_CHANNEL_KEY_GRANT;
 
     let (relay, relay_addr) = common::relay::spawn().await;
     let (mut a, mut s, mut j, mut p) = (
@@ -870,7 +870,7 @@ async fn a_member_leaves_by_saying_so_and_the_elector_alone_rotates() {
     use crate::contact_pairing::{mailbox_open_for, pair_as};
     use kotton_app::daemon::apps::OccupantHost as _;
     use kotton_wire::ipc::Delivery;
-    const GRANT: &str = "sh.kotton.channel.key-grant";
+    const GRANT: &str = kotton_common::namespace::NSID_CHANNEL_KEY_GRANT;
     const LEAVING: &str = "did:key:zHouseholdLeave";
 
     let (relay, relay_addr) = common::relay::spawn().await;

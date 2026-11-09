@@ -240,7 +240,7 @@ mod tests {
             },
             UserRequest::SyncAvailable { user_id: user_id(), paths: vec![] },
             UserRequest::SyncAvailable { user_id: user_id(), paths: vec!["/a".into()] },
-            UserRequest::RecordSyncAvailable { user_id: user_id(), nsids: vec!["sh.kotton.notes".into()] },
+            UserRequest::RecordSyncAvailable { user_id: user_id(), nsids: vec!["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes".into()] },
             UserRequest::RecoveryFetch { user_id: user_id() },
             UserRequest::RecoveryStore { user_id: user_id(), bundle: "b".into(), kel: vec![] },
             UserRequest::FrostSignRound { user_id: user_id(), payload: "{}".into() },
@@ -324,7 +324,7 @@ mod tests {
     fn a_live_record_insert_is_unknown_on_the_peer_wire() {
         let insert = UserRequest::RecordInsert {
             user_id: "alice".into(),
-            schema_nsid: "sh.kotton.notes".into(),
+            schema_nsid: "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes".into(),
             record: serde_json::json!({ "title": "planted", "body": "planted" }),
             root: None,
             app_id: None,

@@ -41,12 +41,17 @@ use serde_json::{json, Map, Value};
 
 use crate::header;
 
-/// The schema every row belongs to (RFC-0088, "The schema").
+/// The schema every row belongs to (RFC-0088, "The schema"), by its identity: Kotton's
+/// release key and the name `governance.record`.
 ///
-/// An extension schema under the project's own namespace: it carries this project's
-/// vocabulary and makes no interoperability claim, and it is not in `kotton_schemas::core`
-/// (Article IX — no core schema is touched).
-pub const NSID: &str = "sh.kotton.governance.record";
+/// It carries this project's vocabulary and makes no interoperability claim. It is in the
+/// core set (`kotton_schemas::core`, the file `governance.record.json`), because Kotton's own
+/// records app and this converter read it on every device of a project's members, and a
+/// schema of Kotton's can reach a device before the first tag only compiled in: a definition
+/// a request carries is checked against its publisher's signature, and Kotton's release key
+/// signs nothing until the first tag. [`crate::schema::definition`] is held to the core file
+/// field for field.
+pub const NSID: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/governance.record";
 
 /// The header keys the schema names, the field each fills, and whether it is a list.
 ///

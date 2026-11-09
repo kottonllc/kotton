@@ -95,7 +95,8 @@ impl RecordsCommand {
         let mut client = KottonClient::connect_as(self.user()).await?;
         match self {
             RecordsCommand::Init { org, name, user } => {
-                client.schema_register(&user, &schema::definition().to_string()).await?;
+                // The record schema is in the core set, on every device already; nothing
+                // registers it (`kotton_record_file::row::NSID`).
                 let made = client.org_root_create(&user, &org, &name).await?;
                 client.schema_grant_set(schema::PRINCIPAL, NSID, true, true, false).await?;
                 println!("✓ Root created: {}", made.root);

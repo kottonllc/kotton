@@ -1482,3 +1482,48 @@ mod ceremony_reader_tests {
         .await;
     }
 }
+
+// ── The schemas the suite publishes ──────────────────────────────────────────
+
+/// The key the suite publishes its own schemas under, and signs them with: a schema is
+/// named by the key that publishes it, and `schema register` refuses a definition its
+/// publisher did not sign. One fixed key, so an identity is the same string in every test.
+pub fn suite_publisher_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[0x2a; 32])
+}
+
+/// The suite's publisher, as its `did:key`.
+pub fn suite_publisher() -> String {
+    kotton_crypto::schema_signature::publisher_of(&suite_publisher_key().verifying_key()).to_string()
+}
+
+/// The identity of the suite's schema called `name`: `<suite publisher>/<name>`.
+pub fn suite_schema(name: &str) -> String {
+    format!("{}/{name}", suite_publisher())
+}
+
+/// A definition of the suite's schema `name`, at `revision`, signed by the suite's key.
+pub fn signed_schema(
+    name: &str,
+    revision: u32,
+    fields: Vec<kotton_schemas::SchemaField>,
+) -> kotton_schemas::SchemaDefinition {
+    let mut def = kotton_schemas::SchemaDefinition::new(
+        kotton_schemas::SchemaId::parse(suite_schema(name)).expect("a suite schema identity"),
+        revision,
+        fields,
+    );
+    kotton_crypto::schema_signature::sign(&mut def, &suite_publisher_key()).expect("the suite's key signs its own schema");
+    def
+}
+
+/// [`signed_schema`] as the JSON `schema register` takes.
+pub fn signed_schema_json(name: &str, revision: u32, fields: Vec<kotton_schemas::SchemaField>) -> String {
+    serde_json::to_string(&signed_schema(name, revision, fields)).expect("a definition serialises")
+}
+
+/// A signed schema with one required string field, `title`: the suite's usual test shape.
+pub fn signed_title_schema_json(name: &str) -> String {
+    use kotton_schemas::{FieldType, SchemaField};
+    signed_schema_json(name, 1, vec![SchemaField::required("title", FieldType::String)])
+}

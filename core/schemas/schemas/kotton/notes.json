@@ -1,0 +1,35 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "notes",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "title",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "body",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "tags",
+      "type": {
+        "list": "string"
+      },
+      "nullable": false
+    },
+    {
+      "name": "created_at",
+      "type": "datetime",
+      "nullable": false
+    },
+    {
+      "name": "updated_at",
+      "type": "datetime",
+      "nullable": false
+    }
+  ],
+  "description": "Titled text notes with optional tags."
+}

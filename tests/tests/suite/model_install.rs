@@ -38,7 +38,7 @@ use crate::common::{
 };
 
 const USER: &str = "alice";
-const MODEL_NSID: &str = "sh.kotton.model";
+const MODEL_NSID: &str = kotton_common::namespace::NSID_MODEL;
 
 /// Weights, as far as this unit is concerned: bytes with a hash.
 ///

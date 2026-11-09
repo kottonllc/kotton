@@ -13,16 +13,17 @@
 //!
 //! ```
 //! # use kotton_schemas::capability::{CapabilityGrant, CapabilityKind};
-//! # use kotton_schemas::Nsid;
+//! # use kotton_schemas::SchemaId;
+//! # use kotton_common::namespace::{NSID_CONTACTS, NSID_NOTES};
 //! // A notes app that reads and writes notes, and reads contacts:
 //! let grants = vec![
-//!     CapabilityGrant::schema(CapabilityKind::Read,  Nsid::from_static("sh.kotton.notes")),
-//!     CapabilityGrant::schema(CapabilityKind::Write, Nsid::from_static("sh.kotton.notes")),
-//!     CapabilityGrant::schema(CapabilityKind::Read,  Nsid::from_static("sh.kotton.contacts")),
+//!     CapabilityGrant::schema(CapabilityKind::Read,  SchemaId::from_static(NSID_NOTES)),
+//!     CapabilityGrant::schema(CapabilityKind::Write, SchemaId::from_static(NSID_NOTES)),
+//!     CapabilityGrant::schema(CapabilityKind::Read,  SchemaId::from_static(NSID_CONTACTS)),
 //! ];
 //! ```
 
-use crate::Nsid;
+use crate::SchemaId;
 use serde::{Deserialize, Serialize};
 
 /// The access direction a capability grant covers.
@@ -83,8 +84,10 @@ pub enum MessageDirection {
 #[cfg_attr(feature = "ts-types", ts(export))]
 #[serde(tag = "resource", rename_all = "snake_case")]
 pub enum CapabilityTarget {
-    /// A named schema — `schema.read:sh.kotton.notes`.
-    Schema { nsid: Nsid },
+    /// A named schema — `schema.read:<publisher>/<name>`. The field keeps the name it had
+    /// on the wire when a schema's identity was a reverse-domain string; it carries a
+    /// [`SchemaId`].
+    Schema { nsid: SchemaId },
     /// A VFS path prefix — `vfs.read:/notes`.
     Vfs { path: String },
     /// A media device — `media.microphone` / `media.camera` / `media.screen`.
@@ -174,7 +177,7 @@ pub struct CapabilityGrant {
 
 impl CapabilityGrant {
     /// Construct a schema-scoped capability grant.
-    pub fn schema(kind: CapabilityKind, nsid: Nsid) -> Self {
+    pub fn schema(kind: CapabilityKind, nsid: SchemaId) -> Self {
         Self {
             kind,
             target: CapabilityTarget::Schema { nsid },
@@ -229,7 +232,7 @@ impl CapabilityGrant {
     }
 
     /// Render this grant as its canonical display / storage string, matching the
-    /// manifest capability keys: `schema.read:nsid`, `vfs.write:/path`, or an
+    /// manifest capability keys: `schema.read:<publisher>/<name>`, `vfs.write:/path`, or an
     /// action key like `media.camera` / `call.initiate` / `apps.launch`. Single
     /// source of truth so a new `CapabilityTarget` variant is rendered in one
     /// place, not re-matched across the shell / CLI / daemon (H1).
@@ -240,7 +243,7 @@ impl CapabilityGrant {
             CapabilityKind::Use => "use",
         };
         match &self.target {
-            CapabilityTarget::Schema { nsid } => format!("schema.{rw}:{}", nsid.as_str()),
+            CapabilityTarget::Schema { nsid } => format!("schema.{rw}:{nsid}"),
             CapabilityTarget::Vfs { path } => format!("vfs.{rw}:{path}"),
             CapabilityTarget::Media { device } => match device {
                 MediaDevice::Microphone => "media.microphone",
@@ -281,16 +284,17 @@ impl CapabilityGrant {
 ///
 /// ```
 /// # use kotton_schemas::capability::{CapabilityGrant, CapabilityKind, CapabilityTarget, CapabilitySet};
-/// # use kotton_schemas::Nsid;
+/// # use kotton_schemas::SchemaId;
+/// # use kotton_common::namespace::NSID_NOTES;
 /// let grants = vec![
-///     CapabilityGrant::schema(CapabilityKind::Read, Nsid::from_static("sh.kotton.notes")),
+///     CapabilityGrant::schema(CapabilityKind::Read, SchemaId::from_static(NSID_NOTES)),
 /// ];
 /// let set = CapabilitySet::new(grants);
 /// assert!(set.allows(&CapabilityKind::Read, &CapabilityTarget::Schema {
-///     nsid: Nsid::from_static("sh.kotton.notes"),
+///     nsid: SchemaId::from_static(NSID_NOTES),
 /// }));
 /// assert!(!set.allows(&CapabilityKind::Write, &CapabilityTarget::Schema {
-///     nsid: Nsid::from_static("sh.kotton.notes"),
+///     nsid: SchemaId::from_static(NSID_NOTES),
 /// }));
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1343,9 +1347,9 @@ version = "1.0.0"
     #[test]
     fn display_string_renders_action_and_resource_keys() {
         assert_eq!(
-            CapabilityGrant::schema(CapabilityKind::Read, Nsid::from_static("sh.kotton.notes"))
+            CapabilityGrant::schema(CapabilityKind::Read, SchemaId::from_static(kotton_common::namespace::NSID_NOTES))
                 .display_string(),
-            "schema.read:sh.kotton.notes"
+            format!("schema.read:{}", kotton_common::namespace::NSID_NOTES)
         );
         assert_eq!(
             CapabilityGrant::vfs(CapabilityKind::Write, "/notes").display_string(),

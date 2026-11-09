@@ -12,7 +12,7 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use kotton_wire::did::Did;
 use kotton_wire::GrantEnvelope;
 use kotton_crypto::DidKeyMethod;
-use kotton_schemas::{CapabilityGrant, CapabilityKind, Nsid};
+use kotton_schemas::{CapabilityGrant, CapabilityKind, SchemaId};
 use rand::rngs::OsRng;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,10 +35,10 @@ fn gen_org_key() -> (SigningKey, String) {
     (sk, did.to_string())
 }
 
-/// Build and sign a `GrantEnvelope` granting `schema.read:sh.kotton.notes`
+/// Build and sign a `GrantEnvelope` granting `schema.read` on the core `notes`
 /// from `issuer_did` to `subject_did`, signed with `signing_key`.
 fn signed_envelope(signing_key: &SigningKey, issuer_did: &str, subject_did: &str) -> GrantEnvelope {
-    let grant = CapabilityGrant::schema(CapabilityKind::Read, Nsid::from_static("sh.kotton.notes"));
+    let grant = CapabilityGrant::schema(CapabilityKind::Read, SchemaId::from_static(kotton_common::namespace::NSID_NOTES));
 
     let mut env = GrantEnvelope {
         id: uuid::Uuid::new_v4().to_string(),

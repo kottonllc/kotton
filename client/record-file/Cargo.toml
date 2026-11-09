@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 publish = false
-description = "A governance record file and its row: the one header parser the board and the converter share, and the byte-exact map between a record file and a row of sh.kotton.governance.record (RFC-0088)"
+description = "A governance record file and its row: the one header parser the board and the converter share, and the byte-exact map between a record file and a row of governance.record (RFC-0088)"
 
 # Deliberately light. `xtask` depends on this for the header parser, and every gate in
 # `just lint` pays for what this links — see the note on `kotton-cli` in xtask/Cargo.toml.
