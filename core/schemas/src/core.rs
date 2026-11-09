@@ -52,7 +52,7 @@ pub enum CoreSchema {
     Tasks,
     /// Clipboard entries — structured snapshots of records the user has copied.
     ///
-    /// Each entry records what was copied (`source_nsid`, `source_id`), a
+    /// Each entry records what was copied (`source_schema`, `source_id`), a
     /// JSON snapshot of the record body at copy time, and when it was copied.
     Clipboard,
     /// Encrypted peer-to-peer and channel message envelope (M34+).

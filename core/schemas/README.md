@@ -53,7 +53,7 @@ contacts            — display_name, dids, emails, phones
 calendar            — title, start_at, end_at, participants, location?
 messages            — sender_did, body, thread_id, sent_at
 tasks               — title, due_at?, completed, parent_task_id?
-clipboard           — source_nsid, source_id, snapshot_json, copied_at
+clipboard           — source_schema, source_id, snapshot_json, copied_at
 message.v1          — the encrypted message envelope
 channel.key-grant   — one epoch of a channel key, sealed to a member
 model               — an installed model's manifest, and whether it is active

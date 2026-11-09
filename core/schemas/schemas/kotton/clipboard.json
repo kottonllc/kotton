@@ -4,7 +4,7 @@
   "revision": 1,
   "fields": [
     {
-      "name": "source_nsid",
+      "name": "source_schema",
       "type": "string",
       "nullable": false
     },
@@ -24,5 +24,5 @@
       "nullable": false
     }
   ],
-  "description": "Clipboard entries — a structured snapshot of a record the user has copied, anchored to its source NSID and record ID."
+  "description": "Clipboard entries — a structured snapshot of a record the user has copied, anchored to its source schema and record ID."
 }
