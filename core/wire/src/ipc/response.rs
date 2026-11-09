@@ -580,6 +580,23 @@ pub enum UserResponse {
     TenantDrivesResult {
         drives: Vec<crate::ipc::TenantDrive>,
     },
+    /// Answer to `TenantDriveHold` and `TenantDriveMake`: the lease the asking
+    /// device now holds, on what it asked for or on the tree it made, and for
+    /// how many seconds unless it is renewed (kotton #143).
+    DriveHold {
+        lease: crate::ipc::DriveLease,
+        for_secs: u32,
+    },
+    /// Answer to `TenantDriveHold` when another device of the person's holds
+    /// the lease (kotton #143); and, the same way, to a sealed write into, a
+    /// naming of or a retire of a drive another device holds to move it. `device_did` is the holding device's key, as the vault admitted
+    /// it, and `for_secs` how much longer the lease lasts unless renewed. The
+    /// device that reads it says the sentence, under its own name for that
+    /// device.
+    DriveHeld {
+        device_did: String,
+        for_secs: u32,
+    },
     /// Answer to `DriveCreate`, `DriveList` and `DriveShow`: the drives the
     /// verb is about, each as its descriptor.
     Drives {
