@@ -9,7 +9,9 @@
 //! `../kotton-protocol` beside this one, as verb-check reads it), every file here equals the
 //! file of the same name there, byte for byte, or is named in [`NOT_YET_PUBLISHED`] as a
 //! schema the protocol has not taken yet; and a file named there as not yet published that
-//! the protocol does have is a finding too, since the list would then be stale. Without a
+//! the protocol does have is a finding too, since the list would then be stale. The other way
+//! too: a file the protocol publishes under `schemas/kotton/` that this tree lacks is a
+//! finding, since the core set would then be short of the protocol's. Without a
 //! checkout, the check says so and passes: the tree is held to its own copy, as verb-check
 //! is to its pinned words.
 
@@ -89,6 +91,25 @@ pub fn findings(ours: &Path, theirs: &Path) -> Vec<String> {
         if !names.iter().any(|n| n == listed) {
             found.push(format!("{listed}: named in NOT_YET_PUBLISHED and not under {}", ours.display()));
         }
+    }
+    let mut published: Vec<String> = match std::fs::read_dir(theirs) {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.ends_with(".json"))
+            .collect(),
+        Err(e) => {
+            found.push(format!("{}: cannot be read: {e}", theirs.display()));
+            Vec::new()
+        }
+    };
+    published.sort();
+    for name in published.iter().filter(|n| !names.contains(n)) {
+        found.push(format!(
+            "{name}: the protocol publishes it at {}, and {} has no copy; the core set is the protocol's, so copy it here",
+            theirs.join(name).display(),
+            ours.display()
+        ));
     }
     found
 }
@@ -176,6 +197,21 @@ mod tests {
                 "{f}"
             );
         }
+    }
+
+    /// A file the protocol publishes that the tree lacks is a finding, by name.
+    #[test]
+    fn a_file_the_protocol_publishes_and_the_tree_lacks_is_named() {
+        let dir = tree(&[
+            ("ours/secret.json", "{}"),
+            ("theirs/secret.json", "{}"),
+            ("theirs/new-in-the-protocol.json", "{}"),
+            ("theirs/README.md", "not a schema"),
+        ]);
+        let found = findings(&dir.path().join("ours"), &dir.path().join("theirs"));
+        let missing: Vec<&String> = found.iter().filter(|f| f.contains("has no copy")).collect();
+        assert_eq!(missing.len(), 1, "{found:#?}");
+        assert!(missing[0].starts_with("new-in-the-protocol.json:"), "{}", missing[0]);
     }
 
     /// The tree's own copy, against the protocol's checkout when there is one.
