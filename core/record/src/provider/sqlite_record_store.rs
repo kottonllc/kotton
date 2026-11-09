@@ -3,7 +3,10 @@
 //!
 //! ## Table layout
 //!
-//! One table per schema NSID, named by replacing `.` with `_`:
+//! One table per schema NSID, by a name that is that NSID's alone: a dot
+//! becomes one underscore and a hyphen two (`nsid_to_table`), so no two
+//! schemas share a table, and every statement also holds a row to the
+//! `schema_nsid` it was written under:
 //!
 //! ```sql
 //! CREATE TABLE IF NOT EXISTS com_kotton_notes (
@@ -153,28 +156,67 @@ use crate::record_store::{
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Convert an NSID string to a safe SQLite table name.
+/// The table an NSID's records are in: a name that is that NSID's alone.
 ///
-/// `sh.kotton.notes` → `sh_kotton_notes`
+/// `sh.kotton.notes` → `sh_kotton_notes`; `sh.kotton.channel.key-grant` →
+/// `sh_kotton_channel_key__grant`. A dot becomes one underscore and a hyphen
+/// two, and nothing else changes: an NSID is lowercase letters, digits,
+/// hyphens and dots, with every segment starting with a letter
+/// (`kotton_schemas::nsid`). So a run of underscores in a table name reads
+/// back as its hyphens, and a dot last if the run is odd, since a hyphen can
+/// end a segment but never begin one ([`table_to_nsid`]). **The map is
+/// injective**: two NSIDs never share a table, so a grant on one schema's
+/// records reaches no other's, whatever the two are called.
 ///
-/// Every character outside `[A-Za-z0-9_]` becomes `_`, not just the dots. The
-/// narrower version silently produced **invalid SQL** for any NSID containing a
-/// hyphen: `sh.kotton.channel.key-grant` became `sh_kotton_channel_key-grant`,
-/// which SQLite rejects at the `-`. That took out channel messaging entirely —
-/// creating a channel failed at the key-grant insert — and went unnoticed
-/// because nothing exercised it (found 2026-08-10 by the first messaging test).
+/// It was not always. Until 2026-11, every character outside `[A-Za-z0-9_]`
+/// became `_`, so `com.ex-ample.foo` and `com.ex.ample.foo` were one table,
+/// read as one by a query that named either and written as one by a `put`
+/// naming the other's id. A table written under that map is split on open
+/// ([`split_by_nsid`]): a hyphenless NSID keeps the name it had, and the rows
+/// of any other NSID move to the table that is theirs. The store also holds
+/// each row to its own NSID in every statement (`schema_nsid = ?`), so a
+/// table the split has not reached yet still answers no other schema's rows.
 ///
-/// Widening this is safe precisely *because* such NSIDs could never have worked:
-/// no table with an invalid identifier exists to migrate.
-///
-/// Note the pre-existing property this inherits rather than introduces: the
-/// mapping is not injective, so `a.b-c` and `a.b_c` would share a table. Records
-/// carry their `schema_nsid` in a column, so they stay distinguishable, but a
-/// future NSID grammar should forbid the ambiguity at the source.
-fn nsid_to_table(nsid: &str) -> String {
-    nsid.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
+/// It takes a validated [`Nsid`], never a string: a row's `schema_nsid` that
+/// arrives from a peer, or sits in a table an older version wrote, is parsed
+/// first and refused or left where it is if it is not one, so no string
+/// outside the grammar ever names a table.
+fn nsid_to_table(nsid: &Nsid) -> String {
+    let mut table = String::with_capacity(nsid.as_str().len() + 8);
+    for c in nsid.as_str().chars() {
+        match c {
+            '.' => table.push('_'),
+            '-' => table.push_str("__"),
+            c => table.push(c),
+        }
+    }
+    table
+}
+
+/// The NSID whose table `table` is, read back from the name ([`nsid_to_table`]),
+/// or none for a name that map never produced.
+fn table_to_nsid(table: &str) -> Option<Nsid> {
+    let mut nsid = String::with_capacity(table.len());
+    let mut chars = table.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '_' {
+            nsid.push(c);
+            continue;
+        }
+        let mut run = 1usize;
+        while chars.peek() == Some(&'_') {
+            chars.next();
+            run += 1;
+        }
+        for _ in 0..run / 2 {
+            nsid.push('-');
+        }
+        if run % 2 == 1 {
+            nsid.push('.');
+        }
+    }
+    let nsid = Nsid::new(nsid).ok()?;
+    (nsid_to_table(&nsid) == table).then_some(nsid)
 }
 
 /// DDL to create a schema table.
@@ -296,12 +338,110 @@ fn require_updated_at_not_null(conn: &Connection, table: &str) -> rusqlite::Resu
     ))
 }
 
+/// Move every row of `table` whose NSID is not the one the table is named for
+/// into the table that is ([`nsid_to_table`]), and drop `table` if it is then
+/// empty and named for no NSID.
+///
+/// A table written under the map before 2026-11 could hold two schemas' rows,
+/// one named for the table and one not. Each row carries its `schema_nsid`, so
+/// the split needs no guess: a row goes to its own table, which is made here
+/// if it is not there. **No row is deleted that its table did not take.** If
+/// the target already holds the id (the same schema written since, or an old
+/// table of another hyphenated NSID that the map now names the same), the row
+/// there is kept as it is, and the row here stays where it is, logged, out of
+/// every other schema's reach by the `schema_nsid` predicate every statement
+/// carries. Which of two such rows should win is not decided here: a migration
+/// that chose would be deleting a record on its own judgement. Rows are moved
+/// in one transaction per source table, so a crash mid-split leaves either
+/// table as it was, and a second open finds only what the first could not move.
+fn split_by_nsid(conn: &Connection, table: &str) -> rusqlite::Result<()> {
+    let own = table_to_nsid(table);
+    let nsids: Vec<String> = conn
+        .prepare(&format!("SELECT DISTINCT schema_nsid FROM {table}"))?
+        .query_map([], |row| row.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let mut strays: Vec<Nsid> = Vec::new();
+    for n in nsids {
+        if own.as_ref().is_some_and(|o| o.as_str() == n) {
+            continue;
+        }
+        match Nsid::new(n.clone()) {
+            Ok(nsid) => strays.push(nsid),
+            // Not an NSID, so no table is its: the row stays where it is, and
+            // every statement's `schema_nsid` predicate keeps it out of reach.
+            Err(e) => tracing::warn!(table, schema_nsid = %n, error = %e, "a row's schema is no NSID; left where it is"),
+        }
+    }
+    if strays.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let moved = (|| -> rusqlite::Result<()> {
+        for nsid in &strays {
+            let target = nsid_to_table(nsid);
+            if target == table {
+                continue;
+            }
+            let nsid = nsid.as_str();
+            conn.execute_batch(&create_table_sql(&target))?;
+            // The ids the target held before the move: a row under one of
+            // these is not taken, and so not deleted here.
+            conn.execute_batch("DROP TABLE IF EXISTS temp.split_held;")?;
+            conn.execute(
+                &format!("CREATE TEMP TABLE split_held AS SELECT id FROM {target} WHERE schema_nsid = ?1"),
+                params![nsid],
+            )?;
+            conn.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO {target} \
+                     (id, schema_nsid, body, created_at, updated_at, deleted_at, root, filed_at, revision) \
+                     SELECT id, schema_nsid, body, created_at, updated_at, deleted_at, root, filed_at, revision \
+                     FROM {table} WHERE schema_nsid = ?1"
+                ),
+                params![nsid],
+            )?;
+            let moved = conn.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE schema_nsid = ?1 \
+                     AND id NOT IN (SELECT id FROM temp.split_held)"
+                ),
+                params![nsid],
+            )?;
+            conn.execute_batch("DROP TABLE temp.split_held;")?;
+            let left: i64 = conn.query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE schema_nsid = ?1"),
+                params![nsid],
+                |r| r.get(0),
+            )?;
+            tracing::warn!(from = table, to = %target, nsid = %nsid, moved, left, "moved a schema's records to the table that is theirs");
+        }
+        if own.is_none() {
+            // Named for no NSID: once nothing is left in it, it goes. A row
+            // whose schema is no NSID, or one its table could not take, keeps it.
+            let left: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
+            if left == 0 {
+                conn.execute_batch(&format!("DROP TABLE {table};"))?;
+            }
+        }
+        Ok(())
+    })();
+    match moved {
+        Ok(()) => conn.execute_batch("COMMIT;"),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 /// Everything a table written by an earlier version is given on open.
 fn adopt(conn: &Connection, table: &str) -> rusqlite::Result<()> {
     require_updated_at_not_null(conn, table)?;
     adopt_into_roots(conn, table)?;
     adopt_filing_order(conn, table)?;
-    adopt_write_revision(conn, table)
+    adopt_write_revision(conn, table)?;
+    split_by_nsid(conn, table)
 }
 
 /// Run [`adopt`] over every record table in the file.
@@ -460,7 +600,7 @@ impl SqliteRecordStore {
 #[async_trait]
 impl RecordStore for SqliteRecordStore {
     async fn create_table(&self, schema: &SchemaDefinition) -> Result<()> {
-        let table = nsid_to_table(schema.nsid.as_str());
+        let table = nsid_to_table(&schema.nsid);
         let conn = Arc::clone(&self.conn);
 
         tokio::task::spawn_blocking(move || {
@@ -480,7 +620,7 @@ impl RecordStore for SqliteRecordStore {
         root: Option<String>,
         record: Value,
     ) -> Result<RecordId> {
-        let table = nsid_to_table(schema_nsid.as_str());
+        let table = nsid_to_table(schema_nsid);
         let nsid_str = schema_nsid.as_str().to_owned();
 
         // Use provided id or generate a new UUID v4.
@@ -512,15 +652,16 @@ impl RecordStore for SqliteRecordStore {
             // A record does not change root by being rewritten: the replace
             // below would delete a row that may be in a root this writer cannot
             // read. Tombstones included — a deleted row is still that root's.
-            let existing: Option<(Option<String>, Option<i64>, i64)> = conn
+            let existing: Option<(Option<String>, Option<i64>, i64, String)> = conn
                 .query_row(
-                    &format!("SELECT root, filed_at, updated_at FROM {table} WHERE id = ?1"),
+                    &format!("SELECT root, filed_at, updated_at, schema_nsid FROM {table} WHERE id = ?1"),
                     params![id_clone],
                     |row| {
                         Ok((
                             row.get::<_, Option<String>>(0)?,
                             row.get::<_, Option<i64>>(1)?,
                             row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
                         ))
                     },
                 )
@@ -529,7 +670,13 @@ impl RecordStore for SqliteRecordStore {
                     rusqlite::Error::QueryReturnedNoRows => Ok(None),
                     other => Err(other),
                 })?;
-            if let Some((held, _, _)) = &existing {
+            if let Some((held, _, _, held_by)) = &existing {
+                // A row is one schema's: a table the split has not reached
+                // can hold another's row under this id, and a replace would
+                // overwrite it (`nsid_to_table`).
+                if *held_by != nsid_str {
+                    return Err(RecordStoreError::UnderAnotherSchema(id_clone));
+                }
                 if *held != root {
                     return Err(RecordStoreError::InAnotherRoot(id_clone));
                 }
@@ -540,9 +687,9 @@ impl RecordStore for SqliteRecordStore {
             // keep that one (module doc, "Every write is a new version").
             let updated_at = existing
                 .as_ref()
-                .map_or(seconds(now), |(_, _, held)| seconds(now).max(*held));
+                .map_or(seconds(now), |(_, _, held, _)| seconds(now).max(*held));
             // Filed once: a rewrite keeps the place the record already had.
-            let filed_at = match existing.and_then(|(_, filed, _)| filed) {
+            let filed_at = match existing.and_then(|(_, filed, _, _)| filed) {
                 Some(filed) => filed,
                 None => next_filing_stamp(&conn, &table, now)?,
             };
@@ -570,7 +717,8 @@ impl RecordStore for SqliteRecordStore {
     }
 
     async fn query(&self, schema_nsid: &Nsid, filter: RecordFilter) -> Result<Vec<Record>> {
-        let table = nsid_to_table(schema_nsid.as_str());
+        let table = nsid_to_table(schema_nsid);
+        let nsid_str = schema_nsid.as_str().to_owned();
         let conn = Arc::clone(&self.conn);
 
         tokio::task::spawn_blocking(move || {
@@ -592,9 +740,13 @@ impl RecordStore for SqliteRecordStore {
 
             // Build WHERE clause. The root predicate is first and always there:
             // a read names the roots it may see, Personal alone by default.
+            // A row is read only by the schema it was written under: the
+            // table is that schema's alone (`nsid_to_table`), and the
+            // predicate holds it so for a table the split has not reached.
             let (in_roots, root_ids) = filter.roots.predicate();
-            let mut where_parts: Vec<String> = vec!["deleted_at IS NULL".to_owned(), in_roots];
-            let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut where_parts: Vec<String> =
+                vec!["schema_nsid = ?".to_owned(), "deleted_at IS NULL".to_owned(), in_roots];
+            let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(nsid_str.clone())];
             for id in root_ids {
                 bound.push(Box::new(id));
             }
@@ -618,9 +770,15 @@ impl RecordStore for SqliteRecordStore {
             }
 
             // Pagination cursor: only rows inserted before `before_id` (by rowid).
+            // The cursor resolves under this schema alone, as the rows do: an id
+            // another schema holds in a table the split has not reached is not
+            // this caller's to find, even as a place to start from.
             if let Some(ref bid) = filter.before_id {
-                where_parts.push(format!("rowid < (SELECT rowid FROM {table} WHERE id = ?)"));
+                where_parts.push(format!(
+                    "rowid < (SELECT rowid FROM {table} WHERE id = ? AND schema_nsid = ?)"
+                ));
                 bound.push(Box::new(bid.clone()));
+                bound.push(Box::new(nsid_str.clone()));
             }
 
             let where_clause = where_parts.join(" AND ");
@@ -676,7 +834,8 @@ impl RecordStore for SqliteRecordStore {
         record_id: &RecordId,
         roots: &crate::record_store::RootSelection,
     ) -> Result<()> {
-        let table = nsid_to_table(schema_nsid.as_str());
+        let table = nsid_to_table(schema_nsid);
+        let nsid_str = schema_nsid.as_str().to_owned();
         let id = record_id.clone();
         let conn = Arc::clone(&self.conn);
         let (in_roots, root_ids) = roots.predicate();
@@ -693,18 +852,19 @@ impl RecordStore for SqliteRecordStore {
             // a new version"): `MAX(?, updated_at)` reads the row's version
             // before this statement writes it, so both stamps take it.
             let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> =
-                vec![Box::new(now), Box::new(now), Box::new(id.clone())];
+                vec![Box::new(now), Box::new(now), Box::new(id.clone()), Box::new(nsid_str)];
             for r in root_ids {
                 bound.push(Box::new(r));
             }
             let params: Vec<&dyn rusqlite::types::ToSql> =
                 bound.iter().map(|b| b.as_ref()).collect();
+            // A delete reaches the row only under its own schema, as a read does.
             let affected = conn.execute(
                 &format!(
                     "UPDATE {table} SET deleted_at = MAX(?, updated_at), \
                      updated_at = MAX(?, updated_at), \
                      revision = revision + 1 \
-                     WHERE id = ? AND deleted_at IS NULL AND {in_roots}"
+                     WHERE id = ? AND schema_nsid = ? AND deleted_at IS NULL AND {in_roots}"
                 ),
                 params.as_slice(),
             )?;
@@ -784,7 +944,12 @@ impl RecordStore for SqliteRecordStore {
         tokio::task::spawn_blocking(move || {
             let mut conn = conn.lock().unwrap();
             for row in &changeset {
-                let table = nsid_to_table(&row.schema_nsid);
+                // A row names its schema as a string on the wire; only an NSID
+                // names a table here (`nsid_to_table`).
+                let table = match Nsid::new(row.schema_nsid.clone()) {
+                    Ok(nsid) => nsid_to_table(&nsid),
+                    Err(_) => return Err(RecordStoreError::SchemaNotFound(row.schema_nsid.clone())),
+                };
                 // One transaction per row, as each row was its own statement
                 // before: a stamp taken for a row that arrives without one is
                 // read and written as one step on the file (module doc, "One
@@ -844,7 +1009,8 @@ impl RecordStore for SqliteRecordStore {
                          WHERE (excluded.updated_at > {table}.updated_at \
                                 OR (excluded.updated_at = {table}.updated_at \
                                     AND excluded.revision > {table}.revision)) \
-                           AND excluded.root IS {table}.root"
+                           AND excluded.root IS {table}.root \
+                           AND excluded.schema_nsid = {table}.schema_nsid"
                     ),
                     params![
                         row.id,
@@ -1556,6 +1722,222 @@ mod tests {
             .await
             .unwrap();
         assert!(family.is_empty(), "a Personal row read back from Family: {family:?}");
+    }
+
+    /// **A table is one NSID's alone.** Two NSIDs that differ only in their
+    /// punctuation, or in where a hyphen falls, name two tables, and a table's
+    /// name reads back as the one NSID it is for.
+    #[test]
+    fn a_table_name_is_one_nsids_alone() {
+        let nsids = [
+            "com.ex-ample.foo", "com.ex.ample.foo", "com.ex--ample.foo", "com.ex-.ample.foo",
+            "a.b", "a.b-c", "a.b-0c", "a.b-00c", "a-b.c", "a--b.c", "a-.b", "sh.kotton.notes",
+            "sh.kotton.channel.key-grant", "sh.kotton.channel.key.grant",
+        ];
+        let mut tables = std::collections::BTreeSet::new();
+        for nsid in nsids {
+            let nsid = Nsid::new(nsid).unwrap_or_else(|e| panic!("{nsid}: {e}"));
+            let table = nsid_to_table(&nsid);
+            assert!(tables.insert(table.clone()), "{nsid} shares the table {table}");
+            assert_eq!(table_to_nsid(&table).as_ref(), Some(&nsid), "{table} does not read back");
+        }
+        assert_eq!(nsid_to_table(&Nsid::new("sh.kotton.notes").unwrap()), "sh_kotton_notes");
+        assert_eq!(
+            nsid_to_table(&Nsid::new("sh.kotton.channel.key-grant").unwrap()),
+            "sh_kotton_channel_key__grant"
+        );
+        // A name the map never produced is no NSID's.
+        for stray in ["_a_b", "a_b_", "a___", "a_b_0c", "1a_b", "a-b"] {
+            assert_eq!(table_to_nsid(stray), None, "{stray}");
+        }
+    }
+
+    /// A row written by one schema's NSID is in no other's table, is read by
+    /// no other's query, and is overwritten by no other's `put` under its id.
+    #[tokio::test]
+    async fn two_nsids_that_shared_a_table_share_no_rows() {
+        let store = notes_store();
+        let hyphen = Nsid::new("com.ex-ample.foo").unwrap();
+        let dot = Nsid::new("com.ex.ample.foo").unwrap();
+        for nsid in [&hyphen, &dot] {
+            let schema = SchemaDefinition::new(nsid.clone(), 1, vec![]);
+            store.create_table(&schema).await.unwrap();
+        }
+        store.insert(&hyphen, json!({ "id": "r1", "who": "hyphen" })).await.unwrap();
+        store.insert(&dot, json!({ "id": "r1", "who": "dot" })).await.unwrap();
+        let only = |rows: Vec<Record>| -> Vec<String> {
+            rows.iter().map(|r| r.body["who"].as_str().unwrap().to_owned()).collect()
+        };
+        assert_eq!(only(store.query(&hyphen, RecordFilter::new()).await.unwrap()), ["hyphen"]);
+        assert_eq!(only(store.query(&dot, RecordFilter::new()).await.unwrap()), ["dot"]);
+        store.delete(&dot, &"r1".to_owned()).await.unwrap();
+        assert_eq!(
+            only(store.query(&hyphen, RecordFilter::new()).await.unwrap()),
+            ["hyphen"],
+            "a delete under one schema reached another's row"
+        );
+        assert!(store.query(&dot, RecordFilter::new()).await.unwrap().is_empty());
+    }
+
+    /// **A table written under the old map is split on open.** It holds two
+    /// schemas' rows; after open each schema reads its own rows and none of
+    /// the other's, the rows of the schema the table is not named for are in
+    /// the table that is theirs, and nothing is lost.
+    #[tokio::test]
+    async fn a_table_two_schemas_shared_is_split_on_open_and_each_reads_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&create_table_sql("com_ex_ample_foo")).unwrap();
+            conn.execute_batch(
+                "INSERT INTO com_ex_ample_foo (id, schema_nsid, body) VALUES
+                   ('d1', 'com.ex.ample.foo', '{\"id\":\"d1\",\"who\":\"dot\"}'),
+                   ('h1', 'com.ex-ample.foo', '{\"id\":\"h1\",\"who\":\"hyphen\"}'),
+                   ('h2', 'com.ex-ample.foo', '{\"id\":\"h2\",\"who\":\"hyphen-two\"}');",
+            )
+            .unwrap();
+        }
+        let store = SqliteRecordStore::open(&path, None).unwrap();
+        let hyphen = Nsid::new("com.ex-ample.foo").unwrap();
+        let dot = Nsid::new("com.ex.ample.foo").unwrap();
+        let who = |rows: Vec<Record>| -> Vec<String> {
+            let mut w: Vec<String> = rows.iter().map(|r| r.body["who"].as_str().unwrap().to_owned()).collect();
+            w.sort();
+            w
+        };
+        assert_eq!(who(store.query(&dot, RecordFilter::new()).await.unwrap()), ["dot"]);
+        assert_eq!(who(store.query(&hyphen, RecordFilter::new()).await.unwrap()), ["hyphen", "hyphen-two"]);
+        {
+            let conn = store.conn.lock().unwrap();
+            let left: i64 = conn.query_row("SELECT COUNT(*) FROM com_ex_ample_foo", [], |r| r.get(0)).unwrap();
+            assert_eq!(left, 1, "the table named for com.ex.ample.foo holds another schema's rows");
+            let moved: i64 = conn.query_row("SELECT COUNT(*) FROM com_ex__ample_foo", [], |r| r.get(0)).unwrap();
+            assert_eq!(moved, 2);
+        }
+        // A second open finds nothing to move.
+        drop(store);
+        let again = SqliteRecordStore::open(&path, None).unwrap();
+        assert_eq!(who(again.query(&hyphen, RecordFilter::new()).await.unwrap()), ["hyphen", "hyphen-two"]);
+    }
+
+    /// **An old table's rows move to the table that is theirs, and the old
+    /// table stays only if it is some NSID's.** Under the old map a hyphen was
+    /// written as a dot's underscore, so `a-bb.x` sat in `a_bb_x`, which is
+    /// `a.bb.x`'s name and stays, empty; `a.b-0c` sat in `a_b_0c`, which no
+    /// NSID reads back to (a segment cannot start with a digit), so it goes.
+    #[tokio::test]
+    async fn an_old_tables_rows_move_to_the_table_that_is_theirs_and_the_old_table_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&create_table_sql("a_b_0c")).unwrap();
+            conn.execute_batch(
+                "INSERT INTO a_b_0c (id, schema_nsid, body) VALUES ('x', 'a.b-0c', '{\"id\":\"x\"}');",
+            )
+            .unwrap();
+            conn.execute_batch(&create_table_sql("a_bb_x")).unwrap();
+            conn.execute_batch(
+                "INSERT INTO a_bb_x (id, schema_nsid, body) VALUES ('y', 'a-bb.x', '{\"id\":\"y\"}');",
+            )
+            .unwrap();
+        }
+        let store = SqliteRecordStore::open(&path, None).unwrap();
+        let conn = store.conn.lock().unwrap();
+        let tables: Vec<String> = record_tables(&conn).unwrap();
+        assert!(tables.contains(&"a_b__0c".to_owned()), "{tables:?}");
+        assert!(!tables.contains(&"a_b_0c".to_owned()), "a table named for no NSID was kept: {tables:?}");
+        assert!(tables.contains(&"a__bb_x".to_owned()), "{tables:?}");
+        assert!(tables.contains(&"a_bb_x".to_owned()), "a_bb_x is a.bb.x's name and stays: {tables:?}");
+        for (table, rows) in [("a_b__0c", 1), ("a__bb_x", 1), ("a_bb_x", 0)] {
+            let n: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap();
+            assert_eq!(n, rows, "{table}");
+        }
+    }
+
+    /// **The split deletes no row its table did not take.** The target already
+    /// holds the id (here, under the same schema, written since): the row there
+    /// is kept as it is, the row in the source stays where it is, the source is
+    /// not dropped, and a read under the schema sees the target's row alone.
+    #[tokio::test]
+    async fn the_split_leaves_a_row_whose_id_its_table_already_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            // The old map's table for `a.b-0c`, named for no NSID, and the new
+            // map's table for it, already holding the same id.
+            conn.execute_batch(&create_table_sql("a_b_0c")).unwrap();
+            conn.execute_batch(
+                "INSERT INTO a_b_0c (id, schema_nsid, body, revision) VALUES
+                   ('x', 'a.b-0c', '{\"id\":\"x\",\"v\":\"older\"}', 1),
+                   ('y', 'a.b-0c', '{\"id\":\"y\",\"v\":\"only here\"}', 1);",
+            )
+            .unwrap();
+            conn.execute_batch(&create_table_sql("a_b__0c")).unwrap();
+            conn.execute_batch(
+                "INSERT INTO a_b__0c (id, schema_nsid, body, revision) VALUES
+                   ('x', 'a.b-0c', '{\"id\":\"x\",\"v\":\"newer\"}', 5);",
+            )
+            .unwrap();
+        }
+        let store = SqliteRecordStore::open(&path, None).unwrap();
+        let nsid = Nsid::new("a.b-0c").unwrap();
+        let mut read: Vec<(String, String)> = store
+            .query(&nsid, RecordFilter::new())
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.id.clone(), r.body["v"].as_str().unwrap().to_owned()))
+            .collect();
+        read.sort();
+        assert_eq!(read, [("x".to_owned(), "newer".to_owned()), ("y".to_owned(), "only here".to_owned())]);
+        let conn = store.conn.lock().unwrap();
+        let in_source: Vec<String> = conn
+            .prepare("SELECT id FROM a_b_0c ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(in_source, ["x"], "the split deleted a row its table did not take, or kept one it did");
+        let revision: i64 = conn.query_row("SELECT revision FROM a_b__0c WHERE id = 'x'", [], |r| r.get(0)).unwrap();
+        assert_eq!(revision, 5, "the row already in the target was replaced");
+    }
+
+    /// **A write under one schema never replaces another schema's row**, even
+    /// in a table the split has not reached: the refusal names the id, and a
+    /// read under the writing schema does not see the other's row.
+    #[tokio::test]
+    async fn a_put_under_one_schema_does_not_replace_another_schemas_row() {
+        let store = notes_store();
+        let dot = Nsid::new("com.ex.ample.foo").unwrap();
+        {
+            // The shared table as the old map left it, with a row of the other schema in it.
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch(&create_table_sql("com_ex_ample_foo")).unwrap();
+            conn.execute_batch(
+                "INSERT INTO com_ex_ample_foo (id, schema_nsid, body) VALUES
+                   ('r1', 'com.ex-ample.foo', '{\"id\":\"r1\",\"who\":\"hyphen\"}');",
+            )
+            .unwrap();
+        }
+        let refused = store.insert(&dot, json!({ "id": "r1", "who": "dot" })).await;
+        assert!(matches!(refused, Err(RecordStoreError::UnderAnotherSchema(ref id)) if id == "r1"), "{refused:?}");
+        assert!(store.query(&dot, RecordFilter::new()).await.unwrap().is_empty(), "a read under one schema saw another's row");
+        // Nor is the other schema's id a place to start a page from: a cursor
+        // naming it answers as a cursor naming no id does.
+        store.insert(&dot, json!({ "id": "d1", "who": "dot" })).await.unwrap();
+        let from_theirs = store.query(&dot, RecordFilter::new().before_id("r1")).await.unwrap();
+        let from_nowhere = store.query(&dot, RecordFilter::new().before_id("absent")).await.unwrap();
+        assert_eq!(from_theirs.len(), from_nowhere.len(), "a cursor naming another schema's id answered differently from one naming none");
+        assert!(matches!(store.delete(&dot, &"r1".to_owned()).await, Err(RecordStoreError::RecordNotFound(_))));
+        let conn = store.conn.lock().unwrap();
+        let who: String = conn
+            .query_row("SELECT json_extract(body, '$.who') FROM com_ex_ample_foo WHERE id = 'r1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(who, "hyphen", "the other schema's row was overwritten");
     }
 
     /// **A record written into one root reads back from that root and no
