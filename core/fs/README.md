@@ -15,6 +15,6 @@ the runtime, and integration tests.
 
 **Does not:** implement any virtualization, encryption, caching, or remote
 access. For encrypted or virtual storage see `kotton-runtime` (VFS layer); for
-generic object key/value storage see `kotton-providers-object-storage`.
+a person's sealed store of objects see `kotton-store`.
 
 **Depends on:** `kotton-platform`.

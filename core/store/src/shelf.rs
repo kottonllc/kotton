@@ -24,6 +24,10 @@ use std::sync::Arc;
 pub struct LocalShelves<F>(pub F);
 
 impl<F: Filesystem + Clone + 'static> Shelves for LocalShelves<F> {
+    /// Opens the shelf at `path` and makes no directory: the mount's maker
+    /// made the root once (`UserStore::create`, `add_shelf_tree`), and a
+    /// write makes none (`LocalObjectStorage::put`, kotton #415), so a root
+    /// that has gone since is refused by every verb rather than remade empty.
     fn open(&self, _user_id: &str, _mount: &str, path: &Path) -> Arc<dyn SyncableStore> {
         Arc::new(crate::provider::LocalObjectStorage::new(
             path.to_path_buf(),

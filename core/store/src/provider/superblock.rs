@@ -24,6 +24,9 @@
 //! retained). Old generations are retired only after the commit's pack
 //! retirement completes, and the immediately-previous generation is always
 //! kept and adoptable, so there is no moment with a single copy in flight.
+//! That holds across a compaction too: compaction deletes no pack a
+//! generation it keeps names, so the base it keeps beside its own commit
+//! still opens and reads (`crate::packed`'s module doc, kotton #423).
 //! "Adoptable" is the caller's to judge: with nothing passed over, the two
 //! newest generations are kept ([`retirable_superblocks`]); the pack layer
 //! keeps two generations it can count on *beside* every held one, since a
@@ -188,12 +191,38 @@ where
     Ok(key)
 }
 
+/// Why a superblock that is present did not open ([`open_superblock`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WhyNotOpened {
+    /// Torn, corrupt, relocated, or sealed under another key: it holds
+    /// nothing this store can read, and is no one's fallback.
+    Unopenable(String),
+    /// It opens, and is of a format version this code does not read: a
+    /// newer device's correct write, whose state and packs are not this
+    /// device's to pass judgement on (kotton #423).
+    UnsupportedVersion(u32),
+}
+
+impl std::fmt::Display for WhyNotOpened {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unopenable(why) => f.write_str(why),
+            Self::UnsupportedVersion(v) => write!(f, "unsupported superblock version {v}"),
+        }
+    }
+}
+
 /// Open one superblock blob stored at `key`.
 fn open_superblock(k_pack: &[u8; 32], key: &str, blob: &[u8]) -> ObjectStorageResult<Superblock> {
+    open_superblock_checked(k_pack, key, blob)
+        .map_err(|why| ObjectStorageError::BackendError(why.to_string()))
+}
+
+/// [`open_superblock`], saying why it did not open ([`WhyNotOpened`]).
+fn open_superblock_checked(k_pack: &[u8; 32], key: &str, blob: &[u8]) -> Result<Superblock, WhyNotOpened> {
+    let unopenable = |why: String| WhyNotOpened::Unopenable(why);
     if blob.len() < NONCE_LEN {
-        return Err(ObjectStorageError::BackendError(
-            "superblock blob too short".into(),
-        ));
+        return Err(unopenable("superblock blob too short".into()));
     }
     let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
     let cipher = ChaCha20Poly1305::new(k_pack.into());
@@ -205,39 +234,25 @@ fn open_superblock(k_pack: &[u8; 32], key: &str, blob: &[u8]) -> ObjectStorageRe
                 aad: key.as_bytes(),
             },
         )
-        .map_err(|_| {
-            ObjectStorageError::BackendError(
-                "superblock open failed (wrong key, corrupt, or relocated)".into(),
-            )
-        })?;
+        .map_err(|_| unopenable("superblock open failed (wrong key, corrupt, or relocated)".into()))?;
     if plaintext.len() < BODY_LEN_BYTES {
-        return Err(ObjectStorageError::BackendError(
-            "superblock plaintext too short".into(),
-        ));
+        return Err(unopenable("superblock plaintext too short".into()));
     }
     let body_len = u32::from_be_bytes(plaintext[..BODY_LEN_BYTES].try_into().unwrap()) as usize;
     let end = BODY_LEN_BYTES + body_len;
     if end > plaintext.len() {
-        return Err(ObjectStorageError::BackendError(
-            "superblock body length past end of plaintext".into(),
-        ));
+        return Err(unopenable("superblock body length past end of plaintext".into()));
     }
     let sb: Superblock = serde_json::from_slice(&plaintext[BODY_LEN_BYTES..end])
-        .map_err(|e| ObjectStorageError::BackendError(format!("superblock parse: {e}")))?;
+        .map_err(|e| unopenable(format!("superblock parse: {e}")))?;
     if sb.version != 1 {
-        return Err(ObjectStorageError::BackendError(format!(
-            "unsupported superblock version {}",
-            sb.version
-        )));
+        return Err(WhyNotOpened::UnsupportedVersion(sb.version));
     }
     // The AAD already binds the key (and thus the generation); this is defence
     // in depth, worth failing loudly on because a mismatch means the binding
     // stopped holding.
     if parse_generation(key) != Some(sb.generation) {
-        return Err(ObjectStorageError::BackendError(format!(
-            "superblock at {key} claims generation {}",
-            sb.generation
-        )));
+        return Err(unopenable(format!("superblock at {key} claims generation {}", sb.generation)));
     }
     Ok(sb)
 }
@@ -316,6 +331,23 @@ where
 {
     let blob = store.get_sealed(Path::new(key)).await?;
     Ok(open_superblock(k_pack, key, &blob).ok())
+}
+
+/// [`read_superblock`], saying why a present superblock did not open
+/// ([`WhyNotOpened`]): `Ok(Err(..))` when it is present and does not open, `Err`
+/// when it could not be read. Compaction's check asks this, so that a
+/// superblock of a version this code does not read, a newer device's
+/// correct write, is told apart from one that is torn (kotton #423).
+pub async fn read_superblock_checked<S>(
+    store: &S,
+    k_pack: &[u8; 32],
+    key: &str,
+) -> ObjectStorageResult<Result<Superblock, WhyNotOpened>>
+where
+    S: SealedObjectAccess + ?Sized,
+{
+    let blob = store.get_sealed(Path::new(key)).await?;
+    Ok(open_superblock_checked(k_pack, key, &blob))
 }
 
 /// Load the **highest generation that opens and whose state is adopted**.

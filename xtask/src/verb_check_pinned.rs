@@ -3,11 +3,12 @@
 // that cannot read kotton-protocol (`verb_check.rs` says why). Generated: with a checkout,
 // `cargo xtask-docs verb-check --pinned` prints this from it.
 pub const PINNED: Pinned = Pinned {
-    commit: "92b416a",
+    commit: "c24a041",
     decision_names: &[".ics", "always", "cat", "channel", "contact", "cp", "default", "device", "diff", "doctor", "drive", "edit", "find", "grep", "head", "host", "id", "identity", "inbox", "log", "ls", "message", "mint", "mkdir", "mv", "open", "pin", "receive", "record", "repl", "restore", "rm", "rmdir", "schema", "search", "secret", "send", "session", "share", "sort", "status", "sync", "tail", "touch", "trash", "versions", "wc"],
     decision_verbs: &[
         ("drive", &["create", "enrol", "export", "list", "move", "show"]),
         ("pin", &["<drive>", "default", "list"]),
+        ("record", &["export", "get", "import", "list", "put", "rm"]),
         ("sync", &[""]),
     ],
     today_names: &["app", "cat", "cd", "clear", "config", "contact", "cp", "daemon", "date", "device", "door", "echo", "enrol", "env", "exit", "export", "extension", "find", "grant", "grep", "handler", "head", "help", "host:", "id", "import", "issuer", "keep", "login", "logs", "message", "mint", "model", "net", "org", "peer", "pwd", "quit", "record", "records", "relay", "repl", "schema", "secrets", "session", "sort", "sync", "tail", "ted", "unset", "vault", "wc", "whoami"],

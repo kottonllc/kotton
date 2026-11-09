@@ -799,6 +799,29 @@ mod tenant_device_tests {
 /// device that enrols it, with [`FIRST_DRIVE_ID`] as its id.
 pub const FIRST_DRIVE_NAME: &str = "personal";
 
+/// The word a record request's `root` takes for the person's Personal root
+/// (kotton #38). Personal's id is not secret from the person: a query answers
+/// each row's `_root`, Personal's id among them, to a caller that is not an app.
+/// The reason is that a caller that means "mine" should not have to hold and
+/// round-trip a durable identifier to say it; a root's id never changes, and
+/// every copy of it kept outside the daemon is one more join key.
+///
+/// It is never an id: a root's local id is sixteen random bytes in hex, and
+/// this word is not hex. **It is never stored on a row**: a write naming it is
+/// stored as Personal's are, unmarked (`kotton_record::roots::RootAccess::write`),
+/// and a read naming it selects Personal's unmarked rows and its id, not the
+/// word. So a row that carried the word as its root, arriving by some other
+/// path, would be in no selection any request can make, by the word or by any
+/// id. Personal's records ride in [`FIRST_DRIVE_NAME`], hence the one word for
+/// both.
+///
+/// **The word is the person's.** A request that identifies as an app names no
+/// root, so a request from an app that names the word is refused
+/// (`kotton_record::daemon::records`): an app that could ask for none and for
+/// the word would learn, row by row, which are Personal's and that the person
+/// is in some other root at all.
+pub const PERSONAL_ROOT: &str = "personal";
+
 /// The mount a vault keeps the tenancy's own tree under: the pool's own
 /// mount, a place for drives and no drive (kotton #124). No device's tree
 /// syncs with it, and no verb over made drives can name it.
