@@ -48,7 +48,7 @@ async fn run() -> io::Result<()> {
         Commands::Handler(cmd) => cmd.execute().await,
         Commands::Record { user, args } => kotton_cli::bridge::run_verb(user, "record", args, json).await,
         Commands::Records(cmd) => cmd.execute().await,
-        Commands::Import(cmd) => cmd.execute().await,
+        Commands::Import { args } => kotton_cli::bridge::run_verb(None, "import", args, json).await,
         Commands::Sync { user, args } => kotton_cli::bridge::run_verb(user, "sync", args, json).await,
         Commands::Drive { user, args } => kotton_cli::bridge::run_verb(user, "drive", args, json).await,
         Commands::Pin { user, args } => kotton_cli::bridge::run_verb(user, "pin", args, json).await,

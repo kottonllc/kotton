@@ -59,8 +59,7 @@ use crate::registry::SchemaRegistry;
 /// schema is, and a device that has never seen the declaration skips its rows. It carries no
 /// signature, as every schema of Kotton's does before the first tag, and reaches the
 /// registry from this code and never from a request, which is where a signature is checked.
-pub const IMPORTED_CALENDAR_NSID: &str =
-    "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event";
+pub const IMPORTED_CALENDAR_NSID: &str = kotton_common::namespace::NSID_IMPORTED_CALENDAR;
 
 /// What one import did.
 #[derive(Debug, Clone, PartialEq, Eq)]

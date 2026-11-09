@@ -97,6 +97,14 @@ pub const NSID_GOVERNANCE_RECORD: &str =
 
 // ── Meta schema identity (schema publication) ────────────────────────────────
 
+/// The identity of the shape an `.ics` import writes its events as: Kotton's, and not in
+/// the core set. `calendar` has no field for an event's recurrence rule, zone, all-day flag
+/// or `UID`, and it is published, so the reader writes this fork of it instead; the daemon
+/// declares it on the device that imports (`kotton_record::import_cmds`). It is here, beside
+/// the core identities, so a client can name it without reaching into the daemon.
+pub const NSID_IMPORTED_CALENDAR: &str =
+    "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event";
+
 /// The identity of a schema publication record.
 ///
 /// A `meta.schema` record body contains the full `SchemaDefinition` JSON for a third-party
@@ -127,6 +135,7 @@ mod tests {
             (NSID_ACCESS_LOG, "access-log"),
             (NSID_GOVERNANCE_RECORD, "governance.record"),
             (NSID_META_SCHEMA, "meta.schema"),
+            (NSID_IMPORTED_CALENDAR, "import.calendar.event"),
         ] {
             assert_eq!(id, format!("{NSID_PREFIX}/{name}"));
         }

@@ -196,7 +196,7 @@ document returns separately.",
 /// One iCalendar export covering `years` of a person's life.
 ///
 /// Through the front door like everything else here: this is handed to
-/// `kotton import`, which is the same path a person's real export takes, rather
+/// `kotton record import`, which is the same path a person's real export takes, rather
 /// than written into the store. If the importer cannot take it, that is a finding
 /// and not a reason to reach around.
 fn generate_ics(years: u32, start_year: u32) -> String {
@@ -314,7 +314,7 @@ fn generated_message(i: u32) -> String {
 /// over it, so the thing the product is has been going untested.
 ///
 /// Both constraints still hold. `--years` generates an iCalendar export and hands
-/// it to the real `kotton import`; `--messages` sends through `message channel
+/// it to the real `kotton record import`; `--messages` sends through `message channel
 /// send`. Nothing writes storage directly, and nothing uses a clock or an RNG.
 pub fn run(workspace_root: &Path, args: &[String]) {
     let years = flag(args, "--years").unwrap_or(0);
@@ -531,7 +531,7 @@ fn flag(args: &[String], name: &str) -> Option<u32> {
 
 /// Generate a calendar and bring it in the way a person brings theirs.
 ///
-/// **One import call, thousands of records.** `kotton import` takes the file's
+/// **One import call, thousands of records.** `kotton record import` takes an `.ics` file's
 /// bytes in a single IPC frame and the CLI refuses anything over 6 MiB, because
 /// `MAX_FRAME_LEN` is 32 MiB and a byte array costs roughly four bytes of JSON
 /// each. A year of this corpus is well inside that; the split is per year anyway,
@@ -560,7 +560,15 @@ fn seed_calendar(kotton: &Path, workspace_root: &Path, years: u32, gaps: &mut Ve
         // the store took, and a seeder that reports its own optimism is how the
         // year bug above went unnoticed for an afternoon.
         let out = Command::new(kotton)
-            .args(["import", path.to_str().unwrap_or_default(), "--user", owner])
+            .args([
+                "record",
+                "--user",
+                owner,
+                "import",
+                "--schema",
+                kotton_common::namespace::NSID_IMPORTED_CALENDAR,
+                path.to_str().unwrap_or_default(),
+            ])
             .current_dir(workspace_root)
             .output();
         let _ = std::fs::remove_file(&path);
@@ -577,7 +585,7 @@ fn seed_calendar(kotton: &Path, workspace_root: &Path, years: u32, gaps: &mut Ve
             );
         } else {
             gaps.push(format!(
-                "could not import {events} calendar events — `kotton import` refused a \
+                "could not import {events} calendar events — `kotton record import` refused a \
                  {} KiB .ics",
                 bytes / 1024
             ));
@@ -686,7 +694,7 @@ mod tests {
             "the same call must produce the same bytes"
         );
 
-        // Well inside `kotton import`'s 6 MiB refusal, which exists because the
+        // Well inside `kotton record import`'s 6 MiB refusal, which exists because the
         // IPC frame cap is 32 MiB and a byte array costs ~4 bytes of JSON each.
         assert!(one.len() < 6 * 1024 * 1024, "a year must fit one import");
     }

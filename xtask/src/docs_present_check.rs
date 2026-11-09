@@ -130,7 +130,7 @@ pub const COMMENT_TREES: &[&str] = crate::host_word_check::RUST_TREES;
 /// How many paths [`COMMENTS_NOT_READ`] holds. The check refuses a list whose length is not
 /// this, so the list does not grow in length unnoticed; a stage that sweeps files lowers it by
 /// as many. It does not catch a swap: one path off and another on leaves the length as it was.
-pub const UNSWEPT_FILES: usize = 264;
+pub const UNSWEPT_FILES: usize = 263;
 
 /// Files under [`COMMENT_TREES`] whose comments still cite a record or narrate a date, and are
 /// not read in them until they are swept. A path joins the list only as a line in the diff,
@@ -147,7 +147,6 @@ pub const COMMENTS_NOT_READ: &[&str] = &[
     "client/cli/src/commands/device.rs",
     "client/cli/src/commands/extension.rs",
     "client/cli/src/commands/id.rs",
-    "client/cli/src/commands/import.rs",
     "client/cli/src/commands/message.rs",
     "client/cli/src/commands/mod.rs",
     "client/cli/src/commands/model.rs",

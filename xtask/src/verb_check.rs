@@ -51,8 +51,6 @@ pub const HELD: &[&str] = &["drive", "pin", "record", "sync"];
 /// Verbs of a held noun the Decision names and the binary does not have yet, each with why.
 pub const DEFERRED: &[(&str, &str, &str)] = &[
     ("drive", "export", "the command-tree decision names it; the binary does not have it yet (#182)"),
-    ("record", "export", "the command-tree decision names it; the binary does not have it yet (#454)"),
-    ("record", "import", "the command-tree decision names it; the binary does not have it yet (#454)"),
 ];
 
 /// Names a tree registers that the command-tree decision gives no place, each with the issue

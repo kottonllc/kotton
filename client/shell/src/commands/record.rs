@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 use async_trait::async_trait;
+use kotton::ImportFormat;
+use kotton_common::namespace::NSID_IMPORTED_CALENDAR;
 use kotton_schemas::SchemaId;
 use kotton_wire::ipc::PERSONAL_ROOT;
 
@@ -16,11 +21,13 @@ use crate::state::ShellState;
 ///   record get --schema <publisher>/<name> <id>
 ///   record put --schema <publisher>/<name> <json>
 ///   record rm --schema <publisher>/<name> <id>
+///   record import --schema <publisher>/<name> <path>
+///   record export --schema <publisher>/<name> <path>
 /// ```
 ///
-/// The command-tree decision's "Records and schemas" line, but `import` and `export`, which
-/// wait for #454. Each verb is one request the daemon already answers (`RecordQuery`, `get`
-/// by the id, `RecordInsert`, `RecordDelete`), so the noun adds no reach. **Each names
+/// The command-tree decision's "Records and schemas" line. Each verb asks only what the
+/// daemon already answers (`RecordQuery`, `get` by the id, `RecordInsert`, `RecordDelete`,
+/// and `Import` for an `.ics`), so the noun adds no reach. **Each names
 /// Personal** ([`PERSONAL_ROOT`]): it reads, writes and removes the person's own records in
 /// Personal and none in another root they are a member of, such as an organisation's. Those
 /// ride sealed in the record log of the tree this device keeps of `personal`
@@ -31,22 +38,46 @@ use crate::state::ShellState;
 ///
 /// `record open <url>` is gone for `record get`: the command-tree decision's table.
 ///
+/// **`import` and `export` take a path on this computer** (kotton #454), read and written by
+/// this process, the one the person typed it at, relative to the directory it runs in; the
+/// path is never sent to the daemon. A file is JSON Lines, one record per line as `record
+/// get` prints it: its `id` among its fields and none of the daemon's `_`-fields, so an
+/// export carries no identifier the record did not already have, and an import of it puts
+/// each record by its own id, which makes a second import of the same file change nothing (a
+/// line without an `id` is a new record each time, as `put` makes one).
+/// The one other format is an `.ics` calendar, by the file's extension: its bytes and its file
+/// name go to the daemon's reader (`Import`), which writes [`NSID_IMPORTED_CALENDAR`]
+/// records, the only schema an `.ics` imports as.
+///
 /// [`parse`] is the one parser for these words: `kotton record …` hands it the words after
 /// the noun (`kotton_cli::bridge`), and the REPL hands it the same.
 pub struct RecordCommand;
 
 const USAGE: &str = "usage: record list --schema <schema> [--json] | record get --schema <schema> <id> | \
-                     record put --schema <schema> <json> | record rm --schema <schema> <id>";
+                     record put --schema <schema> <json> | record rm --schema <schema> <id> | \
+                     record import --schema <schema> <path> | record export --schema <schema> <path>";
 
-/// The verbs: the command-tree decision's "Records and schemas" line less `import` and
-/// `export`, and `open`, which its table retired for `get`.
+/// The verbs: the command-tree decision's "Records and schemas" line, and `open`, which its
+/// table retired for `get`.
 const VERBS: &[Verb] = &[
     Verb::current("list"),
     Verb::current("get"),
     Verb::current("put"),
     Verb::current("rm"),
+    Verb::current("import"),
+    Verb::current("export"),
     Verb::gone("open", "record get"),
 ];
+
+/// The largest `.ics` this hands the daemon in one request. `MAX_FRAME_LEN` in `core/ipc` is
+/// 32 MiB and a frame past it closes the connection, so a large file would fail as a dropped
+/// connection with nothing saying why; bytes cost about four bytes of JSON each, hence the
+/// quarter. A JSON Lines file has no such bound: each record is a request of its own.
+const MAX_ICS_BYTES: u64 = 6 * 1024 * 1024;
+
+/// Records asked of the daemon at a time by `export`, so a schema of many records is never
+/// one answer past the frame bound.
+const EXPORT_PAGE: usize = 256;
 
 /// What `record open` is now, said where it is refused.
 const GET_IS: &str = "`record get --schema <schema> <id>` reads one record, by its schema and its id";
@@ -58,12 +89,81 @@ enum Line {
     Get { schema: SchemaId, id: String },
     Put { schema: SchemaId, body: serde_json::Value },
     Rm { schema: SchemaId, id: String },
+    Import { schema: SchemaId, path: PathBuf, format: FileFormat },
+    Export { schema: SchemaId, path: PathBuf },
+}
+
+/// What a file of records is, by its extension: an `.ics` calendar, or JSON Lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileFormat {
+    JsonLines,
+    Ics,
+}
+
+impl FileFormat {
+    /// The format a path's extension names. An iCalendar file by any of its extensions is
+    /// `.ics`; anything else is read and written as JSON Lines, under the schema `--schema`
+    /// names, so nothing is guessed of what a record means.
+    fn of(path: &Path) -> Self {
+        let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        match ext.as_str() {
+            "ics" | "ical" | "ifb" | "icalendar" => Self::Ics,
+            _ => Self::JsonLines,
+        }
+    }
 }
 
 /// A record's id as a word: not empty, not a flag, and without the `/` that would end it in
 /// the record's URL (`kotton://records/<publisher>/<name>/<id>`, which `get` asks by).
 fn id_word(word: &str) -> Option<String> {
     (!word.is_empty() && !word.starts_with('-') && !word.contains('/')).then(|| word.to_string())
+}
+
+/// Why a text is not a record's body.
+#[derive(Debug, PartialEq)]
+enum NotARecord {
+    /// Not one JSON object.
+    NotAnObject,
+    /// An object whose `id` is not a record's id, as JSON.
+    Id(String),
+}
+
+impl std::fmt::Display for NotARecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAnObject => f.write_str("a record is one JSON object"),
+            Self::Id(id) => write!(
+                f,
+                "the `id` {id} is not a record's id: a string, not empty, not starting with `-`, without `/`"
+            ),
+        }
+    }
+}
+
+/// A record's body, as `put` takes it and `import` takes each line: one JSON object, whose
+/// `id`, if it has one, is a record's id.
+fn a_record(text: &str) -> Result<serde_json::Value, NotARecord> {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(body) if body.is_object() => match body.get("id") {
+            None => Ok(body),
+            Some(serde_json::Value::String(id)) if id_word(id).is_some() => Ok(body),
+            Some(id) => Err(NotARecord::Id(id.to_string())),
+        },
+        _ => Err(NotARecord::NotAnObject),
+    }
+}
+
+/// A path on this computer as a word: not empty and not a flag.
+fn path_word(word: &str) -> Option<PathBuf> {
+    (!word.is_empty() && !word.starts_with('-')).then(|| PathBuf::from(word))
+}
+
+/// What an `.ics` imports as, said where another schema is refused for one.
+fn ics_is() -> String {
+    format!(
+        "an .ics file imports as `{NSID_IMPORTED_CALENDAR}`: `record import --schema {NSID_IMPORTED_CALENDAR} <path>`. \
+         The calendar schema has no field for an event's recurrence, zone or all-day flag"
+    )
 }
 
 /// The words after `record`, as a [`Line`], or the usage refusal (exit 2). `--schema <schema>`
@@ -76,7 +176,7 @@ fn parse(args: &[String]) -> Result<Line, CommandOutput> {
     if verb == "open" {
         return Err(retired("record open", GET_IS));
     }
-    if !matches!(verb.as_str(), "list" | "get" | "put" | "rm") {
+    if !matches!(verb.as_str(), "list" | "get" | "put" | "rm" | "import" | "export") {
         return usage(format!("record: '{verb}' is not a verb of record"));
     }
     let mut schema = None;
@@ -117,15 +217,31 @@ fn parse(args: &[String]) -> Result<Line, CommandOutput> {
             Some(id) => Ok(Line::Rm { schema, id }),
             None => usage(format!("record rm: '{id}' is not a record's id")),
         },
-        ("put", [body]) => match serde_json::from_str::<serde_json::Value>(body) {
-            Ok(body) if body.is_object() => match body.get("id") {
-                None => Ok(Line::Put { schema, body }),
-                Some(serde_json::Value::String(id)) if id_word(id).is_some() => Ok(Line::Put { schema, body }),
-                Some(id) => usage(format!(
-                    "record put: the `id` {id} is not a record's id: a string, not empty, not starting with `-`, without `/`"
-                )),
-            },
-            _ => usage("record put: the record is one JSON object, quoted as one word".into()),
+        ("put", [body]) => match a_record(body) {
+            Ok(body) => Ok(Line::Put { schema, body }),
+            Err(NotARecord::NotAnObject) => usage("record put: the record is one JSON object, quoted as one word".into()),
+            Err(why) => usage(format!("record put: {why}")),
+        },
+        ("import", [path]) => match path_word(path) {
+            Some(path) => {
+                let format = FileFormat::of(&path);
+                if format == FileFormat::Ics && schema.to_string() != NSID_IMPORTED_CALENDAR {
+                    return Err(CommandOutput::usage(
+                        format!("record import: an .ics file is not read as {schema} records"),
+                        Some(ics_is()),
+                    ));
+                }
+                Ok(Line::Import { schema, path, format })
+            }
+            None => usage(format!("record import: '{path}' is not a path")),
+        },
+        ("export", [path]) => match path_word(path) {
+            Some(path) if FileFormat::of(&path) == FileFormat::Ics => usage(format!(
+                "record export: '{}' names an .ics file; an export is JSON Lines, one record per line",
+                path.display()
+            )),
+            Some(path) => Ok(Line::Export { schema, path }),
+            None => usage(format!("record export: '{path}' is not a path")),
         },
         _ => usage(format!("record {verb}: unexpected words")),
     }
@@ -218,6 +334,139 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
             }])),
             Err(e) => Ok(refused("rm", e)),
         },
+        Line::Import { schema, path, format: FileFormat::JsonLines } => {
+            // Every line is read before any is put, so a file that is not records writes
+            // nothing.
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => return Ok(CommandOutput::fail(format!("record import: {}: {e}", path.display()), None)),
+            };
+            let mut records = Vec::new();
+            for (n, line) in text.lines().enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match a_record(line) {
+                    Ok(body) => records.push((n + 1, body)),
+                    Err(why) => {
+                        return Ok(CommandOutput::fail(
+                            format!("record import: {} line {}: {why}; nothing was imported", path.display(), n + 1),
+                            Some("a file of records is JSON Lines: one record per line, as `record export` writes".into()),
+                        ))
+                    }
+                }
+            }
+            let total = records.len();
+            for (put, (n, body)) in records.into_iter().enumerate() {
+                if let Err(e) = client.record_insert_in(&user_id, Some(PERSONAL_ROOT), None, &schema.to_string(), body).await {
+                    return Ok(CommandOutput::fail(
+                        format!("record import: {} line {n}: {e}; {put} of {total} record(s) were put before it", path.display()),
+                        Some("a record with an `id` is put again by it, so importing the file again changes nothing it already put".into()),
+                    ));
+                }
+            }
+            Ok(CommandOutput::shapes(vec![Out::Confirm {
+                action: format!("{total} record(s) imported into personal"),
+                subject: schema.to_string(),
+            }]))
+        }
+        Line::Import { schema, path, format: FileFormat::Ics } => {
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.len() > MAX_ICS_BYTES => {
+                    return Ok(CommandOutput::fail(
+                        format!(
+                            "record import: {} is {} bytes; an .ics is read in one request of at most {MAX_ICS_BYTES}",
+                            path.display(),
+                            meta.len()
+                        ),
+                        Some("split the calendar and import the parts".into()),
+                    ))
+                }
+                Ok(_) => {}
+                Err(e) => return Ok(CommandOutput::fail(format!("record import: {}: {e}", path.display()), None)),
+            }
+            let content = match std::fs::read(&path) {
+                Ok(c) => c,
+                Err(e) => return Ok(CommandOutput::fail(format!("record import: {}: {e}", path.display()), None)),
+            };
+            // The file's name, which the daemon keeps as each event's provenance; never the
+            // path, which says where the person keeps things and would ride every record to
+            // every device.
+            let source_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "import".into());
+            let (wrote, imported, skipped) = match client.import(&user_id, ImportFormat::Ics, &source_name, content).await {
+                Ok(done) => done,
+                Err(e) => return Ok(refused("import", e)),
+            };
+            if wrote != schema.to_string() {
+                return Ok(CommandOutput::fail(
+                    format!("record import: the daemon wrote {imported} event(s) as {wrote}, not {schema}"),
+                    Some(format!("`record list --schema {wrote}` lists them")),
+                ));
+            }
+            let mut out = vec![Out::Confirm {
+                action: format!("{imported} event(s) imported into personal from {source_name}"),
+                subject: wrote,
+            }];
+            if skipped > 0 {
+                // Never folded into the total: only the person can say whether the ones that
+                // did not make it mattered.
+                out.push(Out::Warn {
+                    what: format!("{skipped} event(s) skipped"),
+                    consequence: "the file gave them no start time a record can hold".into(),
+                });
+            }
+            Ok(CommandOutput::shapes(out))
+        }
+        Line::Export { schema, path } => {
+            let mut held = Vec::new();
+            loop {
+                let page = match client
+                    .record_query_in(
+                        &user_id,
+                        Some(PERSONAL_ROOT),
+                        None,
+                        &schema.to_string(),
+                        vec![],
+                        Some(EXPORT_PAGE),
+                        Some(held.len()),
+                    )
+                    .await
+                {
+                    Ok(p) => p,
+                    Err(e) => return Ok(refused("export", e)),
+                };
+                let last = page.len() < EXPORT_PAGE;
+                held.extend(page.iter().map(as_held));
+                if last {
+                    break;
+                }
+            }
+            // Newest first is how the daemon answers; a file reads oldest first, so an import
+            // of it puts the records in the order they were made.
+            held.reverse();
+            let mut text = String::new();
+            for record in &held {
+                text.push_str(&record.to_string());
+                text.push('\n');
+            }
+            // A file already there is the person's, and is not written over.
+            let written = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|()| f.sync_all()));
+            if let Err(e) = written {
+                return Ok(CommandOutput::fail(
+                    format!("record export: {}: {e}", path.display()),
+                    (e.kind() == std::io::ErrorKind::AlreadyExists)
+                        .then(|| "an export writes a new file; name one that is not there".to_string()),
+                ));
+            }
+            Ok(CommandOutput::shapes(vec![Out::Confirm {
+                action: format!("{} record(s) of {schema} exported", held.len()),
+                subject: path.display().to_string(),
+            }]))
+        }
     }
 }
 
@@ -263,6 +512,32 @@ impl Command for RecordCommand {
     }
 }
 
+/// `import`, the word that read an `.ics` before `record import` did: gone for it (kotton
+/// #454, the command-tree decision's table). Both doors register it, so `kotton import …` and
+/// the REPL's `import …` give the one refusal, exit 2, before any session; it is hidden from
+/// `help`, which lists what runs.
+pub struct ImportGone;
+
+/// What `import` is now, said where it is refused.
+fn import_is() -> String {
+    format!("`record import --schema {NSID_IMPORTED_CALENDAR} <path>` reads an .ics file into your records")
+}
+
+#[async_trait]
+impl Command for ImportGone {
+    async fn execute(&self, _args: &[String], _state: &mut ShellState) -> Result<CommandOutput> {
+        Ok(retired("import", &import_is()))
+    }
+
+    async fn execute_without_session(&self, _args: &[String], _named: Option<&str>) -> Option<Result<CommandOutput>> {
+        Some(Ok(retired("import", &import_is())))
+    }
+
+    fn hidden(&self) -> bool {
+        true
+    }
+}
+
 pub(crate) const HELP: &str = "\
 record — your records: typed, sealed, read from every device
 
@@ -271,6 +546,8 @@ USAGE:
   record get --schema <schema> <id>        one record, as JSON on stdout
   record put --schema <schema> <json>      write a record; prints its id
   record rm --schema <schema> <id>         remove a record
+  record import --schema <schema> <path>   put each record of a file into your records
+  record export --schema <schema> <path>   write your records of a schema to a new file
 
 A record is a JSON object of a schema's fields, kept on this device and
 sealed into your first drive, `personal`, at each sync: a record put on one
@@ -289,18 +566,34 @@ removed here.
 makes a new record and prints the id it was given. `rm` removes it on every
 device at their next sync.
 
+`import` and `export` take a path on this computer, relative to the directory
+you run them in; it is read or written here and never sent to the daemon. The
+file is JSON Lines: one record per line, as `get` prints it, its `id` among
+its fields. `export` writes a new file and will not write over one. `import`
+puts a line with an `id` by that id, so importing an export a second time
+changes nothing; a line without one is a new record each time. An `.ics` file
+(by its extension) imports as calendar events, under the schema an `.ics` is
+read as:
+did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event
+It keeps an event's recurrence, zone and all-day flag, which the calendar
+schema has no field for.
+
 FLAGS:
-  --schema <schema>  the schema the record is of, `<publisher>/<name>`; every verb needs it
+  --schema <schema>  the schema the records are of, `<publisher>/<name>`; every verb needs it
   --json           `list`: the records the daemon answered, as JSON on stdout
 
-Exit 0 when done, 1 when refused or when no record has the id (the reason on
-stderr), 2 for a line that is not one of the above.
+Exit 0 when done, 1 when refused, when no record has the id, or when a file
+cannot be read or written (the reason on stderr), 2 for a line that is not one
+of the above.
 
 EXAMPLES:
   record put --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes '{\"title\":\"milk\",\"body\":\"two pints\"}'
   record list --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes
   record get --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>
-  record rm --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>";
+  record rm --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>
+  record export --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes notes.jsonl
+  record import --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes notes.jsonl
+  record import --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event calendar.ics";
 
 #[cfg(test)]
 mod tests {
@@ -328,11 +621,13 @@ mod tests {
             ("get", "get --schema NOTES abc"),
             ("put", r#"put --schema NOTES {"title":"t"}"#),
             ("rm", "rm --schema NOTES abc"),
+            ("import", "import --schema NOTES notes.jsonl"),
+            ("export", "export --schema NOTES notes.jsonl"),
         ] {
             assert!(VERBS.iter().any(|v| v.word == verb && v.is == crate::commands::VerbIs::Current), "{verb}");
             assert!(parse(&words(line)).is_ok(), "`record {line}` did not parse");
         }
-        assert_eq!(VERBS.len(), 5, "a verb was declared that this test does not parse");
+        assert_eq!(VERBS.len(), 7, "a verb was declared that this test does not parse");
     }
 
     /// `--schema` stands anywhere after the verb, and each verb reads what it names.
@@ -370,7 +665,14 @@ mod tests {
             "put --schema NOTES [1,2]",
             "put --schema NOTES --json {}",
             "import --schema NOTES x.ics",
-            "export --schema NOTES out",
+            "import --schema NOTES",
+            "import --schema NOTES a b",
+            "import --schema NOTES -x",
+            "import --schema NOTES --json a.jsonl",
+            "export --schema NOTES",
+            "export --schema NOTES a b",
+            "export --schema NOTES out.ics",
+            "export --schema NOTES --json out",
         ] {
             let refused = parse(&words(line)).expect_err(line);
             assert_eq!(refused.exit_code, ExitCode::Code(2), "`record {line}`");
@@ -390,6 +692,67 @@ mod tests {
             parse(&put(r#"{"id":"r1","title":"t"}"#)).ok(),
             Some(Line::Put { schema: notes(), body: serde_json::json!({ "id": "r1", "title": "t" }) })
         );
+    }
+
+    /// `import` and `export` take one path, as typed, and the format is the extension's: an
+    /// `.ics` by any of its names is a calendar, read only as the schema it imports as;
+    /// anything else is JSON Lines.
+    #[test]
+    fn import_and_export_take_a_path_and_its_format_is_its_extension() {
+        assert_eq!(
+            parse(&words("import --schema NOTES ../notes.jsonl")).ok(),
+            Some(Line::Import { schema: notes(), path: "../notes.jsonl".into(), format: FileFormat::JsonLines })
+        );
+        assert_eq!(
+            parse(&words("export notes --schema NOTES")).ok(),
+            Some(Line::Export { schema: notes(), path: "notes".into() })
+        );
+        for name in ["cal.ics", "CAL.ICS", "cal.ical", "cal.ifb", "cal.icalendar"] {
+            let line = vec!["import".to_string(), "--schema".into(), NSID_IMPORTED_CALENDAR.into(), name.into()];
+            assert_eq!(
+                parse(&line).ok(),
+                Some(Line::Import {
+                    schema: SchemaId::from_static(NSID_IMPORTED_CALENDAR),
+                    path: name.into(),
+                    format: FileFormat::Ics
+                }),
+                "{name}"
+            );
+        }
+        // The calendar schema, for an .ics, is refused with the line that would read it.
+        let calendar = vec![
+            "import".to_string(),
+            "--schema".into(),
+            kotton_common::namespace::NSID_CALENDAR.into(),
+            "cal.ics".into(),
+        ];
+        let refused = parse(&calendar).expect_err("calendar for an .ics");
+        assert_eq!(refused.exit_code, ExitCode::Code(2));
+        let Some(Out::Fail { try_, .. }) = refused.out.first() else { panic!("a refusal is a Fail") };
+        let want = format!("`record import --schema {NSID_IMPORTED_CALENDAR} <path>`");
+        assert!(try_.as_deref().is_some_and(|t| t.contains(&want)), "{try_:?}");
+    }
+
+    /// A line of a file is a record as `put` takes one: an object, whose `id` is a record's.
+    #[test]
+    fn a_line_is_a_record_as_put_takes_one() {
+        assert_eq!(a_record(r#"{"id":"r1","title":"t"}"#), Ok(serde_json::json!({ "id": "r1", "title": "t" })));
+        assert_eq!(a_record(r#"{"title":"t"}"#), Ok(serde_json::json!({ "title": "t" })));
+        assert_eq!(a_record("[1]"), Err(NotARecord::NotAnObject));
+        assert_eq!(a_record("not json"), Err(NotARecord::NotAnObject));
+        assert_eq!(a_record(r#"{"id":"a/b"}"#), Err(NotARecord::Id("\"a/b\"".into())));
+    }
+
+    /// `import` is gone for `record import`: refused, exit 2, with the line that reads an
+    /// `.ics`.
+    #[tokio::test]
+    async fn import_is_gone_for_record_import() {
+        let refused = ImportGone.execute_without_session(&words("cal.ics"), None).await.expect("refused").unwrap();
+        assert_eq!(refused.exit_code, ExitCode::Code(2));
+        let Some(Out::Fail { what, try_ }) = refused.out.first() else { panic!("a refusal is a Fail") };
+        assert_eq!(what, "`import` is gone");
+        let want = format!("`record import --schema {NSID_IMPORTED_CALENDAR} <path>`");
+        assert!(try_.as_deref().is_some_and(|t| t.contains(&want)), "{try_:?}");
     }
 
     /// `record open` is gone for `record get`: refused, exit 2, with the line naming it.
