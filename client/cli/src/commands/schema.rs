@@ -3,12 +3,14 @@
 //!
 //! ```text
 //! kotton schema list                  [--user <id>]
-//! kotton schema show <nsid>           [--user <id>]
+//! kotton schema show <schema>         [--user <id>]
 //! kotton schema register <file.json>  [--user <id>]
 //! ```
 //!
 //! The schemas a person sees are core plus their own registrations, so every verb acts as
-//! someone: `--user`, else `KOTTON_USER`, else the active identity.
+//! someone: `--user`, else `KOTTON_USER`, else the active identity. A schema is named by the
+//! key that publishes it: `<publisher>/<name>`, the publisher being the `did:key` of that key,
+//! and `register` takes a definition that key signed.
 
 use clap::Subcommand;
 use kotton::KottonClient;
@@ -24,15 +26,15 @@ pub enum SchemaCommand {
     },
     /// Print field definitions for a schema
     Show {
-        /// Schema NSID to inspect, e.g. `sh.kotton.notes`
-        nsid: String,
+        /// The schema to inspect, `<publisher>/<name>`
+        schema: String,
         /// Identity to act as (defaults to the active identity / KOTTON_USER)
         #[arg(long, env = "KOTTON_USER")]
         user: String,
     },
-    /// Register an app schema from a JSON definition file
+    /// Register a schema from a JSON definition file, signed by its publisher
     Register {
-        /// Path to a JSON file containing a `SchemaDefinition`
+        /// Path to a JSON file containing a `SchemaDefinition`, its `signature` included
         file: std::path::PathBuf,
         /// Identity to act as (defaults to the active identity / KOTTON_USER)
         #[arg(long, env = "KOTTON_USER")]
@@ -70,7 +72,7 @@ impl SchemaCommand {
                 }
             }
 
-            SchemaCommand::Show { nsid, .. } => match client.schema_get(user_id, nsid).await {
+            SchemaCommand::Show { schema, .. } => match client.schema_get(user_id, schema).await {
                 Ok(json) => {
                     println!("{}", json);
                 }

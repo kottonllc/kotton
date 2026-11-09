@@ -13,12 +13,18 @@ their pools with it.
 `RecordStore` is the async trait and `SqliteRecordStore` its implementation, on rusqlite with
 SQLCipher. Each person has their own `records.db`, opened with their key (`SqliteRecordStore::open`
 takes the key, or none for an unkeyed store in a test). A table is created on demand from a
-`SchemaDefinition`, one per schema NSID, by a name that is that NSID's alone (`sh.kotton.notes`
-becomes `sh_kotton_notes`, `sh.kotton.channel.key-grant` becomes `sh_kotton_channel_key__grant`;
-a dot is one underscore and a hyphen two, so no two schemas share a table), in
-`STRICT` mode under the WAL journal. `insert`, `query` and `delete` take the `Nsid` they act on,
-and `RecordFilter::new()` builds a query by its methods: a field equal to a value, a text
-search, a limit and an offset, a cursor, the roots.
+`SchemaDefinition`, one per schema, by a name that is that schema's alone: `r_` and the first
+32 hex characters of BLAKE3 over the schema's identity, `<publisher>/<name>` (the protocol's
+decision *A schema is named by the key that publishes it*). A digest rather than a readable
+encoding because SQLite folds a table name's case and a publisher is a case-sensitive
+`did:key`, so no readable encoding is both injective and case-safe; the name need only be
+distinct, since every row carries its identity in `schema_nsid` and every statement holds a
+row to it. A table written under an earlier name is split on open, each row to the table of
+the identity it names, and a row written under one of the old core names is read as the
+identity that name became. The tables are in `STRICT` mode under the WAL journal. `insert`,
+`query` and `delete` take the `SchemaId` they act on, and `RecordFilter::new()` builds a query
+by its methods: a field equal to a value, a text search, a limit and an offset, a cursor, the
+roots.
 
 `SchemaRegistry` keeps the schemas a store knows. `record_cmds::Record` is what the daemon's
 record verbs call.
@@ -36,7 +42,7 @@ devices: a record put on one device is read on another after a `sync` on each, w
 device's tree follows it. A device that keeps `personal` on demand receives every record too:
 segments ride in index packs, which every pass takes.
 
-**No record byte, id or NSID is readable at the vault.** A segment is sealed under `K_log`,
+**No record byte, id or schema identity is readable at the vault.** A segment is sealed under `K_log`,
 derived from the master secret, inside a pack sealed under the CEK, under a blinded key, in a
 pack of fixed size. The vault holds neither key. `records_drive` in the integration suite reads
 every file under the vault's directory twice. The first time is before `drive move personal`,
@@ -44,7 +50,7 @@ at the vault that keeps `personal`. The second is after it, at the vault `person
 and at the one it left. Where the vault keeps `personal`, the scan reads at least the files
 and bytes the vault lists in the drive's tree (`users/<user>/drives/<tree>`), so it is shown
 to have read the drive. Nowhere does it find a record's fields, its id (as written or as
-bytes) or its schema's NSID.
+bytes) or its schema's identity.
 
 The log that rides in `personal` carries every root's rows this device holds, each with its
 root (`replication::log_records` exports the whole changeset): a record of an organisation's
@@ -57,15 +63,22 @@ Personal alone; the word is the person's, and a request from an app that names i
 (`daemon::records`). A device must know a record's schema to merge it. One it does not know is
 carried and kept verbatim, not dropped (`replication::snapshot_records`).
 
+`schema list|show|register` are the schema verbs (`schema_cmds`). A device knows the core set,
+compiled in, and what `schema register` was handed: a definition signed by its publisher, the
+key its identity names, checked by `kotton_crypto::schema_signature` before anything is
+migrated or kept. A definition that is unsigned, signed by another key, or changed under its
+signature is refused, and so is one naming a core schema, which changes in the tree and not
+through registration.
+
 ## The `record` verbs
 
-`record list|get|put|rm --schema <nsid>` is the shell's `record` noun
+`record list|get|put|rm --schema <publisher>/<name>` is the shell's `record` noun
 (`client/shell/src/commands/record.rs`), one parser for the REPL and `kotton record`. Each
 verb is one request this crate's daemon handlers already answer: `RecordQuery` (for `list`,
 and for `get` by the record's id), `RecordInsert` and `RecordDelete`. **Each names Personal**
 (`PERSONAL_ROOT`), so a record in another root the person is a member of, such as an
 organisation's project, is not listed, read, written or removed by them. A schema is cited by
-its NSID. An id no record has in Personal exits 1, and so does a schema this device does not
+its identity. An id no record has in Personal exits 1, and so does a schema this device does not
 know, by name. `get` prints the record as the row holds it, its `id` among its fields, and
 `list --json` prints each row the same way; neither prints the fields the daemon adds to an
 answer (`_id`, `_filed_at`, `_root`), because every verb here names Personal and `_root` would
