@@ -11,12 +11,11 @@ Windows on arm64 is not built and not promised.
 `cargo` builds the workspace on Windows as on Linux, through PowerShell. The
 [`Justfile`](../Justfile) names what to install first:
 
-- **OpenSSL**, which the encrypted record database links against: `scoop install openssl`.
-  `.cargo/config.toml` points the build at it and forbids a vendored copy, so the build works
-  in any shell without sourcing `.env`.
+- **OpenSSL**, which the encrypted record database links against: `scoop install openssl`,
+  then set `OPENSSL_DIR` to where it landed, in a gitignored `.env` that `just` loads, or in
+  the shell for a bare `cargo build`. `.cargo/config.toml` forbids a vendored copy
+  (`OPENSSL_NO_VENDOR`); it does not know where yours is.
 - **MSVC Build Tools**, from the Visual Studio Installer ("Desktop development with C++").
-- **Python 3**, for the desktop build only (`just desktop::build`): the CSS engine under the
-  window runs a code-generation step at compile time. A headless or server build needs none.
 
 The toolchain is the one `rust-toolchain.toml` names; `rustup` installs it on the first
 `cargo`. Kotton's data lives under `%LOCALAPPDATA%\Kotton`, and the daemon's socket is a named
@@ -43,13 +42,15 @@ restate its list.
 ## What it does not hold
 
 - **The integration suite** (`tests/`), which starts the daemons and the relay as processes,
-  is compiled on Windows and run on Linux only. The relay itself is a workspace of its own,
-  released for Linux alone, and is not built on Windows; `cargo xtask windows-check`, a grep
-  for Unix-only calls that runs in `just lint`, is what still reads it, and says so in its
-  module doc.
-- **xtask's tests**, the gate's own tooling, written for the Linux the gate runs on.
-- **kvaultd's integration tests**, which install the built vault and drive it with a shell
-  and Linux tools.
+  is compiled on Windows and run by no workflow on any platform: it runs under `just test` on
+  the contributor's Linux machine, and the pull request records that run's exit. The relay
+  itself is a workspace of its own, released for Linux alone, and is not built on Windows;
+  `cargo xtask windows-check`, a grep for Unix-only calls that runs in `just lint`, is what
+  still reads it, and says so in its module doc.
+- **xtask's tests**, the gate's own tooling, written for Linux; no job runs them on either
+  platform, and Windows compiles them.
+- **kvaultd's integration tests**: three install the built vault and drive it with a shell and
+  Linux tools, and one compares its settings reader with systemd's.
 - **A release archive.** The release workflow produces no Windows archive today; the
   PowerShell installer kotton-dist will ship has nothing to install until it does
   (kotton #59). A Windows build of the tree has been run by hand and is not a release.
@@ -59,10 +60,10 @@ restate its list.
   reached by `confine`, which still refuses on Windows: stable Rust gives a `Command` no way to
   carry the attribute list the container rides on. `core/proc/src/provider/sandbox/mod.rs`'s
   platform table and `windows.rs`'s module doc say exactly what is measured and what is not.
-  A guest launched on Windows today runs unconfined, and the daemon says so rather than
-  pretending otherwise.
-- **The desktop.** The window builds on Windows with Python present; it is not exercised by
-  any gate on any platform yet.
+  A guest launched on Windows today runs unconfined, and the daemon says so in its log
+  (`core/app`'s `on_unsupported`) rather than pretending otherwise.
+- **The window.** This repository ships no window: the desktop is built elsewhere, nothing
+  here builds it on any platform, and no gate here exercises it.
 
 A thing not held here is a thing a pull request can break without a check going red. When
 one of these moves into the gate, this page and the workflow's header move with it.
