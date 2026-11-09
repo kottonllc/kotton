@@ -668,11 +668,12 @@ device at their next sync.
 `import` and `export` take a path on this computer, relative to the directory
 you run them in; it is read or written here and never sent to the daemon. The
 file is JSON Lines: one record per line, as `get` prints it, its `id` among
-its fields. `export` writes a new file and will not write over one. `import`
-puts a line with an `id` by that id, so importing an export a second time
-changes nothing; a line without one is a new record each time. An `.ics` file
-(by its extension) imports as calendar events, under the schema an `.ics` is
-read as:
+its fields. `export` writes a new file, readable by you only, and will not
+write over one. `import` puts a line with an `id` by that id: a second import
+of the same file changes nothing; a line whose record has changed since
+replaces it; a record removed since comes back. A line without an `id` is a
+new record each time. An `.ics` file (by its extension) imports as calendar
+events, under the schema an `.ics` is read as:
 did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event
 It keeps an event's recurrence, zone and all-day flag, which the calendar
 schema has no field for.

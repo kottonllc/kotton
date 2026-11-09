@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use crate::common::cli::{said, Cli};
 use crate::common::TestEnv;
 use kotton_common::namespace::{NSID_CALENDAR, NSID_IMPORTED_CALENDAR, NSID_NOTES};
+use kotton_record::record_store::RecordStore as _;
 
 const USER: &str = "bob";
 
@@ -33,6 +34,37 @@ async fn notes_on(env: &mut TestEnv) -> BTreeMap<String, serde_json::Value> {
             (r["id"].as_str().expect("a row's id").to_string(), r)
         })
         .collect()
+}
+
+/// Each of Bob's notes on `env` by id, with its version, `(updated_at, revision)`: what sync
+/// keys on, so a put that changes neither is no new version for another device to take.
+///
+/// Nothing at the terminal, and no answer of the daemon's, says a record's version, so this
+/// reads it from the store itself, by the handle `crypto_recovery` opens it with: the
+/// daemon's own `records.db`, under the key the person's secrets hold.
+async fn versions_on(env: &TestEnv) -> BTreeMap<String, (i64, i64)> {
+    let store = kotton_record::open::user_record_store(env.runtime.base_dir(), USER, env.runtime.secrets())
+        .expect("Bob's record store");
+    store
+        .export_changeset(0)
+        .await
+        .expect("the store's rows")
+        .into_iter()
+        .filter(|row| row.schema_nsid == NSID_NOTES && row.deleted_at.is_none())
+        .map(|row| (row.id, (row.updated_at, row.revision)))
+        .collect()
+}
+
+/// What an import said it did, from its confirmation line: `(put, of them replacing a record
+/// that differed, already held as written)`.
+fn counts(out: &std::process::Output) -> (usize, usize, usize) {
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let line = text.lines().find(|l| l.contains("already held as written")).unwrap_or_else(|| panic!("{}", said(out)));
+    let n = |after: &str| -> usize {
+        let before = &line[..line.find(after).unwrap_or_else(|| panic!("no `{after}` in {line}"))];
+        before.trim_end().rsplit(' ').next().and_then(|w| w.parse().ok()).unwrap_or_else(|| panic!("{line}"))
+    };
+    (n(" record(s) put"), n(" of them replacing"), n(" already held as written"))
 }
 
 /// **Records exported on one device import on a second as they were, and a second import
@@ -59,6 +91,12 @@ async fn records_exported_on_one_device_import_on_a_second_and_again_change_noth
     assert!(exported.status.success(), "`kotton record export` failed.\n{}", said(&exported));
 
     let written = std::fs::read_to_string(&file).expect("the export is at the path Bob typed");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&file).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the export is readable by others: {mode:o}");
+    }
     let lines: Vec<serde_json::Value> =
         written.lines().map(|l| serde_json::from_str(l).expect("each line is one JSON record")).collect();
     assert_eq!(lines.len(), 3, "one line per record:\n{written}");
@@ -81,10 +119,17 @@ async fn records_exported_on_one_device_import_on_a_second_and_again_change_noth
     assert!(imported.status.success(), "`kotton record import` failed.\n{}", said(&imported));
     assert_eq!(notes_on(&mut b).await, held_on_a, "B does not hold what A exported");
 
-    // A second import of the same file puts each record by its id again: nothing new.
+    assert_eq!(counts(&imported), (3, 0, 0), "{}", said(&imported));
+
+    // A second import of the same file puts nothing: each record is held as written, and
+    // none is written again, so no device has a new version of any to take.
+    let versions = versions_on(&b).await;
+    assert_eq!(versions.len(), 3);
     let twice = cli_b.run(&["record", "--user", USER, "import", "--schema", NSID_NOTES, file_arg]);
     assert!(twice.status.success(), "the second import failed.\n{}", said(&twice));
+    assert_eq!(counts(&twice), (0, 0, 3), "{}", said(&twice));
     assert_eq!(notes_on(&mut b).await, held_on_a, "a second import changed B's records");
+    assert_eq!(versions_on(&b).await, versions, "a second import wrote a new version of a record");
 
     // A file that is not records is refused whole: nothing of it is put.
     let bad = dir.path().join("bad.jsonl");
@@ -93,6 +138,45 @@ async fn records_exported_on_one_device_import_on_a_second_and_again_change_noth
     assert_eq!(refused.status.code(), Some(1), "{}", said(&refused));
     assert_eq!(notes_on(&mut b).await, held_on_a, "a refused file put a record");
     drop((a, b));
+}
+
+/// **An old file puts back what it says**: a record edited since the export is replaced by
+/// the file's body, a record removed since comes back, and one held as written is left as it
+/// is, and the import says which it did of each.
+#[tokio::test]
+async fn an_old_export_replaces_an_edit_and_brings_back_a_removed_record() {
+    let (mut env, cli) = a_device().await;
+    for (title, body) in [("milk", "two pints"), ("bread", "a loaf"), ("tea", "a box of it")] {
+        env.client
+            .record_insert(USER, NSID_NOTES, serde_json::json!({ "title": title, "body": body }))
+            .await
+            .expect("insert");
+    }
+    let exported_as = notes_on(&mut env).await;
+    let dir = tempfile::tempdir().expect("a directory of Bob's");
+    let file = dir.path().join("notes.jsonl");
+    let file_arg = file.to_str().expect("utf-8 path");
+    let exported = cli.run(&["record", "--user", USER, "export", "--schema", NSID_NOTES, file_arg]);
+    assert!(exported.status.success(), "{}", said(&exported));
+
+    let mut ids = exported_as.keys().cloned();
+    let (edited, removed, kept) = (ids.next().unwrap(), ids.next().unwrap(), ids.next().unwrap());
+    let edit = serde_json::json!({ "id": edited, "title": "edited", "body": "since the export" });
+    let put = cli.run(&["record", "--user", USER, "put", "--schema", NSID_NOTES, &edit.to_string()]);
+    assert!(put.status.success(), "{}", said(&put));
+    let rm = cli.run(&["record", "--user", USER, "rm", "--schema", NSID_NOTES, &removed]);
+    assert!(rm.status.success(), "{}", said(&rm));
+    let after_edits = notes_on(&mut env).await;
+    assert_eq!(after_edits.get(&edited), Some(&edit));
+    assert!(!after_edits.contains_key(&removed));
+    let kept_version = versions_on(&env).await[&kept];
+
+    let imported = cli.run(&["record", "--user", USER, "import", "--schema", NSID_NOTES, file_arg]);
+    assert!(imported.status.success(), "{}", said(&imported));
+    assert_eq!(counts(&imported), (2, 1, 1), "two put (one back, one over the edit), one held");
+    assert_eq!(notes_on(&mut env).await, exported_as, "the old file did not put back what it says");
+    assert_eq!(versions_on(&env).await[&kept], kept_version, "the record held as written was put again");
+    drop(env);
 }
 
 /// The export under test in `import_ics`, with five importable events and one mangled.

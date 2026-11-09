@@ -43,8 +43,10 @@ use crate::state::ShellState;
 /// path is never sent to the daemon. A file is JSON Lines, one record per line as `record
 /// get` prints it: its `id` among its fields and none of the daemon's `_`-fields, so an
 /// export carries no identifier the record did not already have, and an import of it puts
-/// each record by its own id, which makes a second import of the same file change nothing (a
-/// line without an `id` is a new record each time, as `put` makes one).
+/// each record by its own id. A line whose record Personal already holds as written is not put
+/// again, so a second import of the same file changes nothing; a line whose record has changed
+/// since replaces it, and a record removed since comes back (a line without an `id` is a new
+/// record each time, as `put` makes one).
 /// The one other format is an `.ics` calendar, by the file's extension: its bytes and its file
 /// name go to the daemon's reader (`Import`), which writes [`NSID_IMPORTED_CALENDAR`]
 /// records, the only schema an `.ics` imports as.
@@ -69,11 +71,12 @@ const VERBS: &[Verb] = &[
     Verb::gone("open", "record get"),
 ];
 
-/// The largest `.ics` this hands the daemon in one request. `MAX_FRAME_LEN` in `core/ipc` is
-/// 32 MiB and a frame past it closes the connection, so a large file would fail as a dropped
+/// The most this hands the daemon in one request: an `.ics` whole, or one line of a JSON Lines
+/// file, each record of which is a request of its own. `MAX_FRAME_LEN` in `core/ipc` is 32 MiB
+/// and a frame past it closes the connection, so a larger one would fail as a dropped
 /// connection with nothing saying why; bytes cost about four bytes of JSON each, hence the
-/// quarter. A JSON Lines file has no such bound: each record is a request of its own.
-const MAX_ICS_BYTES: u64 = 6 * 1024 * 1024;
+/// quarter.
+const MAX_REQUEST_BYTES: u64 = 6 * 1024 * 1024;
 
 /// Records asked of the daemon at a time by `export`, so a schema of many records is never
 /// one answer past the frame bound.
@@ -151,6 +154,70 @@ fn a_record(text: &str) -> Result<serde_json::Value, NotARecord> {
         },
         _ => Err(NotARecord::NotAnObject),
     }
+}
+
+/// Why a line of a file is not one `import` puts.
+#[derive(Debug, PartialEq)]
+enum NotALine {
+    /// Longer, in bytes, than one request carries.
+    TooLong(usize),
+    /// Not a record's body, as `put` takes one.
+    NotARecord(NotARecord),
+    /// A field beginning with `_`: those are the daemon's, added to an answer, and none is a
+    /// record's (kotton #459 is the daemon's half).
+    DaemonField(String),
+}
+
+impl std::fmt::Display for NotALine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLong(len) => {
+                write!(f, "the line is {len} bytes; a record is put in one request of at most {MAX_REQUEST_BYTES}")
+            }
+            Self::NotARecord(why) => why.fmt(f),
+            Self::DaemonField(key) => write!(
+                f,
+                "the field `{key}` begins with `_`, which marks a field the daemon adds to an answer, not a record's"
+            ),
+        }
+    }
+}
+
+/// A line of a file as `import` checks it before anything is put: within one request, a
+/// record's body as `put` takes one, and no top-level field beginning with `_`.
+fn a_line(text: &str) -> Result<serde_json::Value, NotALine> {
+    if text.len() as u64 > MAX_REQUEST_BYTES {
+        return Err(NotALine::TooLong(text.len()));
+    }
+    let body = a_record(text).map_err(NotALine::NotARecord)?;
+    let daemons = body.as_object().and_then(|fields| fields.keys().find(|k| k.starts_with('_')));
+    match daemons {
+        Some(key) => Err(NotALine::DaemonField(key.clone())),
+        None => Ok(body),
+    }
+}
+
+/// Write `text` to `path` as a new file, the person's: never over one already there, and on
+/// unix readable by its owner only. A write that fails partway removes what it wrote, and the
+/// error says whether it could.
+fn write_new(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    let mut file = open.open(path)?;
+    if let Err(e) = file.write_all(text.as_bytes()).and_then(|()| file.sync_all()) {
+        drop(file);
+        let removed = match std::fs::remove_file(path) {
+            Ok(()) => "the partial file was removed".to_string(),
+            Err(r) => format!("the partial file could not be removed: {r}"),
+        };
+        return Err(std::io::Error::new(e.kind(), format!("{e}; {removed}")));
+    }
+    Ok(())
 }
 
 /// A path on this computer as a word: not empty and not a flag.
@@ -275,6 +342,21 @@ fn id_said(record: &serde_json::Value) -> String {
     record["_id"].as_str().or_else(|| record["id"].as_str()).unwrap_or("-").to_string()
 }
 
+/// The record `id` of `schema` as Personal holds it, as `record get` prints it, or `None` if
+/// Personal holds none by that id (never put, or removed). By the id, in Personal:
+/// `RecordOpen` names no root, and would reach a record in any root the person is in.
+async fn held_by_id(
+    client: &mut kotton::KottonClient,
+    user_id: &str,
+    schema: &SchemaId,
+    id: &str,
+) -> std::io::Result<Option<serde_json::Value>> {
+    let by_id = vec![("id".to_string(), serde_json::json!(id))];
+    let found =
+        client.record_query_in(user_id, Some(PERSONAL_ROOT), None, &schema.to_string(), by_id, Some(1), None).await?;
+    Ok(found.first().map(as_held))
+}
+
 fn table(records: &[serde_json::Value]) -> Out {
     Out::Table {
         columns: vec!["id".into(), "record".into()],
@@ -303,14 +385,10 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
             Ok(CommandOutput::shapes(vec![table(&records)]))
         }
         Line::Get { schema, id } => {
-            // By the id, in Personal: `RecordOpen` names no root, and would reach a record in
-            // any root the person is in. An unknown schema is the daemon's refusal, said as it.
-            let by_id = vec![("id".to_string(), serde_json::json!(id))];
-            match client.record_query_in(&user_id, Some(PERSONAL_ROOT), None, &schema.to_string(), by_id, Some(1), None).await {
-                Ok(found) if !found.is_empty() => {
-                    Ok(CommandOutput::shapes(vec![Out::Data(serde_json::to_string_pretty(&as_held(&found[0]))?)]))
-                }
-                Ok(_) => Ok(CommandOutput::fail(
+            // An unknown schema is the daemon's refusal, said as it.
+            match held_by_id(&mut client, &user_id, &schema, &id).await {
+                Ok(Some(held)) => Ok(CommandOutput::shapes(vec![Out::Data(serde_json::to_string_pretty(&held)?)])),
+                Ok(None) => Ok(CommandOutput::fail(
                     format!("no record '{id}' under {schema}"),
                     Some(format!("`record list --schema {schema}` lists the ids")),
                 )),
@@ -335,8 +413,9 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
             Err(e) => Ok(refused("rm", e)),
         },
         Line::Import { schema, path, format: FileFormat::JsonLines } => {
-            // Every line is read before any is put, so a file that is not records writes
-            // nothing.
+            // Two passes before any put: every line is checked, then every record a line
+            // names by its `id` is read as Personal holds it. So a file that is not records,
+            // or a read the daemon refuses, writes nothing.
             let text = match std::fs::read_to_string(&path) {
                 Ok(t) => t,
                 Err(e) => return Ok(CommandOutput::fail(format!("record import: {}: {e}", path.display()), None)),
@@ -346,7 +425,7 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
                 if line.trim().is_empty() {
                     continue;
                 }
-                match a_record(line) {
+                match a_line(line) {
                     Ok(body) => records.push((n + 1, body)),
                     Err(why) => {
                         return Ok(CommandOutput::fail(
@@ -356,26 +435,55 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
                     }
                 }
             }
-            let total = records.len();
-            for (put, (n, body)) in records.into_iter().enumerate() {
+            // A line whose record is held as written is not put: a put is a new revision,
+            // which every device syncs, so putting it again would change what each holds for
+            // nothing. A line whose record differs replaces it; one not held (never put, or
+            // removed since) puts it.
+            let mut puts = Vec::new();
+            let mut as_written = 0usize;
+            for (n, body) in records {
+                let replaces = match body.get("id").and_then(serde_json::Value::as_str) {
+                    None => false,
+                    Some(id) => match held_by_id(&mut client, &user_id, &schema, id).await {
+                        Ok(Some(held)) if held == body => {
+                            as_written += 1;
+                            continue;
+                        }
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(e) => {
+                            return Ok(CommandOutput::fail(
+                                format!("record import: {} line {n}: {e}; nothing was imported", path.display()),
+                                None,
+                            ))
+                        }
+                    },
+                };
+                puts.push((n, body, replaces));
+            }
+            let replaced = puts.iter().filter(|(_, _, replaces)| *replaces).count();
+            let total = puts.len();
+            for (put, (n, body, _)) in puts.into_iter().enumerate() {
                 if let Err(e) = client.record_insert_in(&user_id, Some(PERSONAL_ROOT), None, &schema.to_string(), body).await {
                     return Ok(CommandOutput::fail(
                         format!("record import: {} line {n}: {e}; {put} of {total} record(s) were put before it", path.display()),
-                        Some("a record with an `id` is put again by it, so importing the file again changes nothing it already put".into()),
+                        Some("a record already held as written is not put again, so importing the file again puts only the rest".into()),
                     ));
                 }
             }
             Ok(CommandOutput::shapes(vec![Out::Confirm {
-                action: format!("{total} record(s) imported into personal"),
+                action: format!(
+                    "into personal: {total} record(s) put, {replaced} of them replacing one that differed; {as_written} already held as written, not put"
+                ),
                 subject: schema.to_string(),
             }]))
         }
         Line::Import { schema, path, format: FileFormat::Ics } => {
             match std::fs::metadata(&path) {
-                Ok(meta) if meta.len() > MAX_ICS_BYTES => {
+                Ok(meta) if meta.len() > MAX_REQUEST_BYTES => {
                     return Ok(CommandOutput::fail(
                         format!(
-                            "record import: {} is {} bytes; an .ics is read in one request of at most {MAX_ICS_BYTES}",
+                            "record import: {} is {} bytes; an .ics is read in one request of at most {MAX_REQUEST_BYTES}",
                             path.display(),
                             meta.len()
                         ),
@@ -418,6 +526,9 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
             Ok(CommandOutput::shapes(out))
         }
         Line::Export { schema, path } => {
+            // Paged by offset: a record filed while the export runs can shift a page, so a line
+            // may be written twice or a record missed. Harmless to an import of the file, which
+            // puts each line by its id; a record missed is in the next export.
             let mut held = Vec::new();
             loop {
                 let page = match client
@@ -449,13 +560,9 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
                 text.push_str(&record.to_string());
                 text.push('\n');
             }
-            // A file already there is the person's, and is not written over.
-            let written = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|()| f.sync_all()));
-            if let Err(e) = written {
+            // A file already there is the person's, and is not written over; the one written is
+            // theirs too, readable by them only.
+            if let Err(e) = write_new(&path, &text) {
                 return Ok(CommandOutput::fail(
                     format!("record export: {}: {e}", path.display()),
                     (e.kind() == std::io::ErrorKind::AlreadyExists)
@@ -569,11 +676,12 @@ device at their next sync.
 `import` and `export` take a path on this computer, relative to the directory
 you run them in; it is read or written here and never sent to the daemon. The
 file is JSON Lines: one record per line, as `get` prints it, its `id` among
-its fields. `export` writes a new file and will not write over one. `import`
-puts a line with an `id` by that id, so importing an export a second time
-changes nothing; a line without one is a new record each time. An `.ics` file
-(by its extension) imports as calendar events, under the schema an `.ics` is
-read as:
+its fields. `export` writes a new file, readable by you only, and will not
+write over one. `import` puts a line with an `id` by that id: a second import
+of the same file changes nothing; a line whose record has changed since
+replaces it; a record removed since comes back. A line without an `id` is a
+new record each time. An `.ics` file (by its extension) imports as calendar
+events, under the schema an `.ics` is read as:
 did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event
 It keeps an event's recurrence, zone and all-day flag, which the calendar
 schema has no field for.
@@ -741,6 +849,51 @@ mod tests {
         assert_eq!(a_record("[1]"), Err(NotARecord::NotAnObject));
         assert_eq!(a_record("not json"), Err(NotARecord::NotAnObject));
         assert_eq!(a_record(r#"{"id":"a/b"}"#), Err(NotARecord::Id("\"a/b\"".into())));
+    }
+
+    /// A line longer than one request carries is refused before anything is put, by its
+    /// length; a line at the bound is a record like any other.
+    #[test]
+    fn a_line_longer_than_one_request_is_refused() {
+        let line = |len: usize| {
+            let frame = r#"{"title":""#.len() + r#""}"#.len();
+            format!(r#"{{"title":"{}"}}"#, "x".repeat(len - frame))
+        };
+        let bound = MAX_REQUEST_BYTES as usize;
+        assert!(a_line(&line(bound)).is_ok());
+        assert_eq!(a_line(&line(bound + 1)), Err(NotALine::TooLong(bound + 1)));
+        assert!(NotALine::TooLong(bound + 1).to_string().contains(&MAX_REQUEST_BYTES.to_string()));
+    }
+
+    /// A line may not carry a field beginning with `_`: those are the daemon's, and an export
+    /// writes none. The refusal names the field; a `_` below the top level is a record's own.
+    #[test]
+    fn a_line_with_a_daemon_field_is_refused_by_its_name() {
+        for (line, key) in [(r#"{"id":"r1","_root":"p0"}"#, "_root"), (r#"{"title":"t","_id":"x"}"#, "_id")] {
+            let refused = a_line(line).expect_err(line);
+            assert_eq!(refused, NotALine::DaemonField(key.into()));
+            assert!(refused.to_string().contains(&format!("`{key}`")), "{refused}");
+        }
+        assert!(a_line(r#"{"title":"t","meta":{"_x":1}}"#).is_ok());
+        assert_eq!(a_line("[1]"), Err(NotALine::NotARecord(NotARecord::NotAnObject)));
+    }
+
+    /// An export is a new file, never written over one, and on unix its owner's only.
+    #[test]
+    fn an_export_is_a_new_file_and_the_persons() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let path = dir.path().join("notes.jsonl");
+        write_new(&path, "{}\n").expect("written");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "{}\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "an export is readable by its owner only, not {mode:o}");
+        }
+        let again = write_new(&path, "other\n").expect_err("written over");
+        assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "{}\n");
     }
 
     /// `import` is gone for `record import`: refused, exit 2, with the line that reads an
