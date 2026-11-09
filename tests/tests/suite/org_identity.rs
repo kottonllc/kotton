@@ -200,7 +200,7 @@ async fn org_grant_issue_returns_envelope() {
             OWNER,
             &org_did,
             &member_did,
-            vec!["schema.read:sh.kotton.notes".to_string()],
+            vec![format!("schema.read:{}", kotton_common::namespace::NSID_NOTES)],
             None,
             None,
         )
@@ -272,7 +272,7 @@ async fn org_grant_issue_envelope_fields() {
             OWNER,
             &org_did,
             &member_did,
-            vec!["schema.read:sh.kotton.notes".to_string()],
+            vec![format!("schema.read:{}", kotton_common::namespace::NSID_NOTES)],
             None,
             None,
         )
@@ -317,7 +317,7 @@ async fn org_grant_list_shows_issued_grants() {
             OWNER,
             &org_did,
             &member_did,
-            vec!["schema.read:sh.kotton.notes".to_string()],
+            vec![format!("schema.read:{}", kotton_common::namespace::NSID_NOTES)],
             None,
             None,
         )
@@ -387,7 +387,7 @@ async fn org_member_remove_revokes_all_envelopes() {
             OWNER,
             &org_did,
             &member_did,
-            vec!["schema.read:sh.kotton.notes".to_string()],
+            vec![format!("schema.read:{}", kotton_common::namespace::NSID_NOTES)],
             None,
             None,
         )
@@ -480,7 +480,7 @@ async fn org_grant_round_trip_import() {
             OWNER,
             &org_did,
             &member_did,
-            vec!["schema.read:sh.kotton.notes".to_string()],
+            vec![format!("schema.read:{}", kotton_common::namespace::NSID_NOTES)],
             None,
             None,
         )
@@ -521,7 +521,7 @@ async fn org_grant_removed_member_cannot_import() {
             OWNER,
             &org_did,
             &member_did,
-            vec!["schema.read:sh.kotton.notes".to_string()],
+            vec![format!("schema.read:{}", kotton_common::namespace::NSID_NOTES)],
             None,
             None,
         )

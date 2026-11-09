@@ -1,0 +1,35 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "calendar",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "title",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "start_at",
+      "type": "datetime",
+      "nullable": false
+    },
+    {
+      "name": "end_at",
+      "type": "datetime",
+      "nullable": false
+    },
+    {
+      "name": "participants",
+      "type": {
+        "list": "string"
+      },
+      "nullable": false
+    },
+    {
+      "name": "location",
+      "type": "string",
+      "nullable": true
+    }
+  ],
+  "description": "Timed calendar events with optional location and participants."
+}

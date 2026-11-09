@@ -25,7 +25,7 @@
 //!
 //! It was `xtask`'s `record_header` and half of `xtask`'s `record` until 2026-09-23, when
 //! `TASK-the-project-records-are-imported-into-a-root` gave the header a second reader: the
-//! converter that maps a record file to a row of `sh.kotton.governance.record` and back
+//! converter that maps a record file to a row of `governance.record` and back
 //! (RFC-0088 rule 2). The RFC's condition is that the board and the converter **never
 //! disagree about a field**, and the only way that holds by construction is one parser. A
 //! second copy in the converter would be the thing this module was extracted to end, so the

@@ -1,0 +1,53 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "channel.key-grant",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "channel_did",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "to_did",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "enc_key",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "nonce",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "ephemeral_pub",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "epoch",
+      "type": "int",
+      "nullable": false
+    },
+    {
+      "name": "granted_at",
+      "type": "int",
+      "nullable": false
+    },
+    {
+      "name": "roster",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "roster_nonce",
+      "type": "string",
+      "nullable": true
+    }
+  ],
+  "description": "Channel key-grant envelope — distributes one epoch of the channel symmetric key to a member, encrypted to their DID public key (X25519 ECDH). The hosting node relays these as opaque blobs and cannot decrypt them."
+}

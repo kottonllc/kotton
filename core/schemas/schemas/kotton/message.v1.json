@@ -1,0 +1,58 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "message.v1",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "from_did",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "to_did",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "channel_did",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "thread_id",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "body",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "nonce",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "ephemeral_pub",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "epoch",
+      "type": "int",
+      "nullable": true
+    },
+    {
+      "name": "sent_at",
+      "type": "int",
+      "nullable": false
+    },
+    {
+      "name": "type",
+      "type": "string",
+      "nullable": false
+    }
+  ],
+  "description": "Encrypted peer-to-peer or channel message envelope. The daemon stores and relays opaque ciphertext; decryption is always client-side."
+}

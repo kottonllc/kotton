@@ -1,0 +1,33 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "pin",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "device",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "scope",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "drive",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "folder",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "value",
+      "type": "string",
+      "nullable": false
+    }
+  ],
+  "description": "What one of the person's devices keeps of their drives: its default, or a drive or folder set the other way."
+}

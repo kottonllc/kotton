@@ -7,7 +7,7 @@
 //! to exercise them, written before a user surface is built on top, so the
 //! surface rests on verified behaviour rather than assumption.
 //!
-//! Everything here runs on **one node**. Messages are `sh.kotton.message.v1`
+//! Everything here runs on **one node**. Messages are `message.v1`
 //! records encrypted per-recipient and delivered by ordinary record sync, so a
 //! full send → inbox → decrypt round trip needs no second device: the user
 //! addresses their own DID.

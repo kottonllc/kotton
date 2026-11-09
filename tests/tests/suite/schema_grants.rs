@@ -9,8 +9,10 @@
 //!  - Quota override (set to larger limit) unblocks further inserts
 //!  - Grants persist across daemon restart (re-spawn)
 
-use crate::common::{connect_when_ready, wait_for_daemon, TestEnv};
+use crate::common::{connect_when_ready, signed_schema_json, suite_schema, wait_for_daemon, TestEnv};
+use kotton_schemas::{FieldType, SchemaField};
 use kotton_wire::ipc::{UserRequest, UserResponse};
+use std::sync::LazyLock;
 
 trait UserResponseExt {
     fn is_error_containing(&self, fragment: &str) -> bool;
@@ -29,16 +31,11 @@ impl UserResponseExt for UserResponse {
 
 const USER: &str = "alice";
 const APP: &str = "com.test.notes-app";
-const NOTES: &str = "sh.kotton.notes";
-const APP_SCHEMA_NSID: &str = "com.test.grants-test-schema";
-
-const APP_SCHEMA_DEF: &str = r#"{
-  "nsid": "com.test.grants-test-schema",
-  "version": 1,
-  "fields": [
-    { "name": "title", "type": "string", "nullable": false }
-  ]
-}"#;
+const NOTES: &str = kotton_common::namespace::NSID_NOTES;
+/// The app's own schema, published and signed by the suite's key.
+static APP_SCHEMA_NSID: LazyLock<String> = LazyLock::new(|| suite_schema("grants-test-schema"));
+static APP_SCHEMA_DEF: LazyLock<String> =
+    LazyLock::new(|| signed_schema_json("grants-test-schema", 1, vec![SchemaField::required("title", FieldType::String)]));
 
 /// Bootstrap helper — create user and return a TestEnv.
 async fn env_with_user() -> TestEnv {
@@ -274,13 +271,13 @@ async fn schema_register_denied_without_can_register() {
 
     // Grant read+write but NOT register.
     env.client
-        .schema_grant_set(APP, APP_SCHEMA_NSID, true, true, false)
+        .schema_grant_set(APP, &APP_SCHEMA_NSID, true, true, false)
         .await
         .expect("grant set");
 
     let req = UserRequest::SchemaRegister {
         user_id: "owner".to_owned(),
-        definition_json: APP_SCHEMA_DEF.to_owned(),
+        definition_json: APP_SCHEMA_DEF.clone(),
         app_id: Some(APP.to_owned()),
     };
     let resp = env.client.inner().send(&req).await.expect("send");
@@ -296,13 +293,13 @@ async fn schema_register_allowed_with_can_register() {
     let mut env = TestEnv::spawn_authed().await;
 
     env.client
-        .schema_grant_set(APP, APP_SCHEMA_NSID, false, false, true)
+        .schema_grant_set(APP, &APP_SCHEMA_NSID, false, false, true)
         .await
         .expect("grant set");
 
     let req = UserRequest::SchemaRegister {
         user_id: "owner".to_owned(),
-        definition_json: APP_SCHEMA_DEF.to_owned(),
+        definition_json: APP_SCHEMA_DEF.clone(),
         app_id: Some(APP.to_owned()),
     };
     let resp = env.client.inner().send(&req).await.expect("send");
@@ -314,7 +311,7 @@ async fn schema_register_allowed_with_can_register() {
     // Schema now appears in the list.
     let schemas = env.client.schema_list("owner").await.expect("schema_list");
     assert!(
-        schemas.contains(&APP_SCHEMA_NSID.to_string()),
+        schemas.contains(&*APP_SCHEMA_NSID),
         "registered schema should appear in schema_list"
     );
 }
@@ -326,7 +323,7 @@ async fn schema_register_owner_path_always_succeeds() {
 
     // No grant row at all — owner path bypasses grant check.
     env.client
-        .schema_register("owner", APP_SCHEMA_DEF)
+        .schema_register("owner", &APP_SCHEMA_DEF)
         .await
         .expect("owner schema_register should always succeed");
 }

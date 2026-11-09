@@ -28,7 +28,7 @@
 //!
 //! **What a device publishes: one claim per drive it keeps whole.** A
 //! whole-keeper claim ([`Claim`]) is a sealed record in that drive
-//! (`sh.kotton.keeps-whole`, `kotton_schemas`'s core set) holding the device,
+//! (`keeps-whole`, `kotton_schemas`'s core set) holding the device,
 //! by the DID of the key it presents, and the drive's id
 //! (`kotton_peer::daemon::drives::Drive::id`), and nothing else; that it
 //! exists is the claim. Its record id is a digest of the two, so a device
@@ -93,7 +93,7 @@
 //! must keep.
 //!
 //! **What kotton #155 wrote is migrated in place** ([`migrate`]): it kept
-//! every setting as an `sh.kotton.pin` record in the person's drive. The first
+//! every setting as a `pin` record in the person's drive. The first
 //! time this device reads its settings it moves each of its own such records
 //! into its own database — never over a setting stated here since — and
 //! deletes it from the drive, and the delete replicates. Another device's are
@@ -221,7 +221,7 @@ pub async fn write(db: &SqlitePool, user_id: &str, scope: &PinScope, value: Opti
     Ok(())
 }
 
-/// A setting as kotton #155 wrote it, an `sh.kotton.pin` record: the device
+/// A setting as kotton #155 wrote it, a `pin` record: the device
 /// it was about, and the setting.
 fn from_pin_record(body: &Value) -> Option<(String, PinSetting)> {
     let text = |f: &str| body.get(f).and_then(Value::as_str).map(str::to_string);
@@ -230,7 +230,7 @@ fn from_pin_record(body: &Value) -> Option<(String, PinSetting)> {
 }
 
 /// **Move this device's settings out of the drive** (module doc): each
-/// `sh.kotton.pin` record kotton #155 wrote about `me` is kept in this
+/// `pin` record kotton #155 wrote about `me` is kept in this
 /// device's own database, unless a setting at that scope is stated here
 /// already, and deleted from the drive; the delete replicates. Another
 /// device's records are left for that device to move. Returns how many it
@@ -850,7 +850,7 @@ mod tests {
     /// **Settings stay in the device's own database, and none is written to
     /// any drive** (kotton #171's first clause): `pin` at every scope keeps a
     /// row in `pin_settings`, and the person's record store — what rides the
-    /// history log to the drive — holds no `sh.kotton.pin` record and no
+    /// history log to the drive — holds no `pin` record and no
     /// record but this device's one claim.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn settings_stay_in_the_devices_own_database_and_none_reaches_a_drive() {
@@ -950,7 +950,7 @@ mod tests {
     }
 
     /// **What kotton #155 wrote is migrated in place**: this device's
-    /// `sh.kotton.pin` records move into its own database and are deleted
+    /// `pin` records move into its own database and are deleted
     /// from the log; another device's are left; a setting stated here since
     /// is not written over; and a second run moves nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

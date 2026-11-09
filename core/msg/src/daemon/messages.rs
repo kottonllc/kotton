@@ -6,11 +6,11 @@
 //! * **DMs** are encrypted with an ephemeral X25519 ECDH key derived from the
 //!   recipient's `did:key:` (Ed25519 verifying key).  The daemon never stores
 //!   the plaintext — only the ChaCha20-Poly1305 ciphertext, the 12-byte nonce,
-//!   and the 32-byte ephemeral public key are written to the `sh.kotton.message.v1`
+//!   and the 32-byte ephemeral public key are written to the `message.v1`
 //!   record.
 //!
 //! * **Channel messages** reuse a 32-byte symmetric channel key distributed to
-//!   members via `sh.kotton.channel.key-grant` records (each grant is a DM-
+//!   members via `channel.key-grant` records (each grant is a DM-
 //!   encrypted copy of the channel key — see `channel_key_wrap`/`channel_key_unwrap`
 //!   in `kotton_crypto::x25519`).
 //!
@@ -1259,7 +1259,7 @@ async fn member_in_rotation(
 // ── MessageSend ───────────────────────────────────────────────────────────────
 
 /// Encrypt `body` as a DM to `recipient_did` and store it as a
-/// `sh.kotton.message.v1` record owned by `user_id`.
+/// `message.v1` record owned by `user_id`.
 ///
 /// The record stored in the DB contains only ciphertext; the daemon never
 /// writes the plaintext to any persistent store.
@@ -1442,7 +1442,7 @@ async fn send_direct(
         _ => Vec::new(),
     };
 
-    // 4. Build the sender's own sh.kotton.message.v1 record: the claims in the
+    // 4. Build the sender's own `message.v1` record: the claims in the
     //    clear, because this store is theirs, and the message sealed again —
     //    to the sender's own key. `sealed` opens only for the recipient, so
     //    filing it here left the sender holding a copy of their own words they
@@ -1566,7 +1566,7 @@ async fn hand_here(
     }
 }
 
-/// The `sh.kotton.message.v1` record a node files for a direct message it
+/// The `message.v1` record a node files for a direct message it
 /// holds: the opened claims in the clear — this is the holder's own store —
 /// and the sealed form beside them.
 ///
@@ -1639,9 +1639,9 @@ pub async fn message_deliveries(
 // ── MessageChannelSend ────────────────────────────────────────────────────────
 
 /// Encrypt `body` with the channel's symmetric key and store it as a
-/// `sh.kotton.message.v1` record.
+/// `message.v1` record.
 ///
-/// The channel key is read from a `sh.kotton.channel.key-grant` record stored
+/// The channel key is read from a `channel.key-grant` record stored
 /// for this user, then unwrapped with the user's Ed25519 identity key — or, for
 /// a grant wrapped before a `RotateIdentity`, the key it retired, which only
 /// opens.
@@ -2012,7 +2012,7 @@ pub(crate) async fn open_channel_copy(host: &dyn MessageHost, user_id: &str, cop
 
 // ── MessageChannelHistory ─────────────────────────────────────────────────────
 
-/// Return up to `limit` raw (still-encrypted) `sh.kotton.message.v1` records
+/// Return up to `limit` raw (still-encrypted) `message.v1` records
 /// for `channel_did`, newest-filed first — by `filed_at`, the person's own
 /// devices' filing stamps (`Record::filed_at`), never a sender's clock.
 ///
@@ -2045,7 +2045,7 @@ pub async fn message_channel_history(
 
 // ── MessagePollInbox ──────────────────────────────────────────────────────────
 
-/// Return the 50 most recent `sh.kotton.message.v1` records addressed to
+/// Return the 50 most recent `message.v1` records addressed to
 /// `user_id`'s DID (where `to_did` equals the user's `did:key:…`).
 ///
 /// Records are returned still-encrypted; the caller decrypts using their
@@ -2180,7 +2180,7 @@ pub fn expose_row_id(mut v: serde_json::Value) -> serde_json::Value {
 
 // ── Internal: channel key unwrap ─────────────────────────────────────────────
 
-/// Decode the base64 fields from a `sh.kotton.channel.key-grant` record and
+/// Decode the base64 fields from a `channel.key-grant` record and
 /// unwrap the channel symmetric key using `sk`.
 fn unwrap_channel_key(grant: &serde_json::Value, sk: &SigningKey) -> Result<[u8; 32], String> {
     let enc_key = b64_field(grant, "enc_key")?;
@@ -2479,7 +2479,7 @@ pub fn channel_decrypt_record(
 // ── MessageChannelCreate ───────────────────────────────────────────────────────
 
 /// Generate a fresh channel symmetric key, wrap it for the creator's own DID,
-/// and store a `sh.kotton.channel.key-grant` record in the creator's store.
+/// and store a `channel.key-grant` record in the creator's store.
 ///
 /// After this call the creator can immediately call `message_channel_send` and
 /// then grant access to members via `message_channel_grant_key`.
@@ -3067,7 +3067,7 @@ struct Rotation {
 /// does — admitting and removing are this one function.
 ///
 /// The requesting `user_id` must already hold — and be able to open — a
-/// `sh.kotton.channel.key-grant` for `channel_did`. That is the whole of the
+/// `channel.key-grant` for `channel_did`. That is the whole of the
 /// authority to change the membership: whoever may admit may remove
 /// (`TASK-a-member-is-removed-from-a-channel-by-a-rotation-that-omits-them`,
 /// which takes it as the default while who may remove whom stays the
@@ -4038,7 +4038,7 @@ pub(crate) mod test_node {
         /// does — held, and signed for by nothing — rather than answering
         /// nothing. Off by default: nothing travels.
         pub takes: std::sync::atomic::AtomicBool,
-        /// Whether reading `sh.kotton.message.v1` records fails, as a store
+        /// Whether reading `message.v1` records fails, as a store
         /// that cannot be read does.
         pub fails_message_reads: std::sync::atomic::AtomicBool,
         /// Whether reading one channel's grants — its rosters — fails, as a

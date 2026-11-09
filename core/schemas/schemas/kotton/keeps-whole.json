@@ -1,0 +1,18 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "keeps-whole",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "device",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "drive",
+      "type": "string",
+      "nullable": false
+    }
+  ],
+  "description": "That one of the person's devices keeps one of their drives whole."
+}

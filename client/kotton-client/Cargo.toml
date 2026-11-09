@@ -11,7 +11,7 @@ kotton-wire = { path = "../../core/wire" }
 kotton-schemas = { path = "../../core/schemas" }
 kotton-common = { path = "../../core/common" }
 # The record-file converter: `records_import` and `records_export` map a record file to a
-# row of `sh.kotton.governance.record` and back through it (RFC-0088 rule 2).
+# row of `governance.record` and back through it (RFC-0088 rule 2).
 kotton-record-file = { path = "../record-file" }
 
 serde = { version = "1.0", features = ["derive"] }

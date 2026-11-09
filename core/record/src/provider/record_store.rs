@@ -26,7 +26,7 @@
 //! implementation changes.
 
 use async_trait::async_trait;
-use kotton_schemas::{definition::SchemaDefinition, nsid::Nsid};
+use kotton_schemas::{definition::SchemaDefinition, SchemaId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -52,7 +52,8 @@ pub type SyncWatermark = i64;
 pub struct ChangesetRow {
     /// Stable record identifier.
     pub id: RecordId,
-    /// NSID of the schema this record belongs to.
+    /// The identity of the schema this record belongs to, `<publisher>/<name>`, written out.
+    /// The field keeps its name from before a schema was named by the key that publishes it.
     pub schema_nsid: String,
     /// JSON body of the record fields at the time of export.
     pub body: Value,
@@ -252,7 +253,7 @@ impl RecordFilter {
 pub struct Record {
     /// Stable record identifier.
     pub id: RecordId,
-    /// The NSID of the schema this record belongs to.
+    /// The identity of the schema this record belongs to, `<publisher>/<name>`, written out.
     pub schema_nsid: String,
     /// JSON body of the record.
     pub body: Value,
@@ -332,22 +333,22 @@ pub type Result<T> = std::result::Result<T, RecordStoreError>;
 /// Error returned when a schema migration is rejected.
 ///
 /// Additive migrations (new nullable fields, or fields with a declared default)
-/// are always accepted.  Any other structural change requires a new NSID version
-/// segment instead.
+/// are always accepted.  Any other structural change is a new schema: a new name under the
+/// same publisher.
 #[derive(Debug, Error)]
 pub enum MigrationError {
     /// A field present in the old schema was removed — this would silently
-    /// discard data in existing records.  Use a new NSID instead.
+    /// discard data in existing records.  Publish a new schema instead.
     #[error(
         "destructive migration: field '{field}' was removed; \
-         use a new NSID version segment instead of mutating the existing schema"
+         publish a new schema under a new name instead of mutating the existing one"
     )]
     Destructive { field: String },
 
-    /// The incoming version is lower than the currently registered version.
+    /// The incoming revision is lower than the currently registered revision.
     #[error(
-        "downgrade rejected: '{nsid}' is at version {current}, \
-         proposed version {proposed} is not an upgrade"
+        "downgrade rejected: '{nsid}' is at revision {current}, \
+         proposed revision {proposed} is not an upgrade"
     )]
     Downgrade {
         nsid: String,
@@ -370,7 +371,7 @@ pub type MigrationResult = std::result::Result<(), MigrationError>;
 
 /// Async record storage with last-write-wins sync semantics.
 ///
-/// Implementations open a per-user SQLite file, one table per schema NSID.
+/// Implementations open a per-user SQLite file, one table per schema.
 /// Tables must be created before records can be inserted or synced.
 #[async_trait]
 pub trait RecordStore: Send + Sync {
@@ -383,7 +384,7 @@ pub trait RecordStore: Send + Sync {
     ///
     /// Returns the stable [`RecordId`] (UUID v4).  The caller may supply an
     /// `id` field in `record`; if absent one is generated.
-    async fn insert(&self, schema_nsid: &Nsid, record: Value) -> Result<RecordId> {
+    async fn insert(&self, schema_nsid: &SchemaId, record: Value) -> Result<RecordId> {
         self.insert_in(schema_nsid, None, record).await
     }
 
@@ -395,19 +396,19 @@ pub trait RecordStore: Send + Sync {
     /// being rewritten.
     async fn insert_in(
         &self,
-        schema_nsid: &Nsid,
+        schema_nsid: &SchemaId,
         root: Option<String>,
         record: Value,
     ) -> Result<RecordId>;
 
     /// Query non-deleted records matching `filter`.
-    async fn query(&self, schema_nsid: &Nsid, filter: RecordFilter) -> Result<Vec<Record>>;
+    async fn query(&self, schema_nsid: &SchemaId, filter: RecordFilter) -> Result<Vec<Record>>;
 
     /// Soft-delete a record by writing a tombstone.
     ///
     /// The row is retained with `deleted_at` set so the tombstone can be
     /// propagated to paired devices before garbage collection.
-    async fn delete(&self, schema_nsid: &Nsid, record_id: &RecordId) -> Result<()> {
+    async fn delete(&self, schema_nsid: &SchemaId, record_id: &RecordId) -> Result<()> {
         self.delete_in(schema_nsid, record_id, &RootSelection::personal()).await
     }
 
@@ -418,7 +419,7 @@ pub trait RecordStore: Send + Sync {
     /// root learns nothing about what is in it by trying to delete from it.
     async fn delete_in(
         &self,
-        schema_nsid: &Nsid,
+        schema_nsid: &SchemaId,
         record_id: &RecordId,
         roots: &RootSelection,
     ) -> Result<()>;
@@ -453,7 +454,7 @@ pub trait RecordStore: Send + Sync {
     /// Validate and apply an additive schema migration from `old` to `new`.
     ///
     /// Rules enforced:
-    /// - `new.version <= old.version` → [`MigrationError::Downgrade`]
+    /// - `new.revision <= old.revision` → [`MigrationError::Downgrade`]
     /// - A field present in `old` but absent in `new` → [`MigrationError::Destructive`]
     /// - A field added in `new` that is not nullable and has no default →
     ///   [`MigrationError::NonAdditive`]

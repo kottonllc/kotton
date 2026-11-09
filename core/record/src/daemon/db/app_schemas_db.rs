@@ -5,11 +5,12 @@
 //! memory at startup from the sealed core schemas; everything an app registers
 //! is written here so it comes back after a restart. Without that, a user's
 //! records outlive the knowledge needed to read them —
-//! `record_cmds::query` refuses an NSID the registry does not know, and
+//! `record_cmds::query` refuses a schema the registry does not know, and
 //! `apply_record_segments` skips replicated rows whose schema this device has
 //! never seen.
 //!
-//! One row per NSID, keyed within this user's database, which is why no owner
+//! One row per schema identity (the `nsid` column, kept under its old name), keyed within
+//! this user's database, which is why no owner
 //! column appears: the database *is* the principal.
 //!
 //! The **migration** that creates `app_schemas` stays in `kuserd`
@@ -33,7 +34,7 @@ fn db_err(e: sqlx::Error) -> io::Error {
 /// Called after the in-memory registry has accepted the definition, so the
 /// version and `extends` rules have already been applied — this records the
 /// outcome rather than deciding it. `registered_at` is preserved across an
-/// upgrade: it records when this user first registered the NSID, not when they
+/// upgrade: it records when this user first registered the schema, not when they
 /// last bumped it.
 pub async fn upsert(pool: &SqlitePool, def: &SchemaDefinition) -> io::Result<()> {
     let json = serde_json::to_string(def)
@@ -46,8 +47,8 @@ pub async fn upsert(pool: &SqlitePool, def: &SchemaDefinition) -> io::Result<()>
              version         = excluded.version,
              definition_json = excluded.definition_json",
     )
-    .bind(def.nsid.as_str())
-    .bind(def.version)
+    .bind(def.id().to_string())
+    .bind(def.revision)
     .bind(json)
     .execute(pool)
     .await

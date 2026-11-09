@@ -19,11 +19,11 @@
 //! `DEC-0042` says a declaring party states a **shape**, never a name, and
 //! `DEC-0043` says every leaf of it is a type the node can decode. This module
 //! declares the first real one: [`imported_calendar_schema`], a fork of
-//! `sh.kotton.calendar` that keeps what an `.ics` actually carries — the
+//! `calendar` that keeps what an `.ics` actually carries — the
 //! recurrence rule, the zone, the all-day flag, the `UID` — and carries
 //! provenance in a `source` facet.
 //!
-//! **It is a fork because it cannot be the commons.** `sh.kotton.calendar` has
+//! **It is a fork because it cannot be the commons.** `calendar` has
 //! five fields and no room for any of that; Article IX seals it, so adding room
 //! is an amendment and not an executive act. `forked_from` is exactly how
 //! `RFC-0003` says to record that — *"a field appearing in eleven forks of one
@@ -33,7 +33,7 @@
 //! consequences travel with the fork, and both are written down there: a device
 //! that has never seen the declaration skips the rows
 //! ([`crate::replication::apply_record_segments`]), and a reader looking only at
-//! `sh.kotton.calendar` does not see imported events (`DEC-0027` — a fork is not
+//! `calendar` does not see imported events (`DEC-0027` — a fork is not
 //! a subtype).
 
 use std::sync::RwLock;
@@ -42,7 +42,7 @@ use anyhow::Result;
 use kotton_schemas::{
     definition::SchemaDefinition,
     field::{FieldType, SchemaField},
-    nsid::Nsid,
+    SchemaId,
 };
 use serde_json::json;
 
@@ -50,13 +50,17 @@ use crate::provider::sqlite_record_store::SqliteRecordStore;
 use crate::record_cmds::Record;
 use crate::registry::SchemaRegistry;
 
-/// The local identifier for the shape imported calendar events take.
+/// The identity of the shape imported calendar events take.
 ///
-/// Deliberately **not** under `sh.kotton.*`: that namespace is the commons
-/// Article IX seals, and a shape declared by an importer is not the commons
-/// (`DEC-0042` — the name carries no authority and resolves nowhere; it is a
-/// local handle on a shape, and only the shape means anything).
-pub const IMPORTED_CALENDAR_NSID: &str = "import.calendar.event";
+/// Published under Kotton's release key, since it is Kotton's code that declares it, and
+/// **not in the core set**: a shape an importer declares is not the commons (`DEC-0042` —
+/// the name carries no authority and resolves nowhere; it is a handle on a shape, and only
+/// the shape means anything), so it is registered on the device that imports, as an app's
+/// schema is, and a device that has never seen the declaration skips its rows. It carries no
+/// signature, as every schema of Kotton's does before the first tag, and reaches the
+/// registry from this code and never from a request, which is where a signature is checked.
+pub const IMPORTED_CALENDAR_NSID: &str =
+    "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event";
 
 /// What one import did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,16 +78,16 @@ pub struct ImportOutcome {
 
 /// The shape of an imported calendar event.
 ///
-/// The first five fields are `sh.kotton.calendar`'s, name for name and type for
+/// The first five fields are `calendar`'s, name for name and type for
 /// type, so the fork reads as a superset of the commons rather than a rival to
 /// it. The rest is what an `.ics` carries and the commons has no room for, and
 /// `source` is the facet `DEC-0043` added `FieldType::Record` for.
 pub fn imported_calendar_schema() -> SchemaDefinition {
     SchemaDefinition::new(
-        Nsid::from_static(IMPORTED_CALENDAR_NSID),
+        SchemaId::from_static(IMPORTED_CALENDAR_NSID),
         1,
         vec![
-            // ── `sh.kotton.calendar`, unchanged ──────────────────────────────
+            // ── `calendar`, unchanged ──────────────────────────────
             SchemaField::required("title", FieldType::String),
             SchemaField::required("start_at", FieldType::Datetime),
             SchemaField::required("end_at", FieldType::Datetime),
@@ -110,7 +114,7 @@ pub fn imported_calendar_schema() -> SchemaDefinition {
             ),
         ],
     )
-    .with_forked_from(Nsid::from_static(kotton_common::namespace::NSID_CALENDAR))
+    .with_forked_from(SchemaId::from_static(kotton_common::namespace::NSID_CALENDAR))
     .with_description(
         "A calendar event brought in from an export, with the recurrence rule, \
          zone and provenance the core calendar schema has no field for.",
@@ -226,7 +230,7 @@ mod tests {
             assert_eq!(mine.nullable, field.nullable, "`{}` nullability", field.name);
         }
         assert_eq!(
-            import.forked_from.as_ref().map(|n| n.as_str()),
+            import.forked_from.as_ref().map(ToString::to_string).as_deref(),
             Some(kotton_common::namespace::NSID_CALENDAR),
             "a fork records where it came from (DEC-0027, RFC-0003)",
         );
@@ -252,16 +256,15 @@ mod tests {
         }
     }
 
-    /// The shape must not name the sealed namespace. Registration would refuse a
-    /// core NSID outright, but a near-miss like `sh.kotton.calendar-import`
-    /// registers fine and squats on the commons, which nothing else checks.
+    /// The shape is none of the core set's: registration would refuse a core identity
+    /// outright, and a near-miss under the same publisher is a schema of its own, which is
+    /// what this is and says.
     #[test]
-    fn the_import_shape_does_not_claim_the_commons() {
-        assert!(
-            !IMPORTED_CALENDAR_NSID.starts_with(kotton_common::namespace::NSID_PREFIX),
-            "Article IX seals `{}`",
-            kotton_common::namespace::NSID_PREFIX,
-        );
+    fn the_import_shape_is_not_in_the_core_set() {
+        let id = SchemaId::from_static(IMPORTED_CALENDAR_NSID);
+        assert!(!kotton_schemas::CoreSchema::all().iter().any(|c| c.id() == id));
+        assert_eq!(id.publisher().as_str(), kotton_common::namespace::NSID_PREFIX);
+        assert_eq!(id.name().as_str(), "import.calendar.event");
     }
 
     #[test]

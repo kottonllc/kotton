@@ -1,0 +1,38 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "access-log",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "device",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "at",
+      "type": "datetime",
+      "nullable": false
+    },
+    {
+      "name": "asker",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "door",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "act",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "what",
+      "type": "string",
+      "nullable": false
+    }
+  ],
+  "description": "One thing a device's daemon was asked: who asked, through which door, to read or write what, and when."
+}

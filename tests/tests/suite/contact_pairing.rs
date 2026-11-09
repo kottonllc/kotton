@@ -309,7 +309,7 @@ async fn a_sender_reads_back_what_they_sent_and_nobody_else_can() {
         .client
         .record_query(
             "alice",
-            "sh.kotton.message.v1",
+            kotton_common::namespace::NSID_MESSAGE_V1,
             vec![("to_did".to_string(), serde_json::json!(bob_did))],
             None,
             None,
@@ -391,7 +391,7 @@ async fn a_rotated_key_still_opens_what_was_received_and_sent_before_it() {
         .client
         .record_query(
             "alice",
-            "sh.kotton.message.v1",
+            kotton_common::namespace::NSID_MESSAGE_V1,
             vec![("to_did".to_string(), serde_json::json!(bob_did))],
             None,
             None,
@@ -457,7 +457,7 @@ async fn a_rotated_key_still_opens_what_was_received_and_sent_before_it() {
         .client
         .record_query(
             "alice",
-            "sh.kotton.message.v1",
+            kotton_common::namespace::NSID_MESSAGE_V1,
             vec![("to_did".to_string(), serde_json::json!(bob_did))],
             None,
             None,
@@ -614,7 +614,7 @@ async fn a_contact_learns_a_rotated_key_from_the_persons_own_key_log() {
         .client
         .record_query(
             "bob",
-            "sh.kotton.channel.key-grant",
+            kotton_common::namespace::NSID_CHANNEL_KEY_GRANT,
             vec![("to_did".to_string(), serde_json::json!(alice_did))],
             None,
             None,
@@ -1593,7 +1593,7 @@ async fn conversation(env: &mut TestEnv, user: &str, peer: &str) -> Vec<(String,
         .client
         .record_query(
             user,
-            "sh.kotton.message.v1",
+            kotton_common::namespace::NSID_MESSAGE_V1,
             vec![("to_did".to_string(), serde_json::json!(peer))],
             None,
             None,

@@ -1,0 +1,28 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "messages",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "sender_did",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "body",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "thread_id",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "sent_at",
+      "type": "datetime",
+      "nullable": false
+    }
+  ],
+  "description": "Chat messages in threads, identified by sender DID."
+}

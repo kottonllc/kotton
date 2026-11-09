@@ -310,12 +310,14 @@ pub async fn schema_register(
     definition_json: String,
     app_id: Option<String>,
 ) -> io::Result<UserResponse> {
-    // When called by a specific app, require can_register on the target NSID.
+    // When called by a specific app, require can_register on the target schema.
     if let Some(ref aid) = app_id {
-        // Parse out the NSID from the definition JSON to check the grant.
+        // Read the schema's identity out of the definition JSON to check the grant.
         let nsid = serde_json::from_str::<serde_json::Value>(&definition_json)
             .ok()
-            .and_then(|v| v["nsid"].as_str().map(|s| s.to_owned()));
+            .and_then(|v| {
+                Some(format!("{}/{}", v["publisher"].as_str()?, v["name"].as_str()?))
+            });
 
         match nsid {
             Some(ref nsid_str) => {
@@ -327,7 +329,7 @@ pub async fn schema_register(
             }
             None => {
                 return Ok(UserResponse::Error {
-                    message: "invalid schema definition: missing nsid field".to_owned(),
+                    message: "invalid schema definition: missing publisher or name".to_owned(),
                 });
             }
         }
@@ -368,14 +370,37 @@ pub async fn register_and_persist(
     user_id: &str,
 ) -> anyhow::Result<()> {
     crate::schema_cmds::schema_register(schema_registry, store, definition_json, user_id).await?;
+    let id = serde_json::from_str::<kotton_schemas::SchemaDefinition>(definition_json)
+        .ok()
+        .and_then(|def| def.try_id().ok());
+    persist_registered(schema_registry, user_db, id).await
+}
 
+/// [`register_and_persist`] for a definition **this tree's own code declares** — the
+/// importer's shape — through [`crate::schema_cmds::declare`], which applies the revision
+/// rules and checks no signature, since a schema of Kotton's carries none before the first
+/// tag and this definition never arrived in a request.
+pub async fn declare_and_persist(
+    schema_registry: &Arc<RwLock<SchemaRegistry>>,
+    store: &Arc<SqliteRecordStore>,
+    user_db: &Arc<SqlitePool>,
+    def: kotton_schemas::SchemaDefinition,
+    user_id: &str,
+) -> anyhow::Result<()> {
+    let id = def.try_id().ok();
+    crate::schema_cmds::declare(schema_registry, store, def, user_id).await?;
+    persist_registered(schema_registry, user_db, id).await
+}
+
+/// The persistence half: write the definition the registry holds for `id` to `app_schemas`.
+async fn persist_registered(
+    schema_registry: &Arc<RwLock<SchemaRegistry>>,
+    user_db: &Arc<SqlitePool>,
+    id: Option<kotton_schemas::SchemaId>,
+) -> anyhow::Result<()> {
     let stored = {
         let reg = schema_registry.read().unwrap();
-        serde_json::from_str::<serde_json::Value>(definition_json)
-            .ok()
-            .and_then(|v| v["nsid"].as_str().map(str::to_owned))
-            .and_then(|n| kotton_schemas::nsid::Nsid::new(n).ok())
-            .and_then(|n| reg.get(&n).cloned())
+        id.and_then(|id| reg.get(&id).cloned())
     };
     if let Some(def) = stored {
         // A write failure must not answer "registered" — the caller would believe

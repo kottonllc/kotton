@@ -700,20 +700,27 @@ mod tests {
         pool
     }
 
-    fn a_schema(nsid: &str) -> kotton_schemas::definition::SchemaDefinition {
+    /// A publisher of the right shape for the test's own schemas; the registry is the table,
+    /// not the door, so nothing here checks a signature.
+    const TEST_PUBLISHER: &str = "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76";
+
+    fn test_id(name: &str) -> kotton_schemas::SchemaId {
+        kotton_schemas::SchemaId::parse(format!("{TEST_PUBLISHER}/{name}")).unwrap()
+    }
+
+    fn a_schema(name: &str) -> kotton_schemas::definition::SchemaDefinition {
         use kotton_schemas::field::{FieldType, SchemaField};
-        kotton_schemas::definition::SchemaDefinition {
-            nsid: kotton_schemas::nsid::Nsid::new(nsid).unwrap(),
-            version: 1,
-            fields: vec![SchemaField {
+        kotton_schemas::definition::SchemaDefinition::new(
+            test_id(name),
+            1,
+            vec![SchemaField {
                 name: "content".to_owned(),
                 field_type: FieldType::String,
                 nullable: false,
                 default: None,
             }],
-            forked_from: None,
-            description: Some("persisted".to_owned()),
-        }
+        )
+        .with_description("persisted")
     }
 
     #[tokio::test]
@@ -729,7 +736,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].nsid.as_str(), "com.test.kept");
+        assert_eq!(loaded[0].id(), test_id("com.test.kept"));
         assert_eq!(loaded[0].description.as_deref(), Some("persisted"));
     }
 
@@ -742,7 +749,7 @@ mod tests {
             .await
             .unwrap();
         let mut v2 = a_schema("com.test.bumped");
-        v2.version = 2;
+        v2.revision = 2;
         kotton_record::daemon::db::app_schemas_db::upsert(&pool, &v2)
             .await
             .unwrap();
@@ -755,7 +762,7 @@ mod tests {
             1,
             "an upgrade replaces rather than duplicates"
         );
-        assert_eq!(loaded[0].version, 2);
+        assert_eq!(loaded[0].revision, 2);
     }
 
     /// The whole point: a **fresh registry** meeting an **existing database** is
@@ -780,7 +787,7 @@ mod tests {
 
         // Session two: a registry built from nothing but the sealed core set.
         let registry = RwLock::new(kotton_record::registry::SchemaRegistry::new());
-        let nsid = kotton_schemas::nsid::Nsid::new("com.test.survivor").unwrap();
+        let nsid = test_id("com.test.survivor");
         assert!(
             registry.read().unwrap().get(&nsid).is_none(),
             "a new registry starts with core schemas only"
@@ -881,8 +888,8 @@ mod tests {
             "INSERT INTO app_registry (app_id, name, version, wasm_path, installed_at) \
              VALUES ('sh.kotton.notes', 'Notes', '1.0', '/n.wasm', '2026-01-01'); \
              INSERT INTO app_roles (role, app_id) VALUES ('shell', 'sh.kotton.shell'); \
-             INSERT INTO handler_registry (app_id, nsid) VALUES ('sh.kotton.notes', 'sh.kotton.note'); \
-             INSERT INTO schema_grants (app_id, nsid, can_read) VALUES ('sh.kotton.notes', 'sh.kotton.note', 1);",
+             INSERT INTO handler_registry (app_id, nsid) VALUES ('sh.kotton.notes', 'did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76/note'); \
+             INSERT INTO schema_grants (app_id, nsid, can_read) VALUES ('sh.kotton.notes', 'did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76/note', 1);",
         )
         .execute(&machine)
         .await

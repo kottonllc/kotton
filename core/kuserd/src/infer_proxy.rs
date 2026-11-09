@@ -35,7 +35,7 @@
 //! ## Where a stored manifest becomes the backend's
 //!
 //! A model's manifest is the protocol's: `kotton_schemas::ModelManifest`, the
-//! body of a `sh.kotton.model` record, which the wire, the device daemon and the
+//! body of a `model` record, which the wire, the device daemon and the
 //! client carry without linking the inference runtime. `kotton-infer` keeps its
 //! own, because `infer-check` holds that crate to serde and thiserror. This
 //! daemon is the one process that links both, so its tests are where the two are

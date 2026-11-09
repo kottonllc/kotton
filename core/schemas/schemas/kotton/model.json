@@ -1,0 +1,92 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "model",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "name",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "version",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "weights",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "format",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "kind",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "parameters",
+      "type": "int",
+      "nullable": false
+    },
+    {
+      "name": "quantisation",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "size",
+      "type": "int",
+      "nullable": false
+    },
+    {
+      "name": "context_window",
+      "type": "int",
+      "nullable": false
+    },
+    {
+      "name": "template",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "licence",
+      "type": {
+        "record": [
+          {
+            "name": "spdx",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "name": "text_hash",
+            "type": "string",
+            "nullable": false
+          }
+        ]
+      },
+      "nullable": false
+    },
+    {
+      "name": "publisher",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "active",
+      "type": "bool",
+      "nullable": false,
+      "default": false
+    },
+    {
+      "name": "installed_at",
+      "type": "datetime",
+      "nullable": false
+    }
+  ],
+  "description": "An installed model: its manifest, whether it is the active model of its kind, and when the person installed it. The weights are a sealed object this record names by hash."
+}

@@ -582,7 +582,7 @@ const AVERY: &str = "avery";
 const SAM: &str = "sam";
 const JORDAN: &str = "jordan";
 const PAT: &str = "pat";
-const GRANT: &str = "sh.kotton.channel.key-grant";
+const GRANT: &str = kotton_common::namespace::NSID_CHANNEL_KEY_GRANT;
 
 async fn holds_epoch(env: &mut TestEnv, user: &str, channel: &str, epoch: u64) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);

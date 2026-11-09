@@ -53,7 +53,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use kotton_sys::crypto::Hasher as _;
 use serde::{Deserialize, Serialize};
 
-/// The `message-type` a share carries (RFC-0064's envelope, `sh.kotton.message.v1`).
+/// The `message-type` a share carries (RFC-0064's envelope, `message.v1`).
 pub const MESSAGE_TYPE: &str = "share";
 
 /// The `kind` of a manifest that carries a file's bytes.

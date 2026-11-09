@@ -191,7 +191,7 @@ async fn frost_signing_round_trip_2_of_2() {
             COORDINATOR,
             &org_did,
             &coordinator_did, // grant to oneself for test simplicity
-            vec!["schema.read:sh.kotton.notes.v1".to_string()],
+            vec![format!("schema.read:{}", kotton_common::namespace::NSID_NOTES)],
             Some(3600),
             None,
         )
@@ -275,7 +275,7 @@ async fn org_grant_issue_on_frost_org_returns_session() {
         COORDINATOR,
         &org_did,
         &coordinator_did,
-        vec!["schema.read:sh.kotton.notes.v1".to_string()],
+        vec![format!("schema.read:{}", kotton_common::namespace::NSID_NOTES)],
         Some(3600),
         None,
     )

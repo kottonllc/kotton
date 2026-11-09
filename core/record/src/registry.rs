@@ -31,36 +31,51 @@
 //! custom shape skips them until something declares it there too — see
 //! `IDEA-imported-records-have-nowhere-to-say-where-they-came-from`.
 //!
-//! Core schemas (`sh.kotton.*`) are **sealed** — any attempt to register a
-//! schema that conflicts with a core NSID returns [`SchemaError::CoreConflict`].
+//! ## The core set, and what "core" means
+//!
+//! A schema is named by the key that publishes it (the protocol's decision of that title):
+//! its identity is `<publisher>/<name>`, and Kotton's own schemas are published under
+//! Kotton's release key. The core set is the files under `core/schemas/schemas/kotton/`,
+//! compiled in ([`CoreSchema`]), and **core means present on every device and nothing
+//! more**: a core schema has no reach another lacks and refuses nothing another does not.
+//! [`SchemaRegistry::is_core`] answers "is this identity Kotton's publisher and a compiled-in
+//! core name", which is the one thing the registry refuses to take from a request: a
+//! registration of a core identity returns [`SchemaError::CoreConflict`], since the core set
+//! changes in the tree and not through registration.
+//!
+//! Before the first tag the core definitions carry no signature, as the decision says: the
+//! release key never leaves the maintainer's machine, and the files are what every page of
+//! the protocol is, a change the maintainer signed off. The registry admits them as core
+//! without one; every other definition reaches it through `schema_cmds::schema_register`,
+//! which checks the publisher's signature first.
 //!
 //! ## Ownership
 //!
 //! App schemas record **which users registered them**, and the scoped accessors
 //! ([`SchemaRegistry::list_for`], [`SchemaRegistry::get_for`]) answer for one
-//! user: core schemas plus that user's own registrations. NSIDs are
-//! reverse-domain app names, so an unscoped list is a readout of which apps the
-//! other people on a machine run — the authority defect the scoping exists to
-//! close. The unscoped [`get`](SchemaRegistry::get) and
+//! user: core schemas plus that user's own registrations. A registered schema's
+//! identity says which publisher's apps a person runs, so an unscoped list is a
+//! readout of what the other people on a machine run — the authority defect the
+//! scoping exists to close. The unscoped [`get`](SchemaRegistry::get) and
 //! [`list`](SchemaRegistry::list) remain for the daemon's own paths (table
 //! creation during replication, record validation), which act on a store already
 //! resolved to one user.
 
 use std::collections::{HashMap, HashSet};
 
-use kotton_schemas::{core::CoreSchema, definition::SchemaDefinition, nsid::Nsid};
+use kotton_schemas::{core::CoreSchema, definition::SchemaDefinition, SchemaId};
 use thiserror::Error;
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SchemaError {
-    /// The NSID collides with a built-in core schema (sealed, cannot be overridden).
-    #[error("schema '{0}' conflicts with a sealed core schema")]
+    /// The identity is a core schema's, which changes in the tree and not through registration.
+    #[error("schema '{0}' is a core schema, which is not registered")]
     CoreConflict(String),
 
-    /// The proposed version is lower than the one already registered.
-    #[error("schema '{0}' is registered at version {1}, proposed version {2} is a downgrade")]
+    /// The proposed revision is lower than the one already registered.
+    #[error("schema '{0}' is registered at revision {1}, proposed revision {2} is a downgrade")]
     Downgrade(String, u32, u32),
 
     /// The schema definition is structurally invalid.
@@ -78,10 +93,10 @@ pub type Result<T> = std::result::Result<T, SchemaError>;
 /// contain only value types.  Concurrent mutation should be handled by the
 /// caller (e.g. wrap in `tokio::sync::RwLock`).
 pub struct SchemaRegistry {
-    /// Built-in `sh.kotton.*` schemas — immutable after construction.
-    core: HashMap<Nsid, SchemaDefinition>,
+    /// The core set, under Kotton's publisher — immutable after construction.
+    core: HashMap<SchemaId, SchemaDefinition>,
     /// App-supplied schemas, each carrying the users who registered it.
-    app: HashMap<Nsid, AppSchema>,
+    app: HashMap<SchemaId, AppSchema>,
 }
 
 /// An app-supplied schema and the users who registered it.
@@ -95,23 +110,13 @@ struct AppSchema {
 }
 
 impl SchemaRegistry {
-    /// Create a new registry pre-populated with all six core Kotton schemas.
-    ///
-    /// # Core schemas
-    ///
-    /// | NSID | Version |
-    /// |------|---------|
-    /// | `sh.kotton.notes` | 1 |
-    /// | `sh.kotton.contacts` | 1 |
-    /// | `sh.kotton.calendar` | 1 |
-    /// | `sh.kotton.messages` | 1 |
-    /// | `sh.kotton.tasks` | 1 |
-    /// | `sh.kotton.clipboard` | 1 |
+    /// Create a new registry pre-populated with the core set, [`CoreSchema::all`], each
+    /// under Kotton's publisher and admitted without a signature (module doc).
     pub fn new() -> Self {
         let mut core = HashMap::new();
         for cs in CoreSchema::all() {
             let def = cs.definition();
-            core.insert(def.nsid.clone(), def);
+            core.insert(def.id(), def);
         }
         Self {
             core,
@@ -121,45 +126,46 @@ impl SchemaRegistry {
 
     /// Register an app-supplied schema on behalf of `owner`.
     ///
-    /// - A new NSID is inserted with `owner` as its first owner.
-    /// - The same version again joins `owner` to the owner set (idempotent for
+    /// - A new identity is inserted with `owner` as its first owner.
+    /// - The same revision again joins `owner` to the owner set (idempotent for
     ///   a user who already registered it — the second-user-installs-the-same-app
     ///   case).
-    /// - A higher version **replaces** the definition and joins `owner`. Callers
+    /// - A higher revision **replaces** the definition and joins `owner`. Callers
     ///   are responsible for validating the migration against the owner's store
-    ///   first ([`crate::schema_cmds::schema_register`] does). An earlier version
-    ///   of this method refused any existing NSID, so a version upgrade migrated
-    ///   tables and then failed to update the registry.
+    ///   first ([`crate::schema_cmds::schema_register`] does), and for checking the
+    ///   publisher's signature, which that function does too: this is the registry's
+    ///   table, not the door. An earlier version of this method refused any existing
+    ///   identity, so an upgrade migrated tables and then failed to update the registry.
     ///
     /// # Errors
     ///
-    /// - [`SchemaError::CoreConflict`] if the NSID belongs to the `sh.kotton.*` namespace.
-    /// - [`SchemaError::Downgrade`] if the proposed version is lower than the
+    /// - [`SchemaError::CoreConflict`] if the identity is a core schema's.
+    /// - [`SchemaError::Downgrade`] if the proposed revision is lower than the
     ///   registered one.
     pub fn register(&mut self, def: SchemaDefinition, owner: &str) -> Result<()> {
-        let nsid = &def.nsid;
-        if self.core.contains_key(nsid) {
-            return Err(SchemaError::CoreConflict(nsid.as_str().to_owned()));
+        let id = def.id();
+        if self.core.contains_key(&id) {
+            return Err(SchemaError::CoreConflict(id.to_string()));
         }
-        match self.app.get_mut(nsid) {
+        match self.app.get_mut(&id) {
             None => {
                 self.app.insert(
-                    def.nsid.clone(),
+                    id,
                     AppSchema {
                         owners: HashSet::from([owner.to_owned()]),
                         def,
                     },
                 );
             }
-            Some(existing) if def.version < existing.def.version => {
+            Some(existing) if def.revision < existing.def.revision => {
                 return Err(SchemaError::Downgrade(
-                    nsid.as_str().to_owned(),
-                    existing.def.version,
-                    def.version,
+                    id.to_string(),
+                    existing.def.revision,
+                    def.revision,
                 ));
             }
             Some(existing) => {
-                if def.version > existing.def.version {
+                if def.revision > existing.def.revision {
                     existing.def = def;
                 }
                 existing.owners.insert(owner.to_owned());
@@ -170,15 +176,15 @@ impl SchemaRegistry {
 
     /// Re-admit definitions loaded from storage, for `owner`.
     ///
-    /// Not a loop over [`register`](Self::register), which applies the core-seal
-    /// and version rules a stored row already passed. This is the restart path:
+    /// Not a loop over [`register`](Self::register), which applies the core
+    /// and revision rules a stored row already passed. This is the restart path:
     /// rows were judged when they were first registered, and re-judging them
     /// from a partial view would drop a user's schemas for failing a check they
     /// already passed.
     ///
     /// **Nothing here can fail.** `forked_from` is provenance (schemas fork, they do
     /// not extend), so load order does not matter and an origin that no longer exists is
-    /// ordinary rather than broken. The returned vector is the NSIDs that were
+    /// ordinary rather than broken. The returned vector is the identities that were
     /// dropped, and it is always empty — kept in the signature because the
     /// caller logs it and a future rule (a corrupt definition, say) would want
     /// somewhere to say so.
@@ -188,21 +194,22 @@ impl SchemaRegistry {
         owner: &str,
     ) -> Vec<String> {
         for def in defs {
-            if self.core.contains_key(&def.nsid) {
-                // A core NSID in app storage predates the seal or was written
-                // by hand. The compiled-in definition wins, always.
+            let id = def.id();
+            if self.core.contains_key(&id) {
+                // A core identity in app storage was written by hand. The
+                // compiled-in definition wins, always.
                 continue;
             }
-            match self.app.get_mut(&def.nsid) {
+            match self.app.get_mut(&id) {
                 Some(existing) => {
-                    if def.version > existing.def.version {
+                    if def.revision > existing.def.revision {
                         existing.def = def.clone();
                     }
                     existing.owners.insert(owner.to_owned());
                 }
                 None => {
                     self.app.insert(
-                        def.nsid.clone(),
+                        id,
                         AppSchema {
                             owners: HashSet::from([owner.to_owned()]),
                             def,
@@ -215,18 +222,18 @@ impl SchemaRegistry {
         Vec::new()
     }
 
-    /// Look up a schema by NSID.
+    /// Look up a schema by identity.
     ///
     /// Checks core schemas first, then app schemas. Unscoped — for the daemon's
     /// own paths, which act on a store already resolved to one user.
-    pub fn get(&self, nsid: &Nsid) -> Option<&SchemaDefinition> {
+    pub fn get(&self, nsid: &SchemaId) -> Option<&SchemaDefinition> {
         self.core.get(nsid).or_else(|| self.app.get(nsid).map(|a| &a.def))
     }
 
-    /// Look up a schema by NSID **as `user`**: core schemas, or an app schema
+    /// Look up a schema by identity **as `user`**: core schemas, or an app schema
     /// this user registered. Another user's registration answers `None`,
     /// indistinguishable from the schema not existing.
-    pub fn get_for(&self, user: &str, nsid: &Nsid) -> Option<&SchemaDefinition> {
+    pub fn get_for(&self, user: &str, nsid: &SchemaId) -> Option<&SchemaDefinition> {
         self.core.get(nsid).or_else(|| {
             self.app
                 .get(nsid)
@@ -264,18 +271,21 @@ impl SchemaRegistry {
     }
 
     /// Return `true` if no schemas are registered (not possible in practice since
-    /// the five core schemas are always present).
+    /// the core set is always present).
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Return `true` if `nsid` refers to a sealed core schema.
-    pub fn is_core(&self, nsid: &Nsid) -> bool {
+    /// Return `true` if `nsid` is a core schema's identity: Kotton's publisher, the release
+    /// key, and one of the compiled-in core names ([`CoreSchema::all`]). Another name under
+    /// Kotton's publisher is not core, and a core name under another publisher is another
+    /// publisher's schema, which is why the whole identity is asked.
+    pub fn is_core(&self, nsid: &SchemaId) -> bool {
         self.core.contains_key(nsid)
     }
 
     /// Return `true` if `nsid` refers to an app-supplied schema.
-    pub fn is_app(&self, nsid: &Nsid) -> bool {
+    pub fn is_app(&self, nsid: &SchemaId) -> bool {
         self.app.contains_key(nsid)
     }
 }
@@ -291,11 +301,26 @@ impl Default for SchemaRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kotton_common::namespace as ns;
     use kotton_schemas::{
         definition::SchemaDefinition,
         field::{FieldType, SchemaField},
-        nsid::Nsid,
+        SchemaId,
     };
+
+    /// A publisher of the right shape for a test's own schemas. It is not Kotton's and
+    /// signs nothing; the registry is the table, not the door, so no signature is checked
+    /// here.
+    const TEST_PUBLISHER: &str = "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76";
+
+    /// `<TEST_PUBLISHER>/<name>`.
+    fn test_id(name: &str) -> String {
+        format!("{TEST_PUBLISHER}/{name}")
+    }
+
+    fn id(s: &str) -> SchemaId {
+        SchemaId::parse(s).unwrap_or_else(|e| panic!("{s}: {e}"))
+    }
 
     /// `SchemaDefinition` carries no `PartialEq`, and deriving one on a shared
     /// type for a test's convenience is the wrong trade — compare the wire form.
@@ -303,20 +328,21 @@ mod tests {
         serde_json::to_string(def).expect("a definition serializes")
     }
 
-    /// Build a minimal app schema for testing.
-    fn app_schema(nsid: &str) -> SchemaDefinition {
-        SchemaDefinition {
-            nsid: Nsid::new(nsid).unwrap(),
-            version: 1,
-            fields: vec![SchemaField {
+    /// Build a minimal app schema for testing, under [`TEST_PUBLISHER`] unless `name`
+    /// is already a whole identity.
+    fn app_schema(name: &str) -> SchemaDefinition {
+        let id = if name.contains('/') { id(name) } else { id(&test_id(name)) };
+        SchemaDefinition::new(
+            id,
+            1,
+            vec![SchemaField {
                 name: "content".to_owned(),
                 field_type: FieldType::String,
                 nullable: false,
                 default: None,
             }],
-            forked_from: None,
-            description: Some("Test app schema".to_owned()),
-        }
+        )
+        .with_description("Test app schema")
     }
 
     // ── Initial state ─────────────────────────────────────────────────────
@@ -325,7 +351,7 @@ mod tests {
     ///
     /// Counted against `CoreSchema::all()` rather than a literal. These four
     /// tests said `8`, `9`, `9` and `10` until 2026-09-16, when a ninth core
-    /// schema (`sh.kotton.model`, RFC-0085) broke all four at once and none of
+    /// schema (`model`, RFC-0085) broke all four at once and none of
     /// them was about the number — every one is about *core, plus the app
     /// schemas this test registered*. A literal is a second copy of a fact that
     /// lives in another crate, and `core.rs`'s own test exists because that
@@ -343,17 +369,19 @@ mod tests {
     }
 
     #[test]
-    fn core_nsids_are_present() {
+    fn core_identities_are_present() {
         let registry = SchemaRegistry::new();
         for nsid_str in [
-            "sh.kotton.notes",
-            "sh.kotton.contacts",
-            "sh.kotton.calendar",
-            "sh.kotton.messages",
-            "sh.kotton.tasks",
-            "sh.kotton.clipboard",
+            ns::NSID_NOTES,
+            ns::NSID_CONTACTS,
+            ns::NSID_CALENDAR,
+            ns::NSID_MESSAGES,
+            ns::NSID_TASKS,
+            ns::NSID_CLIPBOARD,
+            ns::NSID_SECRET,
+            ns::NSID_ACCESS_LOG,
         ] {
-            let nsid = Nsid::new(nsid_str).unwrap();
+            let nsid = id(nsid_str);
             assert!(
                 registry.get(&nsid).is_some(),
                 "missing core schema: {nsid_str}"
@@ -365,6 +393,19 @@ mod tests {
         }
     }
 
+    /// Core is the whole identity: a core name under another key is that key's own
+    /// schema, and another name under Kotton's key is not core.
+    #[test]
+    fn core_is_the_publisher_and_the_name_together() {
+        let mut registry = SchemaRegistry::new();
+        let theirs = id(&test_id("notes"));
+        assert!(!registry.is_core(&theirs));
+        registry.register(app_schema(&theirs.to_string()), "alice").expect("another key's `notes` registers");
+        let not_core = id(&format!("{}/import.calendar.event", ns::NSID_PREFIX));
+        assert!(!registry.is_core(&not_core));
+        assert!(registry.is_core(&id(ns::NSID_NOTES)));
+    }
+
     // ── register ──────────────────────────────────────────────────────────
 
     #[test]
@@ -373,12 +414,13 @@ mod tests {
         let def = app_schema("io.myapp.posts");
         registry.register(def, "alice").unwrap();
         assert_eq!(registry.len(), CoreSchema::all().len() + 1);
+        assert!(registry.is_app(&id(&test_id("io.myapp.posts"))));
     }
 
     #[test]
     fn register_core_conflict_is_error() {
         let mut registry = SchemaRegistry::new();
-        let def = app_schema("sh.kotton.notes");
+        let def = app_schema(ns::NSID_NOTES);
         let err = registry.register(def, "alice").unwrap_err();
         assert!(
             matches!(err, SchemaError::CoreConflict(_)),
@@ -394,7 +436,7 @@ mod tests {
         registry.register(app_schema("io.myapp.posts"), "alice").unwrap();
         registry.register(app_schema("io.myapp.posts"), "bob").unwrap();
 
-        let nsid = Nsid::new("io.myapp.posts").unwrap();
+        let nsid = id(&test_id("io.myapp.posts"));
         assert!(registry.get_for("alice", &nsid).is_some());
         assert!(registry.get_for("bob", &nsid).is_some());
         assert_eq!(
@@ -404,27 +446,27 @@ mod tests {
         );
     }
 
-    /// A higher version replaces the definition. The old shape of `register`
-    /// refused any existing NSID, so an upgrade migrated the store tables and
+    /// A higher revision replaces the definition. The old shape of `register`
+    /// refused any existing identity, so an upgrade migrated the store tables and
     /// then failed to update the registry.
     #[test]
-    fn register_higher_version_replaces_definition() {
+    fn register_higher_revision_replaces_definition() {
         let mut registry = SchemaRegistry::new();
         registry.register(app_schema("io.myapp.posts"), "alice").unwrap();
 
         let mut v2 = app_schema("io.myapp.posts");
-        v2.version = 2;
+        v2.revision = 2;
         registry.register(v2, "alice").unwrap();
 
-        let nsid = Nsid::new("io.myapp.posts").unwrap();
-        assert_eq!(registry.get(&nsid).unwrap().version, 2);
+        let nsid = id(&test_id("io.myapp.posts"));
+        assert_eq!(registry.get(&nsid).unwrap().revision, 2);
     }
 
     #[test]
     fn register_downgrade_is_error() {
         let mut registry = SchemaRegistry::new();
         let mut v2 = app_schema("io.myapp.posts");
-        v2.version = 2;
+        v2.revision = 2;
         registry.register(v2, "alice").unwrap();
 
         let err = registry
@@ -443,7 +485,7 @@ mod tests {
     /// Build an app schema recording that it was forked from `origin`.
     fn fork_of(nsid: &str, origin: &str) -> SchemaDefinition {
         let mut def = app_schema(nsid);
-        def.forked_from = Some(Nsid::new(origin).unwrap());
+        def.forked_from = Some(if origin.contains('/') { id(origin) } else { id(&test_id(origin)) });
         def
     }
 
@@ -451,12 +493,12 @@ mod tests {
     fn a_fork_of_a_schema_that_does_not_exist_registers_fine() {
         // Under the old subtype model this was refused, because a child of a
         // missing parent was unreachable by query. A fork is reachable under its
-        // own NSID, and an origin that has since been retired is ordinary.
+        // own identity, and an origin that has since been retired is ordinary.
         let mut registry = SchemaRegistry::new();
         registry
             .register(fork_of("com.test.orphan", "com.test.long-gone"), "alice")
             .expect("provenance is not a dependency");
-        assert!(registry.get(&Nsid::new("com.test.orphan").unwrap()).is_some());
+        assert!(registry.get(&id(&test_id("com.test.orphan"))).is_some());
     }
 
     #[test]
@@ -474,15 +516,15 @@ mod tests {
     fn forking_a_core_schema_records_the_origin_and_changes_nothing_else() {
         let mut registry = SchemaRegistry::new();
         registry
-            .register(fork_of("com.test.pinnable", "sh.kotton.notes"), "alice")
+            .register(fork_of("com.test.pinnable", ns::NSID_NOTES), "alice")
             .unwrap();
 
         let def = registry
-            .get(&Nsid::new("com.test.pinnable").unwrap())
+            .get(&id(&test_id("com.test.pinnable")))
             .expect("registered");
         assert_eq!(
-            def.forked_from.as_ref().map(|n| n.as_str()),
-            Some("sh.kotton.notes"),
+            def.forked_from.as_ref().map(|n| n.to_string()).as_deref(),
+            Some(ns::NSID_NOTES),
             "the origin is recorded so forks can be counted"
         );
     }
@@ -500,8 +542,8 @@ mod tests {
             "alice",
         );
         assert!(dropped.is_empty());
-        assert!(registry.get(&Nsid::new("com.test.later").unwrap()).is_some());
-        assert!(registry.get(&Nsid::new("com.test.earlier").unwrap()).is_some());
+        assert!(registry.get(&id(&test_id("com.test.later"))).is_some());
+        assert!(registry.get(&id(&test_id("com.test.earlier"))).is_some());
     }
 
     #[test]
@@ -510,31 +552,18 @@ mod tests {
         let dropped =
             registry.load_persisted(vec![fork_of("com.test.kept", "com.test.gone")], "alice");
         assert!(dropped.is_empty(), "a retired origin is not a reason to drop records");
-        assert!(registry.get(&Nsid::new("com.test.kept").unwrap()).is_some());
-    }
-
-    #[test]
-    fn a_definition_persisted_as_extends_still_loads() {
-        // The rename must not orphan rows already written to `app_schemas`.
-        let json = r#"{"nsid":"com.test.legacy","version":1,
-            "fields":[{"name":"content","type":"string","nullable":false}],
-            "extends":"sh.kotton.notes"}"#;
-        let def: SchemaDefinition = serde_json::from_str(json).expect("the alias reads it");
-        assert_eq!(
-            def.forked_from.as_ref().map(|n| n.as_str()),
-            Some("sh.kotton.notes")
-        );
+        assert!(registry.get(&id(&test_id("com.test.kept"))).is_some());
     }
 
     #[test]
     fn a_load_never_overrides_a_core_schema() {
-        // A core NSID sitting in app storage predates the seal or was written by
-        // hand; the compiled-in definition wins.
+        // A core identity sitting in app storage was written by hand; the
+        // compiled-in definition wins.
         let mut registry = SchemaRegistry::new();
-        let core_nsid = Nsid::new("sh.kotton.notes").unwrap();
+        let core_nsid = id(ns::NSID_NOTES);
         let before = json(registry.get(&core_nsid).expect("core schema present"));
 
-        let mut impostor = app_schema("sh.kotton.notes");
+        let mut impostor = app_schema(ns::NSID_NOTES);
         impostor.description = Some("not the real one".to_owned());
         let dropped = registry.load_persisted(vec![impostor], "alice");
 
@@ -548,7 +577,7 @@ mod tests {
         registry.load_persisted(vec![app_schema("com.test.shared")], "alice");
         registry.load_persisted(vec![app_schema("com.test.shared")], "bob");
 
-        let nsid = Nsid::new("com.test.shared").unwrap();
+        let nsid = id(&test_id("com.test.shared"));
         assert!(registry.get_for("alice", &nsid).is_some());
         assert!(registry.get_for("bob", &nsid).is_some());
     }
@@ -565,7 +594,7 @@ mod tests {
             .register(app_schema("com.test.survivor"), "alice")
             .unwrap();
 
-        let nsid = Nsid::new("com.test.survivor").unwrap();
+        let nsid = id(&test_id("com.test.survivor"));
         assert_eq!(
             json(restarted.get(&nsid).unwrap()),
             json(never_restarted.get(&nsid).unwrap())
@@ -579,16 +608,16 @@ mod tests {
         let def = app_schema("net.example.todos");
         registry.register(def.clone(), "alice").unwrap();
 
-        let nsid = Nsid::new("net.example.todos").unwrap();
+        let nsid = id(&test_id("net.example.todos"));
         let found = registry.get(&nsid).unwrap();
-        assert_eq!(found.nsid.as_str(), "net.example.todos");
-        assert_eq!(found.version, 1);
+        assert_eq!(found.id(), nsid);
+        assert_eq!(found.revision, 1);
     }
 
     #[test]
     fn get_unknown_nsid_returns_none() {
         let registry = SchemaRegistry::new();
-        let nsid = Nsid::new("io.unknown.schema").unwrap();
+        let nsid = id(&test_id("io.unknown.schema"));
         assert!(registry.get(&nsid).is_none());
     }
 
@@ -609,13 +638,13 @@ mod tests {
         let mut registry = SchemaRegistry::new();
         registry.register(app_schema("io.myapp.posts"), "alice").unwrap();
 
-        let nsid = Nsid::new("io.myapp.posts").unwrap();
+        let nsid = id(&test_id("io.myapp.posts"));
         assert!(registry.get_for("bob", &nsid).is_none());
         assert!(
             registry
                 .list_for("bob")
                 .iter()
-                .all(|d| d.nsid.as_str() != "io.myapp.posts"),
+                .all(|d| d.id() != nsid),
             "bob's list must not contain alice's registration"
         );
         // Core schemas are visible to everyone regardless.
@@ -630,8 +659,8 @@ mod tests {
         let json = serde_json::to_string(&def).expect("SchemaDefinition should serialize to JSON");
         let restored: SchemaDefinition =
             serde_json::from_str(&json).expect("JSON should deserialize back to SchemaDefinition");
-        assert_eq!(restored.nsid.as_str(), "io.myapp.notes");
-        assert_eq!(restored.version, def.version);
+        assert_eq!(restored.id(), id(&test_id("io.myapp.notes")));
+        assert_eq!(restored.revision, def.revision);
         assert_eq!(restored.fields.len(), def.fields.len());
     }
 }

@@ -6,7 +6,7 @@
 //! - [`header`] — **the** record header parser. The board generator, every gate in `xtask`,
 //!   and the converter read a field through these functions and no others.
 //! - [`row`] — the byte-exact map between a record file and a row of
-//!   `sh.kotton.governance.record`: [`row::to_row`] and [`row::to_file`], each the other's
+//!   `governance.record`: [`row::to_row`] and [`row::to_file`], each the other's
 //!   inverse (rule 2: the markdown file is the wire format).
 //! - [`schema`] — that schema's definition, and the principal the converter acts as.
 //!

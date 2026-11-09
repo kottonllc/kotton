@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use kotton::ImportFormat;
-use kotton_record::import_cmds::{imported_calendar_schema, IMPORTED_CALENDAR_NSID};
+use kotton_record::import_cmds::IMPORTED_CALENDAR_NSID;
 use kotton_schemas::membership::Posture;
 use kotton_secret::MemorySecrets;
 use kotton_sys::secret::SecretsStore;
@@ -184,7 +184,7 @@ async fn the_import_declares_a_shape_the_person_owns() {
     // these, which is why the assistant reads across schemas rather than one.
     let core = env
         .client
-        .record_query(USER, "sh.kotton.calendar", vec![], None, None)
+        .record_query(USER, kotton_common::namespace::NSID_CALENDAR, vec![], None, None)
         .await
         .expect("record_query on the core schema");
     assert!(
@@ -285,15 +285,17 @@ async fn a_hostile_duration_answers_instead_of_dropping_the_connection() {
 /// schema the receiving device does not know, and a registration lives in that
 /// device's own `app_schemas` table, so a shape declared by an import on one
 /// device is unknown on the other until something declares it there too. This
-/// test shows both halves: nothing arrives, then the shape is registered on the
-/// second device by hand, and everything arrives. The hand-registration is the
-/// gap, and the argument for closing it — the commons adopting the shape, or a
-/// declaration travelling beside the records it describes, as `DEC-0042` says it
-/// should — is
+/// test shows both halves: nothing arrives, then the shape is declared on the
+/// second device by its own code — an import of an export with nothing in it,
+/// since the shape is Kotton's, carries no signature before the first tag, and so
+/// cannot be registered by a request — and everything arrives. The extra step is
+/// the gap, and the argument for closing it — the commons adopting the shape, or
+/// a declaration travelling beside the records it describes, as `DEC-0042` says
+/// it should — is
 /// `IDEA-imported-records-have-nowhere-to-say-where-they-came-from`.
 ///
 /// Its sibling `a_record_written_on_one_device_syncs_to_a_joined_device` has to
-/// register `com.test.notes` on both devices for the same reason, so this is a
+/// register the suite's `notes` on both devices for the same reason, so this is a
 /// standing property of custom shapes, not something import introduced.
 #[tokio::test]
 async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
@@ -377,13 +379,15 @@ async fn imported_events_reach_a_second_device_once_it_knows_the_shape() {
          shape, because the declaration never left E — {refusal}"
     );
 
-    // Give N the declaration. This is the step that should not have to be taken
-    // by hand — see the doc above.
-    let definition = serde_json::to_string(&imported_calendar_schema()).unwrap();
-    client_n
-        .schema_register(USER, &definition)
+    // Give N the declaration, from N's own code: an import of nothing declares the
+    // shape and writes no record. This is the step that should not have to be
+    // taken — see the doc above.
+    let (declared, imported_on_n, _) = client_n
+        .import(USER, ImportFormat::Ics, "nothing.ics", b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n".to_vec())
         .await
         .expect("declare the import shape on N");
+    assert_eq!(declared, IMPORTED_CALENDAR_NSID);
+    assert_eq!(imported_on_n, 0, "an empty export imports nothing");
     client_n
         .sync_mount(USER, "local", "vault", Some(kotton::SyncDirection::Pull))
         .await

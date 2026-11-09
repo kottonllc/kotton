@@ -269,7 +269,7 @@ pub struct MembershipGrant {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kotton_schemas::{CapabilityKind, Nsid};
+    use kotton_schemas::{CapabilityKind, SchemaId};
 
     fn test_envelope() -> GrantEnvelope {
         GrantEnvelope {
@@ -279,7 +279,7 @@ mod tests {
             node_did: Some(Did::parse("did:key:z6MknodeDIDfake").unwrap()),
             grants: vec![CapabilityGrant::schema(
                 CapabilityKind::Read,
-                Nsid::from_static("sh.kotton.notes"),
+                SchemaId::from_static("did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"),
             )],
             issued_at: 1_700_000_000,
             expires_at: Some(1_700_086_400),

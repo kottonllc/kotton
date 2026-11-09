@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// Insert a new app row.
 ///
 /// `capabilities` should be a JSON-encoded `Vec<String>` like
-/// `["schema.read:sh.kotton.notes", "schema.write:sh.kotton.notes"]`.
+/// `["schema.read:<publisher>/<name>", "schema.write:<publisher>/<name>"]`.
 /// `wasm_hash` is a BLAKE3 hex digest of the WASM bytes, used by
 /// `auto_install_bundled_apps` to detect when a bundled app has changed
 /// and needs reinstalling without a manual data-directory wipe, and by

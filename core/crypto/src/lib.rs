@@ -9,5 +9,6 @@ pub mod key_health;
 pub mod provider;
 pub mod delivery_ack;
 pub mod reach_note;
+pub mod schema_signature;
 
 pub use provider::*;

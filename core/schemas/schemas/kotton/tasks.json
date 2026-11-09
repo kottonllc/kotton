@@ -1,0 +1,29 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "tasks",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "title",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "due_at",
+      "type": "datetime",
+      "nullable": true
+    },
+    {
+      "name": "completed",
+      "type": "bool",
+      "nullable": false,
+      "default": false
+    },
+    {
+      "name": "parent_task_id",
+      "type": "string",
+      "nullable": true
+    }
+  ],
+  "description": "Completable work items, optionally nested."
+}

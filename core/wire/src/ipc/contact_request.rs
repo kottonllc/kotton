@@ -98,7 +98,7 @@ pub enum ContactRequest {
     ///
     /// The recipient's node opens it, checks that it is addressed here and that
     /// the sender it names inside is the contact whose door it came through,
-    /// and files it as its own `sh.kotton.message.v1` record. Article V's two
+    /// and files it as its own `message.v1` record. Article V's two
     /// copies, and neither contingent on the other.
     DeliverMessage {
         /// The message, sealed. Nothing outside the seal names anyone.

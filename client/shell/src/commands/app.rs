@@ -154,7 +154,7 @@ fn valid_app_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && kotton_schemas::Nsid::new(scaffold_app_id(name)).is_ok()
+        && kotton_schemas::AppId::new(scaffold_app_id(name)).is_ok()
 }
 
 /// The id the scaffold gives an app called `name`, for its author to replace.
@@ -204,8 +204,8 @@ kind    = \"long-lived\"
 # To keep notes, for one:
 #
 # [capabilities]
-# \"schema.read\"  = [\"sh.kotton.notes\"]
-# \"schema.write\" = [\"sh.kotton.notes\"]
+# \"schema.read\"  = [\"<publisher>/<name>\"]
+# \"schema.write\" = [\"<publisher>/<name>\"]
 ";
 
 const SCAFFOLD_LIB_RS: &str = "\

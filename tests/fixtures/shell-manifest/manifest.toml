@@ -22,5 +22,5 @@ role    = "shell"
 # runs under its own grants, not the shell's.
 "apps.launch"      = []
 # Schema access for the shell's Home pane stats and future contacts/calendar views.
-"schema.read"  = ["sh.kotton.contacts", "sh.kotton.calendar", "sh.kotton.messages"]
-"schema.write" = ["sh.kotton.contacts", "sh.kotton.calendar"]
+"schema.read"  = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/contacts", "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/calendar", "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/messages"]
+"schema.write" = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/contacts", "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/calendar"]

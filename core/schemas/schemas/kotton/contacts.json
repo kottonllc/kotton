@@ -1,0 +1,34 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "contacts",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "display_name",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "dids",
+      "type": {
+        "list": "string"
+      },
+      "nullable": false
+    },
+    {
+      "name": "emails",
+      "type": {
+        "list": "string"
+      },
+      "nullable": false
+    },
+    {
+      "name": "phones",
+      "type": {
+        "list": "string"
+      },
+      "nullable": false
+    }
+  ],
+  "description": "Person identity and contact details."
+}

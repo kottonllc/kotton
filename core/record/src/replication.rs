@@ -33,7 +33,7 @@ use kotton_sys::store::{SnapshotSummary, SyncableStore};
 use crate::record_store::{ChangesetRow, RecordStore as _, SyncWatermark};
 use crate::provider::sqlite_record_store::SqliteRecordStore;
 use crate::registry::SchemaRegistry;
-use kotton_schemas::nsid::Nsid;
+use kotton_schemas::SchemaId;
 
 /// Append the user's record changes to the sealed history log on `mount`.
 ///
@@ -146,8 +146,8 @@ pub async fn apply_record_segments(
 
     let mut applied = 0usize;
     for (nsid_str, rows) in by_nsid {
-        let Ok(nsid) = Nsid::new(&nsid_str) else {
-            tracing::warn!(nsid = %nsid_str, "apply_record_segments: invalid NSID in a segment, skipping");
+        let Ok(nsid) = SchemaId::parse(&nsid_str) else {
+            tracing::warn!(schema = %nsid_str, "apply_record_segments: a segment names a schema by no identity, skipping");
             continue;
         };
         let schema = {
@@ -225,7 +225,7 @@ pub async fn snapshot_records(
                 let Ok(row) = serde_json::from_slice::<ChangesetRow>(payload) else {
                     continue;
                 };
-                let unknown = Nsid::new(&row.schema_nsid)
+                let unknown = SchemaId::parse(&row.schema_nsid)
                     .ok()
                     .map(|nsid| reg.get(&nsid).is_none())
                     .unwrap_or(true);
@@ -333,8 +333,8 @@ mod tests {
         }
     }
 
-    fn notes() -> Nsid {
-        Nsid::new("sh.kotton.notes").unwrap()
+    fn notes() -> SchemaId {
+        SchemaId::from_static(kotton_common::namespace::NSID_NOTES)
     }
 
     async fn store() -> SqliteRecordStore {

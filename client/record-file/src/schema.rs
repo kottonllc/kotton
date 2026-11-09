@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `sh.kotton.governance.record` — the schema a record's row belongs to (RFC-0088).
+//! `governance.record` — the schema a record's row belongs to (RFC-0088), under Kotton's key.
 //!
-//! Carried as the JSON `SchemaRegister` takes, so this crate links nothing the header parser
-//! does not need; `the_definition_is_a_schema_the_registry_accepts` holds the JSON to
-//! `kotton_schemas::SchemaDefinition`, and holds every field a row carries to a declaration.
+//! Carried as the JSON a definition is written in, so this crate links nothing the header
+//! parser does not need; `the_definition_is_the_core_set's` holds the JSON to the file in
+//! `kotton_schemas`'s core set, field for field, and holds every field a row carries to a
+//! declaration. The core file is the authority; this is the converter's copy of it, so a
+//! reader of this crate sees the shape beside the code that fills it.
 //!
 //! Two departures from the RFC's table, each for a reason the table could not see:
 //!
@@ -16,8 +18,8 @@
 
 use serde_json::{json, Value};
 
-/// The schema's version. Additive changes bump it; a breaking one is a new NSID.
-pub const VERSION: u32 = 1;
+/// The schema's revision. Additive changes bump it; a breaking one is a new schema.
+pub const REVISION: u32 = 1;
 
 /// The principal the converter acts as when it reads and writes rows, so that `import` and
 /// `export` run under a grant on the schema a person issued and can read (RFC-0088 rules 6
@@ -31,9 +33,9 @@ pub const VERSION: u32 = 1;
 /// install asks whether a grant already names the id being installed, so a grant to an
 /// app-shaped id passes to whatever app later installs under it
 /// (`TASK-a-schema-grant-to-an-id-no-app-holds-passes-to-the-next-install-under-it`). This one
-/// has a colon and no dot: an app's id must be an NSID (`Nsid::new` refuses the colon) and an
-/// extension's must contain a dot, so no manifest can take it, and the grant `records init`
-/// issues can only ever be the converter's.
+/// has a colon and no dot: an app's id is reverse-domain (`AppId::new` refuses the colon) and
+/// an extension's must contain a dot, so no manifest can take it, and the grant `records
+/// init` issues can only ever be the converter's.
 pub const PRINCIPAL: &str = "record-file:converter";
 
 fn text(name: &str) -> Value {
@@ -48,11 +50,13 @@ fn list(name: &str) -> Value {
     json!({ "name": name, "type": { "list": "string" }, "nullable": true })
 }
 
-/// The definition, as the JSON `kotton schema register` and `SchemaRegister` take.
+/// The definition, as the JSON a schema is written in: the core file, as a value.
 pub fn definition() -> Value {
+    let (publisher, name) = crate::row::NSID.split_once('/').expect("an identity has a slash");
     json!({
-        "nsid": crate::row::NSID,
-        "version": VERSION,
+        "publisher": publisher,
+        "name": name,
+        "revision": REVISION,
         "description": "A governance record: one record file as a row. \
                         The file is the wire format.",
         "fields": [
@@ -110,15 +114,18 @@ mod tests {
         assert!(kotton_schemas::ExtensionManifest::from_toml(&ext(PRINCIPAL)).is_err(), "an extension took {PRINCIPAL}");
     }
 
-    /// The JSON is a definition the registry accepts, under the project's own namespace and
-    /// outside the sealed core set (Article IX), and every field a row carries is declared.
+    /// The JSON is the core set's `governance.record`, field for field, and every field a
+    /// row carries is declared.
     #[test]
-    fn the_definition_is_a_schema_the_registry_accepts() {
+    fn the_definition_is_the_core_sets() {
         let def: SchemaDefinition = serde_json::from_value(definition()).unwrap();
-        assert_eq!(def.nsid.as_str(), crate::row::NSID);
-        assert!(
-            !kotton_schemas::CoreSchema::all().iter().any(|c| c.nsid() == def.nsid),
-            "the governance record is an extension schema, never a core one"
+        assert_eq!(def.id().to_string(), crate::row::NSID);
+        let core = kotton_schemas::CoreSchema::GovernanceRecord.definition();
+        assert_eq!(core.id(), def.id());
+        assert_eq!(
+            serde_json::to_value(&core).unwrap(),
+            serde_json::to_value(&def).unwrap(),
+            "the converter's copy of the schema has drifted from the core file"
         );
         for (_, field, is_list) in crate::row::NAMED {
             let f = def.field(field).unwrap_or_else(|| panic!("`{field}` is not declared"));

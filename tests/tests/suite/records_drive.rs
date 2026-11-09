@@ -20,24 +20,26 @@ use kotton_sys::ipc::IpcEndpoint;
 use kotton_schemas::membership::Posture;
 use kotton_shell::{ExitCode, ShellState};
 use kotton_wire::ipc::{PinValue, FIRST_DRIVE_NAME};
+use std::sync::LazyLock;
 
 /// The user `drive_sync`'s helpers read.
 const USER: &str = "alice";
-/// The schema the records are of, cited by name. Not a core schema: a core NSID is in every
-/// daemon's own database (the machine database's table definitions name `sh.kotton.notes`),
-/// a vault's included, so finding it there says nothing of alice. This one is known only to
-/// her two devices, each of which registers it, so it is a needle only her records carry.
-const NOTES: &str = "com.example.recordsdrive.diary";
+/// The schema the records are of, cited by identity. Not a core schema: a core identity is
+/// in every daemon's own binary, a vault's included, so finding it there says nothing of
+/// alice. This one is the suite's, known only to her two devices, each of which registers
+/// it, so it is a needle only her records carry.
+static NOTES: LazyLock<String> = LazyLock::new(|| crate::common::suite_schema("recordsdrive.diary"));
 
-/// [`NOTES`] registered on a device of alice's, as `schema register` does.
+/// [`NOTES`] registered on a device of alice's, as `schema register` does: signed by its
+/// publisher, the suite's key.
 async fn knows_the_schema(client: &mut kotton::KottonClient) {
     use kotton_schemas::field::{FieldType, SchemaField};
-    let schema = kotton_schemas::definition::SchemaDefinition::new(
-        kotton_schemas::nsid::Nsid::new(NOTES).unwrap(),
+    let schema = crate::common::signed_schema_json(
+        "recordsdrive.diary",
         1,
         vec![SchemaField::required("title", FieldType::String), SchemaField::required("body", FieldType::String)],
     );
-    client.schema_register(USER, &serde_json::to_string(&schema).unwrap()).await.expect("schema register");
+    client.schema_register(USER, &schema).await.expect("schema register");
 }
 
 /// What a line typed at a device's REPL answered: its exit, the payload it printed on stdout,
@@ -101,27 +103,27 @@ impl At<'_> {
 
     /// `record put --schema NOTES <body>`, and the id it printed.
     async fn put(&self, body: serde_json::Value) -> String {
-        let id = self.done(&["record", "put", "--schema", NOTES, &body.to_string()]).await.data;
+        let id = self.done(&["record", "put", "--schema", NOTES.as_str(), &body.to_string()]).await.data;
         assert!(!id.is_empty() && !id.contains(char::is_whitespace), "{} put printed no id: {id:?}", self.who);
         id
     }
 
     /// `record get --schema NOTES <id>`, as the JSON it printed.
     async fn get(&self, id: &str) -> serde_json::Value {
-        let said = self.done(&["record", "get", "--schema", NOTES, id]).await;
+        let said = self.done(&["record", "get", "--schema", NOTES.as_str(), id]).await;
         serde_json::from_str(&said.data).unwrap_or_else(|e| panic!("{} get printed no JSON: {e}: {}", self.who, said.text))
     }
 
     /// `record get` of an id no record has here: exit 1, and no payload.
     async fn get_is_missing(&self, id: &str) {
-        let said = self.line(&["record", "get", "--schema", NOTES, id]).await;
+        let said = self.line(&["record", "get", "--schema", NOTES.as_str(), id]).await;
         assert_eq!(said.exit, ExitCode::Code(1), "{} read a record it should not have: {}", self.who, said.text);
         assert!(said.data.is_empty(), "{}: a missing record printed a payload: {}", self.who, said.data);
     }
 
     /// The ids `record list --schema NOTES --json` answered, sorted.
     async fn listed(&self) -> Vec<String> {
-        let said = self.done(&["record", "list", "--schema", NOTES, "--json"]).await;
+        let said = self.done(&["record", "list", "--schema", NOTES.as_str(), "--json"]).await;
         let rows: Vec<serde_json::Value> = serde_json::from_str(&said.data).expect("list --json is a JSON array");
         // The verbs print a record as the row holds it, `id` among its fields and none of the
         // daemon's `_`-fields.
@@ -270,7 +272,7 @@ async fn a_record_put_on_one_device_is_read_on_another_by_way_of_personal_wherev
     let nobody = "00000000-0000-4000-8000-000000000000";
     on_a.get_is_missing(nobody).await;
     on_b.get_is_missing(nobody).await;
-    let rm = on_b.line(&["record", "rm", "--schema", NOTES, nobody]).await;
+    let rm = on_b.line(&["record", "rm", "--schema", NOTES.as_str(), nobody]).await;
     assert_eq!(rm.exit, ExitCode::Code(1), "B removed a record nobody put: {}", rm.text);
 
     // A second record, put on A and synced to the first vault; then personal moves.
@@ -281,7 +283,7 @@ async fn a_record_put_on_one_device_is_read_on_another_by_way_of_personal_wherev
     the_vault_keeping_it_reads_none_of(
         &vault,
         &at_first,
-        &["records-drive-marker-one", "records-drive-marker-two", &one, &two, NOTES],
+        &["records-drive-marker-one", "records-drive-marker-two", &one, &two, NOTES.as_str()],
     )
     .await;
     on_a.done(&["drive", "move", FIRST_DRIVE_NAME, "--to", "vault-2"]).await;
@@ -296,13 +298,13 @@ async fn a_record_put_on_one_device_is_read_on_another_by_way_of_personal_wherev
 
     // After the move, each verb the other way: B puts and removes, A reads and lists.
     let three = on_b.put(note("records-drive-marker-three")).await;
-    on_b.done(&["record", "rm", "--schema", NOTES, &one]).await;
+    on_b.done(&["record", "rm", "--schema", NOTES.as_str(), &one]).await;
     on_b.get_is_missing(&one).await;
     on_b.sync().await;
     on_a.sync().await;
     assert_eq!(on_a.get(&three).await["body"], "records-drive-marker-three", "A did not read B's record");
     on_a.get_is_missing(&one).await;
-    let rm = on_a.line(&["record", "rm", "--schema", NOTES, &one]).await;
+    let rm = on_a.line(&["record", "rm", "--schema", NOTES.as_str(), &one]).await;
     assert_eq!(rm.exit, ExitCode::Code(1), "A removed again a record B removed: {}", rm.text);
     let mut want = vec![two.clone(), three.clone()];
     want.sort();
@@ -318,7 +320,7 @@ async fn a_record_put_on_one_device_is_read_on_another_by_way_of_personal_wherev
         one.as_str(),
         two.as_str(),
         three.as_str(),
-        NOTES,
+        NOTES.as_str(),
     ];
     the_vault_keeping_it_reads_none_of(&vault_2, &at_second, &needles).await;
     the_vault_it_left_reads_none_of(&vault, &needles);
@@ -341,7 +343,7 @@ async fn the_record_verbs_reach_personal_and_no_other_root_the_person_is_in() {
 
     let theirs = env
         .client
-        .record_insert_in(USER, Some(&root), None, NOTES, note("in-the-project-root"))
+        .record_insert_in(USER, Some(&root), None, NOTES.as_str(), note("in-the-project-root"))
         .await
         .expect("a record in the project's root");
     let in_root = |rows: Vec<serde_json::Value>| -> Vec<String> {
@@ -352,23 +354,24 @@ async fn the_record_verbs_reach_personal_and_no_other_root_the_person_is_in() {
     let mine = at.put(note("in-personal")).await;
     assert_eq!(at.listed().await, std::slice::from_ref(&mine), "`record list` reached past Personal");
     at.get_is_missing(&theirs).await;
-    let rm = at.line(&["record", "rm", "--schema", NOTES, &theirs]).await;
+    let rm = at.line(&["record", "rm", "--schema", NOTES.as_str(), &theirs]).await;
     assert_eq!(rm.exit, ExitCode::Code(1), "`record rm` reached the project's root: {}", rm.text);
 
-    let kept = env.client.record_query_in(USER, Some(&root), None, NOTES, vec![], None, None).await.expect("the root's rows");
+    let kept = env.client.record_query_in(USER, Some(&root), None, NOTES.as_str(), vec![], None, None).await.expect("the root's rows");
     assert_eq!(in_root(kept), std::slice::from_ref(&theirs), "the project's record is gone from its root");
 
     // A schema this device does not know is refused by name, exit 1: it is not a missing id.
-    let unknown = at.line(&["record", "get", "--schema", "com.example.nobody-registered", &mine]).await;
+    let nobody = crate::common::suite_schema("nobody-registered");
+    let unknown = at.line(&["record", "get", "--schema", &nobody, &mine]).await;
     assert_eq!(unknown.exit, ExitCode::Code(1), "{}", unknown.text);
     assert!(
-        unknown.text.contains("unknown schema: com.example.nobody-registered") && !unknown.text.contains("no record"),
+        unknown.text.contains(&format!("unknown schema: {nobody}")) && !unknown.text.contains("no record"),
         "an unknown schema was said as a missing record: {}",
         unknown.text
     );
 
     // And Personal's own record is the verbs' to remove.
-    at.done(&["record", "rm", "--schema", NOTES, &mine]).await;
+    at.done(&["record", "rm", "--schema", NOTES.as_str(), &mine]).await;
     at.get_is_missing(&mine).await;
     assert!(at.listed().await.is_empty(), "Personal still lists the record removed");
 }

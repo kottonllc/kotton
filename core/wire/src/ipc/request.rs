@@ -1479,7 +1479,9 @@ pub enum UserRequest {
     /// declared in the schema.  An `id` field is generated if not supplied.
     RecordInsert {
         user_id: String,
-        /// NSID of the target schema, e.g. `"sh.kotton.notes"`.
+        /// The schema's identity, `<publisher>/<name>`, written out: the publisher is the
+        /// `did:key` of the key that publishes the schema. The field keeps the name it had
+        /// when the identity was a reverse-domain string.
         schema_nsid: String,
         /// JSON-encoded record body.
         record: serde_json::Value,
@@ -1501,7 +1503,7 @@ pub enum UserRequest {
     /// Returns only non-deleted records matching all `field_eq` predicates.
     RecordQuery {
         user_id: String,
-        /// NSID of the target schema.
+        /// The schema's identity, `<publisher>/<name>`, written out (`RecordInsert`).
         schema_nsid: String,
         /// Exact field-equality predicates `[(field_name, expected_value)]`.
         field_eq: Vec<(String, serde_json::Value)>,
@@ -1523,11 +1525,12 @@ pub enum UserRequest {
     /// Cross-schema search for the hub feed and search bar.
     ///
     /// Returns enriched records `{id, schema_nsid, updated_at, body}` sorted by
-    /// `updated_at` descending.  Optionally filtered to a single `nsid` and/or
+    /// `updated_at` descending.  Optionally filtered to a single schema and/or
     /// by a case-insensitive substring match over the JSON body.
     RecordSearch {
         user_id: String,
-        /// Restrict to a single schema NSID; `None` queries all schemas.
+        /// Restrict to one schema, by its identity `<publisher>/<name>`; `None` queries
+        /// all schemas.
         nsid: Option<String>,
         /// Case-insensitive substring to match in the record body.
         text: Option<String>,
@@ -1541,6 +1544,7 @@ pub enum UserRequest {
     /// Soft-delete a record by writing a tombstone.
     RecordDelete {
         user_id: String,
+        /// The schema's identity, `<publisher>/<name>`, written out (`RecordInsert`).
         schema_nsid: String,
         record_id: String,
         /// Delete only from this root, by its local id (RFC-0071 R17), or from
@@ -1553,10 +1557,10 @@ pub enum UserRequest {
         app_id: Option<String>,
     },
 
-    /// Open a single record by its `kotton://records/<nsid>/<id>` URL.
+    /// Open a single record by its `kotton://records/<publisher>/<name>/<id>` URL.
     RecordOpen {
         user_id: String,
-        /// The full `kotton://records/<nsid>/<id>` URL.
+        /// The full `kotton://records/<publisher>/<name>/<id>` URL.
         url: String,
     },
 
@@ -1610,6 +1614,7 @@ pub enum UserRequest {
     /// Retrieve the full JSON definition of a schema visible to `user_id`.
     SchemaGet {
         user_id: String,
+        /// The schema's identity, `<publisher>/<name>`, written out.
         nsid: String,
     },
 
@@ -1619,7 +1624,8 @@ pub enum UserRequest {
         app_id: String,
     },
 
-    /// Create or update a schema access grant for `(app_id, nsid)`.
+    /// Create or update a schema access grant for `(app_id, nsid)`, the schema by its
+    /// identity `<publisher>/<name>`.
     SchemaGrantSet {
         app_id: String,
         nsid: String,
@@ -1648,9 +1654,9 @@ pub enum UserRequest {
     },
 
     // -- Handler registry (v0.5) ----------------------------------------------
-    /// Register `app_id` as a handler for schema `nsid`.
+    /// Register `app_id` as a handler for schema `nsid`, by its identity.
     ///
-    /// The first handler for an NSID becomes the default automatically.
+    /// The first handler for a schema becomes the default automatically.
     RegisterHandler {
         app_id: String,
         nsid: String,
@@ -1663,13 +1669,13 @@ pub enum UserRequest {
         app_id: String,
         nsid: String,
     },
-    /// Return the default handler for a schema NSID.
+    /// Return the default handler for a schema, by its identity.
     GetHandlerFor {
         nsid: String,
     },
-    /// Return all registered handlers, ordered by NSID then app_id.
+    /// Return all registered handlers, ordered by schema then app_id.
     ListHandlers,
-    /// Override the default handler for a schema NSID.
+    /// Override the default handler for a schema, by its identity.
     ///
     /// `app_id` must already be registered for `nsid`.
     SetDefaultHandler {
@@ -1682,7 +1688,7 @@ pub enum UserRequest {
     ///
     /// The daemon parses the manifest, writes the `.wasm` file to the app store
     /// directory, stores metadata in the `app_registry` table, and registers
-    /// the app as a handler for each NSID listed in `handler_for`.
+    /// the app as a handler for each schema listed in `handler_for`.
     AppInstall {
         /// The user_id on whose behalf the app is being installed.
         ///
@@ -1865,7 +1871,7 @@ pub enum UserRequest {
     ///   `"names"`, the people registered on this device and what they are
     ///   called.
     ///
-    /// Every other key, `"record_url"` (a `kotton://records/<nsid>/<id>` deep
+    /// Every other key, `"record_url"` (a `kotton://records/<publisher>/<name>/<id>` deep
     /// link) among them, reaches the app unchanged. An empty list opens the
     /// app's default view.
     AppLaunch {
@@ -1991,7 +1997,7 @@ pub enum UserRequest {
         org_did: String,
         /// DID of the member receiving the grant.
         member_did: String,
-        /// Capability strings in display form, e.g. `["schema.read:sh.kotton.notes"]`.
+        /// Capability strings in display form, e.g. `["schema.read:<publisher>/<name>"]`.
         caps: Vec<String>,
         /// Optional TTL in seconds. `None` means no expiry (not recommended
         /// for cross-DID grants).
@@ -2486,7 +2492,7 @@ pub enum UserRequest {
     // -- Post-quantum migration (M25c) -----------------------------------------
 
     // -- Peer messaging (peer_messaging sprint) --------------------------------
-    /// Encrypt and store an encrypted DM as `sh.kotton.message.v1`.
+    /// Encrypt and store an encrypted DM as `message.v1`.
     ///
     /// The daemon looks up `recipient_did`'s Ed25519 public key from the
     /// contacts/identity registry, performs X25519 ECDH with an ephemeral
@@ -2504,10 +2510,10 @@ pub enum UserRequest {
         thread_id: Option<String>,
     },
 
-    /// Encrypt and store a channel message as `sh.kotton.message.v1`.
+    /// Encrypt and store a channel message as `message.v1`.
     ///
     /// `channel_did` identifies the channel (typically the org DID). The daemon
-    /// looks up the channel's symmetric key from a `sh.kotton.channel.key-grant`
+    /// looks up the channel's symmetric key from a `channel.key-grant`
     /// record stored for this user and encrypts the plaintext with it.
     MessageChannelSend {
         user_id: String,
@@ -2522,7 +2528,7 @@ pub enum UserRequest {
     /// The daemon generates a 32-byte random channel key via
     /// `channel_key_generate()`, wraps it with X25519 ECDH to the creator's
     /// own `did:…` public key, and stores it as a
-    /// `sh.kotton.channel.key-grant` record at **epoch 0** in the creator's
+    /// `channel.key-grant` record at **epoch 0** in the creator's
     /// record store. Every later membership change mints the next epoch.
     ///
     /// Answered with `ChannelCreated`, carrying the channel's id.
@@ -2607,7 +2613,7 @@ pub enum UserRequest {
         channel_did: String,
     },
 
-    /// Return up to `limit` raw (encrypted) `sh.kotton.message.v1` records for
+    /// Return up to `limit` raw (encrypted) `message.v1` records for
     /// a channel, newest-filed first — by `filed_at`, the stamp the person's
     /// own device filed each with — each carrying `filed_at`.
     ///
@@ -2624,7 +2630,7 @@ pub enum UserRequest {
         limit: u32,
     },
 
-    /// Return all `sh.kotton.message.v1` records addressed to `user_id`
+    /// Return all `message.v1` records addressed to `user_id`
     /// (i.e. where `to_did` equals the user's DID), newest-filed first and
     /// capped at 50. Each carries `filed_at` — when this person's device filed
     /// it, on that device's clock — which is the key a conversation is ordered by;
@@ -2706,7 +2712,7 @@ pub enum UserRequest {
 
     /// Decrypt a channel message on behalf of `user_id`.
     ///
-    /// The daemon looks up the `sh.kotton.channel.key-grant` record for
+    /// The daemon looks up the `channel.key-grant` record for
     /// `user_id` + `channel_did`, unwraps the channel key, then decrypts
     /// `body` with it. Answered with `Decrypted`, carrying the `plaintext`, on
     /// success.
@@ -2726,7 +2732,7 @@ pub enum UserRequest {
     /// A client on the person's session sends it when it opens a window for an
     /// app, through `KottonClient::window_opened`; no client in the tree does.
     WindowOpened {
-        /// Reverse-domain app identifier, e.g. `"sh.kotton.notes"`.
+        /// Reverse-domain app identifier, e.g. `"com.acme.notes"`.
         app_id: String,
         /// UUID that uniquely identifies this open instance.
         instance_id: String,
@@ -4288,18 +4294,18 @@ mod trust_origin_tests {
     fn handler_mutation_is_local_only_though_reading_is_not() {
         let register = UserRequest::RegisterHandler {
             app_id: "sh.kotton.notes".into(),
-            nsid: "sh.kotton.contacts".into(),
+            nsid: "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/contacts".into(),
         };
         let unregister = UserRequest::UnregisterHandler {
             app_id: "sh.kotton.notes".into(),
-            nsid: "sh.kotton.contacts".into(),
+            nsid: "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/contacts".into(),
         };
         let set_default = UserRequest::SetDefaultHandler {
             app_id: "sh.kotton.notes".into(),
-            nsid: "sh.kotton.contacts".into(),
+            nsid: "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/contacts".into(),
         };
         let get_for = UserRequest::GetHandlerFor {
-            nsid: "sh.kotton.contacts".into(),
+            nsid: "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/contacts".into(),
         };
         for verb in [&register, &unregister, &set_default] {
             assert_eq!(

@@ -2543,7 +2543,7 @@ mod tests {
         // untestable until a second tree is addressable — the browser half.
         let not_a_path = CapabilityGrant::schema(
             CapabilityKind::Read,
-            kotton_schemas::Nsid::new("sh.kotton.notes").unwrap(),
+            kotton_schemas::SchemaId::from_static(kotton_common::namespace::NSID_NOTES),
         );
         assert_eq!(
             set.meaning_of_vfs_grant(&not_a_path),

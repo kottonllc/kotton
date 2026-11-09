@@ -214,16 +214,14 @@ pub(crate) async fn enrol_vault_from(
     )
 }
 
+/// The suite's `notes` schema, signed by its publisher, as `schema register` takes it.
 fn notes_schema() -> String {
-    let schema = kotton_schemas::definition::SchemaDefinition::new(
-        kotton_schemas::nsid::Nsid::new("com.test.notes").unwrap(),
-        1,
-        vec![kotton_schemas::field::SchemaField::required(
-            "title",
-            kotton_schemas::field::FieldType::String,
-        )],
-    );
-    serde_json::to_string(&schema).unwrap()
+    crate::common::signed_title_schema_json("notes")
+}
+
+/// The identity of [`notes_schema`].
+fn notes_id() -> String {
+    crate::common::suite_schema("notes")
 }
 
 /// A person with one device and a file and a record, ready to push.
@@ -240,7 +238,7 @@ async fn a_person_with_things(
     client.write_file(user, "notes.txt", note).await.expect("write_file");
     client.schema_register(user, &notes_schema()).await.expect("schema");
     client
-        .record_insert(user, "com.test.notes", serde_json::json!({ "title": "survives" }))
+        .record_insert(user, &notes_id(), serde_json::json!({ "title": "survives" }))
         .await
         .expect("record_insert");
     phrase
@@ -331,7 +329,7 @@ async fn a_vault_keeps_what_a_device_pushes_and_gives_it_back_from_the_phrase() 
     let (_cold_device, mut cold) = recover_from(&phrase, "alice", &identity).await;
     assert_eq!(cold.read_file("alice", "notes.txt").await.expect("file").as_slice(), NOTE);
     let recs = cold
-        .record_query("alice", "com.test.notes", vec![], None, None)
+        .record_query("alice", &notes_id(), vec![], None, None)
         .await
         .expect("records");
     assert_eq!(recs.len(), 1);
@@ -537,7 +535,7 @@ async fn a_vault_on_a_bucket_keeps_what_a_device_pushes_and_gives_it_back_from_t
     let (_cold_device, mut cold) = recover_from(&phrase, "alice", &identity).await;
     assert_eq!(cold.read_file("alice", "notes.txt").await.expect("file").as_slice(), NOTE);
     let recs = cold
-        .record_query("alice", "com.test.notes", vec![], None, None)
+        .record_query("alice", &notes_id(), vec![], None, None)
         .await
         .expect("records");
     assert_eq!(recs.len(), 1);
@@ -880,7 +878,7 @@ async fn a_live_record_insert_from_a_paired_device_leaves_no_state_at_the_vault(
     // paired device under its own key.
     let insert = UserRequest::RecordInsert {
         user_id: "alice".into(),
-        schema_nsid: "sh.kotton.notes".into(),
+        schema_nsid: kotton_common::namespace::NSID_NOTES.into(),
         record: serde_json::json!({ "title": "planted", "body": "sent over the vault's peer wire" }),
         root: None,
         app_id: None,
@@ -4471,7 +4469,7 @@ async fn a_person_moves_vaults_and_the_first_landlord_is_never_asked() {
     let (_cold_device, mut cold) = recover_from(&phrase, "alice", &identity_b).await;
     assert_eq!(cold.read_file("alice", "notes.txt").await.expect("file").as_slice(), NOTE);
     let recs = cold
-        .record_query("alice", "com.test.notes", vec![], None, None)
+        .record_query("alice", &notes_id(), vec![], None, None)
         .await
         .expect("records");
     assert_eq!(recs.len(), 1, "the record came with the file");

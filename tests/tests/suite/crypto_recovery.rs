@@ -34,7 +34,7 @@ use kotton_record::{
 use kotton_secret::MemorySecrets;
 use kotton_device::config::RuntimeConfig;
 use kotton_device::DeviceRuntime;
-use kotton_schemas::{CoreSchema, Nsid};
+use kotton_schemas::{CoreSchema, SchemaId};
 use kotton_common::crypto::kdf_labels;
 use serde_json::json;
 use std::sync::Arc;
@@ -42,7 +42,7 @@ use tempfile::TempDir;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-const NOTES_NSID: &str = "sh.kotton.notes";
+const NOTES_NSID: &str = kotton_common::namespace::NSID_NOTES;
 const PIN: &str = "123456";
 
 /// Return a unique user id per test to avoid collisions in shared maps.
@@ -80,7 +80,7 @@ async fn insert_note(store: &SqliteRecordStore, content: &str) -> String {
         .create_table(&CoreSchema::Notes.definition())
         .await
         .expect("create_table");
-    let nsid = Nsid::new(NOTES_NSID).unwrap();
+    let nsid = SchemaId::from_static(NOTES_NSID);
     store
         .insert(
             &nsid,
@@ -102,7 +102,7 @@ async fn assert_note_readable(store: &SqliteRecordStore, content: &str) {
         .create_table(&CoreSchema::Notes.definition())
         .await
         .expect("create_table (idempotent)");
-    let nsid = Nsid::new(NOTES_NSID).unwrap();
+    let nsid = SchemaId::from_static(NOTES_NSID);
     let records = store
         .query(&nsid, RecordFilter::new())
         .await

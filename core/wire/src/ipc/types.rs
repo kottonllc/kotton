@@ -114,16 +114,17 @@ pub enum SyncDirection {
 
 /// A single entry in the handler registry.
 ///
-/// Maps an app identifier to a schema NSID it can render.  At most one entry
-/// per NSID may have `is_default = true`; the GUI uses this to choose which
+/// Maps an app identifier to a schema it can render.  At most one entry
+/// per schema may have `is_default = true`; the GUI uses this to choose which
 /// app to open when the user navigates to a record URL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandlerEntry {
     /// Reverse-domain app identifier, e.g. `"com.acme.notes-pro"`.
     pub app_id: String,
-    /// Schema NSID this app can render, e.g. `"sh.kotton.notes"`.
+    /// The schema this app can render, by its identity `<publisher>/<name>`. The field
+    /// keeps the name it had when the identity was a reverse-domain string.
     pub nsid: String,
-    /// Whether this is the user's preferred handler for the NSID.
+    /// Whether this is the user's preferred handler for the schema.
     pub is_default: bool,
 }
 
@@ -134,7 +135,7 @@ pub struct HandlerEntry {
 pub struct SchemaGrantEntry {
     /// Reverse-domain app identifier.
     pub app_id: String,
-    /// Schema NSID this grant covers.
+    /// The schema this grant covers, by its identity `<publisher>/<name>`.
     pub nsid: String,
     /// App may query records from this schema.
     pub can_read: bool,
@@ -161,7 +162,7 @@ pub struct InstalledApp {
     pub name: String,
     /// App version string.
     pub version: String,
-    /// Capability grants in display form, e.g. `"schema.read:sh.kotton.notes"`.
+    /// Capability grants in display form, e.g. `"schema.read:<publisher>/<name>"`.
     pub capabilities: Vec<String>,
     /// ISO 8601 installation timestamp.
     pub installed_at: String,

@@ -107,8 +107,8 @@ const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
     // RecordStore is a trait: the tests call `store.query(..)`, which needs it in
     // scope even though no line here names it.
     use kotton_record::record_store::{ChangesetRow, RecordFilter, RecordStore as _};
-    use kotton_schemas::nsid::Nsid;
     use kotton_schemas::definition::SchemaDefinition;
+    use kotton_schemas::{SchemaId, SchemaName};
     use kotton_schemas::field::{FieldType, SchemaField};
     use serde_json::json;
     use tempfile::TempDir;
@@ -141,21 +141,30 @@ const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
         .unwrap()
     }
 
-    /// A test schema in a *test* namespace.
+    /// The key these tests publish their own schemas under, and sign them with: a
+    /// registration is refused without its publisher's signature.
+    fn test_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[0x51; 32])
+    }
+
+    /// A definition under the test key, `name`d and at `revision`, signed.
+    fn signed(name: &str, revision: u32, fields: Vec<SchemaField>) -> (SchemaId, SchemaDefinition) {
+        let publisher = kotton_crypto::schema_signature::publisher_of(&test_key().verifying_key());
+        let id = SchemaId::new(publisher, SchemaName::new(name).unwrap()).unwrap();
+        let mut def = SchemaDefinition::new(id.clone(), revision, fields);
+        kotton_crypto::schema_signature::sign(&mut def, &test_key()).unwrap();
+        (id, def)
+    }
+
+    /// A test schema under the tests' own key.
     ///
-    /// This used to name `sh.kotton.notes` with a single field, while the real
+    /// This used to name the core `notes` with a single field, while the real
     /// core schema has five. It appeared to register and did not: the
     /// version-equal branch returned Ok as a no-op, so every test below ran
     /// against the core definition rather than this one. Naming an owned
-    /// namespace makes the registration real and the tests mean what they say.
-    fn notes_schema() -> (Nsid, SchemaDefinition) {
-        let nsid = Nsid::new("com.test.notes").unwrap();
-        let def = SchemaDefinition::new(
-            nsid.clone(),
-            1,
-            vec![SchemaField::required("title", FieldType::String)],
-        );
-        (nsid, def)
+    /// publisher makes the registration real and the tests mean what they say.
+    fn notes_schema() -> (SchemaId, SchemaDefinition) {
+        signed("notes", 1, vec![SchemaField::required("title", FieldType::String)])
     }
 
     /// Every changeset row currently carried by the user's history log.
@@ -242,7 +251,7 @@ const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
         let mount = alice.get_remote("local").unwrap();
         let row = ChangesetRow {
             id: "rec-1".to_string(),
-            schema_nsid: nsid.as_str().to_string(),
+            schema_nsid: nsid.to_string(),
             body: json!({"title": "from a peer"}),
             updated_at: 100,
             revision: 0,
@@ -395,9 +404,9 @@ const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
         assert_eq!(recs.len(), 1, "only the live record survives recovery");
         assert_eq!(recs[0].body["title"], "beta");
     }
-    /// Article IX seals `sh.kotton.*`. The registry has always refused it, but as
+    /// A core schema is never registered. The registry has always refused it, but as
     /// its *last* step — the migration ran first, so a proposal naming a core
-    /// schema at a higher version altered every open store's table and was only
+    /// schema at a higher revision altered every open store's table and was only
     /// then rejected, leaving tables migrated for a definition nothing accepted.
     #[tokio::test]
     async fn a_core_schema_is_refused_before_anything_is_migrated() {
@@ -405,50 +414,99 @@ const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
         let rt = make_runtime(&temp).await;
         let _alice = create_resident(&rt, "alice").await;
 
-        // Same NSID as the core schema, higher version — the shape that used to
-        // reach `migrate_table`.
+        // The core schema's identity, higher revision — the shape that used to
+        // reach `migrate_table`. Unsigned, as the core set is: the refusal is the
+        // identity's, before the signature is even looked at.
         let mut def = kotton_schemas::core::CoreSchema::Notes.definition();
-        def.version = 99;
+        def.revision = 99;
         let json = serde_json::to_string(&def).unwrap();
 
         let err = schema_register(&rt, "alice", &json)
             .await
-            .expect_err("a core NSID must be refused");
+            .expect_err("a core identity must be refused");
         let msg = err.to_string();
         assert!(msg.contains("core schema"), "unhelpful error: {msg}");
-        assert!(msg.contains("Article IX"), "the reason should say why: {msg}");
+        assert!(msg.contains("not through registration"), "the reason should say why: {msg}");
 
-        // And the sealed definition is untouched.
+        // And the compiled-in definition is untouched.
         let reg = rt.schema_registry.read().unwrap();
-        let live = reg.get(&def.nsid).expect("core schema still registered");
-        assert_eq!(live.version, 1, "the core definition must not have moved");
+        let live = reg.get(&def.id()).expect("core schema still registered");
+        assert_eq!(live.revision, 1, "the core definition must not have moved");
     }
 
-    /// A version upgrade migrates the caller's table and lands in the registry.
-    /// Pins the fix for a latent bug: `SchemaRegistry::register` used to refuse
-    /// any existing NSID, so an upgrade migrated the store's table and then
-    /// failed to update the registry — tables moved, registry stale, caller got
-    /// an error.
+    /// A definition that is not signed by its publisher is no schema at all: refused
+    /// unsigned, refused under a key that is not the publisher's, and refused once a field
+    /// changed under the signature — each before anything is migrated or kept.
     #[tokio::test]
-    async fn a_version_upgrade_migrates_and_updates_the_registry() {
+    async fn a_definition_its_publisher_did_not_sign_is_refused() {
         let temp = TempDir::new().unwrap();
         let rt = make_runtime(&temp).await;
         let _alice = create_resident(&rt, "alice").await;
 
-        let nsid = Nsid::new("com.acme.upgradeable").unwrap();
-        let v1 = SchemaDefinition::new(
-            nsid.clone(),
-            1,
-            vec![SchemaField::required("title", FieldType::String)],
-        );
+        let (id, def) = signed("unsigned", 1, vec![SchemaField::required("title", FieldType::String)]);
+        let mut unsigned = def.clone();
+        unsigned.signature = None;
+        let err = schema_register(&rt, "alice", &serde_json::to_string(&unsigned).unwrap())
+            .await
+            .expect_err("unsigned");
+        assert!(err.to_string().contains("not signed by its publisher"), "{err}");
+
+        let mut other_key = def.clone();
+        kotton_crypto::schema_signature::sign(
+            &mut other_key,
+            &ed25519_dalek::SigningKey::from_bytes(&[0x52; 32]),
+        )
+        .expect_err("sign refuses a key that is not the publisher");
+        other_key.signature = {
+            let (_, theirs) = {
+                let key = ed25519_dalek::SigningKey::from_bytes(&[0x52; 32]);
+                let publisher = kotton_crypto::schema_signature::publisher_of(&key.verifying_key());
+                let mut theirs = SchemaDefinition::new(
+                    SchemaId::new(publisher, SchemaName::new("unsigned").unwrap()).unwrap(),
+                    1,
+                    vec![SchemaField::required("title", FieldType::String)],
+                );
+                kotton_crypto::schema_signature::sign(&mut theirs, &key).unwrap();
+                ((), theirs)
+            };
+            theirs.signature
+        };
+        let err = schema_register(&rt, "alice", &serde_json::to_string(&other_key).unwrap())
+            .await
+            .expect_err("another key's signature");
+        assert!(err.to_string().contains("not signed by its publisher"), "{err}");
+
+        let mut changed = def.clone();
+        changed.fields.push(SchemaField::nullable("extra", FieldType::String));
+        let err = schema_register(&rt, "alice", &serde_json::to_string(&changed).unwrap())
+            .await
+            .expect_err("changed under the signature");
+        assert!(err.to_string().contains("not signed by its publisher"), "{err}");
+
+        let reg = rt.schema_registry.read().unwrap();
+        assert!(reg.get(&id).is_none(), "a refused definition reached the registry");
+    }
+
+    /// A revision upgrade migrates the caller's table and lands in the registry.
+    /// Pins the fix for a latent bug: `SchemaRegistry::register` used to refuse
+    /// any existing identity, so an upgrade migrated the store's table and then
+    /// failed to update the registry — tables moved, registry stale, caller got
+    /// an error.
+    #[tokio::test]
+    async fn a_revision_upgrade_migrates_and_updates_the_registry() {
+        let temp = TempDir::new().unwrap();
+        let rt = make_runtime(&temp).await;
+        let _alice = create_resident(&rt, "alice").await;
+
+        let (nsid, v1) = signed("upgradeable", 1, vec![SchemaField::required("title", FieldType::String)]);
         schema_register(&rt, "alice", &serde_json::to_string(&v1).unwrap())
             .await
             .unwrap();
         let store = record_store(&rt, "alice");
         store.create_table(&v1).await.unwrap();
 
-        let v2 = SchemaDefinition::new(
-            nsid.clone(),
+        let (_, v2) = signed(
+            "upgradeable",
             2,
             vec![
                 SchemaField::required("title", FieldType::String),
@@ -461,32 +519,27 @@ const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
 
         let reg = rt.schema_registry.read().unwrap();
         assert_eq!(
-            reg.get(&nsid).unwrap().version,
+            reg.get(&nsid).unwrap().revision,
             2,
             "the registry must carry the upgraded definition"
         );
     }
 
-    /// The seal is narrow. A developer's own namespace is not gated at all —
-    /// no approval, no allowlist — which is what makes reverse-domain NSIDs
-    /// permissionless and lets an app declare and host its own schemas.
+    /// Nothing is reserved. A publisher's own key is not gated at all — no approval, no
+    /// registry to petition — which is what makes naming a schema by the key that
+    /// publishes it permissionless and lets an app declare and host its own schemas.
     #[tokio::test]
-    async fn an_app_namespace_registers_freely() {
+    async fn a_publishers_own_schema_registers_freely() {
         let temp = TempDir::new().unwrap();
         let rt = make_runtime(&temp).await;
         let _alice = create_resident(&rt, "alice").await;
 
-        let nsid = Nsid::new("com.acme.pinnable-note").unwrap();
-        let def = SchemaDefinition::new(
-            nsid.clone(),
-            1,
-            vec![SchemaField::required("title", FieldType::String)],
-        );
+        let (nsid, def) = signed("pinnable-note", 1, vec![SchemaField::required("title", FieldType::String)]);
         let json = serde_json::to_string(&def).unwrap();
 
         schema_register(&rt, "alice", &json)
             .await
-            .expect("an app namespace needs no permission");
+            .expect("a publisher's own key needs no permission");
 
         let reg = rt.schema_registry.read().unwrap();
         assert!(reg.is_app(&nsid));
