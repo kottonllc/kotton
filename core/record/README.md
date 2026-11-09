@@ -13,7 +13,9 @@ their pools with it.
 `RecordStore` is the async trait and `SqliteRecordStore` its implementation, on rusqlite with
 SQLCipher. Each person has their own `records.db`, opened with their key (`SqliteRecordStore::open`
 takes the key, or none for an unkeyed store in a test). A table is created on demand from a
-`SchemaDefinition`, one per schema NSID (`sh.kotton.notes` becomes `sh_kotton_notes`), in
+`SchemaDefinition`, one per schema NSID, by a name that is that NSID's alone (`sh.kotton.notes`
+becomes `sh_kotton_notes`, `sh.kotton.channel.key-grant` becomes `sh_kotton_channel_key__grant`;
+a dot is one underscore and a hyphen two, so no two schemas share a table), in
 `STRICT` mode under the WAL journal. `insert`, `query` and `delete` take the `Nsid` they act on,
 and `RecordFilter::new()` builds a query by its methods: a field equal to a value, a text
 search, a limit and an offset, a cursor, the roots.

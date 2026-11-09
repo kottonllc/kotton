@@ -315,6 +315,14 @@ pub enum RecordStoreError {
     /// its own act, and nothing here performs it.
     #[error("record {0} belongs to another root")]
     InAnotherRoot(String),
+
+    /// A write naming the id of a row another schema holds.
+    ///
+    /// A row is one schema's, and a table is one schema's (`nsid_to_table`);
+    /// a table written before that held two, and a replace by id across them
+    /// would overwrite a record a grant on this schema never reached.
+    #[error("record {0} is held under another schema")]
+    UnderAnotherSchema(String),
 }
 
 pub type Result<T> = std::result::Result<T, RecordStoreError>;
