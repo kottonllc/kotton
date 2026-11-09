@@ -187,4 +187,6 @@ them on any host, and grant them to whom you choose.
 ## Pre-alpha
 
 Kotton is **pre-alpha**. Put nothing in it you cannot afford to lose. A release is a signed tag
-of the distribution; until the first one exists, the first line has nothing to download.
+of the distribution; until the first one exists, the first line has nothing to download. The
+guides under [`docs/`](docs/README.md) say what builds on each platform the protocol names,
+what the gate holds there on every pull request, and what it does not yet.
