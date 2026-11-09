@@ -8342,6 +8342,7 @@ dependencies = [
  "inout",
  "itertools",
  "itoa",
+ "kotton-device",
  "kotton-ipc",
  "kotton-secret",
  "kotton-store",

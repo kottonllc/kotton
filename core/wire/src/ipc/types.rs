@@ -882,6 +882,31 @@ impl MadeDrive {
     }
 }
 
+/// A lease a vault keeps on one of a tenant's drives, or on their making of
+/// one, by the id the vault minted when a device of theirs took it: sixteen
+/// random bytes, fresh for every take, held in the vault's memory only and
+/// never sent to another vault (kotton-protocol's *A drive is where things live
+/// and a device keeps what its person chose*, the lease the drive model names;
+/// kotton #143 built it). It is a fencing token: a retire
+/// of a made drive names the lease its device holds on it, and one that has
+/// lapsed, been let go or been taken by another device since is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DriveLease(pub [u8; 16]);
+
+/// What a lease is on (`TenantDriveHold`): one made drive's tree, held by a
+/// device while it moves the drive, so that no other device writes into it,
+/// names it or retires it meanwhile; or the tenant's making of a drive, held
+/// at one vault by a device while it makes one, so two devices making one
+/// name at once make one drive. Neither names anything the vault does not
+/// already keep: the tree is its own id, and the making is no name at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Holding {
+    /// A made drive's tree, by its id at this vault.
+    Drive(MadeDrive),
+    /// The tenant's making of a drive, whatever its name.
+    Making,
+}
+
 /// One of a tenant's drives, as the vault that keeps it lists it
 /// ([`crate::ipc::UserRequest::TenantDrives`]): the tree it is kept under, the
 /// name a device of the person's sealed for it, and the bytes it holds.
@@ -1288,6 +1313,18 @@ mod made_drive_tests {
         for not in [TENANCY_TREE, "drive-", "drive-AB", "drive-../x", &format!("drive-{}", "AB".repeat(16)), &format!("{tree}0")] {
             assert_eq!(MadeDrive::from_tree(not), None, "{not}");
         }
+    }
+
+    /// A lease and what it is on as they cross: sixteen bytes, and a drive
+    /// named by its tree's id or the making named by no name at all.
+    #[test]
+    fn a_lease_and_what_it_holds_round_trip() {
+        let lease = DriveLease([3; 16]);
+        assert_eq!(serde_json::from_value::<DriveLease>(serde_json::to_value(lease).unwrap()).unwrap(), lease);
+        for holding in [Holding::Drive(MadeDrive([1; 16])), Holding::Making] {
+            assert_eq!(serde_json::from_value::<Holding>(serde_json::to_value(holding).unwrap()).unwrap(), holding);
+        }
+        assert_eq!(serde_json::to_value(Holding::Making).unwrap(), "Making");
     }
 
     /// The descriptor and a vault's listing as they cross: the sealed name as

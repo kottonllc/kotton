@@ -6,6 +6,11 @@ license.workspace = true
 publish = false
 description = "The machine's own authority — device identity and node configuration."
 
+[features]
+# `DeviceRuntime::test_hooks`: pauses a test sets to order two devices' verbs
+# (kotton #143). The integration suite turns it on; no daemon's build does.
+test-support = []
+
 [dependencies]
 anyhow = "1.0"
 
