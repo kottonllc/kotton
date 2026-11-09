@@ -51,6 +51,15 @@ pub fn schema_list(reg: &SchemaRegistry, user_id: &str) -> Vec<String> {
 /// never registered here — it is compiled in and admitted as core by the registry — so its
 /// being unsigned before the first tag costs this path nothing.
 ///
+/// ## The form
+///
+/// The signature is over the digest of the definition's canonical form, so the document
+/// handed in must be the definition and nothing beside it: with `signature` and
+/// `forked_from` set aside, its own canonical form is the parsed definition's, or it is
+/// refused before the signature is looked at. A member the definition does not have, an
+/// omitted `nullable`, or a `description` of `null` would otherwise share a digest and a
+/// signature with the document they are not.
+///
 /// ## Migration enforcement (M17a)
 ///
 /// If a schema with the same identity is already registered, the revision is

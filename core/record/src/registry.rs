@@ -333,13 +333,13 @@ mod tests {
         serde_json::to_string(def).expect("a definition serializes")
     }
 
-    /// Build a minimal app schema for testing, under [`TEST_PUBLISHER`] unless `name`
-    /// is already a whole identity.
     /// How many core schemas a fresh registry holds: the core set less the held back.
     fn registered_core() -> usize {
         CoreSchema::all().iter().filter(|cs| !cs.is_held_back()).count()
     }
 
+    /// Build a minimal app schema for testing, under [`TEST_PUBLISHER`] unless `name`
+    /// is already a whole identity.
     fn app_schema(name: &str) -> SchemaDefinition {
         let id = if name.contains('/') { id(name) } else { id(&test_id(name)) };
         SchemaDefinition::new(

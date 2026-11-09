@@ -67,8 +67,11 @@ carried and kept verbatim, not dropped (`replication::snapshot_records`).
 compiled in, and what `schema register` was handed: a definition signed by its publisher, the
 key its identity names, checked by `kotton_crypto::schema_signature` before anything is
 migrated or kept. A definition that is unsigned, signed by another key, or changed under its
-signature is refused, and so is one naming a core schema, which changes in the tree and not
-through registration.
+signature is refused; so is a document that is not the definition and nothing beside it, since
+the digest is taken over the definition's canonical form; and so is one naming a core schema,
+which changes in the tree and not through registration. Two of the core set, `secret` and
+`access-log`, are published and not yet known to a device: no record is kept under either
+until the grant refusal and the search exclusion they need are built.
 
 ## The `record` verbs
 
