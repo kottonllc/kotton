@@ -380,7 +380,7 @@ pub async fn register_and_persist(
 /// importer's shape — through [`crate::schema_cmds::declare`], which applies the revision
 /// rules and checks no signature, since a schema of Kotton's carries none before the first
 /// tag and this definition never arrived in a request.
-pub async fn declare_and_persist(
+pub(crate) async fn declare_and_persist(
     schema_registry: &Arc<RwLock<SchemaRegistry>>,
     store: &Arc<SqliteRecordStore>,
     user_db: &Arc<SqlitePool>,

@@ -94,11 +94,45 @@ pub async fn schema_register(
         }
     }
 
+    // The document as it arrived is the one its digest is taken over, or it is refused. The
+    // signature is over the parsed definition's canonical form, and parsing forgets: an
+    // extra member, an omitted `nullable`, a `"description": null` all parse to a definition
+    // whose canonical form is not the received document's, so a signature would vouch for a
+    // document other than the one sent, and two documents would carry one version.
+    received_is_canonical(definition_json, &new_def)
+        .map_err(|e| anyhow!("'{id}' is not in the form its digest is taken over: {e}"))?;
+
     // The publisher's word on the definition, before anything is migrated or kept.
     kotton_crypto::schema_signature::verify(&new_def)
         .map_err(|e| anyhow!("'{id}' is not signed by its publisher: {e}"))?;
 
     declare(registry, store, new_def, user_id).await
+}
+
+/// Hold the received JSON to `def`, the definition it parsed to: the received object less
+/// `signature` and `forked_from` (the members the digest is not over) must have the same
+/// canonical form (RFC 8785) as `def`'s.
+fn received_is_canonical(
+    definition_json: &str,
+    def: &kotton_schemas::definition::SchemaDefinition,
+) -> std::result::Result<(), String> {
+    let mut received: serde_json::Value =
+        serde_json::from_str(definition_json).map_err(|e| e.to_string())?;
+    let Some(members) = received.as_object_mut() else {
+        return Err("the definition is not a JSON object".to_owned());
+    };
+    members.remove("signature");
+    members.remove("forked_from");
+    let received = kotton_schemas::canonical_json(&received).map_err(|e| e.to_string())?;
+    let parsed = def.canonical().map_err(|e| e.to_string())?;
+    if received == parsed {
+        Ok(())
+    } else {
+        Err("the document received has a member the definition does not, or writes one \
+             other than the definition does (an omitted `nullable`, a `null` for a member \
+             that is absent); send the definition as it serialises"
+            .to_owned())
+    }
 }
 
 /// Admit a definition **this tree's own code declares**, as `user_id`: the revision rules
@@ -110,7 +144,7 @@ pub async fn schema_register(
 /// shipped with the device, which is the same ground the core set is admitted on. **Never for
 /// a definition that arrived in a request**: that is [`schema_register`], and a request that
 /// names Kotton's publisher without Kotton's signature is refused there.
-pub async fn declare(
+pub(crate) async fn declare(
     registry: &RwLock<SchemaRegistry>,
     store: &SqliteRecordStore,
     new_def: kotton_schemas::definition::SchemaDefinition,
@@ -165,4 +199,121 @@ pub fn schema_get(reg: &SchemaRegistry, user_id: &str, id_str: &str) -> Result<S
         .get_for(user_id, &id)
         .ok_or_else(|| anyhow!("unknown schema: {id_str}"))?;
     serde_json::to_string_pretty(def).map_err(|e| anyhow!("serialize error: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kotton_common::namespace as ns;
+    use kotton_schemas::{FieldType, Publisher, SchemaDefinition, SchemaField, SchemaName};
+    use serde_json::{json, Value};
+
+    /// A registry and a store of the core set, in a directory the test holds.
+    fn a_device() -> (tempfile::TempDir, RwLock<SchemaRegistry>, SqliteRecordStore) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SqliteRecordStore::open(&dir.path().join("records.db"), None).expect("open");
+        (dir, RwLock::new(SchemaRegistry::new()), store)
+    }
+
+    /// A definition under a publisher of its own, with a nullable and a required field and a
+    /// description: every member the received document can be held to.
+    fn a_definition() -> SchemaDefinition {
+        let publisher = Publisher::from_ed25519_public_key(&[0x42; 32]);
+        SchemaDefinition::new(
+            SchemaId::new(publisher, SchemaName::new("bookmark").unwrap()).unwrap(),
+            1,
+            vec![
+                SchemaField::required("url", FieldType::String),
+                SchemaField::nullable("title", FieldType::String),
+            ],
+        )
+        .with_description("A bookmark.")
+    }
+
+    async fn register(doc: &Value) -> Result<()> {
+        let (_dir, registry, store) = a_device();
+        schema_register(&registry, &store, &doc.to_string(), "alice").await
+    }
+
+    async fn refused_for_its_form(doc: Value) {
+        let err = register(&doc).await.expect_err("refused");
+        assert!(err.to_string().contains("not in the form its digest is taken over"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_member_the_definition_does_not_have_is_refused() {
+        let mut doc = serde_json::to_value(a_definition()).unwrap();
+        doc["extra"] = json!("ignored by the parser, and so by the digest");
+        refused_for_its_form(doc).await;
+    }
+
+    #[tokio::test]
+    async fn a_member_a_field_does_not_have_is_refused() {
+        let mut doc = serde_json::to_value(a_definition()).unwrap();
+        doc["fields"][0]["note"] = json!("ignored by the parser");
+        refused_for_its_form(doc).await;
+    }
+
+    #[tokio::test]
+    async fn an_omitted_nullable_is_refused() {
+        let mut doc = serde_json::to_value(a_definition()).unwrap();
+        doc["fields"][0].as_object_mut().unwrap().remove("nullable");
+        refused_for_its_form(doc).await;
+    }
+
+    #[tokio::test]
+    async fn a_null_description_is_refused() {
+        let mut def = a_definition();
+        def.description = None;
+        let mut doc = serde_json::to_value(&def).unwrap();
+        doc["description"] = Value::Null;
+        refused_for_its_form(doc).await;
+    }
+
+    /// The document as the definition serialises, its members in another order and with
+    /// `signature` and `forked_from` beside it, is the form its digest is taken over: it
+    /// passes this check and goes on to the signature's, which it fails, being signed by no
+    /// key (a signed one is accepted end to end in the integration suite's
+    /// `schema_management`).
+    #[tokio::test]
+    async fn the_canonical_equivalent_document_is_accepted() {
+        let def = a_definition();
+        let doc = json!({
+            "signature": "AAAA",
+            "forked_from": format!("{}/notes", ns::NSID_PREFIX),
+            "description": "A bookmark.",
+            "fields": [
+                { "nullable": false, "type": "string", "name": "url" },
+                { "type": "string", "name": "title", "nullable": true }
+            ],
+            "revision": 1,
+            "name": "bookmark",
+            "publisher": def.publisher.as_str(),
+        });
+        let parsed: SchemaDefinition = serde_json::from_str(&doc.to_string()).unwrap();
+        received_is_canonical(&doc.to_string(), &parsed).expect("the canonical-equivalent document");
+        let err = register(&doc).await.expect_err("signed by no key");
+        assert!(err.to_string().contains("not signed by its publisher"), "{err}");
+    }
+
+    /// `secret` and `access-log` are held back from the registry until #449 and #450: a record
+    /// put under either is refused as under an unknown schema, and a registration of either is
+    /// refused as a core identity's, never admitted.
+    #[tokio::test]
+    async fn the_held_back_core_schemas_take_no_record_and_no_registration() {
+        let (_dir, registry, store) = a_device();
+        let err = crate::record_cmds::Record::new(&registry, &store)
+            .insert(ns::NSID_SECRET, json!({ "label": "bank", "value": "hunter2", "kind": "password" }))
+            .await
+            .expect_err("no record under a held-back schema");
+        assert!(err.to_string().contains("unknown schema"), "{err}");
+
+        for held_back in [kotton_schemas::CoreSchema::Secret, kotton_schemas::CoreSchema::AccessLog] {
+            let err = schema_register(&registry, &store, held_back.file(), "alice")
+                .await
+                .expect_err("a core identity is not registered");
+            assert!(err.to_string().contains("core schema"), "{err}");
+            assert!(registry.read().unwrap().get(&held_back.id()).is_none());
+        }
+    }
 }

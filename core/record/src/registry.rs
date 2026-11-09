@@ -7,7 +7,8 @@
 //! ## Lifecycle
 //!
 //! 1. **Construction** — [`SchemaRegistry::new`] populates the core Kotton
-//!    schemas from [`kotton_schemas::core::CoreSchema::all()`].
+//!    schemas from [`kotton_schemas::core::CoreSchema::all()`], less the two held back
+//!    ([`kotton_schemas::core::CoreSchema::is_held_back`]) until #449 and #450.
 //! 2. **Registration** — [`SchemaRegistry::register`] adds an app schema,
 //!    recording the registering user as an owner.
 //!
@@ -111,10 +112,12 @@ struct AppSchema {
 
 impl SchemaRegistry {
     /// Create a new registry pre-populated with the core set, [`CoreSchema::all`], each
-    /// under Kotton's publisher and admitted without a signature (module doc).
+    /// under Kotton's publisher and admitted without a signature (module doc), except the
+    /// two held back ([`CoreSchema::is_held_back`]): `secret` and `access-log` are published
+    /// and not registered until the grant refusal and the search exclusion land (#449, #450).
     pub fn new() -> Self {
         let mut core = HashMap::new();
-        for cs in CoreSchema::all() {
+        for cs in CoreSchema::all().iter().filter(|cs| !cs.is_held_back()) {
             let def = cs.definition();
             core.insert(def.id(), def);
         }
@@ -144,7 +147,7 @@ impl SchemaRegistry {
     ///   registered one.
     pub fn register(&mut self, def: SchemaDefinition, owner: &str) -> Result<()> {
         let id = def.id();
-        if self.core.contains_key(&id) {
+        if self.is_core(&id) {
             return Err(SchemaError::CoreConflict(id.to_string()));
         }
         match self.app.get_mut(&id) {
@@ -195,9 +198,9 @@ impl SchemaRegistry {
     ) -> Vec<String> {
         for def in defs {
             let id = def.id();
-            if self.core.contains_key(&id) {
+            if self.is_core(&id) {
                 // A core identity in app storage was written by hand. The
-                // compiled-in definition wins, always.
+                // compiled-in definition wins, always, and a held-back one stays out.
                 continue;
             }
             match self.app.get_mut(&id) {
@@ -279,9 +282,11 @@ impl SchemaRegistry {
     /// Return `true` if `nsid` is a core schema's identity: Kotton's publisher, the release
     /// key, and one of the compiled-in core names ([`CoreSchema::all`]). Another name under
     /// Kotton's publisher is not core, and a core name under another publisher is another
-    /// publisher's schema, which is why the whole identity is asked.
+    /// publisher's schema, which is why the whole identity is asked. A held-back core schema
+    /// ([`CoreSchema::is_held_back`]) is core though the registry does not hold it, so its
+    /// identity is refused to a registration as every core identity is.
     pub fn is_core(&self, nsid: &SchemaId) -> bool {
-        self.core.contains_key(nsid)
+        self.core.contains_key(nsid) || CoreSchema::all().iter().any(|cs| cs.id() == *nsid)
     }
 
     /// Return `true` if `nsid` refers to an app-supplied schema.
@@ -330,6 +335,11 @@ mod tests {
 
     /// Build a minimal app schema for testing, under [`TEST_PUBLISHER`] unless `name`
     /// is already a whole identity.
+    /// How many core schemas a fresh registry holds: the core set less the held back.
+    fn registered_core() -> usize {
+        CoreSchema::all().iter().filter(|cs| !cs.is_held_back()).count()
+    }
+
     fn app_schema(name: &str) -> SchemaDefinition {
         let id = if name.contains('/') { id(name) } else { id(&test_id(name)) };
         SchemaDefinition::new(
@@ -359,8 +369,8 @@ mod tests {
     #[test]
     fn new_registry_has_all_core_schemas() {
         let registry = SchemaRegistry::new();
-        let core = CoreSchema::all().len();
-        assert_eq!(registry.core.len(), core, "the core set, all of it");
+        let core = registered_core();
+        assert_eq!(registry.core.len(), core, "the core set, all of it but the held back");
         assert_eq!(
             registry.len(),
             core,
@@ -378,8 +388,6 @@ mod tests {
             ns::NSID_MESSAGES,
             ns::NSID_TASKS,
             ns::NSID_CLIPBOARD,
-            ns::NSID_SECRET,
-            ns::NSID_ACCESS_LOG,
         ] {
             let nsid = id(nsid_str);
             assert!(
@@ -390,6 +398,23 @@ mod tests {
                 registry.is_core(&nsid),
                 "{nsid_str} should be marked as core"
             );
+        }
+    }
+
+    /// `secret` and `access-log` are published and held back: a fresh registry holds
+    /// neither, so no record can be put under them, and both identities are still core, so a
+    /// registration of either is refused as one.
+    #[test]
+    fn the_held_back_core_schemas_are_core_and_not_registered() {
+        let mut registry = SchemaRegistry::new();
+        for nsid_str in [ns::NSID_SECRET, ns::NSID_ACCESS_LOG] {
+            let nsid = id(nsid_str);
+            assert!(registry.get(&nsid).is_none(), "{nsid_str} is held back");
+            assert!(!registry.list_for("alice").iter().any(|d| d.id() == nsid));
+            assert!(registry.is_core(&nsid), "{nsid_str} is still core");
+            let err = registry.register(app_schema(nsid_str), "alice").unwrap_err();
+            assert!(matches!(err, SchemaError::CoreConflict(_)), "{nsid_str}: {err:?}");
+            assert!(registry.get(&nsid).is_none(), "a refused registration admits nothing");
         }
     }
 
@@ -413,7 +438,7 @@ mod tests {
         let mut registry = SchemaRegistry::new();
         let def = app_schema("io.myapp.posts");
         registry.register(def, "alice").unwrap();
-        assert_eq!(registry.len(), CoreSchema::all().len() + 1);
+        assert_eq!(registry.len(), registered_core() + 1);
         assert!(registry.is_app(&id(&test_id("io.myapp.posts"))));
     }
 
@@ -441,7 +466,7 @@ mod tests {
         assert!(registry.get_for("bob", &nsid).is_some());
         assert_eq!(
             registry.len(),
-            CoreSchema::all().len() + 1,
+            registered_core() + 1,
             "one schema, two owners"
         );
     }
@@ -626,7 +651,7 @@ mod tests {
         let mut registry = SchemaRegistry::new();
         registry.register(app_schema("org.test.alpha"), "alice").unwrap();
         registry.register(app_schema("org.test.beta"), "alice").unwrap();
-        assert_eq!(registry.list().len(), CoreSchema::all().len() + 2);
+        assert_eq!(registry.list().len(), registered_core() + 2);
     }
 
     // ── scoped accessors ──────────────────────────────────────────────────

@@ -190,11 +190,15 @@ fn is_table_of_the_map(table: &str) -> bool {
 }
 
 /// The core set's names as they were written on disk before a schema was named by the key
-/// that publishes it, each with the identity it became. These are the only old-style names
-/// that were ever stored: a core schema's rows were written under them, and no other
-/// reverse-domain schema shipped. A stored `schema_nsid` that is one of these is read as its
-/// identity and moved to that identity's table on open; any other old-style string is left
-/// where it is, logged, as a row whose schema is no identity.
+/// that publishes it, each with the identity it became. A stored `schema_nsid` that is one of
+/// these is read as its identity and moved to that identity's table on open; any other
+/// old-style string is left where it is, logged, as a row whose schema is no identity.
+///
+/// Two names that were stored on main are deliberately not here: `sh.kotton.governance.record`
+/// and `import.calendar.event`. Neither was core then, and both were names an app could
+/// register, so a row under either may be an app's look-alike; mapping them would respell
+/// such a row into a core identity, Kotton's publisher vouching for a shape it never wrote.
+/// Rows under them stay where they are.
 const OLD_CORE_NAMES: &[(&str, &str)] = &[
     ("sh.kotton.notes", kotton_common::namespace::NSID_NOTES),
     ("sh.kotton.contacts", kotton_common::namespace::NSID_CONTACTS),

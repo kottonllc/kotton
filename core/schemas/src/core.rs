@@ -93,14 +93,18 @@ pub enum CoreSchema {
     /// reads it, and it must arrive on every device of the person's.
     KeepsWhole,
     /// A password or a token in the person's keychain: `label`, `value`, `kind`
-    /// (`password` or `token`) and `note`. No app reaches it: a schema grant on
-    /// it is refused and it is kept out of record search, under the keychain's
-    /// issue, which builds on this declaration.
+    /// (`password` or `token`) and `note`. Published, and not registered yet
+    /// ([`CoreSchema::is_held_back`]): no record can be put under it and no grant
+    /// reaches a row of it. The refusal of a grant on it and its exclusion from
+    /// record search are #449 and #450, under the keychain's issue, which builds on
+    /// this declaration.
     Secret,
     /// One thing a device's daemon was asked: `device`, `at`, `asker`, `door`,
     /// `act` and `what`. Kept on that device, and in a drive only when the
-    /// person pins the log there. No app reaches it, as `secret`, under the
-    /// access log's issue, which builds on this declaration.
+    /// person pins the log there. Published, and not registered yet, as `secret`:
+    /// no record can be put under it and no grant reaches a row of it until #449
+    /// and #450 land, under the access log's issue, which builds on this
+    /// declaration.
     AccessLog,
     /// A governance record: one record file of the project's board as a row
     /// (RFC-0088), the schema `client/record-file` converts to and from. Core
@@ -131,6 +135,16 @@ impl CoreSchema {
             CoreSchema::AccessLog,
             CoreSchema::GovernanceRecord,
         ]
+    }
+
+    /// Return `true` for a core schema that is published and not yet registered: `secret`
+    /// and `access-log`. Their files are here and their identities are core, so `schema
+    /// register` refuses either, but the registry does not admit them: a schema in the
+    /// registry is one a record can be put under and a grant can reach, and these two must be
+    /// reachable by no app. They are held back until the grant refusal and the search
+    /// exclusion land (issues #449 and #450).
+    pub fn is_held_back(self) -> bool {
+        matches!(self, CoreSchema::Secret | CoreSchema::AccessLog)
     }
 
     /// Return the identity of this core schema: Kotton's publisher and its name.

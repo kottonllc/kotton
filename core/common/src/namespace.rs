@@ -75,14 +75,17 @@ pub const NSID_PIN: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfD
 pub const NSID_KEEPS_WHOLE: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/keeps-whole";
 
 /// A password or a token in the person's keychain (the protocol's `schemas/kotton/secret`):
-/// `label`, `value`, `kind` (`password` or `token`) and `note`. No app reaches it: a schema
-/// grant on it is refused and it is kept out of record search, under the keychain's issue.
+/// `label`, `value`, `kind` (`password` or `token`) and `note`. Published and not registered
+/// yet, so no record can be put under it and no grant reaches a row of it; the refusal of a
+/// grant on it and its exclusion from record search are #449 and #450, under the keychain's
+/// issue.
 pub const NSID_SECRET: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/secret";
 
 /// One thing a device's daemon was asked (the protocol's `schemas/kotton/access-log`):
 /// `device`, `at`, `asker`, `door`, `act` and `what`. Kept on that device, and in a drive
-/// only when the person pins the log there. No app reaches it, as `secret`, under the
-/// access log's issue.
+/// only when the person pins the log there. Published and not registered yet, as `secret`:
+/// no record can be put under it and no grant reaches a row of it until #449 and #450, under
+/// the access log's issue.
 pub const NSID_ACCESS_LOG: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/access-log";
 
 /// A governance record: one record file of the project's board as a row (RFC-0088), the

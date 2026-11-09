@@ -23,7 +23,7 @@
 //! carries nothing across a process boundary.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use kotton_schemas::{DigestError, Publisher, SchemaDefinition};
 use thiserror::Error;
 
@@ -77,7 +77,10 @@ pub fn verify(def: &SchemaDefinition) -> Result<(), SchemaSignatureError> {
     let signature = Signature::from_bytes(&bytes);
     let key = key_of(&def.publisher)?;
     let digest = def.digest()?;
-    key.verify(&digest, &signature).map_err(|_| SchemaSignatureError::Invalid)
+    // Strict, as every other Ed25519 check in this crate is: a small-order key or `R` is
+    // refused, so a key with no secret behind it cannot be named as a publisher whose
+    // "signature" anyone can write.
+    key.verify_strict(&digest, &signature).map_err(|_| SchemaSignatureError::Invalid)
 }
 
 /// Sign `def` with `key`, which must be the key `def.publisher` names, and set its
@@ -181,6 +184,31 @@ mod tests {
         let good = signed(&key).signature.unwrap();
         def.signature = Some(good.trim_end_matches('=').to_string());
         assert!(matches!(verify(&def), Err(SchemaSignatureError::NotBase64(_))));
+    }
+
+    /// A publisher whose key is the identity point, a small-order point no secret stands
+    /// behind, and a forged signature with `R` the identity and `S` zero. Plain `verify`
+    /// accepts it over any digest: it checks `[S]B = R + [k]A`, and with `S = 0`, `R` the
+    /// identity and `A` the identity both sides are the identity whatever `k` is. The strict
+    /// check refuses a small-order key, so the forgery is refused.
+    #[test]
+    fn a_small_order_publisher_key_with_a_forged_signature_is_refused() {
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        let key = VerifyingKey::from_bytes(&identity).expect("the identity point decodes");
+        let mut forged = [0u8; 64];
+        forged[0] = 1; // R: the identity's encoding; S: 32 zero bytes.
+        let mut def = SchemaDefinition::new(
+            SchemaId::new(publisher_of(&key), SchemaName::new("bookmark").unwrap()).unwrap(),
+            1,
+            vec![SchemaField::required("url", FieldType::String)],
+        );
+        def.signature = Some(STANDARD.encode(forged));
+        // What the forgery passes: the check this module used to make.
+        use ed25519_dalek::Verifier as _;
+        key.verify(&def.digest().unwrap(), &Signature::from_bytes(&forged))
+            .expect("plain verify accepts the forgery, which is why it is not the check");
+        assert_eq!(verify(&def), Err(SchemaSignatureError::Invalid));
     }
 
     #[test]
