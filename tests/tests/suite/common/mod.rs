@@ -692,6 +692,39 @@ pub async fn lock_as_a_restart_would(daemon: &DeviceDaemon, user_id: &str) {
     daemon.evict_open_databases(user_id).await;
 }
 
+/// A threshold signature over `message` that `daemon` coordinates for `user_id` with
+/// every co-signer it is enrolled with: its own share here, each other share-holder's
+/// over the peer channel, where that daemon's `FrostSignRound` responder answers.
+///
+/// In process, through `kotton_peer::daemon::nodes::threshold_sign`, with what the
+/// daemon itself would hand it: its dialer, the key domain it declares, the person's
+/// resident store for the membership set, its machine database for the paired nodes,
+/// and its keychain. No request on the daemon's socket asks for a signature over bytes,
+/// so a test of the round reaches it here. `Err` is what the round said instead.
+pub async fn threshold_sign_in_process(
+    daemon: &DeviceDaemon,
+    user_id: &str,
+    message: &[u8],
+) -> Result<Vec<u8>, String> {
+    use kotton_device::users::DeviceUsers as _;
+    let runtime = daemon.runtime();
+    let Some(store) = daemon.users().get(user_id) else {
+        return Err(format!("user runtime '{user_id}' is not loaded"));
+    };
+    let domain_id = runtime.user_cek_domain_id(user_id, Some(store.as_ref()));
+    kotton_peer::daemon::nodes::threshold_sign(
+        &runtime.dialer(),
+        domain_id,
+        store.as_ref(),
+        &daemon.machine_db(),
+        user_id.to_string(),
+        message,
+        runtime.secrets_arc().as_ref(),
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))
+}
+
 impl Drop for TestEnv {
     fn drop(&mut self) {
         // Abort first so the accept loop stops taking new work, then close what

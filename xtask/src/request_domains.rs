@@ -11,7 +11,7 @@
 //!
 //! Assigning them is not mechanical. **Only 91 of the 151 carry their domain in
 //! their name.** The other 60 do not: `ReadFile` is `fs`, `Authenticate` is
-//! `session`, `TrustAdd` and `ContactList` are `peer`, `ThresholdSign` is `org`.
+//! `session`, `TrustAdd` and `ContactList` are `peer`, `FrostSignRound` is `org`.
 //! A name that does not say where a variant belongs is exactly how 151 of them
 //! ended up in one enum without anyone deciding to put them there.
 //!
@@ -296,7 +296,6 @@ const DOMAINS: &[(&str, &[&str])] = &[
             "OrgFrostSignContribute",
             "OrgFrostSignFinalize",
             "FrostSignRound",
-            "ThresholdSign",
         ],
     ),
     (

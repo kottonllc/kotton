@@ -1057,21 +1057,6 @@ pub enum UserRequest {
         payload: String,
     },
 
-    /// Coordinate a distributed FROST threshold signature over `message_hex`
-    /// across this node's own network (RFC-0036): this node signs with its share
-    /// and co-signs with every Full own-device member over the peer channel.
-    ///
-    /// Local-IPC only — it signs with this node's share, so a remote peer must
-    /// never trigger it (it is `Local`-tier); peers contribute via
-    /// `FrostSignRound` instead.
-    ///
-    /// Answered with `ThresholdSigned`.
-    ThresholdSign {
-        user_id: String,
-        /// Lowercase-hex of the message bytes to threshold-sign.
-        message_hex: String,
-    },
-
     /// Add a peer node by explicit DID, public key, and address — bypassing the
     /// pairing ceremony.  Used by the demo recipe, the `two_node_transfer`
     /// integration test, and any future tooling that exchanges identity out-of-band.
@@ -2874,7 +2859,6 @@ impl UserRequest {
             Self::VaultCapacity { user_id } => Some(user_id),
             Self::NodeRevoke { user_id, .. } => Some(user_id),
             Self::FrostSignRound { user_id, .. } => Some(user_id),
-            Self::ThresholdSign { user_id, .. } => Some(user_id),
             Self::PeerAdd { user_id, .. } => Some(user_id),
             Self::SyncConfigure { user_id, .. } => Some(user_id),
             Self::SyncRuleList { user_id } => Some(user_id),
@@ -3209,7 +3193,6 @@ impl UserRequest {
             Self::VaultCapacity { .. } => "VaultCapacity",
             Self::NodeRevoke { .. } => "NodeRevoke",
             Self::FrostSignRound { .. } => "FrostSignRound",
-            Self::ThresholdSign { .. } => "ThresholdSign",
             Self::PeerAdd { .. } => "PeerAdd",
             Self::GetNodeIdentity => "GetNodeIdentity",
             Self::SyncConfigure { .. } => "SyncConfigure",
@@ -3515,7 +3498,12 @@ pub enum ConnTrustOrigin {
     /// exec, adding a *device* — stays above it (DEC-0057, RFC-0065).
     Paired,
     /// A direct local client on the OS-protected IPC socket (CLI, desktop host,
-    /// WASM sandbox, `kuid`, `ksyncd`). May invoke any operation.
+    /// `kuid`, `ksyncd`). May invoke any operation.
+    ///
+    /// An app is not one. Its guest runs in `kotton-runner`, which is handed no socket
+    /// (on Linux its profile refuses it one) and speaks only to the daemon that
+    /// spawned it, over that process's stdin and stdout, in the runner's typed frames
+    /// and host calls (`crate::runner`); its world decides which calls it may make.
     Local,
 }
 
@@ -3536,7 +3524,12 @@ pub enum ConnTrustOrigin {
 #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Principal {
     /// A direct local client on the OS-protected IPC socket (CLI, shell, desktop
-    /// host, WASM sandbox) or a non-gateway sidecar acting for the node itself.
+    /// host) or a non-gateway sidecar acting for the node itself.
+    ///
+    /// An app is not one. Its guest runs in `kotton-runner`, which is handed no socket
+    /// (on Linux its profile refuses it one) and speaks only to the daemon that
+    /// spawned it, in the runner's typed frames and host calls (`crate::runner`), as
+    /// the [`ConnTrustOrigin::Local`] tier says.
     LocalOperator,
     /// A gateway sidecar acting **as itself**, holding only its bootstrap token.
     ///
@@ -3742,11 +3735,6 @@ impl UserRequest {
             // device; nothing remote needs either yet, and the browser phase is what would
             // widen them, if it does.
             Self::OrgRootCreate { .. } | Self::OrgRootInvite { .. } => Local,
-
-            // ThresholdSign coordinates a signature with this node's FROST share.
-            // A remote party must never trigger it; peers contribute their share
-            // via FrostSignRound, which is Remote-eligible.
-            Self::ThresholdSign { .. } => Local,
 
             // Gateway configuration and this node's certificate/auth material.
             // A gateway must not be able to reconfigure or re-authorise itself.
@@ -4949,7 +4937,6 @@ mod target_user_id_tests {
             UserRequest::VaultCapacity { user_id: u() },
             UserRequest::NodeRevoke { user_id: u(), node_id: s() },
             UserRequest::FrostSignRound { user_id: u(), payload: s() },
-            UserRequest::ThresholdSign { user_id: u(), message_hex: s() },
             UserRequest::PeerAdd { user_id: u(), label: s(), peer_did: s(), peer_pubkey_hex: s(), peer_addr: ([127, 0, 0, 1], 1).into() },
             UserRequest::SyncConfigure { user_id: u(), drive: s(), direction: None, watch: false },
             UserRequest::SyncRuleList { user_id: u() },

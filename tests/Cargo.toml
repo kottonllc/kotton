@@ -25,7 +25,8 @@ kotton-sys = { path = "../core/sys" }
 # re-exports pointed at all along.
 kotton-device = { path = "../core/device", features = ["test-support"] }
 kotton-identity = { path = "../core/identity" }
-kotton-peer = { path = "../core/peer" }
+# `test-support`: `daemon::nodes::threshold_sign`, driven in process by the suite.
+kotton-peer = { path = "../core/peer", features = ["test-support"] }
 kotton-org = { path = "../core/org" }
 kotton-wire = { path = "../core/wire" }
 kotton-pair = { path = "../core/pair" }

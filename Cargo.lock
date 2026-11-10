@@ -8347,6 +8347,7 @@ dependencies = [
  "itoa",
  "kotton-device",
  "kotton-ipc",
+ "kotton-peer",
  "kotton-secret",
  "kotton-store",
  "libc",
