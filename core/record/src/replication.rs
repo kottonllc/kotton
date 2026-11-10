@@ -42,8 +42,16 @@ use kotton_schemas::SchemaId;
 /// The schema is part of it because the store holds a row by `(schema, id)` (kotton #467):
 /// without it, two schemas' rows under one id at one version are one key, and the second is
 /// never logged. It is read off the field every logged row has always carried,
-/// `schema_nsid`, so a log written before the schema was in the key is read as it was
-/// written, and nothing stored or sent changes shape.
+/// `schema_nsid`, as the row spells it, so nothing stored or sent changes shape, and a row
+/// the log carries under the spelling the store exports is not logged again.
+///
+/// A row an earlier log carries under a core schema's old name (`sh.kotton.notes`, written
+/// before a schema was named by the key that publishes it) is logged once more: the store
+/// holds it under the identity that name became, so its key is not the logged one. It is
+/// logged once, since the next pass finds it under its identity, and that is right twice
+/// over. It cannot set a peer back, being the same `(updated_at, revision)` a merge takes
+/// only when strictly newer; and the applier skips a segment in the old spelling, so this
+/// copy is what carries the row to a device that joins after the rename.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct VersionKey {
     schema: String,
@@ -487,26 +495,47 @@ mod tests {
         assert_eq!(log_records(&store, &mount).await.unwrap(), None);
     }
 
-    /// **A log written before the schema was in the key is read as it was written.** Every
-    /// logged row has always carried `schema_nsid`, so a segment in the form an earlier
-    /// version sealed (no `revision` field, which reads as `0`) still names the version it
-    /// carries, and the row it logged is not logged again.
+    /// **A row an earlier log carries under a core schema's old name is logged once more,
+    /// under its identity, and once.** A log written before a schema was named by the key that
+    /// publishes it spells a notes row `sh.kotton.notes`, in the form without `revision`; the
+    /// store holds that row under the identity the name became, at the same version. The
+    /// exported key is not the logged one, so the row is logged again, and the next pass finds
+    /// it under its identity and logs nothing.
     #[tokio::test]
-    async fn a_row_an_earlier_log_carries_is_not_logged_again() {
+    async fn a_row_logged_under_an_old_core_name_is_logged_once_under_its_identity() {
         let store = store_in_one_second().await;
         let mount = LogOnly::default();
         let earlier = json!({
             "id": "kept",
-            "schema_nsid": kotton_common::namespace::NSID_NOTES,
+            "schema_nsid": "sh.kotton.notes",
             "body": { "title": "from before" },
             "updated_at": 1_600_000_000,
             "deleted_at": null,
         });
         mount.segments.lock().unwrap().push(vec![serde_json::to_vec(&earlier).unwrap()]);
 
-        store.merge_changeset(mount.rows()).await.unwrap();
-        assert_eq!(store.export_changeset(0).await.unwrap()[0].revision, 0);
-        assert_eq!(log_records(&store, &mount).await.unwrap(), None, "the row was logged twice");
+        // The row as the store holds it once it has respelled the old name.
+        let mut held = mount.rows();
+        held[0].schema_nsid = kotton_common::namespace::NSID_NOTES.to_owned();
+        store.merge_changeset(held).await.unwrap();
+        let exported = store.export_changeset(0).await.unwrap();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].schema_nsid, kotton_common::namespace::NSID_NOTES);
+
+        assert!(
+            log_records(&store, &mount).await.unwrap().is_some(),
+            "the row was taken as logged under its old name"
+        );
+        let segments = mount.segments.lock().unwrap().clone();
+        assert_eq!(segments.len(), 2, "one segment was appended");
+        assert_eq!(segments[1].len(), 1, "the one row: {:?}", mount.rows());
+        let relogged: ChangesetRow = serde_json::from_slice(&segments[1][0]).unwrap();
+        assert_eq!(relogged.schema_nsid, kotton_common::namespace::NSID_NOTES);
+        assert_eq!(relogged.id, "kept");
+        assert_eq!((relogged.updated_at, relogged.revision), (1_600_000_000, 0));
+
+        // Once: the next pass finds the row under its identity.
+        assert_eq!(log_records(&store, &mount).await.unwrap(), None);
     }
 
     /// A store whose clock a test sets, in milliseconds, between its writes.
