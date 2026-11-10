@@ -3,8 +3,8 @@
 //! one fixture for both, held to the live registry.
 //!
 //! Each noun here is a table `client/shell/src/commands/` declares (`drive.rs`, `pin.rs`,
-//! `record.rs`, `sync.rs`, `device.rs`), in its declared order. The fixture is the unit tests' copy, so
-//! they run without building the command trees; [`tests::the_fixture_is_the_live_registrys_tables`]
+//! `record.rs`, `secret.rs`, `sync.rs`, `device.rs`), in its declared order. The fixture is
+//! the unit tests' copy, so they run without building the command trees; [`tests::the_fixture_is_the_live_registrys_tables`]
 //! (under the `cli-docs` feature, which builds them) holds it equal to what
 //! `kotton_cli::bridge::repl_executor`'s registry declares, read the way `verb-check` reads it
 //! ([`crate::verb_check::tables_of`]). So a shell edit to a table fails that test, not only the
@@ -39,6 +39,16 @@ pub fn tables() -> BTreeMap<String, Vec<(String, Is)>> {
             ("import", Is::Current),
             ("export", Is::Current),
             ("open", Is::Gone("record get".into())),
+        ]),
+    );
+    t.insert(
+        "secret".to_string(),
+        table(&[
+            ("set", Is::Current),
+            ("get", Is::Current),
+            ("list", Is::Current),
+            ("rm", Is::Current),
+            ("generate", Is::Current),
         ]),
     );
     t.insert(

@@ -287,6 +287,13 @@ impl Record<'_> {
 /// optional case-insensitive body substring match, then merges and sorts the
 /// results by `updated_at` descending.  Each returned `Value` is an envelope:
 /// `{ "id", "schema_nsid", "updated_at", "body" }`.
+///
+/// **A schema kept from apps is never searched**
+/// ([`kotton_schemas::CoreSchema::is_kept_from_apps`]: `secret` and `access-log`), on both
+/// branches: left out of every schema searched when none is named, and answered with no rows
+/// when it is the one named, for every caller. Search is the hub's and the search bar's, and
+/// a caller that names no app is not thereby the person at their terminal; the person reads
+/// their keychain with the `secret` verbs, which ask for it by its schema.
     pub async fn search(
         &self,
     nsid_filter: Option<&str>,
@@ -304,6 +311,8 @@ impl Record<'_> {
             reg.list().into_iter().map(|def| def.id()).collect()
         }
     };
+    let kept = |nsid: &str| kotton_schemas::CoreSchema::kept_from_apps(nsid).is_some();
+    let nsids: Vec<SchemaId> = nsids.into_iter().filter(|nsid| !kept(&nsid.to_string())).collect();
 
 
     let mut all: Vec<Value> = Vec::new();
@@ -317,7 +326,7 @@ impl Record<'_> {
         }
         // Ignore errors from tables that don't exist yet (no records inserted).
         if let Ok(records) = self.store.query(&nsid, filter).await {
-            for r in records {
+            for r in records.into_iter().filter(|r| !kept(&r.schema_nsid)) {
                 all.push(serde_json::json!({
                     "id": r.id,
                     "schema_nsid": r.schema_nsid,

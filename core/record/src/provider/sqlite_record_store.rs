@@ -355,13 +355,20 @@ fn require_updated_at_not_null(conn: &Connection, table: &str) -> rusqlite::Resu
 /// ([`stored_schema`]), which is made here if it is not there, and a row written under an
 /// old core name is written to its new table with its `schema_nsid` rewritten to the identity
 /// that name became, since every statement holds a row to the identity as it is now spelled.
-/// **No row is deleted that its table did not take.** If the target already holds the id
-/// (the same schema written since), the row there is kept as it is, and the row here stays
-/// where it is, logged, out of every other schema's reach by the `schema_nsid` predicate
-/// every statement carries. Which of two such rows should win is not decided here: a
-/// migration that chose would be deleting a record on its own judgement. Rows are moved in
-/// one transaction per source table, so a crash mid-split leaves either table as it was, and
-/// a second open finds only what the first could not move.
+/// **Two versions of one row keep the newer**, by the store's version rule, as a merge
+/// would. If the target already holds the id under the identity and in the same root (the
+/// same schema written since), the two are two versions of one `(schema, id)`, and
+/// [`take_if_newer`], the clause `merge_changeset` writes with, keeps the newer of them,
+/// `(updated_at, revision)`, in the schema's own table; an equal version keeps the row the
+/// target held, and the older is dropped. Once the split commits it logs, per schema in the
+/// table, only counts: rows moved, rows that replaced an older copy, rows dropped as the
+/// older, and rows left; never a record's id or version. A row whose id the target holds in
+/// another root, or under another schema, is not a version of the target's row, and a merge
+/// would not take it either: it stays where it is, out of every other schema's reach by the
+/// `schema_nsid` predicate every statement carries, and no row is deleted that its table did
+/// not take or decide. Rows are moved in one transaction per
+/// source table, so a crash mid-split leaves either table as it was, and a second open finds
+/// only what the first could not move or decide.
 fn split_by_nsid(conn: &Connection, table: &str) -> rusqlite::Result<()> {
     let stored: Vec<String> = conn
         .prepare(&format!("SELECT DISTINCT schema_nsid FROM {table}"))?
@@ -384,6 +391,7 @@ fn split_by_nsid(conn: &Connection, table: &str) -> rusqlite::Result<()> {
         return Ok(());
     }
     conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let mut decided: Vec<Split> = Vec::new();
     let moved = (|| -> rusqlite::Result<()> {
         for (stored, id) in &strays {
             let target = nsid_to_table(id);
@@ -399,36 +407,44 @@ fn split_by_nsid(conn: &Connection, table: &str) -> rusqlite::Result<()> {
                 continue;
             }
             conn.execute_batch(&create_table_sql(&target))?;
-            // The ids the target held before the move: a row under one of
-            // these is not taken, and so not deleted here.
-            conn.execute_batch("DROP TABLE IF EXISTS temp.split_held;")?;
-            conn.execute(
-                &format!("CREATE TEMP TABLE split_held AS SELECT id FROM {target} WHERE schema_nsid = ?1"),
-                params![identity],
+            // Two versions of one row, counted before the statements below decide them:
+            // the source's is newer and replaces the target's, or it is not and is dropped.
+            let (replaced, dropped): (i64, i64) = conn.query_row(
+                &format!(
+                    "SELECT COALESCE(SUM({newer}), 0), COALESCE(SUM(NOT {newer}), 0) \
+                     FROM {table} s JOIN {target} t ON t.id = s.id \
+                     WHERE s.schema_nsid = ?1 AND t.schema_nsid = ?2 AND t.root IS s.root",
+                    newer = newer_version("s", "t")
+                ),
+                params![stored, identity],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             conn.execute(
                 &format!(
-                    "INSERT OR IGNORE INTO {target} \
+                    "INSERT INTO {target} \
                      (id, schema_nsid, body, created_at, updated_at, deleted_at, root, filed_at, revision) \
                      SELECT id, ?2, body, created_at, updated_at, deleted_at, root, filed_at, revision \
-                     FROM {table} WHERE schema_nsid = ?1"
+                     FROM {table} WHERE schema_nsid = ?1 {}",
+                    take_if_newer(&target)
                 ),
                 params![stored, identity],
             )?;
-            let moved = conn.execute(
+            // Taken, or decided: the target holds the row's id under the
+            // identity, in the row's root, at the newer of the two versions.
+            let gone = conn.execute(
                 &format!(
-                    "DELETE FROM {table} WHERE schema_nsid = ?1 \
-                     AND id NOT IN (SELECT id FROM temp.split_held)"
+                    "DELETE FROM {table} WHERE schema_nsid = ?1 AND EXISTS \
+                     (SELECT 1 FROM {target} t WHERE t.id = {table}.id \
+                      AND t.schema_nsid = ?2 AND t.root IS {table}.root)"
                 ),
-                params![stored],
-            )?;
-            conn.execute_batch("DROP TABLE temp.split_held;")?;
+                params![stored, identity],
+            )? as i64;
             let left: i64 = conn.query_row(
                 &format!("SELECT COUNT(*) FROM {table} WHERE schema_nsid = ?1"),
                 params![stored],
                 |r| r.get(0),
             )?;
-            tracing::warn!(from = table, to = %target, schema = %identity, moved, left, "moved a schema's records to the table that is theirs");
+            decided.push(Split { schema: identity, moved: gone - replaced - dropped, replaced, dropped, left });
         }
         if !is_table_of_the_map(table) {
             // Named by no map this store writes: once nothing is left in it, it goes. A
@@ -441,12 +457,65 @@ fn split_by_nsid(conn: &Connection, table: &str) -> rusqlite::Result<()> {
         Ok(())
     })();
     match moved {
-        Ok(()) => conn.execute_batch("COMMIT;"),
+        Ok(()) => conn.execute_batch("COMMIT;")?,
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK;");
-            Err(e)
+            return Err(e);
         }
     }
+    // Logged once the split is committed, by the schema and counts alone: a record's id
+    // and when it was written are the store's to hold, not the process log's.
+    for Split { schema, moved, replaced, dropped, left } in decided {
+        tracing::warn!(
+            from = table, schema = %schema, moved, replaced, dropped, left,
+            "split a schema's records into the table that is theirs: moved the ids it did not \
+             hold, replaced an older copy it held, dropped an older or equal copy"
+        );
+    }
+    Ok(())
+}
+
+/// What [`split_by_nsid`] decided for one schema's rows in one source table, as counts: rows
+/// whose id the schema's table did not hold and took (`moved`), rows newer than the copy it
+/// held that replaced it (`replaced`), rows older than or equal to the copy it held that were
+/// dropped (`dropped`), and rows it could not take, left where they are (`left`).
+struct Split {
+    schema: String,
+    moved: i64,
+    replaced: i64,
+    dropped: i64,
+    left: i64,
+}
+
+/// The store's version rule, as SQL: whether the row `incoming` names is a newer version
+/// than the row `held` names, a later second or the same second and a higher revision
+/// (module doc, "Every write is a new version"). One rule, read by [`take_if_newer`] and by
+/// the split's count of the versions it replaces and drops.
+fn newer_version(incoming: &str, held: &str) -> String {
+    format!(
+        "({incoming}.updated_at > {held}.updated_at \
+          OR ({incoming}.updated_at = {held}.updated_at AND {incoming}.revision > {held}.revision))"
+    )
+}
+
+/// The conflict clause of an insert into `table` that takes an arriving version of a row it
+/// holds only when that version is [newer](newer_version), in the same root and under the
+/// same schema; the root is never changed and the filing stamp the row has is kept. Both
+/// `merge_changeset` and [`split_by_nsid`] write with it, so two versions of one
+/// `(schema, id)` are ordered one way wherever they meet.
+fn take_if_newer(table: &str) -> String {
+    format!(
+        "ON CONFLICT(id) DO UPDATE SET \
+           body       = excluded.body, \
+           updated_at = excluded.updated_at, \
+           deleted_at = excluded.deleted_at, \
+           revision   = excluded.revision, \
+           filed_at   = COALESCE({table}.filed_at, excluded.filed_at) \
+         WHERE {} \
+           AND excluded.root IS {table}.root \
+           AND excluded.schema_nsid = {table}.schema_nsid",
+        newer_version("excluded", table)
+    )
 }
 
 /// Everything a table written by an earlier version is given on open.
@@ -544,7 +613,15 @@ fn begin_immediate(conn: &mut Connection) -> rusqlite::Result<rusqlite::Transact
 pub struct SqliteRecordStore {
     conn: Arc<Mutex<Connection>>,
     clock: StoreClock,
+    written: Option<WriteSignal>,
 }
+
+/// What a store calls after it commits a write the person or an app made: an insert or a
+/// delete, of any schema but one whose writes wake no pass
+/// ([`crate::replication::a_write_wakes_a_pass`]: `access-log`, kotton #450). It is called
+/// with nothing, so it learns that a write landed and not what was written; a merge of rows
+/// another device logged calls it never, since those arrive from a pass.
+pub type WriteSignal = Arc<dyn Fn() + Send + Sync>;
 
 impl SqliteRecordStore {
     /// Open (or create) a SQLite database at `path`.
@@ -584,6 +661,7 @@ impl SqliteRecordStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             clock: StoreClock::system(),
+            written: None,
         })
     }
 
@@ -600,6 +678,34 @@ impl SqliteRecordStore {
         self
     }
 
+    /// Call `signal` after each insert or delete this store commits, but not one of a schema
+    /// whose writes wake no pass ([`WriteSignal`]). The daemon gives it its sync engine's wake,
+    /// so a record write starts a pass knowingly, by schema, rather than by the file changing
+    /// under a watcher that cannot tell one schema's write from another's. Set it where the
+    /// store is opened, before the store is cloned, as [`Self::with_clock`] is.
+    pub fn with_write_signal(mut self, signal: WriteSignal) -> Self {
+        self.written = Some(signal);
+        self
+    }
+
+    /// This store, the same database through the same connection, with no write signal: a
+    /// write through it wakes no pass. The sync engine reads and writes through this during a
+    /// pass, so the pass's own writes (a device's whole-keeper claim, a setting moved out of
+    /// the drive) do not wake the engine that made them and start a pass after it (kotton
+    /// #450). Every other holder keeps the signalled store.
+    pub fn without_write_signal(&self) -> Self {
+        Self { written: None, ..self.clone() }
+    }
+
+    /// Tell the write signal, if any, that a write of a row of `schema` was committed.
+    fn signal_written(&self, schema: &SchemaId) {
+        if let Some(signal) = &self.written {
+            if crate::replication::a_write_wakes_a_pass(schema) {
+                signal();
+            }
+        }
+    }
+
     /// Open an in-memory database (useful for testing).
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
@@ -607,6 +713,7 @@ impl SqliteRecordStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             clock: StoreClock::system(),
+            written: None,
         })
     }
 }
@@ -726,6 +833,7 @@ impl RecordStore for SqliteRecordStore {
             Ok::<(), RecordStoreError>(())
         })
         .await??;
+        self.signal_written(schema_nsid);
 
         Ok(id)
     }
@@ -888,7 +996,9 @@ impl RecordStore for SqliteRecordStore {
             conn.commit()?;
             Ok::<(), RecordStoreError>(())
         })
-        .await?
+        .await??;
+        self.signal_written(schema_nsid);
+        Ok(())
     }
 
     async fn gc_tombstones(&self, before_ts: SyncWatermark) -> Result<u64> {
@@ -1013,18 +1123,8 @@ impl RecordStore for SqliteRecordStore {
                     &format!(
                         "INSERT INTO {table} \
                          (id, schema_nsid, body, created_at, updated_at, deleted_at, root, filed_at, revision) \
-                         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8) \
-                         ON CONFLICT(id) DO UPDATE SET \
-                           body       = excluded.body, \
-                           updated_at = excluded.updated_at, \
-                           deleted_at = excluded.deleted_at, \
-                           revision   = excluded.revision, \
-                           filed_at   = COALESCE({table}.filed_at, excluded.filed_at) \
-                         WHERE (excluded.updated_at > {table}.updated_at \
-                                OR (excluded.updated_at = {table}.updated_at \
-                                    AND excluded.revision > {table}.revision)) \
-                           AND excluded.root IS {table}.root \
-                           AND excluded.schema_nsid = {table}.schema_nsid"
+                         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8) {}",
+                        take_if_newer(&table)
                     ),
                     params![
                         row.id,
@@ -1950,55 +2050,254 @@ mod tests {
         assert_eq!(old, 0, "a row kept its old spelling");
     }
 
-    /// **The split deletes no row its table did not take.** The target already
-    /// holds the id (here, the same schema written since, under the identity): the row
-    /// there is kept as it is, the row in the source stays where it is, the source is
-    /// not dropped, and a read under the schema sees the target's row alone.
+    /// An old `sh_kotton_notes` table holding `x` at `source` and `y`, beside the identity's
+    /// table already holding `x` at `target`, each a version `(updated_at, revision)`; then
+    /// open. Returns the store and the path, for a second open.
+    fn a_split_of_two_versions(
+        dir: &tempfile::TempDir,
+        source: (i64, i64),
+        target: (i64, i64),
+    ) -> (SqliteRecordStore, std::path::PathBuf) {
+        a_split_of(dir, (source, None), (target, None), kotton_common::namespace::NSID_NOTES)
+    }
+
+    /// As [`a_split_of_two_versions`], with each `x` also given its `deleted_at` (`Some` for
+    /// a tombstone), and the target's `x` stored under `target_schema`.
+    fn a_split_of(
+        dir: &tempfile::TempDir,
+        source: ((i64, i64), Option<i64>),
+        target: ((i64, i64), Option<i64>),
+        target_schema: &str,
+    ) -> (SqliteRecordStore, std::path::PathBuf) {
+        let path = dir.path().join("records.db");
+        let table = notes_table();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&create_table_sql("sh_kotton_notes")).unwrap();
+            conn.execute(
+                "INSERT INTO sh_kotton_notes (id, schema_nsid, body, created_at, updated_at, revision, deleted_at) VALUES
+                   ('x', 'sh.kotton.notes', '{\"id\":\"x\",\"title\":\"source\"}', 1, ?1, ?2, ?3),
+                   ('y', 'sh.kotton.notes', '{\"id\":\"y\",\"title\":\"only here\"}', 1, 1, 1, NULL);",
+                params![source.0 .0, source.0 .1, source.1],
+            )
+            .unwrap();
+            conn.execute_batch(&create_table_sql(&table)).unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {table} (id, schema_nsid, body, created_at, updated_at, revision, deleted_at) VALUES
+                       ('x', ?1, '{{\"id\":\"x\",\"title\":\"target\"}}', 1, ?2, ?3, ?4);"
+                ),
+                params![target_schema, target.0 .0, target.0 .1, target.1],
+            )
+            .unwrap();
+        }
+        (SqliteRecordStore::open(&path, None).unwrap(), path)
+    }
+
+    /// The `deleted_at` of `x` in the schema's own table after the split.
+    fn deleted_at_of_x(store: &SqliteRecordStore) -> Option<i64> {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(&format!("SELECT deleted_at FROM {} WHERE id = 'x'", notes_table()), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// A note as the split left it: `(id, title, version)`.
+    type Note = (String, String, (i64, i64));
+
+    /// What the split left: each note under the schema, and the ids still in the old table,
+    /// `None` once it is dropped.
+    fn after_the_split(store: &SqliteRecordStore) -> (Vec<Note>, Option<Vec<String>>) {
+        let conn = store.conn.lock().unwrap();
+        let read: Vec<Note> = conn
+            .prepare(&format!(
+                "SELECT id, json_extract(body, '$.title'), updated_at, revision FROM {} ORDER BY id",
+                notes_table()
+            ))
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, (r.get(2)?, r.get(3)?))))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        let left = record_tables(&conn).unwrap().contains(&"sh_kotton_notes".to_owned()).then(|| {
+            conn.prepare("SELECT id FROM sh_kotton_notes ORDER BY id")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+        });
+        (read, left)
+    }
+
+    fn note(id: &str, title: &str, version: (i64, i64)) -> Note {
+        (id.to_owned(), title.to_owned(), version)
+    }
+
+    /// **The split keeps the newer of two versions: a newer one in the source replaces the
+    /// older the target held**, in the schema's own table, at its own version, and the old
+    /// table, emptied, is dropped. In the same second, the higher revision is the newer.
     #[tokio::test]
-    async fn the_split_leaves_a_row_whose_id_its_table_already_holds() {
+    async fn the_split_replaces_an_older_version_in_the_target_with_a_newer_one() {
+        for (source, target) in [((20, 1), (10, 5)), ((10, 6), (10, 5))] {
+            let dir = tempfile::tempdir().unwrap();
+            let (store, _) = a_split_of_two_versions(&dir, source, target);
+            let (read, left) = after_the_split(&store);
+            assert_eq!(read, [note("x", "source", source), note("y", "only here", (1, 1))], "{source:?} over {target:?}");
+            assert_eq!(left, None, "the old table was kept: {left:?}");
+        }
+    }
+
+    /// **An older version in the source is dropped, and the target's row is kept** as it was.
+    #[tokio::test]
+    async fn the_split_drops_an_older_version_in_the_source_and_keeps_the_target() {
+        for (source, target) in [((10, 5), (20, 1)), ((10, 4), (10, 5))] {
+            let dir = tempfile::tempdir().unwrap();
+            let (store, _) = a_split_of_two_versions(&dir, source, target);
+            let (read, left) = after_the_split(&store);
+            assert_eq!(read, [note("x", "target", target), note("y", "only here", (1, 1))], "{source:?} under {target:?}");
+            assert_eq!(left, None, "the older version was left in the old table: {left:?}");
+        }
+    }
+
+    /// **An equal version keeps the row the target held**, as a merge does, which takes an
+    /// arriving version only when it is strictly newer.
+    #[tokio::test]
+    async fn the_split_keeps_the_targets_row_when_the_versions_are_equal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = a_split_of_two_versions(&dir, (10, 5), (10, 5));
+        let (read, left) = after_the_split(&store);
+        assert_eq!(read, [note("x", "target", (10, 5)), note("y", "only here", (1, 1))]);
+        assert_eq!(left, None, "{left:?}");
+    }
+
+    /// **A second open changes nothing** the first decided: the same rows at the same
+    /// versions, and no old table back.
+    #[tokio::test]
+    async fn a_second_open_after_the_split_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, path) = a_split_of_two_versions(&dir, (20, 1), (10, 5));
+        let first = after_the_split(&store);
+        drop(store);
+        let again = SqliteRecordStore::open(&path, None).unwrap();
+        assert_eq!(after_the_split(&again), first);
+    }
+
+    /// **The split deletes no row a merge would not take.** The target holds the id in
+    /// another root: the two are not versions of one row, so the target's row is kept as it
+    /// is, the source's stays where it is, newer or not, and a second open leaves both so.
+    #[tokio::test]
+    async fn the_split_leaves_a_row_whose_id_the_target_holds_in_another_root() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("records.db");
         let table = notes_table();
         {
             let conn = Connection::open(&path).unwrap();
-            // The old table for the core `notes`, and the identity's table, already
-            // holding the same id.
             conn.execute_batch(&create_table_sql("sh_kotton_notes")).unwrap();
             conn.execute_batch(
-                "INSERT INTO sh_kotton_notes (id, schema_nsid, body, revision) VALUES
-                   ('x', 'sh.kotton.notes', '{\"id\":\"x\",\"title\":\"older\"}', 1),
-                   ('y', 'sh.kotton.notes', '{\"id\":\"y\",\"title\":\"only here\"}', 1);",
+                "INSERT INTO sh_kotton_notes (id, schema_nsid, body, updated_at, revision) VALUES
+                   ('x', 'sh.kotton.notes', '{\"id\":\"x\",\"title\":\"source\"}', 20, 1);",
             )
             .unwrap();
             conn.execute_batch(&create_table_sql(&table)).unwrap();
-            conn.execute_batch(&format!(
-                "INSERT INTO {table} (id, schema_nsid, body, revision) VALUES
-                   ('x', '{}', '{{\"id\":\"x\",\"title\":\"newer\"}}', 5);",
-                kotton_common::namespace::NSID_NOTES
-            ))
+            conn.execute(
+                &format!(
+                    "INSERT INTO {table} (id, schema_nsid, body, updated_at, revision, root) VALUES
+                       ('x', ?1, '{{\"id\":\"x\",\"title\":\"target\"}}', 10, 5, 'a-project');"
+                ),
+                params![kotton_common::namespace::NSID_NOTES],
+            )
             .unwrap();
         }
         let store = SqliteRecordStore::open(&path, None).unwrap();
-        let mut read: Vec<(String, String)> = store
-            .query(&notes_nsid(), RecordFilter::new())
-            .await
-            .unwrap()
-            .iter()
-            .map(|r| (r.id.clone(), r.body["title"].as_str().unwrap().to_owned()))
-            .collect();
-        read.sort();
-        assert_eq!(read, [("x".to_owned(), "newer".to_owned()), ("y".to_owned(), "only here".to_owned())]);
-        let conn = store.conn.lock().unwrap();
-        let in_source: Vec<String> = conn
-            .prepare("SELECT id FROM sh_kotton_notes ORDER BY id")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
-        assert_eq!(in_source, ["x"], "the split deleted a row its table did not take, or kept one it did");
-        let revision: i64 = conn.query_row(&format!("SELECT revision FROM {table} WHERE id = 'x'"), [], |r| r.get(0)).unwrap();
-        assert_eq!(revision, 5, "the row already in the target was replaced");
+        let first = after_the_split(&store);
+        assert_eq!(first, (vec![note("x", "target", (10, 5))], Some(vec!["x".to_owned()])));
+        drop(store);
+        let again = SqliteRecordStore::open(&path, None).unwrap();
+        assert_eq!(after_the_split(&again), first);
+    }
+
+    /// **A tombstone in the source strictly newer than a live row the target holds replaces
+    /// it**, so the record stays removed; in the same second, the higher revision is newer.
+    #[tokio::test]
+    async fn the_split_takes_a_newer_tombstone_over_a_live_row() {
+        for (source, target) in [((20, 1), (10, 5)), ((10, 6), (10, 5))] {
+            let dir = tempfile::tempdir().unwrap();
+            let (store, _) = a_split_of(&dir, (source, Some(source.0)), (target, None), kotton_common::namespace::NSID_NOTES);
+            let (read, left) = after_the_split(&store);
+            assert_eq!(read, [note("x", "source", source), note("y", "only here", (1, 1))], "{source:?} over {target:?}");
+            assert_eq!(deleted_at_of_x(&store), Some(source.0), "the record came back: {source:?} over {target:?}");
+            assert_eq!(left, None, "the old table was kept: {left:?}");
+        }
+    }
+
+    /// **A tombstone in the source older than or equal to a live row the target holds is
+    /// dropped**, and the live row is kept as it was.
+    #[tokio::test]
+    async fn the_split_drops_an_older_or_equal_tombstone_and_keeps_the_live_row() {
+        for (source, target) in [((10, 5), (20, 1)), ((10, 4), (10, 5)), ((10, 5), (10, 5))] {
+            let dir = tempfile::tempdir().unwrap();
+            let (store, _) = a_split_of(&dir, (source, Some(source.0)), (target, None), kotton_common::namespace::NSID_NOTES);
+            let (read, left) = after_the_split(&store);
+            assert_eq!(read, [note("x", "target", target), note("y", "only here", (1, 1))], "{source:?} under {target:?}");
+            assert_eq!(deleted_at_of_x(&store), None, "the live row was removed: {source:?} under {target:?}");
+            assert_eq!(left, None, "the older tombstone was left in the old table: {left:?}");
+        }
+    }
+
+    /// **A live row in the source strictly newer than a tombstone the target holds replaces
+    /// it**; one older than or equal to the tombstone is dropped, and the tombstone kept.
+    #[tokio::test]
+    async fn the_split_orders_a_live_row_against_a_tombstone_by_version() {
+        for (source, target) in [((20, 1), (10, 5)), ((10, 6), (10, 5))] {
+            let dir = tempfile::tempdir().unwrap();
+            let (store, _) = a_split_of(&dir, (source, None), (target, Some(target.0)), kotton_common::namespace::NSID_NOTES);
+            let (read, left) = after_the_split(&store);
+            assert_eq!(read, [note("x", "source", source), note("y", "only here", (1, 1))], "{source:?} over {target:?}");
+            assert_eq!(deleted_at_of_x(&store), None, "the newer live row stayed removed: {source:?} over {target:?}");
+            assert_eq!(left, None, "the old table was kept: {left:?}");
+        }
+        for (source, target) in [((10, 5), (20, 1)), ((10, 4), (10, 5)), ((10, 5), (10, 5))] {
+            let dir = tempfile::tempdir().unwrap();
+            let (store, _) = a_split_of(&dir, (source, None), (target, Some(target.0)), kotton_common::namespace::NSID_NOTES);
+            let (read, left) = after_the_split(&store);
+            assert_eq!(read, [note("x", "target", target), note("y", "only here", (1, 1))], "{source:?} under {target:?}");
+            assert_eq!(deleted_at_of_x(&store), Some(target.0), "an older live row undid the removal: {source:?}");
+            assert_eq!(left, None, "the older live row was left in the old table: {left:?}");
+        }
+    }
+
+    /// **The split deletes no row whose id the target holds under another schema.** The
+    /// schema's table holds `x` under a string that is no schema identity, so no split moves
+    /// it out of that table: the two are not versions of one row, the source's `x` stays in
+    /// the old table, newer or not, the target's row is kept as it is, and a second open
+    /// leaves both so.
+    #[tokio::test]
+    async fn the_split_leaves_a_row_whose_id_the_target_holds_under_another_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, path) = a_split_of(&dir, ((20, 1), None), ((10, 5), None), "com.example.diary");
+        let first = after_the_split(&store);
+        assert_eq!(
+            first,
+            (vec![note("x", "target", (10, 5)), note("y", "only here", (1, 1))], Some(vec!["x".to_owned()]))
+        );
+        {
+            let conn = store.conn.lock().unwrap();
+            let schemas: Vec<(String, String)> = conn
+                .prepare(&format!("SELECT id, schema_nsid FROM {} ORDER BY id", notes_table()))
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            assert_eq!(
+                schemas,
+                [("x".to_owned(), "com.example.diary".to_owned()), ("y".to_owned(), kotton_common::namespace::NSID_NOTES.to_owned())],
+                "the other schema's row was replaced"
+            );
+        }
+        drop(store);
+        let again = SqliteRecordStore::open(&path, None).unwrap();
+        assert_eq!(after_the_split(&again), first);
     }
 
     /// **A write under one schema never replaces another schema's row**, even

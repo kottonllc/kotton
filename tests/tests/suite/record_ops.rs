@@ -439,3 +439,40 @@ fn assert_got_as_its_owner(got: &std::process::Output, id: &str) {
     assert_eq!(body["id"], id, "{}", said(got));
     assert!(body.get("_root").is_none() && body.get("_id").is_none(), "get printed a daemon field: {}", said(got));
 }
+
+/// **`RecordSearch` returns no secret** (kotton #449): not across every schema, and not with
+/// `secret` named as the filter, though the person keeps one in Personal and a note beside it
+/// is found.
+#[tokio::test]
+async fn record_search_returns_no_secret_unfiltered_or_by_name() {
+    const SECRET: &str = kotton_common::namespace::NSID_SECRET;
+    const VALUE: &str = "search-suite-value-61f0";
+    let mut env = env_with_user().await;
+    env.client
+        .record_insert_in(
+            USER,
+            Some(kotton_wire::ipc::PERSONAL_ROOT),
+            None,
+            SECRET,
+            serde_json::json!({ "label": "bank", "value": VALUE, "kind": "password" }),
+        )
+        .await
+        .expect("the person's secret");
+    env.client
+        .record_insert(USER, NOTES, serde_json::json!({ "title": "beside it", "body": "a note" }))
+        .await
+        .expect("a note");
+
+    let all = env.client.record_search(USER, None, None, None).await.expect("search");
+    assert!(all.iter().any(|r| r["body"]["title"] == "beside it"), "the note was not found: {all:?}");
+    for (filter, rows) in [
+        ("none", all),
+        ("secret", env.client.record_search(USER, Some(SECRET), None, None).await.expect("search by secret")),
+        ("its value", env.client.record_search(USER, None, Some(VALUE), None).await.expect("search by text")),
+    ] {
+        assert!(
+            rows.iter().all(|r| r["schema_nsid"] != SECRET && !r.to_string().contains(VALUE)),
+            "search ({filter}) returned a secret: {rows:?}"
+        );
+    }
+}

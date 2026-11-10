@@ -17,16 +17,29 @@ use std::sync::Arc;
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// The refusal for a handler of a schema kept from every app
+/// ([`kotton_schemas::CoreSchema::is_kept_from_apps`]: `secret` and `access-log`), or `None`.
+/// No app handles either: a handler is the app a record of the schema is opened in, which
+/// would hand it the row.
+fn kept_from_apps(nsid: &str) -> Option<UserResponse> {
+    kotton_schemas::CoreSchema::kept_from_apps(nsid)
+        .map(|kept| UserResponse::Error { message: kept.kept_from_apps_refusal() })
+}
+
 /// Register `app_id` as a handler for `nsid`.
 ///
 /// If this is the first handler for the NSID it becomes the default
 /// automatically.  A second registration for the same (app_id, nsid) pair is
-/// idempotent (updates `registered_at`).
+/// idempotent (updates `registered_at`). A schema kept from apps is refused, and nothing is
+/// stored.
 pub async fn handler_register(
     user_db: &Arc<SqlitePool>,
     app_id: String,
     nsid: String,
 ) -> io::Result<UserResponse> {
+    if let Some(refused) = kept_from_apps(&nsid) {
+        return Ok(refused);
+    }
     let existing = hrdb::count_for_nsid(user_db, &nsid).await?;
     let is_default: i32 = if existing == 0 { 1 } else { 0 };
     hrdb::upsert_handler(user_db, &app_id, &nsid, is_default).await?;
@@ -53,7 +66,13 @@ pub async fn handler_unregister(
 }
 
 /// Return the default handler for `nsid`, or `HandlerNotFound` if none exists.
+///
+/// A schema kept from apps has no handler, whatever row the registry holds: one stored
+/// before the refusal existed, or written into the table some other way, is never answered.
 pub async fn handler_get_for(user_db: &Arc<SqlitePool>, nsid: String) -> io::Result<UserResponse> {
+    if kotton_schemas::CoreSchema::kept_from_apps(&nsid).is_some() {
+        return Ok(UserResponse::HandlerNotFound { nsid });
+    }
     match hrdb::get_default_for_nsid(user_db, &nsid).await? {
         Some(entry) => Ok(UserResponse::HandlerInfo { entry }),
         None => Ok(UserResponse::HandlerNotFound { nsid }),
@@ -68,12 +87,15 @@ pub async fn handler_list(user_db: &Arc<SqlitePool>) -> io::Result<UserResponse>
 
 /// Set `app_id` as the default handler for `nsid`.
 ///
-/// `app_id` must already be registered for `nsid`.
+/// `app_id` must already be registered for `nsid`. A schema kept from apps is refused.
 pub async fn handler_set_default(
     user_db: &Arc<SqlitePool>,
     app_id: String,
     nsid: String,
 ) -> io::Result<UserResponse> {
+    if let Some(refused) = kept_from_apps(&nsid) {
+        return Ok(refused);
+    }
     hrdb::clear_default_for_nsid(user_db, &nsid).await?;
     let found = hrdb::set_default(user_db, &app_id, &nsid).await?;
 
@@ -119,6 +141,26 @@ mod tests {
     }
 
     // ── register ─────────────────────────────────────────────────────────────
+
+    /// No app handles `secret`: registering one is refused and stores nothing, setting one as
+    /// default is refused, and a row planted straight into the table is never answered.
+    #[tokio::test]
+    async fn no_app_handles_a_schema_kept_from_apps() {
+        let db = test_db().await;
+        let secret = kotton_common::namespace::NSID_SECRET;
+        let resp = handler_register(&db, "com.acme.keys".into(), secret.into()).await.unwrap();
+        match resp {
+            UserResponse::Error { message } => assert!(message.contains(secret), "{message}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(hrdb::count_for_nsid(&db, secret).await.unwrap(), 0, "nothing was stored");
+        let resp = handler_set_default(&db, "com.acme.keys".into(), secret.into()).await.unwrap();
+        assert!(matches!(resp, UserResponse::Error { .. }), "{resp:?}");
+
+        hrdb::upsert_handler(&db, "com.acme.keys", secret, 1).await.unwrap();
+        let resp = handler_get_for(&db, secret.into()).await.unwrap();
+        assert!(matches!(resp, UserResponse::HandlerNotFound { .. }), "{resp:?}");
+    }
 
     #[tokio::test]
     async fn first_registration_becomes_default() {

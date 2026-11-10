@@ -11,14 +11,14 @@ use std::sync::Arc;
 #[cfg(feature = "cli")]
 use crate::commands::{
     AppCommand, CpCommand, DeviceCommand, DoorCommand, DoctorCommand, IdCommand, IssuerCommand, KeepCommand, LogsCommand,
-    DriveCommand, EnrolCommand, MintCommand, PeerCommand, PinCommand, ImportGone, RecordCommand, RelayCommand, SessionCommand, StatusCommand, SyncCommand,
+    DriveCommand, EnrolCommand, MintCommand, PeerCommand, PinCommand, ImportGone, RecordCommand, RelayCommand, SecretCommand, SecretsGone, SessionCommand, StatusCommand, SyncCommand,
     TedCommand, VaultCommand,
 };
 use crate::commands::{
     CatCommand, CdCommand, ClearCommand, CommandOutput, CommandRegistry, DaemonCommand,
     DateCommand, EchoCommand, EnvCommand, ExitCode, ExitCommand, ExportCommand, FindCommand,
     GrepCommand, HeadCommand, HelpCommand, LsCommand, MkdirCommand, MvCommand, PwdCommand,
-    RmCommand, RmdirCommand, SecretsCommand, SortCommand, TailCommand, TouchCommand, UnsetCommand,
+    RmCommand, RmdirCommand, SortCommand, TailCommand, TouchCommand, UnsetCommand,
     WcCommand, WhoamiCommand,
 };
 use crate::parser::{parse_command_chain, ChainOperator};
@@ -88,7 +88,6 @@ impl ShellExecutor {
         // Low-stakes informational commands.
         registry.register("whoami", WhoamiCommand);
         registry.register("daemon", DaemonCommand);
-        registry.register("secrets", SecretsCommand);
         registry.register("date", DateCommand);
         registry.register("clear", ClearCommand);
 
@@ -117,6 +116,8 @@ impl ShellExecutor {
             registry.register("pin", PinCommand);
             registry.register("record", RecordCommand);
             registry.register("import", ImportGone);
+            registry.register("secret", SecretCommand);
+            registry.register("secrets", SecretsGone);
             registry.register("status", StatusCommand);
             registry.register("id", IdCommand);
         }

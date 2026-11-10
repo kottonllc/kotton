@@ -36,7 +36,7 @@ use kotton_store::runtime::user::UserStore;
 use kotton_sys::secret::SecretsStore;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// The user runtimes loaded on this machine, keyed by user id.
 ///
@@ -171,6 +171,40 @@ fn only<'a>(mut ids: impl Iterator<Item = &'a String>) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// **A record write wakes a pass by its schema** (kotton #450): a store this cache opens
+    /// calls the engine's wake after a note's insert and never after an access-log record's,
+    /// and one opened before the wake was given calls it too. Counted, not timed.
+    #[tokio::test]
+    async fn a_store_opened_here_wakes_the_engine_for_a_note_and_not_for_a_log_record() {
+        use kotton_record::RecordStore as _;
+        use kotton_schemas::{CoreSchema, SchemaId};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let base = tempfile::tempdir().unwrap();
+        let secrets = kotton_secret::MemorySecrets::new();
+        secrets
+            .set_secret(&kotton_common::crypto::kdf_labels::master_secret_keychain_key("alice"), &hex::encode([7u8; 32]))
+            .unwrap();
+        let stores = RecordStores::new();
+        let store = stores.get_or_open(base.path(), "alice", &secrets).unwrap();
+        let woken = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&woken);
+        stores.wake_on_write(Arc::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
+        for cs in [CoreSchema::Notes, CoreSchema::AccessLog] {
+            store.create_table(&cs.definition()).await.unwrap();
+        }
+        let log = SchemaId::from_static(kotton_common::namespace::NSID_ACCESS_LOG);
+        let entry = serde_json::json!({ "device": "did:key:a", "at": "2026-11-10T00:00:00Z",
+            "asker": "terminal", "door": "local", "act": "read", "what": "w" });
+        store.insert(&log, entry).await.unwrap();
+        assert_eq!(woken.load(Ordering::SeqCst), 0, "a log record woke the engine");
+        let notes = SchemaId::from_static(kotton_common::namespace::NSID_NOTES);
+        store.insert(&notes, serde_json::json!({ "title": "a note" })).await.unwrap();
+        assert_eq!(woken.load(Ordering::SeqCst), 1, "a note woke no pass");
+        assert!(Arc::ptr_eq(&store, &stores.get_or_open(base.path(), "alice", &secrets).unwrap()));
+    }
+
     /// **Nothing that acts for a user it was not given guesses between two.**
     /// One person loaded is that person; nobody, or two, is nobody — never
     /// whichever the registry's map happens to yield first. (Moved here from
@@ -225,10 +259,16 @@ mod tests {
 /// states it will not have.
 ///
 /// What it means to *open* one is [`kotton_record::open::user_record_store`]'s;
-/// this only remembers which are already open.
+/// this only remembers which are already open, and gives each the sync engine's wake
+/// ([`Self::wake_on_write`]).
 #[derive(Clone, Default)]
 pub struct RecordStores {
     stores: Arc<RwLock<HashMap<String, Arc<SqliteRecordStore>>>>,
+    /// The sync engine's wake, which every store opened here calls after a write that wakes a
+    /// pass (`kotton_record::SqliteRecordStore::with_write_signal`). Set once the engine
+    /// exists, which is after this cache is lent to it; read at each write, so a store
+    /// opened before it was set calls it too.
+    wake: Arc<OnceLock<kotton_record::WriteSignal>>,
 }
 
 impl RecordStores {
@@ -253,9 +293,15 @@ impl RecordStores {
             return Ok(Arc::clone(store));
         }
 
-        let store = Arc::new(kotton_record::open::user_record_store(
-            base_dir, user_id, secrets,
-        )?);
+        let wake = Arc::clone(&self.wake);
+        let store = Arc::new(
+            kotton_record::open::user_record_store(base_dir, user_id, secrets)?
+                .with_write_signal(Arc::new(move || {
+                    if let Some(wake) = wake.get() {
+                        wake();
+                    }
+                })),
+        );
 
         let mut stores = self.stores.write().unwrap();
         Ok(Arc::clone(
@@ -263,6 +309,17 @@ impl RecordStores {
                 .entry(user_id.to_owned())
                 .or_insert_with(|| Arc::clone(&store)),
         ))
+    }
+
+    /// Have every store opened here wake a sync pass after a record write that wakes one
+    /// (kotton #450): every schema's insert or delete but `access-log`'s
+    /// (`kotton_record::replication::a_write_wakes_a_pass`). The daemon gives it its sync
+    /// engine's wake. A record write used to wake the engine only by changing `records.db`
+    /// under the filesystem watcher, which cannot tell one schema's write from another's and
+    /// no longer wakes on that file (`kotton_sync::engine::a_change_wakes_a_pass`). Set once;
+    /// a second call is ignored.
+    pub fn wake_on_write(&self, wake: kotton_record::WriteSignal) {
+        let _ = self.wake.set(wake);
     }
 
     /// Forget a user's store. Called when a user is evicted; the file stays.

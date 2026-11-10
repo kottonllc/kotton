@@ -13,6 +13,7 @@
 //! - Default limits: 50 000 records, 100 MiB (104 857 600 bytes) per pair
 
 use kotton_common::time::now_secs;
+use kotton_schemas::CoreSchema;
 use sqlx::SqlitePool;
 use std::io;
 
@@ -223,8 +224,27 @@ pub async fn decrement_counters(
 
 // ── Access checks ─────────────────────────────────────────────────────────────
 
-/// Return `Ok(())` if `app_id` has `can_read` on `nsid`, else `Err(permission denied)`.
+/// Refuse `nsid` to every app if it is a schema kept from apps
+/// ([`CoreSchema::is_kept_from_apps`]: `secret` and `access-log`), **before any stored grant
+/// is read**. A grant on such an identity is refused when it is set
+/// (`daemon::schema_grants::schema_grant_set`), but a row can be in the table without that
+/// door: stored before the schema was registered, when nothing refused it, or written into
+/// the grant store some other way. Asked here, at every check an app's record verb passes,
+/// so no such row ever goes live.
+pub fn refuse_if_kept_from_apps(nsid: &str) -> io::Result<()> {
+    match CoreSchema::kept_from_apps(nsid) {
+        Some(kept) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("permission denied: {}", kept.kept_from_apps_refusal()),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Return `Ok(())` if `app_id` has `can_read` on `nsid`, else `Err(permission denied)`. A
+/// schema kept from apps is refused whatever is stored ([`refuse_if_kept_from_apps`]).
 pub async fn check_read(pool: &SqlitePool, app_id: &str, nsid: &str) -> io::Result<()> {
+    refuse_if_kept_from_apps(nsid)?;
     match get_grant(pool, app_id, nsid).await? {
         Some(g) if g.can_read => Ok(()),
         _ => Err(io::Error::new(
@@ -237,13 +257,15 @@ pub async fn check_read(pool: &SqlitePool, app_id: &str, nsid: &str) -> io::Resu
 /// Return `Ok(())` if `app_id` has `can_write` on `nsid` and is within quota.
 ///
 /// `new_bytes` is the serialized size of the record being inserted; it is
-/// checked against the byte quota before the insert occurs.
+/// checked against the byte quota before the insert occurs. A schema kept from apps is
+/// refused whatever is stored ([`refuse_if_kept_from_apps`]).
 pub async fn check_write(
     pool: &SqlitePool,
     app_id: &str,
     nsid: &str,
     new_bytes: i64,
 ) -> io::Result<()> {
+    refuse_if_kept_from_apps(nsid)?;
     match get_grant(pool, app_id, nsid).await? {
         Some(g) if g.can_write => {
             if g.record_quota > 0 && g.record_count >= g.record_quota {
@@ -272,8 +294,10 @@ pub async fn check_write(
     }
 }
 
-/// Return `Ok(())` if `app_id` has `can_register` on `nsid`.
+/// Return `Ok(())` if `app_id` has `can_register` on `nsid`. A schema kept from apps is
+/// refused whatever is stored ([`refuse_if_kept_from_apps`]).
 pub async fn check_register(pool: &SqlitePool, app_id: &str, nsid: &str) -> io::Result<()> {
+    refuse_if_kept_from_apps(nsid)?;
     match get_grant(pool, app_id, nsid).await? {
         Some(g) if g.can_register => Ok(()),
         _ => Err(io::Error::new(

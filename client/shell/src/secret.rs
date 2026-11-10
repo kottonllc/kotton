@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The hidden prompt: where a secret is read at a terminal, for both doors.
 //!
-//! A recovery phrase or a passphrase is read here and nowhere else in this crate:
-//! from the terminal device with echo off, by [`read_hidden`], never through the
-//! REPL's line editor. The line editor is what keeps the history file, so a secret
-//! that never passes through it is one the history cannot hold. It is never taken
-//! on argv either, where the OS shell's history and the process list would hold it.
+//! A recovery phrase, a passphrase or a keychain value is read here and nowhere else in this
+//! crate: from the terminal device with echo off, by [`read_hidden`] (or, for a value kept as
+//! typed, [`read_hidden_untrimmed`]), never through the REPL's line editor. The line editor is
+//! what keeps the history file, so a secret that never passes through it is one the history
+//! cannot hold. It is never taken on argv either, where the OS shell's history and the process
+//! list would hold it.
 //!
 //! One prompt, two doors. `kotton id login`, `kotton id unlock` and the other
 //! one-shot verbs that ask for a secret call [`prompt_recovery_phrase`] and
@@ -24,6 +25,15 @@ use std::io;
 pub fn read_hidden(question: &str) -> io::Result<String> {
     let entered = rpassword::prompt_password(crate::ui::ask(question))?;
     Ok(entered.trim().to_string())
+}
+
+/// Read one line at the terminal with echo off, kept as typed.
+///
+/// [`read_hidden`] for a value whose every character is its own: a keychain secret
+/// (`secret set`), where a space at either end is part of the password and trimming it
+/// would keep another one. Only the line's end is not kept, as the terminal read leaves it.
+pub fn read_hidden_untrimmed(question: &str) -> io::Result<String> {
+    rpassword::prompt_password(crate::ui::ask(question))
 }
 
 /// The question the recovery phrase is asked with, by either door.

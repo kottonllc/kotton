@@ -646,6 +646,20 @@ fn handed(session_user: &Option<SessionUser>) -> io::Result<&SessionUser> {
         .ok_or_else(|| io::Error::other("the gate handed no session user to a verb that requires one"))
 }
 
+/// The trust origin `Authenticate` bound to this connection, for a verb whose answer turns on
+/// it: a record verb naming a schema kept from apps answers only `Local`
+/// (`records::refuse_kept_off_terminal`). The floor ([`origin_refusal`]) reads the same field.
+/// A connection with no session has no origin and is taken as the least, `Remote`, so a verb
+/// that reached here without one is never answered as the terminal.
+fn conn_origin(conn_session: &Mutex<Option<ConnSessionData>>) -> kotton_wire::ConnTrustOrigin {
+    conn_session
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.origin)
+        .unwrap_or(kotton_wire::ConnTrustOrigin::Remote)
+}
+
 /// The door's one-frame answer to `request`. The eleven verbs whose clients
 /// read a stream never arrive here: `super::streamed` answers them first.
 ///
@@ -1893,6 +1907,7 @@ async fn answer_request(
                 schema_nsid,
                 record,
                 app_id,
+                conn_origin(&conn_session),
             )
             .await
         }
@@ -1962,6 +1977,7 @@ async fn answer_request(
                 limit,
                 offset,
                 app_id,
+                conn_origin(&conn_session),
             )
             .await
         }
@@ -1995,6 +2011,7 @@ async fn answer_request(
                 schema_nsid,
                 record_id,
                 app_id,
+                conn_origin(&conn_session),
             )
             .await
         }
@@ -2076,8 +2093,14 @@ async fn answer_request(
                     }
                 };
             let access = super::record_access::record_access(users, base, &user_id);
-            kotton_record::daemon::records::record_open(&runtime.schema_registry, &store, &access, url)
-                .await
+            kotton_record::daemon::records::record_open(
+                &runtime.schema_registry,
+                &store,
+                &access,
+                url,
+                conn_origin(&conn_session),
+            )
+            .await
         }
 
         // -- Schema grant management ------------------------------------------
@@ -3591,6 +3614,14 @@ mod vfs_watch_opening_frame_tests {
 #[cfg(test)]
 #[path = "session_read_tests.rs"]
 mod session_read_tests;
+
+#[cfg(test)]
+#[path = "kept_schema_tests.rs"]
+mod kept_schema_tests;
+
+#[cfg(test)]
+#[path = "write_wake_tests.rs"]
+mod write_wake_tests;
 
 #[cfg(test)]
 #[path = "principal_choice_tests.rs"]

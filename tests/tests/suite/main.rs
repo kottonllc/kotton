@@ -48,6 +48,8 @@ mod vault;
 mod drive_sync;
 mod pins;
 mod records_drive;
+mod access_log;
+mod keychain;
 mod instance;
 mod introduction;
 mod ipc_hardening;

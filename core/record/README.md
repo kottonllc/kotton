@@ -21,10 +21,13 @@ encoding because SQLite folds a table name's case and a publisher is a case-sens
 distinct, since every row carries its identity in `schema_nsid` and every statement holds a
 row to it. A table written under an earlier name is split on open, each row to the table of
 the identity it names, and a row written under one of the old core names is read as the
-identity that name became. The tables are in `STRICT` mode under the WAL journal. `insert`,
-`query` and `delete` take the `SchemaId` they act on, and `RecordFilter::new()` builds a query
-by its methods: a field equal to a value, a text search, a limit and an offset, a cursor, the
-roots.
+identity that name became. Where that table already holds the row's id, in the same root, the
+two are versions of one row, and the split keeps the newer by `(updated_at, revision)`, as a
+merge does, and drops the older. Once it commits it logs, per schema, only counts: rows moved,
+rows that replaced an older copy, rows dropped as the older, rows left; never a record's id or
+when it was written. The tables are in `STRICT` mode under the WAL journal. `insert`, `query`
+and `delete` take the `SchemaId` they act on, and `RecordFilter::new()` builds a query by its
+methods: a field equal to a value, a text search, a limit and an offset, a cursor, the roots.
 
 `SchemaRegistry` keeps the schemas a store knows. `record_cmds::Record` is what the daemon's
 record verbs call.
@@ -72,9 +75,64 @@ definition's digest, never the bare digest. A definition that is unsigned, signe
 key, signed over the bare digest, or changed under its signature is refused; so is a document
 that is not the definition and nothing beside it, since the digest is taken over the
 definition's canonical form; and so is one naming a core schema, which changes in the tree and
-not through registration. Two of the core set, `secret` and `access-log`, are published and not
-yet known to a device: no record is kept under either until the grant refusal and the search
-exclusion they need are built.
+not through registration.
+
+Two of the core set, `secret` and `access-log`, are kept from every app, a refusal held for
+those two identities by name (`CoreSchema::is_kept_from_apps`), not for being core. No app is
+granted either: a grant on one is refused when set, and the check every app's record verb
+passes (`kotton_grant`'s `check_read`, `check_write` and `check_register`) refuses it whatever
+row the grant store holds. No manifest claims to handle or asks for either, no handler is
+registered or answered for either, the runner's records verbs refuse either, and
+`Record::search` returns no row of either to any caller, with no schema named or with one of
+them named. Both are known to every device. The person reaches `secret` at their own terminal
+with the `secret` verbs, in Personal, and `access-log` with the record verbs there; no verb
+writes a log entry for a daemon request yet, which is the `log` noun's own issue.
+
+**The access log is kept on the device that wrote it** (#450). The protocol's *The first release
+is a platform a stranger can use from the command line* keeps the log on the device and puts it
+in a drive only if the person pins it there. `replication` holds the identity by name, not by a
+schema flag: `log_records` logs no row of `access-log`, and `snapshot_records` puts none of this
+device's rows of it in a snapshot's base, carrying instead the newest version of each row of it
+the log already carries, verbatim. Those are the two paths by which a row leaves this device's
+store for a drive; the retired peer verb was the third (module doc). Both carry this device's
+log only when its own setting pins it to `personal` (`replication::AccessLogPin`, kept in the
+device's database by `kotton_device::users::log_pin`, migration `0033`, and read by the sync
+engine for each pass of `personal`'s mount). There is no verb for the setting until the `log`
+noun's issue; `log_pin::set` on the device's database is the handle. Pinned, the device's log
+rides the record log to `personal` like any record, its rows from before the pin among them.
+Unpinned again, no new row leaves; a row already logged stays in the drive and nothing is
+retracted. A row of it from another of the person's devices, one that pinned its log, is merged
+here as any row is.
+
+**Writing a log record starts no pass**, and tells no one it was written. The store wakes the
+sync engine itself after an insert or a delete of any schema but `access-log`
+(`SqliteRecordStore::with_write_signal`, `replication::a_write_wakes_a_pass`), and the wake is
+kept while a pass runs, so writes during a background pass are followed by exactly one more
+(`kotton_sync::engine::SyncWake::wake_pending`). A write that lands while a pass the person
+asked for holds the drive is not followed by one: the background pass skips a drive already
+being passed over, and the write rides the next wake or the periodic tick (#485). On a device
+with a sync sidecar, a record write also used to start a pass over drives the watcher does not
+watch, since the sidecar asked for every drive; it now reaches watched drives only, as a write
+on any other device does. The engine's filesystem watcher, which cannot
+tell one schema's write from another's, neither wakes on a change to `records.db` or the three
+files SQLite keeps beside it nor sends a `VfsWatch` frame for one: they are not files of any
+drive's tree. Before that a frame went to every subscriber for each record write, and the sync
+sidecar, which runs on any device with a paired node and syncs on every frame, started a pass
+for each, an access-log record's among them; a session at `Remote` read the timestamps. Now a
+pinned log rides the next pass that runs anyway and adds no rhythm a host can read.
+
+A pass's own writes wake no pass: the engine reads and writes through
+`SqliteRecordStore::without_write_signal` (`kotton_sync::engine::records_for_a_pass`), so the
+whole-keeper claim a pass makes or withdraws and a pin setting it moves out of the drive do not
+arm the next pass. Nothing else that changes only `records.db` wakes one either, and none
+should: a merge of rows from the log, which a pass makes; a table's creation, or its migration;
+the cleanup of old tombstones; and the split and respelling of old tables when the store is
+opened. None is a row the person or an app wrote, and the rows they touch were logged already
+or ride the next pass that runs anyway.
+
+A row of `secret` reaches a device only as every record does, in the record log of
+`personal`, sealed under the person's `K_log`, which their own devices alone hold: a member of
+a root the person shares holds no key to that log and writes no segment a pass applies here.
 
 ## The `record` verbs
 
@@ -88,8 +146,8 @@ its identity. An id no record has in Personal exits 1, and so does a schema this
 know, by name. `get` prints the record as the row holds it, its `id` among its fields, and
 `list --json` prints each row the same way; neither prints the fields the daemon adds to an
 answer (`_id`, `_filed_at`, `_root`), because every verb here names Personal and `_root` would
-be Personal's id, a durable identifier, on every row. `record import|export` are not in the
-tree yet (#454).
+be Personal's id, a durable identifier, on every row. `record import|export` are in the tree
+(#454).
 
 **An insert takes only what its schema declares.** `RecordInsert`, from any client, is refused,
 naming the field, when the body carries a top-level field beginning with `_` (the daemon's: an
@@ -101,3 +159,19 @@ already accepted, does not meet it, and a row already stored with such a field i
 nothing rewritten on open. No schema allows open fields: `SchemaDefinition` declares its fields
 and nothing more, and `FieldType` is closed, with no type that admits an undeclared name (a
 `map` is declared, and holds one value type), so there is no exception to state.
+
+`secret set|get|list|rm|generate <label>` is the keychain
+(`client/shell/src/commands/secret.rs`), the same requests under `secret`, each naming
+Personal: one record per label, under the id the store gave it, so a label is never written
+into a record's URL. `set` never takes the value on the line; it reads it at a hidden prompt
+at a terminal, and with no terminal `kotton secret set` reads the one line piped to it; in the
+REPL, whose stdin is its script, it reads nothing and is refused. `get` prints the value
+alone; `list` never prints one.
+
+**A kept schema answers only the person's own terminal.** `RecordInsert`, `RecordQuery`,
+`RecordDelete` and `RecordOpen` (by the schema its URL names) on `secret` or `access-log` are
+refused, naming no app or one, unless the connection's origin is `Local`, a client on this
+device's own socket (`daemon::records::refuse_kept_off_terminal`). The origin is the one
+`Authenticate` bound from the credential, read by the door and handed to the verb; a remote
+client or an admitted browser names no app and is not thereby the person at their terminal.
+`RecordSearch` answers no row of either to anyone.
