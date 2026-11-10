@@ -71,8 +71,9 @@ pub struct SchemaDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<SchemaId>,
 
-    /// The publisher's Ed25519 signature over the definition's 32-byte digest, base64
-    /// (standard alphabet, padded). Checked by `kotton_crypto::schema_signature`; a definition
+    /// The publisher's Ed25519 signature over the message `kotton_crypto::schema_signature`
+    /// builds from the definition's 32-byte digest (the tag `kotton-schema-v1`, a zero byte,
+    /// the digest), base64 (standard alphabet, padded). Checked there; a definition
     /// whose signature does not check against its publisher is no schema at all. The core
     /// set compiled into this tree carries none before the first tag, as the protocol's
     /// decision says, and is admitted as core without one.

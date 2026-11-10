@@ -69,10 +69,13 @@ carried and kept verbatim, not dropped (`replication::snapshot_records`).
 `schema list|show|register` are the schema verbs (`schema_cmds`). A device knows the core set,
 compiled in, and what `schema register` was handed: a definition signed by its publisher, the
 key its identity names, checked by `kotton_crypto::schema_signature` before anything is
-migrated or kept. A definition that is unsigned, signed by another key, or changed under its
-signature is refused; so is a document that is not the definition and nothing beside it, since
-the digest is taken over the definition's canonical form; and so is one naming a core schema,
-which changes in the tree and not through registration.
+migrated or kept. The signature is over the 49-byte message the protocol's decision *A schema
+is named by the key that publishes it* names, the tag `kotton-schema-v1`, a zero byte and the
+definition's digest, never the bare digest. A definition that is unsigned, signed by another
+key, signed over the bare digest, or changed under its signature is refused; so is a document
+that is not the definition and nothing beside it, since the digest is taken over the
+definition's canonical form; and so is one naming a core schema, which changes in the tree and
+not through registration.
 
 Two of the core set, `secret` and `access-log`, are kept from every app, a refusal held for
 those two identities by name (`CoreSchema::is_kept_from_apps`), not for being core. No app is

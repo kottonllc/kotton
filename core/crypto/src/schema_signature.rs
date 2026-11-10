@@ -3,9 +3,13 @@
 //!
 //! The protocol's decision *A schema is named by the key that publishes it* says how a
 //! definition is signed and checked: an Ed25519 signature, under the key the publisher's
-//! `did:key` names, over the definition's 32-byte digest (BLAKE3 over its canonical form,
-//! `kotton_schemas::definition`), carried beside the definition as `signature`, base64 with
-//! the standard alphabet and padding, never inside the digest or the identity. A definition
+//! `did:key` names, carried beside the definition as `signature`, base64 with the standard
+//! alphabet and padding, never inside the digest or the identity. The signature is over a
+//! domain-tagged message, not the bare digest: the 16 bytes [`DOMAIN`], `kotton-schema-v1`,
+//! then one zero byte, then the definition's 32-byte digest (BLAKE3 over its canonical form,
+//! `kotton_schemas::definition`), 49 bytes in all. The tag says what the signature is the
+//! publisher's word for, so a signature the same key makes over 32 bytes for any other
+//! purpose is not a schema's, and a signature over the bare digest is refused. A definition
 //! whose signature does not check against its publisher is no schema at all, and so is one
 //! that carries no signature: [`verify`] refuses both, and `schema register` refuses what
 //! [`verify`] refuses.
@@ -45,12 +49,28 @@ pub enum SchemaSignatureError {
     /// The definition has no digest to sign or check.
     #[error("{0}")]
     Digest(#[from] DigestError),
-    /// The signature does not check against the publisher's key over the digest.
-    #[error("the signature does not check against the publisher's key over the definition's digest")]
+    /// The signature does not check against the publisher's key over the message for the
+    /// definition's digest.
+    #[error("the signature does not check against the publisher's key over the definition's signed message")]
     Invalid,
     /// [`sign`] was handed a key that is not the definition's publisher.
     #[error("the signing key is {key}, and the definition's publisher is {publisher}")]
     PublisherMismatch { key: Publisher, publisher: Publisher },
+}
+
+/// The tag a schema definition's signature opens its message with (module doc): the signed
+/// message is these 16 ASCII bytes, one zero byte, and the definition's 32-byte digest. The
+/// `v1` is the signed message's form, not a schema's revision: every revision of every
+/// schema is signed under it, and it changes only if the message itself does.
+pub const DOMAIN: &[u8; 16] = b"kotton-schema-v1";
+
+/// The message a definition's signature is over, for its 32-byte `digest`: [`DOMAIN`], one
+/// zero byte, the digest.
+fn message(digest: &[u8; 32]) -> [u8; 49] {
+    let mut m = [0u8; 49];
+    m[..16].copy_from_slice(DOMAIN);
+    m[17..].copy_from_slice(digest);
+    m
 }
 
 /// The publisher a public key is: its `did:key`.
@@ -64,7 +84,8 @@ fn key_of(publisher: &Publisher) -> Result<VerifyingKey, SchemaSignatureError> {
         .map_err(|e| SchemaSignatureError::PublisherKey(e.to_string()))
 }
 
-/// Check `def.signature` against `def.publisher` over `def`'s digest (module doc).
+/// Check `def.signature` against `def.publisher` over the message for `def`'s digest
+/// (module doc).
 pub fn verify(def: &SchemaDefinition) -> Result<(), SchemaSignatureError> {
     let Some(signature) = def.signature.as_deref() else {
         return Err(SchemaSignatureError::Missing);
@@ -77,10 +98,9 @@ pub fn verify(def: &SchemaDefinition) -> Result<(), SchemaSignatureError> {
     let signature = Signature::from_bytes(&bytes);
     let key = key_of(&def.publisher)?;
     let digest = def.digest()?;
-    // Strict, as every other Ed25519 check in this crate is: a small-order key or `R` is
-    // refused, so a key with no secret behind it cannot be named as a publisher whose
-    // "signature" anyone can write.
-    key.verify_strict(&digest, &signature).map_err(|_| SchemaSignatureError::Invalid)
+    // This module checks strictly: a small-order key or `R` is refused, so a key with no
+    // secret behind it cannot be named as a publisher whose "signature" anyone can write.
+    key.verify_strict(&message(&digest), &signature).map_err(|_| SchemaSignatureError::Invalid)
 }
 
 /// Sign `def` with `key`, which must be the key `def.publisher` names, and set its
@@ -92,7 +112,7 @@ pub fn sign(def: &mut SchemaDefinition, key: &SigningKey) -> Result<(), SchemaSi
         return Err(SchemaSignatureError::PublisherMismatch { key: signer, publisher: def.publisher.clone() });
     }
     let digest = def.digest()?;
-    def.signature = Some(STANDARD.encode(key.sign(&digest).to_bytes()));
+    def.signature = Some(STANDARD.encode(key.sign(&message(&digest)).to_bytes()));
     Ok(())
 }
 
@@ -188,9 +208,10 @@ mod tests {
 
     /// A publisher whose key is the identity point, a small-order point no secret stands
     /// behind, and a forged signature with `R` the identity and `S` zero. Plain `verify`
-    /// accepts it over any digest: it checks `[S]B = R + [k]A`, and with `S = 0`, `R` the
-    /// identity and `A` the identity both sides are the identity whatever `k` is. The strict
-    /// check refuses a small-order key, so the forgery is refused.
+    /// accepts it over any message, the signed message for the definition's digest among
+    /// them: it checks `[S]B = R + [k]A`, and with `S = 0`, `R` the identity and `A` the
+    /// identity both sides are the identity whatever `k` is. The strict check refuses a
+    /// small-order key, so the forgery is refused.
     #[test]
     fn a_small_order_publisher_key_with_a_forged_signature_is_refused() {
         let mut identity = [0u8; 32];
@@ -206,9 +227,93 @@ mod tests {
         def.signature = Some(STANDARD.encode(forged));
         // What the forgery passes: the check this module used to make.
         use ed25519_dalek::Verifier as _;
-        key.verify(&def.digest().unwrap(), &Signature::from_bytes(&forged))
+        key.verify(&message(&def.digest().unwrap()), &Signature::from_bytes(&forged))
             .expect("plain verify accepts the forgery, which is why it is not the check");
         assert_eq!(verify(&def), Err(SchemaSignatureError::Invalid));
+    }
+
+    /// The signed message is exactly the tag, one zero byte and the digest: 49 bytes.
+    #[test]
+    fn the_signed_message_is_the_tag_a_zero_byte_and_the_digest() {
+        let digest: [u8; 32] = core::array::from_fn(|i| i as u8 + 0xa0);
+        let m = message(&digest);
+        assert_eq!(m.len(), 49);
+        assert_eq!(&m[..16], b"kotton-schema-v1");
+        assert_eq!(m[16], 0);
+        assert_eq!(&m[17..], &digest);
+        let mut expected = b"kotton-schema-v1\0".to_vec();
+        expected.extend_from_slice(&digest);
+        assert_eq!(m.as_slice(), expected.as_slice());
+    }
+
+    /// A signature over the bare digest, by the publisher's own key, is refused: the
+    /// publisher's word is for the tagged message, and 32 bytes it signed for any other
+    /// purpose are not a schema's signature.
+    #[test]
+    fn a_signature_over_the_bare_digest_is_refused() {
+        let key = a_key(7);
+        let mut def = signed(&key);
+        verify(&def).unwrap();
+        let bare = key.sign(&def.digest().unwrap());
+        // The signature is good for what it signed, so the refusal is about the message.
+        key.verifying_key().verify_strict(&def.digest().unwrap(), &bare).unwrap();
+        def.signature = Some(STANDARD.encode(bare.to_bytes()));
+        assert_eq!(verify(&def), Err(SchemaSignatureError::Invalid));
+    }
+
+    // A known answer, for another implementation to check itself against and for the
+    // protocol's fixtures: the signing key whose seed is the 32 bytes 0x01 to 0x20 (byte `i`
+    // is `i + 1`), the definition [`known_answer_definition`] builds under the publisher that
+    // key names, and what this module makes of it. Ed25519 is deterministic, so the signature
+    // is fixed too.
+
+    /// The known answer's publisher: the `did:key` of the key whose seed is 0x01 to 0x20.
+    const KNOWN_ANSWER_PUBLISHER: &str = "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7";
+
+    /// The known answer's definition in its canonical form, the bytes its digest is over.
+    const KNOWN_ANSWER_CANONICAL: &str = r#"{"description":"A known-answer definition.","fields":[{"name":"title","nullable":false,"type":"string"}],"name":"example","publisher":"did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7","revision":1}"#;
+
+    /// The known answer's digest, BLAKE3 over its canonical form, as lowercase hex.
+    const KNOWN_ANSWER_DIGEST_HEX: &str = "81b76f8c79ffbe19465217b89db5645c3cbad734aae0bd5797c2184c2e2ae69f";
+
+    /// The known answer's signed message, 49 bytes as lowercase hex: [`DOMAIN`], one zero
+    /// byte, the digest.
+    const KNOWN_ANSWER_MESSAGE_HEX: &str =
+        "6b6f74746f6e2d736368656d612d76310081b76f8c79ffbe19465217b89db5645c3cbad734aae0bd5797c2184c2e2ae69f";
+
+    /// The known answer's signature, base64 with the standard alphabet and padding.
+    const KNOWN_ANSWER_SIGNATURE: &str =
+        "1Bv2xonxDK8cFzz4wL4XcAUWMSbpNikiB+rljXIUBMHolcxEnCwZkA9BnOTe006pr4C/Q8M/aITTklZAhRZDDA==";
+
+    /// The known answer's key: seed byte `i` is `i + 1`.
+    fn known_answer_key() -> SigningKey {
+        SigningKey::from_bytes(&core::array::from_fn(|i| i as u8 + 1))
+    }
+
+    /// The known answer's definition, unsigned: `example`, revision 1, one required string
+    /// field `title`, described as "A known-answer definition.", under `key`'s publisher.
+    fn known_answer_definition(key: &SigningKey) -> SchemaDefinition {
+        SchemaDefinition::new(
+            SchemaId::new(publisher_of(&key.verifying_key()), SchemaName::new("example").unwrap()).unwrap(),
+            1,
+            vec![SchemaField::required("title", FieldType::String)],
+        )
+        .with_description("A known-answer definition.")
+    }
+
+    /// **The known answer holds**: the publisher, the canonical form, the digest, the signed
+    /// message and the signature are the constants above, and the signature verifies.
+    #[test]
+    fn the_known_answer_holds() {
+        let key = known_answer_key();
+        let mut def = known_answer_definition(&key);
+        assert_eq!(def.publisher.as_str(), KNOWN_ANSWER_PUBLISHER);
+        assert_eq!(def.canonical().unwrap(), KNOWN_ANSWER_CANONICAL);
+        assert_eq!(def.digest_hex().unwrap(), KNOWN_ANSWER_DIGEST_HEX);
+        assert_eq!(hex::encode(message(&def.digest().unwrap())), KNOWN_ANSWER_MESSAGE_HEX);
+        sign(&mut def, &key).unwrap();
+        assert_eq!(def.signature.as_deref(), Some(KNOWN_ANSWER_SIGNATURE));
+        verify(&def).unwrap();
     }
 
     #[test]
