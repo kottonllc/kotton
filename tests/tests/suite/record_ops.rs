@@ -376,6 +376,46 @@ async fn a_missing_id_exits_one_and_the_retired_word_exits_two_at_the_terminal()
     drop(env);
 }
 
+/// **A record put back with a daemon field added is refused, and stores no `_root`.** `record
+/// get` prints Bob's note without the fields an answer adds; a hand that adds `_root` back, as
+/// the query's answer spelled it, and puts the result is refused naming the field, and the
+/// stored row is the note as it was: no `_root` in its body, and no new version of it.
+#[tokio::test]
+async fn a_record_put_back_with_a_daemon_field_is_refused_and_stores_no_root() {
+    let (mut env, cli, id) = a_note_and_a_terminal_holding_only_its_owners_session().await;
+    let got = cli.run(&["record", "--user", USER, "get", "--schema", NOTES, &id]);
+    assert_got_as_its_owner(&got, &id);
+    let mut body: serde_json::Value = serde_json::from_slice(&got.stdout).expect("the record as JSON");
+    let rows = env.client.record_query(USER, NOTES, vec![], None, None).await.expect("query");
+    let root = rows[0]["_root"].as_str().expect("an answer names the row's root").to_owned();
+    body["_root"] = serde_json::json!(root);
+    body["title"] = serde_json::json!("put back");
+    let before = stored_note(&env, &id).await;
+
+    let put = cli.run(&["record", "--user", USER, "put", "--schema", NOTES, &body.to_string()]);
+    assert_eq!(put.status.code(), Some(1), "{}", said(&put));
+    assert!(String::from_utf8_lossy(&put.stderr).contains("_root"), "the refusal names no field.\n{}", said(&put));
+
+    let after = stored_note(&env, &id).await;
+    assert!(after.0.get("_root").is_none(), "a daemon field was stored: {:?}", after.0);
+    assert_eq!(after, before, "the refused put changed the stored note");
+    drop(env);
+}
+
+/// Bob's note `id` as the store holds it: its body and its version, `(updated_at, revision)`,
+/// read from the daemon's own `records.db`, under the key the person's secrets hold.
+async fn stored_note(env: &TestEnv, id: &str) -> (serde_json::Value, (i64, i64)) {
+    use kotton_record::record_store::RecordStore as _;
+    let store = kotton_record::open::user_record_store(env.runtime.base_dir(), USER, env.runtime.secrets())
+        .expect("Bob's record store");
+    let changeset = store.export_changeset(0).await.expect("the store's rows");
+    let row = changeset
+        .into_iter()
+        .find(|row| row.schema_nsid == NOTES && row.id == id)
+        .unwrap_or_else(|| panic!("no note {id} is stored"));
+    (row.body, (row.updated_at, row.revision))
+}
+
 /// Bob's note, and a CLI holding only Bob's cached session. Returns the note's id.
 async fn a_note_and_a_terminal_holding_only_its_owners_session() -> (TestEnv, Cli, String) {
     let mut env = TestEnv::spawn_cli_reachable().await;

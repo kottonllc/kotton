@@ -263,7 +263,7 @@ mod tests {
                 &access_from(&self.set, AID),
                 root.map(str::to_owned),
                 CALENDAR.into(),
-                json!({ "title": title, "date": "2026-09-24" }),
+                json!({ "title": title, "start_at": "2026-09-24T09:00:00Z" }),
                 Some(APP.into()),
             )
             .await
@@ -537,7 +537,7 @@ mod tests {
         // one would arrive — no verb writes it.
         let nsid = kotton_schemas::SchemaId::from_static(CALENDAR);
         p.store
-            .insert_in(&nsid, Some(p.theirs.clone()), json!({ "title": "their secret", "date": "2026-09-24" }))
+            .insert_in(&nsid, Some(p.theirs.clone()), json!({ "title": "their secret", "start_at": "2026-09-24T09:00:00Z" }))
             .await
             .unwrap();
 
