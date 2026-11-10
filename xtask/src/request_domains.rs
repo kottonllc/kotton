@@ -5,15 +5,16 @@
 //!
 //! RFC-0080's last open criterion asks that `required_trust()` stop being an
 //! exhaustive match over one enum, and that **per-domain request enums carry
-//! trust in the type**. That is a large change — 151 variants, 466 call sites,
-//! and a wire format that must stay compatible — and it cannot start until
-//! every variant has an owner.
+//! trust in the type**. That is a large change — every variant of the enum, the
+//! call sites that build them, and a wire format that must stay compatible — and
+//! it cannot start until every variant has an owner. (The variant count is the
+//! recording's, `core/wire/wire-surface.txt`, not this doc's.)
 //!
-//! Assigning them is not mechanical. **Only 91 of the 151 carry their domain in
-//! their name.** The other 60 do not: `ReadFile` is `fs`, `Authenticate` is
-//! `session`, `TrustAdd` and `ContactList` are `peer`, `ThresholdSign` is `org`.
-//! A name that does not say where a variant belongs is exactly how 151 of them
-//! ended up in one enum without anyone deciding to put them there.
+//! Assigning them is not mechanical. **Many variants do not carry their domain in
+//! their name:** `ReadFile` is `fs`, `Authenticate` is `session`, `TrustAdd` and
+//! `ContactList` are `peer`, `FrostSignRound` is `org`. A name that does not say
+//! where a variant belongs is exactly how they ended up in one enum without anyone
+//! deciding to put them there.
 //!
 //! So the classification is a judgement, and a judgement left in a commit
 //! message rots. This check makes it an artifact:
@@ -296,7 +297,6 @@ const DOMAINS: &[(&str, &[&str])] = &[
             "OrgFrostSignContribute",
             "OrgFrostSignFinalize",
             "FrostSignRound",
-            "ThresholdSign",
         ],
     ),
     (

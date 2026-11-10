@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+# `daemon::nodes::threshold_sign`: a distributed round over bytes the caller hands it.
+# The integration suite turns it on; no daemon's build does.
+test-support = []
+
 [dependencies]
 kotton-sys = { path = "../sys" }
 kotton-common = { path = "../common" }

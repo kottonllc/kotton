@@ -2,7 +2,7 @@
 # Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
 # Variants sorted by name; fields in declaration order, which is the order
 # serde writes them. See xtask/src/wire_check.rs for why this file exists.
-# variants: 204
+# variants: 203
 AddRecoveryPhrase
     user_id: String
 AppGetBundlePath
@@ -656,9 +656,6 @@ TenantDriveRetire
 TenantDrives
     user_id: String
 Tenants
-ThresholdSign
-    user_id: String
-    message_hex: String
 TrustAdd
     user_id: String
     org_did: String

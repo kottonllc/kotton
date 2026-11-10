@@ -170,26 +170,6 @@ impl KottonClient {
     }
 }
 
-// Moved from network.rs: a threshold signature is an org act, not a network one.
-impl KottonClient {
-    /// Coordinate a distributed FROST threshold signature over `message` across
-    /// this node's own network (RFC-0036): this node signs with its share and
-    /// co-signs with every Full own-device member over the peer channel. Returns
-    /// the aggregate 64-byte Ed25519 signature, verifiable under the group DID.
-    pub async fn threshold_sign(&mut self, user_id: &str, message: &[u8]) -> io::Result<Vec<u8>> {
-        let request = UserRequest::ThresholdSign {
-            user_id: user_id.to_string(),
-            message_hex: hex::encode(message),
-        };
-        match self.client.send(&request).await? {
-            UserResponse::ThresholdSigned { signature_hex } => hex::decode(&signature_hex)
-                .map_err(|e| io::Error::other(format!("bad sig hex: {e}"))),
-            UserResponse::Error { message } => Err(io::Error::other(message)),
-            got => Err(crate::protocol::unexpected(got)),
-        }
-    }
-}
-
 /// The `org` domain, bound to one user — the member acting, not the org acted on.
 pub struct Org<'a> {
     client: &'a mut KottonClient,
@@ -245,12 +225,6 @@ impl Org<'_> {
     pub async fn remove_member(&mut self, org_did: &str, member_did: &str) -> io::Result<u32> {
         let u = self.user_id.clone();
         self.client.org_member_remove(&u, org_did, member_did).await
-    }
-
-    /// Sign as the org. See [`KottonClient::threshold_sign`].
-    pub async fn sign(&mut self, message: &[u8]) -> io::Result<Vec<u8>> {
-        let u = self.user_id.clone();
-        self.client.threshold_sign(&u, message).await
     }
 
     // -- FROST: authority split across holders --------------------------------

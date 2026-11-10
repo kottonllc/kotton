@@ -9,8 +9,14 @@
 //!   2. Joiner N runs `device join`, completing the FROST 2-of-2 split; both persist
 //!      their share + the group `PublicKeyPackage`; both record membership.
 //!   3. E learns N's operational listener address (the harness provides it on
-//!      loopback — in production this is presence/relay) and `threshold_sign`s a
-//!      message: E co-signs with N over the operational peer channel.
+//!      loopback — in production this is presence/relay) and coordinates a
+//!      threshold signature over a message: E co-signs with N over the operational
+//!      peer channel. The round is driven in process
+//!      (`common::threshold_sign_in_process`): no request on any door of a daemon's
+//!      build asks the person's group key to sign bytes the caller supplies, and the
+//!      round is what the `test-support` features of kotton-peer and kuserd compile.
+//!      N answers it over the peer channel through the `FrostSignRound` responder,
+//!      which the suite's daemons are built with.
 //!   4. The 64-byte aggregate verifies as a standard Ed25519 signature under the
 //!      group DID (the DID-preserving split keeps it equal to alice's user DID).
 //!
@@ -28,7 +34,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::{connect_when_ready, enroll_streamed, init_crypto, unique_ipc, wait_for_daemon};
+use crate::common::{
+    connect_when_ready, enroll_streamed, init_crypto, threshold_sign_in_process, unique_ipc,
+    wait_for_daemon,
+};
 
 
 /// The ceremony recorded where `label` answers the protocol, so nothing here
@@ -113,7 +122,10 @@ async fn enroll_then_threshold_sign_across_two_nodes() {
     let daemon_n =
         Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
 
-    let _task_e = tokio::spawn(async move { std::sync::Arc::new(daemon_e).run().await });
+    // Kept as an `Arc`, so the test can coordinate the round on E in process.
+    let daemon_e = Arc::new(daemon_e);
+    let serving_e = Arc::clone(&daemon_e);
+    let _task_e = tokio::spawn(async move { serving_e.run().await });
     let _task_n = tokio::spawn(async move { std::sync::Arc::new(daemon_n).run().await });
     wait_for_daemon(&ipc_e, "daemon E").await;
     wait_for_daemon(&ipc_n, "daemon N").await;
@@ -168,10 +180,9 @@ async fn enroll_then_threshold_sign_across_two_nodes() {
 
     // ── 4. E coordinates a 2-of-2 threshold signature with N. ─────────────────
     let message = b"sprint-08: a constitutional act co-signed across two enrolled nodes";
-    let sig = client_e
-        .threshold_sign("alice", message)
+    let sig = threshold_sign_in_process(&daemon_e, "alice", message)
         .await
-        .expect("threshold_sign across two nodes");
+        .expect("a threshold signature across two nodes");
 
     assert_eq!(sig.len(), 64, "aggregate is a 64-byte Ed25519 signature");
 
@@ -276,11 +287,9 @@ async fn a_locked_coordinator_says_it_is_locked_rather_than_that_it_has_no_co_si
     // E is the node that restarted. N is untouched: still enrolled, still listening.
     crate::common::lock_as_a_restart_would(&daemon_e, "alice").await;
 
-    let refusal = client_e
-        .threshold_sign("alice", message)
+    let refusal = threshold_sign_in_process(&daemon_e, "alice", message)
         .await
         .expect_err("a locked node must refuse to sign, not produce a signature");
-    let refusal = refusal.to_string();
     assert!(
         refusal.contains("it is locked"),
         "the refusal says the node is locked, got: {refusal}"
@@ -294,8 +303,7 @@ async fn a_locked_coordinator_says_it_is_locked_rather_than_that_it_has_no_co_si
         client_e.unlock_with_pin("alice", PASSPHRASE).await.expect("unlock"),
         kotton::PinUnlock::Unlocked
     );
-    let sig = client_e
-        .threshold_sign("alice", message)
+    let sig = threshold_sign_in_process(&daemon_e, "alice", message)
         .await
         .expect("once unlocked, the same two nodes sign");
     let group_vk = group_vk_from_chain(base_e.path(), "alice");
@@ -365,7 +373,10 @@ async fn enroll_then_threshold_sign_over_relay() {
     let daemon_n =
         Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
 
-    let _task_e = tokio::spawn(async move { std::sync::Arc::new(daemon_e).run().await });
+    // Kept as an `Arc`, so the test can coordinate the round on E in process.
+    let daemon_e = Arc::new(daemon_e);
+    let serving_e = Arc::clone(&daemon_e);
+    let _task_e = tokio::spawn(async move { serving_e.run().await });
     let _task_n = tokio::spawn(async move { std::sync::Arc::new(daemon_n).run().await });
     wait_for_daemon(&ipc_e, "daemon E").await;
     wait_for_daemon(&ipc_n, "daemon N").await;
@@ -376,15 +387,14 @@ async fn enroll_then_threshold_sign_over_relay() {
     let client_n = connect_when_ready(&ipc_n, "client_n").await;
 
     let (_did_e, _f) = client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
-    let (mut client_e, _client_n, _node_n) =
+    let (_client_e, _client_n, _node_n) =
         enroll_streamed(client_e, client_n, "alice", "device-n", Posture::Full).await;
 
     // No peer_add / address injection — reach is entirely via the relay.
     let message = b"sprint-08: threshold-signed across two nodes, reached via the relay";
-    let sig = client_e
-        .threshold_sign("alice", message)
+    let sig = threshold_sign_in_process(&daemon_e, "alice", message)
         .await
-        .expect("threshold_sign over the relay");
+        .expect("a threshold signature over the relay");
     assert_eq!(sig.len(), 64);
 
     let group_vk = group_vk_from_chain(base_e.path(), "alice");
@@ -1202,7 +1212,10 @@ async fn cosigner_holds_a_share_but_no_data_keys_and_can_co_sign() {
     let daemon_n =
         Arc::try_unwrap(daemon_n).unwrap_or_else(|_| panic!("sole arc owner for daemon_n"));
 
-    let _task_e = tokio::spawn(async move { std::sync::Arc::new(daemon_e).run().await });
+    // Kept as an `Arc`, so the test can coordinate the round on E in process.
+    let daemon_e = Arc::new(daemon_e);
+    let serving_e = Arc::clone(&daemon_e);
+    let _task_e = tokio::spawn(async move { serving_e.run().await });
     let _task_n = tokio::spawn(async move { std::sync::Arc::new(daemon_n).run().await });
     wait_for_daemon(&ipc_e, "daemon E").await;
     wait_for_daemon(&ipc_n, "daemon N").await;
@@ -1252,10 +1265,9 @@ async fn cosigner_holds_a_share_but_no_data_keys_and_can_co_sign() {
         .expect("inject cosigner operational address");
 
     let message = b"sprint-08: constitutional act co-signed by a data-blind cosigner";
-    let sig = client_e
-        .threshold_sign("alice", message)
+    let sig = threshold_sign_in_process(&daemon_e, "alice", message)
         .await
-        .expect("threshold_sign co-signing with the cosigner");
+        .expect("a threshold signature co-signed with the cosigner");
     assert_eq!(sig.len(), 64);
     let group_vk = group_vk_from_chain(base_e.path(), "alice");
     let sig_arr: [u8; 64] = sig.as_slice().try_into().unwrap();
