@@ -15,6 +15,7 @@
 
 use crate::common::cli::{said, Cli};
 use crate::common::{TestEnv, TEST_PASSPHRASE};
+use kotton_wire::ipc::{FIRST_DRIVE_ID, FIRST_DRIVE_NAME};
 
 const USER: &str = "alice";
 
@@ -327,22 +328,64 @@ async fn a_vault_added_by_hand_becomes_a_drive_when_the_words_recover_and_not_be
     recover_from_the_card(None, Door::AddedByHand).await;
 }
 
-/// The drives `daemon` records for `name`: each one's vault key (hex), tenancy, the
+/// A vault's own row as `daemon` records it: the vault key (hex), the tenancy, the
 /// node it is reached through, and that node's posture.
-async fn drives_of(daemon: &kuserd::DeviceDaemon, name: &str) -> Vec<(String, String, String, Option<String>)> {
-    daemon
-        .drives(name)
+type VaultRow = (String, String, String, Option<String>);
+
+/// A made drive as `daemon` records it: the vault key (hex) of the vault it is
+/// kept at, the tenancy, the node it is reached through, the person's name for
+/// it, and its id.
+type MadeDrive = (String, String, String, String, Option<String>);
+
+/// Every row `daemon` records of `name`'s drives: each vault's own row and each
+/// drive made there (`DeviceDaemon::drives`).
+async fn every_drive_row_of(
+    daemon: &kuserd::DeviceDaemon,
+    name: &str,
+) -> Vec<kotton_peer::daemon::drives::Drive> {
+    daemon.drives(name).await.expect("read the drive record")
+}
+
+/// The vaults `daemon` records `name` keeps drives on: each vault's own row, the
+/// tenancy's own tree, which is what `drives::list` returns.
+async fn vault_rows_of(daemon: &kuserd::DeviceDaemon, name: &str) -> Vec<VaultRow> {
+    every_drive_row_of(daemon, name)
         .await
-        .expect("read the drive record")
         .into_iter()
+        .filter(|d| d.is_tenancy_tree())
         .map(|d| (hex::encode(d.vault_key), d.tenancy, d.node.id, d.node.posture))
         .collect()
 }
 
-/// The one drive a recovery from `line` records for `name`, reached through `label`.
-fn the_lines_drive(line: &str, name: &str, label: &str) -> Vec<(String, String, String, Option<String>)> {
+/// The drives `daemon` records made at `name`'s vaults, learned from the vaults'
+/// listings (#447): every row but the vaults' own.
+async fn made_drives_of(daemon: &kuserd::DeviceDaemon, name: &str) -> Vec<MadeDrive> {
+    every_drive_row_of(daemon, name)
+        .await
+        .into_iter()
+        .filter(|d| !d.is_tenancy_tree())
+        .map(|d| (hex::encode(d.vault_key), d.tenancy, d.node.id, d.name, d.id))
+        .collect()
+}
+
+/// The one vault a recovery from `line` records for `name`, reached through `label`.
+fn the_lines_vault(line: &str, name: &str, label: &str) -> Vec<VaultRow> {
     let key = kotton_wire::line::InstanceLine::parse(line).expect("the card's line parses").key;
     vec![(hex::encode(key), name.to_string(), label.to_string(), Some("blind-storage".to_string()))]
+}
+
+/// `personal`, the one drive made at the line's vault, as a device that has read
+/// that vault's listing records it for `name`, reached through `label`: the first
+/// drive is found by its id (#447, #491).
+fn personal_at_the_lines_vault(line: &str, name: &str, label: &str) -> Vec<MadeDrive> {
+    let key = kotton_wire::line::InstanceLine::parse(line).expect("the card's line parses").key;
+    vec![(
+        hex::encode(key),
+        name.to_string(),
+        label.to_string(),
+        FIRST_DRIVE_NAME.to_string(),
+        Some(FIRST_DRIVE_ID.to_string()),
+    )]
 }
 
 /// **A device that already acts as someone else recovers in one command, and the
@@ -479,7 +522,10 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
                     "a refused recovery left the claim's session cached at {}",
                     cached.display()
                 );
-                assert!(drives_of(&fresh.daemon, &name).await.is_empty(), "a refused recovery recorded a drive");
+                assert!(
+                    every_drive_row_of(&fresh.daemon, &name).await.is_empty(),
+                    "a refused recovery recorded a drive"
+                );
             }
 
             // The recovery: the name unless given, the words, the line, then a
@@ -506,12 +552,18 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
                 "the recovered identity is not the one this machine acts as.\n{}",
                 said(&out)
             );
-            // The vault the line names is the person's drive here, as `id recover`
-            // added it.
+            // The vault the line names is a vault the person keeps drives on here, as
+            // `id recover` added it; and the recovery's own pass read its listing, so
+            // `personal` is back on this device, found at that vault.
             assert_eq!(
-                drives_of(&fresh.daemon, name).await,
-                the_lines_drive(line, name, "vault"),
-                "`kotton id recover` did not record the line's vault as the person's drive"
+                vault_rows_of(&fresh.daemon, name).await,
+                the_lines_vault(line, name, "vault"),
+                "`kotton id recover` did not record the line's vault as the person's"
+            );
+            assert_eq!(
+                made_drives_of(&fresh.daemon, name).await,
+                personal_at_the_lines_vault(line, name, "vault"),
+                "the recovered device did not find '{FIRST_DRIVE_NAME}' at the line's vault"
             );
         }
         Door::AddedByHand => {
@@ -528,7 +580,10 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
             // be reached through this row and not through one the recovery added.
             let out = new_cli.run(&["peer", "--user", &name, "add", "home", &did, &key, &parsed.hint]);
             assert!(out.status.success(), "`kotton peer add` of the line's vault failed.\n{}", said(&out));
-            assert!(drives_of(&fresh.daemon, &name).await.is_empty(), "a plain `peer add` recorded a drive");
+            assert!(
+                every_drive_row_of(&fresh.daemon, &name).await.is_empty(),
+                "a plain `peer add` recorded a drive"
+            );
             // The claim goes; the name's node rows stay (`id recover`'s module doc), so
             // the vault is paired here, by hand, when the recovery begins. The claim
             // must go before the one-shot runs: `kotton id recover` after a by-hand
@@ -543,7 +598,7 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
             );
             assert!(!refused.ok, "words that prove nothing recovered.\n{refused}");
             assert!(
-                drives_of(&fresh.daemon, &name).await.is_empty(),
+                every_drive_row_of(&fresh.daemon, &name).await.is_empty(),
                 "a refused recovery made the vault a drive.\n{refused}"
             );
 
@@ -553,10 +608,18 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
                 &[&phrase, &line, NEW_PASSPHRASE, NEW_PASSPHRASE],
             );
             assert!(recovered.ok, "recovery failed on a device that added its vault by hand.\n{recovered}");
+            // The vault paired by hand is the person's vault, and the recovery's pass
+            // found `personal` there, reached through the row the person added.
             assert_eq!(
-                drives_of(&fresh.daemon, &name).await,
-                the_lines_drive(&line, &name, "home"),
-                "`kotton id recover` did not record the vault paired by hand as the person's drive"
+                vault_rows_of(&fresh.daemon, &name).await,
+                the_lines_vault(&line, &name, "home"),
+                "`kotton id recover` did not record the vault paired by hand as the person's"
+            );
+            assert_eq!(
+                made_drives_of(&fresh.daemon, &name).await,
+                personal_at_the_lines_vault(&line, &name, "home"),
+                "the recovered device did not find '{FIRST_DRIVE_NAME}' at the vault paired \
+                 by hand"
             );
         }
         Door::Repl => {
@@ -565,7 +628,10 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
             // to add, from the line.
             let login = new_cli.run_on_a_terminal(&["id", "login", &name], &[&phrase]);
             assert!(login.ok, "`kotton id login` refused the phrase on a fresh device.\n{login}");
-            assert!(drives_of(&fresh.daemon, &name).await.is_empty(), "the claim recorded a drive");
+            assert!(
+                every_drive_row_of(&fresh.daemon, &name).await.is_empty(),
+                "the claim recorded a drive"
+            );
 
             let typed = "id recover".to_string();
             let session = new_cli.run_on_a_terminal(
@@ -573,12 +639,20 @@ async fn recover_from_the_card(someone_else: Option<&str>, door: Door) {
                 &[&typed, &phrase, &line, NEW_PASSPHRASE, NEW_PASSPHRASE, "sync", "cat notes.txt", "exit"],
             );
             assert!(session.ok, "the REPL did not exit cleanly.\n{session}");
-            // The vault the line names is the person's drive here, as the one-shot
+            // The vault the line names is the person's vault here, as the one-shot
             // records it: the REPL's door no longer leaves it a row with no posture.
+            // The `sync` typed after it read the vault's listing, so `personal` is back.
             assert_eq!(
-                drives_of(&fresh.daemon, &name).await,
-                the_lines_drive(&line, &name, "vault"),
-                "the REPL's `id recover` did not record the line's vault as the person's drive.\n{session}"
+                vault_rows_of(&fresh.daemon, &name).await,
+                the_lines_vault(&line, &name, "vault"),
+                "the REPL's `id recover` did not record the line's vault as the \
+                 person's.\n{session}"
+            );
+            assert_eq!(
+                made_drives_of(&fresh.daemon, &name).await,
+                personal_at_the_lines_vault(&line, &name, "vault"),
+                "the recovered device did not find '{FIRST_DRIVE_NAME}' at the line's \
+                 vault.\n{session}"
             );
             assert!(
                 !session.transcript.contains(phrase.as_str()) && !session.transcript.contains(NEW_PASSPHRASE),
@@ -737,6 +811,14 @@ async fn recover_where_it_is_held(env: &TestEnv, cli: &Cli, name: &str, phrase: 
         said(&out)
     );
 
+    // The vault this device enrolled, and `personal` made there, which the `sync`
+    // above read back from the vault's listing.
+    let vaults_before = vault_rows_of(&env.daemon, name).await;
+    let made_before = made_drives_of(&env.daemon, name).await;
+    assert_eq!(vaults_before, the_lines_vault(line, name, "vault"), "before the refusal");
+    let personal = personal_at_the_lines_vault(line, name, "vault");
+    assert_eq!(made_before, personal, "before the refusal");
+
     // Words that prove nothing, checked against the log this device holds.
     let refused = cli.run_on_a_terminal(&["id", "recover", name], &[NOT_THEIRS, line, NEW_PASSPHRASE, NEW_PASSPHRASE]);
     assert!(!refused.ok, "words that prove nothing recovered a held identity.\n{refused}");
@@ -748,8 +830,12 @@ async fn recover_where_it_is_held(env: &TestEnv, cli: &Cli, name: &str, phrase: 
     );
     assert!(cached.exists(), "a refused recovery took back the session '{name}' had before it.\n{refused}");
     reads_the_note("after the refusal").await;
-    // The vault this device enrolled is its drive, and a refusal leaves it so.
-    assert_eq!(drives_of(&env.daemon, name).await, the_lines_drive(line, name, "vault"), "after the refusal");
+    // The vault this device enrolled, and the drives made there, as the refusal found
+    // them.
+    let (vaults_after, made_after) =
+        (vault_rows_of(&env.daemon, name).await, made_drives_of(&env.daemon, name).await);
+    assert_eq!(vaults_after, vaults_before, "the vault's row, after the refusal");
+    assert_eq!(made_after, made_before, "the made drives, after the refusal");
 
     // The words.
     let recovered = cli.run_on_a_terminal(&["id", "recover"], &[name, phrase, line, NEW_PASSPHRASE, NEW_PASSPHRASE]);
@@ -775,7 +861,9 @@ async fn recover_where_it_is_held(env: &TestEnv, cli: &Cli, name: &str, phrase: 
         "the recovery paired the vault a second time.\n{}",
         said(&out)
     );
-    assert_eq!(drives_of(&env.daemon, name).await, the_lines_drive(line, name, "vault"), "after the recovery");
+    let vaults = vault_rows_of(&env.daemon, name).await;
+    assert_eq!(vaults, the_lines_vault(line, name, "vault"), "after the recovery");
+    assert_eq!(made_drives_of(&env.daemon, name).await, personal, "after the recovery");
     reads_the_note("after the recovery").await;
 }
 

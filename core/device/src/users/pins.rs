@@ -675,6 +675,22 @@ impl Read {
     }
 }
 
+/// The refusal of a pin on `drive`, which is not among `names`, the drives this
+/// device records. A device that records none has not yet read its vaults'
+/// listings, which is where every drive, `personal` among them, is learned
+/// (`kotton_peer::daemon::drives`, module doc): a joiner before its first pass.
+/// That device is told to sync, not that the person has no such drive.
+fn no_such_drive(drive: &str, names: &[String]) -> String {
+    if names.is_empty() {
+        return format!(
+            "you have no drive called '{drive}' yet: this device has not read its drives' \
+             listings; `sync` reads them"
+        );
+    }
+    let had = names.join(", ");
+    format!("you have no drive called '{drive}' (you have {had}); `drive list` names them")
+}
+
 /// `pin <scope> <value>`, on this device `me`: refused for a drive the person
 /// does not have, else written to this device's own database, this device's
 /// claims made to say what it now keeps ([`claim`]), and answered with what
@@ -699,10 +715,7 @@ pub async fn set(
     if let PinScope::Drive { drive } | PinScope::Folder { drive, .. } = scope {
         let names = drive_names(db, user_id).await?;
         if !names.contains(drive) {
-            return Ok(Err(format!(
-                "you have no drive called '{drive}'{}; `drive list` names them",
-                if names.is_empty() { String::new() } else { format!(" (you have {})", names.join(", ")) }
-            )));
+            return Ok(Err(no_such_drive(drive, &names)));
         }
         if drive != FIRST_DRIVE_NAME {
             return Ok(Err(format!(
@@ -773,6 +786,29 @@ mod tests {
         assert_eq!(keep.budget, Some(9));
         let unstated = super::keep(vec![], None);
         assert_eq!((unstated.whole)("files/notes/a.md").as_deref(), Some("default"), "silence keeps everything");
+    }
+
+    /// **A pin on a drive this device does not record is refused, and the
+    /// refusal says why**: a device that records drives names them; one that
+    /// records none, a joiner before its first pass, is told to sync, since
+    /// the drives are learned from the vaults' listings (kotton #491).
+    #[test]
+    fn a_pin_on_no_drive_is_refused_and_one_before_any_listing_is_told_to_sync() {
+        let some = no_such_drive("work", &["personal".to_string()]);
+        assert_eq!(
+            some,
+            "you have no drive called 'work' (you have personal); `drive list` names them"
+        );
+        let none = no_such_drive("personal", &[]);
+        assert_eq!(
+            none,
+            "you have no drive called 'personal' yet: this device has not read its drives' \
+             listings; `sync` reads them"
+        );
+        assert!(
+            !none.contains("drive list"),
+            "a device that read no listing is sent to a list it cannot fill: {none}"
+        );
     }
 
     fn claimed(device: &str, drive: &str) -> Claim {
