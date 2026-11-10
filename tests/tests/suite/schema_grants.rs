@@ -586,3 +586,53 @@ async fn no_app_is_granted_secret_and_its_record_verbs_refuse_an_app() {
         .expect("the person's own query");
     assert_eq!(mine.len(), 1);
 }
+
+/// **No app is granted `petname`, and its record verbs refuse an app** (kotton #471): a grant
+/// prompt trusts what a petname says, so no app writes or reads one. A grant on it is refused
+/// by name and nothing is stored; an app's insert and query under it are refused, naming the
+/// schema; the person's own verbs, naming no app, put and read it.
+#[tokio::test]
+async fn no_app_is_granted_a_petname_and_its_record_verbs_refuse_an_app() {
+    const PETNAME: &str = kotton_common::namespace::NSID_PETNAME;
+    const NAME: &str = "grants-suite-petname";
+    let mut env = env_with_user().await;
+
+    let err = env.client.schema_grant_set(APP, PETNAME, true, true, false).await.expect_err("a grant on petname");
+    assert!(err.to_string().contains("no app is granted it") && err.to_string().contains(PETNAME), "{err}");
+    assert!(env.client.schema_grant_list(APP).await.expect("schema_grant_list").is_empty());
+
+    let body = serde_json::json!({ "key": "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76", "name": NAME });
+    let insert = UserRequest::RecordInsert {
+        user_id: USER.to_owned(),
+        schema_nsid: PETNAME.to_owned(),
+        record: body.clone(),
+        root: None,
+        app_id: Some(APP.to_owned()),
+    };
+    let resp = env.client.inner().send(&insert).await.expect("send RecordInsert");
+    assert!(resp.is_error_containing("permission denied") && resp.is_error_containing(&PETNAME.to_lowercase()), "{resp:?}");
+    let query = UserRequest::RecordQuery {
+        user_id: USER.to_owned(),
+        schema_nsid: PETNAME.to_owned(),
+        field_eq: vec![],
+        limit: None,
+        offset: None,
+        root: None,
+        app_id: Some(APP.to_owned()),
+    };
+    let resp = env.client.inner().send(&query).await.expect("send RecordQuery");
+    assert!(resp.is_error_containing("permission denied"), "{resp:?}");
+
+    env.client
+        .record_insert_in(USER, Some(kotton_wire::ipc::PERSONAL_ROOT), None, PETNAME, body)
+        .await
+        .expect("the person's own insert");
+    let resp = env.client.inner().send(&query).await.expect("send RecordQuery");
+    assert!(!format!("{resp:?}").contains(NAME), "an app was told a name: {resp:?}");
+    let mine = env
+        .client
+        .record_query_in(USER, Some(kotton_wire::ipc::PERSONAL_ROOT), None, PETNAME, vec![], None, None)
+        .await
+        .expect("the person's own query");
+    assert_eq!(mine.len(), 1);
+}

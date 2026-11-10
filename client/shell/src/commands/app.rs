@@ -21,6 +21,7 @@ use kotton_schemas::AppManifest;
 use std::path::PathBuf;
 
 use super::{Command, CommandOutput};
+use crate::grant_prompt::{self, plain, Signer};
 use crate::out::Out;
 use crate::state::ShellState;
 
@@ -381,7 +382,8 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
         .map_err(|e| anyhow::anyhow!("app sideload: read wasm: {e}"))?;
 
     let user_id = state.user_id.clone();
-    let mut client = state.client.lock().await;
+    let client_handle = std::sync::Arc::clone(&state.client);
+    let mut client = client_handle.lock().await;
 
     // ── The consent ceremony ────────────────────────────────────────────────
     //
@@ -458,21 +460,30 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
     if approval.is_none() {
         // The default is not to install. Saying what it wants and stopping is
         // the whole point: there is no flagless path that grants anything.
+        //
+        // Who stands behind the app and each schema it asks for is said by the person's
+        // own name for the key, or by its absence (`crate::grant_prompt`). The key that
+        // signed the app is the manifest's `[publisher]`, read here from the manifest the
+        // daemon read, and only when the daemon's preview checked its signature.
+        let publisher_did = AppManifest::from_toml(&manifest_toml).ok().and_then(|m| m.publisher_did);
+        let signer = Signer::of(publisher_did.as_deref(), preview.publisher_verified);
+        let mut names = crate::petnames::read(&mut client, &user_id).await;
+        let unnamed = grant_prompt::unnamed_keys(&signer, &preview.requested, &names);
+        if !unnamed.is_empty() && name_the_unnamed(state, &mut client, &user_id, &signer, &unnamed).await {
+            names = crate::petnames::read(&mut client, &user_id).await;
+        }
         let mut lines = vec![
-            format!("{} {} ({})", preview.name, preview.version, preview.app_id),
-            if preview.publisher_verified {
-                "Publisher: signature verified".to_string()
-            } else {
-                "Publisher: UNSIGNED — nothing ties this binary to a publisher".to_string()
-            },
+            grant_prompt::app_line(&preview.name, &preview.version, &preview.app_id, &signer, &names),
             String::new(),
         ];
-        if preview.requested_display.is_empty() {
+        if preview.requested.is_empty() {
             lines.push("This app is requesting nothing.".to_string());
         } else {
             lines.push("This app is requesting:".to_string());
-            for cap in &preview.requested_display {
-                lines.push(format!("    {cap}"));
+            for grant in &preview.requested {
+                for line in grant_prompt::grant_lines(grant, &signer, &names) {
+                    lines.push(format!("    {line}"));
+                }
             }
         }
         if !preview.shapes.is_empty() {
@@ -492,15 +503,17 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
                     })
                     .collect::<Vec<_>>()
                     .join(" + ");
+                // All of it is the app's own text, so none of it may rewrite a line.
+                let (id, target) = (plain(&s.id), plain(&s.default_target));
                 match &s.label {
                     Some(label) => {
-                        lines.push(format!("    {label} ({access})"));
+                        lines.push(format!("    {} ({access})", plain(label)));
                         if let Some(desc) = &s.desc {
-                            lines.push(format!("      {desc}"));
+                            lines.push(format!("      {}", plain(desc)));
                         }
-                        lines.push(format!("      {}  [{}]", s.default_target, s.id));
+                        lines.push(format!("      {target}  [{id}]"));
                     }
-                    None => lines.push(format!("    {}  →  {}", s.id, s.default_target)),
+                    None => lines.push(format!("    {id}  →  {target}")),
                 }
             }
         }
@@ -526,7 +539,7 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
                  Approving that takes the word, not the flag:\n\n    \
                  app sideload {path_str} --approve GRANT\n\n\
                  Nothing has been installed.",
-                preview.name
+                plain(&preview.name)
             ),
         ));
     }
@@ -550,16 +563,55 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
         .await
         .map_err(|e| anyhow::anyhow!("app sideload: {e}"))?;
 
-    let mut lines = vec![format!("✓ Sideloaded '{name}' ({app_id})")];
+    let mut lines = vec![format!("✓ Sideloaded '{}' ({})", plain(&name), plain(&app_id))];
     if capabilities.is_empty() {
         lines.push("  No capabilities granted.".to_string());
     } else {
         lines.push("  Capabilities:".to_string());
         for cap in &capabilities {
-            lines.push(format!("    {cap}"));
+            lines.push(format!("    {}", plain(cap)));
         }
     }
     Ok(CommandOutput::success_with_output(lines.join("\n")))
+}
+
+/// **The first meeting with a key**, where the person decides what to call it, as they do a
+/// contact's: for each key the prompt is about to show unnamed, when a person is here to ask,
+/// ask for a name. An answer is written as a petname record through the ordinary insert, so
+/// the daemon holds it to a petname's rules; a refusal is said and the key left unnamed, and
+/// so is an empty answer. With nobody to ask ([`crate::state::Asking::Nobody`]), nothing is
+/// asked and the prompt says the key is not named. True when a name was written.
+async fn name_the_unnamed(
+    state: &mut ShellState,
+    client: &mut kotton::KottonClient,
+    user_id: &str,
+    signer: &Signer,
+    unnamed: &[kotton_schemas::Publisher],
+) -> bool {
+    let mut wrote = false;
+    for key in unnamed {
+        let what = if signer.key() == Some(key) { "signed this app" } else { "publishes a schema it asks for" };
+        let mut said = vec![Out::Note(format!(
+            "The key {key} {what}, and you have not named it. Name it now, as you would a \
+             contact, and every prompt about it says that name; or press Enter to leave it unnamed."
+        ))];
+        let answer = match state.ask(&mut said, "Name:") {
+            Ok(Some(answer)) => answer.trim().to_string(),
+            _ => return wrote,
+        };
+        if answer.is_empty() {
+            continue;
+        }
+        let body = serde_json::json!({ "key": key.as_str(), "name": answer });
+        match client
+            .record_insert_in(user_id, Some(kotton_wire::ipc::PERSONAL_ROOT), None, kotton_common::namespace::NSID_PETNAME, body)
+            .await
+        {
+            Ok(_) => wrote = true,
+            Err(e) => state.emit(Out::Warn { what: format!("not named: {e}"), consequence: "the key is left unnamed".into() }),
+        }
+    }
+    wrote
 }
 
 /// Locate the compiled WASM file inside an app directory.
@@ -979,15 +1031,24 @@ async fn handle_grants(args: &[String], state: &ShellState) -> anyhow::Result<Co
         .await
         .map_err(|e| anyhow::anyhow!("app grants: {e}"))?;
 
-    let mut lines = vec![format!("{} ({})", g.name, g.app_id), String::new()];
+    // Each schema grant by the rule every grant prompt keeps (`crate::grant_prompt`): its
+    // name as written, and who stands behind it by the person's name for the key, or its
+    // absence. The answer carries no key that signed the app, so no line here says who did.
+    let names = crate::petnames::read(&mut client, &state.user_id).await;
+    let said = |grants: &[kotton_schemas::CapabilityGrant]| -> Vec<String> {
+        grants
+            .iter()
+            .flat_map(|g| grant_prompt::grant_lines(g, &Signer::Nobody, &names))
+            .map(|line| format!("    {line}"))
+            .collect()
+    };
+    let mut lines = vec![format!("{} ({})", plain(&g.name), plain(&g.app_id)), String::new()];
 
     lines.push("Asked for:".to_string());
-    if g.requested_display.is_empty() {
+    if g.requested.is_empty() {
         lines.push("    nothing".to_string());
     } else {
-        for cap in &g.requested_display {
-            lines.push(format!("    {cap}"));
-        }
+        lines.extend(said(&g.requested));
     }
 
     lines.push(String::new());
@@ -999,14 +1060,12 @@ async fn handle_grants(args: &[String], state: &ShellState) -> anyhow::Result<Co
                     .to_string(),
             );
         }
-        Some(_) if g.approved_display.is_empty() => {
+        Some(approved) if approved.is_empty() => {
             lines.push("Holds: nothing — approved, and everything declined.".to_string());
         }
-        Some(_) => {
+        Some(approved) => {
             lines.push("Holds:".to_string());
-            for cap in &g.approved_display {
-                lines.push(format!("    {cap}"));
-            }
+            lines.extend(said(approved));
         }
     }
 

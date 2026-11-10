@@ -77,16 +77,30 @@ that is not the definition and nothing beside it, since the digest is taken over
 definition's canonical form; and so is one naming a core schema, which changes in the tree and
 not through registration.
 
-Two of the core set, `secret` and `access-log`, are kept from every app, a refusal held for
-those two identities by name (`CoreSchema::is_kept_from_apps`), not for being core. No app is
-granted either: a grant on one is refused when set, and the check every app's record verb
+Three of the core set, `secret`, `access-log` and `petname`, are kept from every app, a refusal
+held for those identities by name (`CoreSchema::is_kept_from_apps`), not for being core. No app
+is granted one: a grant on one is refused when set, and the check every app's record verb
 passes (`kotton_grant`'s `check_read`, `check_write` and `check_register`) refuses it whatever
-row the grant store holds. No manifest claims to handle or asks for either, no handler is
-registered or answered for either, the runner's records verbs refuse either, and
-`Record::search` returns no row of either to any caller, with no schema named or with one of
-them named. Both are known to every device. The person reaches `secret` at their own terminal
-with the `secret` verbs, in Personal, and `access-log` with the record verbs there; no verb
-writes a log entry for a daemon request yet, which is the `log` noun's own issue.
+row the grant store holds. No manifest claims to handle or asks for one, no handler is
+registered or answered for one, the runner's records verbs refuse one, and `Record::search`
+returns no row of one to any caller, with no schema named or with one of them named. All three
+are known to every device. The person reaches `secret` at their own terminal with the `secret`
+verbs, in Personal, `access-log` with the record verbs there, and `petname` with the record
+verbs and at a grant prompt's first meeting with a key; no verb writes a log entry for a daemon
+request yet, which is the `log` noun's own issue. `petname` is kept because a grant prompt
+trusts what a petname says (the decision *A schema is named by the key that publishes it*): an
+app that could write one could name itself.
+
+**A petname is held at insert**, in `record_cmds::insert`, for that one identity by name, as
+`replication` holds `access-log`: its body keeps `kotton_schemas::petname::check` (`key` a
+`did:key`; `name` not empty, at most 64 characters, no `/`, no control or
+bidirectional-formatting character, not beginning `did:`, and `kotton` for Kotton's publisher
+alone), and it is written in Personal and no other root. The refusal names the rule broken and
+says no more of the body than the name. **One record per key**: a petname for a key already
+named replaces the one before it, the others naming that key in Personal removed once the new
+one is written, so the person renames a key by naming it again. A row merged from another
+device is not held here; the reader ignores one that breaks a rule, and of two for one key reads
+the one filed last.
 
 **The access log is kept on the device that wrote it** (#450). The protocol's *The first release
 is a platform a stranger can use from the command line* keeps the log on the device and puts it
@@ -136,14 +150,18 @@ a root the person shares holds no key to that log and writes no segment a pass a
 
 ## The `record` verbs
 
-`record list|get|put|rm --schema <publisher>/<name>` is the shell's `record` noun
+`record list|get|put|rm --schema <schema>` is the shell's `record` noun
 (`client/shell/src/commands/record.rs`), one parser for the REPL and `kotton record`. Each
 verb is one request this crate's daemon handlers already answer: `RecordQuery` (for `list`,
 and for `get` by the record's id), `RecordInsert` and `RecordDelete`. **Each names Personal**
 (`PERSONAL_ROOT`), so a record in another root the person is a member of, such as an
 organisation's project, is not listed, read, written or removed by them. A schema is cited by
-its identity. An id no record has in Personal exits 1, and so does a schema this device does not
-know, by name. `get` prints the record as the row holds it, its `id` among its fields, and
+its identity, `did:key:…/<name>`, or as `<petname>/<name>`, the person's own name for the key,
+resolved on the device (`kotton_shell::petnames`, the one parser and the one reader of
+petnames): `kotton/notes` on every device. A petname no key has is refused saying so, and one
+that names several keys is refused naming them; output prints the short form wherever the
+publisher has a name. A request always carries the whole identity. An id no record has in
+Personal exits 1, and so does a schema this device does not know, by name. `get` prints the record as the row holds it, its `id` among its fields, and
 `list --json` prints each row the same way; neither prints the fields the daemon adds to an
 answer (`_id`, `_filed_at`, `_root`), because every verb here names Personal and `_root` would
 be Personal's id, a durable identifier, on every row. `record import|export` are in the tree
@@ -169,9 +187,27 @@ REPL, whose stdin is its script, it reads nothing and is refused. `get` prints t
 alone; `list` never prints one.
 
 **A kept schema answers only the person's own terminal.** `RecordInsert`, `RecordQuery`,
-`RecordDelete` and `RecordOpen` (by the schema its URL names) on `secret` or `access-log` are
-refused, naming no app or one, unless the connection's origin is `Local`, a client on this
-device's own socket (`daemon::records::refuse_kept_off_terminal`). The origin is the one
-`Authenticate` bound from the credential, read by the door and handed to the verb; a remote
-client or an admitted browser names no app and is not thereby the person at their terminal.
-`RecordSearch` answers no row of either to anyone.
+`RecordDelete` and `RecordOpen` (by the schema its URL names) on `secret`, `access-log` or
+`petname` are refused, naming no app or one, unless the connection's origin is `Local`, a
+client on this device's own socket (`daemon::records::refuse_kept_off_terminal`). The origin is
+the one `Authenticate` bound from the credential, read by the door and handed to the verb; a
+remote client or an admitted browser names no app and is not thereby the person at their
+terminal.
+`RecordSearch` answers no row of one to anyone.
+
+## The grant prompt
+
+`app sideload <path>` previews what an app asks for before anything is installed
+(`client/shell/src/commands/app.rs`), and `app grants <id>` lists what it asked for and what it
+holds; both say who stands behind what they show by the rule of the decision *A schema is named
+by the key that publishes it* (`kotton_shell::grant_prompt`). A schema's name is shown as its
+publisher wrote it, and who stands behind it only by the person's petname for the publisher's
+key, or by its absence: "read your notes records from kotton", "read your statement records
+from a publisher you have not named". The app is shown by the key that signed its manifest
+(`[publisher]`, when the daemon's preview checked its signature), "from an app nobody signed"
+when it has no such block, and a line says so when the app's publisher did not publish a schema
+it asks for. Its name, id, paths and labels are its own text, printed with every control and
+bidirectional-formatting character removed. At a terminal, a key the prompt would show unnamed
+is offered to be named there, the first meeting; the answer is a petname written through the
+ordinary insert, held to its rules, and the prompt then says it. With nobody to ask, nothing is
+asked and the key is shown not named.

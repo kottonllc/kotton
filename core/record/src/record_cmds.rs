@@ -109,8 +109,9 @@ impl Record<'_> {
 /// 1. Parse and look up `schema_nsid` in the registry — error if unknown.
 /// 2. Open (or reuse) the user's `SqliteRecordStore`.
 /// 3. Refuse, naming it, a field the schema does not declare ([`undeclared_field`]).
-/// 4. Ensure the schema table exists (`create_table` is idempotent).
-/// 5. Insert the record; return its stable ID.
+/// 4. For `petname` alone, hold the body to its rules and to Personal ([`Self::hold_petname`]).
+/// 5. Ensure the schema table exists (`create_table` is idempotent).
+/// 6. Insert the record; for `petname`, remove any other naming the same key. Return its ID.
     pub async fn insert(
         &self,
     schema_nsid: &str,
@@ -139,12 +140,50 @@ impl Record<'_> {
         ));
     }
 
+    let petname = if nsid == SchemaId::from_static(kotton_common::namespace::NSID_PETNAME) {
+        Some(self.hold_petname(&record)?)
+    } else {
+        None
+    };
+
     self.store.create_table(&schema).await?;
     let record_id = self
         .store
         .insert_in(&nsid, self.scope.writes.clone()?, record)
         .await?;
+    if let Some(key) = petname {
+        self.replace_other_petnames(&nsid, &key, &record_id).await?;
+    }
     Ok(record_id)
+}
+
+/// Hold a petname's body before it is written, for this one identity, by name (as
+/// replication holds `access-log`): the rules of [`kotton_schemas::petname::check`], and
+/// Personal alone, where the person's names for keys are kept. The refusal names the rule
+/// broken and says no more of the body than the name. Returns the key it names.
+fn hold_petname(&self, record: &Value) -> Result<kotton_schemas::Publisher> {
+    let petname = kotton_schemas::petname::check(record)
+        .map_err(|e| anyhow!("the petname is not stored: {e}"))?;
+    if self.scope.writes.clone()?.is_some() {
+        return Err(anyhow!("the petname is not stored: a petname is kept in Personal, and no other root"));
+    }
+    Ok(petname.key)
+}
+
+/// **One petname per key**: a petname written for a key already named replaces the one
+/// before it. Every other live row of `petname` in Personal naming `key` is removed once the
+/// new one is written, so the person changes a name by giving it again; a removal travels to
+/// their other devices as any does. A row merged from another device before this one is read
+/// by the reader's own rule until then (`kotton_schemas::Petnames::from_records`).
+async fn replace_other_petnames(&self, nsid: &SchemaId, key: &kotton_schemas::Publisher, kept: &str) -> Result<()> {
+    let personal = crate::record_store::RootSelection::personal();
+    let filter = RecordFilter::new().eq("key", serde_json::json!(key.as_str())).roots(personal.clone());
+    for row in self.store.query(nsid, filter).await? {
+        if row.id != kept {
+            self.store.delete_in(nsid, &row.id, &personal).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Query non-deleted records from the named user's record self.store.
@@ -289,9 +328,9 @@ impl Record<'_> {
 /// `{ "id", "schema_nsid", "updated_at", "body" }`.
 ///
 /// **A schema kept from apps is never searched**
-/// ([`kotton_schemas::CoreSchema::is_kept_from_apps`]: `secret` and `access-log`), on both
-/// branches: left out of every schema searched when none is named, and answered with no rows
-/// when it is the one named, for every caller. Search is the hub's and the search bar's, and
+/// ([`kotton_schemas::CoreSchema::is_kept_from_apps`]: `secret`, `access-log` and
+/// `petname`), on both branches: left out of every schema searched when none is named, and
+/// answered with no rows when it is the one named, for every caller. Search is the hub's and the search bar's, and
 /// a caller that names no app is not thereby the person at their terminal; the person reads
 /// their keychain with the `secret` verbs, which ask for it by its schema.
     pub async fn search(
@@ -396,5 +435,51 @@ mod tests {
 
         let id = records.insert(NSID_NOTES, json!({ "id": "n1", "title": "t", "body": "b" })).await.unwrap();
         assert_eq!(id, "n1");
+    }
+
+    const ACME: &str = "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76";
+
+    /// A petname is held to its rules at insert: each refusal names the rule broken, repeats
+    /// no more of the body than the name, and stores nothing.
+    #[tokio::test]
+    async fn a_petname_is_held_to_its_rules_at_insert() {
+        use kotton_common::namespace::{NSID_PETNAME, NSID_PREFIX};
+        let (_dir, registry, store) = a_device();
+        let records = Record::new(&registry, &store);
+        for (said, body) in [
+            ("not a did:key", json!({ "key": "did:web:hidden-host.example", "name": "Acme" })),
+            ("is empty", json!({ "key": ACME, "name": "" })),
+            ("at most 64 characters", json!({ "key": ACME, "name": "a".repeat(65) })),
+            ("holds no `/`", json!({ "key": ACME, "name": "my/bank" })),
+            ("no control", json!({ "key": ACME, "name": "bank\u{1b}[2K" })),
+            ("no control", json!({ "key": ACME, "name": "\u{202E}knab" })),
+            ("does not begin with `did:`", json!({ "key": ACME, "name": "did:key:z6Mk" })),
+            ("`kotton` names Kotton's publisher", json!({ "key": ACME, "name": "kotton" })),
+        ] {
+            let err = records.insert(NSID_PETNAME, body).await.expect_err("a petname that breaks a rule").to_string();
+            assert!(err.contains("the petname is not stored") && err.contains(said), "{said}: {err}");
+            assert!(!err.contains("hidden-host") && !err.contains(ACME), "the refusal repeated the key: {err}");
+        }
+        assert!(records.query(NSID_PETNAME, vec![], None, None, None).await.unwrap().is_empty());
+        records.insert(NSID_PETNAME, json!({ "key": NSID_PREFIX, "name": "kotton" })).await.expect("kotton is Kotton's");
+    }
+
+    /// **A second petname for a key already named replaces the first**: one record per key,
+    /// so the person renames a key by naming it again; a petname for another key is kept.
+    #[tokio::test]
+    async fn a_second_petname_for_a_key_replaces_the_first() {
+        use kotton_common::namespace::{NSID_PETNAME, NSID_PREFIX};
+        let (_dir, registry, store) = a_device();
+        let records = Record::new(&registry, &store);
+        records.insert(NSID_PETNAME, json!({ "key": ACME, "name": "Acme" })).await.unwrap();
+        records.insert(NSID_PETNAME, json!({ "key": NSID_PREFIX, "name": "Kotton LLC" })).await.unwrap();
+        let second = records.insert(NSID_PETNAME, json!({ "key": ACME, "name": "My Bank" })).await.unwrap();
+        let held = records.query(NSID_PETNAME, vec![], None, None, None).await.unwrap();
+        assert_eq!(held.len(), 2, "{held:?}");
+        let acme: Vec<&Value> = held.iter().filter(|r| r["key"] == ACME).collect();
+        assert_eq!(acme.len(), 1, "{held:?}");
+        assert_eq!((acme[0]["name"].as_str(), acme[0]["_id"].as_str()), (Some("My Bank"), Some(second.as_str())));
+        let names = kotton_schemas::Petnames::from_records(&held);
+        assert_eq!(names.name_for(&kotton_schemas::Publisher::from_static(ACME)), Some("My Bank"));
     }
 }

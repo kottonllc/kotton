@@ -401,9 +401,9 @@ mod tests {
         }
     }
 
-    /// `secret` and `access-log` are registered (#449, #450): a fresh registry holds both, so
-    /// a record can be put under either from the person's own terminal, and both are core, so
-    /// a registration of either is refused as one.
+    /// `secret`, `access-log` and `petname` are registered (#449, #450, #471): a fresh registry
+    /// holds each, so a record can be put under one from the person's own terminal, and each is
+    /// core, so a registration of one is refused as one.
     #[test]
     fn the_kept_core_schemas_are_core_and_registered() {
         let mut registry = SchemaRegistry::new();
@@ -411,7 +411,8 @@ mod tests {
         assert!(registry.get(&access_log).is_some(), "access-log is registered");
         let secret = id(ns::NSID_SECRET);
         assert!(registry.get(&secret).is_some(), "secret is registered");
-        for nsid_str in [ns::NSID_SECRET, ns::NSID_ACCESS_LOG] {
+        assert!(registry.get(&id(ns::NSID_PETNAME)).is_some(), "petname is registered");
+        for nsid_str in [ns::NSID_SECRET, ns::NSID_ACCESS_LOG, ns::NSID_PETNAME] {
             let nsid = id(nsid_str);
             assert!(registry.is_core(&nsid), "{nsid_str} is core");
             let err = registry.register(app_schema(nsid_str), "alice").unwrap_err();

@@ -219,22 +219,23 @@ async fn message_unknown_app_returns_error() {
     );
 }
 
-/// **A manifest claiming to handle `secret` is refused at install**, naming the schema, and
-/// leaves no handler for it (kotton #449: the schema is kept from every app).
+/// **A manifest claiming to handle `secret` or `petname` is refused at install**, naming the
+/// schema, and leaves no handler for it (kotton #449, #471: both are kept from every app).
 #[tokio::test]
 async fn a_manifest_claiming_to_handle_secret_is_refused_at_install() {
-    let secret = kotton_common::namespace::NSID_SECRET;
     let mut env = TestEnv::spawn_authed().await;
-    let manifest = format!(
-        "[app]\nid = \"sh.kotton.test-keys\"\nname = \"Keys\"\nversion = \"0.1.0\"\nhandler_for = [\"{secret}\"]\n"
-    );
-    let err = env
-        .client
-        .app_install_approving_all(USER, manifest, STUB_WASM.to_vec())
-        .await
-        .expect_err("a handler claim on secret");
-    assert!(err.to_string().contains(secret) && err.to_string().contains("handler_for"), "{err}");
-    assert!(env.client.handler_get_for(secret).await.is_err(), "a handler for secret was registered");
-    let apps = env.client.app_list().await.expect("app_list");
-    assert!(!apps.iter().any(|a| a.app_id == "sh.kotton.test-keys"), "the app was installed: {apps:?}");
+    for secret in [kotton_common::namespace::NSID_SECRET, kotton_common::namespace::NSID_PETNAME] {
+        let manifest = format!(
+            "[app]\nid = \"sh.kotton.test-keys\"\nname = \"Keys\"\nversion = \"0.1.0\"\nhandler_for = [\"{secret}\"]\n"
+        );
+        let err = env
+            .client
+            .app_install_approving_all(USER, manifest, STUB_WASM.to_vec())
+            .await
+            .expect_err("a handler claim on a kept schema");
+        assert!(err.to_string().contains(secret) && err.to_string().contains("handler_for"), "{err}");
+        assert!(env.client.handler_get_for(secret).await.is_err(), "a handler for {secret} was registered");
+        let apps = env.client.app_list().await.expect("app_list");
+        assert!(!apps.iter().any(|a| a.app_id == "sh.kotton.test-keys"), "the app was installed: {apps:?}");
+    }
 }

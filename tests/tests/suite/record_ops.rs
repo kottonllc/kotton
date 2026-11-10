@@ -340,6 +340,61 @@ async fn a_record_is_read_from_the_terminal_as_its_owner() {
     drop(env);
 }
 
+/// **`kotton record list --schema kotton/notes` works on a fresh device** (kotton #471):
+/// `kotton` names Kotton's key on every device with no petname record, so the short form
+/// resolves, the note is listed, and `get` by it reads the note; a petname no key has is refused, exit 2,
+/// saying so, and `schema show` takes the short form too.
+#[tokio::test]
+async fn record_list_takes_the_short_form_on_a_fresh_device() {
+    let (env, cli, id) = a_note_and_a_terminal_holding_only_its_owners_session().await;
+    let listed = cli.run(&["record", "--user", USER, "list", "--schema", "kotton/notes"]);
+    assert!(listed.status.success(), "`record list --schema kotton/notes` failed.\n{}", said(&listed));
+    // A table is a message, on stderr off a terminal; what matters is that the note is in it.
+    assert!(said(&listed).contains(&id), "the note was not listed.\n{}", said(&listed));
+    let got = cli.run(&["record", "--user", USER, "get", "--schema", "kotton/notes", &id]);
+    assert_got_as_its_owner(&got, &id);
+    let missing = cli.run(&["record", "--user", USER, "get", "--schema", "kotton/notes", "no-such-record"]);
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("kotton/notes"), "{}", said(&missing));
+    let unknown = cli.run(&["record", "--user", USER, "list", "--schema", "acme/notes"]);
+    assert_eq!(unknown.status.code(), Some(2), "{}", said(&unknown));
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("no key has the name 'acme'"), "{}", said(&unknown));
+    let shown = cli.run(&["schema", "show", "kotton/notes", "--user", USER]);
+    assert!(shown.status.success(), "`schema show kotton/notes` failed.\n{}", said(&shown));
+    assert!(String::from_utf8_lossy(&shown.stdout).contains("\"notes\""), "{}", said(&shown));
+    let schemas = cli.run(&["schema", "list", "--user", USER]);
+    assert!(String::from_utf8_lossy(&schemas.stdout).contains("  kotton/notes\n"), "{}", said(&schemas));
+    drop(env);
+}
+
+/// **`RecordSearch` returns no petname** (kotton #471), unfiltered, by its name, or by the
+/// name a petname holds.
+#[tokio::test]
+async fn record_search_returns_no_petname() {
+    const PETNAME: &str = kotton_common::namespace::NSID_PETNAME;
+    const NAME: &str = "search-suite-petname-3a7c";
+    let mut env = env_with_user().await;
+    env.client
+        .record_insert_in(
+            USER,
+            Some(kotton_wire::ipc::PERSONAL_ROOT),
+            None,
+            PETNAME,
+            serde_json::json!({ "key": "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76", "name": NAME }),
+        )
+        .await
+        .expect("the person's petname");
+    for (filter, rows) in [
+        ("none", env.client.record_search(USER, None, None, None).await.expect("search")),
+        ("petname", env.client.record_search(USER, Some(PETNAME), None, None).await.expect("by schema")),
+        ("its name", env.client.record_search(USER, None, Some(NAME), None).await.expect("by text")),
+    ] {
+        assert!(
+            rows.iter().all(|r| r["schema_nsid"] != PETNAME && !r.to_string().contains(NAME)),
+            "search ({filter}) returned a petname: {rows:?}"
+        );
+    }
+}
+
 /// **A bare `kotton record get` reads as the user `KOTTON_USER` names**, the way `--user`
 /// does: a person who has set it in their shell does not name themselves again.
 #[tokio::test]

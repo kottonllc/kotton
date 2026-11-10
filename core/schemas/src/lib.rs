@@ -32,6 +32,7 @@ pub mod extension_manifest;
 pub mod field;
 pub mod membership;
 pub mod model_manifest;
+pub mod petname;
 pub mod record_url;
 pub mod schema_id;
 
@@ -52,6 +53,7 @@ pub use extension_manifest::{
 pub use field::{FieldType, SchemaField};
 pub use membership::{Ceremony, Member, Posture, Role};
 pub use model_manifest::{Licence, ModelFormat, ModelKind, ModelManifest};
+pub use petname::{Petname, PetnameError, Petnames};
 pub use record_url::{RecordUrl, RecordUrlError};
 pub use schema_id::{
     Publisher, PublisherError, SchemaId, SchemaIdError, SchemaName, SchemaNameError,

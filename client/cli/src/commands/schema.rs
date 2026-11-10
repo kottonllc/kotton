@@ -10,10 +10,14 @@
 //! The schemas a person sees are core plus their own registrations, so every verb acts as
 //! someone: `--user`, else `KOTTON_USER`, else the active identity. A schema is named by the
 //! key that publishes it: `<publisher>/<name>`, the publisher being the `did:key` of that key,
-//! and `register` takes a definition that key signed.
+//! and `register` takes a definition that key signed. `show` takes it whole or as
+//! `<petname>/<name>`, the person's own name for the key, resolved on this device by the
+//! shell's one parser (`kotton_shell::petnames`), and `list` prints the short form wherever
+//! the publisher has a name.
 
 use clap::Subcommand;
 use kotton::KottonClient;
+use kotton_shell::petnames::{self, SchemaArg};
 use std::io;
 
 #[derive(Subcommand)]
@@ -26,7 +30,7 @@ pub enum SchemaCommand {
     },
     /// Print field definitions for a schema
     Show {
-        /// The schema to inspect, `<publisher>/<name>`
+        /// The schema to inspect: `<petname>/<name>` (`kotton/notes`) or `did:key:…/<name>`
         schema: String,
         /// Identity to act as (defaults to the active identity / KOTTON_USER)
         #[arg(long, env = "KOTTON_USER")]
@@ -63,7 +67,14 @@ impl SchemaCommand {
                 if schemas.is_empty() {
                     println!("No schemas registered.");
                 } else {
-                    let mut sorted = schemas;
+                    let names = petnames::read(&mut client, user_id).await;
+                    let mut sorted: Vec<String> = schemas
+                        .iter()
+                        .map(|nsid| match kotton_schemas::SchemaId::parse(nsid) {
+                            Ok(id) => petnames::said(&id, &names),
+                            Err(_) => nsid.clone(),
+                        })
+                        .collect();
                     sorted.sort();
                     println!("Registered schemas ({}):", sorted.len());
                     for nsid in &sorted {
@@ -72,15 +83,22 @@ impl SchemaCommand {
                 }
             }
 
-            SchemaCommand::Show { schema, .. } => match client.schema_get(user_id, schema).await {
-                Ok(json) => {
-                    println!("{}", json);
+            SchemaCommand::Show { schema, .. } => {
+                let names = petnames::read(&mut client, user_id).await;
+                let id = SchemaArg::parse(schema).and_then(|arg| arg.resolve(&names)).map_err(|e| {
+                    eprintln!("error: {e}");
+                    io::Error::new(io::ErrorKind::InvalidInput, e)
+                })?;
+                match client.schema_get(user_id, &id.to_string()).await {
+                    Ok(json) => {
+                        println!("{}", json);
+                    }
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        return Err(e);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("error: {}", e);
-                    return Err(e);
-                }
-            },
+            }
 
             SchemaCommand::Register { file, .. } => {
                 let definition_json = std::fs::read_to_string(file).map_err(|e| {
