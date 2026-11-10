@@ -37,6 +37,8 @@ pub mod commands;
 pub mod contacts;
 pub mod drive_devices;
 pub mod drive_verbs;
+/// Where this device's access log goes: kept here, or pinned to `personal` (kotton #450).
+pub mod log_pin;
 pub mod pairing;
 /// What each device keeps of the person's drives (kotton #55).
 pub mod pins;

@@ -757,6 +757,10 @@ impl DeviceDaemon {
             Arc::clone(&sync_resources),
             Arc::clone(&paired_keys),
         );
+        // A record write wakes a pass by its schema, not by the file changing, and one landing
+        // during a pass is followed by one more (kotton #450).
+        let wake = sync_engine.waker();
+        record_stores.wake_on_write(Arc::new(move || wake.wake_pending()));
         // A pack a device does not keep is fetched from the person's drives
         // when something reads it (kotton #55).
         users.lend_packs(sync_engine.pack_source());
@@ -1071,6 +1075,10 @@ impl DeviceDaemon {
             Arc::clone(&sync_resources),
             Arc::clone(&paired_keys),
         );
+        // A record write wakes a pass by its schema, not by the file changing, and one landing
+        // during a pass is followed by one more (kotton #450).
+        let wake = sync_engine.waker();
+        record_stores.wake_on_write(Arc::new(move || wake.wake_pending()));
         // A pack a device does not keep is fetched from the person's drives
         // when something reads it (kotton #55).
         users.lend_packs(sync_engine.pack_source());

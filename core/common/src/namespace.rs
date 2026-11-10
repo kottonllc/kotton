@@ -82,9 +82,10 @@ pub const NSID_KEEPS_WHOLE: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBv
 pub const NSID_SECRET: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/secret";
 
 /// One thing a device's daemon was asked (the protocol's `schemas/kotton/access-log`):
-/// `device`, `at`, `asker`, `door`, `act` and `what`. Kept on that device, and in a drive
-/// only when the person pins the log there. Kept from every app as `secret` is, and published
-/// and not registered yet: no record can be put under it until #450, the access log's issue.
+/// `device`, `at`, `asker`, `door`, `act` and `what`. Registered, and kept from every app as
+/// `secret` is. Kept on the device that wrote it: no row of it leaves that device for a drive
+/// unless the device's own setting pins its log to `personal` (kotton #450,
+/// `kotton_record::replication`).
 pub const NSID_ACCESS_LOG: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/access-log";
 
 /// A governance record: one record file of the project's board as a row (RFC-0088), the

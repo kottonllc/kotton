@@ -3620,5 +3620,9 @@ mod session_read_tests;
 mod kept_schema_tests;
 
 #[cfg(test)]
+#[path = "write_wake_tests.rs"]
+mod write_wake_tests;
+
+#[cfg(test)]
 #[path = "principal_choice_tests.rs"]
 mod principal_choice_tests;
