@@ -21,10 +21,13 @@ encoding because SQLite folds a table name's case and a publisher is a case-sens
 distinct, since every row carries its identity in `schema_nsid` and every statement holds a
 row to it. A table written under an earlier name is split on open, each row to the table of
 the identity it names, and a row written under one of the old core names is read as the
-identity that name became. The tables are in `STRICT` mode under the WAL journal. `insert`,
-`query` and `delete` take the `SchemaId` they act on, and `RecordFilter::new()` builds a query
-by its methods: a field equal to a value, a text search, a limit and an offset, a cursor, the
-roots.
+identity that name became. Where that table already holds the row's id, in the same root, the
+two are versions of one row, and the split keeps the newer by `(updated_at, revision)`, as a
+merge does, and drops the older. Once it commits it logs, per schema, only counts: rows moved,
+rows that replaced an older copy, rows dropped as the older, rows left; never a record's id or
+when it was written. The tables are in `STRICT` mode under the WAL journal. `insert`, `query`
+and `delete` take the `SchemaId` they act on, and `RecordFilter::new()` builds a query by its
+methods: a field equal to a value, a text search, a limit and an offset, a cursor, the roots.
 
 `SchemaRegistry` keeps the schemas a store knows. `record_cmds::Record` is what the daemon's
 record verbs call.
