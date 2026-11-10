@@ -98,8 +98,8 @@ its identity. An id no record has in Personal exits 1, and so does a schema this
 know, by name. `get` prints the record as the row holds it, its `id` among its fields, and
 `list --json` prints each row the same way; neither prints the fields the daemon adds to an
 answer (`_id`, `_filed_at`, `_root`), because every verb here names Personal and `_root` would
-be Personal's id, a durable identifier, on every row. `record import|export` are not in the
-tree yet (#454).
+be Personal's id, a durable identifier, on every row. `record import|export` are in the tree
+(#454).
 
 **An insert takes only what its schema declares.** `RecordInsert`, from any client, is refused,
 naming the field, when the body carries a top-level field beginning with `_` (the daemon's: an
@@ -115,6 +115,15 @@ and nothing more, and `FieldType` is closed, with no type that admits an undecla
 `secret set|get|list|rm|generate <label>` is the keychain
 (`client/shell/src/commands/secret.rs`), the same requests under `secret`, each naming
 Personal: one record per label, under the id the store gave it, so a label is never written
-into a record's URL. `set` never takes the
-value on the line; it reads it at a hidden prompt at a terminal and from one line of stdin
-otherwise. `get` prints the value alone; `list` never prints one.
+into a record's URL. `set` never takes the value on the line; it reads it at a hidden prompt
+at a terminal, and with no terminal `kotton secret set` reads the one line piped to it; in the
+REPL, whose stdin is its script, it reads nothing and is refused. `get` prints the value
+alone; `list` never prints one.
+
+**A kept schema answers only the person's own terminal.** `RecordInsert`, `RecordQuery`,
+`RecordDelete` and `RecordOpen` (by the schema its URL names) on `secret` or `access-log` are
+refused, naming no app or one, unless the connection's origin is `Local`, a client on this
+device's own socket (`daemon::records::refuse_kept_off_terminal`). The origin is the one
+`Authenticate` bound from the credential, read by the door and handed to the verb; a remote
+client or an admitted browser names no app and is not thereby the person at their terminal.
+`RecordSearch` answers no row of either to anyone.

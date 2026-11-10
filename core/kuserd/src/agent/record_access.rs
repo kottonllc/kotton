@@ -177,6 +177,7 @@ impl kotton_app::daemon::apps::RecordsHost for DaemonRecordsHost<'_> {
 mod tests {
     use super::access_from;
     use kotton_record::daemon::records::{record_delete, record_insert, record_open, record_query, record_search};
+    use kotton_wire::ConnTrustOrigin::Local;
     use kotton_record::{SchemaRegistry, SqliteRecordStore};
     use kotton_store::runtime::roots::{Owner, Residency, RootSet};
     use kotton_store::runtime::user::UserStore;
@@ -265,6 +266,7 @@ mod tests {
                 CALENDAR.into(),
                 json!({ "title": title, "start_at": "2026-09-24T09:00:00Z" }),
                 Some(APP.into()),
+                Local,
             )
             .await
             .unwrap()
@@ -282,6 +284,7 @@ mod tests {
                 None,
                 None,
                 Some(APP.into()),
+                Local,
             )
             .await
             .unwrap()
@@ -332,6 +335,7 @@ mod tests {
                 let UserResponse::RecordQueryResult { records } = record_query(
                     &registry, &store, &user_db, &access, None,
                     CALENDAR.into(), vec![], None, None, app,
+                    Local,
                 )
                 .await
                 .unwrap() else { panic!() };
@@ -402,7 +406,7 @@ mod tests {
 
         // Open, by the URL that names it exactly.
         let url = format!("kotton://records/{CALENDAR}/{id}");
-        let opened = record_open(&p.registry, &p.store, &access, url).await.unwrap();
+        let opened = record_open(&p.registry, &p.store, &access, url, Local).await.unwrap();
         assert!(matches!(opened, UserResponse::RecordOpenNotFound { .. }), "{opened:?}");
 
         // Delete, by default and by naming the root.
@@ -410,6 +414,7 @@ mod tests {
             let gone = record_delete(
                 &p.registry, &p.store, &p.user_db, &access, root,
                 CALENDAR.into(), id.clone(), Some(APP.into()),
+                Local,
             )
             .await
             .unwrap();
@@ -455,7 +460,7 @@ mod tests {
             other => panic!("an app reached secret: {other:?}"),
         };
         refused(
-            record_insert(&p.registry, &p.store, &p.user_db, &access, None, SECRET.into(), body(), Some(APP.into()))
+            record_insert(&p.registry, &p.store, &p.user_db, &access, None, SECRET.into(), body(), Some(APP.into()), Local)
                 .await
                 .unwrap(),
         );
@@ -463,11 +468,13 @@ mod tests {
         // The person: in Personal, as for any schema.
         let UserResponse::RecordInserted { record_id } = record_insert(
             &p.registry, &p.store, &p.user_db, &access, personal(), SECRET.into(), body(), None,
+            Local,
         )
         .await
         .unwrap() else { panic!("the person's insert") };
         let UserResponse::RecordQueryResult { records } = record_query(
             &p.registry, &p.store, &p.user_db, &access, personal(), SECRET.into(), vec![], None, None, None,
+            Local,
         )
         .await
         .unwrap() else { panic!("the person's query") };
@@ -475,12 +482,12 @@ mod tests {
         assert_eq!(records[0]["value"], VALUE);
 
         refused(
-            record_query(&p.registry, &p.store, &p.user_db, &access, None, SECRET.into(), vec![], None, None, Some(APP.into()))
+            record_query(&p.registry, &p.store, &p.user_db, &access, None, SECRET.into(), vec![], None, None, Some(APP.into()), Local)
                 .await
                 .unwrap(),
         );
         refused(
-            record_delete(&p.registry, &p.store, &p.user_db, &access, None, SECRET.into(), record_id.clone(), Some(APP.into()))
+            record_delete(&p.registry, &p.store, &p.user_db, &access, None, SECRET.into(), record_id.clone(), Some(APP.into()), Local)
                 .await
                 .unwrap(),
         );
@@ -507,7 +514,7 @@ mod tests {
         }
 
         // The person removes it.
-        let gone = record_delete(&p.registry, &p.store, &p.user_db, &access, personal(), SECRET.into(), record_id, None)
+        let gone = record_delete(&p.registry, &p.store, &p.user_db, &access, personal(), SECRET.into(), record_id, None, Local)
             .await
             .unwrap();
         assert!(matches!(gone, UserResponse::RecordDeleted), "{gone:?}");

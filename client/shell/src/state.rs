@@ -35,6 +35,46 @@ pub struct ShellState {
     /// keys of a kind wait ([`Asking`]).
     #[cfg(feature = "cli")]
     pub asking: Asking,
+    /// The one line of standard input a verb may take as a value when nobody is at a terminal
+    /// to type it ([`PipedLine`]): handed over by the one-shot door, `kotton <verb>` as its own
+    /// process, and never by the REPL, whose stdin is its script. `None` unless that door set
+    /// it, so a verb in the REPL has no way to read stdin.
+    #[cfg(feature = "cli")]
+    pub piped_line: Option<PipedLine>,
+}
+
+/// The one line of standard input a one-shot process was handed as a value (`kotton secret
+/// set <label>` with the value piped to it), read when the verb takes it and not before.
+///
+/// **A verb in the REPL never reads stdin** ([`Asking::hidden`]): under a pipe it is the
+/// script, and its next line would be taken as the value and never run. So the read is not the
+/// verb's to make. The door that owns the process's stdin, and knows nothing else will read
+/// it, builds this and puts it on [`ShellState::piped_line`]; the REPL builds none. It is taken
+/// once, by value, so a second ask finds none. `Debug` names it and says nothing it read.
+#[cfg(feature = "cli")]
+pub struct PipedLine(Box<dyn FnOnce() -> std::io::Result<String> + Send + Sync>);
+
+#[cfg(feature = "cli")]
+impl PipedLine {
+    /// The line `read` gives, when it is taken: the door's read of its own stdin, or a
+    /// test's answer.
+    pub fn new(read: impl FnOnce() -> std::io::Result<String> + Send + Sync + 'static) -> Self {
+        Self(Box::new(read))
+    }
+
+    /// Take the line, its end (`\n` or `\r\n`) not kept; nothing else of it is changed.
+    pub fn take(self) -> std::io::Result<String> {
+        let line = (self.0)()?;
+        let line = line.strip_suffix('\n').unwrap_or(&line);
+        Ok(line.strip_suffix('\r').unwrap_or(line).to_string())
+    }
+}
+
+#[cfg(feature = "cli")]
+impl std::fmt::Debug for PipedLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PipedLine")
+    }
 }
 
 /// Who answers a question a verb puts in place (the ruling of 2026-10-12 on
@@ -169,6 +209,7 @@ impl ShellState {
             pending_identity_switch: None,
             stdin: None,
             asking: Asking::here(),
+            piped_line: None,
         }
     }
 

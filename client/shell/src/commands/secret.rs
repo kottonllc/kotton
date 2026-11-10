@@ -12,14 +12,20 @@
 //! person's own terminal, reach it.
 //!
 //! **A value never travels on argv** (where the shell's history and the process list would
-//! hold it): `set` reads it at a hidden prompt at a terminal, asked twice, and from one line
-//! of stdin otherwise. It is held in [`Value`], whose `Debug` says nothing of it, and is
-//! printed by `get` alone, as the one line on stdout. No refusal here says it.
+//! hold it): `set` reads it at a hidden prompt at a terminal, asked twice. With nobody at one,
+//! it takes the one line of stdin the one-shot door handed over ([`PipedLine`]: `kotton secret
+//! set <label>`, as its own process, with the value piped to it), and in the REPL, which hands
+//! over none, it refuses: **a verb in the REPL never reads stdin**, which there is the script,
+//! whose next line would be kept as the value and never run. The value is held in [`Value`],
+//! whose `Debug` says nothing of it, and is printed by `get` alone, as the one line on stdout.
+//! No refusal here says it.
 //!
 //! **One record per label.** `set` on a label Personal holds writes that record again, under
 //! the id the store gave it; a label is never a record's id, so it is never written into a
 //! record's URL. Two records under one label (each device set it before either synced) are one
-//! again at the next `set`, which keeps the newest record's id and removes the other.
+//! again at the next `set`, which keeps the newest record's id and removes the other. Newest
+//! is by when the record was first filed (`_filed_at`, the filing device's clock, carried
+//! with the row), then by id ([`under`]), so every device holding both picks the same one.
 //!
 //! [`parse`] is the one parser for these words: `kotton secret …` hands it the words after the
 //! noun (`kotton_cli::bridge`), and the REPL hands it the same.
@@ -31,7 +37,7 @@ use kotton_wire::ipc::PERSONAL_ROOT;
 
 use super::{Command, CommandOutput, Verb};
 use crate::out::Out;
-use crate::state::{Asking, ShellState};
+use crate::state::{Asking, PipedLine, ShellState};
 
 pub struct SecretCommand;
 
@@ -189,7 +195,7 @@ fn parse(args: &[String]) -> Result<Line, CommandOutput> {
         ("set", [_, _, ..]) => Err(CommandOutput::usage(
             "secret set: takes a label and no value: a value on the line would be kept in your \
              shell's history and shown in the process list",
-            Some("`secret set <label>` asks for the value hidden, or reads one line of stdin".into()),
+            Some("`secret set <label>` asks for the value hidden; `kotton secret set <label>` reads it piped".into()),
         )),
         ("generate", [w]) => match label(w) {
             Some(label) => Ok(Line::Generate { label, length: length.unwrap_or(GENERATED_LENGTH), kind, note }),
@@ -222,35 +228,36 @@ fn generate(length: usize) -> std::io::Result<Value> {
 /// Why no value was read for `set`.
 #[derive(Debug, PartialEq, Eq)]
 enum NoValue {
-    /// Nothing was entered, or stdin held no line.
+    /// Nothing was entered, or the piped line was empty.
     Empty,
     /// The two entries at the terminal differed.
     Differed,
+    /// Nobody is at a terminal and no line was handed over: the REPL, whose stdin is its
+    /// script and is never read by a verb.
+    NobodyToAsk,
 }
 
 /// The value for `set <label>`, read as [`Asking`] says: at the terminal, hidden and asked
-/// twice; from one line of stdin when nobody is at one, the line's end not kept; or from an
-/// answer given beforehand. The value is kept as entered: a space at either end is the
-/// value's.
-fn read_value(asking: &mut Asking, label: &str) -> std::io::Result<Result<Value, NoValue>> {
+/// twice; when nobody is at one, the line the one-shot door handed over (`piped`, taken), and
+/// none in the REPL; or from an answer given beforehand. Nothing here reads stdin. The value is
+/// kept as entered: a space at either end is the value's.
+fn read_value(asking: &mut Asking, piped: &mut Option<PipedLine>, label: &str) -> std::io::Result<Result<Value, NoValue>> {
     let entered = match asking {
         Asking::Terminal => {
-            let first = rpassword::prompt_password(crate::ui::ask(&format!("value of '{label}' (hidden)")))?;
+            let first = crate::secret::read_hidden_untrimmed(&format!("value of '{label}' (hidden)"))?;
             if first.is_empty() {
                 return Ok(Err(NoValue::Empty));
             }
-            let again = rpassword::prompt_password(crate::ui::ask("again, to confirm"))?;
+            let again = crate::secret::read_hidden_untrimmed("again, to confirm")?;
             if again != first {
                 return Ok(Err(NoValue::Differed));
             }
             first
         }
-        Asking::Nobody => {
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line)?;
-            let line = line.strip_suffix('\n').unwrap_or(&line);
-            line.strip_suffix('\r').unwrap_or(line).to_string()
-        }
+        Asking::Nobody => match piped.take() {
+            Some(line) => line.take()?,
+            None => return Ok(Err(NoValue::NobodyToAsk)),
+        },
         Asking::Given(answers) => answers.pop_front().unwrap_or_default(),
     };
     Ok(if entered.is_empty() { Err(NoValue::Empty) } else { Ok(Value(entered)) })
@@ -276,10 +283,29 @@ impl Held {
     }
 }
 
-/// The records under `label` in Personal, newest first, as the daemon answers them.
+/// The records under `label` in Personal, newest first ([`newest_first`]).
 async fn under(client: &mut kotton::KottonClient, user_id: &str, label: &str) -> std::io::Result<Vec<serde_json::Value>> {
     let by_label = vec![("label".to_string(), serde_json::json!(label))];
-    client.record_query_in(user_id, Some(PERSONAL_ROOT), None, NSID_SECRET, by_label, None, None).await
+    let mut records = client.record_query_in(user_id, Some(PERSONAL_ROOT), None, NSID_SECRET, by_label, None, None).await?;
+    newest_first(&mut records);
+    Ok(records)
+}
+
+/// Order records under one label newest first, the same on every device that holds them.
+///
+/// The daemon answers in the order this device's table holds rows, which is the order they
+/// reached it: after two devices each set one label and synced, each would put its own
+/// first, and `get` on each would print the other's value. A row's version, `(updated_at,
+/// revision)`, is not in the answer; what is, of when, is `_filed_at`: when the device that
+/// first filed the record filed it, in milliseconds on that device's clock, carried with the
+/// row so every device reads the same number. So newest is the latest filed, and between two
+/// filed in one millisecond the lower `_id`. It orders by first filing, not by last write;
+/// the two differ only for a record rewritten under its id, and `set` leaves one record per
+/// label, so they differ only until the next `set`.
+fn newest_first(records: &mut [serde_json::Value]) {
+    let filed = |r: &serde_json::Value| r["_filed_at"].as_i64().unwrap_or(i64::MIN);
+    let id = |r: &serde_json::Value| r["_id"].as_str().or_else(|| r["id"].as_str()).unwrap_or_default().to_string();
+    records.sort_by(|a, b| filed(b).cmp(&filed(a)).then_with(|| id(a).cmp(&id(b))));
 }
 
 /// Put `value` under `label` in Personal: a new record, or the one already there written again
@@ -327,12 +353,21 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
     let kept = "kept in personal; your other devices read it after a `sync` on each";
     match line {
         Line::Set { label, kind, note } => {
-            let value = match read_value(&mut state.asking, &label) {
+            let value = match read_value(&mut state.asking, &mut state.piped_line, &label) {
                 Ok(Ok(value)) => value,
                 Ok(Err(NoValue::Empty)) => {
                     return Ok(CommandOutput::fail(
                         format!("secret set: no value was given for '{label}'; nothing was kept"),
-                        Some("at a terminal it is asked for, hidden; otherwise it is the first line of stdin".into()),
+                        Some("at a terminal it is asked for, hidden; `kotton secret set` reads the first line piped to it".into()),
+                    ))
+                }
+                Ok(Err(NoValue::NobodyToAsk)) => {
+                    return Ok(CommandOutput::fail(
+                        format!(
+                            "secret set: nobody is at a terminal to type the value of '{label}', and a verb here \
+                             never reads it from stdin; nothing was kept"
+                        ),
+                        Some(format!("run `kotton secret set {label}` and pipe the value to it")),
                     ))
                 }
                 Ok(Err(NoValue::Differed)) => {
@@ -498,7 +533,10 @@ reads it, or finds it in a search: it is reached here, at your own terminal.
 
 `set` never takes the value on the line, where your shell's history and the
 process list would keep it. At a terminal it asks for the value, hidden, and
-asks again to confirm; otherwise it reads the first line of stdin. One label
+asks again to confirm. With no terminal, `kotton secret set <label>` reads the
+first line piped to it; in the shell, whose input is its script, `set` reads
+nothing and is refused. The label and a note are typed on the line, so your
+shell keeps them in its history on this device; the value never is. One label
 is one secret: `set` on a label you keep replaces its value, and keeps its
 kind and note unless you give them. A new secret is a password, with no note.
 
@@ -622,9 +660,46 @@ mod tests {
     #[test]
     fn a_value_is_read_as_given_and_an_empty_one_is_none() {
         let mut asking = Asking::Given([" spaced ".to_string(), String::new()].into_iter().collect());
-        assert_eq!(read_value(&mut asking, "bank").unwrap(), Ok(Value(" spaced ".into())));
-        assert_eq!(read_value(&mut asking, "bank").unwrap(), Err(NoValue::Empty));
-        assert_eq!(read_value(&mut asking, "bank").unwrap(), Err(NoValue::Empty));
+        let mut piped = None;
+        assert_eq!(read_value(&mut asking, &mut piped, "bank").unwrap(), Ok(Value(" spaced ".into())));
+        assert_eq!(read_value(&mut asking, &mut piped, "bank").unwrap(), Err(NoValue::Empty));
+        assert_eq!(read_value(&mut asking, &mut piped, "bank").unwrap(), Err(NoValue::Empty));
+    }
+
+    /// **With nobody at a terminal and no line handed over — the REPL — there is no value,
+    /// and nothing is read.** The REPL builds no [`PipedLine`], and `read_value` has no other
+    /// way to stdin, so the script's next line stays the script's.
+    #[test]
+    fn with_nobody_to_ask_and_no_line_handed_over_no_value_is_read() {
+        let mut piped = None;
+        assert_eq!(read_value(&mut Asking::Nobody, &mut piped, "bank").unwrap(), Err(NoValue::NobodyToAsk));
+    }
+
+    /// **The line the one-shot door hands over is the value, taken once**: its end not kept,
+    /// a space at either end kept, and a second ask finds none.
+    #[test]
+    fn the_line_handed_over_is_the_value_and_is_taken_once() {
+        let mut piped = Some(PipedLine::new(|| Ok(" piped-7a1c \r\n".to_string())));
+        assert_eq!(read_value(&mut Asking::Nobody, &mut piped, "bank").unwrap(), Ok(Value(" piped-7a1c ".into())));
+        assert!(piped.is_none(), "the line was not taken");
+        assert_eq!(read_value(&mut Asking::Nobody, &mut piped, "bank").unwrap(), Err(NoValue::NobodyToAsk));
+        let mut empty = Some(PipedLine::new(|| Ok("\n".to_string())));
+        assert_eq!(read_value(&mut Asking::Nobody, &mut empty, "bank").unwrap(), Err(NoValue::Empty));
+        assert_eq!(format!("{:?}", PipedLine::new(|| Ok("hunter2".into()))), "PipedLine");
+    }
+
+    /// **Newest is the same on every device**: the latest filed first, whatever order the
+    /// answer came in, and between two filed in one millisecond the lower id.
+    #[test]
+    fn records_under_one_label_are_newest_filed_first_then_by_id() {
+        let row = |id: &str, filed: i64| serde_json::json!({ "_id": id, "_filed_at": filed, "label": "bank" });
+        let order = |rows: &mut Vec<serde_json::Value>| {
+            newest_first(rows);
+            rows.iter().map(|r| r["_id"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        };
+        let want = ["b", "a", "c"];
+        assert_eq!(order(&mut vec![row("a", 200), row("b", 300), row("c", 200)]), want);
+        assert_eq!(order(&mut vec![row("c", 200), row("a", 200), row("b", 300)]), want);
     }
 
     /// A note is shown whole up to its bound and cut after it.

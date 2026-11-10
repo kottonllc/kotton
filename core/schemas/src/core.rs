@@ -180,6 +180,17 @@ impl CoreSchema {
         )
     }
 
+    /// What a connection that is not the person's own terminal is told when it reaches for this
+    /// schema, kept from apps: a remote or paired session naming no app is refused as an app
+    /// is, in one sentence that names the schema.
+    pub fn kept_off_terminal_refusal(self) -> String {
+        format!(
+            "{} is the person's own terminal's: it is answered only to a client on this \
+             device's own socket, never to a remote or paired session",
+            self.id()
+        )
+    }
+
     /// Return the identity of this core schema: Kotton's publisher and its name.
     pub fn id(self) -> SchemaId {
         SchemaId::from_static(match self {

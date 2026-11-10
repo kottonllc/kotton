@@ -734,7 +734,10 @@ reads it, or finds it in a search: it is reached here, at your own terminal.
 
 `set` never takes the value on the line, where your shell's history and the
 process list would keep it. At a terminal it asks for the value, hidden, and
-asks again to confirm; otherwise it reads the first line of stdin. One label
+asks again to confirm. With no terminal, `kotton secret set <label>` reads the
+first line piped to it; in the shell, whose input is its script, `set` reads
+nothing and is refused. The label and a note are typed on the line, so your
+shell keeps them in its history on this device; the value never is. One label
 is one secret: `set` on a label you keep replaces its value, and keeps its
 kind and note unless you give them. A new secret is a password, with no note.
 

@@ -17,6 +17,16 @@
 //! `schema_grants` table before proceeding.  CLI / shell callers pass
 //! `app_id = None` and receive unconditional access as the device owner.
 //!
+//! ## A schema kept from apps is the terminal's
+//!
+//! A schema kept from every app (`CoreSchema::is_kept_from_apps`: `secret` and `access-log`)
+//! is refused to an app by the grant check whatever is stored. Naming no app does not make a
+//! caller the person at their terminal: a remote client or an admitted browser names none.
+//! So every record verb that names a schema is also handed the connection's origin, bound at
+//! `Authenticate` from the credential and never the caller's to say, and a kept schema is
+//! answered only at [`ConnTrustOrigin::Local`] ([`refuse_kept_off_terminal`]), before any
+//! grant or row is read.
+//!
 //! ## Root enforcement (RFC-0071 R12, R17)
 //!
 //! Every record verb also takes the person's [`RootAccess`] and, where it names
@@ -36,6 +46,7 @@ use std::io;
 use std::sync::Arc;
 
 use kotton_wire::ipc::{UserResponse, PERSONAL_ROOT};
+use kotton_wire::ConnTrustOrigin;
 
 // ── Record operations ─────────────────────────────────────────────────────────
 
@@ -49,7 +60,11 @@ pub async fn record_insert(
     schema_nsid: String,
     record: serde_json::Value,
     app_id: Option<String>,
+    origin: ConnTrustOrigin,
 ) -> io::Result<UserResponse> {
+    if let Some(message) = refuse_kept_off_terminal(&schema_nsid, origin) {
+        return Ok(UserResponse::Error { message });
+    }
     // Compute body size before moving `record`.
     let body_bytes = serde_json::to_string(&record)
         .map(|s| s.len() as i64)
@@ -107,7 +122,11 @@ pub async fn record_query(
     limit: Option<usize>,
     offset: Option<usize>,
     app_id: Option<String>,
+    origin: ConnTrustOrigin,
 ) -> io::Result<UserResponse> {
+    if let Some(message) = refuse_kept_off_terminal(&schema_nsid, origin) {
+        return Ok(UserResponse::Error { message });
+    }
     if let Some(ref aid) = app_id {
         if let Err(e) = schema_grants_db::check_read(user_db, aid, &schema_nsid).await {
             return Ok(UserResponse::Error {
@@ -168,7 +187,11 @@ pub async fn record_delete(
     schema_nsid: String,
     record_id: String,
     app_id: Option<String>,
+    origin: ConnTrustOrigin,
 ) -> io::Result<UserResponse> {
+    if let Some(message) = refuse_kept_off_terminal(&schema_nsid, origin) {
+        return Ok(UserResponse::Error { message });
+    }
     if let Some(ref aid) = app_id {
         if let Err(e) = schema_grants_db::check_write(user_db, aid, &schema_nsid, 0).await {
             return Ok(UserResponse::Error {
@@ -203,6 +226,19 @@ pub async fn record_delete(
             message: e.to_string(),
         }),
     }
+}
+
+/// The refusal for a schema kept from apps (`CoreSchema::is_kept_from_apps`) asked for by a
+/// connection that is not the person's own terminal on this device, or `None`.
+///
+/// Only [`ConnTrustOrigin::Local`] is the terminal: a client on this device's own socket. A
+/// `Remote` session (a paired node `kquicd` minted one for, or a gateway) and a `Paired` one (a
+/// browser admitted by ceremony) are refused whether or not they name an app, because naming
+/// none is what the person's terminal does and is not evidence of being it. The origin is the
+/// one `Authenticate` bound from the credential, so no request can claim it.
+pub fn refuse_kept_off_terminal(nsid: &str, origin: ConnTrustOrigin) -> Option<String> {
+    let kept = kotton_schemas::CoreSchema::kept_from_apps(nsid)?;
+    (origin != ConnTrustOrigin::Local).then(|| kept.kept_off_terminal_refusal())
 }
 
 /// The root a request names, as its caller may name it: the word for Personal
@@ -430,7 +466,15 @@ pub async fn record_open(
     store: &Arc<SqliteRecordStore>,
     access: &RootAccess,
     url: String,
+    origin: ConnTrustOrigin,
 ) -> io::Result<UserResponse> {
+    // The URL names its schema, so a kept one is refused as a query of it is; a URL that does
+    // not parse names none, and the verb refuses it below.
+    if let Ok(parsed) = kotton_schemas::RecordUrl::parse(&url) {
+        if let Some(message) = refuse_kept_off_terminal(&parsed.schema.to_string(), origin) {
+            return Ok(UserResponse::Error { message });
+        }
+    }
     let verb = match crate::record_cmds::Record::new(schema_registry, store).within(access, None) {
         Ok(verb) => verb,
         Err(e) => {

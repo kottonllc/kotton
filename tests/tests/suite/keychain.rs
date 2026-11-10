@@ -6,7 +6,7 @@
 
 use crate::common::cli::{said, Cli};
 use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto, TestEnv};
-use crate::drive_sync::personal_tree;
+use crate::drive_sync::{personal_tree, sealed_in};
 use crate::records_drive::the_vault_keeping_it_reads_none_of;
 use crate::vault::{enrol_vault_from, spawn_device, spawn_vault};
 use kotton_schemas::membership::Posture;
@@ -86,6 +86,10 @@ async fn a_secret_set_on_one_device_is_read_on_another_and_the_vault_reads_none_
 
     done(on_a(&["sync"], &[]).await);
     done(on_b(&["sync"]).await);
+    // What the vault keeps of personal before the secret is set: B is paired with A directly,
+    // so B reading it shows nothing of the vault; the vault's own objects growing does.
+    let at_first = personal_tree(&a, &first.pubkey_hex).await;
+    let before = sealed_in(&vault, &at_first).await;
 
     let set = done(on_a(&["secret", "set", LABEL], &[VALUE]).await);
     assert!(!set.text.contains(VALUE), "set said the value: {}", set.text);
@@ -94,6 +98,16 @@ async fn a_secret_set_on_one_device_is_read_on_another_and_the_vault_reads_none_
     assert!(missing.data.is_empty());
 
     done(on_a(&["sync"], &[]).await);
+    let after = sealed_in(&vault, &at_first).await;
+    let (held_before, held_after) =
+        (before.iter().map(|(_, b)| b.len()).sum::<usize>(), after.iter().map(|(_, b)| b.len()).sum::<usize>());
+    assert!(
+        after.len() > before.len() && held_after > held_before,
+        "A's sync after the set sent the vault nothing: {} objects of {held_before} bytes before, \
+         {} of {held_after} after",
+        before.len(),
+        after.len()
+    );
     done(on_b(&["sync"]).await);
 
     let got = done(on_b(&["secret", "get", LABEL]).await);
@@ -102,7 +116,6 @@ async fn a_secret_set_on_one_device_is_read_on_another_and_the_vault_reads_none_
     assert!(listed.text.contains(LABEL) && listed.text.contains("password"), "{}", listed.text);
     assert!(!listed.text.contains(VALUE), "list printed a value: {}", listed.text);
 
-    let at_first = personal_tree(&a, &first.pubkey_hex).await;
     the_vault_keeping_it_reads_none_of(&vault, &at_first, &[VALUE, LABEL]).await;
 }
 
@@ -195,5 +208,69 @@ async fn set_on_a_label_kept_replaces_its_value_and_keeps_its_note() {
         .await
         .expect("the person's own query");
     assert_eq!(rows.len(), 1, "two records under one label: {rows:?}");
+    drop(env);
+}
+
+/// The secrets Personal holds for `USER`, as the person's own query answers them.
+async fn secrets_held(env: &mut TestEnv) -> Vec<serde_json::Value> {
+    env.client
+        .record_query_in(USER, Some(kotton_wire::ipc::PERSONAL_ROOT), None, kotton_common::namespace::NSID_SECRET, vec![], None, None)
+        .await
+        .expect("the person's own query")
+}
+
+/// **In the REPL with nobody at a terminal, `secret set` reads nothing and is refused**, exit
+/// 1, naming the one-shot to pipe the value to, and nothing is kept. A verb in the REPL never
+/// reads stdin: there it is the script, whose next line would be kept as the value.
+#[tokio::test]
+async fn in_the_repl_with_nobody_to_ask_set_is_refused_and_keeps_nothing() {
+    let (mut env, _cli) = a_terminal().await;
+    let token = env.client.session_token.clone().expect("alice logged in");
+    let mut client = kotton::KottonClient::connect_to(env.endpoint.clone()).await.expect("a REPL connection");
+    client.authenticate(&token).await.expect("the REPL's identity");
+    let mut state = ShellState::new(USER.to_string(), std::sync::Arc::new(tokio::sync::Mutex::new(client)));
+    state.asking = Asking::Nobody;
+    assert!(state.piped_line.is_none(), "the REPL's state was handed a line of stdin");
+
+    let words: Vec<String> = ["set", "bank"].iter().map(|w| w.to_string()).collect();
+    let out = kotton_cli::bridge::repl_executor()
+        .registry()
+        .execute("secret", &words, &mut state)
+        .await
+        .expect("secret set");
+    assert_eq!(out.exit_code, ExitCode::Code(1), "set ran with nobody to ask");
+    let text: String = out.out.iter().map(kotton_shell::out::render_shape).collect::<Vec<_>>().join("\n")
+        + out.stderr.as_deref().unwrap_or_default();
+    assert!(text.contains("kotton secret set bank") && text.contains("pipe"), "the refusal names no one-shot: {text}");
+    assert!(secrets_held(&mut env).await.is_empty(), "a refused set kept a secret");
+    drop(env);
+}
+
+/// **The REPL's script is never read as a value.** With one secret, `mail`, kept by the
+/// one-shot from a pipe, `kotton repl` is run with its stdin a pipe holding `secret set bank`
+/// and then `secret list`: the set is refused, the next line is run as the command it is (the
+/// list names `mail`), and `bank` is not kept, so the line was not taken as its value.
+#[tokio::test]
+async fn a_scripted_repl_runs_the_line_after_set_as_a_command() {
+    let (mut env, cli) = a_terminal().await;
+    let mut first = cli.spawn_on_pipes(&["secret", "--user", USER, "set", "mail"]);
+    first.stdin.take().expect("stdin").write_all(b"mail-value-0e6b\n").expect("write the value");
+    let first = first.wait_with_output().expect("secret set");
+    assert!(first.status.success(), "{}", said(&first));
+
+    let mut child = cli.spawn_on_pipes(&["repl", USER]);
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"secret set bank\nsecret list\n")
+        .expect("write the script");
+    let ran = child.wait_with_output().expect("the REPL");
+    let shown = said(&ran);
+    assert!(shown.contains("kotton secret set bank"), "set was not refused naming the one-shot: {shown}");
+    assert!(shown.contains("mail"), "the line after set was not run: {shown}");
+    let held = secrets_held(&mut env).await;
+    assert_eq!(held.len(), 1, "the REPL kept a secret from its script: {} rows", held.len());
+    assert_eq!(held[0]["label"], "mail");
     drop(env);
 }
