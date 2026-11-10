@@ -101,8 +101,13 @@ here as any row is.
 **Writing a log record starts no pass**, and tells no one it was written. The store wakes the
 sync engine itself after an insert or a delete of any schema but `access-log`
 (`SqliteRecordStore::with_write_signal`, `replication::a_write_wakes_a_pass`), and the wake is
-kept while a pass runs, so writes during a pass are followed by exactly one more
-(`kotton_sync::engine::SyncWake::wake_pending`). The engine's filesystem watcher, which cannot
+kept while a pass runs, so writes during a background pass are followed by exactly one more
+(`kotton_sync::engine::SyncWake::wake_pending`). A write that lands while a pass the person
+asked for holds the drive is not followed by one: the background pass skips a drive already
+being passed over, and the write rides the next wake or the periodic tick (#485). On a device
+with a sync sidecar, a record write also used to start a pass over drives the watcher does not
+watch, since the sidecar asked for every drive; it now reaches watched drives only, as a write
+on any other device does. The engine's filesystem watcher, which cannot
 tell one schema's write from another's, neither wakes on a change to `records.db` or the three
 files SQLite keeps beside it nor sends a `VfsWatch` frame for one: they are not files of any
 drive's tree. Before that a frame went to every subscriber for each record write, and the sync
