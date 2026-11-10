@@ -85,5 +85,16 @@ its identity. An id no record has in Personal exits 1, and so does a schema this
 know, by name. `get` prints the record as the row holds it, its `id` among its fields, and
 `list --json` prints each row the same way; neither prints the fields the daemon adds to an
 answer (`_id`, `_filed_at`, `_root`), because every verb here names Personal and `_root` would
-be Personal's id, a durable identifier, on every row, and `record put` of a printed record would
-store it as a field. `record import|export` are not in the tree yet (#454).
+be Personal's id, a durable identifier, on every row. `record import|export` are not in the
+tree yet (#454).
+
+**An insert takes only what its schema declares.** `RecordInsert`, from any client, is refused,
+naming the field, when the body carries a top-level field beginning with `_` (the daemon's: an
+answer adds `_id`, `_filed_at` and `_root`, and a body fed back from one would store Personal's
+id as a field and log it to every device) or a field the schema does not declare. `id` is the
+store's and is taken whether the schema declares it or not. The check is in
+`record_cmds::insert`, before the store; replication's merge, which carries rows another device
+already accepted, does not meet it, and a row already stored with such a field is left as it is,
+nothing rewritten on open. No schema allows open fields: `SchemaDefinition` declares its fields
+and nothing more, and `FieldType` is closed, with no type that admits an undeclared name (a
+`map` is declared, and holds one value type), so there is no exception to state.
