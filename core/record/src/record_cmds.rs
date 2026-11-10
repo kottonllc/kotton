@@ -108,8 +108,9 @@ impl Record<'_> {
 ///
 /// 1. Parse and look up `schema_nsid` in the registry — error if unknown.
 /// 2. Open (or reuse) the user's `SqliteRecordStore`.
-/// 3. Ensure the schema table exists (`create_table` is idempotent).
-/// 4. Insert the record; return its stable ID.
+/// 3. Refuse, naming it, a field the schema does not declare ([`undeclared_field`]).
+/// 4. Ensure the schema table exists (`create_table` is idempotent).
+/// 5. Insert the record; return its stable ID.
     pub async fn insert(
         &self,
     schema_nsid: &str,
@@ -125,6 +126,18 @@ impl Record<'_> {
             .ok_or_else(|| anyhow!("unknown schema: {schema_nsid}"))?
             .clone()
     };
+
+    if let Some(field) = undeclared_field(&schema, &record) {
+        return Err(anyhow!(
+            "'{field}' is not a field of {schema_nsid}, so the record is not stored{}",
+            if field.starts_with('_') {
+                "; a field beginning with `_` is the daemon's, added to a query's answer, \
+                 and is removed before a record is put back"
+            } else {
+                ""
+            }
+        ));
+    }
 
     self.store.create_table(&schema).await?;
     let record_id = self
@@ -329,4 +342,50 @@ impl Record<'_> {
 
     Ok(all)
 }
+}
+
+/// The first top-level field of `record` that an insert under `schema` refuses, if any: one
+/// beginning with `_`, which is the daemon's (a query's answer adds `_id`, `_root` and
+/// `_filed_at`), or one the schema does not declare. `id` is the store's, so it is allowed
+/// whether the schema declares it or not. Only an insert asks this: replication's merge
+/// carries rows another device already accepted, and a row already stored is left as it is.
+fn undeclared_field<'r>(schema: &kotton_schemas::SchemaDefinition, record: &'r Value) -> Option<&'r str> {
+    let body = record.as_object()?;
+    body.keys().map(String::as_str).find(|name| {
+        name.starts_with('_')
+            || (*name != "id" && !schema.fields.iter().any(|f| f.name == *name))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kotton_common::namespace::NSID_NOTES;
+    use serde_json::json;
+
+    fn a_device() -> (tempfile::TempDir, RwLock<SchemaRegistry>, SqliteRecordStore) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SqliteRecordStore::open(&dir.path().join("records.db"), None).expect("open");
+        (dir, RwLock::new(SchemaRegistry::new()), store)
+    }
+
+    /// An insert refuses, naming it, a field beginning with `_` and a field the schema does not
+    /// declare, and stores nothing; `id`, the store's, is taken whether declared or not.
+    #[tokio::test]
+    async fn an_insert_refuses_a_field_its_schema_does_not_declare() {
+        let (_dir, registry, store) = a_device();
+        let records = Record::new(&registry, &store);
+        for (field, body) in [
+            ("_root", json!({ "id": "n1", "title": "t", "_root": "a-root" })),
+            ("_id", json!({ "title": "t", "_id": "n1" })),
+            ("pinned", json!({ "title": "t", "pinned": true })),
+        ] {
+            let err = records.insert(NSID_NOTES, body).await.expect_err("an undeclared field");
+            assert!(err.to_string().contains(&format!("'{field}'")), "{err}");
+        }
+        assert!(records.query(NSID_NOTES, vec![], None, None, None).await.unwrap().is_empty());
+
+        let id = records.insert(NSID_NOTES, json!({ "id": "n1", "title": "t", "body": "b" })).await.unwrap();
+        assert_eq!(id, "n1");
+    }
 }
