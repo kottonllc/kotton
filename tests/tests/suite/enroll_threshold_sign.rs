@@ -756,6 +756,132 @@ async fn a_record_written_on_one_device_syncs_to_a_joined_device() {
     assert_eq!(recs[0]["title"], "reaches my phone");
 }
 
+/// **Two schemas' first writes of one id in one second both reach a joined device**
+/// (kotton #467). The store holds a row by `(schema, id)`, so a note and a task may each
+/// be filed under one id the person chose; written in one second, both are revision `1` at
+/// the same `updated_at`. The log once named a version by `(id, updated_at, revision)`, so
+/// the task, logged on the sync after the note's, was taken for the note's version and never
+/// left E.
+///
+/// The second is held, not hoped for: both rows are written on E through E's own
+/// `records.db`, opened in this process from E's runtime with a clock fixed on one second,
+/// and the test asserts the two rows E holds share `(updated_at, revision)` before it looks
+/// at N. Each is then carried by the daemons' real sync, the note on one push and the task
+/// on the next, so the task's pass runs against a log that already carries the note.
+#[tokio::test]
+async fn two_schemas_first_writes_of_one_id_in_one_second_both_reach_a_joined_device() {
+    use kotton_record::record_store::RecordStore as _;
+
+    init_crypto();
+
+    let base_e = tempfile::tempdir().expect("base_e");
+    let ipc_e = unique_ipc();
+    let secrets_e: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
+    let daemon_e = DeviceDaemon::new_with_base_and_secrets(
+        base_e.path().to_owned(),
+        ipc_e.clone(),
+        Arc::clone(&secrets_e),
+    )
+    .await
+    .expect("daemon E");
+    // E's runtime, kept to open E's store in this process the way the daemon does.
+    let runtime_e = daemon_e.runtime();
+
+    let base_n = tempfile::tempdir().expect("base_n");
+    let ipc_n = unique_ipc();
+    let secrets_n: Arc<dyn SecretsStore + Send + Sync> = Arc::new(MemorySecrets::new());
+    let daemon_n = DeviceDaemon::new_with_base_and_secrets(
+        base_n.path().to_owned(),
+        ipc_n.clone(),
+        Arc::clone(&secrets_n),
+    )
+    .await
+    .expect("daemon N");
+
+    let _task_e = tokio::spawn(async move { std::sync::Arc::new(daemon_e).run().await });
+    let _task_n = tokio::spawn(async move { std::sync::Arc::new(daemon_n).run().await });
+    wait_for_daemon(&ipc_e, "daemon E").await;
+    wait_for_daemon(&ipc_n, "daemon N").await;
+
+    let mut client_e = connect_when_ready(&ipc_e, "client_e").await;
+    let client_n = connect_when_ready(&ipc_n, "client_n").await;
+
+    client_e.create_user("alice", crate::common::TEST_PASSPHRASE).await.expect("create_user E");
+    let (client_e, _drive) = crate::drive_sync::a_drive_for(client_e, "device-e", "alice").await;
+    let (mut client_e, mut client_n, _node_n) =
+        enroll_streamed(client_e, client_n, "alice", "device-n", Posture::Full).await;
+
+    // Two of the suite's schemas, each one required `title`, registered on both devices.
+    let names = ["notes", "tasks"];
+    for name in names {
+        let json = crate::common::signed_title_schema_json(name);
+        client_e.schema_register("alice", &json).await.expect("schema on E");
+        client_n.schema_register("alice", &json).await.expect("schema on N");
+    }
+    let [notes, tasks] = names.map(|name| {
+        kotton_schemas::SchemaId::parse(crate::common::suite_schema(name)).expect("a suite schema")
+    });
+
+    // E's own store, its clock held on one second.
+    let store_e = kotton_record::open::user_record_store(runtime_e.base_dir(), "alice", runtime_e.secrets())
+        .expect("E's records.db")
+        .with_clock(kotton_record::StoreClock::fixed(1_700_000_000_500));
+    for name in names {
+        let def: kotton_schemas::SchemaDefinition =
+            serde_json::from_str(&crate::common::signed_title_schema_json(name)).expect("a definition");
+        store_e.create_table(&def).await.expect("the table on E");
+    }
+
+    store_e
+        .insert(&notes, serde_json::json!({ "id": "shared", "title": "a note" }))
+        .await
+        .expect("the note on E");
+    client_e
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
+        .await
+        .expect("E pushes the note");
+    store_e
+        .insert(&tasks, serde_json::json!({ "id": "shared", "title": "a task" }))
+        .await
+        .expect("the task on E");
+    client_e
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Push))
+        .await
+        .expect("E pushes the task");
+
+    // E also holds rows of its own (the device's keeps-whole claim), so only the two
+    // rows under the shared id are looked at.
+    let held: Vec<_> = store_e
+        .export_changeset(0)
+        .await
+        .expect("E's rows")
+        .into_iter()
+        .filter(|row| row.id == "shared")
+        .collect();
+    assert_eq!(held.len(), 2, "E holds the note and the task: {held:?}");
+    assert_eq!(
+        (held[0].updated_at, held[0].revision),
+        (held[1].updated_at, held[1].revision),
+        "the two rows were not at one version, so the case was not held"
+    );
+    assert_eq!(held[0].revision, 1, "each is its row's first write");
+
+    client_n
+        .sync_mount("alice", "local", "vault", Some(SyncDirection::Pull))
+        .await
+        .expect("N pulls from the drive");
+
+    for (schema, title) in [(&notes, "a note"), (&tasks, "a task")] {
+        let recs = client_n
+            .record_query("alice", &schema.to_string(), vec![], None, None)
+            .await
+            .expect("record_query on N");
+        assert_eq!(recs.len(), 1, "{schema}'s row did not reach N: {recs:?}");
+        assert_eq!(recs[0]["id"], "shared");
+        assert_eq!(recs[0]["title"], title);
+    }
+}
+
 /// Recursively collect every regular file under `dir`.
 fn walk_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
