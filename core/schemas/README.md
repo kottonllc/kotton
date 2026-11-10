@@ -15,9 +15,12 @@ dot-separated segments of lowercase letters, digits and hyphens, each beginning 
 Nothing resolves, registers or reserves a name; nobody can publish under a key they do not
 hold. The version is the digest of the definition: BLAKE3 over the document `publisher`,
 `name`, `revision`, `fields`, `description` serialised by the JSON Canonicalization Scheme
-(RFC 8785), as lowercase hex. The signature is Ed25519 under the publisher's key over that
-digest, carried beside the definition as `signature`, base64, and checked by
-`kotton_crypto::schema_signature`; a definition whose signature does not check is no schema.
+(RFC 8785), as lowercase hex. The signature is Ed25519 under the publisher's key over a
+domain-tagged message, not the bare digest: the 16 ASCII bytes `kotton-schema-v1`, one zero
+byte, and the 32-byte digest, 49 bytes in all, so 32 bytes the key signed for another purpose
+are not a schema's signature. It is carried beside the definition as `signature`, base64, and
+checked by `kotton_crypto::schema_signature`; a definition whose signature does not check is
+no schema, and neither is one signed over the bare digest.
 
 Kotton's own schemas are published under Kotton's release key
 (`infra/release/allowed_signers`), `did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB`;
