@@ -155,7 +155,9 @@ async fn run() -> io::Result<()> {
     let recover = cli.recover;
 
     let endpoint = kdeviced_endpoint()?;
-    let mut dev = DeviceClient::new(IpcClient::connect(endpoint).await?);
+    // kdeviced is this user's own process: on Unix nothing is sent unless the socket's
+    // server is this uid (`IpcClient::connect_to_own_user`, `kotton_wire::sys_ipc`).
+    let mut dev = DeviceClient::new(IpcClient::connect_to_own_user(endpoint).await?);
 
     match cli.command {
         Commands::Daemon {
@@ -361,7 +363,9 @@ async fn authenticate(dev: &mut DeviceClient, recover: bool) -> io::Result<Strin
     let verifying_key = signing_key.verifying_key();
     let did = DidKeyMethod::from_public_key(&verifying_key).to_string();
 
-    // Request a challenge nonce, decode, and sign it.
+    // Request a challenge, decode it, and sign the login message it makes
+    // (`kotton_wire::sys_ipc::login_message`: the tag, a zero byte, the challenge); a
+    // challenge of any length but 32 bytes is refused before anything is signed.
     //
     // The signing happens here rather than inside `kotton-operator`, which takes a
     // finished signature. The operator facade never holds a key — the same
@@ -371,7 +375,9 @@ async fn authenticate(dev: &mut DeviceClient, recover: bool) -> io::Result<Strin
         .decode(&nonce_b64)
         .map_err(|e| io::Error::other(format!("server returned invalid nonce: {e}")))?;
 
-    let sig = signing_key.sign(&nonce_raw);
+    let message = kotton_wire::sys_ipc::login_message(&nonce_raw)
+        .map_err(|e| io::Error::other(format!("server returned an unusable challenge: {e}")))?;
+    let sig = signing_key.sign(&message);
     let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
 
     let did = dev

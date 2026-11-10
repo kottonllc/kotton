@@ -243,7 +243,8 @@ impl Session<'_> {
 
     /// Answer a challenge, the second half. Returns the authenticated DID.
     ///
-    /// `signature` is base64url over the raw nonce bytes. Signing happens in the
+    /// `signature` is base64url over `kotton_wire::sys_ipc::login_message` of the
+    /// decoded nonce: the login tag, a zero byte, the challenge. Signing happens in the
     /// caller: this crate never holds a key, which is why it takes a signature
     /// rather than something to sign with.
     pub async fn authenticate(

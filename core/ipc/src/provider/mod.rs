@@ -25,6 +25,8 @@ pub use inherited::{
 pub mod test_peer;
 #[cfg(feature = "os-provider")]
 pub use os::{AcceptedConnection, Caller, OsConnection, OsListener, OsUserId};
+#[cfg(all(feature = "os-provider", unix))]
+pub use os::own_uid;
 #[cfg(feature = "os-provider")]
 pub use acceptor::{ChannelAcceptor, HandlerOutput};
 
