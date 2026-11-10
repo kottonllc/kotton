@@ -35,6 +35,42 @@ use crate::provider::sqlite_record_store::SqliteRecordStore;
 use crate::registry::SchemaRegistry;
 use kotton_schemas::SchemaId;
 
+/// The identity of one version of one row, as the log's dedup compares it: the schema
+/// that holds the row, its id within that schema, and its version, `(updated_at,
+/// revision)`.
+///
+/// The schema is part of it because the store holds a row by `(schema, id)` (kotton #467):
+/// without it, two schemas' rows under one id at one version are one key, and the second is
+/// never logged. It is read off the field every logged row has always carried,
+/// `schema_nsid`, as the row spells it, so nothing stored or sent changes shape, and a row
+/// the log carries under the spelling the store exports is not logged again.
+///
+/// A row an earlier log carries under a core schema's old name (`sh.kotton.notes`, written
+/// before a schema was named by the key that publishes it) is logged once more: the store
+/// holds it under the identity that name became, so its key is not the logged one. It is
+/// logged once, since the next pass finds it under its identity, and that is right twice
+/// over. It cannot set a peer back, being the same `(updated_at, revision)` a merge takes
+/// only when strictly newer; and the applier skips a segment in the old spelling, so this
+/// copy is what carries the row to a device that joins after the rename.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VersionKey {
+    schema: String,
+    id: String,
+    updated_at: SyncWatermark,
+    revision: i64,
+}
+
+impl VersionKey {
+    fn of(row: &ChangesetRow) -> Self {
+        Self {
+            schema: row.schema_nsid.clone(),
+            id: row.id.clone(),
+            updated_at: row.updated_at,
+            revision: row.revision,
+        }
+    }
+}
+
 /// Append the user's record changes to the sealed history log on `mount`.
 ///
 /// The producer half of record sync on the log (RFC-0046). Records live in a
@@ -45,8 +81,8 @@ use kotton_schemas::SchemaId;
 /// pack, reaching even a blind node that can never read it.
 ///
 /// **What has already been logged is derived from the log itself**, as a set of
-/// `(id, updated_at, revision)` version identities, rather than from a persisted
-/// high-water mark. The log is the source of truth for what it carries, so a
+/// [`VersionKey`] identities, `(schema, id, updated_at, revision)`, rather than from a
+/// persisted high-water mark. The log is the source of truth for what it carries, so a
 /// derived view cannot drift out of step with it the way a remembered watermark
 /// can — the failure mode this project keeps rediscovering. That one dedup also
 /// does double duty: it is why a row written in the same wall-clock second as
@@ -59,6 +95,11 @@ use kotton_schemas::SchemaId;
 /// that delete was taken as already logged and never left the device (kotton
 /// #158). Every write raises the row's [`ChangesetRow::revision`], so a write
 /// never has the identity of the version it replaces, whatever the clock read.
+///
+/// **A version is named by its schema too** (kotton #467). The store holds a row by
+/// `(schema, id)`, so two schemas may each hold a row under one caller-chosen id, and two
+/// such first writes in one second carry the same `updated_at` and revision `1`. Keyed by
+/// id alone, the second was read as the first, already logged, and never left the device.
 ///
 /// Exporting the full state each pass is O(store); the dedup keeps the *log*
 /// bounded regardless, since only unlogged versions are appended. A watermark
@@ -74,11 +115,11 @@ pub async fn log_records(
     // The version identities the log already carries — this device's own and any
     // a peer's replication delivered.
     let logged = mount.scan_record_segments().await?;
-    let mut logged_versions: HashSet<(String, SyncWatermark, i64)> = HashSet::new();
+    let mut logged_versions: HashSet<VersionKey> = HashSet::new();
     for seg in &logged {
         for payload in &seg.rows {
             if let Ok(row) = serde_json::from_slice::<ChangesetRow>(payload) {
-                logged_versions.insert((row.id, row.updated_at, row.revision));
+                logged_versions.insert(VersionKey::of(&row));
             }
         }
     }
@@ -89,7 +130,7 @@ pub async fn log_records(
         .export_changeset(0)
         .await?
         .into_iter()
-        .filter(|row| !logged_versions.contains(&(row.id.clone(), row.updated_at, row.revision)))
+        .filter(|row| !logged_versions.contains(&VersionKey::of(row)))
         .collect();
     if fresh.is_empty() {
         return Ok(None);
@@ -412,6 +453,89 @@ mod tests {
         peer.merge_changeset(logged[1..].to_vec()).await.unwrap();
         let held = peer.query(&notes(), Default::default()).await.unwrap();
         assert_eq!(held[0].body["title"], "second");
+    }
+
+    fn tasks() -> SchemaId {
+        SchemaId::from_static(kotton_common::namespace::NSID_TASKS)
+    }
+
+    /// **Two schemas' first writes of one id in one second are two versions** (kotton
+    /// #467). The store holds a row by `(schema, id)`, so `notes` and `tasks` may each hold
+    /// a row under one id the caller chose. The clock is held on one second and both rows
+    /// are asserted to carry the same `(updated_at, revision)`, so the only thing telling
+    /// them apart is the schema: the case a dedup by id alone took as already logged.
+    #[tokio::test]
+    async fn two_schemas_first_writes_of_one_id_in_one_second_are_both_logged() {
+        let store = store_in_one_second().await;
+        store.create_table(&CoreSchema::Tasks.definition()).await.unwrap();
+        let mount = LogOnly::default();
+
+        let id = store.insert(&notes(), json!({ "id": "shared", "title": "a note" })).await.unwrap();
+        assert_eq!(id, "shared");
+        assert!(log_records(&store, &mount).await.unwrap().is_some());
+        store.insert(&tasks(), json!({ "id": "shared", "title": "a task" })).await.unwrap();
+        assert!(
+            log_records(&store, &mount).await.unwrap().is_some(),
+            "the task was taken as the note's version, already logged"
+        );
+
+        let logged = mount.rows();
+        assert_eq!(logged.len(), 2, "the note and the task: {logged:?}");
+        let (note, task) = (&logged[0], &logged[1]);
+        assert_eq!((note.id.as_str(), task.id.as_str()), ("shared", "shared"));
+        assert_eq!(
+            (note.updated_at, note.revision),
+            (task.updated_at, task.revision),
+            "the two rows were not at one version, so the case was not held"
+        );
+        assert_eq!(note.revision, 1, "each is its row's first write");
+        assert_ne!(note.schema_nsid, task.schema_nsid);
+
+        // Nothing is left unlogged, so the next pass appends nothing.
+        assert_eq!(log_records(&store, &mount).await.unwrap(), None);
+    }
+
+    /// **A row an earlier log carries under a core schema's old name is logged once more,
+    /// under its identity, and once.** A log written before a schema was named by the key that
+    /// publishes it spells a notes row `sh.kotton.notes`, in the form without `revision`; the
+    /// store holds that row under the identity the name became, at the same version. The
+    /// exported key is not the logged one, so the row is logged again, and the next pass finds
+    /// it under its identity and logs nothing.
+    #[tokio::test]
+    async fn a_row_logged_under_an_old_core_name_is_logged_once_under_its_identity() {
+        let store = store_in_one_second().await;
+        let mount = LogOnly::default();
+        let earlier = json!({
+            "id": "kept",
+            "schema_nsid": "sh.kotton.notes",
+            "body": { "title": "from before" },
+            "updated_at": 1_600_000_000,
+            "deleted_at": null,
+        });
+        mount.segments.lock().unwrap().push(vec![serde_json::to_vec(&earlier).unwrap()]);
+
+        // The row as the store holds it once it has respelled the old name.
+        let mut held = mount.rows();
+        held[0].schema_nsid = kotton_common::namespace::NSID_NOTES.to_owned();
+        store.merge_changeset(held).await.unwrap();
+        let exported = store.export_changeset(0).await.unwrap();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].schema_nsid, kotton_common::namespace::NSID_NOTES);
+
+        assert!(
+            log_records(&store, &mount).await.unwrap().is_some(),
+            "the row was taken as logged under its old name"
+        );
+        let segments = mount.segments.lock().unwrap().clone();
+        assert_eq!(segments.len(), 2, "one segment was appended");
+        assert_eq!(segments[1].len(), 1, "the one row: {:?}", mount.rows());
+        let relogged: ChangesetRow = serde_json::from_slice(&segments[1][0]).unwrap();
+        assert_eq!(relogged.schema_nsid, kotton_common::namespace::NSID_NOTES);
+        assert_eq!(relogged.id, "kept");
+        assert_eq!((relogged.updated_at, relogged.revision), (1_600_000_000, 0));
+
+        // Once: the next pass finds the row under its identity.
+        assert_eq!(log_records(&store, &mount).await.unwrap(), None);
     }
 
     /// A store whose clock a test sets, in milliseconds, between its writes.
