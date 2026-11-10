@@ -15,12 +15,14 @@
 //! The introductions are the device's own lent handle,
 //! `kotton_device::Introducer`: the listeners open now and the key they present.
 //!
-//! One of these holds the whole keychain, `Arc<dyn SecretsStore>`, because
-//! what it answers is kept there (a second, `file_host::PeerStoreHost`, holds
-//! it for a mount's key domain): [`FrostSigner`] reads this node's FROST share
-//! for a person and answers one signing round with it. It hands neither the
-//! keychain nor the share back, and reads only `frost_share` — but that is true
-//! of its method, not its type. `PeerStoreHost` reads and writes
+//! None of these holds the keychain in a daemon's build. One handle outside this
+//! module does, `file_host::PeerStoreHost`, for a mount's key domain. Under
+//! kuserd's `test-support` feature, which the integration suite turns on and no
+//! daemon's build does, a second is compiled here: `FrostSigner`, which reads
+//! this node's FROST share for a person and answers one round of the test-only
+//! threshold signature with it. It hands neither the keychain nor the share
+//! back, and reads only `frost_share` — but that is true of its method, not its
+//! type. `PeerStoreHost` reads and writes
 //! `sealed_mount_domain` and reads `operational_cek` — or the person's **root
 //! seed** `seed32` when no CEK is stored — and it holds the keychain beside
 //! the resident stores, each of which answers its base directory
@@ -41,6 +43,7 @@
 //! them is reached.
 use crate::device_users::UserId;
 use kotton_device::users::admission::{Chains, PeerStanding};
+#[cfg(feature = "test-support")]
 use kotton_sys::secret::SecretsStore;
 use kotton_wire::ipc::UserResponse;
 use kotton_wire::peer::EphemeralSession;
@@ -220,6 +223,11 @@ impl Recovery {
 /// answers one round. The share never leaves this handle. It holds the whole
 /// keychain; that no other secret is read through it is this method's
 /// discipline, not its type's (kotton #256).
+///
+/// Compiled under `test-support` only: the round it answers signs the message its
+/// coordinator hands it, and the one coordinator,
+/// `kotton_peer::daemon::nodes::threshold_sign`, is compiled for tests only.
+#[cfg(feature = "test-support")]
 pub(super) struct FrostSigner {
     secrets: Arc<dyn SecretsStore + Send + Sync>,
     /// Holds a round-1's secret nonces until the matching round-2, a later and
@@ -227,6 +235,7 @@ pub(super) struct FrostSigner {
     participant: Arc<kotton_org::frost_signing::FrostParticipant>,
 }
 
+#[cfg(feature = "test-support")]
 impl FrostSigner {
     pub(super) fn new(
         secrets: Arc<dyn SecretsStore + Send + Sync>,

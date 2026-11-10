@@ -356,6 +356,12 @@ struct NonceSession {
 /// act description and this responder must gate its share on it (RFC-0029
 /// trusted-path consent). The seam is additive — a new field on [`FrostRound`]
 /// that `Full`-only quorums ignore — so it is deferred, not foreclosed.
+///
+/// **On the person's identity key, the round is compiled for tests only.** The one
+/// coordinator of that round (`kotton_peer::daemon::nodes::threshold_sign`) and the
+/// peer responder that hands this participant the person's share (kuserd's
+/// `FrostSignRound` arm) are each compiled under their crate's `test-support`
+/// feature, which no daemon's build turns on. A daemon's build refuses the round.
 #[derive(Default)]
 pub struct FrostParticipant {
     /// `session_id` → round-1 nonce session; set by round 1, removed by round 2.

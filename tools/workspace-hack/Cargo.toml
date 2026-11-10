@@ -82,8 +82,10 @@ itertools = { version = "0.14.0", default-features = false, features = ["default
 itoa = { version = "1.0.18", default-features = false, features = [] }
 kotton-device = { path = "../../core/device", default-features = false, features = ["test-support"] }
 kotton-ipc = { path = "../../core/ipc", default-features = false, features = ["default", "os-provider", "test-utils"] }
+kotton-peer = { path = "../../core/peer", default-features = false, features = ["test-support"] }
 kotton-secret = { path = "../../core/secret", default-features = false, features = ["default", "test-utils"] }
 kotton-store = { path = "../../core/store", default-features = false, features = ["test-support"] }
+kuserd = { path = "../../core/kuserd", default-features = false, features = ["test-support"] }
 libc = { version = "0.2.189", default-features = false, features = ["default", "extra_traits", "std"] }
 libm = { version = "0.2.16", default-features = false, features = ["arch", "default"] }
 libsqlite3-sys = { version = "0.28.0", default-features = false, features = ["bundled", "bundled-sqlcipher", "bundled_bindings", "cc", "default", "min_sqlite_version_3_14_0", "pkg-config", "unlock_notify", "vcpkg"] }
