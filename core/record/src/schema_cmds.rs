@@ -305,20 +305,19 @@ mod tests {
         assert!(err.to_string().contains("not signed by its publisher"), "{err}");
     }
 
-    /// `access-log` is held back from the registry until #450: a record put under it is refused
-    /// as under an unknown schema. `secret` was held back with it until #449 and takes a
-    /// record now. A registration of either is refused as a core identity's, never admitted.
+    /// `secret` (#449) and `access-log` (#450) are registered: the person's own verbs put a
+    /// record under either. A registration of either is refused as a core identity's, never
+    /// admitted over the core definition.
     #[tokio::test]
-    async fn the_held_back_core_schema_takes_no_record_and_neither_takes_a_registration() {
+    async fn the_kept_core_schemas_take_a_record_and_neither_takes_a_registration() {
         let (_dir, registry, store) = a_device();
-        let err = crate::record_cmds::Record::new(&registry, &store)
+        crate::record_cmds::Record::new(&registry, &store)
             .insert(
                 ns::NSID_ACCESS_LOG,
-                json!({ "device": "d", "at": 1, "asker": "a", "door": "local", "act": "read", "what": "w" }),
+                json!({ "device": "d", "at": "2026-11-10T00:00:00Z", "asker": "a", "door": "local", "act": "read", "what": "w" }),
             )
             .await
-            .expect_err("no record under a held-back schema");
-        assert!(err.to_string().contains("unknown schema"), "{err}");
+            .expect("access-log is registered, and the person's own verbs put a record under it");
         crate::record_cmds::Record::new(&registry, &store)
             .insert(ns::NSID_SECRET, json!({ "label": "bank", "value": "hunter2", "kind": "password" }))
             .await
@@ -329,8 +328,7 @@ mod tests {
                 .await
                 .expect_err("a core identity is not registered");
             assert!(err.to_string().contains("core schema"), "{err}");
-            let held = registry.read().unwrap().get(&schema.id()).is_some();
-            assert_eq!(held, !schema.is_held_back(), "{schema:?}: the registry is as it was");
+            assert!(registry.read().unwrap().get(&schema.id()).is_some(), "{schema:?}: the registry is as it was");
         }
     }
 }

@@ -100,12 +100,14 @@ pub enum CoreSchema {
     /// it, or handles it, and record search returns none of its rows. The person reaches it
     /// with the `secret` verbs at their own terminal, which read and write Personal alone.
     Secret,
-    /// One thing a device's daemon was asked: `device`, `at`, `asker`, `door`,
-    /// `act` and `what`. Kept on that device, and in a drive only when the
-    /// person pins the log there. Kept from every app as `secret` is
-    /// ([`CoreSchema::is_kept_from_apps`]), and published and not registered yet
-    /// ([`CoreSchema::is_held_back`]): no record can be put under it until the access
-    /// log's own change (#450), which builds on this declaration.
+    /// One thing a device's daemon was asked: `device`, `at`, `asker`, `door`, `act` and
+    /// `what`. Registered, and kept from every app as `secret` is
+    /// ([`CoreSchema::is_kept_from_apps`]). **Kept on the device that wrote it** (kotton
+    /// #450): the record log carries no row of it to a drive, and neither does a snapshot,
+    /// unless that device's own setting pins its log to `personal`
+    /// (`kotton_record::replication::AccessLogPin`); a row of it that arrives from another
+    /// of the person's devices, one that pinned its log, is merged as any row is. Writing
+    /// one starts no sync pass: a pinned log rides the next pass that runs anyway.
     AccessLog,
     /// A governance record: one record file of the project's board as a row
     /// (RFC-0088), the schema `client/record-file` converts to and from. Core
@@ -136,16 +138,6 @@ impl CoreSchema {
             CoreSchema::AccessLog,
             CoreSchema::GovernanceRecord,
         ]
-    }
-
-    /// Return `true` for a core schema that is published and not yet registered:
-    /// `access-log`. Its file is here and its identity is core, so `schema register` refuses
-    /// it, but the registry does not admit it: a schema in the registry is one a record can
-    /// be put under. It is held back until the access log's own change (#450). `secret` was
-    /// held back with it until its refusal to apps ([`CoreSchema::is_kept_from_apps`]) was
-    /// built (#449).
-    pub fn is_held_back(self) -> bool {
-        matches!(self, CoreSchema::AccessLog)
     }
 
     /// Return `true` for a core schema kept from every app: `secret` and `access-log`.
@@ -317,7 +309,7 @@ mod tests {
 
     /// `secret` and `access-log` are kept from apps, by their whole identities; no other core
     /// schema is, a name of theirs under another key is not, and a string that is no identity
-    /// names none. `secret` is registered now; `access-log` is still held back.
+    /// names none.
     #[test]
     fn two_identities_are_kept_from_apps_by_name() {
         let kept: Vec<CoreSchema> =
@@ -330,8 +322,6 @@ mod tests {
         assert_eq!(CoreSchema::kept_from_apps(theirs), None);
         assert_eq!(CoreSchema::kept_from_apps("secret"), None);
         assert!(CoreSchema::Secret.kept_from_apps_refusal().contains(ns::NSID_SECRET));
-        assert!(!CoreSchema::Secret.is_held_back());
-        assert!(CoreSchema::AccessLog.is_held_back());
     }
 
     #[test]

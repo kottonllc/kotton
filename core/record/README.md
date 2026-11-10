@@ -78,9 +78,29 @@ passes (`kotton_grant`'s `check_read`, `check_write` and `check_register`) refus
 row the grant store holds. No manifest claims to handle or asks for either, no handler is
 registered or answered for either, the runner's records verbs refuse either, and
 `Record::search` returns no row of either to any caller, with no schema named or with one of
-them named. `secret` is known to every device, and the person reaches it at their own terminal
-with the `secret` verbs, in Personal. `access-log` is published and not yet known to a device
-(`CoreSchema::is_held_back`): no record is kept under it until its own change (#450).
+them named. Both are known to every device. The person reaches `secret` at their own terminal
+with the `secret` verbs, in Personal, and `access-log` with the record verbs there; no verb
+writes a log entry for a daemon request yet, which is the `log` noun's own issue.
+
+**The access log is kept on the device that wrote it** (#450). The protocol's *The first release
+is a platform a stranger can use from the command line* keeps the log on the device and puts it
+in a drive only if the person pins it there. `replication` holds the identity by name, not by a
+schema flag: `log_records` logs no row of `access-log`, and `snapshot_records` puts none of this
+device's rows of it in a snapshot's base, carrying instead the newest version of each row of it
+the log already carries, verbatim. Those are the two paths by which a row leaves this device's
+store for a drive; the retired peer verb was the third (module doc). Both carry this device's
+log only when its own setting pins it to `personal` (`replication::AccessLogPin`, kept in the
+device's database by `kotton_device::users::log_pin`, migration `0033`, and read by the sync
+engine for each pass of `personal`'s mount). There is no verb for the setting until the `log`
+noun's issue; `log_pin::set` on the device's database is the handle. Pinned, the device's log
+rides the record log to `personal` like any record, its rows from before the pin among them.
+Unpinned again, no new row leaves; a row already logged stays in the drive and nothing is
+retracted. A row of it from another of the person's devices, one that pinned its log, is merged
+here as any row is. **Writing a log record starts no pass.** The store wakes the sync engine
+itself after an insert or a delete of any schema but `access-log`
+(`SqliteRecordStore::with_write_signal`, `replication::a_write_wakes_a_pass`), and the engine's
+filesystem watcher no longer wakes on a change to `records.db`, which it could not tell apart by
+schema; so a pinned log rides the next pass that runs anyway and adds no rhythm a host can read.
 
 A row of `secret` reaches a device only as every record does, in the record log of
 `personal`, sealed under the person's `K_log`, which their own devices alone hold: a member of

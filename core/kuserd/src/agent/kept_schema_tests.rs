@@ -183,3 +183,47 @@ async fn a_remote_or_paired_session_still_reaches_a_schema_not_kept() {
         );
     }
 }
+
+/// **`access-log` answers the terminal alone, as `secret` does** (kotton #450): the person's
+/// insert at `Local` is kept, and at `Remote` an insert and a query of it naming no app are
+/// refused as the terminal's, before any row is read. One assertion each: the door is the one
+/// `secret` passes through.
+#[tokio::test]
+async fn the_access_log_answers_the_terminal_and_no_remote_session() {
+    const LOG: &str = kotton_common::namespace::NSID_ACCESS_LOG;
+    const WHAT: &str = "access-log-what-7c2e";
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = alice_and_bob(dir.path()).await;
+    let ctx = daemon.agent_context();
+    sessions::insert(&ctx.sessions, ALICE_SESSION.to_string(), "alice".to_string());
+    let insert = || UserRequest::RecordInsert {
+        user_id: "alice".into(),
+        schema_nsid: LOG.into(),
+        record: serde_json::json!({ "device": "did:key:a", "at": "2026-11-10T00:00:00Z",
+            "asker": "terminal", "door": "local", "act": "read", "what": WHAT }),
+        root: Some(PERSONAL_ROOT.into()),
+        app_id: None,
+    };
+    let query = || UserRequest::RecordQuery {
+        user_id: "alice".into(),
+        schema_nsid: LOG.into(),
+        field_eq: vec![],
+        limit: None,
+        offset: None,
+        root: Some(PERSONAL_ROOT.into()),
+        app_id: None,
+    };
+    let kept = ask(&ctx, Principal::LocalOperator, insert()).await;
+    assert!(matches!(kept, UserResponse::RecordInserted { .. }), "the person's insert: {}", shape(&kept));
+    for (verb, resp) in [("insert", ask(&ctx, remote(), insert()).await), ("query", ask(&ctx, remote(), query()).await)] {
+        let UserResponse::Error { message } = &resp else {
+            panic!("{verb} on {LOG} at Remote was answered: {}", shape(&resp));
+        };
+        assert!(message.contains(LOG) && message.contains("the person's own terminal's"), "{verb}: {message}");
+        assert!(!message.contains(WHAT), "{verb}: the refusal carries what the record says");
+    }
+    let UserResponse::RecordQueryResult { records } = ask(&ctx, Principal::LocalOperator, query()).await else {
+        panic!("the person's query at Local");
+    };
+    assert_eq!(records.len(), 1, "the refused insert stored a row");
+}

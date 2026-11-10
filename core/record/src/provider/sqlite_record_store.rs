@@ -544,7 +544,15 @@ fn begin_immediate(conn: &mut Connection) -> rusqlite::Result<rusqlite::Transact
 pub struct SqliteRecordStore {
     conn: Arc<Mutex<Connection>>,
     clock: StoreClock,
+    written: Option<WriteSignal>,
 }
+
+/// What a store calls after it commits a write the person or an app made: an insert or a
+/// delete, of any schema but one whose writes wake no pass
+/// ([`crate::replication::a_write_wakes_a_pass`]: `access-log`, kotton #450). It is called
+/// with nothing, so it learns that a write landed and not what was written; a merge of rows
+/// another device logged calls it never, since those arrive from a pass.
+pub type WriteSignal = Arc<dyn Fn() + Send + Sync>;
 
 impl SqliteRecordStore {
     /// Open (or create) a SQLite database at `path`.
@@ -584,6 +592,7 @@ impl SqliteRecordStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             clock: StoreClock::system(),
+            written: None,
         })
     }
 
@@ -600,6 +609,25 @@ impl SqliteRecordStore {
         self
     }
 
+    /// Call `signal` after each insert or delete this store commits, but not one of a schema
+    /// whose writes wake no pass ([`WriteSignal`]). The daemon gives it its sync engine's wake,
+    /// so a record write starts a pass knowingly, by schema, rather than by the file changing
+    /// under a watcher that cannot tell one schema's write from another's. Set it where the
+    /// store is opened, before the store is cloned, as [`Self::with_clock`] is.
+    pub fn with_write_signal(mut self, signal: WriteSignal) -> Self {
+        self.written = Some(signal);
+        self
+    }
+
+    /// Tell the write signal, if any, that a write of a row of `schema` was committed.
+    fn signal_written(&self, schema: &SchemaId) {
+        if let Some(signal) = &self.written {
+            if crate::replication::a_write_wakes_a_pass(schema) {
+                signal();
+            }
+        }
+    }
+
     /// Open an in-memory database (useful for testing).
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
@@ -607,6 +635,7 @@ impl SqliteRecordStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             clock: StoreClock::system(),
+            written: None,
         })
     }
 }
@@ -726,6 +755,7 @@ impl RecordStore for SqliteRecordStore {
             Ok::<(), RecordStoreError>(())
         })
         .await??;
+        self.signal_written(schema_nsid);
 
         Ok(id)
     }
@@ -888,7 +918,9 @@ impl RecordStore for SqliteRecordStore {
             conn.commit()?;
             Ok::<(), RecordStoreError>(())
         })
-        .await?
+        .await??;
+        self.signal_written(schema_nsid);
+        Ok(())
     }
 
     async fn gc_tombstones(&self, before_ts: SyncWatermark) -> Result<u64> {

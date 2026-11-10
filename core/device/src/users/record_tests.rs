@@ -38,7 +38,7 @@ const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
         mount: &str,
     ) -> Result<Option<u64>> {
         let m = mount_of(user, mount).await;
-        kotton_record::replication::log_records(store, m.as_ref()).await
+        kotton_record::replication::log_records(store, m.as_ref(), Default::default()).await
     }
 
     async fn apply_record_segments(
@@ -65,6 +65,7 @@ const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
             store,
             m.as_ref(),
             keep_full_secs,
+            Default::default(),
         )
         .await
     }

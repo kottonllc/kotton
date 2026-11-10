@@ -767,11 +767,13 @@ impl SyncEngine {
             tracing::warn!(user_id, "maintenance: no local mount; nothing to snapshot");
             return;
         };
+        let log_pin = access_log_pin(&*self.resources, user_id, "local").await;
         match kotton_record::replication::snapshot_records(
             &self.runtime.schema_registry,
             &record_store,
             mount_store.as_ref(),
             MAINTENANCE_KEEP_FULL_SECS,
+            log_pin,
         )
         .await
         {
@@ -1189,8 +1191,11 @@ pub async fn sync_mount_with_records(
         None => Outbound::Everything,
     };
 
+    // Whether this device's access log rides this pass (kotton #450): only to `personal`,
+    // and only when this device's own setting pins it there.
+    let log_pin = access_log_pin(resources, user_id, mount).await;
     if let Err(e) =
-        kotton_record::replication::log_records(&store, mount_store.as_ref()).await
+        kotton_record::replication::log_records(&store, mount_store.as_ref(), log_pin).await
     {
         tracing::warn!(error = %e, user_id, "sync: log_records before sync failed");
     }
@@ -1233,6 +1238,19 @@ pub async fn sync_mount_with_records(
 /// device keeps of the person's first drive and the one pins are over today,
 /// and for a pass whose settings cannot be read. Else the settings resolved
 /// for this device, within the budget its mount for that drive records.
+/// Where `user_id`'s access log goes on a pass of `mount`: this device's own setting
+/// (`kotton_device::users::log_pin`), and kept here when the device's database is not open.
+async fn access_log_pin(
+    resources: &dyn crate::SyncHost,
+    user_id: &str,
+    mount: &str,
+) -> kotton_record::replication::AccessLogPin {
+    match resources.machine_db() {
+        Some(db) => kotton_device::users::log_pin::pin_for(&db, user_id, mount).await,
+        None => kotton_record::replication::AccessLogPin::Unpinned,
+    }
+}
+
 async fn keep_for(
     runtime: &DeviceRuntime,
     resources: &dyn crate::SyncHost,
@@ -1390,7 +1408,8 @@ async fn ensure_packed_for_peer(
 // ---------------------------------------------------------------------------
 
 /// Spawn a filesystem watch task that calls [`SyncEngine::wake_background`]
-/// whenever a file is created, modified, or deleted under `<base_dir>/users/`.
+/// whenever a file is created, modified, or deleted under `<base_dir>/users/`,
+/// but a person's record database ([`a_change_wakes_a_pass`]).
 /// It also broadcasts a [`VfsChangeFrame`] to all active `VfsWatch` subscribers.
 ///
 /// The watcher runs in a blocking thread (as required by the `notify` crate)
@@ -1486,6 +1505,28 @@ impl Drop for FsWatcherHandle {
     }
 }
 
+/// The files of a person's record database under `<base>/users/<user>/`: SQLite's main file
+/// and the three it keeps beside it.
+const RECORD_DB_FILES: [&str; 4] = ["records.db", "records.db-wal", "records.db-shm", "records.db-journal"];
+
+/// Return `true` when a change to `paths` under `watch_dir` (`<base>/users/`) wakes the
+/// background pass: a change to anything but a person's record database does.
+///
+/// **A record write wakes a pass by its schema, not by the file** (kotton #450). The watcher
+/// sees `records.db` change and cannot tell a note's write from an access-log record's, so
+/// waking on it made every log record start a pass, and a pinned log a rhythm a host could
+/// read. The store wakes the engine itself instead, after an insert or delete of any schema
+/// but `access-log` (`kotton_record::SqliteRecordStore::with_write_signal`, given the
+/// engine's wake by `kuserd`'s record store cache), and a log record rides the next pass
+/// that runs anyway. An event naming no path wakes, as every event did before.
+pub fn a_change_wakes_a_pass(watch_dir: &std::path::Path, paths: &[std::path::PathBuf]) -> bool {
+    let is_record_db = |p: &std::path::PathBuf| {
+        p.file_name().and_then(|n| n.to_str()).is_some_and(|n| RECORD_DB_FILES.contains(&n))
+            && p.parent().and_then(std::path::Path::parent) == Some(watch_dir)
+    };
+    paths.is_empty() || !paths.iter().all(is_record_db)
+}
+
 pub fn spawn_fs_watcher(
     base_dir: std::path::PathBuf,
     engine: Arc<SyncEngine>,
@@ -1572,8 +1613,10 @@ pub fn spawn_fs_watcher(
                         event.kind,
                         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
                     ) {
-                        tracing::debug!(?event.kind, "fs_watcher: change detected, waking sync engine");
-                        engine.wake_background();
+                        if a_change_wakes_a_pass(&watch_dir, &event.paths) {
+                            tracing::debug!(?event.kind, "fs_watcher: change detected, waking sync engine");
+                            engine.wake_background();
+                        }
 
                         // Broadcast to VfsWatch subscribers (RFC-0017).
                         let kind = match event.kind {
@@ -1965,6 +2008,24 @@ mod maintenance_tests {
 mod fs_watch_readiness_tests {
     use super::maintenance_tests::engine;
     use super::*;
+
+    /// **A change to a person's record database wakes no pass** (kotton #450): the watcher
+    /// cannot tell an access-log record's write from a note's, so the store wakes the engine by
+    /// schema instead. A change to the person's tree wakes, as does an event naming both, or
+    /// none, and a file named `records.db` anywhere but beside a person's other databases.
+    #[test]
+    fn a_change_to_the_record_database_alone_wakes_no_pass() {
+        let users = std::path::Path::new("/base/users");
+        let at = |p: &str| users.join(p);
+        for quiet in ["alice/records.db", "alice/records.db-wal", "alice/records.db-shm", "alice/records.db-journal"] {
+            assert!(!a_change_wakes_a_pass(users, &[at(quiet)]), "{quiet} woke a pass");
+        }
+        assert!(!a_change_wakes_a_pass(users, &[at("alice/records.db"), at("alice/records.db-wal")]));
+        assert!(a_change_wakes_a_pass(users, &[at("alice/store/files/a.txt")]));
+        assert!(a_change_wakes_a_pass(users, &[at("alice/records.db"), at("alice/store/files/a.txt")]));
+        assert!(a_change_wakes_a_pass(users, &[at("alice/store/files/records.db")]), "a file of the tree");
+        assert!(a_change_wakes_a_pass(users, &[]));
+    }
 
     /// The watcher says when it is up.
     ///
