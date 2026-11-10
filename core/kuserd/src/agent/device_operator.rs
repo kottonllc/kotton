@@ -12,8 +12,10 @@
 //! person holds can honestly be bound.
 //!
 //! **Speaking.** A connection to `kdeviced`'s socket, authenticated by this key
-//! signing the connection's nonce and naming the person it is theirs for
-//! (`Authenticate { person }`). What happens is `kdeviced`'s:
+//! signing the tagged login message over the connection's challenge
+//! (`kotton_wire::sys_ipc::login_message`) and naming the person it is theirs for
+//! (`Authenticate { person }`); that `Authenticate` spends the challenge, so each
+//! dial asks for its own. What happens is `kdeviced`'s:
 //!
 //! | the key is… | `kdeviced` answers | here |
 //! |---|---|---|

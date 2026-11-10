@@ -242,6 +242,8 @@ impl Session<'_> {
     }
 
     /// Answer a challenge, the second half. Returns the authenticated DID.
+    /// The call spends the connection's challenge whatever kdeviced answers, so
+    /// a retry on the same connection asks [`Session::challenge`] again first.
     ///
     /// `signature` is base64url over `kotton_wire::sys_ipc::login_message` of the
     /// decoded nonce: the login tag, a zero byte, the challenge. Signing happens in the

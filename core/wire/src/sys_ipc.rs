@@ -27,7 +27,12 @@
 //!
 //! 1. Caller sends `Challenge`.  kdeviced returns `ChallengeIssued { nonce }`: a
 //!    challenge of exactly [`LOGIN_CHALLENGE_LEN`] bytes from the OS random source,
-//!    fresh for this connection and used once, base64url-encoded.
+//!    fresh for this connection, base64url-encoded. It is **spent by the next
+//!    `Authenticate` on the connection, whatever that is answered**: a refusal,
+//!    `OperatorKeyKept` and admission alike leave the connection holding no
+//!    challenge, so another `Authenticate` is refused ("no Challenge issued on this
+//!    connection") until the caller sends `Challenge` again. A second `Challenge`
+//!    replaces the first.
 //! 2. Caller builds the login message with [`login_message`] — the ASCII tag
 //!    [`LOGIN_TAG`], one `0x00` byte, then the challenge — signs it with their
 //!    Ed25519 private key, and base64url-encodes the 64-byte signature. A challenge
@@ -105,8 +110,9 @@ pub enum DeviceRequest {
 
     /// Complete authentication by proving DID ownership.
     ///
-    /// `nonce` must be the base64url string returned by a preceding `Challenge`
-    /// call on this connection.
+    /// `nonce` must be the base64url string returned by the latest `Challenge`
+    /// call on this connection, not yet spent: each `Authenticate` spends the
+    /// connection's challenge, whatever it is answered.
     ///
     /// `signature` must be a base64url-encoded Ed25519 signature over
     /// [`login_message`] of the decoded nonce, produced by the private key of `did`.
@@ -291,8 +297,9 @@ pub enum DeviceResponse {
     Pong,
 
     /// A random challenge for the caller to sign inside [`login_message`]. Valid
-    /// only for this connection and only until a subsequent `Challenge` or
-    /// `Authenticate` replaces it.
+    /// only for this connection, and only until a subsequent `Challenge` replaces
+    /// it or the next `Authenticate` spends it — whatever that `Authenticate` is
+    /// answered, refused or admitted, the connection holds no challenge after it.
     ChallengeIssued {
         /// base64url-encoded random 32-byte nonce.
         nonce: String,

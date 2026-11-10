@@ -43,9 +43,9 @@ where
     /// unless it does.
     ///
     /// On Unix the kernel's answer for the peer of the connected stream
-    /// ([`OsConnection::peer`]) must be [`crate::own_uid`]; any other uid, or no
-    /// answer, is refused before a single frame is sent, so nothing this client
-    /// would sign or say reaches a process of another user. For a client of a
+    /// ([`OsConnection::peer`]) is held to [`crate::Caller::require_own_user`]; any
+    /// other uid, or no answer, is refused before a single frame is sent, so nothing
+    /// this client would sign or say reaches a process of another user. For a client of a
     /// daemon that is the same user by design: `kctl` and `kuserd`'s device
     /// operator reaching `kdeviced` (`kotton_wire::sys_ipc`).
     ///
@@ -55,19 +55,13 @@ where
             .await
             .map_err(io::Error::other)?;
         #[cfg(unix)]
-        {
-            let me = crate::own_uid();
-            let server = connection.peer();
-            if server.user != crate::OsUserId::Uid(me) {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!(
-                        "{endpoint:?} is served by {server}, not by uid {me}, the user this \
-                         runs as; nothing was sent to it"
-                    ),
-                ));
-            }
-        }
+        connection.peer().require_own_user().map_err(|e| {
+            let IpcEndpoint::UnixSocket(path) = &endpoint;
+            io::Error::new(
+                e.kind(),
+                format!("the server at {}: {e}; nothing was sent to it", path.display()),
+            )
+        })?;
         Ok(Self {
             connection,
             _phantom: std::marker::PhantomData,

@@ -82,6 +82,30 @@ impl Caller {
             gid: None,
         }
     }
+
+    /// **The kernel names this peer as this process's own effective uid**
+    /// ([`own_uid`]), or the peer is refused: any other uid, and a peer the kernel
+    /// did not name ([`OsUserId::Unknown`]), which is never read as permission.
+    ///
+    /// The one check for both ends of a door that serves only its own user: kdeviced
+    /// holds each connection's caller to it before answering, and
+    /// `IpcClient::connect_to_own_user` holds the server it reached to it before
+    /// sending (`kotton_wire::sys_ipc`). Each wraps the refusal in what it was doing.
+    #[cfg(unix)]
+    pub fn require_own_user(&self) -> std::io::Result<()> {
+        let me = own_uid();
+        if self.user == OsUserId::Uid(me) {
+            return Ok(());
+        }
+        let who = match self.user {
+            OsUserId::Unknown => format!("a peer the kernel does not name ({self})"),
+            _ => format!("{self}"),
+        };
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{who} is not uid {me}, the user this process runs as"),
+        ))
+    }
 }
 
 impl std::fmt::Display for Caller {
@@ -126,24 +150,41 @@ fn unix_peer(stream: &UnixStream) -> Caller {
     }
 }
 
+/// The one clause every refusal of a socket's directory ends with: the variables
+/// that move a daemon's door (`kotton_common::paths::runtime_dir`'s tiers), which the
+/// daemon and its clients must be given alike.
+#[cfg(target_os = "linux")]
+const SOCKET_DIR_WAY_OUT: &str = "a daemon and its clients move their sockets together \
+     when started with the same XDG_RUNTIME_DIR (or, with that unset, the same TMPDIR) \
+     naming a directory of this user's own";
+#[cfg(all(unix, not(target_os = "linux")))]
+const SOCKET_DIR_WAY_OUT: &str = "a daemon and its clients move their sockets together \
+     when started with the same TMPDIR naming a directory of this user's own";
+
+/// A refusal of the socket directory `dir`: the path, what is wrong (`why`), the rule
+/// and the way out, in one message.
+#[cfg(unix)]
+fn refuse_socket_dir(dir: &std::path::Path, why: &str) -> IpcError {
+    IpcError::BindFailed(format!(
+        "the socket directory {} {why}; a socket is bound only in a directory, not a \
+         symlink, owned by uid {} and granting group and other no permission bits; \
+         {SOCKET_DIR_WAY_OUT}",
+        dir.display(),
+        own_uid()
+    ))
+}
+
 /// **A socket's directory is this user's alone, or the socket is not bound in it**:
 /// its own entry (a symlink there is not followed) is a directory, owned by
 /// [`own_uid`], granting group and other nothing (`mode & 0o077 == 0`). Holds for a
 /// directory the bind just made `0o700` and for one that was already there, whatever
 /// tier of `kotton_common::paths::runtime_dir` or its short `/tmp` fallback chose it.
 /// Nothing is changed when it does not hold: the refusal names the path and what is
-/// wrong with it.
+/// wrong with it ([`refuse_socket_dir`]).
 #[cfg(unix)]
 fn check_socket_dir(dir: &std::path::Path) -> IpcResult<()> {
     use std::os::unix::fs::MetadataExt as _;
-    let shown = dir.display();
-    let refuse = |why: String| {
-        Err(IpcError::BindFailed(format!(
-            "the socket directory {shown} {why}; a socket is bound only in a directory that is \
-             a real directory owned by uid {} with mode 0700",
-            own_uid()
-        )))
-    };
+    let refuse = |why: String| Err(refuse_socket_dir(dir, &why));
     let entry = match std::fs::symlink_metadata(kotton_common::fs::own_entry(dir)) {
         Ok(entry) => entry,
         Err(e) => return refuse(format!("cannot be read ({e})")),
@@ -377,23 +418,25 @@ impl OsListener {
     pub async fn bind(endpoint: IpcEndpoint) -> IpcResult<Self> {
         let IpcEndpoint::UnixSocket(ref path) = endpoint;
 
-        // The socket's directory: made 0o700 where it is missing (`mode` applies to
-        // the segments this creates and to none that exist), then held to
-        // `check_socket_dir` whether it was made here or found. Only then is a stale
-        // socket in it removed and the new one bound.
+        // The socket's directory. Its own entry is read first (a symlink there is not
+        // followed): only when nothing is there is it made, 0o700 (`mode` applies to
+        // the segments this creates and to none that exist). Whatever is there —
+        // made here or found, a directory, a symlink, dangling or not, or a file — is
+        // then held to `check_socket_dir`, so each refusal names the path and what is
+        // wrong with it. Only then is a stale socket in it removed and the new one
+        // bound.
         let parent = match path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
             _ => std::path::Path::new("."),
         };
-        {
+        let there = std::fs::symlink_metadata(kotton_common::fs::own_entry(parent));
+        if matches!(&there, Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
             use std::os::unix::fs::DirBuilderExt;
             std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
                 .create(parent)
-                .map_err(|e| {
-                    IpcError::BindFailed(format!("Failed to create socket directory: {}", e))
-                })?;
+                .map_err(|e| refuse_socket_dir(parent, &format!("cannot be made ({e})")))?;
         }
         check_socket_dir(parent)?;
 
@@ -724,5 +767,92 @@ pub(crate) mod tests {
         assert!(refusal.contains("is a symlink"), "{refusal}");
         assert!(refusal.contains(&link.display().to_string()), "{refusal}");
         assert!(!real.join("sock").exists(), "a socket was bound through the symlink");
+    }
+
+    /// Every refusal of a socket's directory names the rule and the way out.
+    #[cfg(unix)]
+    fn says_the_rule_and_the_way_out(refusal: &str) {
+        assert!(refusal.contains("granting group and other no permission bits"), "{refusal}");
+        assert!(refusal.contains("TMPDIR"), "{refusal}");
+        #[cfg(target_os = "linux")]
+        assert!(refusal.contains("XDG_RUNTIME_DIR"), "{refusal}");
+    }
+
+    /// **A dangling symlink at the directory's name is refused as a symlink**,
+    /// naming the path, and nothing is made where it points.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_at_the_socket_directory_is_refused_by_name() {
+        let tmp = tempfile::tempdir_in("/tmp").expect("scratch");
+        let nowhere = tmp.path().join("nowhere");
+        let link = tmp.path().join("kotton");
+        std::os::unix::fs::symlink(&nowhere, &link).unwrap();
+        let refusal = bind_refusal(IpcEndpoint::UnixSocket(link.join("sock")));
+        assert!(refusal.contains(&link.display().to_string()), "{refusal}");
+        assert!(refusal.contains("is a symlink"), "{refusal}");
+        says_the_rule_and_the_way_out(&refusal);
+        assert!(!nowhere.exists(), "the bind made the symlink's target");
+    }
+
+    /// **A regular file at the directory's name is refused as not a directory**,
+    /// naming the path, and the file is left as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_at_the_socket_directory_is_refused_by_name() {
+        let tmp = tempfile::tempdir_in("/tmp").expect("scratch");
+        let file = tmp.path().join("kotton");
+        std::fs::write(&file, b"kept").unwrap();
+        let refusal = bind_refusal(IpcEndpoint::UnixSocket(file.join("sock")));
+        assert!(refusal.contains(&file.display().to_string()), "{refusal}");
+        assert!(refusal.contains("is not a directory"), "{refusal}");
+        says_the_rule_and_the_way_out(&refusal);
+        assert_eq!(std::fs::read(&file).unwrap(), b"kept");
+    }
+
+    /// **A directory the bind cannot make is refused by name**, with why it could
+    /// not be made. Its parent is one this process cannot write: a `0500`
+    /// directory of its own, or, for root, which writes past mode bits, `/proc`.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_directory_that_cannot_be_made_is_refused_by_name() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir_in("/tmp").expect("scratch");
+        let dir = if own_uid() != 0 {
+            let locked = tmp.path().join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+            locked.join("kotton")
+        } else if cfg!(target_os = "linux") {
+            std::path::PathBuf::from(format!("/proc/kotton-{}", std::process::id()))
+        } else {
+            eprintln!("root writes any directory here; this shape is not exercised");
+            return;
+        };
+        let refusal = bind_refusal(IpcEndpoint::UnixSocket(dir.join("sock")));
+        assert!(refusal.contains(&dir.display().to_string()), "{refusal}");
+        assert!(refusal.contains("cannot be made"), "{refusal}");
+        says_the_rule_and_the_way_out(&refusal);
+        assert!(!dir.exists());
+    }
+
+    /// **A peer is answered only as this process's own uid**: another uid and a peer
+    /// the kernel does not name are refused, each saying who it was — the check both
+    /// kdeviced and `IpcClient::connect_to_own_user` hold their peer to.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_own_uid_is_answered_as_the_own_user() {
+        let me = own_uid();
+        let at = |user| Caller { user, pid: Some(7), gid: None };
+        assert!(at(OsUserId::Uid(me)).require_own_user().is_ok());
+
+        let another = at(OsUserId::Uid(me.wrapping_add(1))).require_own_user().unwrap_err();
+        assert_eq!(another.kind(), std::io::ErrorKind::PermissionDenied);
+        let said = another.to_string();
+        assert!(said.contains(&format!("uid:{}", me.wrapping_add(1))), "{said}");
+        assert!(said.contains(&format!("is not uid {me}")), "{said}");
+
+        let unnamed = Caller::anonymous().require_own_user().unwrap_err();
+        assert_eq!(unnamed.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(unnamed.to_string().contains("the kernel does not name"), "{unnamed}");
     }
 }
