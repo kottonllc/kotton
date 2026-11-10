@@ -58,27 +58,46 @@ pub enum PetnameError {
     TooLong(usize),
     #[error("a petname's `name` holds no `/`, which separates it from a schema's name: {0:?}")]
     Slash(String),
-    #[error("a petname's `name` holds no control or bidirectional-formatting character")]
+    #[error("a petname's `name` holds no control, bidirectional-formatting or invisible character")]
     Control,
     #[error("a petname's `name` does not begin with `did:`, so it is never read as a key: {0:?}")]
     DidPrefix(String),
-    #[error("`kotton` names Kotton's publisher and no other key")]
+    #[error("`kotton` names Kotton's publisher and no other key, in any case and with any spaces around it")]
     KottonIsKottons,
 }
 
-/// Whether `c` is a character no name may hold: a control character, or one of Unicode's
-/// bidirectional formatting characters, which reorder the line they sit in.
+/// Whether `c` is a character no name may hold, and none is shown of another party's text
+/// (`kotton_shell::grant_prompt::others`): a control character; one of Unicode's
+/// bidirectional formatting characters, which reorder the line they sit in; the line and
+/// paragraph separators (U+2028, U+2029), which break it; the zero-width and invisible ones
+/// (U+200B to U+200D, U+2060 to U+2064, U+FEFF), which make two different strings look alike;
+/// and the tag characters (U+E0000 to U+E007F), which carry text no one sees.
 pub fn is_hostile_char(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            '\u{061C}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+                | '\u{E0000}'..='\u{E007F}'
         )
 }
 
+/// `name` as names are compared for sameness: spaces around it trimmed, each run of
+/// whitespace one space, and the case folded. `kotton` is reserved by it, and two keys whose
+/// names compare the same by it are said to share one, since a person reading the two cannot
+/// tell them apart.
+pub fn folded(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
 /// Hold `name`, given to `key`, to the rules: not empty, at most [`MAX_NAME_CHARS`]
-/// characters, no `/` and no control or bidirectional-formatting character, not beginning
-/// with `did:`, and [`KOTTON`] for Kotton's publisher alone.
+/// characters, no `/` and no character [`is_hostile_char`] names, not beginning with `did:`,
+/// and [`KOTTON`] for Kotton's publisher alone, compared [`folded`] (so `Kotton` and
+/// `kotton ` are Kotton's too).
 pub fn check_name(key: &Publisher, name: &str) -> Result<(), PetnameError> {
     if name.is_empty() {
         return Err(PetnameError::Empty);
@@ -96,7 +115,7 @@ pub fn check_name(key: &Publisher, name: &str) -> Result<(), PetnameError> {
     if name.starts_with("did:") {
         return Err(PetnameError::DidPrefix(name.to_owned()));
     }
-    if name == KOTTON && key.as_str() != NSID_PREFIX {
+    if folded(name) == KOTTON && key.as_str() != NSID_PREFIX {
         return Err(PetnameError::KottonIsKottons);
     }
     Ok(())
@@ -164,6 +183,14 @@ impl Petnames {
     pub fn keys_named(&self, name: &str) -> Vec<&Publisher> {
         self.names.iter().filter(|p| p.name == name).map(|p| &p.key).collect()
     }
+
+    /// The keys whose names compare the same as `name` when [`folded`]: the keys a person
+    /// reading `name` could take it for. More than one, and a prompt showing the name says it
+    /// is shared.
+    pub fn keys_called(&self, name: &str) -> Vec<&Publisher> {
+        let name = folded(name);
+        self.names.iter().filter(|p| folded(&p.name) == name).map(|p| &p.key).collect()
+    }
 }
 
 #[cfg(test)]
@@ -195,9 +222,15 @@ mod tests {
         assert_eq!(check_name(&acme(), "\u{202E}knab"), Err(PetnameError::Control));
         assert_eq!(check_name(&acme(), "bank\u{2066}"), Err(PetnameError::Control));
         assert!(matches!(check_name(&acme(), "did:key:z6Mk"), Err(PetnameError::DidPrefix(_))));
-        assert_eq!(check_name(&acme(), KOTTON), Err(PetnameError::KottonIsKottons));
+        for invisible in ["\u{2028}", "\u{2029}", "\u{200B}", "\u{200D}", "\u{2060}", "\u{FEFF}", "\u{E0041}"] {
+            assert_eq!(check_name(&acme(), &format!("My{invisible} Bank")), Err(PetnameError::Control), "{invisible:?}");
+        }
+        for kotton_too in [KOTTON, "Kotton", "KOTTON", "kotton ", " Kotton\u{3000}"] {
+            assert_eq!(check_name(&acme(), kotton_too), Err(PetnameError::KottonIsKottons), "{kotton_too:?}");
+        }
         assert_eq!(check_name(&kotton(), KOTTON), Ok(()));
-        assert_eq!(check_name(&acme(), "Kotton"), Ok(()), "only the name `kotton` is Kotton's");
+        assert_eq!(check_name(&kotton(), "Kotton"), Ok(()));
+        assert_eq!(check_name(&acme(), "Kotton LLC"), Ok(()), "only `kotton` itself is Kotton's");
     }
 
     /// A body is a petname only with a `did:key` for `key` and a name the rules allow; a
@@ -245,6 +278,21 @@ mod tests {
         let names = Petnames::from_records(&records);
         let keys: Vec<&str> = names.keys_named("bank").iter().map(|k| k.as_str()).collect();
         assert_eq!(keys, vec![ACME, other]);
+    }
+
+    /// Names that read alike are called alike: case and spacing aside, two keys share one.
+    #[test]
+    fn names_that_read_alike_are_called_alike() {
+        let other = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+        let records = [
+            json!({ "key": ACME, "name": "My Bank", "_id": "p1", "_filed_at": 1 }),
+            json!({ "key": other, "name": " my  BANK", "_id": "p2", "_filed_at": 2 }),
+        ];
+        let names = Petnames::from_records(&records);
+        assert_eq!(names.keys_named("My Bank").len(), 1, "the short form still resolves exactly");
+        let keys: Vec<&str> = names.keys_called("My Bank").iter().map(|k| k.as_str()).collect();
+        assert_eq!(keys, vec![ACME, other]);
+        assert_eq!(folded(" My\t Bank "), "my bank");
     }
 
     /// A stored record that breaks a rule is never a name: one naming another key `kotton`

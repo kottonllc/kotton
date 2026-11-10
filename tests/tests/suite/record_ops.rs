@@ -366,6 +366,47 @@ async fn record_list_takes_the_short_form_on_a_fresh_device() {
     drop(env);
 }
 
+/// **`kotton` is Kotton's in any case, through the record verbs** (kotton #471): `record put
+/// --schema kotton/petname` naming another key `Kotton` or `kotton ` is refused, exit 1, by
+/// the daemon's rule, and nothing is stored; naming Kotton's own key so renames the built-in
+/// name. **And a name is given one at a time**: `record import` under `petname`, by the short
+/// form or whole, is refused, exit 2, before the file is read, and stores nothing.
+#[tokio::test]
+async fn record_put_keeps_kotton_for_kottons_key_and_import_refuses_names() {
+    const PETNAME: &str = kotton_common::namespace::NSID_PETNAME;
+    const ACME: &str = "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76";
+    let (mut env, cli, _id) = a_note_and_a_terminal_holding_only_its_owners_session().await;
+    for name in ["Kotton", "kotton ", "KOTTON"] {
+        let body = serde_json::json!({ "key": ACME, "name": name }).to_string();
+        let put = cli.run(&["record", "--user", USER, "put", "--schema", "kotton/petname", &body]);
+        assert_eq!(put.status.code(), Some(1), "{name:?}: {}", said(&put));
+        assert!(said(&put).contains("`kotton` names Kotton's publisher"), "{name:?}: {}", said(&put));
+    }
+    let personal = Some(kotton_wire::ipc::PERSONAL_ROOT);
+    let held = env.client.record_query_in(USER, personal, None, PETNAME, vec![], None, None).await.expect("query");
+    assert!(held.is_empty(), "a refused name was stored: {held:?}");
+
+    let kottons = serde_json::json!({ "key": kotton_common::namespace::NSID_PREFIX, "name": "Kotton LLC" });
+    let put = cli.run(&["record", "--user", USER, "put", "--schema", "kotton/petname", &kottons.to_string()]);
+    assert!(put.status.success(), "renaming Kotton's key: {}", said(&put));
+    let renamed = cli.run(&["record", "--user", USER, "list", "--schema", "Kotton LLC/notes"]);
+    assert!(renamed.status.success(), "the new name resolves: {}", said(&renamed));
+    let gone = cli.run(&["record", "--user", USER, "list", "--schema", "kotton/notes"]);
+    assert_eq!(gone.status.code(), Some(2), "the built-in name is replaced: {}", said(&gone));
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("names.jsonl");
+    std::fs::write(&file, format!("{}\n", serde_json::json!({ "key": ACME, "name": "My Bank" }))).unwrap();
+    for schema in ["Kotton LLC/petname", PETNAME] {
+        let import = cli.run(&["record", "--user", USER, "import", "--schema", schema, file.to_str().unwrap()]);
+        assert_eq!(import.status.code(), Some(2), "{schema}: {}", said(&import));
+        assert!(said(&import).contains("a name is given one at a time"), "{schema}: {}", said(&import));
+    }
+    let held = env.client.record_query_in(USER, personal, None, PETNAME, vec![], None, None).await.expect("query");
+    assert_eq!(held.len(), 1, "an import stored a name: {held:?}");
+    drop(env);
+}
+
 /// **`RecordSearch` returns no petname** (kotton #471), unfiltered, by its name, or by the
 /// name a petname holds.
 #[tokio::test]

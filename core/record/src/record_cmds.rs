@@ -455,6 +455,8 @@ mod tests {
             ("no control", json!({ "key": ACME, "name": "\u{202E}knab" })),
             ("does not begin with `did:`", json!({ "key": ACME, "name": "did:key:z6Mk" })),
             ("`kotton` names Kotton's publisher", json!({ "key": ACME, "name": "kotton" })),
+            ("`kotton` names Kotton's publisher", json!({ "key": ACME, "name": "Kotton " })),
+            ("no control", json!({ "key": ACME, "name": "My\u{200B}Bank" })),
         ] {
             let err = records.insert(NSID_PETNAME, body).await.expect_err("a petname that breaks a rule").to_string();
             assert!(err.contains("the petname is not stored") && err.contains(said), "{said}: {err}");

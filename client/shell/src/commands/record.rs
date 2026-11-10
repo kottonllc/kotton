@@ -405,19 +405,36 @@ fn table(records: &[serde_json::Value]) -> Out {
     }
 }
 
+/// **A name is given one at a time**: `record import` under `petname` (whole or by a short
+/// form) is refused, exit 2, before the file is read. A grant prompt trusts what a petname
+/// says, and a file is whoever wrote it, so a file of names would be a stranger's words read
+/// as the person's own; `record put` gives one name, as the person typed it.
+fn petname_import_refused(schema: &SchemaId) -> Option<CommandOutput> {
+    (*schema == SchemaId::from_static(kotton_common::namespace::NSID_PETNAME)).then(|| {
+        CommandOutput::usage(
+            "record import: your names for keys are not imported; a name is given one at a time",
+            Some("record put --schema kotton/petname '{\"key\":\"did:key:…\",\"name\":\"…\"}'".into()),
+        )
+    })
+}
+
 /// Run a parsed line of `record`: its schema resolved against the person's petnames
-/// ([`crate::petnames::read`]), then the verb. A schema the petnames do not resolve is refused,
-/// exit 2, saying why; a refusal of the verb is exit 1, with the daemon's reason. A schema is
-/// printed in the short form wherever the publisher has a name ([`said`]).
+/// ([`crate::petnames::read_for_typing`]), then the verb. A schema the petnames do not resolve
+/// is refused, exit 2, saying why; a refusal of the verb is exit 1, with the daemon's reason.
+/// A schema is printed in the short form wherever the publisher has a name ([`said`]).
+/// `import` under `petname` is refused, exit 2 ([`petname_import_refused`]).
 async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
     let user_id = state.user_id.clone();
     let mut client = state.client.lock().await;
-    let names = crate::petnames::read(&mut client, &user_id).await;
+    let names = crate::petnames::read_for_typing(&mut client, &user_id).await;
     let resolved = match line.schema().resolve(&names) {
         Ok(id) => id,
         Err(why) => return Ok(CommandOutput::usage(format!("record: {why}"), None)),
     };
     if let Line::Import { format, .. } = &line {
+        if let Some(refused) = petname_import_refused(&resolved) {
+            return Ok(refused);
+        }
         if let Some(refused) = ics_refused(*format, &resolved, said(&resolved, &names)) {
             return Ok(refused);
         }
@@ -725,6 +742,16 @@ petname is resolved on this device; one no key has, or one you gave several
 keys, is refused. This device must know the schema, as a core schema or one
 `schema register` added.
 
+A petname is itself one of your records, of `kotton/petname`: the key, as a
+`did:key`, and your name for it. `record put` gives one name at a time, and a
+name given again to the same key replaces the one before; `record import`
+refuses `kotton/petname`, since a file of names would be its writer's words
+read as yours. A name holds no `/` and does not begin with `did:`, and
+`kotton` names Kotton's key alone, in any case and with any spaces around it.
+Two rules are this device's own, not the protocol's: a name is at most 64
+characters, and it holds no control, bidirectional-formatting or invisible
+character (one that reorders, breaks or hides part of a line).
+
 These are your own records, in Personal: a record in another root you are a
 member of, such as an organisation's project, is not listed, read, written or
 removed here.
@@ -779,6 +806,16 @@ mod tests {
     /// `line`, with `NOTES` and `TASKS` where the line says them, split into words.
     fn words(line: &str) -> Vec<String> {
         line.replace("NOTES", NOTES).replace("TASKS", TASKS).split_whitespace().map(str::to_string).collect()
+    }
+
+    /// **A name is given one at a time**: an import under `petname` is refused, exit 2,
+    /// saying so; one under any other schema is not refused by it.
+    #[test]
+    fn an_import_of_petnames_is_refused() {
+        let petname = SchemaId::from_static(kotton_common::namespace::NSID_PETNAME);
+        let refused = petname_import_refused(&petname).expect("an import of names");
+        assert_eq!(refused.exit_code, ExitCode::Code(2));
+        assert!(petname_import_refused(&SchemaId::from_static(NOTES)).is_none());
     }
 
     /// Every current verb the table declares is a line this parser answers, so the table the

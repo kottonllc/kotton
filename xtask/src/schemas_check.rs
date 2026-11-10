@@ -7,8 +7,8 @@
 //! compiled into `kotton_schemas::CoreSchema`. This check holds the copy to the original:
 //! when a checkout of kotton-protocol is at hand (`$KOTTON_PROTOCOL_DIR`, or
 //! `../kotton-protocol` beside this one, as verb-check reads it), every file here equals the
-//! file of the same name there, byte for byte, but for the files named in
-//! [`NOT_YET_PUBLISHED`]. That list is where a new core schema this tree holds first
+//! file of the same name there, byte for byte. The protocol publishes the whole core set, so
+//! none is excepted; [`NOT_YET_PUBLISHED`] is where a new core schema this tree holds first
 //! waits for the protocol to take it, and a name on it that the protocol does have is a
 //! finding too, since the list would then be stale. The other way too: a file the protocol
 //! publishes under `schemas/kotton/` that this tree lacks is a finding, since the core set
@@ -21,11 +21,7 @@ use std::path::{Path, PathBuf};
 /// new core schema this tree holds first, waiting to join `schemas/kotton/` in the protocol by
 /// a pull request there. Empty while the protocol publishes the whole core set. A name comes
 /// off this list in the commit that finds it published.
-pub const NOT_YET_PUBLISHED: &[&str] = &[
-    // The person's own name for a key, read by a grant prompt: kotton-protocol's branch
-    // `schemas/a-petname-is-a-record-no-app-can-write` (kotton #471).
-    "petname.json",
-];
+pub const NOT_YET_PUBLISHED: &[&str] = &[];
 
 /// Where the tree's copy of the core set is.
 const OURS: &str = "core/schemas/schemas/kotton";

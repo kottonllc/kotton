@@ -200,14 +200,23 @@ terminal.
 `app sideload <path>` previews what an app asks for before anything is installed
 (`client/shell/src/commands/app.rs`), and `app grants <id>` lists what it asked for and what it
 holds; both say who stands behind what they show by the rule of the decision *A schema is named
-by the key that publishes it* (`kotton_shell::grant_prompt`). A schema's name is shown as its
-publisher wrote it, and who stands behind it only by the person's petname for the publisher's
-key, or by its absence: "read your notes records from kotton", "read your statement records
-from a publisher you have not named". The app is shown by the key that signed its manifest
-(`[publisher]`, when the daemon's preview checked its signature), "from an app nobody signed"
-when it has no such block, and a line says so when the app's publisher did not publish a schema
-it asks for. Its name, id, paths and labels are its own text, printed with every control and
-bidirectional-formatting character removed. At a terminal, a key the prompt would show unnamed
-is offered to be named there, the first meeting; the answer is a petname written through the
-ordinary insert, held to its rules, and the prompt then says it. With nobody to ask, nothing is
-asked and the key is shown not named.
+by the key that publishes it* (`kotton_shell::grant_prompt`). **What the device says comes
+first**, on lines of its own in a fixed shape: who stands behind the app, by the person's
+petname for the key, marked as theirs ("This app's code is signed by a publisher you call "My
+Bank"."), or "a publisher you have not named" with the key, or "an app nobody signed". **It says
+only what was checked**: the publisher's signature covers the digest of the app's code alone, so
+the next line says that what the app asks for is not signed by anyone, and a schema is a
+publisher's only when this device holds its signed definition; one it does not hold is "a schema
+this device does not hold", attributed to no one. A line says so when the app's code is not a
+schema's publisher's, an unsigned app's included. A name the person gave more than one key is
+shown as shared, with the key it is; when the names cannot be read, the prompt says so and shows
+keys as keys. **Every string another party chose** (the app's name, version, id, description,
+paths, labels, a schema's name) follows, each on a line beginning ` | `, which no line of the
+device's does, labelled as whose and quoted: whitespace one space, control, bidirectional,
+separator, zero-width and tag characters removed, combining marks at most four to a character,
+and at most 64 characters shown, saying when it was cut. At a terminal, once the prompt has been
+shown, a key it shows unnamed is offered to be named, the first meeting; a name that already
+names another key is said to, with that key, and kept only on an explicit yes. The answer is a
+petname written through the ordinary insert, held to its rules, and the prompt is shown again
+with it. With nobody to ask, nothing is asked and the key is shown not named. `record import`
+refuses `petname`: a name is given one at a time.

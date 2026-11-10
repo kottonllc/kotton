@@ -79,19 +79,26 @@ provenance and not a type relation.
 
 ## Petnames, and what a grant prompt says
 
-The decision *A schema is named by the key that publishes it* has a grant prompt show a
-schema's name as its publisher wrote it, and say who stands behind it only by the person's own
-name for the publisher's key, or by its absence: "your *notes* records from **kotton**", or
-"from a publisher you have not named". An app is shown the same way, by the key that signed its
-manifest, and an app with no `[publisher]` block is "from an app nobody signed". A string a
-publisher or an app chose is never shown as who stands behind anything.
+The decision *A schema is named by the key that publishes it* has a grant prompt say who stands
+behind a schema or an app only by the person's own name for the key, marked as theirs (`a
+publisher you call "My Bank"`), or by its absence (`a publisher you have not named`, with the
+key). An app is shown by the key whose signature over its code checked; its manifest (its name,
+its id, what it asks for) is signed by no one, and the prompt says so. A schema is shown as its
+publisher's only when the device holds its signed definition. A string a publisher or an app
+chose is never shown as who stands behind anything (`kotton_shell::grant_prompt`).
 
 That name is a petname, a record of `petname` in Personal: `key`, a `did:key`, and `name`, one
 record per key. `petname::check` holds a body to its rules: `key` parses as a `did:key`, and
-`name` is not empty, at most 64 characters, holds no `/` and no control or
-bidirectional-formatting character, does not begin with `did:`, and is `kotton` for Kotton's
-publisher alone. The record daemon asks it at insert, and `Petnames::from_records`, the reader,
-asks it of every stored record, so one that breaks a rule (written before the rule, or merged
-from another device) is never a name. `kotton` names Kotton's publisher on every device with no
-record, and a record for that key replaces it. Because a prompt trusts what a petname says,
+`name` is not empty, holds no `/`, does not begin with `did:`, and is `kotton` for Kotton's
+publisher alone, compared with the case folded and spaces trimmed, so `Kotton` and `kotton ` are
+refused for another key. **Two rules are this tree's, not the decision's**: a name is at most 64
+characters, and it holds no control, bidirectional-formatting or invisible character
+(`petname::is_hostile_char`: the line and paragraph separators, the zero-width characters and
+the tag characters too), so a name cannot reorder, break or hide part of the line it is shown
+in, or look like another name it is not. The record daemon asks it at insert, and
+`Petnames::from_records`, the reader, asks it of every stored record, so one that breaks a rule
+(written before the rule, or merged from another device) is never a name. `kotton` names
+Kotton's publisher on every device with no record, and a record for that key replaces it. A name
+the person gave more than one key (`Petnames::keys_called`, case and spacing aside) is shown as
+shared wherever it is shown, with the key it is. Because a prompt trusts what a petname says,
 `petname` is kept from every app: nothing but the person's own terminal writes one.

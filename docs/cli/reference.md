@@ -663,6 +663,16 @@ petname is resolved on this device; one no key has, or one you gave several
 keys, is refused. This device must know the schema, as a core schema or one
 `schema register` added.
 
+A petname is itself one of your records, of `kotton/petname`: the key, as a
+`did:key`, and your name for it. `record put` gives one name at a time, and a
+name given again to the same key replaces the one before; `record import`
+refuses `kotton/petname`, since a file of names would be its writer's words
+read as yours. A name holds no `/` and does not begin with `did:`, and
+`kotton` names Kotton's key alone, in any case and with any spaces around it.
+Two rules are this device's own, not the protocol's: a name is at most 64
+characters, and it holds no control, bidirectional-formatting or invisible
+character (one that reorders, breaks or hides part of a line).
+
 These are your own records, in Personal: a record in another root you are a
 member of, such as an organisation's project, is not listed, read, written or
 removed here.

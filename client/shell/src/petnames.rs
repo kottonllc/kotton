@@ -9,7 +9,7 @@
 //!
 //! - [`read`]: **the one reader of petnames**, for every verb that takes or prints a schema
 //!   and for the grant prompt. It reads Personal through the person's own session; a stored
-//!   record that breaks a petname's rules is never a name.
+//!   record that breaks a petname's rules is never a name, and a read that fails says so.
 //! - [`SchemaArg`]: the one parser of a typed schema, both forms, and [`SchemaArg::resolve`],
 //!   which turns the short form into the identity against what [`read`] gave.
 //! - [`said`]: a schema as output prints it, the short form wherever the person's name for
@@ -26,16 +26,26 @@ use kotton_wire::ipc::PERSONAL_ROOT;
 /// What a person may type for a schema, said in a refusal and in help.
 pub const FORMS: &str = "`<petname>/<name>` (such as `kotton/notes`) or `did:key:…/<name>`";
 
-/// The person's names for keys, read from Personal through their own session.
+/// The person's names for keys, read from Personal through their own session, or why they
+/// could not be.
 ///
 /// A session that is not the person's own terminal is refused `petname`, which is kept from
-/// apps, so for it this answers the names every device gives without a record: `kotton`
-/// alone. Nothing it reads is shown that breaks a petname's rules.
-pub async fn read(client: &mut kotton::KottonClient, user_id: &str) -> Petnames {
-    match client.record_query_in(user_id, Some(PERSONAL_ROOT), None, NSID_PETNAME, vec![], None, None).await {
-        Ok(records) => Petnames::from_records(&records),
-        Err(_) => Petnames::built_in(),
-    }
+/// apps, and a daemon can fail a read; either way this says so, and a caller that shows who
+/// stands behind something says it could not read the names rather than show every key as
+/// unnamed (`crate::grant_prompt`). Nothing it reads is shown that breaks a petname's rules.
+pub async fn read(client: &mut kotton::KottonClient, user_id: &str) -> Result<Petnames, String> {
+    client
+        .record_query_in(user_id, Some(PERSONAL_ROOT), None, NSID_PETNAME, vec![], None, None)
+        .await
+        .map(|records| Petnames::from_records(&records))
+        .map_err(|e| e.to_string())
+}
+
+/// [`read`], for resolving what a person typed: the names every device gives (`kotton`
+/// alone) when the person's could not be read, so a short form of another name is refused as
+/// one no key has. Never for saying who stands behind something; that is [`read`]'s.
+pub async fn read_for_typing(client: &mut kotton::KottonClient, user_id: &str) -> Petnames {
+    read(client, user_id).await.unwrap_or_else(|_| Petnames::built_in())
 }
 
 /// A schema as typed, parsed and not yet resolved.
