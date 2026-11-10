@@ -66,9 +66,10 @@ pub struct ChangesetRow {
     /// **With `updated_at`, it is the row's version**, and the version is what
     /// both halves of sync key on: [`RecordStore::merge_changeset`] applies a row
     /// whose `(updated_at, revision)` is strictly newer, and
-    /// `replication::log_records` logs every `(id, updated_at, revision)` the log
-    /// does not yet carry. A write and the delete after it in the same second
-    /// are two versions, not one (kotton #158).
+    /// `replication::log_records` logs every `(schema_nsid, id, updated_at, revision)`
+    /// the log does not yet carry. A write and the delete after it in the same second
+    /// are two versions, not one (kotton #158), and so are two schemas' rows under one
+    /// id (kotton #467).
     ///
     /// `0` on a row written before the count existed, and skipped then, so a
     /// segment written by this version for such a row is the segment an earlier
