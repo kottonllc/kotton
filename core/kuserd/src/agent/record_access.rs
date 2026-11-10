@@ -428,6 +428,91 @@ mod tests {
         assert_eq!(still.len(), 1);
     }
 
+    /// **`secret` is the person's, and no app's, through the record verbs.** A grant row on
+    /// it planted straight into the grant store, read and write, does not let an app insert,
+    /// query or delete under it; the person's own verbs (no app id), in Personal, do all
+    /// three. And search returns no row of it, to the person or to an app, with no schema
+    /// named and with `secret` named as the filter.
+    #[tokio::test]
+    async fn a_secret_is_the_persons_through_the_record_verbs_and_no_apps() {
+        use kotton_wire::ipc::PERSONAL_ROOT;
+        const SECRET: &str = kotton_common::namespace::NSID_SECRET;
+        const VALUE: &str = "kept-from-apps-7f3a9c";
+        let p = person().await;
+        kotton_grant::daemon::db::schema_grants_db::set_grant(&p.user_db, APP, SECRET, true, true, true)
+            .await
+            .unwrap();
+        let access = access_from(&p.set, AID);
+        let body = || json!({ "label": "bank", "value": VALUE, "kind": "password" });
+        let personal = || Some(PERSONAL_ROOT.to_owned());
+
+        // An app, holding the planted row: refused, every verb, naming the schema.
+        let refused = |r: UserResponse| match r {
+            UserResponse::Error { message } => {
+                assert!(message.contains(SECRET), "{message}");
+                assert!(!message.contains(VALUE), "a value in a refusal: {message}");
+            }
+            other => panic!("an app reached secret: {other:?}"),
+        };
+        refused(
+            record_insert(&p.registry, &p.store, &p.user_db, &access, None, SECRET.into(), body(), Some(APP.into()))
+                .await
+                .unwrap(),
+        );
+
+        // The person: in Personal, as for any schema.
+        let UserResponse::RecordInserted { record_id } = record_insert(
+            &p.registry, &p.store, &p.user_db, &access, personal(), SECRET.into(), body(), None,
+        )
+        .await
+        .unwrap() else { panic!("the person's insert") };
+        let UserResponse::RecordQueryResult { records } = record_query(
+            &p.registry, &p.store, &p.user_db, &access, personal(), SECRET.into(), vec![], None, None, None,
+        )
+        .await
+        .unwrap() else { panic!("the person's query") };
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["value"], VALUE);
+
+        refused(
+            record_query(&p.registry, &p.store, &p.user_db, &access, None, SECRET.into(), vec![], None, None, Some(APP.into()))
+                .await
+                .unwrap(),
+        );
+        refused(
+            record_delete(&p.registry, &p.store, &p.user_db, &access, None, SECRET.into(), record_id.clone(), Some(APP.into()))
+                .await
+                .unwrap(),
+        );
+
+        // Search: no secret, whoever asks, with no schema named and with it named.
+        p.add(None, "dentist").await;
+        for app in [None, Some(APP.to_owned())] {
+            for filter in [None, Some(SECRET.to_owned())] {
+                let UserResponse::RecordQueryResult { records } =
+                    record_search(&p.registry, &p.store, &access, filter.clone(), None, None, app.clone())
+                        .await
+                        .unwrap()
+                else {
+                    panic!()
+                };
+                assert!(
+                    records.iter().all(|r| r["schema_nsid"] != SECRET && !r.to_string().contains(VALUE)),
+                    "search returned a secret (filter {filter:?}, app {app:?}): {records:?}"
+                );
+                if filter.is_none() {
+                    assert!(!records.is_empty(), "the search found nothing at all");
+                }
+            }
+        }
+
+        // The person removes it.
+        let gone = record_delete(&p.registry, &p.store, &p.user_db, &access, personal(), SECRET.into(), record_id, None)
+            .await
+            .unwrap();
+        assert!(matches!(gone, UserResponse::RecordDeleted), "{gone:?}");
+    }
+
     /// **`schema.kept` answers the schema's rows in every root the person is
     /// in, each by the root's name, and no row from a root they are not.**
     ///

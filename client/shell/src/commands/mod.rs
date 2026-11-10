@@ -271,7 +271,6 @@ mod wc;
 mod clear;
 mod daemon;
 mod date;
-mod secrets;
 mod whoami;
 
 // CLI-only commands (terminal TUI / host process / daemon-admin IPC) — not in the guest build
@@ -289,6 +288,8 @@ mod drive;
 mod pin;
 #[cfg(feature = "cli")]
 mod record;
+#[cfg(feature = "cli")]
+mod secret;
 #[cfg(feature = "cli")]
 mod status;
 #[cfg(feature = "cli")]
@@ -341,7 +342,6 @@ pub use wc::WcCommand;
 pub use clear::ClearCommand;
 pub use daemon::DaemonCommand;
 pub use date::DateCommand;
-pub use secrets::SecretsCommand;
 pub use whoami::WhoamiCommand;
 
 // Re-exports — CLI-only commands
@@ -362,6 +362,8 @@ pub use drive::DriveCommand;
 pub use pin::PinCommand;
 #[cfg(feature = "cli")]
 pub use record::{ImportGone, RecordCommand};
+#[cfg(feature = "cli")]
+pub use secret::{SecretCommand, SecretsGone};
 #[cfg(feature = "cli")]
 pub use status::StatusCommand;
 #[cfg(feature = "cli")]

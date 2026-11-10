@@ -39,6 +39,7 @@ This document contains the help content for the `Kotton` command-line program.
 * [`Kotton handler list`↴](#Kotton-handler-list)
 * [`Kotton handler set-default`↴](#Kotton-handler-set-default)
 * [`Kotton record`↴](#Kotton-record)
+* [`Kotton secret`↴](#Kotton-secret)
 * [`Kotton records`↴](#Kotton-records)
 * [`Kotton records init`↴](#Kotton-records-init)
 * [`Kotton records invite`↴](#Kotton-records-invite)
@@ -125,6 +126,7 @@ Kotton - Your data sovereignty platform
 * `schema` — Schema management (list, show, register)
 * `handler` — Handler registry (register, unregister, get, list, set-default)
 * `record` — Your records — list, get, put, rm, import, export, each by `--schema <schema>` — the REPL's `record`, one parser for both
+* `secret` — Your keychain — set, get, list, rm, generate: passwords and tokens as records in `personal`, kept from every app — the REPL's `secret`, one parser for both
 * `records` — The project's records in a root its org owns — init, invite, import, export
 * `sync` — Sync this device's drives, now — the REPL's `sync`, one parser for both
 * `drive` — Your drives — create, list, show, move, enrol — the REPL's `drive`, one parser for both
@@ -702,6 +704,67 @@ RETIRED:
 ###### **Arguments:**
 
 * `<ARGS>` — Arguments: `list --schema <schema> [--json]` | `get --schema <schema> <id>` | `put --schema <schema> <json>` | `rm --schema <schema> <id>` | `import --schema <schema> <path>` | `export --schema <schema> <path>`
+
+###### **Options:**
+
+* `--user <USER>` — Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
+
+
+
+## `Kotton secret`
+
+Your keychain — set, get, list, rm, generate: passwords and tokens as records in `personal`, kept from every app — the REPL's `secret`, one parser for both
+
+**Usage:** `Kotton secret [OPTIONS] [ARGS]...`
+
+```text
+secret — your keychain: passwords and tokens, read from every device
+
+USAGE:
+  secret set <label> [--kind password|token] [--note <text>]   keep a secret under a label
+  secret get <label>                                         print its value on stdout
+  secret list                                                every label, its kind and note
+  secret rm <label>                                          remove a secret
+  secret generate <label> [--length <n>] [--kind …] [--note …]   make one and keep it
+
+A secret is a record in your first drive, `personal`, sealed at each sync:
+one kept on one device is read on another after a `sync` on each. The vault
+keeps it sealed under your key and can read none of it. No app is granted it,
+reads it, or finds it in a search: it is reached here, at your own terminal.
+
+`set` never takes the value on the line, where your shell's history and the
+process list would keep it. At a terminal it asks for the value, hidden, and
+asks again to confirm; otherwise it reads the first line of stdin. One label
+is one secret: `set` on a label you keep replaces its value, and keeps its
+kind and note unless you give them. A new secret is a password, with no note.
+
+`get` prints the value alone, one line on stdout, so it pipes. `list` never
+prints a value. `generate` makes a value of 56 letters and digits that are not
+read as one another, 32 characters long unless `--length` (8 to 256) says,
+from this computer's random source, and keeps it under a label you do not
+keep yet; it does not print it.
+
+FLAGS:
+  --kind password|token  `set`, `generate`: what the secret is (a new one is a password)
+  --note <text>          `set`, `generate`: a line about it, shown by `list`
+  --length <n>           `generate`: how many characters, 8 to 256 (32)
+
+Exit 0 when done, 1 when refused, when no secret has the label, or when no
+value was given (the reason on stderr), 2 for a line that is not one of the
+above.
+
+EXAMPLES:
+  secret set bank
+  secret set deploy --kind token --note "the CI deploy key" < token.txt
+  secret get bank
+  secret list
+  secret generate wifi --length 24
+  secret rm bank
+```
+
+###### **Arguments:**
+
+* `<ARGS>` — Arguments: `set <label> [--kind password|token] [--note <text>]` | `get <label>` | `list` | `rm <label>` | `generate <label> [--length <n>]`; `set` takes no value on the line
 
 ###### **Options:**
 

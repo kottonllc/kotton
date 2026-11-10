@@ -69,9 +69,22 @@ key its identity names, checked by `kotton_crypto::schema_signature` before anyt
 migrated or kept. A definition that is unsigned, signed by another key, or changed under its
 signature is refused; so is a document that is not the definition and nothing beside it, since
 the digest is taken over the definition's canonical form; and so is one naming a core schema,
-which changes in the tree and not through registration. Two of the core set, `secret` and
-`access-log`, are published and not yet known to a device: no record is kept under either
-until the grant refusal and the search exclusion they need are built.
+which changes in the tree and not through registration.
+
+Two of the core set, `secret` and `access-log`, are kept from every app, a refusal held for
+those two identities by name (`CoreSchema::is_kept_from_apps`), not for being core. No app is
+granted either: a grant on one is refused when set, and the check every app's record verb
+passes (`kotton_grant`'s `check_read`, `check_write` and `check_register`) refuses it whatever
+row the grant store holds. No manifest claims to handle or asks for either, no handler is
+registered or answered for either, the runner's records verbs refuse either, and
+`Record::search` returns no row of either to any caller, with no schema named or with one of
+them named. `secret` is known to every device, and the person reaches it at their own terminal
+with the `secret` verbs, in Personal. `access-log` is published and not yet known to a device
+(`CoreSchema::is_held_back`): no record is kept under it until its own change (#450).
+
+A row of `secret` reaches a device only as every record does, in the record log of
+`personal`, sealed under the person's `K_log`, which their own devices alone hold: a member of
+a root the person shares holds no key to that log and writes no segment a pass applies here.
 
 ## The `record` verbs
 
@@ -87,3 +100,10 @@ know, by name. `get` prints the record as the row holds it, its `id` among its f
 answer (`_id`, `_filed_at`, `_root`), because every verb here names Personal and `_root` would
 be Personal's id, a durable identifier, on every row, and `record put` of a printed record would
 store it as a field. `record import|export` are not in the tree yet (#454).
+
+`secret set|get|list|rm|generate <label>` is the keychain
+(`client/shell/src/commands/secret.rs`), the same requests under `secret`, each naming
+Personal: one record per label, under the id the store gave it, so a label is never written
+into a record's URL. `set` never takes the
+value on the line; it reads it at a hidden prompt at a terminal and from one line of stdin
+otherwise. `get` prints the value alone; `list` never prints one.

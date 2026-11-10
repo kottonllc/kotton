@@ -535,3 +535,54 @@ async fn spawn_daemon_at(
         _task: task,
     }
 }
+
+// ── a schema kept from apps ───────────────────────────────────────────────────
+
+/// **No app is granted `secret`, and its record verbs refuse an app** (kotton #449). A grant
+/// on it is refused by name and nothing is stored; an app's insert and query under it are
+/// refused, naming the schema; the person's own verbs, naming no app, put and read it.
+#[tokio::test]
+async fn no_app_is_granted_secret_and_its_record_verbs_refuse_an_app() {
+    const SECRET: &str = kotton_common::namespace::NSID_SECRET;
+    let mut env = env_with_user().await;
+
+    let err = env.client.schema_grant_set(APP, SECRET, true, true, false).await.expect_err("a grant on secret");
+    assert!(err.to_string().contains("no app is granted it") && err.to_string().contains(SECRET), "{err}");
+    let grants = env.client.schema_grant_list(APP).await.expect("schema_grant_list");
+    assert!(grants.is_empty(), "a refused grant was stored: {grants:?}");
+
+    let body = serde_json::json!({ "label": "bank", "value": "grants-suite-value", "kind": "password" });
+    let insert = UserRequest::RecordInsert {
+        user_id: USER.to_owned(),
+        schema_nsid: SECRET.to_owned(),
+        record: body.clone(),
+        root: None,
+        app_id: Some(APP.to_owned()),
+    };
+    let resp = env.client.inner().send(&insert).await.expect("send RecordInsert");
+    assert!(resp.is_error_containing("permission denied") && resp.is_error_containing(&SECRET.to_lowercase()), "{resp:?}");
+
+    env.client
+        .record_insert_in(USER, Some(kotton_wire::ipc::PERSONAL_ROOT), None, SECRET, body)
+        .await
+        .expect("the person's own insert");
+    let query = UserRequest::RecordQuery {
+        user_id: USER.to_owned(),
+        schema_nsid: SECRET.to_owned(),
+        field_eq: vec![],
+        limit: None,
+        offset: None,
+        root: None,
+        app_id: Some(APP.to_owned()),
+    };
+    let resp = env.client.inner().send(&query).await.expect("send RecordQuery");
+    assert!(resp.is_error_containing("permission denied") && resp.is_error_containing(&SECRET.to_lowercase()), "{resp:?}");
+    assert!(!format!("{resp:?}").contains("grants-suite-value"), "an app was told a value: {resp:?}");
+
+    let mine = env
+        .client
+        .record_query_in(USER, Some(kotton_wire::ipc::PERSONAL_ROOT), None, SECRET, vec![], None, None)
+        .await
+        .expect("the person's own query");
+    assert_eq!(mine.len(), 1);
+}

@@ -46,7 +46,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The nouns the command-tree decision's rewrite has reached: their verbs are held both ways.
-pub const HELD: &[&str] = &["drive", "pin", "record", "sync"];
+pub const HELD: &[&str] = &["drive", "pin", "record", "secret", "sync"];
 
 /// Verbs of a held noun the Decision names and the binary does not have yet, each with why.
 pub const DEFERRED: &[(&str, &str, &str)] = &[
@@ -564,6 +564,8 @@ whole` is \"collect all my things\". `sync` syncs this device's drives, now.
 **Records and schemas.** `record list|get|put|rm --schema <name>` · `record import|export
 --schema <name> <path>` (a calendar comes in this way) · `schema list|show|register`.
 
+**The keychain.** `secret set|get|list|rm|generate` (passwords and tokens as sealed records).
+
 **Contacts and messages.** `contact pair` · `join <code>` · `list` · `message send <contact> <text>` · `inbox`.
 
 ### Where it runs
@@ -626,13 +628,13 @@ whole` is \"collect all my things\". `sync` syncs this device's drives, now.
     fn trees() -> Trees {
         let tables = crate::verb_tables::tables();
         let mut clap: BTreeMap<String, bool> =
-            ["drive", "pin", "record", "sync", "device", "keep"].iter().map(|n| (n.to_string(), true)).collect();
+            ["drive", "pin", "record", "secret", "sync", "device", "keep"].iter().map(|n| (n.to_string(), true)).collect();
         for (name, _) in UNPLACED {
             clap.insert(name.to_string(), false);
         }
         Trees {
             clap,
-            repl: set(&["drive", "pin", "record", "sync", "device", "keep", "cat", "ls"]),
+            repl: set(&["drive", "pin", "record", "secret", "sync", "device", "keep", "cat", "ls"]),
             repl_tables: tables.clone(),
             clap_tables: tables,
         }

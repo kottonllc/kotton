@@ -200,7 +200,7 @@ fn readable_at(vault: &RunningVault, tree: Option<&str>, needles: &[&str]) -> Sc
 /// `vault` keeps `personal` in `tree`, and its disk holds none of `needles`. The scan is
 /// shown to have read the drive: at least as many files under its tree as the vault lists
 /// sealed objects in it, and at least their bytes.
-async fn the_vault_keeping_it_reads_none_of(vault: &RunningVault, tree: &str, needles: &[&str]) {
+pub(crate) async fn the_vault_keeping_it_reads_none_of(vault: &RunningVault, tree: &str, needles: &[&str]) {
     let sealed = sealed_in(vault, tree).await;
     assert!(!sealed.is_empty(), "personal at {} holds nothing to scan", vault.base_path.display());
     let held: usize = sealed.iter().map(|(_, b)| b.len()).sum();

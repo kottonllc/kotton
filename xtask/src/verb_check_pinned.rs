@@ -9,6 +9,7 @@ pub const PINNED: Pinned = Pinned {
         ("drive", &["create", "enrol", "export", "list", "move", "show"]),
         ("pin", &["<drive>", "default", "list"]),
         ("record", &["export", "get", "import", "list", "put", "rm"]),
+        ("secret", &["generate", "get", "list", "rm", "set"]),
         ("sync", &[""]),
     ],
     today_names: &["app", "cat", "cd", "clear", "config", "contact", "cp", "daemon", "date", "device", "door", "echo", "enrol", "env", "exit", "export", "extension", "find", "grant", "grep", "handler", "head", "help", "host:", "id", "import", "issuer", "keep", "login", "logs", "message", "mint", "model", "net", "org", "peer", "pwd", "quit", "record", "records", "relay", "repl", "schema", "secrets", "session", "sort", "sync", "tail", "ted", "unset", "vault", "wc", "whoami"],

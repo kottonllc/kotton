@@ -54,6 +54,19 @@ pub enum ManifestError {
     /// The `handler_for` list names something that is not a schema identity.
     #[error("invalid handler_for entry {0:?}: {1}")]
     InvalidHandlerSchema(String, SchemaIdError),
+    /// The manifest claims to handle, or asks for `schema.read` or `schema.write` on, a schema
+    /// kept from every app ([`crate::CoreSchema::is_kept_from_apps`]). Refused at parse, so at
+    /// every install and sideload, rather than stored and refused later: an app that declared
+    /// it would be installed holding a claim nothing will honour.
+    #[error("{claim} names {schema}, which no app may claim: {refusal}")]
+    KeptFromApps {
+        /// Which declaration named it: `handler_for`, `schema.read` or `schema.write`.
+        claim: &'static str,
+        /// The schema it named.
+        schema: SchemaId,
+        /// The refusal the schema's own words give.
+        refusal: String,
+    },
     /// A `[[capabilities]]` entry named a resource kind this host does not know.
     ///
     /// An error rather than a skip: a host that silently ignored an unknown
@@ -336,6 +349,9 @@ impl AppManifest {
             .iter()
             .map(|s| SchemaId::parse(s).map_err(|e| ManifestError::InvalidHandlerSchema(s.clone(), e)))
             .collect::<Result<Vec<_>, _>>()?;
+        for schema in &handler_for {
+            refuse_if_kept("handler_for", schema)?;
+        }
 
         let meta = AppMeta {
             id,
@@ -413,6 +429,7 @@ impl AppManifest {
                     for id_str in values {
                         let id = SchemaId::parse(id_str)
                             .map_err(|e| ManifestError::InvalidSchemaId(id_str.clone(), e))?;
+                        refuse_if_kept("schema.read", &id)?;
                         grants.push(CapabilityGrant::schema(CapabilityKind::Read, id));
                     }
                 }
@@ -420,6 +437,7 @@ impl AppManifest {
                     for id_str in values {
                         let id = SchemaId::parse(id_str)
                             .map_err(|e| ManifestError::InvalidSchemaId(id_str.clone(), e))?;
+                        refuse_if_kept("schema.write", &id)?;
                         grants.push(CapabilityGrant::schema(CapabilityKind::Write, id));
                     }
                 }
@@ -529,12 +547,50 @@ impl AppManifest {
     }
 }
 
+/// [`ManifestError::KeptFromApps`] if `schema` is kept from every app, naming the declaration
+/// that named it.
+fn refuse_if_kept(claim: &'static str, schema: &SchemaId) -> Result<(), ManifestError> {
+    match crate::CoreSchema::kept_from_apps(&schema.to_string()) {
+        Some(kept) => Err(ManifestError::KeptFromApps {
+            claim,
+            schema: schema.clone(),
+            refusal: kept.kept_from_apps_refusal(),
+        }),
+        None => Ok(()),
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::CapabilityTarget;
+
+    /// A manifest that claims to handle, or asks to read or write, a schema kept from apps is
+    /// refused by name, for `secret` and for `access-log`; the same manifest naming notes
+    /// parses.
+    #[test]
+    fn a_manifest_naming_a_schema_kept_from_apps_is_refused() {
+        use kotton_common::namespace::{NSID_ACCESS_LOG, NSID_NOTES, NSID_SECRET};
+        for kept in [NSID_SECRET, NSID_ACCESS_LOG] {
+            for (claim, body) in [
+                ("handler_for", format!("handler_for = [\"{kept}\"]\n\n[capabilities]\n")),
+                ("schema.read", format!("\n[capabilities]\n\"schema.read\" = [\"{kept}\"]\n")),
+                ("schema.write", format!("\n[capabilities]\n\"schema.write\" = [\"{kept}\"]\n")),
+            ] {
+                let toml = format!("[app]\nid = \"com.example.keys\"\nname = \"Keys\"\nversion = \"1.0.0\"\n{body}");
+                let err = AppManifest::from_toml(&toml).expect_err("a kept schema is refused");
+                let said = err.to_string();
+                assert!(matches!(err, ManifestError::KeptFromApps { .. }), "{claim}: {said}");
+                assert!(said.contains(claim) && said.contains(kept), "{said}");
+            }
+        }
+        let toml = format!(
+            "[app]\nid = \"com.example.notes\"\nname = \"N\"\nversion = \"1.0.0\"\nhandler_for = [\"{NSID_NOTES}\"]\n\n[capabilities]\n\"schema.read\" = [\"{NSID_NOTES}\"]\n"
+        );
+        AppManifest::from_toml(&toml).expect("notes is any app's to ask for");
+    }
 
     const EXAMPLE: &str = r#"
 [app]

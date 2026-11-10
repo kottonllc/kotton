@@ -263,3 +263,16 @@ async fn a_handler_is_registered_from_the_terminal_as_the_user_it_names() {
     assert_eq!(entry.app_id, APP_A, "the owner's registry names the app registered from the terminal");
     assert!(entry.is_default);
 }
+
+/// **No app handles `secret`** (kotton #449): registering one is refused, naming the schema,
+/// and none is answered for it.
+#[tokio::test]
+async fn no_app_is_registered_to_handle_secret() {
+    let secret = kotton_common::namespace::NSID_SECRET;
+    let mut env = TestEnv::spawn_authed().await;
+    let err = env.client.handler_register(APP_A, secret).await.expect_err("a handler for secret");
+    assert!(err.to_string().contains(secret), "{err}");
+    assert!(env.client.handler_get_for(secret).await.is_err(), "a handler for secret was answered");
+    let entries = env.client.handler_list().await.expect("handler_list");
+    assert!(!entries.iter().any(|e| e.nsid == secret), "{entries:?}");
+}
