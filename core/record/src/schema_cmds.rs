@@ -53,7 +53,8 @@ pub fn schema_list(reg: &SchemaRegistry, user_id: &str) -> Vec<String> {
 ///
 /// ## The form
 ///
-/// The signature is over the digest of the definition's canonical form, so the document
+/// The signature is over the 49-byte message `kotton_crypto::schema_signature` builds: its
+/// tag, one zero byte, then the digest of the definition's canonical form. So the document
 /// handed in must be the definition and nothing beside it: with `signature` and
 /// `forked_from` set aside, its own canonical form is the parsed definition's, or it is
 /// refused before the signature is looked at. A member the definition does not have, an

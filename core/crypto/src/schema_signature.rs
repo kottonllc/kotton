@@ -98,9 +98,8 @@ pub fn verify(def: &SchemaDefinition) -> Result<(), SchemaSignatureError> {
     let signature = Signature::from_bytes(&bytes);
     let key = key_of(&def.publisher)?;
     let digest = def.digest()?;
-    // Strict, as every other Ed25519 check in this crate is: a small-order key or `R` is
-    // refused, so a key with no secret behind it cannot be named as a publisher whose
-    // "signature" anyone can write.
+    // This module checks strictly: a small-order key or `R` is refused, so a key with no
+    // secret behind it cannot be named as a publisher whose "signature" anyone can write.
     key.verify_strict(&message(&digest), &signature).map_err(|_| SchemaSignatureError::Invalid)
 }
 
@@ -260,6 +259,61 @@ mod tests {
         key.verifying_key().verify_strict(&def.digest().unwrap(), &bare).unwrap();
         def.signature = Some(STANDARD.encode(bare.to_bytes()));
         assert_eq!(verify(&def), Err(SchemaSignatureError::Invalid));
+    }
+
+    // A known answer, for another implementation to check itself against and for the
+    // protocol's fixtures: the signing key whose seed is the 32 bytes 0x01 to 0x20 (byte `i`
+    // is `i + 1`), the definition [`known_answer_definition`] builds under the publisher that
+    // key names, and what this module makes of it. Ed25519 is deterministic, so the signature
+    // is fixed too.
+
+    /// The known answer's publisher: the `did:key` of the key whose seed is 0x01 to 0x20.
+    const KNOWN_ANSWER_PUBLISHER: &str = "did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7";
+
+    /// The known answer's definition in its canonical form, the bytes its digest is over.
+    const KNOWN_ANSWER_CANONICAL: &str = r#"{"description":"A known-answer definition.","fields":[{"name":"title","nullable":false,"type":"string"}],"name":"example","publisher":"did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7","revision":1}"#;
+
+    /// The known answer's digest, BLAKE3 over its canonical form, as lowercase hex.
+    const KNOWN_ANSWER_DIGEST_HEX: &str = "81b76f8c79ffbe19465217b89db5645c3cbad734aae0bd5797c2184c2e2ae69f";
+
+    /// The known answer's signed message, 49 bytes as lowercase hex: [`DOMAIN`], one zero
+    /// byte, the digest.
+    const KNOWN_ANSWER_MESSAGE_HEX: &str =
+        "6b6f74746f6e2d736368656d612d76310081b76f8c79ffbe19465217b89db5645c3cbad734aae0bd5797c2184c2e2ae69f";
+
+    /// The known answer's signature, base64 with the standard alphabet and padding.
+    const KNOWN_ANSWER_SIGNATURE: &str =
+        "1Bv2xonxDK8cFzz4wL4XcAUWMSbpNikiB+rljXIUBMHolcxEnCwZkA9BnOTe006pr4C/Q8M/aITTklZAhRZDDA==";
+
+    /// The known answer's key: seed byte `i` is `i + 1`.
+    fn known_answer_key() -> SigningKey {
+        SigningKey::from_bytes(&core::array::from_fn(|i| i as u8 + 1))
+    }
+
+    /// The known answer's definition, unsigned: `example`, revision 1, one required string
+    /// field `title`, described as "A known-answer definition.", under `key`'s publisher.
+    fn known_answer_definition(key: &SigningKey) -> SchemaDefinition {
+        SchemaDefinition::new(
+            SchemaId::new(publisher_of(&key.verifying_key()), SchemaName::new("example").unwrap()).unwrap(),
+            1,
+            vec![SchemaField::required("title", FieldType::String)],
+        )
+        .with_description("A known-answer definition.")
+    }
+
+    /// **The known answer holds**: the publisher, the canonical form, the digest, the signed
+    /// message and the signature are the constants above, and the signature verifies.
+    #[test]
+    fn the_known_answer_holds() {
+        let key = known_answer_key();
+        let mut def = known_answer_definition(&key);
+        assert_eq!(def.publisher.as_str(), KNOWN_ANSWER_PUBLISHER);
+        assert_eq!(def.canonical().unwrap(), KNOWN_ANSWER_CANONICAL);
+        assert_eq!(def.digest_hex().unwrap(), KNOWN_ANSWER_DIGEST_HEX);
+        assert_eq!(hex::encode(message(&def.digest().unwrap())), KNOWN_ANSWER_MESSAGE_HEX);
+        sign(&mut def, &key).unwrap();
+        assert_eq!(def.signature.as_deref(), Some(KNOWN_ANSWER_SIGNATURE));
+        verify(&def).unwrap();
     }
 
     #[test]
