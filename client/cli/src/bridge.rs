@@ -68,6 +68,7 @@ pub async fn run_verb(
     let actor = user_id.clone();
     let client = Arc::new(Mutex::new(client));
     let mut state = ShellState::new(user_id, Arc::clone(&client));
+    state.piped_line = piped_line();
 
     let output = executor
         .registry()
@@ -75,6 +76,24 @@ pub async fn run_verb(
         .await
         .map_err(io::Error::other)?;
     finish(output, json, Some(&actor));
+}
+
+/// The one line of standard input this process may hand a verb as a value, when stdin is not
+/// a terminal (`echo … | kotton secret set <label>`), read only if the verb takes it.
+///
+/// This door alone builds one. A one-shot is its own process, run for one verb, so its stdin is
+/// the verb's to read. The REPL's stdin is its script, so it builds none, and a verb there
+/// cannot reach a read of it ([`kotton_shell::PipedLine`]).
+fn piped_line() -> Option<kotton_shell::PipedLine> {
+    use std::io::IsTerminal as _;
+    if io::stdin().is_terminal() {
+        return None;
+    }
+    Some(kotton_shell::PipedLine::new(|| {
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        Ok(line)
+    }))
 }
 
 /// A verb that reads `--json` among its own words is handed the word for a

@@ -31,7 +31,7 @@ pub use host::ShellHost;
 pub use shell::{onboard, Shell};
 pub use state::ShellState;
 #[cfg(feature = "cli")]
-pub use state::Asking;
+pub use state::{Asking, PipedLine};
 pub use utils::{expand_vars, normalize_path, parse_command};
 
 /// What the shell prints that a page outside it types or a fixture outside it holds: the

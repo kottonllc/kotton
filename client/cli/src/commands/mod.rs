@@ -154,6 +154,17 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },
+    /// Your keychain — set, get, list, rm, generate: passwords and tokens as records in
+    /// `personal`, kept from every app — the REPL's `secret`, one parser for both
+    #[command(after_help = shell_help("secret"))]
+    Secret {
+        /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
+        #[arg(long)]
+        user: Option<String>,
+        /// Arguments: `set <label> [--kind password|token] [--note <text>]` | `get <label>` | `list` | `rm <label>` | `generate <label> [--length <n>]`; `set` takes no value on the line
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
+        args: Vec<String>,
+    },
     /// The project's records in a root its org owns — init, invite, import, export
     #[command(subcommand)]
     Records(RecordsCommand),

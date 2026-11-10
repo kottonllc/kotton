@@ -305,24 +305,32 @@ mod tests {
         assert!(err.to_string().contains("not signed by its publisher"), "{err}");
     }
 
-    /// `secret` and `access-log` are held back from the registry until #449 and #450: a record
-    /// put under either is refused as under an unknown schema, and a registration of either is
-    /// refused as a core identity's, never admitted.
+    /// `access-log` is held back from the registry until #450: a record put under it is refused
+    /// as under an unknown schema. `secret` was held back with it until #449 and takes a
+    /// record now. A registration of either is refused as a core identity's, never admitted.
     #[tokio::test]
-    async fn the_held_back_core_schemas_take_no_record_and_no_registration() {
+    async fn the_held_back_core_schema_takes_no_record_and_neither_takes_a_registration() {
         let (_dir, registry, store) = a_device();
         let err = crate::record_cmds::Record::new(&registry, &store)
-            .insert(ns::NSID_SECRET, json!({ "label": "bank", "value": "hunter2", "kind": "password" }))
+            .insert(
+                ns::NSID_ACCESS_LOG,
+                json!({ "device": "d", "at": 1, "asker": "a", "door": "local", "act": "read", "what": "w" }),
+            )
             .await
             .expect_err("no record under a held-back schema");
         assert!(err.to_string().contains("unknown schema"), "{err}");
+        crate::record_cmds::Record::new(&registry, &store)
+            .insert(ns::NSID_SECRET, json!({ "label": "bank", "value": "hunter2", "kind": "password" }))
+            .await
+            .expect("secret is registered, and the person's own verbs put a record under it");
 
-        for held_back in [kotton_schemas::CoreSchema::Secret, kotton_schemas::CoreSchema::AccessLog] {
-            let err = schema_register(&registry, &store, held_back.file(), "alice")
+        for schema in [kotton_schemas::CoreSchema::Secret, kotton_schemas::CoreSchema::AccessLog] {
+            let err = schema_register(&registry, &store, schema.file(), "alice")
                 .await
                 .expect_err("a core identity is not registered");
             assert!(err.to_string().contains("core schema"), "{err}");
-            assert!(registry.read().unwrap().get(&held_back.id()).is_none());
+            let held = registry.read().unwrap().get(&schema.id()).is_some();
+            assert_eq!(held, !schema.is_held_back(), "{schema:?}: the registry is as it was");
         }
     }
 }

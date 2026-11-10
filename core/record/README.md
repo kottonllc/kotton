@@ -72,9 +72,22 @@ key its identity names, checked by `kotton_crypto::schema_signature` before anyt
 migrated or kept. A definition that is unsigned, signed by another key, or changed under its
 signature is refused; so is a document that is not the definition and nothing beside it, since
 the digest is taken over the definition's canonical form; and so is one naming a core schema,
-which changes in the tree and not through registration. Two of the core set, `secret` and
-`access-log`, are published and not yet known to a device: no record is kept under either
-until the grant refusal and the search exclusion they need are built.
+which changes in the tree and not through registration.
+
+Two of the core set, `secret` and `access-log`, are kept from every app, a refusal held for
+those two identities by name (`CoreSchema::is_kept_from_apps`), not for being core. No app is
+granted either: a grant on one is refused when set, and the check every app's record verb
+passes (`kotton_grant`'s `check_read`, `check_write` and `check_register`) refuses it whatever
+row the grant store holds. No manifest claims to handle or asks for either, no handler is
+registered or answered for either, the runner's records verbs refuse either, and
+`Record::search` returns no row of either to any caller, with no schema named or with one of
+them named. `secret` is known to every device, and the person reaches it at their own terminal
+with the `secret` verbs, in Personal. `access-log` is published and not yet known to a device
+(`CoreSchema::is_held_back`): no record is kept under it until its own change (#450).
+
+A row of `secret` reaches a device only as every record does, in the record log of
+`personal`, sealed under the person's `K_log`, which their own devices alone hold: a member of
+a root the person shares holds no key to that log and writes no segment a pass applies here.
 
 ## The `record` verbs
 
@@ -88,8 +101,8 @@ its identity. An id no record has in Personal exits 1, and so does a schema this
 know, by name. `get` prints the record as the row holds it, its `id` among its fields, and
 `list --json` prints each row the same way; neither prints the fields the daemon adds to an
 answer (`_id`, `_filed_at`, `_root`), because every verb here names Personal and `_root` would
-be Personal's id, a durable identifier, on every row. `record import|export` are not in the
-tree yet (#454).
+be Personal's id, a durable identifier, on every row. `record import|export` are in the tree
+(#454).
 
 **An insert takes only what its schema declares.** `RecordInsert`, from any client, is refused,
 naming the field, when the body carries a top-level field beginning with `_` (the daemon's: an
@@ -101,3 +114,19 @@ already accepted, does not meet it, and a row already stored with such a field i
 nothing rewritten on open. No schema allows open fields: `SchemaDefinition` declares its fields
 and nothing more, and `FieldType` is closed, with no type that admits an undeclared name (a
 `map` is declared, and holds one value type), so there is no exception to state.
+
+`secret set|get|list|rm|generate <label>` is the keychain
+(`client/shell/src/commands/secret.rs`), the same requests under `secret`, each naming
+Personal: one record per label, under the id the store gave it, so a label is never written
+into a record's URL. `set` never takes the value on the line; it reads it at a hidden prompt
+at a terminal, and with no terminal `kotton secret set` reads the one line piped to it; in the
+REPL, whose stdin is its script, it reads nothing and is refused. `get` prints the value
+alone; `list` never prints one.
+
+**A kept schema answers only the person's own terminal.** `RecordInsert`, `RecordQuery`,
+`RecordDelete` and `RecordOpen` (by the schema its URL names) on `secret` or `access-log` are
+refused, naming no app or one, unless the connection's origin is `Local`, a client on this
+device's own socket (`daemon::records::refuse_kept_off_terminal`). The origin is the one
+`Authenticate` bound from the credential, read by the door and handed to the verb; a remote
+client or an admitted browser names no app and is not thereby the person at their terminal.
+`RecordSearch` answers no row of either to anyone.

@@ -775,6 +775,12 @@ async fn service_host_call(
     // it before this frame was written. An instance launched for nobody has no
     // person whose records to read, and is told so rather than dropped.
     if let RunnerHostCall::Kept { nsid } = call {
+        // A schema kept from every app is refused here, in the daemon, whatever the sandbox
+        // read of the app's grants: a grant on it is refused when set and refused at every
+        // check, and this is the check for the runner's path.
+        if let Some(kept) = kotton_schemas::CoreSchema::kept_from_apps(&nsid) {
+            return Ok(RunnerHostReply::RecordFailed { message: kept.kept_from_apps_refusal() });
+        }
         let Some(host) = records else {
             return Ok(RunnerHostReply::RecordFailed {
                 message: "no person's records are open to this instance".to_string(),
@@ -855,6 +861,14 @@ async fn service_host_call(
             // guest receives — a root the person is not in included — and not
             // a fault that drops the instance: the frame is one its world can
             // make, and refusing it is the membership check doing its job.
+            //
+            // The occupant is an app, so a schema kept from every app is refused to it as to
+            // any other, before the root is asked of: the person reaches their keychain at
+            // their own terminal, not through the app that draws the screen.
+            let (RunnerRecordVerb::List { nsid, .. } | RunnerRecordVerb::Add { nsid, .. }) = &verb;
+            if let Some(kept) = kotton_schemas::CoreSchema::kept_from_apps(nsid) {
+                return Ok(RunnerHostReply::RecordFailed { message: kept.kept_from_apps_refusal() });
+            }
             return Ok(match verb {
                 RunnerRecordVerb::List { root, nsid } => {
                     match host.root_records(&root, &nsid).await {
@@ -6342,6 +6356,40 @@ mod host_call_tests {
             RunnerHostReply::RecordFailed { .. } => {}
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// **A schema kept from apps reaches no guest by the runner's path**, whatever the
+    /// sandbox read of its grants: `schema.kept` on `secret` or `access-log` is refused before
+    /// the records host is asked, and so is the occupant's own root verb, read or write,
+    /// before the occupant host is asked. Each refusal is an answer, naming the schema.
+    #[tokio::test]
+    async fn a_schema_kept_from_apps_reaches_no_guest_by_the_runner() {
+        struct Kept(std::sync::Mutex<Vec<String>>);
+        #[async_trait::async_trait]
+        impl RecordsHost for Kept {
+            async fn kept_records(&self, nsid: &str) -> Result<Vec<RunnerKeptRecord>, String> {
+                self.0.lock().unwrap().push(nsid.to_owned());
+                Ok(vec![])
+            }
+        }
+        let kept = Kept(std::sync::Mutex::new(Vec::new()));
+        let spy = Spy::new();
+        for nsid in [kotton_common::namespace::NSID_SECRET, kotton_common::namespace::NSID_ACCESS_LOG] {
+            for call in [
+                RunnerHostCall::Kept { nsid: nsid.into() },
+                RunnerHostCall::Records { verb: RunnerRecordVerb::List { root: "fam".into(), nsid: nsid.into() } },
+                RunnerHostCall::Records {
+                    verb: RunnerRecordVerb::Add { root: "fam".into(), nsid: nsid.into(), data: "{}".into() },
+                },
+            ] {
+                match service_host_call(call, Some(&spy), None, Some(&kept)).await.expect("an answer") {
+                    RunnerHostReply::RecordFailed { message } => assert!(message.contains(nsid), "{message}"),
+                    other => panic!("a kept schema was answered: {other:?}"),
+                }
+            }
+        }
+        assert!(kept.0.lock().unwrap().is_empty(), "the records host was asked");
+        assert!(spy.asked().is_empty(), "the occupant host was asked");
     }
 
     async fn call(spy: &Spy, verb: RunnerMessageVerb) -> RunnerHostReply {
