@@ -1328,13 +1328,6 @@ pub enum UserResponse {
         payload: String,
     },
 
-    /// Answer to [`crate::UserRequest::ThresholdSign`]: the aggregate
-    /// threshold signature as lowercase hex (64 bytes), verifiable as a standard
-    /// Ed25519 signature under the group (identity) DID.
-    ThresholdSigned {
-        signature_hex: String,
-    },
-
     // -- VFS watch subscription (RFC-0017) ------------------------------------
     /// Answer to [`crate::UserRequest::VfsWatch`], the first frame of its stream:
     /// the watch is **established**, and a change made from here on is delivered.

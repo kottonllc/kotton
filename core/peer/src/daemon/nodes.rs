@@ -417,17 +417,6 @@ pub async fn node_revoke(
 // Distributed FROST signing — coordinator side
 // ---------------------------------------------------------------------------
 
-/// Coordinate a threshold signature over `message` across this node's own
-/// network. This node contributes its own FROST share locally and co-signs with
-/// every **Full** own-device member reached over the authenticated peer channel
-/// — each runs the `FrostSignRound` responder, so their shares never leave their
-/// nodes. Returns the aggregate 64-byte Ed25519 signature, which verifies under
-/// the group (identity) DID.
-///
-/// Co-signers are resolved from the membership set (the source of truth):
-/// a paired node is included iff it holds a share — a `Full` or `Cosigner`
-/// membership record — which is precisely what excludes a `BlindStorage` (no
-/// share) from the quorum.
 /// Best-effort refresh of a paired node's stored address after a successful
 /// operational connect.
 ///
@@ -479,6 +468,27 @@ pub async fn refresh_observed_peer_address(
     }
 }
 
+/// Coordinate a threshold signature over `message` across this node's own
+/// network. This node contributes its own FROST share locally and co-signs with
+/// every **Full** own-device member reached over the authenticated peer channel
+/// — each runs the `FrostSignRound` responder, so their shares never leave their
+/// nodes. Returns the aggregate 64-byte Ed25519 signature, which verifies under
+/// the group (identity) DID.
+///
+/// Co-signers are resolved from the membership set (the source of truth):
+/// a paired node is included iff it holds a share — a `Full` or `Cosigner`
+/// membership record — which is precisely what excludes a `BlindStorage` (no
+/// share) from the quorum.
+///
+/// **Compiled only under `test-support`: this is the test-only round.** No request on
+/// any door of a daemon's build asks the person's group key to sign bytes the caller
+/// supplies: this coordinator is not in a daemon's build, and neither is the
+/// `FrostSignRound` responder that answers it (kuserd's `test-support`). The
+/// integration suite turns both features on, to drive a distributed round between two
+/// enrolled daemons in process, over the peer channel and the responder each
+/// co-signer serves. Each error says why no signature came: the store is locked, this
+/// node holds no share, a co-signer could not be reached, or the round failed.
+#[cfg(feature = "test-support")]
 pub async fn threshold_sign(
     // Not the machine handle: this wants a way to dial co-signers and the key
     // domain to declare, not the whole machine. Naming those two is what lets
@@ -492,9 +502,9 @@ pub async fn threshold_sign(
     member_store: &dyn crate::membership::MemberStore,
     db: &Arc<SqlitePool>,
     user_id: String,
-    message: Vec<u8>,
+    message: &[u8],
     secrets: &dyn SecretsStore,
-) -> io::Result<UserResponse> {
+) -> anyhow::Result<Vec<u8>> {
     use kotton_org::frost_signing::{
         coordinate_threshold_sign, FrostRound, FrostRoundReply, FrostRoundTrip, FrostSigner,
         LocalFrostSigner, PeerFrostSigner,
@@ -514,14 +524,10 @@ pub async fn threshold_sign(
     // It comes before the share is read so that a locked node's answer is the lock
     // and nothing else: it touches no signing material to say it, and says the
     // same whether or not it is enrolled.
-    let members = match member_store.list_members().await {
-        Ok(members) => members,
-        Err(e) => {
-            return Ok(UserResponse::Error {
-                message: format!("cannot choose who signs with this node: {e:#}"),
-            })
-        }
-    };
+    let members = member_store
+        .list_members()
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot choose who signs with this node: {e:#}"))?;
     let full_dids: HashSet<String> = members
         .into_iter()
         // Any share-holding member can co-sign: `Full` and `Cosigner` both
@@ -534,21 +540,13 @@ pub async fn threshold_sign(
     // enrollment). Absence means this node is not enrolled in the threshold.
     let local_share = match secrets.get_secret(&kdf_labels::frost_share(&user_id)) {
         Ok(Some(s)) => s,
-        Ok(None) => {
-            return Ok(UserResponse::Error {
-                message: "no FROST share on this node — not enrolled in the threshold".to_string(),
-            })
-        }
-        Err(e) => return Err(io::Error::other(format!("keychain read failed: {e}"))),
+        Ok(None) => anyhow::bail!("no FROST share on this node — not enrolled in the threshold"),
+        Err(e) => anyhow::bail!("keychain read failed: {e}"),
     };
     let pubkey_package = match secrets.get_secret(&kdf_labels::frost_pubkey_package(&user_id)) {
         Ok(Some(s)) => s,
-        Ok(None) => {
-            return Ok(UserResponse::Error {
-                message: "no group public-key package on this node".to_string(),
-            })
-        }
-        Err(e) => return Err(io::Error::other(format!("keychain read failed: {e}"))),
+        Ok(None) => anyhow::bail!("no group public-key package on this node"),
+        Err(e) => anyhow::bail!("keychain read failed: {e}"),
     };
 
     let mut cosigner_nodes: Vec<PairedNode> = Vec::new();
@@ -581,11 +579,7 @@ pub async fn threshold_sign(
                 refresh_peer_relay(db, &user_id, &label, prev_relay.as_deref(), c.learned_relay()).await;
                 clients.push(Arc::new(c));
             }
-            Err(e) => {
-                return Ok(UserResponse::Error {
-                    message: format!("could not reach co-signer {label}: {e}"),
-                })
-            }
+            Err(e) => anyhow::bail!("could not reach co-signer {label}: {e}"),
         }
     }
 
@@ -629,14 +623,9 @@ pub async fn threshold_sign(
         signers.push(ps);
     }
 
-    match coordinate_threshold_sign(&signers, &pubkey_package, &message).await {
-        Ok(sig) => Ok(UserResponse::ThresholdSigned {
-            signature_hex: hex::encode(sig),
-        }),
-        Err(e) => Ok(UserResponse::Error {
-            message: format!("threshold signing failed: {e}"),
-        }),
-    }
+    coordinate_threshold_sign(&signers, &pubkey_package, message)
+        .await
+        .map_err(|e| anyhow::anyhow!("threshold signing failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------
