@@ -329,18 +329,24 @@ pub fn build_add_recovery(prev: &KelEvent, new_set: &[[u8; 32]], group_sk: &Sign
 /// `resolve_current_key` finalizes it immediately via `LocalArbiter`; a multi-factor
 /// identity holds it pending the (deferred) witnessed contest window.
 ///
-/// `recovery_index` is how many recovery rotations have already occurred (0 for the
-/// first — the inception committed `pub(K_rec[0])`). `contest_min_seconds` is the
-/// minimum window carried on the event (committed, so it cannot be tampered).
-/// `prior_set` is the set of recovery public keys `prev.recovery_commitment`
-/// commits to, and it is required because a Merkle proof cannot be built from a
-/// root alone. For the ordinary one-member case pass `&[revealed]` — the proof is
-/// then empty and the root *is* the leaf.
+/// `recovery_index` is the rung of this phrase's ladder that `prev`'s commitment
+/// holds ([`committed_recovery_rung`]): 0 for a phrase that has not rotated the
+/// identity since it was committed. `contest_min_seconds` is the minimum window
+/// carried on the event (committed, so it cannot be tampered).
+/// `prior_set` is the **whole** set of recovery public keys
+/// `prev.recovery_commitment` commits to ([`committed_recovery_set`]), every
+/// member and not only the one revealed, and it is required because a Merkle
+/// proof cannot be built from a root alone. For a one-member set that is
+/// `&[revealed]` — the proof is then empty and the root *is* the leaf. Passing
+/// one member of a larger set builds the empty proof too, and validation
+/// rejects it.
 ///
-/// **Where a recovering party gets the set is an open question**, and this
-/// signature is where it surfaces rather than hides. A device holding only the
+/// **A recovering party gets the set from the chain**, which carries it in the
+/// clear on every event that sets a commitment. A device holding only the
 /// phrase knows *its own* member and not the others, so it cannot compute the
-/// sibling path unaided. The leaf hashes reveal nothing but the set's size, so
+/// sibling path unaided: it needs the chain first, and how little of the set the
+/// chain must publish for that is still open. The leaf hashes reveal nothing but
+/// the set's size, so
 /// publishing them alongside the chain is one answer; requiring the recovering
 /// party to present every leaf hash (making the "proof" the whole set) is another,
 /// and for the two-to-five members a real recovery set will have, the size
@@ -647,23 +653,33 @@ pub fn resolve_current_key<A: RecoveryArbiter>(
     Ok(current.key_state.group_key)
 }
 
-/// How many mnemonic recoveries a chain has already performed — the `recovery_index` the
-/// *next* one must use.
+/// How many recoveries a chain has already performed — the highest rung of any phrase's
+/// ladder the chain can be standing on.
 ///
-/// The reserve keys are a ladder: the inception commits to `pub(K_rec[0])`, and each recovery
-/// reveals `K_rec[n]` while pre-committing `pub(K_rec[n+1])`. So the index is not a choice, it
-/// is a count, and getting it wrong produces a rotation whose revealed key does not hash to
-/// the stored commitment — rejected by [`validate`], but only after the event is built.
+/// The reserve keys are a ladder: the event that commits a phrase commits `pub(K_rec[0])`,
+/// and each recovery reveals `K_rec[n]` while pre-committing `pub(K_rec[n+1])`. A phrase
+/// climbs only by its own recoveries, so no phrase is further up than the chain has had
+/// recoveries, and an identity with one phrase since its inception stands exactly here.
+/// That holds for every event this module builds. A guardian recovery has no builder yet
+/// and [`validate`] does not read the set a recovery installs, so for one it is the
+/// convention its builder must keep: commit a phrase no higher than one rung per recovery.
+///
+/// It is a bound, not the rung. It was the rung while an identity could commit one phrase;
+/// a phrase added after another's recovery is committed at rung 0 and this count is already
+/// 1, so the two disagree. [`committed_recovery_rung`] answers which rung a phrase is on,
+/// from what the chain commits, and searches no further than this.
 ///
 /// Counting rather than storing it keeps the chain the single source of truth: a counter kept
 /// beside the chain is one more thing that can disagree with it.
 pub fn next_recovery_index(chain: &[KelEvent]) -> u64 {
-    // **Both** recovery kinds consume a rung, and this counted only one of them until
+    // **Both** recovery kinds are counted, and this counted only one of them until
     // 2026-08-24. `validate_recovery` serves `RotationGuardian` and `RotationMnemonic` alike
-    // and checks each against the *same* `prev.recovery_commitment` — there is one reserve
-    // ladder, not one per kind. Counting only mnemonic recoveries returns an index one too low
-    // for any identity that has ever used a guardian, which builds an event whose revealed key
-    // does not match the stored commitment and stops the chain replaying from then on.
+    // and checks each against the *same* `prev.recovery_commitment`, and either replaces the
+    // committed set. While this count was read as the rung itself, counting only mnemonic
+    // recoveries returned an index one too low for any identity that had used a guardian,
+    // which built an event whose revealed key did not match the stored commitment and stopped
+    // the chain replaying from then on. As a bound it counts both for the same reason: one
+    // too low ends the search a rung short of a phrase a guardian recovery re-committed.
     //
     // The bug survived its own test because that test performed two *mnemonic* recoveries, so
     // both counts agreed. `a_guardian_recovery_also_consumes_a_rung` is the one that fails.
@@ -716,16 +732,52 @@ pub fn tip_commits_recovery_key(chain: &[KelEvent], reserve_pubkey: &[u8; 32]) -
     //
     // `verify_recovery_inclusion` refuses the empty root on its own, so a chain that
     // never committed any authority still answers `false` rather than matching.
-    let Some(set) = chain
+    recovery_proof(committed_recovery_set(chain), reserve_pubkey).is_some_and(|proof| {
+        verify_recovery_inclusion(&tip.recovery_commitment, reserve_pubkey, &proof)
+    })
+}
+
+/// The recovery set the tip's commitment commits to, as the chain carries it: the
+/// set on the last event that carries one, and empty when none does.
+///
+/// One reading of "the committed set", for the three places that need it: the
+/// membership check above, the rung a phrase is on, and the inclusion proof a
+/// recovery rotation carries. (`add_recovery_phrase` grows the tip's own carried
+/// set instead, because that is the set [`validate`] checks growth against.) The
+/// rotation used to pass a set of its own — the one
+/// key it revealed — which is the committed set only while that set has one member;
+/// with two, it built an event no verifier accepts
+/// (`either_of_two_recovery_phrases_rotates_to_a_key_the_log_resolves`).
+///
+/// The carried list is outside the event's canonical pre-image, so it is a claim
+/// until it is checked against the root: a caller proves membership against
+/// `tip.recovery_commitment`, as [`tip_commits_recovery_key`] does, or validates the
+/// event it builds from this before keeping it.
+pub fn committed_recovery_set(chain: &[KelEvent]) -> &[[u8; 32]] {
+    chain
         .iter()
         .rev()
-        .map(|e| &e.recovery_set)
+        .map(|e| e.recovery_set.as_slice())
         .find(|s| !s.is_empty())
-    else {
-        return false;
-    };
-    recovery_proof(set, reserve_pubkey).is_some_and(|proof| {
-        verify_recovery_inclusion(&tip.recovery_commitment, reserve_pubkey, &proof)
+        .unwrap_or(&[])
+}
+
+/// The rung of this phrase's ladder the chain commits, or `None` when it commits
+/// none of them — the phrase is not an authority for this identity.
+///
+/// **Found in what the chain commits, not counted.** A phrase is committed at rung 0
+/// by the event that adds it and climbs one rung each time *it* rotates the
+/// identity. The count of recoveries in the chain is that rung only for a phrase
+/// that was there for all of them: a phrase added after another's recovery sits at
+/// rung 0 while the count is 1, and deriving its key at the count asks the chain
+/// about a key it never committed
+/// (`a_phrase_added_after_a_recovery_rotation_holds_authority_and_rotates`).
+/// Membership is the rule [`validate`] holds a recovery to, so membership is what
+/// answers here; the count ([`next_recovery_index`]) only bounds the search.
+pub fn committed_recovery_rung(chain: &[KelEvent], seed32: &[u8; 32]) -> Option<u64> {
+    (0..=next_recovery_index(chain)).find(|&rung| {
+        let member = kel_recovery_pubkey(&crate::kdf::derive_kel_recovery_key(seed32, rung));
+        tip_commits_recovery_key(chain, &member)
     })
 }
 
@@ -1538,13 +1590,59 @@ mod tests {
         assert_eq!(tip_commits_any_recovery_key(&chain, &theirs), None);
     }
 
-    /// Both recovery kinds draw on the same reserve ladder, so both advance the index.
+    /// **A phrase's rung is the one the chain commits for it, not the chain's count of
+    /// recoveries**, and a rotation from a set of two carries a proof that validates.
     ///
-    /// The bug this pins shipped on 2026-08-23 and survived its own test, which performed two
-    /// *mnemonic* recoveries — a case where counting one kind and counting both agree. An
-    /// identity that has ever used a guardian recovery would then build its next mnemonic
-    /// rotation against the wrong rung, reveal a key that does not match the stored
-    /// commitment, and stop replaying from that point on.
+    /// Phrase A is added and rotates; phrase B is added after. The chain has had one
+    /// recovery, A stands on rung 1 of its ladder and B on rung 0 of its own. Counting
+    /// put B on rung 1, a key the chain never committed, so B was refused its own
+    /// authority. B's rotation then reveals one member of a two-member set: built from
+    /// the committed set it validates, and built from the revealed key alone its proof is
+    /// empty and it does not.
+    #[test]
+    fn a_phrase_stands_on_the_rung_the_chain_commits_for_it() {
+        let rung = |seed: &[u8; 32], i| kel_recovery_pubkey(&crate::kdf::derive_kel_recovery_key(seed, i));
+        let (a, b, stranger) = ([21u8; 32], [22u8; 32], [23u8; 32]);
+        let first = SigningKey::from_bytes(&[31u8; 32]);
+        let second = SigningKey::from_bytes(&[32u8; 32]);
+
+        let inc = build_fresh_inception(&first);
+        let add_a = build_add_recovery(&inc, &[rung(&a, 0)], &first);
+        let mut chain = vec![inc, add_a];
+        assert_eq!(committed_recovery_rung(&chain, &a), Some(0));
+
+        let rot_a = build_mnemonic_rotation(&chain[1], &a, 0, &second, 0, committed_recovery_set(&chain));
+        assert_eq!(validate(&chain[1], &rot_a), Verdict::PendingRecovery);
+        chain.push(rot_a);
+        let add_b = build_add_recovery(&chain[2], &[rung(&a, 1), rung(&b, 0)], &second);
+        assert_eq!(validate(&chain[2], &add_b), Verdict::Valid);
+        chain.push(add_b);
+
+        assert_eq!(next_recovery_index(&chain), 1);
+        assert_eq!(committed_recovery_rung(&chain, &a), Some(1), "A climbed by its own recovery");
+        assert_eq!(committed_recovery_rung(&chain, &b), Some(0), "B has made none");
+        assert_eq!(committed_recovery_rung(&chain, &stranger), None);
+
+        let third = SigningKey::from_bytes(&[33u8; 32]);
+        let tip = chain.last().unwrap();
+        let from_the_set = build_mnemonic_rotation(tip, &b, 0, &third, 0, committed_recovery_set(&chain));
+        assert_eq!(validate(tip, &from_the_set), Verdict::PendingRecovery);
+        let from_one_member = build_mnemonic_rotation(tip, &b, 0, &third, 0, &[rung(&b, 0)]);
+        assert!(
+            matches!(validate(tip, &from_one_member), Verdict::Invalid(_)),
+            "an empty proof does not open a two-member root"
+        );
+    }
+
+    /// Both recovery kinds are checked against the same commitment, so both are counted.
+    ///
+    /// The bug this pins shipped on 2026-08-23, while the count was read as the rung, and
+    /// survived its own test, which performed two *mnemonic* recoveries — a case where
+    /// counting one kind and counting both agree. An identity that had ever used a guardian
+    /// recovery would then build its next mnemonic rotation against the wrong rung, reveal a
+    /// key that does not match the stored commitment, and stop replaying from that point on.
+    /// The count now bounds the search for a phrase's rung (`committed_recovery_rung`), and
+    /// one too low still ends that search a rung short.
     #[test]
     fn a_guardian_recovery_also_consumes_a_rung() {
         let group = SigningKey::from_bytes(&[7u8; 32]);

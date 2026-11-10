@@ -538,8 +538,8 @@ fn register_this_device(
 
 /// Does this phrase hold recovery authority over `chain`?
 ///
-/// Derives the rung of the phrase's ladder the chain is standing on and asks
-/// whether the tip's committed set contains it — the same check a recovery
+/// Asks whether the tip's committed set contains a rung of the phrase's ladder
+/// (`kel_verify::committed_recovery_rung`) — the same membership a recovery
 /// event is held to by `validate`, so a phrase that passes here produces an
 /// event that is accepted rather than one that looks right and is rejected.
 /// Verifies rather than derives: the AID is random and the phrase cannot compute
@@ -549,11 +549,32 @@ pub fn phrase_holds_authority(chain: &[kotton_wire::kel::KelEvent], seed32: &[u8
     // device asks the identical question, and two copies of a test that gates the
     // same authority is the shape that produced the `next_recovery_index` bug. It
     // also reads past a `RotationCooperative` tip, which carries no set of its own.
-    let index = kotton_crypto::kel_verify::next_recovery_index(chain);
-    let member = kotton_crypto::kel_verify::kel_recovery_pubkey(
-        &kotton_crypto::kdf::derive_kel_recovery_key(seed32, index),
-    );
-    kotton_crypto::kel_verify::tip_commits_recovery_key(chain, &member)
+    // The rung is the one the chain commits for this phrase, and the rotation
+    // reveals that same rung, so the two cannot disagree about which it is.
+    kotton_crypto::kel_verify::committed_recovery_rung(chain, seed32).is_some()
+}
+
+/// Hold an event this file built to the rule every verifier will hold it to,
+/// before anything is written.
+///
+/// `kel_store::append_event` leaves validity to its caller, and a log holding one
+/// event that does not validate stops replaying at it for good: the key it names
+/// resolves for nobody, and nothing appended after it is read. So a built event is
+/// validated against its predecessor first, and one that fails is a refusal with
+/// nothing changed. A recovery rotation answers `PendingRecovery`, which is the
+/// arbiter's to finalize and is a valid event to keep.
+fn continues_the_log(
+    prev: &kotton_wire::kel::KelEvent,
+    event: &kotton_wire::kel::KelEvent,
+) -> Result<()> {
+    use kotton_crypto::kel_verify::Verdict;
+    match kotton_crypto::kel_verify::validate(prev, event) {
+        Verdict::Valid | Verdict::PendingRecovery => Ok(()),
+        Verdict::Invalid(why) => Err(anyhow!(
+            "the key event built here would not be accepted by anyone replaying the log, so \
+             it was not appended and nothing changed: {why}"
+        )),
+    }
 }
 
 // ── Key health and migration — `core/crypto`'s ────────────────────────────────
@@ -792,6 +813,7 @@ pub async fn add_recovery_phrase(
     let sk = ed25519_dalek::SigningKey::from_bytes(&signing_bytes);
 
     let event = kotton_crypto::kel_verify::build_add_recovery(prev, &set, &sk);
+    continues_the_log(prev, &event)?;
     kotton_identity::kel_store::append_event(base_dir, user_id, &event)?;
 
     // Seal recovery copies of the random roots under the new phrase. Until this
@@ -976,59 +998,37 @@ pub async fn rotate_identity_to_key(
         .last()
         .ok_or_else(|| anyhow!("user '{user_id}' has no KEL to rotate (legacy did:key account)"))?;
 
-    // The reserve index is the number of recovery rotations already applied (0 for
-    // the first — the inception committed `pub(K_rec[0])`). Counted by the shared
-    // helper rather than inline: a second copy of this rule is easy to get
-    // wrong by omitting guardian recoveries, which builds an event against the
-    // wrong rung.
-    let recovery_index = kotton_crypto::kel_verify::next_recovery_index(&chain);
-
     // The phrase must hold recovery authority over *this* identity. It used to be
     // checked by reconstructing the AID from the mnemonic and comparing — which
     // only worked while the identity derived from the phrase, and asked the weaker
     // question anyway ("did this phrase mint this identity?" rather than "may this
     // phrase act for it?").
     //
-    // Checked against the committed set instead: derive the reserve key for the
-    // rung this chain is standing on, and require it to be a member. That is the
-    // same verification a recovery event will be held to by `validate`, so a phrase
-    // that passes here produces an event that is accepted rather than one that
-    // looks right and is rejected downstream.
-    let reserve = kotton_crypto::kel_verify::kel_recovery_pubkey(
-        &kotton_crypto::kdf::derive_kel_recovery_key(&seed32, recovery_index),
-    );
-    let holds_authority = kotton_crypto::kel_verify::recovery_proof(&prev.recovery_set, &reserve)
-        .is_some_and(|proof| {
-            kotton_crypto::kel_verify::verify_recovery_inclusion(
-                &prev.recovery_commitment,
-                &reserve,
-                &proof,
-            )
-        });
-    if !holds_authority {
-        return Err(anyhow!(
-            "this recovery phrase is not an authority for this identity"
-        ));
-    }
+    // Checked against the committed set instead: find the rung of this phrase's
+    // ladder the log commits, and refuse a phrase with none. The rung is found
+    // rather than counted — the count of recoveries in the log is the rung only
+    // for a phrase that was there for all of them — and by the shared helper,
+    // the one `phrase_holds_authority` asks, so the check and the reveal cannot
+    // name different rungs.
+    let recovery_index = kotton_crypto::kel_verify::committed_recovery_rung(&chain, &seed32)
+        .ok_or_else(|| anyhow!("this recovery phrase is not an authority for this identity"))?;
 
     let new_identity_key = new_sk.to_bytes();
-    // The prior commitment is a *set*, so building the event needs
-    // the set it commits to, not just the key being revealed. Today every identity
-    // commits a one-member set holding the mnemonic reserve, so that is what is
-    // passed; when an identity can hold several authorities this is where the rest
-    // of them have to come from, and `build_mnemonic_rotation`'s doc says why that
-    // is an open question rather than an oversight.
-    let prior_set = [kotton_crypto::kel_verify::kel_recovery_pubkey(
-        &kotton_crypto::kdf::derive_kel_recovery_key(&seed32, recovery_index),
-    )];
+    // The prior commitment is a *set*, so the inclusion proof is built from every
+    // member of it, not from the key being revealed alone: the set the log carries
+    // on the last event that set one, which is what the tip's commitment commits.
+    let prior_set = kotton_crypto::kel_verify::committed_recovery_set(&chain);
     let rotation = build_mnemonic_rotation(
         prev,
         &seed32,
         recovery_index,
         new_sk,
         RECOVERY_CONTEST_MIN_SECONDS,
-        &prior_set,
+        prior_set,
     );
+    // Before the retiring key is kept, the log appended or the key replaced: an
+    // event the log's own rule rejects is refused here, with nothing changed.
+    continues_the_log(prev, &rotation)?;
 
     // Keep the key being replaced — sealed to its successor, beside the key log —
     // so that what was sealed to it still opens for the person: every message they
@@ -1677,6 +1677,155 @@ mod tests {
                 .await
                 .is_err(),
             "a foreign mnemonic must not rotate this identity"
+        );
+    }
+
+    /// The key the stored log resolves to, replayed from its inception: `Err` when
+    /// an event in it does not validate.
+    fn key_the_log_resolves(base: &Path, user: &str) -> std::result::Result<String, String> {
+        let chain = kel_store::load_chain(base, user).unwrap();
+        kotton_crypto::kel_verify::resolve_current_key(
+            &chain,
+            &kotton_crypto::kel_verify::LocalArbiter,
+            false,
+        )
+        .map(hex::encode)
+    }
+
+    /// **Either of two committed phrases rotates the identity, and the log still
+    /// replays.** The rotation reveals one member of a two-member set, so its event
+    /// carries the sibling path to the committed root, and a verifier holding only
+    /// the log accepts it. Built against a one-member set, the path is empty, the
+    /// event does not validate, and every later replay of the log stops at it.
+    #[tokio::test]
+    async fn either_of_two_recovery_phrases_rotates_to_a_key_the_log_resolves() {
+        for which in [0usize, 1] {
+            let temp = TempDir::new().unwrap();
+            let rt = make_runtime(&temp).await;
+            create_user(&rt, "alice", TEST_PASSPHRASE).await.unwrap();
+            let phrases = [
+                add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice")
+                    .await
+                    .expect("first phrase"),
+                add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice")
+                    .await
+                    .expect("second phrase"),
+            ];
+
+            let new_key =
+                rotate_identity_via_mnemonic(&rt, "alice", &phrases[which], Some(TEST_PASSPHRASE))
+                    .await
+                    .unwrap_or_else(|e| panic!("phrase {which} of two rotates the identity: {e:#}"));
+
+            assert_eq!(
+                key_the_log_resolves(rt.base_dir(), "alice"),
+                Ok(new_key),
+                "after phrase {which} of two rotated, the log replays to the key it installed"
+            );
+        }
+    }
+
+    /// **A phrase added after a recovery rotation is an authority, and rotates.**
+    /// The phrase is committed at the first rung of its own ladder, whatever other
+    /// phrases have done to the identity before it was added; the rung it is
+    /// checked and revealed at is the one the log commits for it.
+    #[tokio::test]
+    async fn a_phrase_added_after_a_recovery_rotation_holds_authority_and_rotates() {
+        let temp = TempDir::new().unwrap();
+        let rt = make_runtime(&temp).await;
+        create_user(&rt, "alice", TEST_PASSPHRASE).await.unwrap();
+
+        let phrase_a = add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice")
+            .await
+            .expect("phrase A");
+        rotate_identity_via_mnemonic(&rt, "alice", &phrase_a, Some(TEST_PASSPHRASE))
+            .await
+            .expect("phrase A rotates");
+        let phrase_b = add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice")
+            .await
+            .expect("phrase B, added after the rotation");
+
+        let chain = kel_store::load_chain(rt.base_dir(), "alice").unwrap();
+        let seed_a = try_mnemonic_to_seed32(&phrase_a).unwrap();
+        let seed_b = try_mnemonic_to_seed32(&phrase_b).unwrap();
+        assert!(
+            phrase_holds_authority(&chain, &seed_a),
+            "phrase A is still an authority, a rung further up its ladder"
+        );
+        assert!(
+            phrase_holds_authority(&chain, &seed_b),
+            "the log commits phrase B, so phrase B holds authority"
+        );
+
+        let new_key = rotate_identity_via_mnemonic(&rt, "alice", &phrase_b, Some(TEST_PASSPHRASE))
+            .await
+            .expect("phrase B rotates the identity");
+        assert_eq!(
+            key_the_log_resolves(rt.base_dir(), "alice"),
+            Ok(new_key),
+            "the log replays to the key phrase B installed"
+        );
+    }
+
+    /// **A recovery phrase the log cannot verify is refused, and the log still
+    /// replays.** A cooperative rotation carries the commitment forward and no set,
+    /// and `validate` checks growth against the predecessor's carried set alone, so
+    /// no add-recovery event validates on top of one. Appended anyway, it stops
+    /// every later replay of the log; refused, nothing changed.
+    #[tokio::test]
+    async fn a_recovery_phrase_the_log_cannot_verify_is_refused_and_the_log_still_replays() {
+        use ed25519_dalek::Signer as _;
+        use kotton_wire::kel::{Authorization, EventKind, KelEvent};
+
+        let temp = TempDir::new().unwrap();
+        let rt = make_runtime(&temp).await;
+        create_user(&rt, "alice", TEST_PASSPHRASE).await.unwrap();
+        add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice")
+            .await
+            .expect("a first phrase, so the commitment is not the empty one");
+
+        // A cooperative rotation onto the key already held: valid, and its tip
+        // carries no set.
+        let chain = kel_store::load_chain(rt.base_dir(), "alice").unwrap();
+        let tip = chain.last().unwrap();
+        let stored = rt
+            .secrets()
+            .get_secret(&kdf_labels::identity_signing_key("alice"))
+            .unwrap()
+            .unwrap();
+        let sk_bytes: [u8; 32] = hex::decode(stored).unwrap().try_into().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
+        let mut cooperative = KelEvent {
+            aid: tip.aid.clone(),
+            seq: tip.seq + 1,
+            prev_event_digest: Some(kotton_crypto::kel_verify::digest(tip)),
+            kind: EventKind::RotationCooperative,
+            key_state: tip.key_state.clone(),
+            recovery_commitment: tip.recovery_commitment,
+            recovery_set: Vec::new(),
+            authorization: Authorization::Quorum { sig: vec![0u8; 64] },
+            contest_window: None,
+        };
+        cooperative.authorization = Authorization::Quorum {
+            sig: sk.sign(cooperative.canonical().as_bytes()).to_bytes().to_vec(),
+        };
+        kel_store::append_event(rt.base_dir(), "alice", &cooperative).unwrap();
+        let key_before = key_the_log_resolves(rt.base_dir(), "alice");
+        assert!(key_before.is_ok(), "the log replays before the add: {key_before:?}");
+        let len_before = kel_store::load_chain(rt.base_dir(), "alice").unwrap().len();
+
+        let added = add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice").await;
+
+        assert_eq!(
+            key_the_log_resolves(rt.base_dir(), "alice"),
+            key_before,
+            "whatever the add answered, the log still replays to the same key"
+        );
+        assert!(added.is_err(), "an add the log cannot verify is refused, not reported as done");
+        assert_eq!(
+            kel_store::load_chain(rt.base_dir(), "alice").unwrap().len(),
+            len_before,
+            "a refused add appends nothing"
         );
     }
 
