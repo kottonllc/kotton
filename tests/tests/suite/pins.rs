@@ -121,6 +121,9 @@ async fn a_device_on_demand_keeps_the_folder_it_pins_whole_and_fetches_the_rest_
     let joined = client_b.pin_list(USER).await.expect("B's pins");
     assert_eq!(joined.default, PinValue::OnDemand, "a device paired later keeps drives on demand: {joined:?}");
     client_b.pin_set(USER, pin("default"), Some(PinValue::OnDemand)).await.expect("pin default on-demand");
+    // B was handed the vault at the join, not the drives in it: it learns `personal`
+    // from the vault's listing at its first pass, and pins a folder of it after.
+    synced(&mut client_b, "B").await;
     let pinned = client_b.pin_set(USER, pin("personal:/photos"), Some(PinValue::Whole)).await.expect("pin personal:/photos whole");
     assert_eq!(pinned.exceptions.len(), 1, "{pinned:?}");
     assert_eq!(pinned.exceptions[0].scope.said(), "personal:/photos");

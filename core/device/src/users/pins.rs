@@ -675,6 +675,28 @@ impl Read {
     }
 }
 
+/// The refusal of a pin on `drive`, which is not among `names`, the drives this
+/// device records. With none recorded it says what the device records: no vault
+/// (`drive enrol` adds one), or a vault whose listing it has not read (`sync`
+/// reads them); with some, it names them.
+fn no_such_drive(drive: &str, names: &[String], has_vault: bool) -> String {
+    if names.is_empty() {
+        return if has_vault {
+            format!(
+                "you have no drive called '{drive}' on this device yet: no vault listing it has \
+                 read names one; `sync` reads them"
+            )
+        } else {
+            format!(
+                "you have no drive called '{drive}' yet: this device keeps drives on no vault; \
+                 `drive enrol <invite>` adds one"
+            )
+        };
+    }
+    let had = names.join(", ");
+    format!("you have no drive called '{drive}' (you have {had}); `drive list` names them")
+}
+
 /// `pin <scope> <value>`, on this device `me`: refused for a drive the person
 /// does not have, else written to this device's own database, this device's
 /// claims made to say what it now keeps ([`claim`]), and answered with what
@@ -699,10 +721,12 @@ pub async fn set(
     if let PinScope::Drive { drive } | PinScope::Folder { drive, .. } = scope {
         let names = drive_names(db, user_id).await?;
         if !names.contains(drive) {
-            return Ok(Err(format!(
-                "you have no drive called '{drive}'{}; `drive list` names them",
-                if names.is_empty() { String::new() } else { format!(" (you have {})", names.join(", ")) }
-            )));
+            let has_vault = if names.is_empty() {
+                !kotton_peer::daemon::drives::list(db, user_id).await?.is_empty()
+            } else {
+                true
+            };
+            return Ok(Err(no_such_drive(drive, &names, has_vault)));
         }
         if drive != FIRST_DRIVE_NAME {
             return Ok(Err(format!(
@@ -773,6 +797,34 @@ mod tests {
         assert_eq!(keep.budget, Some(9));
         let unstated = super::keep(vec![], None);
         assert_eq!((unstated.whole)("files/notes/a.md").as_deref(), Some("default"), "silence keeps everything");
+    }
+
+    /// **A pin on a drive this device does not record is refused, and the
+    /// refusal says what this device records**: no vault, so `drive enrol`; a
+    /// vault whose listing names no such drive, so `sync`; or the drives it
+    /// has (kotton #491).
+    #[test]
+    fn a_pin_on_no_drive_is_refused_with_what_this_device_records() {
+        let some = no_such_drive("work", &["personal".to_string()], true);
+        assert_eq!(
+            some,
+            "you have no drive called 'work' (you have personal); `drive list` names them"
+        );
+        let no_vault = no_such_drive("personal", &[], false);
+        assert_eq!(
+            no_vault,
+            "you have no drive called 'personal' yet: this device keeps drives on no vault; \
+             `drive enrol <invite>` adds one"
+        );
+        let unread = no_such_drive("personal", &[], true);
+        assert_eq!(
+            unread,
+            "you have no drive called 'personal' on this device yet: no vault listing it has \
+             read names one; `sync` reads them"
+        );
+        for none in [&no_vault, &unread] {
+            assert!(!none.contains("drive list"), "sent to a list it cannot fill: {none}");
+        }
     }
 
     fn claimed(device: &str, drive: &str) -> Claim {
