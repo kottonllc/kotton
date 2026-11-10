@@ -676,16 +676,22 @@ impl Read {
 }
 
 /// The refusal of a pin on `drive`, which is not among `names`, the drives this
-/// device records. A device that records none has not yet read its vaults'
-/// listings, which is where every drive, `personal` among them, is learned
-/// (`kotton_peer::daemon::drives`, module doc): a joiner before its first pass.
-/// That device is told to sync, not that the person has no such drive.
-fn no_such_drive(drive: &str, names: &[String]) -> String {
+/// device records. With none recorded it says what the device records: no vault
+/// (`drive enrol` adds one), or a vault whose listing it has not read (`sync`
+/// reads them); with some, it names them.
+fn no_such_drive(drive: &str, names: &[String], has_vault: bool) -> String {
     if names.is_empty() {
-        return format!(
-            "you have no drive called '{drive}' yet: this device has not read its drives' \
-             listings; `sync` reads them"
-        );
+        return if has_vault {
+            format!(
+                "you have no drive called '{drive}' on this device yet: no vault listing it has \
+                 read names one; `sync` reads them"
+            )
+        } else {
+            format!(
+                "you have no drive called '{drive}' yet: this device keeps drives on no vault; \
+                 `drive enrol <invite>` adds one"
+            )
+        };
     }
     let had = names.join(", ");
     format!("you have no drive called '{drive}' (you have {had}); `drive list` names them")
@@ -715,7 +721,12 @@ pub async fn set(
     if let PinScope::Drive { drive } | PinScope::Folder { drive, .. } = scope {
         let names = drive_names(db, user_id).await?;
         if !names.contains(drive) {
-            return Ok(Err(no_such_drive(drive, &names)));
+            let has_vault = if names.is_empty() {
+                !kotton_peer::daemon::drives::list(db, user_id).await?.is_empty()
+            } else {
+                true
+            };
+            return Ok(Err(no_such_drive(drive, &names, has_vault)));
         }
         if drive != FIRST_DRIVE_NAME {
             return Ok(Err(format!(
@@ -789,26 +800,31 @@ mod tests {
     }
 
     /// **A pin on a drive this device does not record is refused, and the
-    /// refusal says why**: a device that records drives names them; one that
-    /// records none, a joiner before its first pass, is told to sync, since
-    /// the drives are learned from the vaults' listings (kotton #491).
+    /// refusal says what this device records**: no vault, so `drive enrol`; a
+    /// vault whose listing names no such drive, so `sync`; or the drives it
+    /// has (kotton #491).
     #[test]
-    fn a_pin_on_no_drive_is_refused_and_one_before_any_listing_is_told_to_sync() {
-        let some = no_such_drive("work", &["personal".to_string()]);
+    fn a_pin_on_no_drive_is_refused_with_what_this_device_records() {
+        let some = no_such_drive("work", &["personal".to_string()], true);
         assert_eq!(
             some,
             "you have no drive called 'work' (you have personal); `drive list` names them"
         );
-        let none = no_such_drive("personal", &[]);
+        let no_vault = no_such_drive("personal", &[], false);
         assert_eq!(
-            none,
-            "you have no drive called 'personal' yet: this device has not read its drives' \
-             listings; `sync` reads them"
+            no_vault,
+            "you have no drive called 'personal' yet: this device keeps drives on no vault; \
+             `drive enrol <invite>` adds one"
         );
-        assert!(
-            !none.contains("drive list"),
-            "a device that read no listing is sent to a list it cannot fill: {none}"
+        let unread = no_such_drive("personal", &[], true);
+        assert_eq!(
+            unread,
+            "you have no drive called 'personal' on this device yet: no vault listing it has \
+             read names one; `sync` reads them"
         );
+        for none in [&no_vault, &unread] {
+            assert!(!none.contains("drive list"), "sent to a list it cannot fill: {none}");
+        }
     }
 
     fn claimed(device: &str, drive: &str) -> Claim {
