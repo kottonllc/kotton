@@ -69,7 +69,10 @@ async fn a_relay_introduces_two_devices_and_they_go_direct() {
     let daemon_a =
         Arc::try_unwrap(daemon_a).unwrap_or_else(|_| panic!("sole arc owner for daemon_a"));
     let _task_a = tokio::spawn(async move { Arc::new(daemon_a).run().await });
-    let _task_b = tokio::spawn(async move { Arc::new(daemon_b).run().await });
+    // Kept as an `Arc`, so the test can coordinate the round on B in process.
+    let daemon_b = Arc::new(daemon_b);
+    let serving_b = Arc::clone(&daemon_b);
+    let _task_b = tokio::spawn(async move { serving_b.run().await });
     wait_for_daemon(&ipc_a, "daemon A").await;
     wait_for_daemon(&ipc_b, "daemon B").await;
 
@@ -118,12 +121,13 @@ async fn a_relay_introduces_two_devices_and_they_go_direct() {
     // B speaks to A as one of the person's own devices does: a threshold
     // signature B coordinates, which A co-signs over the peer channel. Devices
     // do not sync from each other — what they replicate goes by way of a drive —
-    // so a co-signature, and not a pull, is what B asks of A here.
+    // so a co-signature, and not a pull, is what B asks of A here. B's half is
+    // driven in process; A's is its peer listener's, as for any co-signer.
     let before = runtime_a.introduced_requests();
-    let signature = client_b
-        .threshold_sign("alice", b"introduced, then direct")
-        .await
-        .expect("B and A co-sign after an introduction");
+    let signature =
+        crate::common::threshold_sign_in_process(&daemon_b, "alice", b"introduced, then direct")
+            .await
+            .expect("B and A co-sign after an introduction");
     assert_eq!(signature.len(), 64, "an Ed25519 signature");
 
     // The rounds went over a session A's introduced listener accepted: the relay

@@ -23,7 +23,7 @@
 //! | `ReadSealed`, `ListSealed`, `WriteSealed` | a paired device | the same store's sealed objects, verbatim |
 //! | `SyncAvailable`, `RecordSyncAvailable` | a paired device | a wake of this device's own sync pass; they carry no object and no record |
 //! | `RecoveryFetch`, `RecoveryStore` | a paired device, or (fetch only) one admitted on a recovery claim | the public key-event chain and the phrase-sealed recovery copy |
-//! | `FrostSignRound` | a paired cosigner | one round over this node's threshold share |
+//! | `FrostSignRound` | a paired cosigner, in tests | one round over this node's FROST share |
 //! | `NodeRelay` | a paired device, or a gateway | where this node reserves |
 //! | `Introduce` | a paired device | a listener for one introduced address |
 //! | `BrowserFrame` | a gateway, for the person whose row pairs it as theirs | the browser's sealed channel — see below |
@@ -33,6 +33,11 @@
 //! object and the sync pass merges; `RecordSyncAvailable` wakes that pass and
 //! carries no record. The test at the bottom holds that no record verb of the
 //! door's decodes as this type.
+//!
+//! **`FrostSignRound` is answered only in a test build.** The responder is compiled
+//! under kuserd's `test-support` feature, with the round's one coordinator under
+//! kotton-peer's; a daemon's build refuses the verb. No request on any door of a
+//! daemon's build asks the person's group key to sign bytes the caller supplies.
 //!
 //! **`BrowserFrame` is the exception in kind, not in type.** A frame is
 //! ciphertext the gateway cannot read; once the browser's channel is
@@ -143,7 +148,11 @@ pub enum PeerRequest {
     },
 
     // -- Membership: the node's own answers --------------------------------------
-    /// [`UserRequest::FrostSignRound`].
+    /// [`UserRequest::FrostSignRound`]. On the wire in every build; answered by
+    /// the co-signer's responder only in a build with kuserd's `test-support`
+    /// feature, the round being compiled for tests only. A daemon's build refuses
+    /// it: no request on any door of a daemon's build asks the person's group key to
+    /// sign bytes the caller supplies.
     FrostSignRound {
         user_id: String,
         payload: String,

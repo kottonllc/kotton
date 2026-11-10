@@ -1966,6 +1966,8 @@ impl DeviceDaemon {
             // distributed-signing round-1 stashes its secret nonces here and
             // the matching round-2 (a later, separate peer request) consumes
             // them. Every listener that clones this handler's Arc shares it.
+            // Compiled for tests only, with the round it answers.
+            #[cfg(feature = "test-support")]
             signer: peer_reach::FrostSigner::new(
                 self.runtime.secrets_arc(),
                 Arc::new(kotton_org::frost_signing::FrostParticipant::new()),
@@ -2020,9 +2022,10 @@ impl DeviceDaemon {
 /// engine or `DeviceRuntime` is here. **Module privacy** holds that this
 /// function's module cannot read a handle's fields. **Method discipline** —
 /// what the methods in `peer_reach.rs` and `file_host.rs` choose to do with
-/// those fields — holds the rest: two handles (`stores`, `signer`) each hold
-/// the whole keychain, `Arc<dyn SecretsStore>`, and that they read only their
-/// labels is true of their methods, not of their types (kotton #256).
+/// those fields — holds the rest: `stores` holds the whole keychain,
+/// `Arc<dyn SecretsStore>` (and so, under `test-support` only, does `signer`),
+/// and that each reads only its labels is true of its methods, not of its
+/// type (kotton #256).
 /// `guests` holds a read-only view of the agent databases the daemon already
 /// opened and nothing one opens from, so it cannot open, create or migrate a
 /// database, nor add a slot to the map, on a peer's request — held by its
@@ -2051,17 +2054,19 @@ impl DeviceDaemon {
 /// - `db` — the paired-node rows a posture is read from.
 /// - `sync_wake` — the two wakes: it starts a pass sooner, and reaches nothing
 ///   a pass reaches.
-/// - `signer` — this node's FROST share for a person, answering one round, and
-///   the nonces a round keeps between requests.
+/// - `signer`, under `test-support` only — this node's FROST share for a
+///   person, answering one round of the test-only threshold signature, and the
+///   nonces a round keeps between requests.
 /// - `sealed_reassembly` — the state a chunked sealed write keeps between
 ///   requests.
 ///
 /// **What is not here, by type:** the machine; the record stores, the sync
 /// host that opens them, the sync engine, the sessions and every other field
 /// of [`AgentContext`]; and, in `guests`, anything an agent database opens
-/// from (kotton #262). The keychain is still whole inside `stores` and
-/// `signer`, and `stores` reaches a base directory through the resident stores
-/// (kotton #256).
+/// from (kotton #262). The keychain is still whole inside `stores` (and, under
+/// `test-support`, `signer`), and `stores` reaches a base directory through the
+/// resident stores (kotton #256). In a daemon's build no field here reads the
+/// person's FROST share on a peer's request.
 pub(super) struct PeerContext {
     standing: peer_reach::Standing,
     guests: peer_reach::GuestSessions,
@@ -2071,6 +2076,10 @@ pub(super) struct PeerContext {
     recovery: peer_reach::Recovery,
     db: Arc<SqlitePool>,
     sync_wake: kotton_sync::engine::SyncWake,
+    /// The `FrostSignRound` responder, which reads the person's share on a peer's
+    /// request. Compiled under `test-support` only; a daemon's build has no field
+    /// here and no handle that reads the share for a peer.
+    #[cfg(feature = "test-support")]
     signer: peer_reach::FrostSigner,
     sealed_reassembly: kotton_device::users::files::SealedReassembly,
 }
@@ -2294,9 +2303,9 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 /// discipline**, in one handle now rather than two: [`file_host::PeerStoreHost`]
 /// holds the whole keychain beside the resident stores, and a resident store
 /// answers its base directory (`UserStore::base_dir`) — together, what
-/// `kotton_record::open` takes. The keychain itself is whole in two handles
-/// (`PeerStoreHost`, [`peer_reach::FrostSigner`]), each reading only its
-/// labels because its methods do. Lending each only its labels, and no handle
+/// `kotton_record::open` takes. The keychain itself is whole in that handle (and,
+/// under `test-support` only, in `peer_reach::FrostSigner`), each reading only
+/// its labels because its methods do. Lending each only its labels, and no handle
 /// a base directory beside them, is kotton #256. What remains, and what holds
 /// each:
 ///
@@ -2314,10 +2323,11 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 ///   `resolve_operational_cek` falls back to and derives the CEK from. So a
 ///   peer's file or sealed request can make this host read a root secret
 ///   (method discipline);
-/// - this node's **FROST share** for the person, read by
-///   [`peer_reach::FrostSigner`] under its one label to answer a round, and
-///   never handed out — the signer holds the whole keychain, and its method is
-///   what reads one label (method discipline);
+/// - under `test-support` only, this node's **FROST share** for the person,
+///   read by `peer_reach::FrostSigner` under its one label to answer a round of
+///   the test-only threshold signature, and never handed out — the signer holds
+///   the whole keychain, and its method is what reads one label (method
+///   discipline). A daemon's build compiles no signer and refuses the round;
 /// - the person's **database**, when the daemon already has it open, for the
 ///   one question of which guest session a stranger's key holds — read by
 ///   [`peer_reach::GuestSessions`] through its read-only view, never opened
@@ -2359,6 +2369,7 @@ async fn handle_peer_request(
         recovery,
         db,
         sync_wake,
+        #[cfg(feature = "test-support")]
         signer,
         sealed_reassembly,
     } = peer;
@@ -2757,12 +2768,24 @@ async fn handle_peer_request(
         }
 
         // -- Distributed FROST signing — co-signer side -----------------------
-        // Only reachable when the caller is a permanently paired node (the
-        // ephemeral path above rejects non-file ops). The signer loads this
-        // node's FROST share and answers one round; its participant holds the
-        // round-1 nonces between this request and the next. The share never
+        // Compiled under `test-support` only, the one coordinator
+        // (`kotton_peer::daemon::nodes::threshold_sign`) being compiled for
+        // tests only. Only reachable when the caller is a permanently paired
+        // node (the ephemeral path above rejects non-file ops). The signer loads
+        // this node's FROST share and answers one round; its participant holds
+        // the round-1 nonces between this request and the next. The share never
         // leaves the signer.
+        #[cfg(feature = "test-support")]
         PeerRequest::FrostSignRound { payload, .. } => Ok(signer.answer(&user_id, &payload)),
+        // A daemon's build does not answer it: a key signs only an object the
+        // signer built and can name, and a round's message is the coordinator's.
+        // The variant stays on the wire, so the refusal is named here.
+        #[cfg(not(feature = "test-support"))]
+        PeerRequest::FrostSignRound { .. } => Ok(UserResponse::Error {
+            message: "FrostSignRound is not answered by this node: a threshold round on the \
+                      person's key is compiled for tests only"
+                .to_string(),
+        }),
 
         // A frame is a gateway's verb: `peer_ask` sent each one to the
         // gateway's path or back refused, before this function was entered.

@@ -20,7 +20,7 @@
 //! unlock and the contact list in `daily_credential`, and which app is the shell in
 //! `daily_credential` and `app_lifecycle`.
 
-use crate::common::TestEnv;
+use crate::common::{threshold_sign_in_process, TestEnv};
 use kotton::PinUnlock;
 use kotton_peer::membership::Membership as _;
 use kotton_record::open::LOCKED;
@@ -351,16 +351,13 @@ async fn the_window_closing_closes_what_the_account_had_open() {
 /// this is the half that asks about the order
 /// (`TASK-a-locked-node-reports-no-co-signers-rather-than-that-it-is-locked`).
 #[tokio::test]
-async fn a_restarted_daemon_answers_a_signing_request_with_the_lock_first() {
+async fn a_restarted_daemon_refuses_a_threshold_round_with_the_lock_first() {
     let mut env = TestEnv::spawn().await;
     a_person_with_a_passphrase(&mut env).await;
 
-    let before = env
-        .client
-        .threshold_sign(USER, b"asked of a node with no share")
+    let before = threshold_sign_in_process(&env.daemon, USER, b"asked of a node with no share")
         .await
-        .expect_err("a node enrolled in no threshold cannot sign")
-        .to_string();
+        .expect_err("a node enrolled in no threshold cannot sign");
     assert!(
         before.contains("no FROST share"),
         "while open, the refusal is the missing share, got: {before}"
@@ -368,12 +365,9 @@ async fn a_restarted_daemon_answers_a_signing_request_with_the_lock_first() {
 
     env.lock_as_a_restart_would(USER).await;
 
-    let after = env
-        .client
-        .threshold_sign(USER, b"asked of a node with no share")
+    let after = threshold_sign_in_process(&env.daemon, USER, b"asked of a node with no share")
         .await
-        .expect_err("a locked node cannot sign")
-        .to_string();
+        .expect_err("a locked node cannot sign");
     assert!(
         after.contains("it is locked") && !after.contains("FROST share"),
         "once locked, the refusal is the lock and not the share, got: {after}"

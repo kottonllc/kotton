@@ -14,6 +14,12 @@ path = "src/lib.rs"
 name = "kuserd"
 path = "src/main.rs"
 
+[features]
+# The `FrostSignRound` responder: a co-signer's part in a round over a message its
+# coordinator hands it, read with the person's share. The integration suite turns it
+# on, with kotton-peer's round it answers; no daemon's build does.
+test-support = []
+
 [dependencies]
 kotton-sys = { path = "../sys" }
 kotton-wire = { path = "../wire" }

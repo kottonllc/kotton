@@ -1468,37 +1468,6 @@ async fn answer_request(
             // (`drive_devices::revoke`), on the runtime's own allowlist.
             kotton_device::users::drive_devices::revoke(runtime, user_rt.as_ref(), db, user_id, node_id).await
         }
-        UserRequest::ThresholdSign {
-            user_id,
-            message_hex,
-        } => match hex::decode(&message_hex) {
-            Ok(message) => {
-                let secrets = runtime.secrets_arc();
-                // The caller resolves both: which key domain to declare on the
-                // link, and how to dial. `threshold_sign` names neither the
-                // machine nor the registry.
-                let domain_id =
-                    runtime.user_cek_domain_id(&user_id, users.get(&user_id).as_deref());
-                let Some(user_rt) = users.get(&user_id) else {
-                    return Ok(UserResponse::Error {
-                        message: format!("user runtime '{user_id}' is not loaded"),
-                    });
-                };
-                kotton_peer::daemon::nodes::threshold_sign(
-                    &runtime.dialer(),
-                    domain_id,
-                    user_rt.as_ref(),
-                    db,
-                    user_id,
-                    message,
-                    secrets.as_ref(),
-                )
-                .await
-            }
-            Err(e) => Ok(UserResponse::Error {
-                message: format!("invalid message_hex: {e}"),
-            }),
-        },
         UserRequest::PeerAdd {
             user_id,
             label,
