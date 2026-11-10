@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! IPC contract between `kdeviced` (the device daemon) and its clients.
 //!
-//! `DeviceRequest` / `DeviceResponse` are the wire types for the **`kdeviced` socket**
-//! (`\\.\pipe\kdeviced` on Windows, `/run/kdeviced.sock` on Unix, or the value
-//! of `KDEVICED_IPC_NAME` for dev overrides).
+//! `DeviceRequest` / `DeviceResponse` are the wire types for the **`kdeviced` socket**:
+//! the pipe `\\.\pipe\kdeviced` on Windows, and on Unix `kdeviced.sock` in the
+//! runtime directory `kotton_common::paths::kdeviced_door` names
+//! (`$XDG_RUNTIME_DIR/kotton/` on Linux when that is set, else `$TMPDIR/kotton/`, else
+//! `<base dir>/run/`, or a short `/tmp/kotton-<key>/` when that path is too long for a
+//! socket). `KDEVICED_IPC_NAME` replaces the name `kdeviced` in either.
+//!
+//! kdeviced runs as the same OS user as its clients, and spawns each `kuserd` with no
+//! change of user. On Unix the socket's directory is that user's alone (the bind
+//! refuses one that is not), kdeviced answers a connection from no other uid, and a
+//! client reads the peer credentials of the socket it reached and goes no further
+//! unless kdeviced is its own uid (`kotton_ipc::IpcClient::connect_to_own_user`).
 //!
 //! This socket is distinct from the per-user `kuserd-{did_short}` socket:
 //!
@@ -16,9 +25,21 @@
 //! All requests except `Ping`, `Challenge`, and `Authenticate` require the
 //! caller to first prove DID ownership.  The flow is:
 //!
-//! 1. Caller sends `Challenge`.  kdeviced returns `ChallengeIssued { nonce }`.
-//! 2. Caller signs the raw nonce bytes with their Ed25519 private key and
-//!    base64url-encodes the 64-byte signature.
+//! 1. Caller sends `Challenge`.  kdeviced returns `ChallengeIssued { nonce }`: a
+//!    challenge of exactly [`LOGIN_CHALLENGE_LEN`] bytes from the OS random source,
+//!    fresh for this connection, base64url-encoded. It is **spent by the next
+//!    `Authenticate` on the connection, whatever that is answered**: a refusal,
+//!    `OperatorKeyKept` and admission alike leave the connection holding no
+//!    challenge, so another `Authenticate` is refused ("no Challenge issued on this
+//!    connection") until the caller sends `Challenge` again. A second `Challenge`
+//!    replaces the first.
+//! 2. Caller builds the login message with [`login_message`] — the ASCII tag
+//!    [`LOGIN_TAG`], one `0x00` byte, then the challenge — signs it with their
+//!    Ed25519 private key, and base64url-encodes the 64-byte signature. A challenge
+//!    of any other length is refused before anything is signed. The tag names what
+//!    the signature is for, so it is never a signature over bytes of any other
+//!    meaning; kdeviced verifies over the tagged message only, strictly, and refuses
+//!    a signature over the bare challenge.
 //! 3. Caller sends `Authenticate { did, nonce, signature }`.
 //!    kdeviced: extracts the public key from the `did:key:` DID, verifies
 //!    the signature, checks the DID against the sudoers set.
@@ -42,6 +63,40 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The domain a kdeviced login signature is made under: the first bytes of every
+/// [`login_message`].
+pub const LOGIN_TAG: &str = "kotton-kdeviced-auth-v1";
+
+/// The length of a kdeviced login challenge, in bytes.
+pub const LOGIN_CHALLENGE_LEN: usize = 32;
+
+/// A challenge that is not [`LOGIN_CHALLENGE_LEN`] bytes: nothing is signed over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WrongChallengeLength(pub usize);
+
+impl std::fmt::Display for WrongChallengeLength {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "a kdeviced challenge is {LOGIN_CHALLENGE_LEN} bytes; this one is {}", self.0)
+    }
+}
+
+impl std::error::Error for WrongChallengeLength {}
+
+/// **The bytes a client signs to log in to kdeviced, and the bytes kdeviced
+/// verifies**: [`LOGIN_TAG`], one `0x00` byte, then `challenge`, which must be
+/// exactly [`LOGIN_CHALLENGE_LEN`] bytes. Every signer and the verifier build the
+/// message here, so there is one message and it says what it is for.
+pub fn login_message(challenge: &[u8]) -> Result<Vec<u8>, WrongChallengeLength> {
+    if challenge.len() != LOGIN_CHALLENGE_LEN {
+        return Err(WrongChallengeLength(challenge.len()));
+    }
+    let mut out = Vec::with_capacity(LOGIN_TAG.len() + 1 + challenge.len());
+    out.extend_from_slice(LOGIN_TAG.as_bytes());
+    out.push(0);
+    out.extend_from_slice(challenge);
+    Ok(out)
+}
+
 /// Requests sent to the `kdeviced` device daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DeviceRequest {
@@ -55,17 +110,19 @@ pub enum DeviceRequest {
 
     /// Complete authentication by proving DID ownership.
     ///
-    /// `nonce` must be the base64url string returned by a preceding `Challenge`
-    /// call on this connection.
+    /// `nonce` must be the base64url string returned by the latest `Challenge`
+    /// call on this connection, not yet spent: each `Authenticate` spends the
+    /// connection's challenge, whatever it is answered.
     ///
-    /// `signature` must be a base64url-encoded Ed25519 signature over the raw
-    /// decoded nonce bytes, produced by the private key of `did`.
+    /// `signature` must be a base64url-encoded Ed25519 signature over
+    /// [`login_message`] of the decoded nonce, produced by the private key of `did`.
     Authenticate {
         /// `did:key:…` of the caller.
         did: String,
         /// The nonce string from `ChallengeIssued`, as-is (base64url).
         nonce: String,
-        /// base64url-encoded 64-byte Ed25519 signature over the raw nonce bytes.
+        /// base64url-encoded 64-byte Ed25519 signature over [`login_message`] of the
+        /// decoded nonce.
         signature: String,
         /// **The person whose own key this is**, when the caller is that
         /// person's daemon speaking with the key it keeps in their sealed store
@@ -239,8 +296,10 @@ pub enum DeviceResponse {
     /// Response to [`SysRequest::Ping`].
     Pong,
 
-    /// A random nonce for the caller to sign.  Valid only for this connection
-    /// and only until a subsequent `Challenge` or `Authenticate` replaces it.
+    /// A random challenge for the caller to sign inside [`login_message`]. Valid
+    /// only for this connection, and only until a subsequent `Challenge` replaces
+    /// it or the next `Authenticate` spends it — whatever that `Authenticate` is
+    /// answered, refused or admitted, the connection holds no challenge after it.
     ChallengeIssued {
         /// base64url-encoded random 32-byte nonce.
         nonce: String,
@@ -329,8 +388,26 @@ impl From<std::io::Error> for DeviceResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::DeviceResponse;
+    use super::{login_message, DeviceResponse, WrongChallengeLength, LOGIN_CHALLENGE_LEN};
     use crate::ipc::SecretBytes;
+
+    /// **The login message is the tag, one zero byte and the challenge**, and it
+    /// has a fixed shape on the wire.
+    #[test]
+    fn the_login_message_is_the_tag_a_zero_byte_and_the_challenge() {
+        let challenge = [0x5au8; LOGIN_CHALLENGE_LEN];
+        let mut expected = b"kotton-kdeviced-auth-v1\0".to_vec();
+        expected.extend_from_slice(&challenge);
+        assert_eq!(login_message(&challenge).unwrap(), expected);
+    }
+
+    /// **A challenge of any length but 32 bytes is refused**, short, long or empty.
+    #[test]
+    fn a_challenge_of_another_length_is_refused() {
+        for len in [0, 16, 31, 33, 64] {
+            assert_eq!(login_message(&vec![7u8; len]), Err(WrongChallengeLength(len)), "{len}");
+        }
+    }
 
     /// **The device's operational seed never prints**: `DeviceResponse`
     /// derives `Debug`, so the seed it hands `kuserd` is `SecretBytes` —

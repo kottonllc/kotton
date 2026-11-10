@@ -1362,7 +1362,7 @@ fn screen_of(resp: kotton_wire::UserResponse) -> (Option<String>, Option<String>
 #[serial_test::serial]
 #[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
 async fn a_second_boot_with_a_registered_identity_opens_the_lock_screen() {
-    let base = tempfile::tempdir().expect("tempdir");
+    let base = crate::common::a_base();
     stage_a_system_shell(base.path());
 
     // SAFETY: `#[serial_test::serial]` means nothing else is running. Restored
@@ -1483,7 +1483,7 @@ async fn a_second_boot_with_a_registered_identity_opens_the_lock_screen() {
 #[serial_test::serial]
 #[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
 async fn a_launch_for_a_person_whose_store_holds_no_keys_opens_the_lock_screen_and_says_why() {
-    let base = tempfile::tempdir().expect("tempdir");
+    let base = crate::common::a_base();
     stage_a_system_shell(base.path());
 
     // SAFETY: `#[serial_test::serial]` means nothing else is running.
@@ -1632,7 +1632,7 @@ async fn a_launch_for_a_person_whose_store_holds_no_keys_opens_the_lock_screen_a
 #[serial_test::serial]
 #[allow(unsafe_code)] // env::set_var is unsafe in Rust 1.81+; serialised by #[serial]
 async fn a_boot_with_nobody_registered_still_opens_the_welcome() {
-    let base = tempfile::tempdir().expect("tempdir");
+    let base = crate::common::a_base();
     stage_a_system_shell(base.path());
 
     // SAFETY: `#[serial_test::serial]` means nothing else is running.

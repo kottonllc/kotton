@@ -508,8 +508,15 @@ mod tests {
     /// is the reason this file is on kotton-common's socket allow list
     /// (`paths::tests::a_socket_joined_onto_the_temp_dir_asks_whether_it_fits`).
     fn a_dir() -> tempfile::TempDir {
+        // `0o700` at `mkdir`: the bind uses a socket directory only if it is this
+        // user's alone (`kotton_ipc::OsListener::bind`).
         #[cfg(unix)]
-        let dir = tempfile::tempdir_in("/tmp");
+        let dir = {
+            use std::os::unix::fs::PermissionsExt as _;
+            tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir_in("/tmp")
+        };
         #[cfg(windows)]
         let dir = tempfile::tempdir();
         dir.expect("a temporary directory")

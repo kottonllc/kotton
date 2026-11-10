@@ -4,13 +4,15 @@
 //! Listens on the `kdeviced` IPC socket and manages per-user `kuserd`
 //! child processes.  All device-level operations except `Ping`, `Challenge`,
 //! and `Authenticate` require the caller to first prove DID ownership via the
-//! challenge-response protocol defined in [`kotton_wire::sys_ipc`].
+//! challenge-response protocol defined in [`kotton_wire::sys_ipc`], and on Unix
+//! only a connection from kdeviced's own uid is answered at all.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::Signature;
 use kotton_sys::ipc::IpcEndpoint;
 use kotton_wire::did::Did;
+use kotton_wire::sys_ipc::{login_message, LOGIN_CHALLENGE_LEN};
 use kotton_wire::{DeviceInfo, DeviceIpcSessionInfo, SysDaemonStatus, DeviceRequest, DeviceResponse, UserSessionInfo};
 use kotton_crypto::DidKeyMethod;
 use kotton_ipc::ChannelAcceptor;
@@ -83,10 +85,18 @@ pub enum DeviceSession {
     Child(ChildDid),
 }
 
-/// The pending challenge nonce, if the connection is awaiting `Authenticate`.
-fn session_nonce(session: &Mutex<Option<DeviceSession>>) -> Option<String> {
-    match session.lock().ok()?.as_ref()? {
-        DeviceSession::Challenged { nonce_b64 } => Some(nonce_b64.clone()),
+/// **Spend** the pending challenge: take it out of the slot and return it, if the
+/// connection is awaiting `Authenticate`. The slot is left with no challenge, so
+/// the challenge answers one `Authenticate` whatever that answer is, and the next
+/// `Authenticate` on the connection needs a fresh `Challenge` (`sys_ipc`'s step 1).
+/// An authenticated slot holds no challenge and is left as it is.
+fn session_take_nonce(session: &Mutex<Option<DeviceSession>>) -> Option<String> {
+    let mut slot = session.lock().ok()?;
+    if !matches!(slot.as_ref(), Some(DeviceSession::Challenged { .. })) {
+        return None;
+    }
+    match slot.take() {
+        Some(DeviceSession::Challenged { nonce_b64 }) => Some(nonce_b64),
         _ => None,
     }
 }
@@ -408,7 +418,7 @@ impl SystemDaemon {
         let supervised_children = Arc::clone(&self.supervised_children);
 
         server
-            .accept_with_session(move |request, _caller, session| {
+            .accept_with_session(move |request, caller, session| {
                 let children = Arc::clone(&children);
                 let base = base.clone();
                 let kuserd_bin = kuserd_bin.clone();
@@ -417,6 +427,7 @@ impl SystemDaemon {
                 let kctl_sessions = Arc::clone(&kctl_sessions);
                 let supervised_children = Arc::clone(&supervised_children);
                 async move {
+                    answers_only_its_own_user(&caller)?;
                     handle_sys_request(
                         request,
                         session,
@@ -434,6 +445,22 @@ impl SystemDaemon {
             })
             .await
     }
+}
+
+/// **kdeviced answers only its own OS user.** kdeviced, the `kuserd`s it spawns
+/// (with no change of user) and `kctl` are one user; on Unix a connection whose peer
+/// the kernel names as any other uid, or does not name, is refused at its first frame,
+/// before a challenge is issued or anything else is answered, and the connection
+/// closes (`kotton_wire::sys_ipc`). On Windows the pipe's caller is not checked here.
+/// The check is [`kotton_ipc::Caller::require_own_user`], the one the client side holds
+/// the server to as well.
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn answers_only_its_own_user(caller: &kotton_ipc::Caller) -> io::Result<()> {
+    #[cfg(unix)]
+    caller.require_own_user().map_err(|e| {
+        io::Error::new(e.kind(), format!("kdeviced answers no other user: {e}"))
+    })?;
+    Ok(())
 }
 
 // ── Supervised-child requests ─────────────────────────────────────────────────
@@ -612,8 +639,10 @@ async fn handle_operator_request(
                 // Any operator adds one, from the people with an account here.
                 DeviceRequest::SudoersAdd { did: new_did, person } => {
                     // The credential is a key the new operator can prove by
-                    // signing a nonce; anything else would be a row nobody can
-                    // ever authenticate as — or a name standing for a key.
+                    // signing the login message over a challenge
+                    // (`sys_ipc::login_message`); anything else would be a row
+                    // nobody can ever authenticate as — or a name standing for
+                    // a key.
                     let is_key = new_did
                         .parse::<Did>()
                         .ok()
@@ -766,7 +795,7 @@ async fn handle_sys_request(
         DeviceRequest::Ping => Ok(DeviceResponse::Pong),
 
         DeviceRequest::Challenge => {
-            let mut nonce_bytes = [0u8; 32];
+            let mut nonce_bytes = [0u8; LOGIN_CHALLENGE_LEN];
             rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
             let nonce_b64 = URL_SAFE_NO_PAD.encode(nonce_bytes);
             session_set(&session, DeviceSession::Challenged { nonce_b64: nonce_b64.clone() });
@@ -779,8 +808,11 @@ async fn handle_sys_request(
             signature,
             person,
         } => {
-            // 1. Retrieve the nonce issued to this connection.
-            let Some(stored_nonce_b64) = session_nonce(&session) else {
+            // 1. Spend the challenge issued to this connection: it is taken out
+            // here, before anything is checked, so every answer below — a
+            // refusal, `OperatorKeyKept`, or admission — leaves the connection
+            // with no challenge, and another `Authenticate` needs a new one.
+            let Some(stored_nonce_b64) = session_take_nonce(&session) else {
                 return Ok(DeviceResponse::AuthFailed {
                     reason: "no Challenge issued on this connection".into(),
                 });
@@ -793,7 +825,8 @@ async fn handle_sys_request(
                 });
             }
 
-            // 3. Decode raw nonce bytes for signature verification.
+            // 3. Decode the challenge and build the message its signature is over:
+            // the login tag, a zero byte, the challenge (`sys_ipc::login_message`).
             let nonce_raw = match URL_SAFE_NO_PAD.decode(&nonce) {
                 Ok(b) => b,
                 Err(_) => {
@@ -801,6 +834,10 @@ async fn handle_sys_request(
                         reason: "invalid nonce encoding".into(),
                     })
                 }
+            };
+            let message = match login_message(&nonce_raw) {
+                Ok(m) => m,
+                Err(e) => return Ok(DeviceResponse::AuthFailed { reason: e.to_string() }),
             };
 
             // 4. Decode the signature (must be exactly 64 bytes).
@@ -833,8 +870,9 @@ async fn handle_sys_request(
                 }
             };
 
-            // 6. Verify the Ed25519 signature over the raw nonce bytes.
-            if verifying_key.verify_strict(&nonce_raw, &ed_sig).is_err() {
+            // 6. Verify the Ed25519 signature, strictly, over the login message and
+            // nothing else: a signature over the bare challenge is refused here.
+            if verifying_key.verify_strict(&message, &ed_sig).is_err() {
                 return Ok(DeviceResponse::AuthFailed {
                     reason: "signature verification failed".into(),
                 });
@@ -898,7 +936,7 @@ async fn handle_sys_request(
                 }
             }
 
-            // 8. Commit authenticated state; consume the pending nonce.
+            // 8. Commit authenticated state (the challenge was spent at step 1).
             session_set(&session, DeviceSession::Operator(OperatorDid(did.clone())));
 
             // 9. Register this operator session in the kctl_sessions map.
@@ -1019,16 +1057,21 @@ mod tests {
     fn the_session_slot_carries_a_typed_principal() {
         let slot: Mutex<Option<DeviceSession>> = Mutex::new(None);
         // Fresh: no nonce, no principal.
-        assert!(session_nonce(&slot).is_none());
+        assert!(session_take_nonce(&slot).is_none());
         assert!(session_principal(&slot).is_none());
-        // A challenge is a state, read back as its nonce and nothing else.
+        // A challenge is a state, not a principal; taking it spends it.
         session_set(&slot, DeviceSession::Challenged { nonce_b64: "abc".into() });
-        assert_eq!(session_nonce(&slot).as_deref(), Some("abc"));
         assert!(session_principal(&slot).is_none(), "a challenge is not a principal");
+        assert_eq!(session_take_nonce(&slot).as_deref(), Some("abc"));
+        assert!(session_take_nonce(&slot).is_none(), "a challenge is taken once");
         // An operator and a child are different variants.
         session_set(&slot, DeviceSession::Operator(OperatorDid("did:key:zOp".into())));
         assert!(matches!(session_principal(&slot), Some(DeviceSession::Operator(_))));
-        assert!(session_nonce(&slot).is_none(), "an operator has no pending nonce");
+        assert!(session_take_nonce(&slot).is_none(), "an operator has no pending nonce");
+        assert!(
+            matches!(session_principal(&slot), Some(DeviceSession::Operator(_))),
+            "taking from an authenticated slot leaves it authenticated"
+        );
         session_set(&slot, DeviceSession::Child(ChildDid("did:key:zChild".into())));
         assert!(matches!(session_principal(&slot), Some(DeviceSession::Child(_))));
     }
@@ -1217,14 +1260,17 @@ mod tests {
             .expect("the door answers")
         }
 
-        /// A fresh connection, authenticated as `who` by signing its nonce.
+        /// A fresh connection, authenticated as `who` by signing the login
+        /// message over the challenge it is issued.
         async fn connect(&self, who: &Person) -> (Conn, DeviceResponse) {
             self.connect_for(who, None).await
         }
 
-        /// A fresh connection on which `key` signs its nonce, said to be the
-        /// own key of `person` when that is `Some` — as a person's daemon
-        /// speaks with the key it keeps in their sealed store.
+        /// A fresh connection that asks for a challenge and on which `who`'s key
+        /// signs the tagged login message over it (`sys_ipc::login_message`),
+        /// said to be the own key of `person` when that is `Some` — as a
+        /// person's daemon speaks with the key it keeps in their sealed store.
+        /// The `Authenticate` spends the challenge, whatever it is answered.
         async fn connect_for(&self, who: &Person, person: Option<&Person>) -> (Conn, DeviceResponse) {
             let conn: Conn = Arc::new(Mutex::new(None));
             let DeviceResponse::ChallengeIssued { nonce } = self.say(&conn, DeviceRequest::Challenge).await else {
@@ -1232,7 +1278,8 @@ mod tests {
             };
             let raw = URL_SAFE_NO_PAD.decode(&nonce).unwrap();
             use ed25519_dalek::Signer as _;
-            let signature = URL_SAFE_NO_PAD.encode(who.key.sign(&raw).to_bytes());
+            let message = login_message(&raw).expect("kdeviced issues a 32-byte challenge");
+            let signature = URL_SAFE_NO_PAD.encode(who.key.sign(&message).to_bytes());
             let answer = self
                 .say(
                     &conn,
@@ -1673,6 +1720,7 @@ mod tests {
             matches!(device.say(&at_ben, DeviceRequest::SudoersList).await, DeviceResponse::Unauthenticated),
             "a kept key stands for nothing"
         );
+        assert!(at_ben.lock().unwrap().is_none(), "keeping the key spent the challenge");
         // Proving it again changes nothing; a second, different key for Ben is refused.
         let (_, again) = device.connect_for(&ben_key, Some(&ben)).await;
         assert!(matches!(again, DeviceResponse::OperatorKeyKept { .. }), "{again:?}");
@@ -1722,5 +1770,143 @@ mod tests {
         assert_eq!(operators.len(), 1);
         assert_eq!(operators[0].did, ana_key.did);
         assert_eq!(operators[0].person.as_deref(), Some(ana.did.as_str()));
+    }
+
+    // ── The login signs a named message, and the door knows who is at it ─────
+
+    /// The answer to an `Authenticate` on `conn` carrying `signature` for `who`
+    /// over the challenge `conn` holds.
+    async fn authenticate_with(
+        device: &Device,
+        conn: &Conn,
+        who: &Person,
+        nonce: String,
+        signature: Vec<u8>,
+    ) -> DeviceResponse {
+        device
+            .say(
+                conn,
+                DeviceRequest::Authenticate {
+                    did: who.did.clone(),
+                    nonce,
+                    signature: URL_SAFE_NO_PAD.encode(signature),
+                    person: None,
+                },
+            )
+            .await
+    }
+
+    /// **A signature over the bare challenge is refused**: kdeviced verifies over
+    /// the tagged login message only, so the key's signature of the 32 challenge
+    /// bytes themselves admits nobody, on an empty device that would otherwise enrol
+    /// the first verified key.
+    #[tokio::test]
+    async fn a_signature_over_the_bare_challenge_is_refused() {
+        use ed25519_dalek::Signer as _;
+        let ana = person();
+        let device = device_with(&[&ana]).await;
+        let conn: Conn = Arc::new(Mutex::new(None));
+        let issued = device.say(&conn, DeviceRequest::Challenge).await;
+        let DeviceResponse::ChallengeIssued { nonce } = issued else {
+            panic!("no challenge: {issued:?}");
+        };
+        let raw = URL_SAFE_NO_PAD.decode(&nonce).unwrap();
+        assert_eq!(raw.len(), LOGIN_CHALLENGE_LEN, "the challenge is 32 bytes");
+        let bare = ana.key.sign(&raw).to_bytes().to_vec();
+        let answer = authenticate_with(&device, &conn, &ana, nonce, bare).await;
+        let refused = matches!(
+            &answer,
+            DeviceResponse::AuthFailed { reason } if reason == "signature verification failed"
+        );
+        assert!(refused, "{answer:?}");
+        let operators = operators_db::list(&device.db).await.unwrap();
+        assert!(operators.is_empty(), "a bare signature enrolled a key: {operators:?}");
+    }
+
+    /// **A challenge of another length is refused by the verifier too**: a
+    /// connection holding a 16-byte challenge, signed inside the tag as a client
+    /// would, does not authenticate.
+    #[tokio::test]
+    async fn a_challenge_of_another_length_is_refused_at_authenticate() {
+        use ed25519_dalek::Signer as _;
+        let ana = person();
+        let device = device_with(&[&ana]).await;
+        let conn: Conn = Arc::new(Mutex::new(None));
+        let short = [9u8; 16];
+        let nonce = URL_SAFE_NO_PAD.encode(short);
+        session_set(&conn, DeviceSession::Challenged { nonce_b64: nonce.clone() });
+        let mut tagged = kotton_wire::sys_ipc::LOGIN_TAG.as_bytes().to_vec();
+        tagged.push(0);
+        tagged.extend_from_slice(&short);
+        let signature = ana.key.sign(&tagged).to_bytes().to_vec();
+        let answer = authenticate_with(&device, &conn, &ana, nonce, signature).await;
+        let refused = matches!(
+            &answer,
+            DeviceResponse::AuthFailed { reason } if reason.contains("32 bytes")
+        );
+        assert!(refused, "{answer:?}");
+    }
+
+    /// **A challenge is spent by the `Authenticate` that names it, whatever the
+    /// answer.** After a refused `Authenticate`, a second one on the same
+    /// connection — even one correctly signed over the same challenge — is refused
+    /// for want of a challenge; after a fresh `Challenge` a correct one is admitted.
+    #[tokio::test]
+    async fn a_challenge_is_spent_by_the_authenticate_that_names_it() {
+        use ed25519_dalek::Signer as _;
+        let ana = person();
+        let device = device_with(&[&ana]).await;
+        let conn: Conn = Arc::new(Mutex::new(None));
+        let issued = |answer: DeviceResponse| match answer {
+            DeviceResponse::ChallengeIssued { nonce } => nonce,
+            other => panic!("no challenge: {other:?}"),
+        };
+        let signed = |nonce: &str| {
+            let raw = URL_SAFE_NO_PAD.decode(nonce).unwrap();
+            let message = login_message(&raw).expect("kdeviced issues a 32-byte challenge");
+            ana.key.sign(&message).to_bytes().to_vec()
+        };
+
+        let nonce = issued(device.say(&conn, DeviceRequest::Challenge).await);
+        let wrong = signed(&URL_SAFE_NO_PAD.encode([7u8; LOGIN_CHALLENGE_LEN]));
+        let first = authenticate_with(&device, &conn, &ana, nonce.clone(), wrong).await;
+        let refused = matches!(
+            &first,
+            DeviceResponse::AuthFailed { reason } if reason == "signature verification failed"
+        );
+        assert!(refused, "{first:?}");
+
+        let right = signed(&nonce);
+        let again = authenticate_with(&device, &conn, &ana, nonce, right).await;
+        let spent = matches!(
+            &again,
+            DeviceResponse::AuthFailed { reason }
+                if reason == "no Challenge issued on this connection"
+        );
+        assert!(spent, "a refused Authenticate left its challenge standing: {again:?}");
+        assert!(operators_db::list(&device.db).await.unwrap().is_empty());
+
+        let fresh = issued(device.say(&conn, DeviceRequest::Challenge).await);
+        let right = signed(&fresh);
+        let admitted = authenticate_with(&device, &conn, &ana, fresh, right).await;
+        assert!(matches!(admitted, DeviceResponse::Authenticated { .. }), "{admitted:?}");
+    }
+
+    /// **The door answers its own uid and no other**: a caller the kernel names as
+    /// this process's uid is answered; another uid, or a caller the kernel did not
+    /// name, is refused before any request is handled.
+    #[cfg(unix)]
+    #[test]
+    fn the_door_answers_its_own_uid_and_no_other() {
+        use kotton_ipc::{Caller, OsUserId};
+        let me = kotton_ipc::own_uid();
+        let at = |user| Caller { user, pid: Some(1), gid: None };
+        assert!(answers_only_its_own_user(&at(OsUserId::Uid(me))).is_ok());
+        let another = at(OsUserId::Uid(me.wrapping_add(1)));
+        let other = answers_only_its_own_user(&another).unwrap_err();
+        assert_eq!(other.kind(), io::ErrorKind::PermissionDenied);
+        assert!(other.to_string().contains("answers no other user"), "{other}");
+        let unnamed = answers_only_its_own_user(&Caller::anonymous());
+        assert!(unnamed.is_err(), "an unnamed caller was answered");
     }
 }

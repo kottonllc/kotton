@@ -366,7 +366,7 @@ mod tests {
     /// all three tests here failed `SUN_LEN` under a 104-byte one, and each run
     /// left its directory behind (`TASK-three-unit-tests-join-their-socket-onto-tmpdir-by-hand`).
     fn a_socket() -> (tempfile::TempDir, IpcEndpoint) {
-        let dir = tempfile::tempdir_in("/tmp").expect("a directory under /tmp for the socket");
+        let dir = crate::provider::os::tests::socket_dir();
         let endpoint = IpcEndpoint::UnixSocket(dir.path().join("sock"));
         (dir, endpoint)
     }

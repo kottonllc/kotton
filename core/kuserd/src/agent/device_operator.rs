@@ -12,8 +12,10 @@
 //! person holds can honestly be bound.
 //!
 //! **Speaking.** A connection to `kdeviced`'s socket, authenticated by this key
-//! signing the connection's nonce and naming the person it is theirs for
-//! (`Authenticate { person }`). What happens is `kdeviced`'s:
+//! signing the tagged login message over the connection's challenge
+//! (`kotton_wire::sys_ipc::login_message`) and naming the person it is theirs for
+//! (`Authenticate { person }`); that `Authenticate` spends the challenge, so each
+//! dial asks for its own. What happens is `kdeviced`'s:
 //!
 //! | the key is… | `kdeviced` answers | here |
 //! |---|---|---|
@@ -120,7 +122,10 @@ pub(crate) async fn speak_as(
 }
 
 async fn dial(at: &IpcEndpoint, key: &SigningKey, person: &str) -> Result<Standing, String> {
-    let mut client = IpcClient::<DeviceRequest, DeviceResponse>::connect(at.clone())
+    // kdeviced spawned this daemon as its own user: on Unix nothing is sent, and so
+    // nothing signed, unless the socket's server is this uid
+    // (`IpcClient::connect_to_own_user`, `kotton_wire::sys_ipc`).
+    let mut client = IpcClient::<DeviceRequest, DeviceResponse>::connect_to_own_user(at.clone())
         .await
         .map_err(|e| format!("this machine's kdeviced is not running, or cannot be reached: {e}"))?;
     let nonce = match send(&mut client, DeviceRequest::Challenge).await? {
@@ -130,8 +135,10 @@ async fn dial(at: &IpcEndpoint, key: &SigningKey, person: &str) -> Result<Standi
     let raw = URL_SAFE_NO_PAD
         .decode(&nonce)
         .map_err(|e| format!("kdeviced sent a nonce that does not decode: {e}"))?;
+    let message = kotton_wire::sys_ipc::login_message(&raw)
+        .map_err(|e| format!("kdeviced sent a challenge this does not sign: {e}"))?;
     let own = did_of(key);
-    let signature = URL_SAFE_NO_PAD.encode(key.sign(&raw).to_bytes());
+    let signature = URL_SAFE_NO_PAD.encode(key.sign(&message).to_bytes());
     let answer = send(
         &mut client,
         DeviceRequest::Authenticate {
