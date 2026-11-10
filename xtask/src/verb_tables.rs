@@ -36,6 +36,8 @@ pub fn tables() -> BTreeMap<String, Vec<(String, Is)>> {
             ("get", Is::Current),
             ("put", Is::Current),
             ("rm", Is::Current),
+            ("import", Is::Current),
+            ("export", Is::Current),
             ("open", Is::Gone("record get".into())),
         ]),
     );

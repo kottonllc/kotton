@@ -66,6 +66,7 @@ mod principal_sessions;
 mod project_records;
 mod quic_gateway;
 mod record_ops;
+mod record_files;
 mod relay_circuit;
 mod relay_presence;
 mod headless;

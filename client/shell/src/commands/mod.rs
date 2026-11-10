@@ -361,7 +361,7 @@ pub use drive::DriveCommand;
 #[cfg(feature = "cli")]
 pub use pin::PinCommand;
 #[cfg(feature = "cli")]
-pub use record::RecordCommand;
+pub use record::{ImportGone, RecordCommand};
 #[cfg(feature = "cli")]
 pub use status::StatusCommand;
 #[cfg(feature = "cli")]

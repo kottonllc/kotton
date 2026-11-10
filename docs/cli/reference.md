@@ -44,7 +44,6 @@ This document contains the help content for the `Kotton` command-line program.
 * [`Kotton records invite`↴](#Kotton-records-invite)
 * [`Kotton records import`↴](#Kotton-records-import)
 * [`Kotton records export`↴](#Kotton-records-export)
-* [`Kotton import`↴](#Kotton-import)
 * [`Kotton sync`↴](#Kotton-sync)
 * [`Kotton drive`↴](#Kotton-drive)
 * [`Kotton pin`↴](#Kotton-pin)
@@ -125,9 +124,8 @@ Kotton - Your data sovereignty platform
 * `device` — Manage the devices on your identity — add, join, list, revoke, name (six-digit pairing) — shares the REPL's `device` verb. `reset` is the exception: it starts this whole device fresh and needs no daemon
 * `schema` — Schema management (list, show, register)
 * `handler` — Handler registry (register, unregister, get, list, set-default)
-* `record` — Your records — list, get, put, rm, each by `--schema <nsid>` — the REPL's `record`, one parser for both
+* `record` — Your records — list, get, put, rm, import, export, each by `--schema <schema>` — the REPL's `record`, one parser for both
 * `records` — The project's records in a root its org owns — init, invite, import, export
-* `import` — Bring your history with you — read an export (.ics) into your own records
 * `sync` — Sync this device's drives, now — the REPL's `sync`, one parser for both
 * `drive` — Your drives — create, list, show, move, enrol — the REPL's `drive`, one parser for both
 * `pin` — What this device keeps of your drives — default, a drive or folder, list — the REPL's `pin`, one parser for both
@@ -635,7 +633,7 @@ Override the default handler for a schema
 
 ## `Kotton record`
 
-Your records — list, get, put, rm, each by `--schema <nsid>` — the REPL's `record`, one parser for both
+Your records — list, get, put, rm, import, export, each by `--schema <schema>` — the REPL's `record`, one parser for both
 
 **Usage:** `Kotton record [OPTIONS] [ARGS]...`
 
@@ -647,6 +645,8 @@ USAGE:
   record get --schema <schema> <id>        one record, as JSON on stdout
   record put --schema <schema> <json>      write a record; prints its id
   record rm --schema <schema> <id>         remove a record
+  record import --schema <schema> <path>   put each record of a file into your records
+  record export --schema <schema> <path>   write your records of a schema to a new file
 
 A record is a JSON object of a schema's fields, kept on this device and
 sealed into your first drive, `personal`, at each sync: a record put on one
@@ -665,18 +665,35 @@ removed here.
 makes a new record and prints the id it was given. `rm` removes it on every
 device at their next sync.
 
+`import` and `export` take a path on this computer, relative to the directory
+you run them in; it is read or written here and never sent to the daemon. The
+file is JSON Lines: one record per line, as `get` prints it, its `id` among
+its fields. `export` writes a new file, readable by you only, and will not
+write over one. `import` puts a line with an `id` by that id: a second import
+of the same file changes nothing; a line whose record has changed since
+replaces it; a record removed since comes back. A line without an `id` is a
+new record each time. An `.ics` file (by its extension) imports as calendar
+events, under the schema an `.ics` is read as:
+did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event
+It keeps an event's recurrence, zone and all-day flag, which the calendar
+schema has no field for.
+
 FLAGS:
-  --schema <schema>  the schema the record is of, `<publisher>/<name>`; every verb needs it
+  --schema <schema>  the schema the records are of, `<publisher>/<name>`; every verb needs it
   --json           `list`: the records the daemon answered, as JSON on stdout
 
-Exit 0 when done, 1 when refused or when no record has the id (the reason on
-stderr), 2 for a line that is not one of the above.
+Exit 0 when done, 1 when refused, when no record has the id, or when a file
+cannot be read or written (the reason on stderr), 2 for a line that is not one
+of the above.
 
 EXAMPLES:
   record put --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes '{"title":"milk","body":"two pints"}'
   record list --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes
   record get --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>
   record rm --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>
+  record export --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes notes.jsonl
+  record import --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes notes.jsonl
+  record import --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event calendar.ics
 
 RETIRED:
   record open              gone: type `record get`
@@ -684,7 +701,7 @@ RETIRED:
 
 ###### **Arguments:**
 
-* `<ARGS>` — Arguments: `list --schema <nsid> [--json]` | `get --schema <nsid> <id>` | `put --schema <nsid> <json>` | `rm --schema <nsid> <id>`
+* `<ARGS>` — Arguments: `list --schema <schema> [--json]` | `get --schema <schema> <id>` | `put --schema <schema> <json>` | `rm --schema <schema> <id>` | `import --schema <schema> <path>` | `export --schema <schema> <path>`
 
 ###### **Options:**
 
@@ -771,22 +788,6 @@ Write every row of the project's root back to a directory, one file per record
 
 * `--root <ROOT>` — The project's root (defaults to KOTTON_RECORDS_ROOT)
 * `--user <USER>` — Identity to act as (defaults to the active identity / KOTTON_USER)
-
-
-
-## `Kotton import`
-
-Bring your history with you — read an export (.ics) into your own records
-
-**Usage:** `Kotton import --user <USER> <PATH>`
-
-###### **Arguments:**
-
-* `<PATH>` — The export to read: a `.ics` calendar file
-
-###### **Options:**
-
-* `--user <USER>` — Identity to import into (defaults to the active identity / KOTTON_USER)
 
 
 

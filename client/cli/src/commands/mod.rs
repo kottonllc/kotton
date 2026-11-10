@@ -10,7 +10,6 @@ mod grant;
 mod handler;
 pub mod id;
 mod recover;
-mod import;
 mod ipc;
 mod login;
 mod message;
@@ -30,7 +29,6 @@ pub use frost_org::FrostOrgCommand;
 pub use grant::GrantCommand;
 pub use handler::HandlerCommand;
 pub use id::IdCommand;
-pub use import::ImportCommand;
 pub use ipc::IpcCommand;
 pub use login::LoginCommand;
 pub use message::MessageCommand;
@@ -146,21 +144,28 @@ pub enum Commands {
     /// Handler registry (register, unregister, get, list, set-default)
     #[command(subcommand)]
     Handler(HandlerCommand),
-    /// Your records — list, get, put, rm, each by `--schema <nsid>` — the REPL's `record`, one parser for both
+    /// Your records — list, get, put, rm, import, export, each by `--schema <schema>` — the REPL's `record`, one parser for both
     #[command(after_help = shell_help("record"))]
     Record {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        /// Arguments: `list --schema <nsid> [--json]` | `get --schema <nsid> <id>` | `put --schema <nsid> <json>` | `rm --schema <nsid> <id>`
+        /// Arguments: `list --schema <schema> [--json]` | `get --schema <schema> <id>` | `put --schema <schema> <json>` | `rm --schema <schema> <id>` | `import --schema <schema> <path>` | `export --schema <schema> <path>`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },
     /// The project's records in a root its org owns — init, invite, import, export
     #[command(subcommand)]
     Records(RecordsCommand),
-    /// Bring your history with you — read an export (.ics) into your own records
-    Import(ImportCommand),
+    /// Gone for `record import`: refused, with the line that reads an `.ics` now — the REPL's
+    /// `import`, one refusal for both
+    #[command(hide = true)]
+    Import {
+        /// Refused whatever they are, `--user` among them: the word is refused before any
+        /// session, so it acts as no one
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Sync this device's drives, now — the REPL's `sync`, one parser for both
     #[command(after_help = shell_help("sync"))]
     Sync {

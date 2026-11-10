@@ -3852,7 +3852,7 @@ impl UserRequest {
             // that holds every user's content key.
             //
             // Nothing legitimate is lost today — the only caller is
-            // `kotton import <path>` at the machine. The verb that a browser or
+            // `kotton record import <path>` at the machine. The verb that a browser or
             // a phone would eventually want is *upload this to my node*, which
             // is a different question with its own consent, not this one widened.
             Self::Import { .. } => Local,
