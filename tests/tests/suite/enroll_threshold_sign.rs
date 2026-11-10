@@ -12,9 +12,11 @@
 //!      loopback — in production this is presence/relay) and coordinates a
 //!      threshold signature over a message: E co-signs with N over the operational
 //!      peer channel. The round is driven in process
-//!      (`common::threshold_sign_in_process`), since no request on a daemon's socket
-//!      asks for a signature over bytes; N answers it over the peer channel as any
-//!      co-signer does.
+//!      (`common::threshold_sign_in_process`): no request on any door of a daemon's
+//!      build asks the person's group key to sign bytes the caller supplies, and the
+//!      round is what the `test-support` features of kotton-peer and kuserd compile.
+//!      N answers it over the peer channel through the `FrostSignRound` responder,
+//!      which the suite's daemons are built with.
 //!   4. The 64-byte aggregate verifies as a standard Ed25519 signature under the
 //!      group DID (the DID-preserving split keeps it equal to alice's user DID).
 //!

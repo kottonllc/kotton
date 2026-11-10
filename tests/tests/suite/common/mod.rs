@@ -699,8 +699,10 @@ pub async fn lock_as_a_restart_would(daemon: &DeviceDaemon, user_id: &str) {
 /// In process, through `kotton_peer::daemon::nodes::threshold_sign`, with what the
 /// daemon itself would hand it: its dialer, the key domain it declares, the person's
 /// resident store for the membership set, its machine database for the paired nodes,
-/// and its keychain. No request on the daemon's socket asks for a signature over bytes,
-/// so a test of the round reaches it here. `Err` is what the round said instead.
+/// and its keychain. No request on any door of a daemon's build asks the person's group
+/// key to sign bytes the caller supplies; the round, coordinator and `FrostSignRound`
+/// responder, is what the `test-support` features of kotton-peer and kuserd compile, so
+/// a test of it reaches it here. `Err` is what the round said instead.
 pub async fn threshold_sign_in_process(
     daemon: &DeviceDaemon,
     user_id: &str,

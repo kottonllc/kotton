@@ -480,13 +480,14 @@ pub async fn refresh_observed_peer_address(
 /// membership record — which is precisely what excludes a `BlindStorage` (no
 /// share) from the quorum.
 ///
-/// **Compiled only under `test-support`.** The identity signs only objects the daemon
-/// builds and can name, so no request on any socket hands this function bytes and no
-/// daemon's build contains it. The integration suite turns the feature on, to drive a
-/// distributed round between two enrolled daemons in process, over the peer channel
-/// and the `FrostSignRound` responder each co-signer serves. Each error says why no
-/// signature came: the store is locked, this node holds no share, a co-signer could
-/// not be reached, or the round failed.
+/// **Compiled only under `test-support`: this is the test-only round.** No request on
+/// any door of a daemon's build asks the person's group key to sign bytes the caller
+/// supplies: this coordinator is not in a daemon's build, and neither is the
+/// `FrostSignRound` responder that answers it (kuserd's `test-support`). The
+/// integration suite turns both features on, to drive a distributed round between two
+/// enrolled daemons in process, over the peer channel and the responder each
+/// co-signer serves. Each error says why no signature came: the store is locked, this
+/// node holds no share, a co-signer could not be reached, or the round failed.
 #[cfg(feature = "test-support")]
 pub async fn threshold_sign(
     // Not the machine handle: this wants a way to dial co-signers and the key

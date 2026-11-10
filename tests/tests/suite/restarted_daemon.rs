@@ -351,7 +351,7 @@ async fn the_window_closing_closes_what_the_account_had_open() {
 /// this is the half that asks about the order
 /// (`TASK-a-locked-node-reports-no-co-signers-rather-than-that-it-is-locked`).
 #[tokio::test]
-async fn a_restarted_daemon_answers_a_signing_request_with_the_lock_first() {
+async fn a_restarted_daemon_refuses_a_threshold_round_with_the_lock_first() {
     let mut env = TestEnv::spawn().await;
     a_person_with_a_passphrase(&mut env).await;
 

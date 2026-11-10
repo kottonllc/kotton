@@ -8350,6 +8350,7 @@ dependencies = [
  "kotton-peer",
  "kotton-secret",
  "kotton-store",
+ "kuserd",
  "libc",
  "libm",
  "libsqlite3-sys",

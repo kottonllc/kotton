@@ -12,7 +12,8 @@ build = "build.rs"
 [dev-dependencies]
 workspace-hack = { path = "../tools/workspace-hack" }
 kotton-pty-drive = { path = "../tools/pty-drive" }
-kuserd         = { path = "../core/kuserd" }
+# `test-support`: the `FrostSignRound` responder each in-process co-signer serves.
+kuserd         = { path = "../core/kuserd", features = ["test-support"] }
 kvaultd        = { path = "../core/kvaultd" }
 kdeviced       = { path = "../core/kdeviced" }
 kotton     = { path = "../client/kotton-client" }

@@ -1047,10 +1047,17 @@ pub enum UserRequest {
     /// signing package). The co-signer's FROST share and its round-1 nonces never
     /// leave its process — only a commitment and a signature share are returned.
     ///
-    /// This is a **peer-only** request (served via the QUIC peer listener, like
-    /// file/record sync); it is intentionally `Remote`-eligible.
+    /// Its tier is `Remote`, so it decodes as a
+    /// [`RemoteRequest`](crate::ipc::remote_request::RemoteRequest), but the user door
+    /// does not answer it: `kuserd`'s dispatch refuses it on every connection, as it
+    /// refuses the peer-only sync notifications. Only the peer acceptor's
+    /// [`PeerRequest::FrostSignRound`](crate::ipc::PeerRequest::FrostSignRound)
+    /// reaches a responder, and that responder is compiled under kuserd's
+    /// `test-support` feature only, with the one coordinator of the round
+    /// (`kotton_peer::daemon::nodes::threshold_sign`, under kotton-peer's). A
+    /// daemon's build answers the round with a refusal.
     ///
-    /// Answered with `FrostSignReply`.
+    /// Answered with `FrostSignReply` where it is answered.
     FrostSignRound {
         user_id: String,
         /// JSON of the runtime `FrostRound` message.
@@ -4552,6 +4559,27 @@ mod trust_origin_tests {
         assert!(refused.to_string().contains("unknown variant `ApplyRecordChangeset`"), "{refused}");
         assert!(serde_json::from_value::<RemoteRequest>(pushed.clone()).is_err(), "{pushed} still decodes remotely");
         assert!(!REMOTE_ELIGIBLE.contains(&"ApplyRecordChangeset"));
+    }
+
+    /// **The person's key signs only an object the signer built and can name.**
+    /// The verb that handed the daemon a message for the identity's group key to
+    /// sign (`ThresholdSign`) is retired, so a request by that name does not decode
+    /// at the user door, as a `UserRequest`, nor as a `RemoteRequest`.
+    #[test]
+    fn a_message_for_the_identity_to_sign_is_not_a_request() {
+        use crate::ipc::remote_request::RemoteRequest;
+        let asked = serde_json::json!({ "ThresholdSign": {
+            "user_id": "alice",
+            "message_hex": "00",
+        } });
+        let refused = serde_json::from_value::<UserRequest>(asked.clone())
+            .expect_err("ThresholdSign still decodes");
+        assert!(refused.to_string().contains("unknown variant `ThresholdSign`"), "{refused}");
+        assert!(
+            serde_json::from_value::<RemoteRequest>(asked.clone()).is_err(),
+            "{asked} still decodes remotely"
+        );
+        assert!(!REMOTE_ELIGIBLE.contains(&"ThresholdSign"));
     }
 
     /// **No request makes a node a drive on the caller's word** (#80). `PeerAdd`
