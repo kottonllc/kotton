@@ -96,11 +96,28 @@ noun's issue; `log_pin::set` on the device's database is the handle. Pinned, the
 rides the record log to `personal` like any record, its rows from before the pin among them.
 Unpinned again, no new row leaves; a row already logged stays in the drive and nothing is
 retracted. A row of it from another of the person's devices, one that pinned its log, is merged
-here as any row is. **Writing a log record starts no pass.** The store wakes the sync engine
-itself after an insert or a delete of any schema but `access-log`
-(`SqliteRecordStore::with_write_signal`, `replication::a_write_wakes_a_pass`), and the engine's
-filesystem watcher no longer wakes on a change to `records.db`, which it could not tell apart by
-schema; so a pinned log rides the next pass that runs anyway and adds no rhythm a host can read.
+here as any row is.
+
+**Writing a log record starts no pass**, and tells no one it was written. The store wakes the
+sync engine itself after an insert or a delete of any schema but `access-log`
+(`SqliteRecordStore::with_write_signal`, `replication::a_write_wakes_a_pass`), and the wake is
+kept while a pass runs, so writes during a pass are followed by exactly one more
+(`kotton_sync::engine::SyncWake::wake_pending`). The engine's filesystem watcher, which cannot
+tell one schema's write from another's, neither wakes on a change to `records.db` or the three
+files SQLite keeps beside it nor sends a `VfsWatch` frame for one: they are not files of any
+drive's tree. Before that a frame went to every subscriber for each record write, and the sync
+sidecar, which runs on any device with a paired node and syncs on every frame, started a pass
+for each, an access-log record's among them; a session at `Remote` read the timestamps. Now a
+pinned log rides the next pass that runs anyway and adds no rhythm a host can read.
+
+A pass's own writes wake no pass: the engine reads and writes through
+`SqliteRecordStore::without_write_signal` (`kotton_sync::engine::records_for_a_pass`), so the
+whole-keeper claim a pass makes or withdraws and a pin setting it moves out of the drive do not
+arm the next pass. Nothing else that changes only `records.db` wakes one either, and none
+should: a merge of rows from the log, which a pass makes; a table's creation, or its migration;
+the cleanup of old tombstones; and the split and respelling of old tables when the store is
+opened. None is a row the person or an app wrote, and the rows they touch were logged already
+or ride the next pass that runs anyway.
 
 A row of `secret` reaches a device only as every record does, in the record log of
 `personal`, sealed under the person's `K_log`, which their own devices alone hold: a member of

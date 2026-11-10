@@ -218,6 +218,32 @@ impl SyncWake {
     pub fn wake(&self) {
         self.0.notify_waiters();
     }
+
+    /// Wake the background loop, or, when it is in a pass and so waits on nothing, keep the
+    /// wake for the end of that pass: the loop's next wait ([`SyncEngine::next_turn`]) then
+    /// returns at once. Any number of these during one pass keep one wake, so they are
+    /// followed by exactly one more pass.
+    ///
+    /// What a record write calls (kotton #450). [`Self::wake`] keeps nothing
+    /// (`notify_waiters`), so a write landing while a pass ran used to wake nobody and wait
+    /// for the periodic tick; until then the sync sidecar's pass on every change to
+    /// `records.db` hid that, and the filesystem watcher no longer tells a subscriber of that
+    /// file ([`spawn_fs_watcher`]). The pass's own writes call nothing: it writes through a
+    /// store with no signal ([`records_for_a_pass`]), so this cannot re-arm the loop forever.
+    pub fn wake_pending(&self) {
+        self.0.notify_one();
+    }
+}
+
+/// What ended the background loop's wait between passes ([`SyncEngine::next_turn`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Turn {
+    /// The periodic tick: a pass runs.
+    Tick,
+    /// A wake, kept or not: a pass runs.
+    Woken,
+    /// A hand-over still waits to enter a log: it is packed again, and no pass runs.
+    HandOverRetry,
 }
 
 /// Central sync scheduler.  Wrap in `Arc` and share across the daemon.
@@ -756,7 +782,7 @@ impl SyncEngine {
         // is the retention window, not a switch: segments newer than it survive.
         // This pass is best-effort and returns nothing, so a store that will not
         // open is logged and skipped rather than propagated.
-        let record_store = match self.resources.record_store(user_id) {
+        let record_store = match records_for_a_pass(&*self.resources, user_id) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, user_id, "maintenance: record store unavailable");
@@ -805,33 +831,46 @@ impl SyncEngine {
             ticker.tick().await; // discard the immediate first tick
 
             loop {
-                // Registered before the hand-over check, so a hand-over that
-                // lands between the two still wakes this wait.
-                let woken = self.notify.notified();
-                tokio::pin!(woken);
-                woken.as_mut().enable();
-                let waiting = self.any_hand_over_waiting();
-                let retry = tokio::select! {
-                    _ = ticker.tick() => false,
-                    _ = &mut woken => {
-                        tracing::debug!("sync_engine: triggered by background wake");
-                        false
-                    }
-                    _ = tokio::time::sleep(Duration::from_millis(HAND_OVER_RETRY_MILLIS)), if waiting => true,
-                };
+                let turn = self.next_turn(async {
+                    ticker.tick().await;
+                })
+                .await;
                 // A hand-over goes into the log before the pass dials anyone:
                 // the pass in front of it can be a slow peer, and the person
                 // is watching the sheet. The pass then carries the packed copy.
                 if self.any_hand_over_waiting() {
                     self.maintain_quiet_users().await;
                 }
-                if retry {
+                if turn == Turn::HandOverRetry {
                     continue;
                 }
                 self.run_background_pass().await;
                 self.maintain_quiet_users().await;
             }
         });
+    }
+
+    /// The background loop's wait between passes: until `tick` (the periodic tick), a wake,
+    /// or, while a hand-over waits to enter a log, its retry. A wake kept while the loop was
+    /// in a pass ([`SyncWake::wake_pending`]) is taken here at once, and once.
+    ///
+    /// Public so a host's tests can hold the wait the loop holds and see, without a clock,
+    /// whether a write left a pass pending: poll it once, with a `tick` that never ends.
+    pub async fn next_turn(&self, tick: impl std::future::Future<Output = ()>) -> Turn {
+        // Registered before the hand-over check, so a hand-over that lands between
+        // the two still wakes this wait.
+        let woken = self.notify.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
+        let waiting = self.any_hand_over_waiting();
+        tokio::select! {
+            _ = tick => Turn::Tick,
+            _ = &mut woken => {
+                tracing::debug!("sync_engine: triggered by background wake");
+                Turn::Woken
+            }
+            _ = tokio::time::sleep(Duration::from_millis(HAND_OVER_RETRY_MILLIS)), if waiting => Turn::HandOverRetry,
+        }
     }
 
     /// Evict completed job entries older than 120 s, keeping at most 256 total.
@@ -1159,7 +1198,9 @@ pub async fn sync_mount_with_records(
         .user_store(user_id)
         .ok_or_else(|| anyhow::anyhow!("user '{user_id}' not found (session locked?)"))?;
 
-    let store = resources.record_store(user_id)?;
+    // Through a handle with no write signal: this pass's own writes (its whole-keeper
+    // claims, a setting moved out of the drive) do not wake the engine for another.
+    let store = records_for_a_pass(resources, user_id)?;
     // Resolving which mount carries the record log is the daemon's: it is the
     // only side holding both the user's store and the record domain. The
     // wrappers that used to do it were forwarding and nothing else (RFC-0080
@@ -1233,11 +1274,23 @@ pub async fn sync_mount_with_records(
     Ok(result)
 }
 
-/// What a pass keeps of the drive `remote` reaches, for `mount` (kotton #55):
-/// `None` — every byte, as before pins — for any mount but `local`, the tree a
-/// device keeps of the person's first drive and the one pins are over today,
-/// and for a pass whose settings cannot be read. Else the settings resolved
-/// for this device, within the budget its mount for that drive records.
+/// The record store a pass, or maintenance, reads and writes `user_id`'s records through:
+/// the host's, the same database through the same connection, with no write signal
+/// (`kotton_record::SqliteRecordStore::without_write_signal`).
+///
+/// **The engine's own writes do not wake the engine** (kotton #450). The host's store wakes it
+/// after a person's or an app's write ([`SyncWake::wake_pending`]), and that wake is kept
+/// while a pass runs; a pass writes too (`pins::claim` makes or withdraws this device's
+/// `keeps-whole` claim, `pins::migrate` deletes a setting it moved out of the drive), so
+/// through the host's store each pass that wrote would arm the next. A merge of rows from the
+/// log signals nothing on either handle.
+pub fn records_for_a_pass(
+    resources: &dyn crate::SyncHost,
+    user_id: &str,
+) -> anyhow::Result<Arc<kotton_record::SqliteRecordStore>> {
+    Ok(Arc::new(resources.record_store(user_id)?.without_write_signal()))
+}
+
 /// Where `user_id`'s access log goes on a pass of `mount`: this device's own setting
 /// (`kotton_device::users::log_pin`), and kept here when the device's database is not open.
 async fn access_log_pin(
@@ -1251,6 +1304,11 @@ async fn access_log_pin(
     }
 }
 
+/// What a pass keeps of the drive `remote` reaches, for `mount` (kotton #55):
+/// `None` — every byte, as before pins — for any mount but `local`, the tree a
+/// device keeps of the person's first drive and the one pins are over today,
+/// and for a pass whose settings cannot be read. Else the settings resolved
+/// for this device, within the budget its mount for that drive records.
 async fn keep_for(
     runtime: &DeviceRuntime,
     resources: &dyn crate::SyncHost,
@@ -1409,8 +1467,15 @@ async fn ensure_packed_for_peer(
 
 /// Spawn a filesystem watch task that calls [`SyncEngine::wake_background`]
 /// whenever a file is created, modified, or deleted under `<base_dir>/users/`,
-/// but a person's record database ([`a_change_wakes_a_pass`]).
-/// It also broadcasts a [`VfsChangeFrame`] to all active `VfsWatch` subscribers.
+/// and broadcasts a [`VfsChangeFrame`] for it to all active `VfsWatch` subscribers.
+///
+/// **A person's record database is neither** (kotton #450): a change to `records.db` or the
+/// three files SQLite keeps beside it wakes no pass ([`a_change_wakes_a_pass`]) and is
+/// broadcast to no subscriber ([`is_a_record_db_file`]). Those files are not files of any
+/// drive's tree, and a frame per change to them was a timestamp per record write, an
+/// access-log record's among them, to every `VfsWatch` subscriber: a session at `Remote`, and
+/// the sync sidecar, which syncs on any frame. A record write wakes a pass by its schema
+/// instead, from the store ([`SyncWake::wake_pending`]).
 ///
 /// The watcher runs in a blocking thread (as required by the `notify` crate)
 /// and only wakes the tokio runtime when events arrive.
@@ -1509,22 +1574,35 @@ impl Drop for FsWatcherHandle {
 /// and the three it keeps beside it.
 const RECORD_DB_FILES: [&str; 4] = ["records.db", "records.db-wal", "records.db-shm", "records.db-journal"];
 
-/// Return `true` when a change to `paths` under `watch_dir` (`<base>/users/`) wakes the
-/// background pass: a change to anything but a person's record database does.
+/// Return `true` when `path` is a file of a person's record database: one of
+/// [`RECORD_DB_FILES`] directly in a person's directory under one of `watch_dirs`, each a
+/// spelling of `<base>/users/` (the path as given, and the path resolved, since a backend may
+/// report either). A file of that name in a drive's tree is a file of the tree.
+pub fn is_a_record_db_file(watch_dirs: &[&std::path::Path], path: &std::path::Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()).is_some_and(|n| RECORD_DB_FILES.contains(&n))
+        && path.parent().and_then(std::path::Path::parent).is_some_and(|d| watch_dirs.contains(&d))
+}
+
+/// Return `true` when a change to `paths` under `watch_dirs` (`<base>/users/`, as
+/// [`is_a_record_db_file`] reads it) wakes the background pass: a change to anything but a
+/// person's record database does.
 ///
 /// **A record write wakes a pass by its schema, not by the file** (kotton #450). The watcher
 /// sees `records.db` change and cannot tell a note's write from an access-log record's, so
 /// waking on it made every log record start a pass, and a pinned log a rhythm a host could
 /// read. The store wakes the engine itself instead, after an insert or delete of any schema
 /// but `access-log` (`kotton_record::SqliteRecordStore::with_write_signal`, given the
-/// engine's wake by `kuserd`'s record store cache), and a log record rides the next pass
-/// that runs anyway. An event naming no path wakes, as every event did before.
-pub fn a_change_wakes_a_pass(watch_dir: &std::path::Path, paths: &[std::path::PathBuf]) -> bool {
-    let is_record_db = |p: &std::path::PathBuf| {
-        p.file_name().and_then(|n| n.to_str()).is_some_and(|n| RECORD_DB_FILES.contains(&n))
-            && p.parent().and_then(std::path::Path::parent) == Some(watch_dir)
-    };
-    paths.is_empty() || !paths.iter().all(is_record_db)
+/// engine's [`SyncWake::wake_pending`] by `kuserd`'s record store cache), and a log record
+/// rides the next pass that runs anyway. An event naming no path wakes, as every event did
+/// before.
+///
+/// So nothing else that changes only `records.db` wakes a pass either, and none should: a
+/// merge of rows from the log, which a pass makes; a table's creation or migration; the
+/// cleanup of old tombstones; and the split and respelling of old tables when the store is
+/// opened. None is a write of a row the person or an app made; the rows they touch were
+/// already logged, or ride the next pass that runs anyway.
+pub fn a_change_wakes_a_pass(watch_dirs: &[&std::path::Path], paths: &[std::path::PathBuf]) -> bool {
+    paths.is_empty() || !paths.iter().all(|p| is_a_record_db_file(watch_dirs, p))
 }
 
 pub fn spawn_fs_watcher(
@@ -1554,6 +1632,12 @@ pub fn spawn_fs_watcher(
             };
         }
     }
+
+    // Resolved once, now the directory exists, so a backend that reports resolved paths (a
+    // symlinked base, macOS's `/private` under `/var`) is matched too. Should it not resolve
+    // (the directory removed under us), the path as given is the only spelling matched; the
+    // watch below then fails on that directory and says so.
+    let resolved_dir = std::fs::canonicalize(&watch_dir).ok().filter(|r| *r != watch_dir);
 
     let (ready_tx, ready_rx) = watch::channel(FsWatchState::Starting);
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1589,6 +1673,8 @@ pub fn spawn_fs_watcher(
         tracing::info!(path = %watch_dir.display(), "fs_watcher: watching for changes");
         // The same fact the line above tells an operator, told to subscribers.
         let _ = ready_tx.send(FsWatchState::Watching);
+        let watch_dirs: Vec<&std::path::Path> =
+            std::iter::once(watch_dir.as_path()).chain(resolved_dir.as_deref()).collect();
 
         loop {
             // A timed receive rather than `for … in rx`, so the thread can notice
@@ -1613,7 +1699,7 @@ pub fn spawn_fs_watcher(
                         event.kind,
                         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
                     ) {
-                        if a_change_wakes_a_pass(&watch_dir, &event.paths) {
+                        if a_change_wakes_a_pass(&watch_dirs, &event.paths) {
                             tracing::debug!(?event.kind, "fs_watcher: change detected, waking sync engine");
                             engine.wake_background();
                         }
@@ -1628,7 +1714,11 @@ pub fn spawn_fs_watcher(
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs();
-                        for path in &event.paths {
+                        // No frame for a person's record database: its files are not
+                        // files of any drive's tree, and a frame per record write would
+                        // tell a `VfsWatch` subscriber, at `Remote` and the sync sidecar
+                        // among them, when each access-log record was written (kotton #450).
+                        for path in event.paths.iter().filter(|p| !is_a_record_db_file(&watch_dirs, p)) {
                             let _ = vfs_tx.send((
                                 path.to_string_lossy().into_owned(),
                                 kind.clone(),
@@ -2012,19 +2102,72 @@ mod fs_watch_readiness_tests {
     /// **A change to a person's record database wakes no pass** (kotton #450): the watcher
     /// cannot tell an access-log record's write from a note's, so the store wakes the engine by
     /// schema instead. A change to the person's tree wakes, as does an event naming both, or
-    /// none, and a file named `records.db` anywhere but beside a person's other databases.
+    /// none, and a file named `records.db` anywhere but beside a person's other databases. The
+    /// directory is matched as given and as resolved, since a backend may report either.
     #[test]
     fn a_change_to_the_record_database_alone_wakes_no_pass() {
         let users = std::path::Path::new("/base/users");
+        let resolved = std::path::Path::new("/private/base/users");
+        let dirs = [users, resolved];
         let at = |p: &str| users.join(p);
-        for quiet in ["alice/records.db", "alice/records.db-wal", "alice/records.db-shm", "alice/records.db-journal"] {
-            assert!(!a_change_wakes_a_pass(users, &[at(quiet)]), "{quiet} woke a pass");
+        for quiet in RECORD_DB_FILES {
+            let quiet = format!("alice/{quiet}");
+            assert!(!a_change_wakes_a_pass(&dirs, &[at(&quiet)]), "{quiet} woke a pass");
+            assert!(!a_change_wakes_a_pass(&dirs, &[resolved.join(&quiet)]), "{quiet}, resolved");
         }
-        assert!(!a_change_wakes_a_pass(users, &[at("alice/records.db"), at("alice/records.db-wal")]));
-        assert!(a_change_wakes_a_pass(users, &[at("alice/store/files/a.txt")]));
-        assert!(a_change_wakes_a_pass(users, &[at("alice/records.db"), at("alice/store/files/a.txt")]));
-        assert!(a_change_wakes_a_pass(users, &[at("alice/store/files/records.db")]), "a file of the tree");
-        assert!(a_change_wakes_a_pass(users, &[]));
+        assert!(a_change_wakes_a_pass(&[users], &[resolved.join("alice/records.db")]), "unresolved");
+        assert!(!a_change_wakes_a_pass(&dirs, &[at("alice/records.db"), at("alice/records.db-wal")]));
+        assert!(a_change_wakes_a_pass(&dirs, &[at("alice/store/files/a.txt")]));
+        assert!(a_change_wakes_a_pass(&dirs, &[at("alice/records.db"), at("alice/store/files/a.txt")]));
+        assert!(a_change_wakes_a_pass(&dirs, &[at("alice/store/files/records.db")]), "a file of the tree");
+        assert!(a_change_wakes_a_pass(&dirs, &[]));
+    }
+
+    /// **No `VfsWatch` subscriber is told of a change to a person's record database**
+    /// (kotton #450): its four files are not files of any drive's tree, and a frame per
+    /// change was a timestamp per record write, the access log's among them, to a session at
+    /// `Remote` and to the sync sidecar, which syncs on any frame. The broadcast receiver the
+    /// daemon's `VfsWatch` handler reads yields no frame for `records.db`, `-wal`, `-shm` or
+    /// `-journal`, written straight into a person's directory, and yields one for a file
+    /// written beside them after them. The watcher reads one inotify queue in order, so every
+    /// frame for the four arrives before the first for the file beside them, or never: the
+    /// frames before it are all the test needs to read. The deadline is a hang guard.
+    #[tokio::test]
+    async fn no_subscriber_is_told_of_a_change_to_the_record_database() {
+        let (dir, _rt, engine, _resources) = engine().await;
+        let person = dir.path().join("users").join("alice");
+        std::fs::create_dir_all(&person).unwrap();
+        let (vfs_tx, mut vfs_rx) = tokio::sync::broadcast::channel(1024);
+        let handle = spawn_fs_watcher(dir.path().to_owned(), Arc::clone(&engine), vfs_tx);
+        let mut state = handle.state();
+        tokio::time::timeout(std::time::Duration::from_secs(30), wait_until_watching(&mut state))
+            .await
+            .expect("the watcher registers")
+            .expect("the watch is up");
+
+        for name in RECORD_DB_FILES {
+            std::fs::write(person.join(name), b"a page of the record database").unwrap();
+        }
+        let beside = person.join("beside-the-records.txt");
+        std::fs::write(&beside, b"an ordinary file").unwrap();
+
+        let beside = beside.to_string_lossy().into_owned();
+        let mut before = Vec::new();
+        loop {
+            let (path, _, _) = tokio::time::timeout(std::time::Duration::from_secs(30), vfs_rx.recv())
+                .await
+                .expect("a frame for the file beside the record database")
+                .expect("the broadcast stays open");
+            if path == beside {
+                break;
+            }
+            before.push(path);
+        }
+        assert!(
+            !before.iter().any(|p| RECORD_DB_FILES.iter().any(|n| p.ends_with(&format!("/{n}")))),
+            "a subscriber was told of the record database: {before:?}"
+        );
+        drop(handle);
     }
 
     /// The watcher says when it is up.
@@ -2114,6 +2257,102 @@ mod fs_watch_readiness_tests {
             settled.is_ok(),
             "a subscription must never wait forever on a watcher that has stopped"
         );
+    }
+}
+
+#[cfg(test)]
+mod write_wake_tests {
+    //! **A record write during a pass is followed by exactly one more pass** (kotton #450).
+    //! Every test holds the wait the background loop holds ([`SyncEngine::next_turn`]) and
+    //! polls it once with a tick that never comes: ready is a pass the loop would run, and
+    //! pending is none. Nothing sleeps and nothing is timed; between two waits is where the
+    //! loop is while it runs a pass.
+    use super::maintenance_tests::engine;
+    use super::*;
+    use kotton_record::RecordStore as _;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    /// Poll `turn` once.
+    fn once<F: Future<Output = Turn>>(turn: std::pin::Pin<&mut F>) -> Option<Turn> {
+        match turn.poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(t) => Some(t),
+            Poll::Pending => None,
+        }
+    }
+
+    /// What the loop's next wait does now.
+    fn next(engine: &SyncEngine) -> Option<Turn> {
+        let turn = engine.next_turn(std::future::pending());
+        tokio::pin!(turn);
+        once(turn)
+    }
+
+    /// A record store signalling the engine as `kuserd`'s record store cache has it.
+    async fn signalled(engine: &SyncEngine) -> kotton_record::SqliteRecordStore {
+        let wake = engine.waker();
+        let store = kotton_record::SqliteRecordStore::in_memory()
+            .unwrap()
+            .with_write_signal(Arc::new(move || wake.wake_pending()));
+        for cs in [kotton_schemas::CoreSchema::Notes, kotton_schemas::CoreSchema::AccessLog] {
+            store.create_table(&cs.definition()).await.unwrap();
+        }
+        store
+    }
+
+    fn notes() -> kotton_schemas::SchemaId {
+        kotton_schemas::SchemaId::from_static(kotton_common::namespace::NSID_NOTES)
+    }
+
+    fn log() -> kotton_schemas::SchemaId {
+        kotton_schemas::SchemaId::from_static(kotton_common::namespace::NSID_ACCESS_LOG)
+    }
+
+    /// Writes of an ordinary schema while the loop is in a pass, three of them, are followed
+    /// by exactly one more pass, and one while it waits ends the wait.
+    #[tokio::test]
+    async fn a_write_during_a_pass_is_followed_by_exactly_one_more_pass() {
+        let (_dir, _rt, engine, _host) = engine().await;
+        let store = signalled(&engine).await;
+        let id = store.insert(&notes(), [("title", "during")].into_iter().collect()).await.unwrap();
+        store.insert(&notes(), [("title", "and again")].into_iter().collect()).await.unwrap();
+        store.delete(&notes(), &id).await.unwrap();
+        assert_eq!(next(&engine), Some(Turn::Woken), "a write during a pass was followed by none");
+        assert_eq!(next(&engine), None, "three writes during one pass were followed by two");
+
+        let waiting = engine.next_turn(std::future::pending());
+        tokio::pin!(waiting);
+        assert_eq!(once(waiting.as_mut()), None);
+        store.insert(&notes(), [("title", "while it waits")].into_iter().collect()).await.unwrap();
+        assert_eq!(once(waiting.as_mut()), Some(Turn::Woken), "a write did not end the wait");
+        assert_eq!(next(&engine), None, "a write that ended a wait kept another pass");
+    }
+
+    /// An access-log record written or deleted while the loop is in a pass is followed by
+    /// no pass.
+    #[tokio::test]
+    async fn an_access_log_write_during_a_pass_is_followed_by_none() {
+        let (_dir, _rt, engine, _host) = engine().await;
+        let store = signalled(&engine).await;
+        let entry = [("device", "did:key:a"), ("at", "2026-11-10T00:00:00Z"), ("asker", "terminal"),
+            ("door", "local"), ("act", "read"), ("what", "w")];
+        let id = store.insert(&log(), entry.into_iter().collect()).await.unwrap();
+        store.delete(&log(), &id).await.unwrap();
+        assert_eq!(next(&engine), None, "a log record's write started a pass");
+    }
+
+    /// An engine nothing was written to runs no pass after the one it ran; nor does one whose
+    /// pass wrote, through the handle a pass writes through ([`records_for_a_pass`]).
+    #[tokio::test]
+    async fn an_idle_engine_and_a_pass_s_own_writes_start_no_pass() {
+        let (_dir, _rt, engine, _host) = engine().await;
+        engine.run_background_pass().await;
+        assert_eq!(next(&engine), None, "an idle engine ran a pass after its pass");
+        let store = signalled(&engine).await;
+        let pass = store.without_write_signal();
+        pass.insert(&notes(), [("title", "the pass's own")].into_iter().collect()).await.unwrap();
+        assert_eq!(next(&engine), None, "a pass's own write started another");
+        assert_eq!(next(&engine), None);
     }
 }
 

@@ -840,6 +840,16 @@ mod tests {
         let merged = store.export_changeset(0).await.unwrap();
         store.merge_changeset(merged).await.unwrap();
         assert_eq!(woken.load(Ordering::SeqCst), 2, "a merge, which a pass makes, signalled one");
+
+        // The handle a pass writes through: the same rows, and no signal.
+        let pass = store.without_write_signal();
+        let quiet = pass.insert(&notes(), json!({ "title": "the pass's own" })).await.unwrap();
+        let seen = store.query(&notes(), Default::default()).await.unwrap();
+        assert!(seen.iter().any(|r| r.id == quiet), "the pass's handle is not the same database");
+        pass.delete(&notes(), &quiet).await.unwrap();
+        assert_eq!(woken.load(Ordering::SeqCst), 2, "a write through the pass's handle signalled");
+        store.insert(&notes(), json!({ "title": "after" })).await.unwrap();
+        assert_eq!(woken.load(Ordering::SeqCst), 3, "the store lost its signal to its clone");
     }
 
     async fn store_with(rows: &[ChangesetRow]) -> SqliteRecordStore {

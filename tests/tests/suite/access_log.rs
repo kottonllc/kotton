@@ -186,3 +186,57 @@ async fn record_search_returns_none_of_the_log() {
         );
     }
 }
+
+/// **Writing a log record tells no `VfsWatch` subscriber anything** (kotton #450). The sync
+/// sidecar is one, with no path filter, and syncs on every frame it is sent; a session at
+/// `Remote` may be another. The suite runs no sidecar (it is spawned only for a daemon that
+/// has paired nodes when it boots, from a binary beside the daemon's), so this holds what it
+/// would be told: the person's subscription, filtering nothing, is sent no frame for a log
+/// record written, and the first frame it is sent after it is for a directory made beside the
+/// record database after it. The watcher reads one inotify queue in order, so a frame for the
+/// record would come first or never. The deadline is a hang guard.
+///
+/// The person's first record verb lays down their roots index (`core/`) and writes their
+/// `agent.db`, once, whatever the schema: their first use, not a log write. So a first log
+/// record is written and its frames read up to a first marker, and what is held is what the
+/// next one does.
+///
+/// The issue's check that a log write on a device with a paired node starts no pass rests on
+/// this: a pass starts from the engine's wake, which a log record never calls (`kuserd`'s
+/// `write_wake_tests`), or from a frame sent to the sidecar, which this shows is never sent.
+#[tokio::test]
+async fn a_log_record_written_tells_a_subscriber_nothing() {
+    use kotton_wire::UserResponse;
+    let mut env = TestEnv::spawn_authed().await;
+    env.client.create_user(USER, crate::common::TEST_PASSPHRASE).await.expect("create_user");
+    let token = env.client.session_token.clone().expect("session token");
+    let mut watch: kotton_ipc::IpcClient<UserRequest, UserResponse> =
+        kotton_ipc::IpcClient::connect(env.endpoint.clone()).await.expect("a second connection");
+    let auth = UserRequest::Authenticate { token: kotton_wire::ipc::SecretText::new(token), scope: None };
+    assert!(matches!(watch.send(&auth).await.expect("auth"), UserResponse::ActiveSession { .. }));
+    let mut frames = watch
+        .send_streaming(&UserRequest::VfsWatch { user_id: USER.to_owned(), paths: vec![] })
+        .await
+        .expect("VfsWatch");
+    let hang = std::time::Duration::from_secs(30);
+    let first = tokio::time::timeout(hang, frames.recv()).await.expect("the watch answers").expect("open");
+    assert!(matches!(first, UserResponse::VfsWatchReady), "{first:?}");
+    let person = env.base_dir.join("users").join(USER);
+    let mut next_path = async || {
+        let frame = tokio::time::timeout(hang, frames.recv()).await.expect("a frame").expect("open");
+        let UserResponse::VfsChanged { path, .. } = frame else {
+            panic!("a VfsChanged frame, got {frame:?}");
+        };
+        path
+    };
+
+    written(&mut env.client, "access-log-the-first-use-17c0").await;
+    let first_use = person.join("marker-after-the-first-use");
+    tokio::fs::create_dir(&first_use).await.expect("the first marker");
+    while next_path().await != first_use.to_string_lossy() {}
+
+    written(&mut env.client, "access-log-watched-for-9e64").await;
+    let after = person.join("marker-after-the-log-record");
+    tokio::fs::create_dir(&after).await.expect("the second marker");
+    assert_eq!(next_path().await, after.to_string_lossy(), "a subscriber was told of the log record's write");
+}

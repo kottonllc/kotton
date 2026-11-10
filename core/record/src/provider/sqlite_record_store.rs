@@ -619,6 +619,15 @@ impl SqliteRecordStore {
         self
     }
 
+    /// This store, the same database through the same connection, with no write signal: a
+    /// write through it wakes no pass. The sync engine reads and writes through this during a
+    /// pass, so the pass's own writes (a device's whole-keeper claim, a setting moved out of
+    /// the drive) do not wake the engine that made them and start a pass after it (kotton
+    /// #450). Every other holder keeps the signalled store.
+    pub fn without_write_signal(&self) -> Self {
+        Self { written: None, ..self.clone() }
+    }
+
     /// Tell the write signal, if any, that a write of a row of `schema` was committed.
     fn signal_written(&self, schema: &SchemaId) {
         if let Some(signal) = &self.written {
