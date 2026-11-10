@@ -107,12 +107,31 @@ pub fn init_crypto() {
     });
 }
 
+/// A fresh base directory for a test daemon, removed when it drops.
+///
+/// `0o700` at `mkdir` on Unix, as a node's base dir is made: a daemon's door may be
+/// bound directly in it ([`door_in`]), and the bind uses a socket directory only if
+/// it is this user's alone (`kotton_ipc::OsListener::bind`).
+pub fn a_base() -> tempfile::TempDir {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .expect("create tempdir")
+    }
+    #[cfg(windows)]
+    tempfile::tempdir().expect("create tempdir")
+}
+
 /// A fresh IPC endpoint no other test is listening on.
 ///
-/// `$TMPDIR/kotton-test-<id>.sock`, or the same name in a fresh `0o700` directory
-/// under `/tmp` when the first does not fit `sun_path` — [`door_in`], asked of
-/// `TMPDIR`. The [`Door`] removes what it made when the caller drops it, which is
-/// the end of the test for every caller that binds it with `let`.
+/// `kotton-test-<id>.sock` in a fresh `0o700` directory under `/tmp` of its own:
+/// the bind uses a socket directory only if it is this user's alone
+/// (`kotton_ipc::OsListener::bind`), which `TMPDIR` itself is not. The [`Door`]
+/// removes what it made when the caller drops it, which is the end of the test for
+/// every caller that binds it with `let`.
 ///
 /// Until 2026-09-28 the fallback was `/tmp/kotton-test-<id>.sock`, straight into
 /// world-writable `/tmp`, and nothing removed either form: one package-scoped run
@@ -123,7 +142,7 @@ pub fn unique_ipc() -> Door {
     #[cfg(windows)]
     return Door::pipe(format!("kotton-test-{id}"));
     #[cfg(unix)]
-    door_in(&std::env::temp_dir(), &format!("kotton-test-{id}.sock"))
+    door_in_a_dir_of_its_own(&format!("kotton-test-{id}.sock"))
 }
 
 /// A test daemon's socket, and the directory outside the base it was asked for
@@ -194,6 +213,13 @@ pub fn door_in(base: &std::path::Path, file: &str) -> Door {
     if kotton_common::paths::socket_path_fits(&socket) {
         return Door { endpoint: IpcEndpoint::UnixSocket(socket), dir_outside_base: None };
     }
+    door_in_a_dir_of_its_own(file)
+}
+
+/// The door for a socket named `file` in a fresh `0o700` directory under `/tmp`,
+/// short enough for `sun_path`, which the [`Door`] removes when it drops.
+#[cfg(unix)]
+fn door_in_a_dir_of_its_own(file: &str) -> Door {
     // `0o700` asked for at `mkdir`, not after: `tempdir_in` alone takes the
     // default mode (`0o755` under the usual umask), which is what `isolated_door`
     // made until `a_door_is_private_when_it_leaves_its_base_and_goes_when_dropped`
@@ -418,7 +444,7 @@ impl TestEnv {
     }
 
     async fn spawn_placed(runner: PathBuf, placement: Placement, relay: RelayChoice) -> Self {
-        let base = tempfile::tempdir().expect("create tempdir");
+        let base = a_base();
 
         // Unique IPC name per test so parallel invocations don't collide.
         let unique = Uuid::new_v4().simple().to_string();

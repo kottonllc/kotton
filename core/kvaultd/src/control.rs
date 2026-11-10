@@ -610,7 +610,13 @@ pub(crate) mod tests {
         return (None, IpcEndpoint::NamedPipe(id));
         #[cfg(unix)]
         {
-            let dir = tempfile::tempdir_in("/tmp").expect("a directory under /tmp for the door");
+            // `0o700` at `mkdir`: the bind uses a socket directory only if it is
+            // this user's alone (`kotton_ipc::OsListener::bind`).
+            use std::os::unix::fs::PermissionsExt as _;
+            let dir = tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir_in("/tmp")
+                .expect("a directory under /tmp for the door");
             let door = IpcEndpoint::UnixSocket(dir.path().join("control.sock"));
             (Some(dir), door)
         }

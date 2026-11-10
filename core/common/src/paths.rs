@@ -252,9 +252,14 @@ pub fn default_vfs_storage_path(username: &str, _profile: Option<&str>) -> Resul
 
 /// Get the runtime directory for IPC sockets.
 ///
-/// Resolves through a three-tier fallback.  Each tier guarantees that sockets
-/// live in a directory only the owner can access, preventing socket squatting
-/// (see `docs/decisions.md` — *IPC socket placement*).
+/// Resolves through a three-tier fallback. Whichever tier chooses it, a socket is
+/// bound in it only if it is the binding user's alone: `kotton_ipc::OsListener::bind`
+/// makes the directory `0o700` when nothing is at its name, and refuses one — made
+/// there or found — that is a symlink (dangling or not), not a directory, owned by
+/// another uid, or open to group or other, and one it cannot make; each refusal names
+/// the path, what is wrong, and that the daemon and its clients move the directory
+/// together by `XDG_RUNTIME_DIR` (Linux) or `TMPDIR` (see `docs/decisions.md` — *IPC
+/// socket placement*).
 ///
 /// | Tier | Condition | Path |
 /// |------|-----------|------|
@@ -268,7 +273,8 @@ pub fn default_vfs_storage_path(username: &str, _profile: Option<&str>) -> Resul
 /// its own `0o700` `DirBuilder` — and a vault refuses to
 /// start in one that is not; a device base dir that already existed keeps
 /// whatever mode it was given. `run/`, and any base dir above it, made by the
-/// bind is made `0o700` there (`kotton_ipc::OsListener::bind`).
+/// bind is made `0o700` there, and a `run/` that was already there is used only if
+/// it is this user's alone (`kotton_ipc::OsListener::bind`).
 #[cfg(unix)]
 pub fn runtime_dir() -> Result<PathBuf> {
     runtime_dir_in(&process_env)
@@ -285,8 +291,8 @@ pub fn runtime_dir_in(env: Env) -> Result<PathBuf> {
         return Ok(PathBuf::from(xdg).join("kotton"));
     }
 
-    // Tier 2: $TMPDIR — per-user on macOS (e.g. /var/folders/…/T/), giving the
-    // same squatting protection without requiring a login manager.
+    // Tier 2: $TMPDIR — per-user on macOS (e.g. /var/folders/…/T/). Its `kotton/`
+    // is held to the bind's check like every tier's.
     if let Some(tmpdir) = env("TMPDIR") {
         return Ok(PathBuf::from(tmpdir).join("kotton"));
     }
@@ -303,7 +309,9 @@ pub fn runtime_dir_in(env: Env) -> Result<PathBuf> {
 /// On Unix: `{runtime_dir()}/{name}.sock`
 ///
 /// The parent directory is created with `0o700` by [`kotton_ipc::OsListener::bind`]
-/// at daemon startup.  Call-sites must not construct socket paths inline —
+/// at daemon startup when nothing is at its name; whatever is there is used only if
+/// it is a directory of this user's alone, and refused by path otherwise.
+/// Call-sites must not construct socket paths inline —
 /// use this function so the path stays consistent with `runtime_dir`.
 ///
 /// Override the data root with `KOTTON_BASE_DIR` to move both the data
@@ -345,8 +353,16 @@ pub fn daemon_socket_path_in(env: Env, name: &str) -> Result<PathBuf> {
     // Fall back to a short, per-user `/tmp` dir keyed by a stable hash of the
     // preferred path — so `KOTTON_BASE_DIR` dev isolation still maps to distinct
     // sockets, and daemon + client + tooling all derive the *same* path. The
-    // squatting protection is unchanged: `OsListener::bind` creates the parent
-    // `0o700`, so a pre-squatted dir in world-writable `/tmp` fails the bind.
+    // directory is under world-writable `/tmp`, so something may already be at its
+    // name when the daemon starts: `OsListener::bind` makes it `0o700` only when
+    // nothing is there, and binds in it only if it is a real directory (not a symlink)
+    // owned by this uid with no group or other permission bits. Otherwise the start
+    // is refused, naming the path and what is wrong — a symlink (dangling or not), a
+    // file, another owner, an open mode, or a directory that cannot be made — and
+    // the variables that move the door for the daemon and its clients together
+    // (`XDG_RUNTIME_DIR` on Linux, `TMPDIR`). A client checks the uid of the process
+    // it reached (`kotton_ipc::IpcClient::connect_to_own_user`) before it says
+    // anything.
     let key = short_path_key(&preferred);
     Ok(PathBuf::from(FALLBACK_PARENT)
         .join(format!("{FALLBACK_PREFIX}{key}"))
@@ -402,8 +418,8 @@ pub fn socket_path_fits(path: &std::path::Path) -> bool {
 /// Short, stable, non-cryptographic key derived from a path (FNV-1a → 8 hex).
 ///
 /// Only needs to separate per-user / per-`KOTTON_BASE_DIR` sockets so distinct
-/// daemons don't collide in `/tmp`; the `0o700` bind is the security boundary,
-/// not this name. Deterministic so every process resolves the same socket.
+/// daemons don't collide in `/tmp`; the bind's ownership and mode check is the
+/// boundary, not this name. Deterministic so every process resolves the same socket.
 #[cfg(unix)]
 fn short_path_key(path: &std::path::Path) -> String {
     use std::os::unix::ffi::OsStrExt;

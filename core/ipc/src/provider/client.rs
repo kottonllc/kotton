@@ -38,6 +38,35 @@ where
             _phantom: std::marker::PhantomData,
         })
     }
+
+    /// Connect to a daemon that runs as **this process's own user**, and go no further
+    /// unless it does.
+    ///
+    /// On Unix the kernel's answer for the peer of the connected stream
+    /// ([`OsConnection::peer`]) is held to [`crate::Caller::require_own_user`]; any
+    /// other uid, or no answer, is refused before a single frame is sent, so nothing
+    /// this client would sign or say reaches a process of another user. For a client of a
+    /// daemon that is the same user by design: `kctl` and `kuserd`'s device
+    /// operator reaching `kdeviced` (`kotton_wire::sys_ipc`).
+    ///
+    /// On Windows it is [`Self::connect`]: the pipe's server is not identified here.
+    pub async fn connect_to_own_user(endpoint: IpcEndpoint) -> io::Result<Self> {
+        let connection = OsConnection::connect(&endpoint)
+            .await
+            .map_err(io::Error::other)?;
+        #[cfg(unix)]
+        connection.peer().require_own_user().map_err(|e| {
+            let IpcEndpoint::UnixSocket(path) = &endpoint;
+            io::Error::new(
+                e.kind(),
+                format!("the server at {}: {e}; nothing was sent to it", path.display()),
+            )
+        })?;
+        Ok(Self {
+            connection,
+            _phantom: std::marker::PhantomData,
+        })
+    }
 }
 
 impl<Req, Resp, C> IpcClient<Req, Resp, C>
