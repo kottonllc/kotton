@@ -62,7 +62,7 @@ pub enum PetnameError {
     Slash(String),
     #[error("a petname's `name` holds no control, bidirectional-formatting or invisible character")]
     Control,
-    #[error("a petname's `name` does not begin with `did:`, so it is never read as a key: {0:?}")]
+    #[error("a petname's `name` does not begin with `did:`, in any case and with any spaces before it, so it is never read as a key: {0:?}")]
     DidPrefix(String),
     #[error("`kotton` names Kotton's publisher and no other key, in any case and with any spaces around it")]
     KottonIsKottons,
@@ -138,7 +138,7 @@ pub fn folded(name: &str) -> String {
 /// Hold `name`, given to `key`, to the rules: not empty, not only spaces, blanks
 /// ([`renders_blank`]) and combining marks ([`is_combining_mark`]), at most
 /// [`MAX_NAME_CHARS`] characters, no `/` and no character [`is_hostile_char`] names, not
-/// beginning with `did:`, and [`KOTTON`] for Kotton's publisher alone, compared [`folded`] (so
+/// beginning with `did:` compared [`folded`], and [`KOTTON`] for Kotton's publisher alone, compared [`folded`] (so
 /// `Kotton` and `kotton ` are Kotton's too).
 pub fn check_name(key: &Publisher, name: &str) -> Result<(), PetnameError> {
     if name.is_empty() {
@@ -157,7 +157,7 @@ pub fn check_name(key: &Publisher, name: &str) -> Result<(), PetnameError> {
     if name.contains('/') {
         return Err(PetnameError::Slash(name.to_owned()));
     }
-    if name.starts_with("did:") {
+    if folded(name).starts_with("did:") {
         return Err(PetnameError::DidPrefix(name.to_owned()));
     }
     if folded(name) == KOTTON && key.as_str() != NSID_PREFIX {
@@ -282,7 +282,9 @@ mod tests {
         assert_eq!(check_name(&acme(), "bank\n"), Err(PetnameError::Control));
         assert_eq!(check_name(&acme(), "\u{202E}knab"), Err(PetnameError::Control));
         assert_eq!(check_name(&acme(), "bank\u{2066}"), Err(PetnameError::Control));
-        assert!(matches!(check_name(&acme(), "did:key:z6Mk"), Err(PetnameError::DidPrefix(_))));
+        for did in ["did:key:z6Mk", " DID:key:z6Mk", "Did:web:x"] {
+            assert!(matches!(check_name(&acme(), did), Err(PetnameError::DidPrefix(_))), "{did:?}");
+        }
         for invisible in ["\u{2028}", "\u{2029}", "\u{200B}", "\u{200D}", "\u{2060}", "\u{FEFF}", "\u{E0041}"] {
             assert_eq!(check_name(&acme(), &format!("My{invisible} Bank")), Err(PetnameError::Control), "{invisible:?}");
         }

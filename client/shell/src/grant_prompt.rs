@@ -90,6 +90,10 @@ pub const GUTTER: &str = "  | ";
 /// row carried on never lines up with a row a label begins.
 pub const CONTINUED: &str = "  |   ";
 
+/// What a row that carries on another party's words begins with when its first letter would
+/// be written right to left: [`CONTINUED`] and a word of the device's written left to right.
+pub const CARRIED_RTL: &str = "  |   (more) ";
+
 /// Said, on a row of its own under words that hold right-to-left letters, since a terminal
 /// can show those in another order than they were written.
 pub const RIGHT_TO_LEFT: &str =
@@ -115,8 +119,44 @@ fn width() -> usize {
 
 /// The columns `text` takes, counted the wider way wherever a terminal may differ (a
 /// character of ambiguous width as two), so a row measured to fit does fit.
-fn cols(text: &str) -> usize {
-    text.width().max(text.width_cjk())
+pub(crate) fn cols(text: &str) -> usize {
+    let each: usize = text.chars().map(char_cols).sum();
+    each.max(text.width()).max(text.width_cjk())
+}
+
+/// The columns one character takes, counted alone: the wider of its normal and East Asian
+/// widths, and one for a character the crate gives none that is not a combining mark, since a
+/// terminal may draw it in a cell. A row is never measured narrower than the sum of these, as
+/// a terminal that gives each character its own cells lays it out.
+fn char_cols(c: char) -> usize {
+    let w = c.width().unwrap_or(0).max(c.width_cjk().unwrap_or(0));
+    if w == 0 && !is_combining_mark(c) {
+        1
+    } else {
+        w
+    }
+}
+
+/// Whether `c` is a format character a terminal may draw in a cell, though Unicode's widths
+/// give it none, and not [`is_hostile_char`]'s: the soft hyphen (U+00AD), the Mongolian vowel
+/// separator (U+180E), U+2065, the deprecated format characters (U+206A to U+206F), the
+/// interlinear annotation characters (U+FFF9 to U+FFFB), and the format characters above the
+/// Basic Multilingual Plane. Another party's string loses each. The list stands until
+/// Unicode's general category replaces it (kottonllc/kotton#498).
+fn is_unseen_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{180E}'
+            | '\u{2065}'
+            | '\u{206A}'..='\u{206F}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+    )
 }
 
 /// Who signed an app's code, as the prompt may say it.
@@ -188,9 +228,9 @@ impl Known {
 /// `text`, another party's, made one plain run: every run of whitespace (line breaks and the
 /// line and paragraph separators among it) and of characters that [`renders_blank`] one
 /// space, trimmed; every character [`is_hostile_char`] names removed (control,
-/// bidirectional-formatting, zero-width and tag characters); and more than [`MARKS_MAX`]
-/// combining marks, or other characters a terminal gives no column, on one character cut to
-/// that many, and none on nothing.
+/// bidirectional-formatting, zero-width and tag characters), and every other character that
+/// takes no column but a combining mark ([`is_unseen_format`] among them); and more than
+/// [`MARKS_MAX`] combining marks on one character cut to that many, and none on nothing.
 fn cleaned(text: &str) -> String {
     let mut out = String::new();
     let mut marks = 0;
@@ -200,10 +240,12 @@ fn cleaned(text: &str) -> String {
             space = !out.is_empty();
             continue;
         }
-        if is_hostile_char(c) {
+        // A character that takes no column is kept only as a combining mark; any other (a
+        // format character among them) is lost, since a terminal may draw it in a cell.
+        if is_hostile_char(c) || is_unseen_format(c) || (c.width() == Some(0) && !is_combining_mark(c)) {
             continue;
         }
-        if is_combining_mark(c) || c.width() == Some(0) {
+        if is_combining_mark(c) {
             marks += 1;
             if marks > MARKS_MAX || out.is_empty() {
                 continue;
@@ -292,15 +334,22 @@ fn is_right_to_left(c: char) -> bool {
     )
 }
 
-/// `content` laid out in rows of at most `width` columns, the first beginning `first` and
-/// every other [`CONTINUED`]: broken at the last space of a row where it has one, else
-/// between two characters, and never before a character that takes no column.
+/// `content` laid out in rows of at most `width` columns ([`cols`]), the first beginning
+/// `first` and every other [`CONTINUED`]: broken at the last space of a row where it has one,
+/// else between two characters, and never before a character that takes no column. A row
+/// carried on whose first letter would be written right to left begins [`CARRIED_RTL`]
+/// instead, so a terminal that takes a row's direction from its first letter keeps the
+/// gutter on the left.
 fn rows(content: &str, width: usize, first: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut row = String::new();
+    let mut prefix = first;
     let mut pending: std::collections::VecDeque<char> = content.chars().collect();
     while let Some(c) = pending.pop_front() {
-        let prefix = if out.is_empty() { first } else { CONTINUED };
+        if row.is_empty() && !out.is_empty() {
+            let letter = std::iter::once(c).chain(pending.iter().copied()).find(|c| c.is_alphabetic());
+            prefix = if letter.is_some_and(is_right_to_left) { CARRIED_RTL } else { CONTINUED };
+        }
         let room = width.saturating_sub(cols(prefix)).max(2);
         let next = format!("{row}{c}");
         if cols(&next) <= room || row.is_empty() {
@@ -320,7 +369,6 @@ fn rows(content: &str, width: usize, first: &str) -> Vec<String> {
             pending.pop_front();
         }
     }
-    let prefix = if out.is_empty() { first } else { CONTINUED };
     out.push(format!("{prefix}{row}"));
     out
 }
@@ -458,8 +506,8 @@ pub fn grant_lines(grant: &CapabilityGrant, signer: &Signer, known: &Known) -> V
             lines
         }
         CapabilityTarget::Vfs { path } => with(
-            format!("  {rw} your files under a path the app names"),
-            "the app's path",
+            format!("  {rw} your files under this path"),
+            "the path (the app's, or one you bound)",
             path,
         ),
         CapabilityTarget::Quarantine { extension_id } => with(
@@ -877,8 +925,9 @@ mod tests {
         let blank = format!("a{}b", "\u{3164}\u{115F}\u{1160}\u{FFA0}\u{2800}".repeat(20));
         let long = "x".repeat(300);
         let reason = format!("manifest parse error: TOML parse error at line 3\n  |\n3 | name = \"{}\u{1b}[2K\"\n  |        ^\n{long}", "y".repeat(90));
+        let [toned, lam_alef, shy] = narrower_than_drawn();
         let mut lines = Vec::new();
-        for text in [&quotes, &wide, &blank, &long] {
+        for text in [&quotes, &wide, &blank, &long, &toned, &lam_alef, &shy] {
             lines.extend(app_words(text, text, text));
             let path = CapabilityGrant::vfs(CapabilityKind::Read, text.as_str());
             lines.extend(grant_lines(&path, &Signer::Nobody, &nothing_named()));
@@ -889,8 +938,9 @@ mod tests {
             assert!(!line.contains('\n') && !line.contains('\u{1b}'), "{line:?}");
             if line.starts_with(GUTTER) {
                 assert!(cols(line) <= 80, "{} columns: {line:?}", cols(line));
+                assert!(each_cell(line) <= 80, "{} columns by its characters: {line:?}", each_cell(line));
             } else {
-                for theirs in ["\"\"", "漢", "xxxx", "yyyy", "a b"] {
+                for theirs in ["\"\"", "漢", "xxxx", "yyyy", "a b", "\u{1F44D}", "\u{0644}", "itself"] {
                     assert!(!line.contains(theirs), "another party's words on a device line: {line:?}");
                 }
             }
@@ -904,6 +954,50 @@ mod tests {
         // A reason is shown longer, and cut too.
         let reasoned = logical(&reason_line(&reason)).concat();
         assert!(reasoned.contains("yyyy") && reasoned.contains("(cut:"), "{reasoned}");
+        // Never measured narrower than its characters: a skin tone is its own two columns,
+        // and lam and alef one each.
+        assert!(cols("\u{1F44D}\u{1F3FD}") >= 4 && cols("\u{0644}\u{0627}") >= 2);
+        assert_eq!(cols("\u{263A}\u{FE0F}"), 2, "a character shown as an emoji counts 2");
+    }
+
+    /// The three kinds of string the third design review found measured narrower than a
+    /// terminal draws them, each the app's name at 80 columns: 14 thumbs with a skin tone,
+    /// 29 lam-alefs, and 12 letters each with four soft hyphens, each then `x` and 24 ASCII
+    /// characters.
+    fn narrower_than_drawn() -> [String; 3] {
+        let tail = "xSigned by Kotton itself.";
+        [
+            format!("{}{tail}", "\u{1F44D}\u{1F3FD}".repeat(14)),
+            format!("{}{tail}", "\u{0644}\u{0627}".repeat(29)),
+            format!("{}{tail}", "a\u{AD}\u{AD}\u{AD}\u{AD}".repeat(12)),
+        ]
+    }
+
+    /// The columns a row takes in a terminal that gives every character its own cells: the
+    /// sum of each one's width alone, the wider way.
+    fn each_cell(row: &str) -> usize {
+        row.chars().map(|c| c.width().unwrap_or(0).max(c.width_cjk().unwrap_or(0))).sum()
+    }
+
+    /// **A row of the app's name is measured as a terminal draws it**: each of the three is
+    /// laid out in rows of at most 80 columns by its characters; the soft hyphens and every
+    /// other character that takes no column but a mark are removed; the thumbs are cut.
+    #[test]
+    fn no_row_is_measured_narrower_than_its_characters() {
+        let [toned, lam_alef, shy] = narrower_than_drawn();
+        for name in [&toned, &lam_alef, &shy] {
+            let lines = app_words(name, "1.0.0", "com.example.x");
+            for line in &lines[1..] {
+                assert!(line.starts_with(GUTTER), "{line:?}");
+                assert!(each_cell(line) <= 80, "{} columns by its characters: {line:?}", each_cell(line));
+            }
+        }
+        assert_eq!(others(&shy).0, format!("{}xSigned by Kotton itself.", "a".repeat(12)));
+        assert!(quoted(&toned).contains("(cut:"), "{}", quoted(&toned));
+        for unseen in ["\u{AD}", "\u{180E}", "\u{2065}", "\u{206A}", "\u{206F}", "\u{FFF9}", "\u{FFFB}", "\u{110BD}", "\u{1D173}", "\u{FE0F}"] {
+            assert_eq!(others(&format!("a{unseen}b")).0, "ab", "{unseen:?}");
+        }
+        assert_eq!(others("e\u{0301}").0, "e\u{0301}", "a combining mark is kept");
     }
 
     /// The layout itself: the first row behind [`GUTTER`], the rest behind [`CONTINUED`],
@@ -935,6 +1029,22 @@ mod tests {
         assert_eq!(lines, vec!["  | the app's name: \"בנק שלי\"".to_owned(), format!("{CONTINUED}{RIGHT_TO_LEFT}")]);
         assert!(lines.concat().chars().all(|c| !is_hostile_char(c)));
         assert_eq!(words_rows("the app's name", "Ledger", WORDS_MAX, 80).len(), 1);
+    }
+
+    /// **No carried-on row begins with a right-to-left letter**: one that would begins with a
+    /// word of the device's written left to right, so the gutter stays on the left.
+    #[test]
+    fn a_row_carried_on_begins_left_to_right() {
+        let lines = words_rows("the app's description", &"בנק שלי ".repeat(20), REASON_MAX, 40);
+        assert!(lines.len() > 2, "{lines:#?}");
+        for line in &lines[1..] {
+            assert!(line.starts_with(CONTINUED) && cols(line) <= 40, "{line:?}");
+            let first = line[CONTINUED.len()..].chars().find(|c| c.is_alphabetic());
+            assert!(!first.is_some_and(is_right_to_left), "a row begins right to left: {line:?}");
+        }
+        assert!(lines[1].starts_with(CARRIED_RTL), "{lines:#?}");
+        let plain = words_rows("the app's description", &"ledger ".repeat(20), REASON_MAX, 40);
+        assert!(plain.iter().all(|l| !l.contains("(more)")), "{plain:#?}");
     }
 
     /// Every kind of grant has its lines; one whose target carries a string puts it behind

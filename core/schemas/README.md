@@ -90,9 +90,9 @@ chose is never shown as who stands behind anything (`kotton_shell::grant_prompt`
 That name is a petname, a record of `petname` in Personal: `key`, a `did:key`, and `name`, one
 record per key. `petname::check` holds a body to its rules: `key` parses as a `did:key`, and
 `name` is not empty and not only spaces, blanks and combining marks, holds no `/`, does not
-begin with `did:`, and is `kotton` for Kotton's
-publisher alone, compared with the case folded and spaces trimmed, so `Kotton` and `kotton ` are
-refused for another key. **Two rules are this tree's, not the decision's**: a name is at most 64
+begin with `did:`, and is `kotton` for Kotton's publisher alone, the last two compared with the
+case folded and spaces trimmed, so `Kotton`, `kotton ` and ` DID:key` are refused for another
+key. **Two rules are this tree's, not the decision's**: a name is at most 64
 characters, and it holds no control, bidirectional-formatting or invisible character
 (`petname::is_hostile_char`: the line and paragraph separators, the zero-width characters and
 the tag characters too), so a name cannot reorder, break or hide part of the line it is shown

@@ -748,7 +748,7 @@ A petname is itself one of your records, of `kotton/petname`: the key, as a
 name given again to the same key replaces the one before; `record import`
 refuses `kotton/petname`, since a file of names would be its writer's words
 read as yours. A name holds no `/` and does not begin with `did:`, and
-`kotton` names Kotton's key alone, in any case and with any spaces around it.
+`kotton` names Kotton's key alone, each in any case and with any spaces around it.
 Two rules are this device's own, not the protocol's: a name is at most 64
 characters, and it holds no control, bidirectional-formatting or invisible
 character (one that reorders, breaks or hides part of a line).

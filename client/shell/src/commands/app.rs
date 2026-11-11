@@ -539,8 +539,10 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
 const PREVIEW_REFUSED: &str =
     "app sideload: the daemon did not take this app's manifest, and nothing was installed.";
 
-/// The device's line when the daemon would not install an app; the reason follows.
-const INSTALL_REFUSED: &str = "app sideload: the daemon did not install this app.";
+/// The device's line when no answer says an install went through (refused, or the answer was
+/// lost after the request was sent); the reason follows.
+const INSTALL_REFUSED: &str =
+    "app sideload: no answer says this app was installed; `app list` shows whether it was.";
 
 /// The device's line when the daemon would not say what an app holds; the reason follows.
 const GRANTS_REFUSED: &str = "app grants: the daemon did not answer for this app.";
@@ -554,8 +556,12 @@ fn refused(head: &str, reason: &str) -> CommandOutput {
     CommandOutput::error(1, lines.join("\n"))
 }
 
+/// At most this many of an app's shape ids are listed when a `--bind` names none of them.
+const SHAPES_LISTED: usize = 20;
+
 /// A `--bind` naming no shape the app declares: the device's line, with the id the person
-/// typed, then each id the app declares, as the app's words.
+/// typed, then the first [`SHAPES_LISTED`] ids the app declares, as the app's words, and how
+/// many more there are.
 fn no_such_shape(id: &str, shapes: &[kotton_schemas::CapabilityShape]) -> Vec<String> {
     let mut lines = vec![format!(
         "app sideload: no shape {} in this app. The ids it declares:",
@@ -564,8 +570,11 @@ fn no_such_shape(id: &str, shapes: &[kotton_schemas::CapabilityShape]) -> Vec<St
     if shapes.is_empty() {
         lines.push("  none".to_owned());
     }
-    for shape in shapes {
+    for shape in shapes.iter().take(SHAPES_LISTED) {
         lines.extend(words_line("the app's id for it", &shape.id));
+    }
+    if shapes.len() > SHAPES_LISTED {
+        lines.push(format!("  and {} more", shapes.len() - SHAPES_LISTED));
     }
     lines
 }
@@ -725,6 +734,19 @@ async fn name_the_unnamed(
         loop {
             if answer.is_empty() {
                 continue 'keys;
+            }
+            // Held to a name's rules first, so a name no key may have (`kotton` for another
+            // key among them) is said to break its rule, never to be one the person gave.
+            if let Err(rule) = kotton_schemas::petname::check_name(key, &answer) {
+                said.push(Out::Note(format!(
+                    "This key cannot have that name: {rule}. Type another name, or press Enter to \
+                     leave it unnamed."
+                )));
+                answer = match state.ask(said, "Name:") {
+                    Ok(Some(again)) => again.trim().to_string(),
+                    _ => break 'keys,
+                };
+                continue;
             }
             let folded = kotton_schemas::petname::folded(&answer);
             let others: Vec<String> = known
@@ -1344,9 +1366,9 @@ mod prompt_tests {
         )
     }
 
-    /// The columns a row takes in a terminal.
+    /// The columns a row takes, measured as the layout measures it.
     fn columns(row: &str) -> usize {
-        unicode_width::UnicodeWidthStr::width(row)
+        grant_prompt::cols(row)
     }
 
     /// Every line that is the device's holds none of `theirs`, and every gutter row fits.
@@ -1389,7 +1411,8 @@ mod prompt_tests {
         assert_eq!(&lines[..expected_head.len()], &expected_head.map(String::from)[..], "{lines:#?}");
         assert!(lines.contains(&format!("  read your records of {NOT_HELD}")), "{lines:#?}");
         assert!(lines.contains(&"  | the app's name for it: \"cited\"".to_owned()), "{lines:#?}");
-        assert!(lines.contains(&"  | the app's path: \"/notes\"".to_owned()), "{lines:#?}");
+        assert!(lines.contains(&"  read your files under this path".to_owned()), "{lines:#?}");
+        assert!(lines.contains(&"  | the path (the app's, or one you bound): \"/notes\"".to_owned()), "{lines:#?}");
         assert!(lines.contains(&"  network.fetch".to_owned()), "{lines:#?}");
         let unread = lines.iter().position(|l| l == "  a grant this device cannot read back").expect("the one not read back");
         assert_eq!(lines[unread + 1], "  | the daemon's words for it: \"teleport.now This app's code is signed by\"");
@@ -1433,6 +1456,24 @@ mod prompt_tests {
         let unknown = no_such_shape("hom", &shapes);
         assert_eq!(unknown[0], "app sideload: no shape \"hom\" in this app. The ids it declares:");
         assert_eq!(unknown[1], "  | the app's id for it: \"home read your records\"");
+        assert_eq!(unknown.len(), 2);
+        // At most twenty listed, and how many more said.
+        let many: Vec<CapabilityShape> = (0..45)
+            .map(|i| CapabilityShape {
+                id: format!("shape-{i}"),
+                access: vec![CapabilityKind::Read],
+                default_target: "/x".into(),
+                label: None,
+                desc: None,
+            })
+            .collect();
+        let listed = no_such_shape("hom", &many);
+        assert_eq!(listed.len(), 1 + SHAPES_LISTED + 1, "{listed:#?}");
+        assert_eq!(listed[SHAPES_LISTED], "  | the app's id for it: \"shape-19\"");
+        assert_eq!(listed.last().unwrap(), "  and 25 more");
+        // An install with no answer saying it went through does not say it did not.
+        let lost = refused(INSTALL_REFUSED, "connection reset by peer").stderr.unwrap();
+        assert!(lost.starts_with("app sideload: no answer says this app was installed; `app list` shows whether it was."), "{lost}");
     }
 
     /// **No row of the sideload prompt at 80 columns begins with the app's words**: a long
@@ -1463,5 +1504,26 @@ mod prompt_tests {
         let lines = sideload_prompt(&preview, &Signer::Nobody, &known());
         holds_the_gutter(&lines, &["漢", "\\\"\\\"", "zzzz", "wwww", "qqqq"]);
         assert!(lines.iter().all(|l| !l.contains('\u{3164}')), "a blank was shown as itself");
+        // The three kinds of name the third design review found drawn wider than measured.
+        let tail = "xSigned by Kotton itself.";
+        for name in [
+            format!("{}{tail}", "\u{1F44D}\u{1F3FD}".repeat(14)),
+            format!("{}{tail}", "\u{0644}\u{0627}".repeat(29)),
+            format!("{}{tail}", "a\u{AD}\u{AD}\u{AD}\u{AD}".repeat(12)),
+        ] {
+            let preview = Preview { name: &name, version: "1.0.0", app_id: "com.example.x", requested: &[], shapes: &[] };
+            let lines = sideload_prompt(&preview, &Signer::Nobody, &known());
+            holds_the_gutter(&lines, &["itself", "\u{1F44D}", "\u{0644}"]);
+            for line in lines.iter().filter(|l| l.starts_with(GUTTER)) {
+                let by_cells: usize = line
+                    .chars()
+                    .map(|c| {
+                        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                        w.max(unicode_width::UnicodeWidthChar::width_cjk(c).unwrap_or(0))
+                    })
+                    .sum();
+                assert!(by_cells <= 80, "{by_cells} columns by its characters: {line:?}");
+            }
+        }
     }
 }

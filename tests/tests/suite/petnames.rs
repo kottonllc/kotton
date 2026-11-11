@@ -163,7 +163,12 @@ async fn a_petname_given_on_one_device_names_the_publisher_in_a_prompt_on_anothe
 
     // The first meeting, on A: the prompt is shown, then the person names the bank's key, and
     // the prompt then says that name.
-    let met = done(on_a(line(&["app", "sideload", &ledger]), &["My Bank"]).await);
+    // `Kotton` first: a name no key but Kotton's may have, said to break its rule and asked
+    // again, never said to be one the person already gave.
+    let met = done(on_a(line(&["app", "sideload", &ledger]), &["Kotton", "My Bank"]).await);
+    let flat_met = met.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat_met.contains("This key cannot have that name: `kotton` names Kotton's publisher and no other key"), "{}", met.text);
+    assert!(!met.text.contains("You already gave"), "a name the person never gave was said to be theirs: {}", met.text);
     let shown = met.text.find(&unnamed_bank).expect("the prompt, shown before the question");
     let asked = met.text.find("Name it now").expect("the question");
     assert!(shown < asked, "the name was asked for before the prompt was shown: {}", met.text);
