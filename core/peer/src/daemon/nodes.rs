@@ -24,7 +24,8 @@ use kotton_wire::peer::DataKeys;
 use kotton_crypto::{derive_cek, derive_master_secret};
 use crate::pair_channel::SasConfirmer;
 use crate::relay_keys::{FirstContact, Presented, RefusedAtTheRelay, Tier};
-use crate::pairing::{ed25519_to_x25519_private, JoinNotKept};
+use crate::pairing::JoinNotKept;
+use kotton_crypto::x25519::ed25519_priv_to_x25519;
 use kotton_schemas::membership::{Ceremony, Member, Posture, Role};
 use kotton_schemas::{CapabilityGrant, CapabilityKind};
 use kotton_common::crypto::kdf_labels;
@@ -246,7 +247,7 @@ pub async fn pair_node_ephemeral(
                     let cek_kek = KekAes256::from(cek);
 
                     // Derive ECDH session wrapping key.
-                    let issuer_x25519 = ed25519_to_x25519_private(&signing_key);
+                    let issuer_x25519 = ed25519_priv_to_x25519(&signing_key);
                     let guest_x25519 = X25519PublicKey::from(guest_x25519_bytes);
                     let shared_secret = issuer_x25519.diffie_hellman(&guest_x25519);
                     let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());

@@ -23,7 +23,6 @@ kotton-net = { path = "../net" }
 kotton-diag = { path = "../diag" }
 kotton-org = { path = "../org" }
 kotton-schemas = { path = "../schemas" }
-curve25519-dalek = { workspace = true }
 ed25519-dalek = { workspace = true }
 rustls = { version = "0.23", features = ["ring"] }
 hex = "0.4"

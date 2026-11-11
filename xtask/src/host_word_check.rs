@@ -68,6 +68,7 @@ pub const RUST_TREES: &[&str] = &[
     "core/diag/src",
     "core/fs/src",
     "core/grant/src",
+    "core/handshake/src",
     "core/identity/src",
     "core/infer/src",
     "core/ipc/src",

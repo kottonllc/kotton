@@ -30,12 +30,9 @@
 //!   for pairing off-LAN or when mDNS discovery is blocked.
 //! * `generate/parse_pairing_code` — the address/pubkey codec `open_pair_listener`
 //!   uses internally.
-//! * `ed25519_to_x25519_{public,private}` — Ed25519↔X25519 conversion, shared with
-//!   guest-session and DM encryption.
 
 use crate::contact_pairing::{generate_code, normalize_code, rendezvous_in, RendezvousDomain};
 use anyhow::{anyhow, Context, Result};
-use curve25519_dalek::edwards::CompressedEdwardsY;
 use ed25519_dalek::{Signer, SigningKey};
 use kotton_net::extract_ed25519_pubkey_from_cert;
 use kotton_net::transport::{rendezvous_dial, rendezvous_reserve};
@@ -45,12 +42,10 @@ use kotton_wire::peer::{
 use rand::RngCore;
 use rustls::pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha512};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
-use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 // ---------------------------------------------------------------------------
 // Pairing code — encodes ephemeral pubkey + expiry as a hex string
@@ -201,48 +196,6 @@ fn base32_encode(data: &[u8]) -> String {
 
 fn base32_decode(code: &str) -> Result<Vec<u8>> {
     kotton_common::base32::decode(code).ok_or_else(|| anyhow!("invalid base32 character in code"))
-}
-
-// ---------------------------------------------------------------------------
-// Ed25519 ↔ X25519 key conversion (Birkhoff point conversion)
-// ---------------------------------------------------------------------------
-
-/// Convert an Ed25519 public key (compressed Edwards point) to an X25519 public
-/// key (Montgomery u-coordinate).
-///
-/// This is the standard "Birkhoff" conversion specified in RFC 7748 §4.1.
-pub fn ed25519_to_x25519_public(ed25519_bytes: [u8; 32]) -> Result<X25519PublicKey> {
-    let compressed = CompressedEdwardsY(ed25519_bytes);
-    let point = compressed
-        .decompress()
-        .ok_or_else(|| anyhow!("ed25519_to_x25519_public: invalid Edwards point"))?;
-    let montgomery = point.to_montgomery();
-    Ok(X25519PublicKey::from(montgomery.to_bytes()))
-}
-
-/// Convert an Ed25519 signing key seed to an X25519 static secret.
-///
-/// Ed25519 private keys are seeds — the actual scalar is `SHA-512(seed)[..32]`
-/// after clamping. This is the same scalar used by X25519 (same underlying
-/// curve, different coordinate system).
-///
-/// Reference: <https://www.ietf.org/archive/id/draft-ietf-lwig-curve-representations-23.txt>
-/// Section 4.1.
-pub fn ed25519_to_x25519_private(signing_key: &SigningKey) -> StaticSecret {
-    // Step 1: hash the 32-byte seed with SHA-512
-    let seed = signing_key.as_bytes();
-    let hash: [u8; 64] = Sha512::digest(seed).into();
-
-    // Step 2: take the first 32 bytes
-    let mut scalar = [0u8; 32];
-    scalar.copy_from_slice(&hash[..32]);
-
-    // Step 3: clamp (RFC 7748 §5); same clamping as for X25519 keys
-    scalar[0] &= 248; // clear the 3 lowest bits
-    scalar[31] &= 127; // clear the highest bit
-    scalar[31] |= 64; // set the second-highest bit
-
-    StaticSecret::from(scalar)
 }
 
 // ---------------------------------------------------------------------------
