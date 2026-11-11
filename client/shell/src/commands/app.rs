@@ -761,11 +761,7 @@ async fn name_the_unnamed(
                 break;
             }
             // The keys on lines of their own, so none is wrapped where the person reads it.
-            said.push(Out::Note(format!(
-                "You already gave the name {} to {}:",
-                quoted(&answer),
-                if others.len() == 1 { "another key" } else { "other keys" }
-            )));
+            said.push(Out::Note(already_given(&answer, others.len())));
             said.push(Out::Data(others.iter().map(|k| format!("  {k}")).collect::<Vec<_>>().join("\n")));
             said.push(Out::Note(
                 "Two keys with one name are told apart only by the key, so every prompt will say \
@@ -792,6 +788,16 @@ async fn name_the_unnamed(
         }
     }
     answered.then_some(!given.is_empty())
+}
+
+/// The offer's line when the person's answer already names `others` other keys: the answer
+/// said as they typed it ([`grant_prompt::persons`]), since it is their own name.
+fn already_given(answer: &str, others: usize) -> String {
+    format!(
+        "You already gave the name {} to {}:",
+        grant_prompt::persons(answer),
+        if others == 1 { "another key" } else { "other keys" }
+    )
 }
 
 /// Locate the compiled WASM file inside an app directory.
@@ -1474,6 +1480,15 @@ mod prompt_tests {
         // An install with no answer saying it went through does not say it did not.
         let lost = refused(INSTALL_REFUSED, "connection reset by peer").stderr.unwrap();
         assert!(lost.starts_with("app sideload: no answer says this app was installed; `app list` shows whether it was."), "{lost}");
+    }
+
+    /// **The offer says the person's answer as they typed it**: spacing, and every sign on
+    /// a letter, kept.
+    #[test]
+    fn the_offer_says_the_answer_as_typed() {
+        let typed = format!("My  Bank \u{0915}{}", "\u{0947}".repeat(6));
+        assert_eq!(already_given(&typed, 1), format!("You already gave the name \"{typed}\" to another key:"));
+        assert_eq!(already_given("my \"bank\"", 2), "You already gave the name \"my \\\"bank\\\"\" to other keys:");
     }
 
     /// **No row of the sideload prompt at 80 columns begins with the app's words**: a long

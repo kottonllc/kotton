@@ -98,6 +98,10 @@ pub fn renders_blank(c: char) -> bool {
 /// Whether `c` is a combining mark, of the blocks Unicode gives to marks for any script
 /// (Combining Diacritical Marks, Extended and Supplement, for Symbols, Half Marks) and the
 /// marks of the scripts most stacked (Cyrillic, Hebrew, Arabic, Thai, and Japanese kana).
+/// The ranges are whole blocks, so a code point not yet assigned in one counts as a mark
+/// here; a terminal draws such a code point in a column, and the prompt's measure, which
+/// counts it as one, errs wide, never narrow. Unicode's tables replace the list
+/// (kottonllc/kotton#498).
 pub fn is_combining_mark(c: char) -> bool {
     matches!(
         c,

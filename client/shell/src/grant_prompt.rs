@@ -225,12 +225,14 @@ impl Known {
     }
 }
 
-/// `text`, another party's, made one plain run: every run of whitespace (line breaks and the
-/// line and paragraph separators among it) and of characters that [`renders_blank`] one
-/// space, trimmed; every character [`is_hostile_char`] names removed (control,
-/// bidirectional-formatting, zero-width and tag characters), and every other character that
-/// takes no column but a combining mark ([`is_unseen_format`] among them); and more than
-/// [`MARKS_MAX`] combining marks on one character cut to that many, and none on nothing.
+/// `text`, **another party's, and only another party's**, made one plain run: every run of
+/// whitespace (line breaks and the line and paragraph separators among it) and of characters
+/// that [`renders_blank`] one space, trimmed; every character [`is_hostile_char`] names
+/// removed (control, bidirectional-formatting, zero-width and tag characters), and every
+/// [`is_unseen_format`] character; and every other character that takes no column kept as a
+/// mark, as a combining mark is, more than [`MARKS_MAX`] on one character cut to that many,
+/// and none on nothing. The person's own name is never cleaned: [`persons`] shows it as the
+/// rules admitted it.
 fn cleaned(text: &str) -> String {
     let mut out = String::new();
     let mut marks = 0;
@@ -240,12 +242,13 @@ fn cleaned(text: &str) -> String {
             space = !out.is_empty();
             continue;
         }
-        // A character that takes no column is kept only as a combining mark; any other (a
-        // format character among them) is lost, since a terminal may draw it in a cell.
-        if is_hostile_char(c) || is_unseen_format(c) || (c.width() == Some(0) && !is_combining_mark(c)) {
+        if is_hostile_char(c) || is_unseen_format(c) {
             continue;
         }
-        if is_combining_mark(c) {
+        // Any other character that takes no column (a vowel sign, a virama, a variation
+        // selector) is kept as a mark: the words stay the ones written, and [`char_cols`]
+        // counts it a column, so a row is never measured narrower for it.
+        if is_combining_mark(c) || c.width() == Some(0) {
             marks += 1;
             if marks > MARKS_MAX || out.is_empty() {
                 continue;
@@ -315,10 +318,15 @@ fn quoted_within(text: &str, max: usize) -> (String, bool) {
     (quote, rtl)
 }
 
-/// The person's own name for a key, quoted as a device line says it: [`cleaned`] and
-/// escaped, and never cut, since the rules hold a name to [`kotton_schemas::petname::MAX_NAME_CHARS`].
-fn persons(name: &str) -> String {
-    format!("\"{}\"", cleaned(name).chars().map(escaped).collect::<String>())
+/// The person's own name for a key, quoted as a device line says it: exactly as
+/// [`kotton_schemas::petname::check_name`] admitted it, `"` and `\` escaped and nothing
+/// removed or cut, so the device never says "you call" of a string that is not the name the
+/// person gave, and two names that differ are said differently. The rules already hold a name
+/// to [`kotton_schemas::petname::MAX_NAME_CHARS`] and refuse every character
+/// [`is_hostile_char`] names; a device line is not laid out in rows, so nothing here depends
+/// on its width.
+pub(crate) fn persons(name: &str) -> String {
+    format!("\"{}\"", name.chars().map(escaped).collect::<String>())
 }
 
 /// Whether `c` is a letter of a script written right to left (Hebrew, Arabic, Syriac, Thaana,
@@ -337,9 +345,10 @@ fn is_right_to_left(c: char) -> bool {
 /// `content` laid out in rows of at most `width` columns ([`cols`]), the first beginning
 /// `first` and every other [`CONTINUED`]: broken at the last space of a row where it has one,
 /// else between two characters, and never before a character that takes no column. A row
-/// carried on whose first letter would be written right to left begins [`CARRIED_RTL`]
-/// instead, so a terminal that takes a row's direction from its first letter keeps the
-/// gutter on the left.
+/// carried on whose first strong character (a letter, or any character of a right-to-left
+/// block, its punctuation and signs among them) would be right to left begins [`CARRIED_RTL`]
+/// instead, so a terminal that takes a row's direction from its first strong character keeps
+/// the gutter on the left.
 fn rows(content: &str, width: usize, first: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut row = String::new();
@@ -347,7 +356,9 @@ fn rows(content: &str, width: usize, first: &str) -> Vec<String> {
     let mut pending: std::collections::VecDeque<char> = content.chars().collect();
     while let Some(c) = pending.pop_front() {
         if row.is_empty() && !out.is_empty() {
-            let letter = std::iter::once(c).chain(pending.iter().copied()).find(|c| c.is_alphabetic());
+            let letter = std::iter::once(c)
+                .chain(pending.iter().copied())
+                .find(|c| c.is_alphabetic() || is_right_to_left(*c));
             prefix = if letter.is_some_and(is_right_to_left) { CARRIED_RTL } else { CONTINUED };
         }
         let room = width.saturating_sub(cols(prefix)).max(2);
@@ -784,8 +795,9 @@ mod tests {
         assert_eq!(
             who(&Publisher::from_static(OTHER), &known),
             format!(
-                "a publisher you call \"my bank\" (a name you gave 2 keys; this is {OTHER})"
-            )
+                "a publisher you call \"my bank \" (a name you gave 2 keys; this is {OTHER})"
+            ),
+            "the name as the person gave it, its trailing space kept"
         );
     }
 
@@ -994,10 +1006,52 @@ mod tests {
         }
         assert_eq!(others(&shy).0, format!("{}xSigned by Kotton itself.", "a".repeat(12)));
         assert!(quoted(&toned).contains("(cut:"), "{}", quoted(&toned));
-        for unseen in ["\u{AD}", "\u{180E}", "\u{2065}", "\u{206A}", "\u{206F}", "\u{FFF9}", "\u{FFFB}", "\u{110BD}", "\u{1D173}", "\u{FE0F}"] {
+        for unseen in ["\u{AD}", "\u{180E}", "\u{2065}", "\u{206A}", "\u{206F}", "\u{FFF9}", "\u{FFFB}", "\u{110BD}", "\u{1D173}"] {
             assert_eq!(others(&format!("a{unseen}b")).0, "ab", "{unseen:?}");
         }
         assert_eq!(others("e\u{0301}").0, "e\u{0301}", "a combining mark is kept");
+    }
+
+    /// **Another party's words lose only what is listed**: every other character that takes
+    /// no column is kept as a mark, so a variation selector stays on its base and words in
+    /// scripts whose signs the mark list does not name come through whole; a run of more than
+    /// [`MARKS_MAX`] of them is cut to that many, and one on nothing is dropped. The gutter
+    /// holds for them.
+    #[test]
+    fn a_character_with_no_column_is_kept_as_a_mark() {
+        assert_eq!(others("\u{2764}\u{FE0F}").0, "\u{2764}\u{FE0F}", "U+FE0F is kept after a base");
+        assert_eq!(others("\u{FE0F}x").0, "x", "and dropped with no base");
+        for whole in ["हिंदी", "தமிழ்", "\u{1100}\u{1161}\u{11A8}"] {
+            assert_eq!(others(whole).0, whole);
+        }
+        // U+0947, a Devanagari vowel sign, is outside the mark list: six on one letter are four.
+        assert_eq!(others(&format!("क{}ल", "\u{0947}".repeat(6))).0, format!("क{}ल", "\u{0947}".repeat(4)));
+        for text in ["हिंदी ".repeat(30), "தமிழ் ".repeat(30), "\u{2764}\u{FE0F}".repeat(60)] {
+            for width in [24, 40, 80] {
+                for line in words_rows("the app's description", &text, REASON_MAX, width) {
+                    assert!(line.starts_with(GUTTER), "{line:?}");
+                    assert!(cols(&line) <= width && each_cell(&line) <= width, "{width}: {line:?}");
+                }
+            }
+        }
+    }
+
+    /// **The person's own name is said as they gave it**: a sign outside the mark list is
+    /// kept, and two names that differ only in one are said differently.
+    #[test]
+    fn the_persons_name_is_said_as_given() {
+        let named = |name: &str| knowing(&[json!({ "key": ACME, "name": name, "_id": "p1", "_filed_at": 1 })]);
+        assert_eq!(who(&acme(), &named("क\u{947}ला")), "a publisher you call \"क\u{947}ला\"");
+        for (one, other) in [
+            ("क\u{947}ला", "क\u{948}ला"),
+            ("\u{1100}\u{1161}\u{11A8}", "\u{1100}\u{1165}\u{11AB}"),
+            ("\u{2764}\u{FE0F}", "\u{2764}"),
+        ] {
+            let (a, b) = (who(&acme(), &named(one)), who(&acme(), &named(other)));
+            assert_ne!(a, b, "{one:?} and {other:?} said alike");
+            assert!(a.contains(one) && b.contains(other), "{a} / {b}");
+        }
+        assert_eq!(persons("say \"hi\" \\"), "\"say \\\"hi\\\" \\\\\"");
     }
 
     /// The layout itself: the first row behind [`GUTTER`], the rest behind [`CONTINUED`],
@@ -1039,10 +1093,21 @@ mod tests {
         assert!(lines.len() > 2, "{lines:#?}");
         for line in &lines[1..] {
             assert!(line.starts_with(CONTINUED) && cols(line) <= 40, "{line:?}");
-            let first = line[CONTINUED.len()..].chars().find(|c| c.is_alphabetic());
+            let first = line[CONTINUED.len()..].chars().find(|c| c.is_alphabetic() || is_right_to_left(*c));
             assert!(!first.is_some_and(is_right_to_left), "a row begins right to left: {line:?}");
         }
         assert!(lines[1].starts_with(CARRIED_RTL), "{lines:#?}");
+        // A row whose first strong character is right-to-left punctuation or a sign, not a
+        // letter: U+061F (the Arabic question mark) and U+0608 (the Arabic ray).
+        for sign in ['\u{061F}', '\u{0608}'] {
+            // The quote is too long for the first row and has no space in it early, so it
+            // carries on to a row of its own, beginning with the sign and then letters
+            // written left to right.
+            let text = format!("{sign}{} bank", "x".repeat(40));
+            let lines = words_rows("the app's name", &text, REASON_MAX, 40);
+            let carried = lines.iter().find(|l| l.contains(sign)).unwrap_or_else(|| panic!("{lines:#?}"));
+            assert!(carried.starts_with(CARRIED_RTL), "{sign:?}: {lines:#?}");
+        }
         let plain = words_rows("the app's description", &"ledger ".repeat(20), REASON_MAX, 40);
         assert!(plain.iter().all(|l| !l.contains("(more)")), "{plain:#?}");
     }
