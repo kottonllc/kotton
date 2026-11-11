@@ -161,8 +161,7 @@ pub async fn record_query(
     {
         Ok(mut records) => {
             if app_id.is_some() {
-                withhold_root_ids(&mut records, "_root");
-                withhold_root_ids(&mut records, "_filed_at");
+                records.iter_mut().for_each(crate::record_cmds::withhold_from_apps);
             }
             Ok(UserResponse::RecordQueryResult { records })
         }
@@ -281,7 +280,11 @@ fn root_the_caller_may_name(
 /// identifier, but it is when this person's devices filed each row, which is
 /// attention data an app has no use for and Article VII keeps on the person's
 /// side. The person's own surfaces order a conversation by it
-/// (`TASK-a-conversation-is-ordered-by-a-clock-it-does-not-hold`).
+/// (`TASK-a-conversation-is-ordered-by-a-clock-it-does-not-hold`). And
+/// `_updated_at`, when one of them last wrote the row, for the same reason; the
+/// keychain tells two records under one label apart by it (kotton #483). A
+/// query's answer takes all three out through one list
+/// ([`crate::record_cmds::WITHHELD_FROM_APPS`]).
 fn withhold_root_ids(records: &mut [serde_json::Value], key: &str) {
     for record in records {
         if let Some(obj) = record.as_object_mut() {

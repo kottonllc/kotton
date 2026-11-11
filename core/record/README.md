@@ -164,13 +164,13 @@ them, and when the names could not be read a short form is refused saying that; 
 the short form wherever the publisher's name is one key's alone. A request always carries the whole identity. An id no record has in
 Personal exits 1, and so does a schema this device does not know, by name. `get` prints the record as the row holds it, its `id` among its fields, and
 `list --json` prints each row the same way; neither prints the fields the daemon adds to an
-answer (`_id`, `_filed_at`, `_root`), because every verb here names Personal and `_root` would
+answer (`_id`, `_filed_at`, `_updated_at`, `_root`), because every verb here names Personal and `_root` would
 be Personal's id, a durable identifier, on every row. `record import|export` are in the tree
 (#454).
 
 **An insert takes only what its schema declares.** `RecordInsert`, from any client, is refused,
 naming the field, when the body carries a top-level field beginning with `_` (the daemon's: an
-answer adds `_id`, `_filed_at` and `_root`, and a body fed back from one would store Personal's
+answer adds `_id`, `_filed_at`, `_updated_at` and `_root`, and a body fed back from one would store Personal's
 id as a field and log it to every device) or a field the schema does not declare. `id` is the
 store's and is taken whether the schema declares it or not. The check is in
 `record_cmds::insert`, before the store; replication's merge, which carries rows another device

@@ -2164,6 +2164,10 @@ pub async fn message_conversation(
 /// clock and on what you sent is yours. A conversation is ordered by it and a
 /// read mark is written with it
 /// (`TASK-a-conversation-is-ordered-by-a-clock-it-does-not-hold`).
+///
+/// **And `_updated_at` is dropped.** A query's answer carries it for the
+/// person's own record verbs (kotton #483); a message is ordered by its filing,
+/// never by its last write, so it is not part of a message on the wire.
 pub fn expose_row_id(mut v: serde_json::Value) -> serde_json::Value {
     if let Some(id) = v.get("_id").and_then(|x| x.as_str()).map(str::to_owned) {
         v["id"] = json!(id);
@@ -2174,6 +2178,7 @@ pub fn expose_row_id(mut v: serde_json::Value) -> serde_json::Value {
     if let Some(o) = v.as_object_mut() {
         o.remove("_id");
         o.remove("_filed_at");
+        o.remove("_updated_at");
     }
     v
 }
@@ -3901,6 +3906,14 @@ mod tests {
         assert_eq!(out["filed_at"], 1_757_000_000_123i64);
         assert!(out.get("_filed_at").is_none(), "the internal name must not leave the daemon");
         assert_eq!(out["sent_at"], 5, "the sender's claim is still there, and still only a claim");
+    }
+
+    /// When the row was last written is the store's, and is not part of a message.
+    #[test]
+    fn a_time_of_last_write_does_not_leave_with_a_message() {
+        let out = expose_row_id(serde_json::json!({ "_id": "row-1", "_filed_at": 7, "_updated_at": 1_757_000_000i64 }));
+        assert!(out.get("_updated_at").is_none(), "the internal name must not leave the daemon: {out}");
+        assert!(out.get("updated_at").is_none(), "{out}");
     }
 
     /// A row with no id at all is passed through rather than refused — the

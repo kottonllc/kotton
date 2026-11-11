@@ -750,17 +750,21 @@ reads it, or finds it in a search: it is reached here, at your own terminal.
 `set` never takes the value on the line, where your shell's history and the
 process list would keep it. At a terminal it asks for the value, hidden, and
 asks again to confirm. With no terminal, `kotton secret set <label>` reads the
-first line piped to it; in the shell, whose input is its script, `set` reads
-nothing and is refused. The label and a note are typed on the line, so your
-shell keeps them in its history on this device; the value never is. One label
-is one secret: `set` on a label you keep replaces its value, and keeps its
-kind and note unless you give them. A new secret is a password, with no note.
+one line piped to it, and refuses more than one, keeping nothing: a key of
+several lines belongs in a file in a drive. In the shell, whose input is its
+script, `set` reads nothing and is refused. The label and a note are typed on
+the line, so your shell keeps them in its history on this device; the value
+never is. One label is one secret: `set` on a label you keep replaces its
+value, and keeps its kind and note unless you give them. A new secret is a
+password, with no note.
 
-`get` prints the value alone, one line on stdout, so it pipes. `list` never
-prints a value. `generate` makes a value of 56 letters and digits that are not
-read as one another, 32 characters long unless `--length` (8 to 256) says,
-from this computer's random source, and keeps it under a label you do not
-keep yet; it does not print it.
+`get` prints the value alone, one line on stdout, so it pipes. A label set on
+two devices before either synced holds two secrets until the next `set`; `get`
+prints the one written last, and says on stderr when it cannot tell which that
+is (both written in one second). `list` never prints a value. `generate` makes
+a value of 56 letters and digits that are not read as one another, 32
+characters long unless `--length` (8 to 256) says, from this computer's random
+source, and keeps it under a label you do not keep yet; it does not print it.
 
 FLAGS:
   --kind password|token  `set`, `generate`: what the secret is (a new one is a password)
@@ -768,8 +772,8 @@ FLAGS:
   --length <n>           `generate`: how many characters, 8 to 256 (32)
 
 Exit 0 when done, 1 when refused, when no secret has the label, or when no
-value was given (the reason on stderr), 2 for a line that is not one of the
-above.
+value, or a value of more than one line, was given (the reason on stderr), 2
+for a line that is not one of the above.
 
 EXAMPLES:
   secret set bank

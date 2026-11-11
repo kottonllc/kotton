@@ -2,7 +2,8 @@
 //! The keychain is records (kotton #449): a secret set on one device is read on another after
 //! a bare `sync`, the vault that keeps `personal` reads none of it, and at the terminal the
 //! value is never a word of the line, is read hidden or from stdin, and is printed by `get`
-//! alone.
+//! alone. Of two records under one label, `get` prints the one written last, and a piped value
+//! of more than one line is refused (kotton #483).
 
 use crate::common::cli::{said, Cli};
 use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto, TestEnv};
@@ -119,6 +120,103 @@ async fn a_secret_set_on_one_device_is_read_on_another_and_the_vault_reads_none_
     the_vault_keeping_it_reads_none_of(&vault, &at_first, &[VALUE, LABEL]).await;
 }
 
+/// **Of two records under one label, `get` prints the one written last, on both devices, and
+/// the next `set` keeps that one** (kotton #483's sequence). A sets `bank` to v1 (R1); B, not
+/// yet synced, sets it to v2 (R2, filed after R1); a second on, A sets it to v3, which rewrites
+/// R1 and keeps its first filing. After both sync, each holds both, R2 filed last and R1
+/// written last: `get` prints v3 on each and says nothing of two, and B's next `set` keeps R1
+/// and removes R2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn of_two_devices_setting_one_label_get_prints_the_value_written_last() {
+    const LABEL: &str = "bank";
+    init_crypto();
+    let vault = spawn_vault("vault").await;
+    let a = spawn_device("device A").await;
+    let mut client_a = connect_when_ready(&a.ipc, "client A").await;
+    client_a.create_user(USER, crate::common::TEST_PASSPHRASE).await.expect("create_user on A");
+    let (client_a, _first) = enrol_vault_from(client_a, "device-a", &vault, USER, "vault").await;
+    let b = spawn_device("device B").await;
+    let client_b = connect_when_ready(&b.ipc, "client B").await;
+    let (mut client_a, mut client_b, _node_b) =
+        enroll_streamed_as(client_a, client_b, USER, "device-a", "device-b", Posture::Full).await;
+    let token_a = client_a.session_token.clone().expect("A's session");
+    let token_b = client_b.session_token.clone().expect("B's session");
+    let on = |device: &'static str, words: &'static [&'static str], answers: &'static [&'static str]| {
+        let (door, token) = if device == "A" { (a.ipc.clone(), token_a.clone()) } else { (b.ipc.clone(), token_b.clone()) };
+        async move { typed(&door, device, &token, words, answers).await }
+    };
+    let done = |said: Said| {
+        assert_eq!(said.exit, ExitCode::Success, "{}", said.text);
+        said
+    };
+
+    done(on("A", &["sync"], &[]).await);
+    done(on("B", &["sync"], &[]).await);
+    done(on("A", &["secret", "set", LABEL], &["v1"]).await);
+    done(on("B", &["secret", "set", LABEL], &["v2"]).await);
+    // `_updated_at` is whole seconds: v3 is written in a later second than v2, as a person's
+    // next `set` on another device is.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    done(on("A", &["secret", "set", LABEL], &["v3"]).await);
+    for device in ["A", "B", "A", "B"] {
+        done(on(device, &["sync"], &[]).await);
+    }
+
+    let rows = secrets_on(&mut client_a).await;
+    assert_eq!(rows.len(), 2, "A does not hold both records: {rows:?}");
+    let by_value = |v: &str| rows.iter().find(|r| r["value"] == v).unwrap_or_else(|| panic!("no {v} on A: {rows:?}")).clone();
+    let (r1, r2) = (by_value("v3"), by_value("v2"));
+    assert!(
+        r2["_filed_at"].as_i64() > r1["_filed_at"].as_i64(),
+        "R2 was not filed after R1, so this is not the issue's sequence: {r1} {r2}"
+    );
+    assert!(r1["_updated_at"].as_i64() > r2["_updated_at"].as_i64(), "R1 was not written last: {r1} {r2}");
+    assert_eq!(secrets_on(&mut client_b).await.len(), 2, "B does not hold both records");
+
+    for device in ["A", "B"] {
+        let got = done(on(device, &["secret", "get", LABEL], &[]).await);
+        assert_eq!(got.data, "v3", "{device} printed another value than the one written last");
+        assert!(!got.text.contains("holds"), "{device} said the label holds two when it could tell: {}", got.text);
+    }
+
+    done(on("B", &["secret", "set", LABEL], &["v4"]).await);
+    let after = secrets_on(&mut client_b).await;
+    assert_eq!(after.len(), 1, "set left two records under one label: {after:?}");
+    assert_eq!(after[0]["_id"], r1["_id"], "set kept the record filed last, not the one written last");
+    assert_eq!(after[0]["value"], "v4");
+}
+
+/// **A piped value of more than one line is refused, naming why, and nothing is kept**: a key
+/// of three lines in PEM form is not kept as its first line, and a label already kept keeps
+/// its value.
+#[tokio::test]
+async fn a_piped_value_of_three_lines_is_refused_and_nothing_is_kept() {
+    const PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIBnFQ1xgVJdq7\n-----END PRIVATE KEY-----\n";
+    let (mut env, cli) = a_terminal().await;
+    let pipe = |label: &str, text: &str| {
+        let mut child = cli.spawn_on_pipes(&["secret", "--user", USER, "set", label]);
+        child.stdin.take().expect("stdin").write_all(text.as_bytes()).expect("write the value");
+        child.wait_with_output().expect("secret set")
+    };
+
+    let refused = pipe("deploy", PEM);
+    assert_eq!(refused.status.code(), Some(1), "{}", said(&refused));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("more than one line") && stderr.contains("nothing was kept"), "{}", said(&refused));
+    assert!(!said(&refused).contains("BEGIN") && !said(&refused).contains("MC4CAQ"), "the refusal said the value: {}", said(&refused));
+    assert!(secrets_held(&mut env).await.is_empty(), "a refused set kept a secret");
+
+    let kept = pipe("bank", "one-line-7f2a\n");
+    assert!(kept.status.success(), "{}", said(&kept));
+    let refused = pipe("bank", PEM);
+    assert_eq!(refused.status.code(), Some(1), "{}", said(&refused));
+    let got = cli.run(&["secret", "--user", USER, "get", "bank"]);
+    assert_eq!(String::from_utf8_lossy(&got.stdout), "one-line-7f2a\n", "a refused set changed it: {}", said(&got));
+    let held = secrets_held(&mut env).await;
+    assert_eq!(held.len(), 1, "{held:?}");
+    drop(env);
+}
+
 /// A daemon the `kotton` binary can reach, `USER` on it, and a CLI holding their session.
 async fn a_terminal() -> (TestEnv, Cli) {
     let mut env = TestEnv::spawn_cli_reachable().await;
@@ -213,7 +311,12 @@ async fn set_on_a_label_kept_replaces_its_value_and_keeps_its_note() {
 
 /// The secrets Personal holds for `USER`, as the person's own query answers them.
 async fn secrets_held(env: &mut TestEnv) -> Vec<serde_json::Value> {
-    env.client
+    secrets_on(&mut env.client).await
+}
+
+/// The secrets Personal holds for `USER` on the device `client` is connected to.
+async fn secrets_on(client: &mut kotton::KottonClient) -> Vec<serde_json::Value> {
+    client
         .record_query_in(USER, Some(kotton_wire::ipc::PERSONAL_ROOT), None, kotton_common::namespace::NSID_SECRET, vec![], None, None)
         .await
         .expect("the person's own query")
