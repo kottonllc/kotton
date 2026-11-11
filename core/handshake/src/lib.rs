@@ -16,7 +16,8 @@
 //! The prologue is the ASCII bytes `kotton-handshake-` followed by the version byte. What that
 //! binds is Noise's handshake hash: the prologue enters it, and every handshake message is
 //! sealed under it as associated data, so no message made under one version opens under
-//! another, and neither side reaches the transport without having read all three under one.
+//! another, and neither side reaches the transport without having made or read all three
+//! under one.
 //! The prologue enters no key: Noise's chaining key mixes only the protocol name and the
 //! exchanges, so the cipher keys and the transport keys are the same under any version for
 //! the same exchanges. The handshake page's sentence "so the version is bound into every

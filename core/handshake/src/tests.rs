@@ -357,11 +357,16 @@ fn a_first_frame_that_never_completes_is_the_state_the_caller_times() {
     assert!(FIRST_FRAME_WAIT > Duration::ZERO);
 }
 
-/// Every encoding of a point of small order on Curve25519: an exchange with any yields all
-/// zeros. The eight points of small order have five canonical u-coordinates (a point and its
-/// negation share one): 0, 1, p-1, and the two of order 8. The rest are non-canonical
-/// encodings that reduce to them, by adding p where that fits below 2^255, or by setting the
-/// top bit, which X25519 ignores. The check is on the exchange's output, so it refuses each.
+/// Every encoding of a u-coordinate of small order that X25519 accepts: an exchange with any
+/// yields all zeros. Where each comes from:
+/// - the curve's points of small order have four u-coordinates: 0 (order 2), 1 (order 4),
+///   and the two of order 8;
+/// - p-1 is of order 4 on the twist, which X25519 also computes over, since it reads a
+///   u-coordinate without checking which of the two it lies on;
+/// - the rest are non-canonical encodings of those five values: p and p+1 (0 and 1 plus p,
+///   which fit below 2^255), and each of the seven with the top bit set, which X25519 masks.
+///
+/// The check is on the exchange's output, so it refuses each.
 const LOW_ORDER: [[u8; 32]; 14] = [
     // canonical
     hex32("0000000000000000000000000000000000000000000000000000000000000000"),
@@ -766,4 +771,27 @@ fn the_responder_tries_every_key_on_every_first_frame() {
     // A first message no key opens: all three are tried.
     let (_init, opening) = Initiator::open(&i_key, &mont_pub(&ed(0x77)), None, None).expect("open");
     assert_eq!(trials(VERSION, &opening[3..]), (3, Err(Closed::Refused)));
+
+    // A first message made under an unspoken version's prologue, to a key the responder
+    // holds: that key opens it, all three are tried, and the version alone refuses it.
+    for named in &eds {
+        let (_init, opening) = Initiator::open_with(
+            speaking(2, &[1, 2]),
+            &i_key,
+            &mont_pub(named),
+            Some(IDENTITY),
+            None,
+        )
+        .expect("open");
+        assert_eq!(opening[0], 2);
+        assert_eq!(trials(2, &opening[3..]), (3, Err(Closed::Refused)));
+    }
+
+    // The length gate: a first frame that is not 48 bytes is refused with no trial.
+    let (_init, opening) = Initiator::open(&i_key, &mont_pub(&eds[0]), None, None).expect("open");
+    let mut long = opening[3..].to_vec();
+    long.push(0);
+    assert_eq!(trials(VERSION, &opening[3..50]), (0, Err(Closed::Refused)));
+    assert_eq!(trials(VERSION, &long), (0, Err(Closed::Refused)));
+    assert_eq!((opening[3..50].len(), long.len()), (47, 49));
 }
