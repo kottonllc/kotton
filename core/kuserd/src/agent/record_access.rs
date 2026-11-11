@@ -520,6 +520,76 @@ mod tests {
         assert!(matches!(gone, UserResponse::RecordDeleted), "{gone:?}");
     }
 
+    /// **`petname` is the person's, and no app's, through the record verbs** (kotton #471): a
+    /// grant row on it planted straight into the grant store does not let an app insert,
+    /// query or delete under it, the person's own verbs in Personal do, and search returns no
+    /// row of it, to the person or to an app, with no schema named and with it named.
+    #[tokio::test]
+    async fn a_petname_is_the_persons_through_the_record_verbs_and_no_apps() {
+        use kotton_wire::ipc::PERSONAL_ROOT;
+        const PETNAME: &str = kotton_common::namespace::NSID_PETNAME;
+        const NAME: &str = "kept-petname-2e9f";
+        let p = person().await;
+        kotton_grant::daemon::db::schema_grants_db::set_grant(&p.user_db, APP, PETNAME, true, true, true)
+            .await
+            .unwrap();
+        let access = access_from(&p.set, AID);
+        let body = || json!({ "key": "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76", "name": NAME });
+        let personal = || Some(PERSONAL_ROOT.to_owned());
+        let refused = |r: UserResponse| match r {
+            UserResponse::Error { message } => {
+                assert!(message.contains(PETNAME), "{message}");
+                assert!(!message.contains(NAME), "a name in a refusal: {message}");
+            }
+            other => panic!("an app reached petname: {other:?}"),
+        };
+        refused(
+            record_insert(&p.registry, &p.store, &p.user_db, &access, None, PETNAME.into(), body(), Some(APP.into()), Local)
+                .await
+                .unwrap(),
+        );
+        let UserResponse::RecordInserted { record_id } = record_insert(
+            &p.registry, &p.store, &p.user_db, &access, personal(), PETNAME.into(), body(), None,
+            Local,
+        )
+        .await
+        .unwrap() else { panic!("the person's insert") };
+        refused(
+            record_query(&p.registry, &p.store, &p.user_db, &access, None, PETNAME.into(), vec![], None, None, Some(APP.into()), Local)
+                .await
+                .unwrap(),
+        );
+        refused(
+            record_delete(&p.registry, &p.store, &p.user_db, &access, None, PETNAME.into(), record_id.clone(), Some(APP.into()), Local)
+                .await
+                .unwrap(),
+        );
+        p.add(None, "dentist").await;
+        for app in [None, Some(APP.to_owned())] {
+            for filter in [None, Some(PETNAME.to_owned())] {
+                let UserResponse::RecordQueryResult { records } =
+                    record_search(&p.registry, &p.store, &access, filter.clone(), None, None, app.clone())
+                        .await
+                        .unwrap()
+                else {
+                    panic!()
+                };
+                assert!(
+                    records.iter().all(|r| r["schema_nsid"] != PETNAME && !r.to_string().contains(NAME)),
+                    "search returned a petname (filter {filter:?}, app {app:?}): {records:?}"
+                );
+            }
+        }
+        let UserResponse::RecordQueryResult { records } = record_query(
+            &p.registry, &p.store, &p.user_db, &access, personal(), PETNAME.into(), vec![], None, None, None,
+            Local,
+        )
+        .await
+        .unwrap() else { panic!("the person's query") };
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["name"], NAME);
+    }
+
     /// **`schema.kept` answers the schema's rows in every root the person is
     /// in, each by the root's name, and no row from a root they are not.**
     ///

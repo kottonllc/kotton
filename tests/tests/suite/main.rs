@@ -50,6 +50,7 @@ mod pins;
 mod records_drive;
 mod access_log;
 mod keychain;
+mod petnames;
 mod instance;
 mod introduction;
 mod ipc_hardening;

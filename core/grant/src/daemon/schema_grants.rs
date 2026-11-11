@@ -113,7 +113,7 @@ pub async fn schema_quota_set(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kotton_common::namespace::{NSID_ACCESS_LOG, NSID_NOTES, NSID_SECRET};
+    use kotton_common::namespace::{NSID_ACCESS_LOG, NSID_NOTES, NSID_PETNAME, NSID_SECRET};
 
     const APP: &str = "com.example.keys";
 
@@ -142,7 +142,7 @@ mod tests {
     #[tokio::test]
     async fn no_app_is_granted_a_schema_kept_from_apps() {
         let pool = grant_store().await;
-        for kept in [NSID_SECRET, NSID_ACCESS_LOG] {
+        for kept in [NSID_SECRET, NSID_ACCESS_LOG, NSID_PETNAME] {
             match schema_grant_set(&pool, APP.into(), kept.into(), true, true, true).await.unwrap() {
                 UserResponse::Error { message } => {
                     assert!(message.contains(kept) && message.contains("no app is granted it"), "{message}")

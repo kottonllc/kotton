@@ -142,24 +142,26 @@ mod tests {
 
     // ── register ─────────────────────────────────────────────────────────────
 
-    /// No app handles `secret`: registering one is refused and stores nothing, setting one as
-    /// default is refused, and a row planted straight into the table is never answered.
+    /// No app handles `secret` or `petname`: registering one is refused and stores nothing,
+    /// setting one as default is refused, and a row planted straight into the table is never
+    /// answered.
     #[tokio::test]
     async fn no_app_handles_a_schema_kept_from_apps() {
         let db = test_db().await;
-        let secret = kotton_common::namespace::NSID_SECRET;
-        let resp = handler_register(&db, "com.acme.keys".into(), secret.into()).await.unwrap();
-        match resp {
-            UserResponse::Error { message } => assert!(message.contains(secret), "{message}"),
-            other => panic!("expected a refusal, got {other:?}"),
-        }
-        assert_eq!(hrdb::count_for_nsid(&db, secret).await.unwrap(), 0, "nothing was stored");
-        let resp = handler_set_default(&db, "com.acme.keys".into(), secret.into()).await.unwrap();
-        assert!(matches!(resp, UserResponse::Error { .. }), "{resp:?}");
+        for secret in [kotton_common::namespace::NSID_SECRET, kotton_common::namespace::NSID_PETNAME] {
+            let resp = handler_register(&db, "com.acme.keys".into(), secret.into()).await.unwrap();
+            match resp {
+                UserResponse::Error { message } => assert!(message.contains(secret), "{message}"),
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+            assert_eq!(hrdb::count_for_nsid(&db, secret).await.unwrap(), 0, "nothing was stored");
+            let resp = handler_set_default(&db, "com.acme.keys".into(), secret.into()).await.unwrap();
+            assert!(matches!(resp, UserResponse::Error { .. }), "{resp:?}");
 
-        hrdb::upsert_handler(&db, "com.acme.keys", secret, 1).await.unwrap();
-        let resp = handler_get_for(&db, secret.into()).await.unwrap();
-        assert!(matches!(resp, UserResponse::HandlerNotFound { .. }), "{resp:?}");
+            hrdb::upsert_handler(&db, "com.acme.keys", secret, 1).await.unwrap();
+            let resp = handler_get_for(&db, secret.into()).await.unwrap();
+            assert!(matches!(resp, UserResponse::HandlerNotFound { .. }), "{resp:?}");
+        }
     }
 
     #[tokio::test]

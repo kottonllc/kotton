@@ -7,6 +7,8 @@ use async_trait::async_trait;
 use kotton::ImportFormat;
 use kotton_common::namespace::NSID_IMPORTED_CALENDAR;
 use kotton_schemas::SchemaId;
+
+use crate::petnames::{said, SchemaArg};
 use kotton_wire::ipc::PERSONAL_ROOT;
 
 use super::{retired, Command, CommandOutput, Verb};
@@ -17,12 +19,12 @@ use crate::state::ShellState;
 ///
 /// Usage:
 /// ```text
-///   record list --schema <publisher>/<name> [--json]
-///   record get --schema <publisher>/<name> <id>
-///   record put --schema <publisher>/<name> <json>
-///   record rm --schema <publisher>/<name> <id>
-///   record import --schema <publisher>/<name> <path>
-///   record export --schema <publisher>/<name> <path>
+///   record list --schema <schema> [--json]
+///   record get --schema <schema> <id>
+///   record put --schema <schema> <json>
+///   record rm --schema <schema> <id>
+///   record import --schema <schema> <path>
+///   record export --schema <schema> <path>
 /// ```
 ///
 /// The command-tree decision's "Records and schemas" line. Each verb asks only what the
@@ -34,7 +36,9 @@ use crate::state::ShellState;
 /// (`kotton_record::replication`). A record put here
 /// is read on another device after a `sync` on each, wherever `personal` lives. A schema is
 /// cited by its identity, `<publisher>/<name>`, the publisher being the `did:key` of the key
-/// that publishes it; this device must know it (a core schema, or one `schema register`ed).
+/// that publishes it, or as `<petname>/<name>`, the person's own name for that key, resolved
+/// on this device ([`crate::petnames`]); this device must know it (a core schema, or one
+/// `schema register`ed).
 ///
 /// `record open <url>` is gone for `record get`: the command-tree decision's table.
 ///
@@ -86,14 +90,43 @@ const EXPORT_PAGE: usize = 256;
 const GET_IS: &str = "`record get --schema <schema> <id>` reads one record, by its schema and its id";
 
 /// A line of `record`, parsed.
+///
+/// Generic over the schema: [`parse`] gives a line of the schema as typed ([`SchemaArg`]),
+/// and [`run`] resolves it against the person's petnames into a line of the identity.
 #[derive(Debug, PartialEq)]
-enum Line {
-    List { schema: SchemaId, json: bool },
-    Get { schema: SchemaId, id: String },
-    Put { schema: SchemaId, body: serde_json::Value },
-    Rm { schema: SchemaId, id: String },
-    Import { schema: SchemaId, path: PathBuf, format: FileFormat },
-    Export { schema: SchemaId, path: PathBuf },
+enum Line<S = SchemaArg> {
+    List { schema: S, json: bool },
+    Get { schema: S, id: String },
+    Put { schema: S, body: serde_json::Value },
+    Rm { schema: S, id: String },
+    Import { schema: S, path: PathBuf, format: FileFormat },
+    Export { schema: S, path: PathBuf },
+}
+
+impl<S> Line<S> {
+    /// The schema the line names.
+    fn schema(&self) -> &S {
+        match self {
+            Self::List { schema, .. }
+            | Self::Get { schema, .. }
+            | Self::Put { schema, .. }
+            | Self::Rm { schema, .. }
+            | Self::Import { schema, .. }
+            | Self::Export { schema, .. } => schema,
+        }
+    }
+
+    /// The same line, of `to` in place of its schema.
+    fn with<T>(self, to: T) -> Line<T> {
+        match self {
+            Self::List { json, .. } => Line::List { schema: to, json },
+            Self::Get { id, .. } => Line::Get { schema: to, id },
+            Self::Put { body, .. } => Line::Put { schema: to, body },
+            Self::Rm { id, .. } => Line::Rm { schema: to, id },
+            Self::Import { path, format, .. } => Line::Import { schema: to, path, format },
+            Self::Export { path, .. } => Line::Export { schema: to, path },
+        }
+    }
 }
 
 /// What a file of records is, by its extension: an `.ics` calendar, or JSON Lines.
@@ -233,6 +266,14 @@ fn ics_is() -> String {
     )
 }
 
+/// The refusal of an `.ics` import under any schema but the one an `.ics` is read as, or
+/// `None`. `typed` is the schema as the person typed it.
+fn ics_refused(format: FileFormat, schema: &SchemaId, typed: String) -> Option<CommandOutput> {
+    (format == FileFormat::Ics && schema.to_string() != NSID_IMPORTED_CALENDAR).then(|| {
+        CommandOutput::usage(format!("record import: an .ics file is not read as {typed} records"), Some(ics_is()))
+    })
+}
+
 /// The words after `record`, as a [`Line`], or the usage refusal (exit 2). `--schema <schema>`
 /// may stand anywhere after the verb; it is said once, and every verb needs it.
 fn parse(args: &[String]) -> Result<Line, CommandOutput> {
@@ -254,14 +295,14 @@ fn parse(args: &[String]) -> Result<Line, CommandOutput> {
         match w.as_str() {
             "--schema" => {
                 let Some(name) = it.next() else {
-                    return usage(format!("record {verb}: `--schema` needs a schema, `<publisher>/<name>`"))
+                    return usage(format!("record {verb}: `--schema` needs a schema, {}", crate::petnames::FORMS))
                 };
                 if schema.is_some() {
                     return usage(format!("record {verb}: `--schema` is said once"));
                 }
-                match SchemaId::parse(name) {
+                match SchemaArg::parse(name) {
                     Ok(n) => schema = Some(n),
-                    Err(e) => return usage(format!("record {verb}: '{name}' is not a schema identity: {e}")),
+                    Err(e) => return usage(format!("record {verb}: {e}")),
                 }
             }
             "--json" => json = true,
@@ -269,7 +310,7 @@ fn parse(args: &[String]) -> Result<Line, CommandOutput> {
         }
     }
     let Some(schema) = schema else {
-        return usage(format!("record {verb}: needs --schema <publisher>/<name>"));
+        return usage(format!("record {verb}: needs --schema <schema>, {}", crate::petnames::FORMS));
     };
     if json && verb != "list" {
         return usage("record: `--json` is for `record list`; `record get` prints the record as JSON".into());
@@ -292,11 +333,11 @@ fn parse(args: &[String]) -> Result<Line, CommandOutput> {
         ("import", [path]) => match path_word(path) {
             Some(path) => {
                 let format = FileFormat::of(&path);
-                if format == FileFormat::Ics && schema.to_string() != NSID_IMPORTED_CALENDAR {
-                    return Err(CommandOutput::usage(
-                        format!("record import: an .ics file is not read as {schema} records"),
-                        Some(ics_is()),
-                    ));
+                // The whole identity is held here; a short one when it is resolved (`run`).
+                if let SchemaArg::Full(id) = &schema {
+                    if let Some(refused) = ics_refused(format, id, id.to_string()) {
+                        return Err(refused);
+                    }
                 }
                 Ok(Line::Import { schema, path, format })
             }
@@ -364,10 +405,43 @@ fn table(records: &[serde_json::Value]) -> Out {
     }
 }
 
-/// Run a parsed line of `record`. A refusal is exit 1, with the daemon's reason.
+/// **A name is given one at a time**: `record import` under `petname` (whole or by a short
+/// form) is refused, exit 2, before the file is read. A grant prompt trusts what a petname
+/// says, and a file is whoever wrote it, so a file of names would be a stranger's words read
+/// as the person's own; `record put` gives one name, as the person typed it.
+fn petname_import_refused(schema: &SchemaId) -> Option<CommandOutput> {
+    (*schema == SchemaId::from_static(kotton_common::namespace::NSID_PETNAME)).then(|| {
+        CommandOutput::usage(
+            "record import: your names for keys are not imported; a name is given one at a time",
+            Some("record put --schema kotton/petname '{\"key\":\"did:key:…\",\"name\":\"…\"}'".into()),
+        )
+    })
+}
+
+/// Run a parsed line of `record`: its schema resolved against the person's petnames
+/// ([`crate::petnames::read_for_typing`]), then the verb. A schema the petnames do not resolve
+/// is refused, exit 2, saying why; a refusal of the verb is exit 1, with the daemon's reason.
+/// A schema is printed in the short form wherever the publisher has a name ([`said`]).
+/// `import` under `petname` is refused, exit 2 ([`petname_import_refused`]).
 async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
     let user_id = state.user_id.clone();
     let mut client = state.client.lock().await;
+    let typing = crate::petnames::read_for_typing(&mut client, &user_id).await;
+    let names = &typing.names;
+    let resolved = match typing.resolve(line.schema()) {
+        Ok(id) => id,
+        Err(why) => return Ok(CommandOutput::usage(format!("record: {why}"), None)),
+    };
+    if let Line::Import { format, .. } = &line {
+        if let Some(refused) = petname_import_refused(&resolved) {
+            return Ok(refused);
+        }
+        if let Some(refused) = ics_refused(*format, &resolved, said(&resolved, names)) {
+            return Ok(refused);
+        }
+    }
+    let shown = said(&resolved, names);
+    let line = line.with(resolved);
     let refused = |verb: &str, e: std::io::Error| CommandOutput::fail(format!("record {verb}: {e}"), None);
     match line {
         Line::List { schema, json } => {
@@ -389,8 +463,8 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
             match held_by_id(&mut client, &user_id, &schema, &id).await {
                 Ok(Some(held)) => Ok(CommandOutput::shapes(vec![Out::Data(serde_json::to_string_pretty(&held)?)])),
                 Ok(None) => Ok(CommandOutput::fail(
-                    format!("no record '{id}' under {schema}"),
-                    Some(format!("`record list --schema {schema}` lists the ids")),
+                    format!("no record '{id}' under {shown}"),
+                    Some(format!("`record list --schema {shown}` lists the ids")),
                 )),
                 Err(e) => Ok(refused("get", e)),
             }
@@ -475,7 +549,7 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
                 action: format!(
                     "into personal: {total} record(s) put, {replaced} of them replacing one that differed; {as_written} already held as written, not put"
                 ),
-                subject: schema.to_string(),
+                subject: shown,
             }]))
         }
         Line::Import { schema, path, format: FileFormat::Ics } => {
@@ -507,13 +581,13 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
             };
             if wrote != schema.to_string() {
                 return Ok(CommandOutput::fail(
-                    format!("record import: the daemon wrote {imported} event(s) as {wrote}, not {schema}"),
+                    format!("record import: the daemon wrote {imported} event(s) as {wrote}, not {shown}"),
                     Some(format!("`record list --schema {wrote}` lists them")),
                 ));
             }
             let mut out = vec![Out::Confirm {
                 action: format!("{imported} event(s) imported into personal from {source_name}"),
-                subject: wrote,
+                subject: shown,
             }];
             if skipped > 0 {
                 // Never folded into the total: only the person can say whether the ones that
@@ -570,7 +644,7 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
                 ));
             }
             Ok(CommandOutput::shapes(vec![Out::Confirm {
-                action: format!("{} record(s) of {schema} exported", held.len()),
+                action: format!("{} record(s) of {shown} exported", held.len()),
                 subject: path.display().to_string(),
             }]))
         }
@@ -661,9 +735,23 @@ sealed into your first drive, `personal`, at each sync: a record put on one
 device is read on another after a `sync` on each, and wherever `personal` is
 moved. The vault keeps it sealed under your key and can read none of it: not
 its fields, its id, or its schema's name. A schema is named by the key that
-publishes it: `<publisher>/<name>`, the publisher being the `did:key` of that
-key, so Kotton's notes are `did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes`.
-This device must know the schema, as a core schema or one `schema register` added.
+publishes it: `did:key:…/<name>`, the `did:key` of that key and the name, so
+Kotton's notes are `did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes`.
+Type it whole, or as `<petname>/<name>`, your own name for the key: `kotton`
+names Kotton's key on every device, so those notes are `kotton/notes`. A
+petname is resolved on this device; one no key has, or one you gave several
+keys, is refused. This device must know the schema, as a core schema or one
+`schema register` added.
+
+A petname is itself one of your records, of `kotton/petname`: the key, as a
+`did:key`, and your name for it. `record put` gives one name at a time, and a
+name given again to the same key replaces the one before; `record import`
+refuses `kotton/petname`, since a file of names would be its writer's words
+read as yours. A name holds no `/` and does not begin with `did:`, and
+`kotton` names Kotton's key alone, each in any case and with any spaces around it.
+Two rules are this device's own, not the protocol's: a name is at most 64
+characters, and it holds no control, bidirectional-formatting or invisible
+character (one that reorders, breaks or hides part of a line).
 
 These are your own records, in Personal: a record in another root you are a
 member of, such as an organisation's project, is not listed, read, written or
@@ -681,13 +769,13 @@ write over one. `import` puts a line with an `id` by that id: a second import
 of the same file changes nothing; a line whose record has changed since
 replaces it; a record removed since comes back. A line without an `id` is a
 new record each time. An `.ics` file (by its extension) imports as calendar
-events, under the schema an `.ics` is read as:
-did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event
+events, under the schema an `.ics` is read as, `kotton/import.calendar.event`.
 It keeps an event's recurrence, zone and all-day flag, which the calendar
 schema has no field for.
 
 FLAGS:
-  --schema <schema>  the schema the records are of, `<publisher>/<name>`; every verb needs it
+  --schema <schema>  the schema the records are of, `<petname>/<name>` or
+                     `did:key:…/<name>`; every verb needs it
   --json           `list`: the records the daemon answered, as JSON on stdout
 
 Exit 0 when done, 1 when refused, when no record has the id, or when a file
@@ -695,13 +783,14 @@ cannot be read or written (the reason on stderr), 2 for a line that is not one
 of the above.
 
 EXAMPLES:
-  record put --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes '{\"title\":\"milk\",\"body\":\"two pints\"}'
+  record put --schema kotton/notes '{\"title\":\"milk\",\"body\":\"two pints\"}'
+  record list --schema kotton/notes
   record list --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes
-  record get --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>
-  record rm --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>
-  record export --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes notes.jsonl
-  record import --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes notes.jsonl
-  record import --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event calendar.ics";
+  record get --schema kotton/notes <id>
+  record rm --schema kotton/notes <id>
+  record export --schema kotton/notes notes.jsonl
+  record import --schema kotton/notes notes.jsonl
+  record import --schema kotton/import.calendar.event calendar.ics";
 
 #[cfg(test)]
 mod tests {
@@ -711,13 +800,23 @@ mod tests {
     const NOTES: &str = kotton_common::namespace::NSID_NOTES;
     const TASKS: &str = kotton_common::namespace::NSID_TASKS;
 
-    fn notes() -> SchemaId {
-        SchemaId::from_static(NOTES)
+    fn notes() -> SchemaArg {
+        SchemaArg::Full(SchemaId::from_static(NOTES))
     }
 
     /// `line`, with `NOTES` and `TASKS` where the line says them, split into words.
     fn words(line: &str) -> Vec<String> {
         line.replace("NOTES", NOTES).replace("TASKS", TASKS).split_whitespace().map(str::to_string).collect()
+    }
+
+    /// **A name is given one at a time**: an import under `petname` is refused, exit 2,
+    /// saying so; one under any other schema is not refused by it.
+    #[test]
+    fn an_import_of_petnames_is_refused() {
+        let petname = SchemaId::from_static(kotton_common::namespace::NSID_PETNAME);
+        let refused = petname_import_refused(&petname).expect("an import of names");
+        assert_eq!(refused.exit_code, ExitCode::Code(2));
+        assert!(petname_import_refused(&SchemaId::from_static(NOTES)).is_none());
     }
 
     /// Every current verb the table declares is a line this parser answers, so the table the
@@ -820,7 +919,7 @@ mod tests {
             assert_eq!(
                 parse(&line).ok(),
                 Some(Line::Import {
-                    schema: SchemaId::from_static(NSID_IMPORTED_CALENDAR),
+                    schema: SchemaArg::Full(SchemaId::from_static(NSID_IMPORTED_CALENDAR)),
                     path: name.into(),
                     format: FileFormat::Ics
                 }),
@@ -839,6 +938,25 @@ mod tests {
         let Some(Out::Fail { try_, .. }) = refused.out.first() else { panic!("a refusal is a Fail") };
         let want = format!("`record import --schema {NSID_IMPORTED_CALENDAR} <path>`");
         assert!(try_.as_deref().is_some_and(|t| t.contains(&want)), "{try_:?}");
+    }
+
+    /// `--schema` takes the short form too, `<petname>/<name>`, parsed by the one parser and
+    /// resolved when the line runs; a word that is neither form is usage, exit 2.
+    #[test]
+    fn the_short_form_parses() {
+        let SchemaArg::Short { petname, name } = SchemaArg::parse("kotton/notes").unwrap() else { panic!("short") };
+        let short = SchemaArg::Short { petname, name };
+        assert_eq!(
+            parse(&words("list --schema kotton/notes")).ok(),
+            Some(Line::List { schema: short.clone(), json: false })
+        );
+        assert_eq!(
+            parse(&words("import --schema kotton/import.calendar.event cal.ics")).ok().map(|l| l.with(())),
+            Some(Line::Import { schema: (), path: "cal.ics".into(), format: FileFormat::Ics })
+        );
+        for line in ["list --schema kotton", "list --schema kotton/Notes", "list --schema /notes"] {
+            assert_eq!(parse(&words(line)).expect_err(line).exit_code, ExitCode::Code(2), "{line}");
+        }
     }
 
     /// A line of a file is a record as `put` takes one: an object, whose `id` is a record's.

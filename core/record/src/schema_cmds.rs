@@ -324,7 +324,11 @@ mod tests {
             .await
             .expect("secret is registered, and the person's own verbs put a record under it");
 
-        for schema in [kotton_schemas::CoreSchema::Secret, kotton_schemas::CoreSchema::AccessLog] {
+        for schema in [
+            kotton_schemas::CoreSchema::Secret,
+            kotton_schemas::CoreSchema::AccessLog,
+            kotton_schemas::CoreSchema::Petname,
+        ] {
             let err = schema_register(&registry, &store, schema.file(), "alice")
                 .await
                 .expect_err("a core identity is not registered");

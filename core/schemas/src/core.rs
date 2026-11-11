@@ -12,12 +12,12 @@
 //! **Core means present on every device, and nothing more.** A core schema has no reach
 //! another schema lacks and refuses nothing another does not; it is compiled in because the
 //! daemon writes it and reads it on every device of a person's, and a device that has never
-//! seen a declaration skips its rows. Two identities among them, `secret` and `access-log`,
-//! are kept from every app ([`CoreSchema::is_kept_from_apps`]): a refusal held for those two
-//! by name, not for being core. Before the first tag the files carry no `signature`, as
-//! the decision says: nothing depends on a schema by version yet, the release key never
-//! leaves the maintainer's machine, and the files are what every page of the protocol is, a
-//! change the maintainer signed off. The registry admits them as core without one.
+//! seen a declaration skips its rows. Three identities among them, `secret`, `access-log` and
+//! `petname`, are kept from every app ([`CoreSchema::is_kept_from_apps`]): a refusal held for
+//! those three by name, not for being core. Before the first tag the files carry no
+//! `signature`, as the decision says: nothing depends on a schema by version yet, the release
+//! key never leaves the maintainer's machine, and the files are what every page of the
+//! protocol is, a change the maintainer signed off. The registry admits them as core without one.
 //!
 //! | Schema               | Purpose                                                   |
 //! |----------------------|-----------------------------------------------------------|
@@ -34,6 +34,7 @@
 //! | `keeps-whole`        | That a device keeps a drive whole                         |
 //! | `secret`             | A password or a token in the person's keychain            |
 //! | `access-log`         | One thing a device's daemon was asked                     |
+//! | `petname`            | The person's own name for a key                           |
 //! | `governance.record`  | One record file of the project's board, as a row          |
 //!
 //! The table is gated against [`CoreSchema::all`] in this module's tests, so it
@@ -109,6 +110,11 @@ pub enum CoreSchema {
     /// of the person's devices, one that pinned its log, is merged as any row is. Writing
     /// one starts no sync pass: a pinned log rides the next pass that runs anyway.
     AccessLog,
+    /// The person's own name for a key: `key`, a `did:key`, and `name`. Registered, and kept
+    /// from every app as `secret` is ([`CoreSchema::is_kept_from_apps`]), since a grant prompt
+    /// trusts what a petname says. Kept in Personal, one record per key, and held to its rules
+    /// at insert (`kotton_schemas::petname`).
+    Petname,
     /// A governance record: one record file of the project's board as a row
     /// (RFC-0088), the schema `client/record-file` converts to and from. Core
     /// because Kotton's own records app and converter read it on every device
@@ -136,22 +142,29 @@ impl CoreSchema {
             CoreSchema::KeepsWhole,
             CoreSchema::Secret,
             CoreSchema::AccessLog,
+            CoreSchema::Petname,
             CoreSchema::GovernanceRecord,
         ]
     }
 
-    /// Return `true` for a core schema kept from every app: `secret` and `access-log`.
+    /// Return `true` for a core schema kept from every app: `secret`, `access-log` and
+    /// `petname`.
     ///
     /// A schema is named by the key that publishes it (the protocol's decision of that
-    /// title), and these two identities, under Kotton's release key, are refused to every
-    /// app: no app is granted either, reads or writes a row of either whatever grant is
-    /// stored, claims to handle either, or finds a row of either in record search. Only the
-    /// person's own terminal reaches them. **The refusal is held for these identities by
+    /// title), and these three identities, under Kotton's release key, are refused to every
+    /// app: no app is granted any of them, reads or writes a row of one whatever grant is
+    /// stored, claims to handle one, or finds a row of one in record search. Only the
+    /// person's own terminal reaches them. `secret` holds the person's passwords and
+    /// `access-log` what their daemon was asked. `petname` is kept because a grant prompt
+    /// trusts what a petname says: that decision has a prompt say who stands behind a schema or
+    /// an app only by the person's own name for the publisher's key, so a petname an app could
+    /// write would let the app name itself, and nothing but the person's own terminal may
+    /// write one. **The refusal is held for these identities by
     /// name, and is not a property of being core:** being core confers nothing (module doc),
     /// and another core schema is reachable by an app exactly as any schema is. Every place
     /// an app could reach a schema asks [`CoreSchema::kept_from_apps`].
     pub fn is_kept_from_apps(self) -> bool {
-        matches!(self, CoreSchema::Secret | CoreSchema::AccessLog)
+        matches!(self, CoreSchema::Secret | CoreSchema::AccessLog | CoreSchema::Petname)
     }
 
     /// The core schema kept from apps ([`CoreSchema::is_kept_from_apps`]) that `nsid` names,
@@ -199,6 +212,7 @@ impl CoreSchema {
             CoreSchema::KeepsWhole => ns::NSID_KEEPS_WHOLE,
             CoreSchema::Secret => ns::NSID_SECRET,
             CoreSchema::AccessLog => ns::NSID_ACCESS_LOG,
+            CoreSchema::Petname => ns::NSID_PETNAME,
             CoreSchema::GovernanceRecord => ns::NSID_GOVERNANCE_RECORD,
         })
     }
@@ -219,6 +233,7 @@ impl CoreSchema {
             CoreSchema::KeepsWhole => include_str!("../schemas/kotton/keeps-whole.json"),
             CoreSchema::Secret => include_str!("../schemas/kotton/secret.json"),
             CoreSchema::AccessLog => include_str!("../schemas/kotton/access-log.json"),
+            CoreSchema::Petname => include_str!("../schemas/kotton/petname.json"),
             CoreSchema::GovernanceRecord => include_str!("../schemas/kotton/governance.record.json"),
         }
     }
@@ -275,7 +290,7 @@ mod tests {
         }
         named.sort();
         assert_eq!(named, files_in_the_directory(), "the set and the directory differ");
-        assert_eq!(CoreSchema::all().len(), 14);
+        assert_eq!(CoreSchema::all().len(), 15);
     }
 
     /// The module table is the first thing anyone reads about the core set,
@@ -307,16 +322,19 @@ mod tests {
         }
     }
 
-    /// `secret` and `access-log` are kept from apps, by their whole identities; no other core
-    /// schema is, a name of theirs under another key is not, and a string that is no identity
-    /// names none.
+    /// `secret`, `access-log` and `petname` are kept from apps, by their whole identities; no
+    /// other core schema is, a name of theirs under another key is not, and a string that is no
+    /// identity names none.
     #[test]
-    fn two_identities_are_kept_from_apps_by_name() {
+    fn three_identities_are_kept_from_apps_by_name() {
         let kept: Vec<CoreSchema> =
             CoreSchema::all().iter().copied().filter(|cs| cs.is_kept_from_apps()).collect();
-        assert_eq!(kept, vec![CoreSchema::Secret, CoreSchema::AccessLog]);
+        assert_eq!(kept, vec![CoreSchema::Secret, CoreSchema::AccessLog, CoreSchema::Petname]);
         assert_eq!(CoreSchema::kept_from_apps(ns::NSID_SECRET), Some(CoreSchema::Secret));
         assert_eq!(CoreSchema::kept_from_apps(ns::NSID_ACCESS_LOG), Some(CoreSchema::AccessLog));
+        assert_eq!(CoreSchema::kept_from_apps(ns::NSID_PETNAME), Some(CoreSchema::Petname));
+        let theirs_petname = "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76/petname";
+        assert_eq!(CoreSchema::kept_from_apps(theirs_petname), None);
         assert_eq!(CoreSchema::kept_from_apps(ns::NSID_NOTES), None);
         let theirs = "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76/secret";
         assert_eq!(CoreSchema::kept_from_apps(theirs), None);
