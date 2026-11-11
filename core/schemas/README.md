@@ -46,9 +46,9 @@ core files carry no signature, and the registry admits them as core without one.
 
 The files under `schemas/kotton/`, one per schema, in the form a schema is published: its
 publisher, its name, its revision, its fields and a description. Each is the protocol's file
-of the same name under kotton-protocol's `schemas/kotton/`, but `petname`, which waits on a
-pull request there; `cargo xtask schemas-check` holds every copy here to the protocol's file
-byte for byte, or names it as not yet published.
+of the same name under kotton-protocol's `schemas/kotton/`, `petname` included, which is
+published there; `cargo xtask schemas-check` holds every copy here to the protocol's file
+byte for byte.
 
 ```
 notes               — title, body, tags, created_at, updated_at
