@@ -248,7 +248,7 @@ fn cleaned(text: &str) -> String {
         // Any other character that takes no column (a vowel sign, a virama, a variation
         // selector) is kept as a mark: the words stay the ones written, and [`char_cols`]
         // counts it a column, so a row is never measured narrower for it.
-        if is_combining_mark(c) || c.width() == Some(0) {
+        if is_mark(c) {
             marks += 1;
             if marks > MARKS_MAX || out.is_empty() {
                 continue;
@@ -263,6 +263,12 @@ fn cleaned(text: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// Whether `c` is kept by [`cleaned`] as a mark on the character before it: a combining mark,
+/// or any other character that takes no column.
+fn is_mark(c: char) -> bool {
+    is_combining_mark(c) || c.width() == Some(0)
 }
 
 /// `c` as a quote shows it: `"` and `\` escaped, so the quote is the one the prompt closed.
@@ -344,11 +350,15 @@ fn is_right_to_left(c: char) -> bool {
 
 /// `content` laid out in rows of at most `width` columns ([`cols`]), the first beginning
 /// `first` and every other [`CONTINUED`]: broken at the last space of a row where it has one,
-/// else between two characters, and never before a character that takes no column. A row
-/// carried on whose first strong character (a letter, or any character of a right-to-left
-/// block, its punctuation and signs among them) would be right to left begins [`CARRIED_RTL`]
-/// instead, so a terminal that takes a row's direction from its first strong character keeps
-/// the gutter on the left.
+/// else between two characters, and **never between a character and a mark kept on it**
+/// ([`is_mark`]): when the character that does not fit is a mark, its base and the marks
+/// already on it go to the next row with it. (A base with its four marks is at most six
+/// columns, and a row has more room than that, so they always fit.) A row carried on whose
+/// first strong character (a letter, or any character of a right-to-left block, its
+/// punctuation and signs among them) would be right to left begins [`CARRIED_RTL`] instead,
+/// so a terminal that takes a row's direction from its first strong character keeps the
+/// gutter on the left. The search for that character runs past the row's end when the row
+/// has none, and counts right-to-left digits and marks as strong; both err toward `(more)`.
 fn rows(content: &str, width: usize, first: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut row = String::new();
@@ -373,6 +383,21 @@ fn rows(content: &str, width: usize, first: &str) -> Vec<String> {
                 pending.push_front(carried);
             }
             row.truncate(at);
+        } else if is_mark(c) {
+            // The base the mark sits on, and the marks already on it, start the next row.
+            let mut at = row.len();
+            for (i, ch) in row.char_indices().rev() {
+                at = i;
+                if !is_mark(ch) {
+                    break;
+                }
+            }
+            if at > 0 {
+                for carried in row[at..].chars().rev() {
+                    pending.push_front(carried);
+                }
+                row.truncate(at);
+            }
         }
         out.push(format!("{prefix}{row}"));
         row.clear();
@@ -1032,6 +1057,40 @@ mod tests {
                     assert!(line.starts_with(GUTTER), "{line:?}");
                     assert!(cols(&line) <= width && each_cell(&line) <= width, "{width}: {line:?}");
                 }
+            }
+        }
+    }
+
+    /// **No row ends between a character and a mark kept on it**: no carried-on row's text
+    /// begins with a character that takes no column, for the mark test's texts and the same
+    /// texts with no spaces, at every width from 24 to 81; and every row still begins with the
+    /// gutter and fits.
+    #[test]
+    fn no_row_ends_between_a_character_and_its_mark() {
+        let spaced = ["हिंदी ".repeat(30), "தமிழ் ".repeat(30), "\u{1100}\u{1161}\u{11A8} ".repeat(40), "\u{2764}\u{FE0F}".repeat(60)];
+        let unspaced: Vec<String> = spaced.iter().map(|t| t.replace(' ', "")).collect();
+        let marked = "e\u{0301}\u{0302}\u{0303}\u{0304}".repeat(40);
+        for text in spaced.iter().chain(&unspaced).chain(std::iter::once(&marked)) {
+            for width in 24..=81 {
+                let lines = words_rows("the app's description", text, REASON_MAX, width);
+                for (i, line) in lines.iter().enumerate() {
+                    assert!(line.starts_with(GUTTER), "{line:?}");
+                    assert!(cols(line) <= width && each_cell(line) <= width, "{width}: {line:?}");
+                    if i == 0 {
+                        continue;
+                    }
+                    let rest = line.strip_prefix(CARRIED_RTL).or_else(|| line.strip_prefix(CONTINUED)).unwrap_or_else(|| panic!("{line:?}"));
+                    let head = rest.chars().next();
+                    assert!(
+                        !head.is_some_and(|c| c.width() == Some(0) || is_combining_mark(c)),
+                        "{width}: a row begins with a mark parted from its base: {line:?}"
+                    );
+                }
+                // Nothing is lost or added in the layout: the rows, joined, are the words.
+                let (quote, _) = quoted_within(text, REASON_MAX);
+                let joined: String = logical(&lines)[0].chars().filter(|c| *c != ' ').collect();
+                let whole: String = format!("  |the app's description:{quote}").chars().filter(|c| *c != ' ').collect();
+                assert_eq!(joined, whole, "{width}");
             }
         }
     }

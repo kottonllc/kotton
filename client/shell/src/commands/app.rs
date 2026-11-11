@@ -1483,7 +1483,8 @@ mod prompt_tests {
     }
 
     /// **The offer says the person's answer as they typed it**: spacing, and every sign on
-    /// a letter, kept.
+    /// a letter, kept. This tests `already_given` itself; the offer trims the answer before it
+    /// gets here, so a space at either end never reaches it in the flow.
     #[test]
     fn the_offer_says_the_answer_as_typed() {
         let typed = format!("My  Bank \u{0915}{}", "\u{0947}".repeat(6));

@@ -94,10 +94,11 @@ begin with `did:`, and is `kotton` for Kotton's publisher alone, compared with t
 and spaces trimmed, so `Kotton` and `kotton ` are refused for another key. The protocol's text
 says a name "does not begin with `did:`"; **this tree compares that folded too**, so ` DID:key`
 is refused, and skipped on read, though the protocol's words alone would allow it. **Two more
-rules are this tree's, not the decision's**: a name is at most 64 characters, and it holds no control, bidirectional-formatting or invisible character
-(`petname::is_hostile_char`: the line and paragraph separators, the zero-width characters and
-the tag characters too), so a name cannot reorder, break or hide part of the line it is shown
-in, or look like another name it is not. The record daemon asks it at insert, and
+rules are this tree's, not the decision's**: a name is at most 64 characters, and it holds no
+control, bidirectional-formatting or invisible character (`petname::is_hostile_char`: the line
+and paragraph separators, the zero-width characters and the tag characters too), so a name
+cannot reorder, break or hide part of the line it is shown in, or look like another name it is
+not. The record daemon asks it at insert, and
 `Petnames::from_records`, the reader, asks it of every stored record, so one that breaks a rule
 (written before the rule, or merged from another device) is never a name. `kotton` names
 Kotton's publisher on every device with no record, and a record for that key replaces it; the
