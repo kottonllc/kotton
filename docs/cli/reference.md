@@ -514,7 +514,7 @@ Print field definitions for a schema
 
 ###### **Arguments:**
 
-* `<SCHEMA>` — The schema to inspect, `<publisher>/<name>`
+* `<SCHEMA>` — The schema to inspect: `<petname>/<name>` (`kotton/notes`) or `did:key:…/<name>`
 
 ###### **Options:**
 
@@ -655,9 +655,23 @@ sealed into your first drive, `personal`, at each sync: a record put on one
 device is read on another after a `sync` on each, and wherever `personal` is
 moved. The vault keeps it sealed under your key and can read none of it: not
 its fields, its id, or its schema's name. A schema is named by the key that
-publishes it: `<publisher>/<name>`, the publisher being the `did:key` of that
-key, so Kotton's notes are `did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes`.
-This device must know the schema, as a core schema or one `schema register` added.
+publishes it: `did:key:…/<name>`, the `did:key` of that key and the name, so
+Kotton's notes are `did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes`.
+Type it whole, or as `<petname>/<name>`, your own name for the key: `kotton`
+names Kotton's key on every device, so those notes are `kotton/notes`. A
+petname is resolved on this device; one no key has, or one you gave several
+keys, is refused. This device must know the schema, as a core schema or one
+`schema register` added.
+
+A petname is itself one of your records, of `kotton/petname`: the key, as a
+`did:key`, and your name for it. `record put` gives one name at a time, and a
+name given again to the same key replaces the one before; `record import`
+refuses `kotton/petname`, since a file of names would be its writer's words
+read as yours. A name holds no `/` and does not begin with `did:`, and
+`kotton` names Kotton's key alone, each in any case and with any spaces around it.
+Two rules are this device's own, not the protocol's: a name is at most 64
+characters, and it holds no control, bidirectional-formatting or invisible
+character (one that reorders, breaks or hides part of a line).
 
 These are your own records, in Personal: a record in another root you are a
 member of, such as an organisation's project, is not listed, read, written or
@@ -675,13 +689,13 @@ write over one. `import` puts a line with an `id` by that id: a second import
 of the same file changes nothing; a line whose record has changed since
 replaces it; a record removed since comes back. A line without an `id` is a
 new record each time. An `.ics` file (by its extension) imports as calendar
-events, under the schema an `.ics` is read as:
-did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event
+events, under the schema an `.ics` is read as, `kotton/import.calendar.event`.
 It keeps an event's recurrence, zone and all-day flag, which the calendar
 schema has no field for.
 
 FLAGS:
-  --schema <schema>  the schema the records are of, `<publisher>/<name>`; every verb needs it
+  --schema <schema>  the schema the records are of, `<petname>/<name>` or
+                     `did:key:…/<name>`; every verb needs it
   --json           `list`: the records the daemon answered, as JSON on stdout
 
 Exit 0 when done, 1 when refused, when no record has the id, or when a file
@@ -689,13 +703,14 @@ cannot be read or written (the reason on stderr), 2 for a line that is not one
 of the above.
 
 EXAMPLES:
-  record put --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes '{"title":"milk","body":"two pints"}'
+  record put --schema kotton/notes '{"title":"milk","body":"two pints"}'
+  record list --schema kotton/notes
   record list --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes
-  record get --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>
-  record rm --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes <id>
-  record export --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes notes.jsonl
-  record import --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes notes.jsonl
-  record import --schema did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/import.calendar.event calendar.ics
+  record get --schema kotton/notes <id>
+  record rm --schema kotton/notes <id>
+  record export --schema kotton/notes notes.jsonl
+  record import --schema kotton/notes notes.jsonl
+  record import --schema kotton/import.calendar.event calendar.ics
 
 RETIRED:
   record open              gone: type `record get`

@@ -568,12 +568,12 @@ mod tests {
     use crate::CapabilityTarget;
 
     /// A manifest that claims to handle, or asks to read or write, a schema kept from apps is
-    /// refused by name, for `secret` and for `access-log`; the same manifest naming notes
+    /// refused by name, for `secret`, `access-log` and `petname`; the same manifest naming notes
     /// parses.
     #[test]
     fn a_manifest_naming_a_schema_kept_from_apps_is_refused() {
-        use kotton_common::namespace::{NSID_ACCESS_LOG, NSID_NOTES, NSID_SECRET};
-        for kept in [NSID_SECRET, NSID_ACCESS_LOG] {
+        use kotton_common::namespace::{NSID_ACCESS_LOG, NSID_NOTES, NSID_PETNAME, NSID_SECRET};
+        for kept in [NSID_SECRET, NSID_ACCESS_LOG, NSID_PETNAME] {
             for (claim, body) in [
                 ("handler_for", format!("handler_for = [\"{kept}\"]\n\n[capabilities]\n")),
                 ("schema.read", format!("\n[capabilities]\n\"schema.read\" = [\"{kept}\"]\n")),

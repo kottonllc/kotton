@@ -1,0 +1,18 @@
+{
+  "publisher": "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB",
+  "name": "petname",
+  "revision": 1,
+  "fields": [
+    {
+      "name": "key",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "name": "name",
+      "type": "string",
+      "nullable": false
+    }
+  ],
+  "description": "The person's own name for a key: the key, as a did:key, and what the person calls it."
+}

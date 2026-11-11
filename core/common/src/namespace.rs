@@ -88,6 +88,12 @@ pub const NSID_SECRET: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3
 /// `kotton_record::replication`).
 pub const NSID_ACCESS_LOG: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/access-log";
 
+/// The person's own name for a key (the protocol's `schemas/kotton/petname`): `key`, a
+/// `did:key`, and `name`, what the person calls it. Kept from every app as `secret` is, since a
+/// grant prompt trusts what a petname says; kept in Personal, one record per key, and held to
+/// its rules at insert (`kotton_schemas::petname`).
+pub const NSID_PETNAME: &str = "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/petname";
+
 /// A governance record: one record file of the project's board as a row (RFC-0088), the
 /// schema `client/record-file` converts to and from. Core because Kotton's own records app
 /// and converter read it on every device of a project's members, and a schema of Kotton's
@@ -133,6 +139,7 @@ mod tests {
             (NSID_KEEPS_WHOLE, "keeps-whole"),
             (NSID_SECRET, "secret"),
             (NSID_ACCESS_LOG, "access-log"),
+            (NSID_PETNAME, "petname"),
             (NSID_GOVERNANCE_RECORD, "governance.record"),
             (NSID_META_SCHEMA, "meta.schema"),
             (NSID_IMPORTED_CALENDAR, "import.calendar.event"),

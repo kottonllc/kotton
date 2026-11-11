@@ -6,6 +6,10 @@ pub mod executor;
 mod host;
 mod parser;
 #[cfg(feature = "cli")]
+pub mod grant_prompt;
+#[cfg(feature = "cli")]
+pub mod petnames;
+#[cfg(feature = "cli")]
 pub mod recover;
 #[cfg(feature = "cli")]
 pub mod secret;

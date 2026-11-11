@@ -6374,7 +6374,11 @@ mod host_call_tests {
         }
         let kept = Kept(std::sync::Mutex::new(Vec::new()));
         let spy = Spy::new();
-        for nsid in [kotton_common::namespace::NSID_SECRET, kotton_common::namespace::NSID_ACCESS_LOG] {
+        for nsid in [
+            kotton_common::namespace::NSID_SECRET,
+            kotton_common::namespace::NSID_ACCESS_LOG,
+            kotton_common::namespace::NSID_PETNAME,
+        ] {
             for call in [
                 RunnerHostCall::Kept { nsid: nsid.into() },
                 RunnerHostCall::Records { verb: RunnerRecordVerb::List { root: "fam".into(), nsid: nsid.into() } },

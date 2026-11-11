@@ -3639,6 +3639,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "unicode-width 0.2.2",
  "workspace-hack",
 ]
 

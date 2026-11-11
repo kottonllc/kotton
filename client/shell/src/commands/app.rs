@@ -17,10 +17,11 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use kotton_schemas::AppManifest;
+use kotton_schemas::{AppManifest, CapabilityGrant};
 use std::path::PathBuf;
 
 use super::{Command, CommandOutput};
+use crate::grant_prompt::{self, quoted, words_line, Known, Signer, OFFER_CAUTION};
 use crate::out::Out;
 use crate::state::ShellState;
 
@@ -381,7 +382,8 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
         .map_err(|e| anyhow::anyhow!("app sideload: read wasm: {e}"))?;
 
     let user_id = state.user_id.clone();
-    let mut client = state.client.lock().await;
+    let client_handle = std::sync::Arc::clone(&state.client);
+    let mut client = client_handle.lock().await;
 
     // ── The consent ceremony ────────────────────────────────────────────────
     //
@@ -389,10 +391,13 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
     // unapproved sideload leaves no trace — and the capability list shown below
     // is the daemon's own reading of the manifest, not this command's, so what
     // the user approves is what the daemon will sign.
-    let preview = client
+    let preview = match client
         .app_install_preview(&user_id, manifest_toml.clone(), wasm_bytes.clone())
         .await
-        .map_err(|e| anyhow::anyhow!("app sideload: {e}"))?;
+    {
+        Ok(preview) => preview,
+        Err(e) => return Ok(refused(PREVIEW_REFUSED, &e.to_string())),
+    };
 
     // `--bind <shape-id>=<path>` — RFC-0021's "the user can accept the default
     // or type any path they like", in a surface that cannot prompt. Repeatable;
@@ -407,11 +412,7 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
 
     for (id, _) in &bindings {
         if !preview.shapes.iter().any(|s| &s.id == id) {
-            let known: Vec<&str> = preview.shapes.iter().map(|s| s.id.as_str()).collect();
-            return Ok(CommandOutput::error(
-                1,
-                format!("app sideload: no shape '{id}' in this app. It declares: {known:?}"),
-            ));
+            return Ok(CommandOutput::error(1, no_such_shape(id, &preview.shapes).join("\n")));
         }
     }
 
@@ -454,81 +455,58 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
 
     let approval = args.iter().position(|a| a == "--approve");
     let typed = approval.and_then(|i| args.get(i + 1)).map(String::as_str);
+    // The key that signed the app's code is the manifest's `[publisher]`, read here from the
+    // manifest the daemon read, and only when the daemon's preview checked its signature.
+    let publisher_did = AppManifest::from_toml(&manifest_toml).ok().and_then(|m| m.publisher_did);
+    let signer = Signer::of(publisher_did.as_deref(), preview.publisher_verified);
 
     if approval.is_none() {
         // The default is not to install. Saying what it wants and stopping is
         // the whole point: there is no flagless path that grants anything.
-        let mut lines = vec![
-            format!("{} {} ({})", preview.name, preview.version, preview.app_id),
-            if preview.publisher_verified {
-                "Publisher: signature verified".to_string()
-            } else {
-                "Publisher: UNSIGNED — nothing ties this binary to a publisher".to_string()
-            },
-            String::new(),
-        ];
-        if preview.requested_display.is_empty() {
-            lines.push("This app is requesting nothing.".to_string());
-        } else {
-            lines.push("This app is requesting:".to_string());
-            for cap in &preview.requested_display {
-                lines.push(format!("    {cap}"));
-            }
-        }
-        if !preview.shapes.is_empty() {
-            lines.push(String::new());
-            lines.push("Where its files will live (change with --bind id=path):".to_string());
-            for s in &preview.shapes {
-                // Label first when the manifest declared one. A path tells the
-                // user where, and only the author can say what for — which is
-                // the thing they are actually being asked to judge.
-                let access = s
-                    .access
-                    .iter()
-                    .map(|k| match k {
-                        kotton_schemas::CapabilityKind::Write => "write",
-                        kotton_schemas::CapabilityKind::Read => "read",
-                        kotton_schemas::CapabilityKind::Use => "use",
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" + ");
-                match &s.label {
-                    Some(label) => {
-                        lines.push(format!("    {label} ({access})"));
-                        if let Some(desc) = &s.desc {
-                            lines.push(format!("      {desc}"));
-                        }
-                        lines.push(format!("      {}  [{}]", s.default_target, s.id));
-                    }
-                    None => lines.push(format!("    {}  →  {}", s.id, s.default_target)),
+        //
+        // What the device checked comes first, in its own words, and the app's own words
+        // follow, each quoted on a line of its own (`crate::grant_prompt`).
+        let mut known = known(&mut client, &user_id).await;
+        let preview = Preview {
+            name: &preview.name,
+            version: &preview.version,
+            app_id: &preview.app_id,
+            requested: &preview.requested,
+            shapes: &preview.shapes,
+        };
+        let footer = sideload_footer(&path_str, !wildcards.is_empty());
+        // The first meeting: a key the prompt shows unnamed is offered to be named after the
+        // prompt is shown, so the person names it knowing what it stands behind.
+        let unnamed = grant_prompt::unnamed_keys(&signer, preview.requested, &known);
+        let mut said = Vec::new();
+        let mut asked = false;
+        if !unnamed.is_empty() && state.asking != crate::state::Asking::Nobody {
+            asked = true;
+            said.push(Out::Data(sideload_prompt(&preview, &signer, &known).join("\n")));
+            match name_the_unnamed(state, &mut client, &user_id, &signer, &unnamed, &known, &mut said).await {
+                // Nobody answered the first question: as if nobody was here to ask.
+                None => {
+                    said.clear();
+                    asked = false;
                 }
+                Some(true) => {
+                    known = self::known(&mut client, &user_id).await;
+                    said.push(Out::Note("With the names you gave, it reads:".into()));
+                    asked = false;
+                }
+                Some(false) => {}
             }
         }
-        if !wildcards.is_empty() {
-            lines.push(String::new());
-            lines.push("  !  This includes access to your whole file tree.".to_string());
-            lines.push("     Only approve this for an app you trust completely.".to_string());
-            lines.push(String::new());
-            lines.push(format!("To install:  app sideload {path_str} --approve GRANT"));
-        } else {
-            lines.push(String::new());
-            lines.push(format!("To install:  app sideload {path_str} --approve"));
-        }
-        lines.push("Nothing has been installed.".to_string());
-        return Ok(CommandOutput::success_with_output(lines.join("\n")));
+        // Asked and nothing named: the prompt stands above as it was, and is not said twice.
+        let mut lines = if asked { Vec::new() } else { sideload_prompt(&preview, &signer, &known) };
+        lines.extend(footer);
+        let mut out = CommandOutput::success_with_output(lines.join("\n"));
+        out.out = said;
+        return Ok(out);
     }
 
     if !wildcards.is_empty() && typed != Some("GRANT") {
-        return Ok(CommandOutput::error(
-            1,
-            format!(
-                "app sideload: {} requests access to your whole file tree.\n\
-                 Approving that takes the word, not the flag:\n\n    \
-                 app sideload {path_str} --approve GRANT\n\n\
-                 Nothing has been installed.",
-                preview.name
-            ),
-        ));
+        return Ok(CommandOutput::error(1, whole_tree_refusal(&path_str, &preview.name).join("\n")));
     }
 
     // The VFS grants are not echoed back: the daemon builds those from the
@@ -545,21 +523,281 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
     } else {
         effective
     };
-    let (app_id, name, capabilities) = client
+    let (app_id, name, capabilities) = match client
         .app_install(&user_id, manifest_toml, wasm_bytes, non_vfs, send_bindings)
         .await
-        .map_err(|e| anyhow::anyhow!("app sideload: {e}"))?;
+    {
+        Ok(installed) => installed,
+        Err(e) => return Ok(refused(INSTALL_REFUSED, &e.to_string())),
+    };
+    let known = known(&mut client, &user_id).await;
+    let lines = receipt(&name, &app_id, &capabilities, &signer, &known);
+    Ok(CommandOutput::success_with_output(lines.join("\n")))
+}
 
-    let mut lines = vec![format!("✓ Sideloaded '{name}' ({app_id})")];
+/// The device's line when the daemon would not preview an app; the reason follows.
+const PREVIEW_REFUSED: &str =
+    "app sideload: the daemon did not take this app's manifest, and nothing was installed.";
+
+/// The device's line when no answer says an install went through (refused, or the answer was
+/// lost after the request was sent); the reason follows.
+const INSTALL_REFUSED: &str =
+    "app sideload: no answer says this app was installed; `app list` shows whether it was.";
+
+/// The device's line when the daemon would not say what an app holds; the reason follows.
+const GRANTS_REFUSED: &str = "app grants: the daemon did not answer for this app.";
+
+/// A refusal of the daemon's: the device's `head`, then the reason it gave, which can quote
+/// the app's manifest, so it is shown as another party's words are, behind the gutter and
+/// within [`grant_prompt::REASON_MAX`] columns.
+fn refused(head: &str, reason: &str) -> CommandOutput {
+    let mut lines = vec![head.to_owned()];
+    lines.extend(grant_prompt::reason_line(reason));
+    CommandOutput::error(1, lines.join("\n"))
+}
+
+/// At most this many of an app's shape ids are listed when a `--bind` names none of them.
+const SHAPES_LISTED: usize = 20;
+
+/// A `--bind` naming no shape the app declares: the device's line, with the id the person
+/// typed, then the first [`SHAPES_LISTED`] ids the app declares, as the app's words, and how
+/// many more there are.
+fn no_such_shape(id: &str, shapes: &[kotton_schemas::CapabilityShape]) -> Vec<String> {
+    let mut lines = vec![format!(
+        "app sideload: no shape {} in this app. The ids it declares:",
+        quoted(id)
+    )];
+    if shapes.is_empty() {
+        lines.push("  none".to_owned());
+    }
+    for shape in shapes.iter().take(SHAPES_LISTED) {
+        lines.extend(words_line("the app's id for it", &shape.id));
+    }
+    if shapes.len() > SHAPES_LISTED {
+        lines.push(format!("  and {} more", shapes.len() - SHAPES_LISTED));
+    }
+    lines
+}
+
+/// The refusal of a grant over the whole file tree approved without the word: the device's
+/// sentence first, then the app's name as its words, then what to type.
+fn whole_tree_refusal(path_str: &str, name: &str) -> Vec<String> {
+    let mut lines = vec!["app sideload: this app asks for access to your whole file tree.".to_owned()];
+    lines.extend(words_line("the app's name", name));
+    lines.extend([
+        "Approving that takes the word, not the flag:".to_owned(),
+        String::new(),
+        format!("    app sideload {path_str} --approve GRANT"),
+        String::new(),
+        "Nothing has been installed.".to_owned(),
+    ]);
+    lines
+}
+
+/// What an install says it granted, in the prompt's own form ([`grant_prompt::grant_lines`]):
+/// each capability the daemon answers, read back as its grant; one this device cannot read
+/// back is shown as the daemon's words, behind the gutter.
+fn receipt(name: &str, app_id: &str, capabilities: &[String], signer: &Signer, known: &Known) -> Vec<String> {
+    let mut lines = vec!["✓ Sideloaded the app".to_string()];
+    lines.extend(words_line("the app's name", name));
+    lines.extend(words_line("the app's id", app_id));
     if capabilities.is_empty() {
-        lines.push("  No capabilities granted.".to_string());
-    } else {
-        lines.push("  Capabilities:".to_string());
-        for cap in &capabilities {
-            lines.push(format!("    {cap}"));
+        lines.push("It holds nothing.".to_string());
+        return lines;
+    }
+    lines.push("It holds, as the daemon says:".to_string());
+    for cap in capabilities {
+        match CapabilityGrant::from_display_string(cap) {
+            Some(grant) => lines.extend(grant_prompt::grant_lines(&grant, signer, known)),
+            None => {
+                lines.push("  a grant this device cannot read back".to_string());
+                lines.extend(words_line("the daemon's words for it", cap));
+            }
         }
     }
-    Ok(CommandOutput::success_with_output(lines.join("\n")))
+    lines
+}
+
+/// What the prompt knows to say who stands behind a thing: the person's names for keys and
+/// the schemas this device holds, each as read, or that the read failed
+/// ([`grant_prompt::Known`]).
+async fn known(client: &mut kotton::KottonClient, user_id: &str) -> Known {
+    let names = crate::petnames::read(client, user_id).await;
+    let held = client.schema_list(user_id).await.map_err(|e| e.to_string());
+    Known::new(names, held)
+}
+
+/// What the daemon's preview said of an app, as the prompt shows it.
+struct Preview<'a> {
+    name: &'a str,
+    version: &'a str,
+    app_id: &'a str,
+    requested: &'a [kotton_schemas::CapabilityGrant],
+    shapes: &'a [kotton_schemas::CapabilityShape],
+}
+
+/// The sideload preview, before its footer: the device's lines on who signed the code and
+/// what that does not cover, then the app's own words, then what it asks for, then where its
+/// files will live. Every string the app chose is on a [`grant_prompt::GUTTER`] line.
+fn sideload_prompt(preview: &Preview<'_>, signer: &Signer, known: &Known) -> Vec<String> {
+    let mut lines = grant_prompt::signer_lines(signer, known);
+    lines.push(String::new());
+    lines.extend(grant_prompt::app_words(preview.name, preview.version, preview.app_id));
+    lines.push(String::new());
+    if preview.requested.is_empty() {
+        lines.push("It asks for nothing.".to_string());
+    } else {
+        lines.push("It asks to:".to_string());
+        for grant in preview.requested {
+            lines.extend(grant_prompt::grant_lines(grant, signer, known));
+        }
+    }
+    if !preview.shapes.is_empty() {
+        lines.push(String::new());
+        lines.push("Where its files will live (change with --bind id=path):".to_string());
+        for s in preview.shapes {
+            let access = s
+                .access
+                .iter()
+                .map(|k| match k {
+                    kotton_schemas::CapabilityKind::Write => "write",
+                    kotton_schemas::CapabilityKind::Read => "read",
+                    kotton_schemas::CapabilityKind::Use => "use",
+                })
+                .collect::<Vec<_>>()
+                .join(" + ");
+            // A path tells the person where, and only the author can say what for; all of it
+            // is the app's own text, so each is a line of the app's words.
+            lines.push(format!("  {access} files at a place the app suggests"));
+            if let Some(label) = &s.label {
+                lines.extend(words_line("the app's label", label));
+            }
+            if let Some(desc) = &s.desc {
+                lines.extend(words_line("the app's description", desc));
+            }
+            lines.extend(words_line("the app's path", &s.default_target));
+            lines.extend(words_line("the app's id for it (for --bind)", &s.id));
+        }
+    }
+    lines
+}
+
+/// The sideload preview's footer: the warning for a grant over the whole tree, and what to
+/// type to install.
+fn sideload_footer(path_str: &str, whole_tree: bool) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    if whole_tree {
+        lines.push("  !  This includes access to your whole file tree.".to_string());
+        lines.push("     Only approve this for an app you trust completely.".to_string());
+        lines.push(String::new());
+        lines.push(format!("To install:  app sideload {path_str} --approve GRANT"));
+    } else {
+        lines.push(format!("To install:  app sideload {path_str} --approve"));
+    }
+    lines.push("Nothing has been installed.".to_string());
+    lines
+}
+
+/// **The first meeting with a key**, where the person decides what to call it, as they do a
+/// contact's: for each key the prompt shows unnamed, once the prompt has been shown (it is
+/// in `said` already), ask for a name. A name that already names another key (compared as
+/// names are, case and spacing aside) is said to, with that key, and asked again: the same
+/// name is kept only on an explicit `yes`, another answer is taken as the name instead, and
+/// an empty one leaves the key unnamed. An answer is written as a petname record through the
+/// ordinary insert, so the daemon holds it to a petname's rules; a refusal is said and the key
+/// left unnamed. With nobody to ask ([`crate::state::Asking::Nobody`]) the caller asks
+/// nothing. `Some(true)` when a name was written, `None` when nobody answered the first
+/// question.
+async fn name_the_unnamed(
+    state: &mut ShellState,
+    client: &mut kotton::KottonClient,
+    user_id: &str,
+    signer: &Signer,
+    unnamed: &[kotton_schemas::Publisher],
+    known: &Known,
+    said: &mut Vec<Out>,
+) -> Option<bool> {
+    let mut given: Vec<(kotton_schemas::Publisher, String)> = Vec::new();
+    let mut answered = false;
+    'keys: for key in unnamed {
+        let what = if signer.key() == Some(key) { "signed this app's code" } else { "publishes a schema it asks for" };
+        said.push(Out::Note(format!(
+            "The key {key} {what}, and you have not named it. {OFFER_CAUTION} Name it now, as \
+             you would a contact, and every prompt about it says that name; or press Enter to \
+             leave it unnamed."
+        )));
+        let mut answer = match state.ask(said, "Name:") {
+            Ok(Some(answer)) => answer.trim().to_string(),
+            _ => break,
+        };
+        answered = true;
+        loop {
+            if answer.is_empty() {
+                continue 'keys;
+            }
+            // Held to a name's rules first, so a name no key may have (`kotton` for another
+            // key among them) is said to break its rule, never to be one the person gave.
+            if let Err(rule) = kotton_schemas::petname::check_name(key, &answer) {
+                said.push(Out::Note(format!(
+                    "This key cannot have that name: {rule}. Type another name, or press Enter to \
+                     leave it unnamed."
+                )));
+                answer = match state.ask(said, "Name:") {
+                    Ok(Some(again)) => again.trim().to_string(),
+                    _ => break 'keys,
+                };
+                continue;
+            }
+            let folded = kotton_schemas::petname::folded(&answer);
+            let others: Vec<String> = known
+                .names
+                .iter()
+                .flat_map(|names| names.keys_called(&answer))
+                .map(|k| k.to_string())
+                .chain(given.iter().filter(|(_, n)| kotton_schemas::petname::folded(n) == folded).map(|(k, _)| k.to_string()))
+                .filter(|k| k != key.as_str())
+                .collect();
+            if others.is_empty() {
+                break;
+            }
+            // The keys on lines of their own, so none is wrapped where the person reads it.
+            said.push(Out::Note(already_given(&answer, others.len())));
+            said.push(Out::Data(others.iter().map(|k| format!("  {k}")).collect::<Vec<_>>().join("\n")));
+            said.push(Out::Note(
+                "Two keys with one name are told apart only by the key, so every prompt will say \
+                 the name is shared. Type yes to give this key that name too, another name to give \
+                 it that instead, or press Enter to leave it unnamed."
+                    .into(),
+            ));
+            let again = match state.ask(said, "Same name? (yes, or another name):") {
+                Ok(Some(again)) => again.trim().to_string(),
+                _ => break 'keys,
+            };
+            if again.eq_ignore_ascii_case("yes") {
+                break;
+            }
+            answer = again;
+        }
+        let body = serde_json::json!({ "key": key.as_str(), "name": answer });
+        match client
+            .record_insert_in(user_id, Some(kotton_wire::ipc::PERSONAL_ROOT), None, kotton_common::namespace::NSID_PETNAME, body)
+            .await
+        {
+            Ok(_) => given.push((key.clone(), answer)),
+            Err(e) => said.push(Out::Warn { what: format!("not named: {e}"), consequence: "the key is left unnamed".into() }),
+        }
+    }
+    answered.then_some(!given.is_empty())
+}
+
+/// The offer's line when the person's answer already names `others` other keys: the answer
+/// said as they typed it ([`grant_prompt::persons`]), since it is their own name.
+fn already_given(answer: &str, others: usize) -> String {
+    format!(
+        "You already gave the name {} to {}:",
+        grant_prompt::persons(answer),
+        if others == 1 { "another key" } else { "other keys" }
+    )
 }
 
 /// Locate the compiled WASM file inside an app directory.
@@ -974,20 +1212,30 @@ async fn handle_grants(args: &[String], state: &ShellState) -> anyhow::Result<Co
     };
 
     let mut client = state.client.lock().await;
-    let g = client
-        .app_grants(app_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("app grants: {e}"))?;
+    let g = match client.app_grants(app_id).await {
+        Ok(g) => g,
+        Err(e) => return Ok(refused(GRANTS_REFUSED, &e.to_string())),
+    };
 
-    let mut lines = vec![format!("{} ({})", g.name, g.app_id), String::new()];
+    // By the rule every grant prompt keeps (`crate::grant_prompt`): the device's lines first,
+    // the app's own words after, quoted. The answer carries no key that signed the app, so
+    // no line here says who did, and no schema is said to differ from it.
+    let known = known(&mut client, &state.user_id).await;
+    let said = |grants: &[kotton_schemas::CapabilityGrant]| -> Vec<String> {
+        grants.iter().flat_map(|g| grant_prompt::grant_lines(g, &Signer::Unknown, &known)).collect()
+    };
+    let mut lines = grant_prompt::signer_lines(&Signer::Unknown, &known);
+    lines.push(String::new());
+    lines.push(grant_prompt::APP_WORDS.to_string());
+    lines.extend(words_line("the app's name", &g.name));
+    lines.extend(words_line("the app's id", &g.app_id));
+    lines.push(String::new());
 
     lines.push("Asked for:".to_string());
-    if g.requested_display.is_empty() {
-        lines.push("    nothing".to_string());
+    if g.requested.is_empty() {
+        lines.push("  nothing".to_string());
     } else {
-        for cap in &g.requested_display {
-            lines.push(format!("    {cap}"));
-        }
+        lines.extend(said(&g.requested));
     }
 
     lines.push(String::new());
@@ -999,14 +1247,12 @@ async fn handle_grants(args: &[String], state: &ShellState) -> anyhow::Result<Co
                     .to_string(),
             );
         }
-        Some(_) if g.approved_display.is_empty() => {
+        Some(approved) if approved.is_empty() => {
             lines.push("Holds: nothing — approved, and everything declined.".to_string());
         }
-        Some(_) => {
+        Some(approved) => {
             lines.push("Holds:".to_string());
-            for cap in &g.approved_display {
-                lines.push(format!("    {cap}"));
-            }
+            lines.extend(said(approved));
         }
     }
 
@@ -1105,5 +1351,195 @@ mod scaffold_tests {
         let out = handle_new(&["new".to_string(), "My.App".to_string()]).await.unwrap();
         assert_ne!(out.exit_code, crate::commands::ExitCode::Success);
         assert!(!Path::new("My.App").exists(), "nothing written");
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use grant_prompt::{GUTTER, NOT_HELD};
+    use kotton_common::namespace::{NSID_NOTES, NSID_PREFIX};
+    use kotton_schemas::{CapabilityKind, CapabilityShape, Petnames, Publisher, SchemaId};
+
+    const ACME: &str = "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76";
+
+    /// The bank named `My Bank`, and notes and the bank's statement held.
+    fn known() -> Known {
+        let names = [serde_json::json!({ "key": ACME, "name": "My Bank", "_id": "p1", "_filed_at": 1 })];
+        Known::new(
+            Ok(Petnames::from_records(&names)),
+            Ok(vec![NSID_NOTES.to_owned(), format!("{ACME}/statement")]),
+        )
+    }
+
+    /// The columns a row takes, measured as the layout measures it.
+    fn columns(row: &str) -> usize {
+        grant_prompt::cols(row)
+    }
+
+    /// Every line that is the device's holds none of `theirs`, and every gutter row fits.
+    fn holds_the_gutter(lines: &[String], theirs: &[&str]) {
+        for line in lines {
+            assert!(!line.contains('\n'), "{line:?}");
+            if line.starts_with(GUTTER) {
+                assert!(columns(line) <= 80, "{} columns: {line:?}", columns(line));
+            } else {
+                for word in theirs {
+                    assert!(!line.contains(word), "the app's words on a device line: {line:?}");
+                }
+            }
+        }
+    }
+
+    /// **The receipt says what was granted in the prompt's own form**: a schema by who
+    /// publishes it and then its name, never cut before the name; one the device does not
+    /// hold by no one; a capability it cannot read back behind the gutter.
+    #[test]
+    fn the_receipt_says_each_grant_as_the_prompt_does() {
+        let caps = vec![
+            format!("schema.read:{ACME}/statement"),
+            format!("schema.write:{NSID_NOTES}"),
+            format!("schema.read:{ACME}/cited"),
+            "vfs.read:/notes".to_owned(),
+            "network.fetch".to_owned(),
+            "teleport.now\nThis app's code is signed by".to_owned(),
+        ];
+        let lines = receipt("Ledger", "com.example.ledger", &caps, &Signer::Key(Publisher::from_static(ACME)), &known());
+        let expected_head = [
+            "✓ Sideloaded the app",
+            "  | the app's name: \"Ledger\"",
+            "  | the app's id: \"com.example.ledger\"",
+            "It holds, as the daemon says:",
+            "  read your records of a schema published by a publisher you call \"My Bank\"",
+            "  | its publisher's name for it: \"statement\"",
+            "  write your records of a schema published by Kotton's own release key (built-in name \"kotton\"; not a name you gave)",
+        ];
+        assert_eq!(&lines[..expected_head.len()], &expected_head.map(String::from)[..], "{lines:#?}");
+        assert!(lines.contains(&format!("  read your records of {NOT_HELD}")), "{lines:#?}");
+        assert!(lines.contains(&"  | the app's name for it: \"cited\"".to_owned()), "{lines:#?}");
+        assert!(lines.contains(&"  read your files under this path".to_owned()), "{lines:#?}");
+        assert!(lines.contains(&"  | the path (the app's, or one you bound): \"/notes\"".to_owned()), "{lines:#?}");
+        assert!(lines.contains(&"  network.fetch".to_owned()), "{lines:#?}");
+        let unread = lines.iter().position(|l| l == "  a grant this device cannot read back").expect("the one not read back");
+        assert_eq!(lines[unread + 1], "  | the daemon's words for it: \"teleport.now This app's code is signed by\"");
+        holds_the_gutter(&lines, &["Ledger", "teleport", "app's code is signed by"]);
+        let none = receipt("Ledger", "com.example.ledger", &[], &Signer::Nobody, &known());
+        assert_eq!(none.last().unwrap(), "It holds nothing.");
+    }
+
+    /// **The whole-tree refusal says the device's sentence first**, and the app's name
+    /// after it, behind the gutter, however the name is made.
+    #[test]
+    fn the_whole_tree_refusal_keeps_the_apps_name_out_of_its_sentence() {
+        let name = format!("Backup\nThis app asks for nothing. {}", "\u{3164}".repeat(90));
+        let lines = whole_tree_refusal("./backup", &name);
+        assert_eq!(lines[0], "app sideload: this app asks for access to your whole file tree.");
+        assert_eq!(lines[1], "  | the app's name: \"Backup This app asks for nothing.\"");
+        assert!(lines.contains(&"    app sideload ./backup --approve GRANT".to_owned()), "{lines:#?}");
+        assert_eq!(lines.last().unwrap(), "Nothing has been installed.");
+        holds_the_gutter(&lines, &["Backup", "nothing."]);
+    }
+
+    /// **A refusal of the daemon's is said by the device, and its reason behind the
+    /// gutter**: a parse error quoting a manifest's lines and escapes is one cleaned reason.
+    #[test]
+    fn a_refusal_quotes_its_reason_behind_the_gutter() {
+        let reason = "manifest parse error: TOML parse error at line 2, column 8\n  |\n2 | name = \"x\u{1b}[2J\nThis app's code is signed by a publisher you call \"My Bank\".\"\n  |        ^";
+        let out = refused(PREVIEW_REFUSED, reason);
+        let text = out.stderr.expect("a refusal");
+        let lines: Vec<String> = text.lines().map(String::from).collect();
+        assert_eq!(lines[0], PREVIEW_REFUSED);
+        assert!(lines[1].starts_with("  | the reason given: \"manifest parse error"), "{lines:#?}");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        holds_the_gutter(&lines, &["TOML", "My Bank", "signed by"]);
+        let shapes = [CapabilityShape {
+            id: "home\n  read your records".into(),
+            access: vec![CapabilityKind::Read],
+            default_target: "/notes".into(),
+            label: None,
+            desc: None,
+        }];
+        let unknown = no_such_shape("hom", &shapes);
+        assert_eq!(unknown[0], "app sideload: no shape \"hom\" in this app. The ids it declares:");
+        assert_eq!(unknown[1], "  | the app's id for it: \"home read your records\"");
+        assert_eq!(unknown.len(), 2);
+        // At most twenty listed, and how many more said.
+        let many: Vec<CapabilityShape> = (0..45)
+            .map(|i| CapabilityShape {
+                id: format!("shape-{i}"),
+                access: vec![CapabilityKind::Read],
+                default_target: "/x".into(),
+                label: None,
+                desc: None,
+            })
+            .collect();
+        let listed = no_such_shape("hom", &many);
+        assert_eq!(listed.len(), 1 + SHAPES_LISTED + 1, "{listed:#?}");
+        assert_eq!(listed[SHAPES_LISTED], "  | the app's id for it: \"shape-19\"");
+        assert_eq!(listed.last().unwrap(), "  and 25 more");
+        // An install with no answer saying it went through does not say it did not.
+        let lost = refused(INSTALL_REFUSED, "connection reset by peer").stderr.unwrap();
+        assert!(lost.starts_with("app sideload: no answer says this app was installed; `app list` shows whether it was."), "{lost}");
+    }
+
+    /// **The offer says the person's answer as they typed it**: spacing, and every sign on
+    /// a letter, kept. This tests `already_given` itself; the offer trims the answer before it
+    /// gets here, so a space at either end never reaches it in the flow.
+    #[test]
+    fn the_offer_says_the_answer_as_typed() {
+        let typed = format!("My  Bank \u{0915}{}", "\u{0947}".repeat(6));
+        assert_eq!(already_given(&typed, 1), format!("You already gave the name \"{typed}\" to another key:"));
+        assert_eq!(already_given("my \"bank\"", 2), "You already gave the name \"my \\\"bank\\\"\" to other keys:");
+    }
+
+    /// **No row of the sideload prompt at 80 columns begins with the app's words**: a long
+    /// label, quotes, wide characters and blanks each stay behind the gutter.
+    #[test]
+    fn no_row_of_the_prompt_lacks_the_gutter_at_80_columns() {
+        let wide = "漢".repeat(64);
+        let quotes = "\"".repeat(64);
+        let requested = [
+            CapabilityGrant::schema(CapabilityKind::Read, SchemaId::parse(format!("{ACME}/statement")).unwrap()),
+            CapabilityGrant::schema(CapabilityKind::Read, SchemaId::parse(format!("{NSID_PREFIX}/{}", "z".repeat(60))).unwrap()),
+            CapabilityGrant::vfs(CapabilityKind::Read, quotes.clone()),
+        ];
+        let shapes = [CapabilityShape {
+            id: wide.clone(),
+            access: vec![CapabilityKind::Read, CapabilityKind::Write],
+            default_target: format!("/{}", "\u{3164}".repeat(64)),
+            label: Some(quotes.clone()),
+            desc: Some(format!("{}\n{}", "w".repeat(200), wide)),
+        }];
+        let preview = Preview {
+            name: &wide,
+            version: &quotes,
+            app_id: &format!("com.{}", "q".repeat(120)),
+            requested: &requested,
+            shapes: &shapes,
+        };
+        let lines = sideload_prompt(&preview, &Signer::Nobody, &known());
+        holds_the_gutter(&lines, &["漢", "\\\"\\\"", "zzzz", "wwww", "qqqq"]);
+        assert!(lines.iter().all(|l| !l.contains('\u{3164}')), "a blank was shown as itself");
+        // The three kinds of name the third design review found drawn wider than measured.
+        let tail = "xSigned by Kotton itself.";
+        for name in [
+            format!("{}{tail}", "\u{1F44D}\u{1F3FD}".repeat(14)),
+            format!("{}{tail}", "\u{0644}\u{0627}".repeat(29)),
+            format!("{}{tail}", "a\u{AD}\u{AD}\u{AD}\u{AD}".repeat(12)),
+        ] {
+            let preview = Preview { name: &name, version: "1.0.0", app_id: "com.example.x", requested: &[], shapes: &[] };
+            let lines = sideload_prompt(&preview, &Signer::Nobody, &known());
+            holds_the_gutter(&lines, &["itself", "\u{1F44D}", "\u{0644}"]);
+            for line in lines.iter().filter(|l| l.starts_with(GUTTER)) {
+                let by_cells: usize = line
+                    .chars()
+                    .map(|c| {
+                        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                        w.max(unicode_width::UnicodeWidthChar::width_cjk(c).unwrap_or(0))
+                    })
+                    .sum();
+                assert!(by_cells <= 80, "{by_cells} columns by its characters: {line:?}");
+            }
+        }
     }
 }
