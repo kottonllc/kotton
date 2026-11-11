@@ -11,7 +11,7 @@ use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey};
 use kotton_schemas::membership::Posture;
 use kotton_schemas::Publisher;
-use kotton_shell::grant_prompt::{DIFFERS, DIFFERS_UNSIGNED, NOT_HELD};
+use kotton_shell::grant_prompt::{BUILT_IN, DIFFERS, DIFFERS_UNSIGNED, GUTTER, NOT_HELD, OFFER_CAUTION};
 use kotton_shell::{Asking, ExitCode, ShellState};
 use kotton_sys::ipc::IpcEndpoint;
 
@@ -167,11 +167,18 @@ async fn a_petname_given_on_one_device_names_the_publisher_in_a_prompt_on_anothe
     let shown = met.text.find(&unnamed_bank).expect("the prompt, shown before the question");
     let asked = met.text.find("Name it now").expect("the question");
     assert!(shown < asked, "the name was asked for before the prompt was shown: {}", met.text);
+    // A note is wrapped to the terminal, so the caution is found with the text's whitespace
+    // made one space.
+    let flat = met.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cautioned = flat.find(OFFER_CAUTION).unwrap_or_else(|| panic!("the offer does not say nothing shows whose key it is: {}", met.text));
+    assert!(flat.find(&unnamed_bank).unwrap() < cautioned && cautioned < flat.find("Name it now").unwrap(), "{}", met.text);
     let after_naming = &met.text[asked..];
     assert!(after_naming.contains(&signed_by("My Bank")), "{}", met.text);
     assert!(after_naming.contains(&reads_from("My Bank")), "{}", met.text);
     assert!(
-        after_naming.contains("  write your records of a schema published by a publisher you call \"kotton\""),
+        after_naming.contains(&format!(
+            "  write your records of a schema published by {BUILT_IN} (built-in name \"kotton\"; not a name you gave)"
+        )),
         "{}",
         met.text
     );
@@ -186,7 +193,7 @@ async fn a_petname_given_on_one_device_names_the_publisher_in_a_prompt_on_anothe
     assert!(after.text.trim_start().starts_with(&signed_by("My Bank")), "{}", after.text);
     assert!(after.text.contains(&reads_from("My Bank")), "{}", after.text);
     // The short form resolves by it too: to the bank's identity.
-    let listed = on_b(line(&["record", "list", "--schema", "My Bank/statement"])).await;
+    let listed = done(on_b(line(&["record", "list", "--schema", "My Bank/statement"])).await);
     assert!(!listed.text.contains("no key has the name"), "{}", listed.text);
 
     // A publisher the person has not named, for the app, and a schema no device holds: the
@@ -221,6 +228,10 @@ async fn a_petname_given_on_one_device_names_the_publisher_in_a_prompt_on_anothe
     assert!(unsigned.text.trim_start().starts_with("This is an app nobody signed: no key signed its code."), "{}", unsigned.text);
     assert!(unsigned.text.contains(&reads_from("My Bank")), "{}", unsigned.text);
     assert!(unsigned.text.contains(DIFFERS_UNSIGNED), "{}", unsigned.text);
+    // Every row of the app's words is behind the gutter: none of a device line is the app's.
+    for row in unsigned.text.lines().filter(|l| l.contains("Bare")) {
+        assert!(row.starts_with(GUTTER), "{row:?}");
+    }
 
     // **The offer with a name already taken**: a second key named "my bank" is told the name
     // is the bank key's, shown that key, and asked again; an explicit yes keeps it.
@@ -236,6 +247,13 @@ async fn a_petname_given_on_one_device_names_the_publisher_in_a_prompt_on_anothe
     // key it is.
     let shared = format!("a publisher you call \"my bank\" (a name you gave 2 keys; this is {imposter_key})");
     assert!(taken.text.contains(&format!("This app's code is signed by {shared}.")), "{}", taken.text);
+    // Outside the prompt too: the shared name no longer resolves, in either spelling, and
+    // the refusal names both keys.
+    for typed in ["My Bank/statement", "my bank/statement"] {
+        let refused = on_a(line(&["record", "list", "--schema", typed]), &[]).await;
+        assert_eq!(refused.exit, ExitCode::Code(2), "{}", refused.text);
+        assert!(refused.text.contains(&bank_key) && refused.text.contains(&imposter_key), "{}", refused.text);
+    }
     let again = done(on_a(line(&["app", "sideload", &ledger]), &[]).await);
     let bank_shared = format!("a publisher you call \"My Bank\" (a name you gave 2 keys; this is {bank_key})");
     assert!(again.text.trim_start().starts_with(&format!("This app's code is signed by {bank_shared}.")), "{}", again.text);

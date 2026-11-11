@@ -67,7 +67,7 @@ impl SchemaCommand {
                 if schemas.is_empty() {
                     println!("No schemas registered.");
                 } else {
-                    let names = petnames::read_for_typing(&mut client, user_id).await;
+                    let names = petnames::read_for_typing(&mut client, user_id).await.names;
                     let mut sorted: Vec<String> = schemas
                         .iter()
                         .map(|nsid| match kotton_schemas::SchemaId::parse(nsid) {
@@ -84,8 +84,8 @@ impl SchemaCommand {
             }
 
             SchemaCommand::Show { schema, .. } => {
-                let names = petnames::read_for_typing(&mut client, user_id).await;
-                let id = SchemaArg::parse(schema).and_then(|arg| arg.resolve(&names)).map_err(|e| {
+                let typing = petnames::read_for_typing(&mut client, user_id).await;
+                let id = SchemaArg::parse(schema).and_then(|arg| typing.resolve(&arg)).map_err(|e| {
                     eprintln!("error: {e}");
                     io::Error::new(io::ErrorKind::InvalidInput, e)
                 })?;

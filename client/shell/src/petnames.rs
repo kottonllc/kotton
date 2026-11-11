@@ -11,9 +11,12 @@
 //!   and for the grant prompt. It reads Personal through the person's own session; a stored
 //!   record that breaks a petname's rules is never a name, and a read that fails says so.
 //! - [`SchemaArg`]: the one parser of a typed schema, both forms, and [`SchemaArg::resolve`],
-//!   which turns the short form into the identity against what [`read`] gave.
+//!   which turns the short form into the identity against what [`read`] gave, refusing a name
+//!   the person gave more than one key, as names are compared (case and spacing aside,
+//!   [`Petnames::keys_called`]).
 //! - [`said`]: a schema as output prints it, the short form wherever the person's name for
-//!   the publisher reads back as that publisher alone, else the whole identity.
+//!   the publisher reads back as that publisher alone, compared the same way, else the whole
+//!   identity; so a name two keys share is never printed as if it were one publisher's.
 //!
 //! The resolution is the device's: a petname never leaves it in a request, which carries the
 //! whole identity alone.
@@ -41,11 +44,39 @@ pub async fn read(client: &mut kotton::KottonClient, user_id: &str) -> Result<Pe
         .map_err(|e| e.to_string())
 }
 
+/// The names a typed schema is resolved against and printed by ([`read_for_typing`]).
+#[derive(Debug, Clone)]
+pub struct ForTyping {
+    /// The person's names, or the names every device gives (`kotton` alone) when theirs
+    /// could not be read.
+    pub names: Petnames,
+    /// Whether the person's names could not be read.
+    pub unread: bool,
+}
+
+impl ForTyping {
+    /// [`SchemaArg::resolve`] against these names; when the person's could not be read, a
+    /// short form no key has is refused saying so, not as a name no key has.
+    pub fn resolve(&self, arg: &SchemaArg) -> Result<SchemaId, String> {
+        match (arg.resolve(&self.names), arg) {
+            (Err(_), SchemaArg::Short { petname, name }) if self.unread && self.names.keys_called(petname).is_empty() => Err(format!(
+                "your names for keys could not be read on this device, so '{petname}/{name}' names no \
+                 schema here; type the whole identity, `did:key:…/{name}`"
+            )),
+            (resolved, _) => resolved,
+        }
+    }
+}
+
 /// [`read`], for resolving what a person typed: the names every device gives (`kotton`
-/// alone) when the person's could not be read, so a short form of another name is refused as
-/// one no key has. Never for saying who stands behind something; that is [`read`]'s.
-pub async fn read_for_typing(client: &mut kotton::KottonClient, user_id: &str) -> Petnames {
-    read(client, user_id).await.unwrap_or_else(|_| Petnames::built_in())
+/// alone) when the person's could not be read, and that they could not, so a short form of
+/// another name is refused saying so. Never for saying who stands behind something; that is
+/// [`read`]'s.
+pub async fn read_for_typing(client: &mut kotton::KottonClient, user_id: &str) -> ForTyping {
+    match read(client, user_id).await {
+        Ok(names) => ForTyping { names, unread: false },
+        Err(_) => ForTyping { names: Petnames::built_in(), unread: true },
+    }
 }
 
 /// A schema as typed, parsed and not yet resolved.
@@ -78,22 +109,25 @@ impl SchemaArg {
     }
 
     /// The identity this names, on this device: the short form's petname must name exactly
-    /// one key. A petname no key has is refused saying so; one that names several is refused
-    /// naming them, since only the whole identity can say which.
+    /// one key, as names are compared ([`Petnames::keys_called`], case and spacing aside). A
+    /// petname no key has is refused saying so; one the person gave several keys, in any
+    /// spelling that compares the same, is refused naming them, since only the whole identity
+    /// can say which.
     pub fn resolve(&self, names: &Petnames) -> Result<SchemaId, String> {
         let (petname, name) = match self {
             Self::Full(id) => return Ok(id.clone()),
             Self::Short { petname, name } => (petname, name),
         };
-        match names.keys_named(petname).as_slice() {
+        match names.keys_called(petname).as_slice() {
             [] => Err(format!(
                 "no key has the name '{petname}' on this device, so '{petname}/{name}' names no schema; \
                  type the whole identity, `did:key:…/{name}`"
             )),
             [key] => SchemaId::new((*key).clone(), name.clone()).map_err(|e| e.to_string()),
             several => Err(format!(
-                "'{petname}' names {} keys ({}), so '{petname}/{name}' could be any of their schemas; \
-                 type the whole identity, `did:key:…/{name}`",
+                "'{petname}' names {} keys, as names compare (case and spacing aside): {}; so \
+                 '{petname}/{name}' could be any of their schemas; type the whole identity, \
+                 `did:key:…/{name}`",
                 several.len(),
                 several.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
             )),
@@ -102,10 +136,12 @@ impl SchemaArg {
 }
 
 /// `schema` as output prints it: `<petname>/<name>` when the person's name for its publisher
-/// names that key alone, so that what is printed resolves back to it; else the whole identity.
+/// names that key alone, as names are compared ([`Petnames::keys_called`]), so that what is
+/// printed resolves back to it and a name two keys share is never printed as one publisher's;
+/// else the whole identity.
 pub fn said(schema: &SchemaId, names: &Petnames) -> String {
     match names.name_for(schema.publisher()) {
-        Some(petname) if names.keys_named(petname).len() == 1 => format!("{petname}/{}", schema.name()),
+        Some(petname) if names.keys_called(petname).len() == 1 => format!("{petname}/{}", schema.name()),
         _ => schema.to_string(),
     }
 }
@@ -174,6 +210,44 @@ mod tests {
         // Printed whole, since the short form would not resolve back.
         let id = SchemaId::parse(format!("{ACME}/statement")).unwrap();
         assert_eq!(said(&id, &two), id.to_string());
+    }
+
+    /// **A name two keys share as names compare is shared everywhere**: `My Bank` on one key
+    /// and `my bank` on another print whole, and neither spelling resolves, the refusal naming
+    /// both keys. One key under the name resolves by any spelling of it.
+    #[test]
+    fn a_name_shared_case_and_spacing_aside_is_refused_and_printed_whole() {
+        let two = names(&[
+            json!({ "key": ACME, "name": "My Bank", "_id": "p1", "_filed_at": 1 }),
+            json!({ "key": OTHER, "name": "my  bank", "_id": "p2", "_filed_at": 2 }),
+        ]);
+        for typed in ["My Bank/statement", "my  bank/statement", "MY BANK/statement"] {
+            let err = SchemaArg::parse(typed).unwrap().resolve(&two).unwrap_err();
+            assert!(err.contains("names 2 keys") && err.contains(ACME) && err.contains(OTHER), "{typed}: {err}");
+        }
+        for key in [ACME, OTHER] {
+            let id = SchemaId::parse(format!("{key}/statement")).unwrap();
+            assert_eq!(said(&id, &two), id.to_string());
+        }
+        let one = names(&[json!({ "key": ACME, "name": "My Bank", "_id": "p1", "_filed_at": 1 })]);
+        let id = SchemaArg::parse("my bank/statement").unwrap().resolve(&one).unwrap();
+        assert_eq!(id.to_string(), format!("{ACME}/statement"));
+        assert_eq!(said(&id, &one), "My Bank/statement");
+    }
+
+    /// **Names that could not be read are said so**, not taken for a name no key has; the
+    /// name every device gives still resolves.
+    #[test]
+    fn a_short_form_when_the_names_could_not_be_read_says_so() {
+        let unread = ForTyping { names: Petnames::built_in(), unread: true };
+        let err = unread.resolve(&SchemaArg::parse("My Bank/statement").unwrap()).unwrap_err();
+        assert!(err.contains("your names for keys could not be read"), "{err}");
+        assert!(!err.contains("no key has the name"), "{err}");
+        let notes = unread.resolve(&SchemaArg::parse("kotton/notes").unwrap()).unwrap();
+        assert_eq!(notes, SchemaId::from_static(NSID_NOTES));
+        let read = ForTyping { names: Petnames::built_in(), unread: false };
+        let err = read.resolve(&SchemaArg::parse("acme/notes").unwrap()).unwrap_err();
+        assert!(err.contains("no key has the name 'acme'"), "{err}");
     }
 
     /// Output prints the short form when the publisher has a name, else the whole identity;

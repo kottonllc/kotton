@@ -54,6 +54,8 @@ pub enum PetnameError {
     NoName,
     #[error("a petname's `name` is empty")]
     Empty,
+    #[error("a petname's `name` holds a character that shows, not only spaces or combining marks")]
+    Blank,
     #[error("a petname's `name` is at most {MAX_NAME_CHARS} characters, and this one is {0}")]
     TooLong(usize),
     #[error("a petname's `name` holds no `/`, which separates it from a schema's name: {0:?}")]
@@ -86,24 +88,67 @@ pub fn is_hostile_char(c: char) -> bool {
         )
 }
 
-/// `name` as names are compared for sameness: spaces around it trimmed, each run of
-/// whitespace one space, and the case folded. `kotton` is reserved by it, and two keys whose
-/// names compare the same by it are said to share one, since a person reading the two cannot
-/// tell them apart.
-pub fn folded(name: &str) -> String {
-    name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+/// Whether `c` renders as blank without being whitespace: the Hangul fillers (U+115F, U+1160,
+/// U+3164, U+FFA0) and the blank Braille pattern (U+2800). A name and another party's string
+/// take each as one space, so none of them pads a line or makes two names look alike.
+pub fn renders_blank(c: char) -> bool {
+    matches!(c, '\u{115F}' | '\u{1160}' | '\u{2800}' | '\u{3164}' | '\u{FFA0}')
 }
 
-/// Hold `name`, given to `key`, to the rules: not empty, at most [`MAX_NAME_CHARS`]
-/// characters, no `/` and no character [`is_hostile_char`] names, not beginning with `did:`,
-/// and [`KOTTON`] for Kotton's publisher alone, compared [`folded`] (so `Kotton` and
-/// `kotton ` are Kotton's too).
+/// Whether `c` is a combining mark, of the blocks Unicode gives to marks for any script
+/// (Combining Diacritical Marks, Extended and Supplement, for Symbols, Half Marks) and the
+/// marks of the scripts most stacked (Cyrillic, Hebrew, Arabic, Thai, and Japanese kana).
+pub fn is_combining_mark(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0300}'..='\u{036F}'
+            | '\u{0483}'..='\u{0489}'
+            | '\u{0591}'..='\u{05BD}'
+            | '\u{05BF}'
+            | '\u{05C1}'..='\u{05C2}'
+            | '\u{05C4}'..='\u{05C5}'
+            | '\u{05C7}'
+            | '\u{0610}'..='\u{061A}'
+            | '\u{064B}'..='\u{065F}'
+            | '\u{0670}'
+            | '\u{06D6}'..='\u{06DC}'
+            | '\u{06DF}'..='\u{06E4}'
+            | '\u{06E7}'..='\u{06E8}'
+            | '\u{06EA}'..='\u{06ED}'
+            | '\u{0E31}'
+            | '\u{0E34}'..='\u{0E3A}'
+            | '\u{0E47}'..='\u{0E4E}'
+            | '\u{1AB0}'..='\u{1AFF}'
+            | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{20D0}'..='\u{20FF}'
+            | '\u{3099}'..='\u{309A}'
+            | '\u{FE20}'..='\u{FE2F}'
+    )
+}
+
+/// `name` as names are compared for sameness: spaces around it trimmed, each run of
+/// whitespace (and of characters that [`renders_blank`]) one space, and the case folded.
+/// `kotton` is reserved by it, and two keys whose names compare the same by it are said to
+/// share one, since a person reading the two cannot tell them apart.
+pub fn folded(name: &str) -> String {
+    let spaced: String = name.chars().map(|c| if renders_blank(c) { ' ' } else { c }).collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Hold `name`, given to `key`, to the rules: not empty, not only spaces, blanks
+/// ([`renders_blank`]) and combining marks ([`is_combining_mark`]), at most
+/// [`MAX_NAME_CHARS`] characters, no `/` and no character [`is_hostile_char`] names, not
+/// beginning with `did:`, and [`KOTTON`] for Kotton's publisher alone, compared [`folded`] (so
+/// `Kotton` and `kotton ` are Kotton's too).
 pub fn check_name(key: &Publisher, name: &str) -> Result<(), PetnameError> {
     if name.is_empty() {
         return Err(PetnameError::Empty);
     }
     if name.chars().any(is_hostile_char) {
         return Err(PetnameError::Control);
+    }
+    if name.chars().all(|c| c.is_whitespace() || renders_blank(c) || is_combining_mark(c)) {
+        return Err(PetnameError::Blank);
     }
     let chars = name.chars().count();
     if chars > MAX_NAME_CHARS {
@@ -133,10 +178,14 @@ pub fn check(body: &Value) -> Result<Petname, PetnameError> {
     Ok(Petname { key, name: name.to_owned() })
 }
 
-/// The person's names for keys, as their stored petname records give them: one per key.
+/// The person's names for keys, as their stored petname records give them: one per key, and
+/// [`KOTTON`] for Kotton's publisher where no record names it, a name the person never gave
+/// ([`Petnames::is_built_in`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Petnames {
     names: Vec<Petname>,
+    /// Whether Kotton's publisher has its name from no record, but from every device.
+    built_in: bool,
 }
 
 impl Petnames {
@@ -162,10 +211,11 @@ impl Petnames {
             names.push(petname);
         }
         let kotton = Publisher::from_static(NSID_PREFIX);
-        if !names.iter().any(|p| p.key == kotton) {
+        let built_in = !names.iter().any(|p| p.key == kotton);
+        if built_in {
             names.push(Petname { key: kotton, name: KOTTON.to_owned() });
         }
-        Self { names }
+        Self { names, built_in }
     }
 
     /// The names a device with no petname record gives: [`KOTTON`] for Kotton's publisher.
@@ -176,6 +226,13 @@ impl Petnames {
     /// The person's name for `key`, or `None` when they gave it none.
     pub fn name_for(&self, key: &Publisher) -> Option<&str> {
         self.names.iter().find(|p| &p.key == key).map(|p| p.name.as_str())
+    }
+
+    /// Whether the name for `key` is built in, given by every device and not by the person:
+    /// [`KOTTON`] for Kotton's publisher where no record names it. A prompt never says the
+    /// person calls a key by a name they did not give.
+    pub fn is_built_in(&self, key: &Publisher) -> bool {
+        self.built_in && key.as_str() == NSID_PREFIX
     }
 
     /// The keys `name` names, exactly as written: none, one, or several (two keys the person
@@ -214,6 +271,10 @@ mod tests {
         assert_eq!(check_name(&acme(), "My Bank"), Ok(()));
         assert_eq!(check_name(&acme(), &"a".repeat(MAX_NAME_CHARS)), Ok(()));
         assert_eq!(check_name(&acme(), ""), Err(PetnameError::Empty));
+        for blank in [" ", "   ", "\u{3000}", "\u{0301}", " \u{0301}\u{0302} ", "\u{3164}", "\u{2800}\u{115F}\u{1160}\u{FFA0}"] {
+            assert_eq!(check_name(&acme(), blank), Err(PetnameError::Blank), "{blank:?}");
+        }
+        assert_eq!(check_name(&acme(), " e\u{0301} "), Ok(()), "a letter with a mark shows");
         let long = "é".repeat(MAX_NAME_CHARS + 1);
         assert_eq!(check_name(&acme(), &long), Err(PetnameError::TooLong(MAX_NAME_CHARS + 1)));
         assert!(matches!(check_name(&acme(), "my/bank"), Err(PetnameError::Slash(_))));
@@ -253,6 +314,8 @@ mod tests {
     fn kotton_is_built_in() {
         let names = Petnames::built_in();
         assert_eq!(names.name_for(&kotton()), Some(KOTTON));
+        assert!(names.is_built_in(&kotton()), "a name the person never gave");
+        assert!(!names.is_built_in(&acme()));
         assert_eq!(names.keys_named(KOTTON), vec![&kotton()]);
         assert_eq!(names.name_for(&acme()), None);
         assert!(names.keys_named("acme").is_empty());
@@ -264,7 +327,10 @@ mod tests {
         let records = [json!({ "key": NSID_PREFIX, "name": "Kotton LLC", "_id": "p1", "_filed_at": 1 })];
         let names = Petnames::from_records(&records);
         assert_eq!(names.name_for(&kotton()), Some("Kotton LLC"));
+        assert!(!names.is_built_in(&kotton()), "the person's own name");
         assert!(names.keys_named(KOTTON).is_empty());
+        let kept = [json!({ "key": NSID_PREFIX, "name": "kotton", "_id": "p1", "_filed_at": 1 })];
+        assert!(!Petnames::from_records(&kept).is_built_in(&kotton()), "given, though the same");
     }
 
     /// Two keys given one name are both named by it, so a reader can refuse it as ambiguous.
@@ -293,6 +359,7 @@ mod tests {
         let keys: Vec<&str> = names.keys_called("My Bank").iter().map(|k| k.as_str()).collect();
         assert_eq!(keys, vec![ACME, other]);
         assert_eq!(folded(" My\t Bank "), "my bank");
+        assert_eq!(folded("My\u{3164}Bank\u{2800}"), "my bank", "a blank is a space");
     }
 
     /// A stored record that breaks a rule is never a name: one naming another key `kotton`

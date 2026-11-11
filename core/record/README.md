@@ -158,9 +158,10 @@ and for `get` by the record's id), `RecordInsert` and `RecordDelete`. **Each nam
 organisation's project, is not listed, read, written or removed by them. A schema is cited by
 its identity, `did:key:…/<name>`, or as `<petname>/<name>`, the person's own name for the key,
 resolved on the device (`kotton_shell::petnames`, the one parser and the one reader of
-petnames): `kotton/notes` on every device. A petname no key has is refused saying so, and one
-that names several keys is refused naming them; output prints the short form wherever the
-publisher has a name. A request always carries the whole identity. An id no record has in
+petnames): `kotton/notes` on every device. Petnames are compared case and spacing aside: a
+petname no key has is refused saying so, one the person gave several keys is refused naming
+them, and when the names could not be read a short form is refused saying that; output prints
+the short form wherever the publisher's name is one key's alone. A request always carries the whole identity. An id no record has in
 Personal exits 1, and so does a schema this device does not know, by name. `get` prints the record as the row holds it, its `id` among its fields, and
 `list --json` prints each row the same way; neither prints the fields the daemon adds to an
 answer (`_id`, `_filed_at`, `_root`), because every verb here names Personal and `_root` would
@@ -203,19 +204,25 @@ holds; both say who stands behind what they show by the rule of the decision *A 
 by the key that publishes it* (`kotton_shell::grant_prompt`). **What the device says comes
 first**, on lines of its own in a fixed shape: who stands behind the app, by the person's
 petname for the key, marked as theirs ("This app's code is signed by a publisher you call "My
-Bank"."), or "a publisher you have not named" with the key, or "an app nobody signed". **It says
+Bank"."), or "a publisher you have not named" with the key, or "an app nobody signed"; the name
+every device gives Kotton's release key is said to be built in, not the person's. **It says
 only what was checked**: the publisher's signature covers the digest of the app's code alone, so
 the next line says that what the app asks for is not signed by anyone, and a schema is a
 publisher's only when this device holds its signed definition; one it does not hold is "a schema
-this device does not hold", attributed to no one. A line says so when the app's code is not a
-schema's publisher's, an unsigned app's included. A name the person gave more than one key is
+this device holds no signed definition of", attributed to no one. A line under the schema's,
+before its name, says so when the app's code is not that schema's publisher's, or when no
+signature on it checked. A name the person gave more than one key is
 shown as shared, with the key it is; when the names cannot be read, the prompt says so and shows
 keys as keys. **Every string another party chose** (the app's name, version, id, description,
-paths, labels, a schema's name) follows, each on a line beginning ` | `, which no line of the
-device's does, labelled as whose and quoted: whitespace one space, control, bidirectional,
-separator, zero-width and tag characters removed, combining marks at most four to a character,
-and at most 64 characters shown, saying when it was cut. At a terminal, once the prompt has been
-shown, a key it shows unnamed is offered to be named, the first meeting; a name that already
+paths, labels, a schema's name, and a reason the daemon gives, which can quote a manifest)
+follows, labelled as whose and quoted: whitespace and what renders blank one space, control,
+bidirectional, separator, zero-width and tag characters removed, combining marks at most four to
+a character, and at most 64 columns shown as escaped (400 for a reason), saying when it was cut.
+It is laid out in rows that fit the terminal, every row beginning ` | `, which no line of the
+device's does, with a note when it holds right-to-left letters. An install's receipt says what
+was granted in the prompt's own form. At a terminal, once the prompt has been shown, a key it
+shows unnamed is offered to be named, the first meeting, saying that nothing shown says whose
+key it is; a name that already
 names another key is said to, with that key, and kept only on an explicit yes. The answer is a
 petname written through the ordinary insert, held to its rules, and the prompt is shown again
 with it. With nobody to ask, nothing is asked and the key is shown not named. `record import`

@@ -89,7 +89,8 @@ chose is never shown as who stands behind anything (`kotton_shell::grant_prompt`
 
 That name is a petname, a record of `petname` in Personal: `key`, a `did:key`, and `name`, one
 record per key. `petname::check` holds a body to its rules: `key` parses as a `did:key`, and
-`name` is not empty, holds no `/`, does not begin with `did:`, and is `kotton` for Kotton's
+`name` is not empty and not only spaces, blanks and combining marks, holds no `/`, does not
+begin with `did:`, and is `kotton` for Kotton's
 publisher alone, compared with the case folded and spaces trimmed, so `Kotton` and `kotton ` are
 refused for another key. **Two rules are this tree's, not the decision's**: a name is at most 64
 characters, and it holds no control, bidirectional-formatting or invisible character
@@ -98,7 +99,11 @@ the tag characters too), so a name cannot reorder, break or hide part of the lin
 in, or look like another name it is not. The record daemon asks it at insert, and
 `Petnames::from_records`, the reader, asks it of every stored record, so one that breaks a rule
 (written before the rule, or merged from another device) is never a name. `kotton` names
-Kotton's publisher on every device with no record, and a record for that key replaces it. A name
-the person gave more than one key (`Petnames::keys_called`, case and spacing aside) is shown as
-shared wherever it is shown, with the key it is. Because a prompt trusts what a petname says,
+Kotton's publisher on every device with no record, and a record for that key replaces it; the
+prompt says that name is built in, not one the person gave (`Petnames::is_built_in`). Names are
+compared by `petname::folded`, case and spacing aside, and a name the person gave more than one
+key by that comparison (`Petnames::keys_called`) is never shown as one publisher's: the grant
+prompt says it is shared, with the key each line is; the record and schema verbs print the
+whole identity rather than the short form; and the short form of it does not resolve, the
+refusal naming the keys. Because a prompt trusts what a petname says,
 `petname` is kept from every app: nothing but the person's own terminal writes one.

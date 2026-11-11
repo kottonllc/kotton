@@ -426,8 +426,9 @@ fn petname_import_refused(schema: &SchemaId) -> Option<CommandOutput> {
 async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
     let user_id = state.user_id.clone();
     let mut client = state.client.lock().await;
-    let names = crate::petnames::read_for_typing(&mut client, &user_id).await;
-    let resolved = match line.schema().resolve(&names) {
+    let typing = crate::petnames::read_for_typing(&mut client, &user_id).await;
+    let names = &typing.names;
+    let resolved = match typing.resolve(line.schema()) {
         Ok(id) => id,
         Err(why) => return Ok(CommandOutput::usage(format!("record: {why}"), None)),
     };
@@ -435,11 +436,11 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
         if let Some(refused) = petname_import_refused(&resolved) {
             return Ok(refused);
         }
-        if let Some(refused) = ics_refused(*format, &resolved, said(&resolved, &names)) {
+        if let Some(refused) = ics_refused(*format, &resolved, said(&resolved, names)) {
             return Ok(refused);
         }
     }
-    let shown = said(&resolved, &names);
+    let shown = said(&resolved, names);
     let line = line.with(resolved);
     let refused = |verb: &str, e: std::io::Error| CommandOutput::fail(format!("record {verb}: {e}"), None);
     match line {

@@ -273,6 +273,51 @@ impl CapabilityGrant {
             CapabilityTarget::RootMember { root } => format!("root.member:{root}"),
         }
     }
+
+    /// The grant [`Self::display_string`] renders as `shown`, or `None` when it renders none:
+    /// its inverse, so a caller handed the display strings (an install's answer) can say each
+    /// grant as it says a requested one. A key it does not know is `None`, never a guess.
+    pub fn from_display_string(shown: &str) -> Option<Self> {
+        let kind_of = |rw: &str| match rw {
+            "read" => Some(CapabilityKind::Read),
+            "write" => Some(CapabilityKind::Write),
+            "use" => Some(CapabilityKind::Use),
+            _ => None,
+        };
+        if let Some((key, rest)) = shown.split_once(':') {
+            let kinded = |prefix: &str| key.strip_prefix(prefix).and_then(kind_of);
+            if let Some(kind) = kinded("schema.") {
+                return SchemaId::parse(rest).ok().map(|nsid| Self::schema(kind, nsid));
+            }
+            if let Some(kind) = kinded("vfs.") {
+                return Some(Self::vfs(kind, rest));
+            }
+            if let Some(kind) = kinded("quarantine.") {
+                return Some(Self { kind, target: CapabilityTarget::Quarantine { extension_id: rest.to_owned() } });
+            }
+            return match key {
+                "org.invite" => Some(Self::org_invite(rest)),
+                "root.member" => Some(Self::root_member(rest)),
+                _ => None,
+            };
+        }
+        let target = match shown {
+            "media.microphone" => CapabilityTarget::Media { device: MediaDevice::Microphone },
+            "media.camera" => CapabilityTarget::Media { device: MediaDevice::Camera },
+            "media.screen" => CapabilityTarget::Media { device: MediaDevice::Screen },
+            "call.initiate" => CapabilityTarget::Call { direction: CallDirection::Initiate },
+            "call.receive" => CapabilityTarget::Call { direction: CallDirection::Receive },
+            "messages.send" => CapabilityTarget::Messages { direction: MessageDirection::Send },
+            "messages.receive" => CapabilityTarget::Messages { direction: MessageDirection::Receive },
+            "events.subscribe" => CapabilityTarget::Events,
+            "network.fetch" => CapabilityTarget::Network,
+            "infer.run" => CapabilityTarget::Infer,
+            "apps.launch" => CapabilityTarget::AppLaunch,
+            "ui.custom" => CapabilityTarget::Ui,
+            _ => return None,
+        };
+        Some(Self::action(target))
+    }
 }
 
 /// A set of [`CapabilityGrant`]s declared by an app.
@@ -1342,6 +1387,45 @@ version = "1.0.0"
             MediaDevice::Camera,
         )]);
         assert!(!camera.is_admissible_for(&requested, &shapes));
+    }
+
+    /// Every grant reads back from its display string as itself, and a string that is no
+    /// grant's reads back as none.
+    #[test]
+    fn a_display_string_reads_back_as_its_grant() {
+        let notes = SchemaId::from_static(kotton_common::namespace::NSID_NOTES);
+        let every = [
+            CapabilityGrant::schema(CapabilityKind::Read, notes.clone()),
+            CapabilityGrant::schema(CapabilityKind::Write, notes),
+            CapabilityGrant::vfs(CapabilityKind::Read, "/notes:x"),
+            CapabilityGrant::vfs(CapabilityKind::Write, "/"),
+            CapabilityGrant::media(MediaDevice::Microphone),
+            CapabilityGrant::media(MediaDevice::Camera),
+            CapabilityGrant::media(MediaDevice::Screen),
+            CapabilityGrant::call(CallDirection::Initiate),
+            CapabilityGrant::call(CallDirection::Receive),
+            CapabilityGrant::messages(MessageDirection::Send),
+            CapabilityGrant::messages(MessageDirection::Receive),
+            CapabilityGrant::action(CapabilityTarget::Events),
+            CapabilityGrant::action(CapabilityTarget::Network),
+            CapabilityGrant::action(CapabilityTarget::Infer),
+            CapabilityGrant::action(CapabilityTarget::AppLaunch),
+            CapabilityGrant::action(CapabilityTarget::Ui),
+            CapabilityGrant {
+                kind: CapabilityKind::Read,
+                target: CapabilityTarget::Quarantine { extension_id: "ext".into() },
+            },
+            CapabilityGrant::org_invite("root-1"),
+            CapabilityGrant::root_member("root-1"),
+        ];
+        for grant in every {
+            let shown = grant.display_string();
+            let back = CapabilityGrant::from_display_string(&shown).unwrap_or_else(|| panic!("{shown}"));
+            assert_eq!((&back.kind, &back.target), (&grant.kind, &grant.target), "{shown}");
+        }
+        for not_one in ["", "schema.read:notes", "schema.own:x", "vfs:/x", "media.radio", "files.read:/x"] {
+            assert!(CapabilityGrant::from_display_string(not_one).is_none(), "{not_one}");
+        }
     }
 
     #[test]
