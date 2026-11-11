@@ -1,0 +1,31 @@
+[package]
+name = "kotton-handshake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "The handshake every connection begins with: Noise XK over keys handed in in Montgomery form, as pure mechanism"
+
+[dependencies]
+kotton-wire = { path = "../wire" }
+# Pinned: the handshake's bytes are its vectors, and a new release of the Noise
+# implementation is read against them before it is taken. The features are the ones
+# libp2p-noise already turns on natively, so this adds no feature set: ChaCha20-Poly1305,
+# SHA-256 and the random source come from ring, and the exchange is this crate's own
+# (`dh.rs`), which refuses one that yields all zeros.
+snow = { version = "=0.9.6", default-features = false, features = ["ring-resolver"] }
+x25519-dalek = { workspace = true }
+zeroize = "1"
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+# The vectors begin from Ed25519 keys and convert them as every caller will, by
+# `kotton-crypto`'s one conversion.
+kotton-crypto = { path = "../crypto" }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+
+[lints]
+workspace = true
