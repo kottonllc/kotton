@@ -418,10 +418,10 @@ async fn wrapped_deks_end_to_end() {
         .try_into()
         .expect("identity key must be 32 bytes");
     let issuer_signing_key = ed25519_dalek::SigningKey::from_bytes(&identity_seed);
-    let issuer_x25519_pub = kotton_peer::pairing::ed25519_to_x25519_public(
-        issuer_signing_key.verifying_key().to_bytes(),
+    let issuer_x25519_pub = kotton_crypto::x25519::ed25519_pub_to_x25519(
+        &issuer_signing_key.verifying_key().to_bytes(),
     )
-    .expect("ed25519_to_x25519_public");
+    .expect("ed25519_pub_to_x25519");
 
     let shared_secret = guest_secret.diffie_hellman(&issuer_x25519_pub);
     let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());

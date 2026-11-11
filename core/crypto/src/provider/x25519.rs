@@ -30,7 +30,7 @@
 //! derived from Ed25519 keys via the Birkhoff point conversion (Elligator2):
 //! Ed25519 verifying key (Edwards point) → Montgomery (X25519) point.
 //! Ed25519 signing key seed → clamped X25519 scalar via SLIP-10-consistent
-//! hashing (same approach as used in `core/05_runtime/src/user/pairing.rs`).
+//! hashing. This is the tree's one conversion between the two forms.
 
 use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;

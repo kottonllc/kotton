@@ -17,6 +17,9 @@ members = [
     "core/common",
     "core/sys",
     "core/pair",
+    # `handshake`: the one handshake every connection begins with, over keys
+    # handed in. No socket, no clock, no principal.
+    "core/handshake",
     "core/proc",
     # `infer`: the Backend trait and the context a host composes. It
     # links almost nothing on purpose — `cargo xtask infer-check` holds the list.

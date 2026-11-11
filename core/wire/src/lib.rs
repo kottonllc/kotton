@@ -12,6 +12,7 @@
 pub mod base64_bytes;
 pub mod did;
 pub mod grant;
+pub mod handshake;
 pub mod ipc;
 pub mod kel;
 pub mod kuid_ipc;
