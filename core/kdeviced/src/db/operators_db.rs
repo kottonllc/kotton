@@ -3,7 +3,8 @@
 //! (`TASK-a-device-has-operators-not-an-operator`).
 //!
 //! **A set of keys, each answering for one person.** A row is a credential —
-//! the `did:key` a caller proves by signing this connection's nonce — and the
+//! the `did:key` a caller proves by signing the login message over this
+//! connection's challenge (`kotton_wire::sys_ipc::login_message`) — and the
 //! account on this device it answers for. The key is the primary key, so no
 //! key is ever two people's; a person may hold several. What an operator may do
 //! is decided by their key's row, read again on every request

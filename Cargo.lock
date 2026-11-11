@@ -3274,6 +3274,7 @@ dependencies = [
  "async-trait",
  "kotton-common",
  "kotton-sys",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
