@@ -13,17 +13,29 @@
 //! 3. -> s, se      payload: kotton_wire::handshake::ThirdPayload
 //! ```
 //!
-//! The prologue is the ASCII bytes `kotton-handshake-` followed by the version byte, so the
-//! version is bound into every key. Each message is one frame, its length first as two bytes,
-//! most significant first. After the third message the channel is Noise's transport, frames
-//! of at most 65535 bytes, the first of which is the responder's
-//! ([`kotton_wire::handshake::ResponderFrame`]).
+//! The prologue is the ASCII bytes `kotton-handshake-` followed by the version byte. What that
+//! binds is Noise's handshake hash: the prologue enters it, and every handshake message is
+//! sealed under it as associated data, so no message made under one version opens under
+//! another, and neither side reaches the transport without having read all three under one.
+//! The prologue enters no key: Noise's chaining key mixes only the protocol name and the
+//! exchanges, so the cipher keys and the transport keys are the same under any version for
+//! the same exchanges. The handshake page's sentence "so the version is bound into every
+//! key" says more than that; kottonllc/kotton-protocol#57 decides its words.
+//!
+//! Each message is one frame, its length first as two bytes, most significant first. After
+//! the third message the channel is Noise's transport, frames of at most 65535 bytes, the
+//! first of which is the responder's ([`kotton_wire::handshake::ResponderFrame`]).
 //!
 //! **No socket, no clock, no authority.** This crate turns bytes into bytes. It names no
 //! principal and decides nobody's admission: the responder hands back the initiator's static
 //! key and payload, and its caller answers. Keys are handed in already in Montgomery form;
 //! `kotton_crypto::x25519` owns the conversion from Ed25519. A static key is never written in
 //! any frame this crate makes in the clear, and nothing is signed.
+//!
+//! **What `snow` keeps.** `snow` does not zero its chaining key, its cipher keys or an
+//! exchange's output when it drops them; that is the Noise implementation decision a chose,
+//! not this crate's. This crate zeroes only what it owns, the copies of the statics and both
+//! halves its exchange holds, and a caller should assume no more of a dropped handshake.
 //!
 //! **The one wait.** A responder that has not read the whole first frame, the version byte and
 //! the first message, holds nothing to answer. [`read_opening`] says `Incomplete` until it
@@ -67,10 +79,13 @@ pub fn prologue(version: u8) -> Vec<u8> {
 }
 
 /// Why a side closed. Nothing of it crosses the wire: every close is the connection ending.
+///
+/// It derives `Debug` for this crate's tests. It does not belong in a log line on refusal:
+/// a refusal reads the same to everyone, and a line that says why is a record of who tried.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Closed {
-    /// A responder that does not speak the version, or holds no key the first message opens
-    /// under: it read one frame and writes nothing.
+    /// A first frame of the wrong length, a version this side does not speak, or one no key
+    /// opens under: it read one frame and writes nothing.
     Refused,
     /// An exchange yielded all zeros: a key of low order.
     LowOrder,
@@ -155,6 +170,7 @@ fn secret_bytes(key: &StaticSecret) -> Zeroizing<[u8; 32]> {
 struct Run {
     version: u8,
     speaks: Versions,
+    #[cfg(test)]
     ephemeral: Option<Zeroizing<[u8; 32]>>,
 }
 
@@ -163,6 +179,7 @@ impl Default for Run {
         Self {
             version: VERSION,
             speaks: Versions::spoken(),
+            #[cfg(test)]
             ephemeral: None,
         }
     }
@@ -171,10 +188,14 @@ impl Default for Run {
 fn builder<'a>(run: &'a Run, prologue: &'a [u8]) -> Builder<'a> {
     let params = PROTOCOL_NAME.parse().expect("the protocol name parses");
     let b = Builder::with_resolver(params, dh::resolver()).prologue(prologue);
-    match &run.ephemeral {
+    #[cfg(test)]
+    let b = match &run.ephemeral {
         Some(e) => b.fixed_ephemeral_key_for_testing_only(&e[..]),
         None => b,
-    }
+    };
+    #[cfg(not(test))]
+    let _ = run;
+    b
 }
 
 fn write(hs: &mut HandshakeState, payload: &[u8]) -> Result<Vec<u8>, Closed> {
@@ -284,8 +305,17 @@ pub struct Responder {
     key: usize,
 }
 
-/// Try one key on the first message.
+#[cfg(test)]
+thread_local! {
+    /// How many keys this thread has tried on a first message: the tests read it to hold
+    /// that every key is tried on every first frame.
+    static TRIALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Try one key on the first message, under the prologue of the version byte it came with.
 fn try_key(run: &Run, key: &StaticSecret, first: &[u8]) -> Result<HandshakeState, snow::Error> {
+    #[cfg(test)]
+    TRIALS.with(|t| t.set(t.get() + 1));
     let own = secret_bytes(key);
     let prologue = prologue(run.version);
     let mut hs = builder(run, &prologue)
@@ -304,6 +334,10 @@ impl Responder {
     /// message opens under answers; returns the second message's frame to send. A version
     /// this side does not speak, or a first message no key opens, is [`Closed::Refused`]
     /// with nothing to send, whatever the reason.
+    ///
+    /// The work is the same whichever key opens it and whatever its version byte: every key
+    /// is tried on every first frame of the right length, under the prologue of the byte it
+    /// came with, and only then is the version or the outcome read.
     pub fn answer_opening(
         keys: &[StaticSecret],
         version: u8,
@@ -324,14 +358,20 @@ impl Responder {
         keys: &[StaticSecret],
         first: &[u8],
     ) -> Result<(Self, Vec<u8>), Closed> {
-        if !run.speaks.contains(run.version) || first.len() != FIRST_LEN {
+        if first.len() != FIRST_LEN {
             return Err(Closed::Refused);
         }
-        let (key, mut hs) = keys
-            .iter()
+        // Every trial runs before any is read: no early stop.
+        let trials: Vec<Result<HandshakeState, snow::Error>> =
+            keys.iter().map(|k| try_key(&run, k, first)).collect();
+        let opened = trials
+            .into_iter()
             .enumerate()
-            .find_map(|(i, k)| try_key(&run, k, first).ok().map(|hs| (i, hs)))
-            .ok_or(Closed::Refused)?;
+            .find_map(|(i, t)| t.ok().map(|hs| (i, hs)));
+        if !run.speaks.contains(run.version) {
+            return Err(Closed::Refused);
+        }
+        let (key, mut hs) = opened.ok_or(Closed::Refused)?;
         let second = write(&mut hs, &[])?;
         Ok((Self { hs, run, key }, second))
     }

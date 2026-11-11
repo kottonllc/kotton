@@ -164,6 +164,10 @@ pub const THIRD_PAYLOAD_LEN: usize = 1 + 32 + EVENT_REF_LEN + VERSIONS_LEN;
 /// On the wire: a presence byte and the 32 bytes of the identity's identifier (its
 /// inception's digest), the latest event as [`EventRef`] with its presence byte, then
 /// [`Versions`]. An absent field is its presence byte 0 and zeros.
+///
+/// It does not belong in a log line on refusal: it names the identity an initiator acts for
+/// and where its log stands, and a responder that writes it down on a refusal keeps the record
+/// the handshake was built not to show. It derives `Debug` for tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThirdPayload {
     /// The identity the initiator acts for, as its inception's digest; `None` for one that

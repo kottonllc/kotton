@@ -357,12 +357,47 @@ fn a_first_frame_that_never_completes_is_the_state_the_caller_times() {
     assert!(FIRST_FRAME_WAIT > Duration::ZERO);
 }
 
-/// Values of low order on Curve25519: an exchange with any of them yields all zeros.
-const LOW_ORDER: [[u8; 32]; 2] = [[0; 32], {
-    let mut one = [0u8; 32];
-    one[0] = 1;
-    one
-}];
+/// Every encoding of a point of small order on Curve25519: an exchange with any yields all
+/// zeros. The eight points of small order have five canonical u-coordinates (a point and its
+/// negation share one): 0, 1, p-1, and the two of order 8. The rest are non-canonical
+/// encodings that reduce to them, by adding p where that fits below 2^255, or by setting the
+/// top bit, which X25519 ignores. The check is on the exchange's output, so it refuses each.
+const LOW_ORDER: [[u8; 32]; 14] = [
+    // canonical
+    hex32("0000000000000000000000000000000000000000000000000000000000000000"),
+    hex32("0100000000000000000000000000000000000000000000000000000000000000"),
+    hex32("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex32("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"),
+    hex32("5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157"),
+    // non-canonical: p, p+1, and each with the top bit set
+    hex32("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex32("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    hex32("0000000000000000000000000000000000000000000000000000000000000080"),
+    hex32("0100000000000000000000000000000000000000000000000000000000000080"),
+    hex32("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+    hex32("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880"),
+    hex32("5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f11d7"),
+    hex32("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+    hex32("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+];
+
+const fn hex32(s: &str) -> [u8; 32] {
+    const fn nibble(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => panic!("hex"),
+        }
+    }
+    let b = s.as_bytes();
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = nibble(b[2 * i]) << 4 | nibble(b[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
 
 /// A static key that claims a value of low order and computes with a scalar of its own. The
 /// first key the builder asks for is the static; the second, the ephemeral, is honest.
@@ -509,11 +544,17 @@ fn a_low_order_value_closes_either_side() {
 
 #[test]
 fn the_version_is_bound_into_every_key() {
-    // The prologue enters Noise's handshake hash, which every handshake message is sealed
-    // under as associated data: es, ee and se each open only under the version they were
-    // made with. Noise's split derives the transport keys from the chaining key, which the
-    // prologue does not enter, so the transport is bound through the handshake: no side
-    // reaches it without having read all three messages under one version.
+    // What holds: the prologue enters Noise's handshake hash, and every handshake message is
+    // sealed under that hash as associated data, so no message made under one version opens
+    // under another, and no side reaches the transport without reading all three under one.
+    //
+    // What does not, pinned below so this test says no more than is true: the prologue
+    // enters no key. Noise's chaining key mixes only the protocol name and the exchanges, so
+    // with the same statics and ephemerals two versions seal under the same cipher keys (the
+    // ciphertext is the same keystream; only the tags differ) and split into the same
+    // transport keys. The handshake page's sentence "so the version is bound into every key"
+    // says more;
+    // kottonllc/kotton-protocol#57 decides its words, and this test's name with them.
     let (i_ed, r_ed) = (ed(0x11), ed(0x22));
     let (i_key, r_key) = (mont(&i_ed), mont(&r_ed));
     let run = |version: u8, e: u8| Run {
@@ -530,22 +571,9 @@ fn the_version_is_bound_into_every_key() {
             std::slice::from_ref(&r_key),
         )
     };
-    let (one, two) = (at(1), at(2));
-    // The same statics and ephemerals: the clear values agree, and every sealed byte differs.
-    assert_eq!(one.opening[3..35], two.opening[3..35], "the same ephemeral");
-    assert_ne!(
-        one.opening[35..],
-        two.opening[35..],
-        "es: the first message's tag"
-    );
-    assert_eq!(one.second[2..34], two.second[2..34], "the same ephemeral");
-    assert_ne!(
-        one.second[34..],
-        two.second[34..],
-        "ee: the second message's tag"
-    );
-    assert_ne!(one.third[2..], two.third[2..], "se: the third message");
+    let (mut one, mut two) = (at(1), at(2));
 
+    // Holds: no handshake message opens across versions.
     // es: a responder under version 2 opens no first message made under 1.
     assert!(matches!(
         try_key(&run(2, 0x44), &r_key, &one.opening[3..]),
@@ -570,6 +598,55 @@ fn the_version_is_bound_into_every_key() {
         resp.read_third(&one.third[2..]),
         Err(Closed::Unopened)
     ));
+    // Each message's tag is made under the hash, so each differs.
+    assert_ne!(
+        one.opening[35..51],
+        two.opening[35..51],
+        "es: the first message's tag"
+    );
+    assert_ne!(
+        one.second[34..50],
+        two.second[34..50],
+        "ee: the second message's tag"
+    );
+    assert_ne!(
+        one.third[34..50],
+        two.third[34..50],
+        "the third message's static's tag"
+    );
+    assert_ne!(
+        one.third[156..],
+        two.third[156..],
+        "se: the third message's payload's tag"
+    );
+
+    // Does not hold: the same exchanges give the same keys under either version.
+    assert_eq!(one.opening[3..35], two.opening[3..35], "the same ephemeral");
+    assert_eq!(one.second[2..34], two.second[2..34], "the same ephemeral");
+    assert_eq!(
+        one.third[2..34],
+        two.third[2..34],
+        "the initiator's static is sealed under the same key and nonce: equal ciphertext"
+    );
+    // The two payloads differ only in their version sets, and their ciphertexts differ by
+    // exactly as much: one keystream.
+    let xor = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x ^ y).collect::<Vec<u8>>();
+    assert_eq!(
+        xor(&one.third[50..156], &two.third[50..156]),
+        xor(&one.payload_seen.encode(), &two.payload_seen.encode()),
+        "the payload is sealed under the same key under either version"
+    );
+    // The transport keys are equal: the same plaintext seals to the same frame on each side.
+    assert_eq!(
+        one.initiator_channel.seal(b"same").expect("seal"),
+        two.initiator_channel.seal(b"same").expect("seal"),
+        "the initiator's transport key is the same under either version"
+    );
+    assert_eq!(
+        one.responder_channel.seal(b"same").expect("seal"),
+        two.responder_channel.seal(b"same").expect("seal"),
+        "the responder's transport key is the same under either version"
+    );
 }
 
 #[test]
@@ -667,4 +744,26 @@ fn both_speaking_a_later_version_close() {
         assert_eq!(responder, Ok(()));
         assert_eq!(initiator, Ok(Answer::AskForEvents));
     }
+}
+
+#[test]
+fn the_responder_tries_every_key_on_every_first_frame() {
+    let i_key = mont(&ed(0x11));
+    let eds = [ed(0x21), ed(0x22), ed(0x23)];
+    let keys: Vec<StaticSecret> = eds.iter().map(mont).collect();
+    let trials = |version: u8, first: &[u8]| {
+        TRIALS.with(|t| t.set(0));
+        let answered = Responder::answer_opening(&keys, version, first).map(|r| r.0.key_index());
+        (TRIALS.with(|t| t.get()), answered)
+    };
+    for (i, named) in eds.iter().enumerate() {
+        let (_init, opening) = Initiator::open(&i_key, &mont_pub(named), None, None).expect("open");
+        // Named first, second or third: all three keys are tried.
+        assert_eq!(trials(VERSION, &opening[3..]), (3, Ok(i)));
+        // An unspoken version: all three are tried before it is refused.
+        assert_eq!(trials(2, &opening[3..]), (3, Err(Closed::Refused)));
+    }
+    // A first message no key opens: all three are tried.
+    let (_init, opening) = Initiator::open(&i_key, &mont_pub(&ed(0x77)), None, None).expect("open");
+    assert_eq!(trials(VERSION, &opening[3..]), (3, Err(Closed::Refused)));
 }
