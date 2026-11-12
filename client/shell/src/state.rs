@@ -46,6 +46,12 @@ pub struct ShellState {
 /// The one line of standard input a one-shot process was handed as a value (`kotton secret
 /// set <label>` with the value piped to it), read when the verb takes it and not before.
 ///
+/// **A value is one line, and more than one is told, not cut** (kotton #483). The door reads
+/// the first line and then reads on as far as a second, if one was piped, and hands over all
+/// it read; nothing past that second line is read. So a verb that takes it sees a line break
+/// inside what [`take`](Self::take) gives, and refuses it, rather than keeping a key in PEM
+/// form as its first line with no word said.
+///
 /// **A verb in the REPL never reads stdin** ([`Asking::hidden`]): under a pipe it is the
 /// script, and its next line would be taken as the value and never run. So the read is not the
 /// verb's to make. The door that owns the process's stdin, and knows nothing else will read
@@ -56,13 +62,15 @@ pub struct PipedLine(Box<dyn FnOnce() -> std::io::Result<String> + Send + Sync>)
 
 #[cfg(feature = "cli")]
 impl PipedLine {
-    /// The line `read` gives, when it is taken: the door's read of its own stdin, or a
-    /// test's answer.
+    /// What `read` gives, when it is taken: the door's read of its own stdin (its first line,
+    /// and its second if there is one), or a test's answer.
     pub fn new(read: impl FnOnce() -> std::io::Result<String> + Send + Sync + 'static) -> Self {
         Self(Box::new(read))
     }
 
-    /// Take the line, its end (`\n` or `\r\n`) not kept; nothing else of it is changed.
+    /// Take what was read, one end of line at its end (`\n` or `\r\n`) not kept; nothing
+    /// else of it is changed, so a line break left inside it says more than one line was
+    /// piped.
     pub fn take(self) -> std::io::Result<String> {
         let line = (self.0)()?;
         let line = line.strip_suffix('\n').unwrap_or(&line);

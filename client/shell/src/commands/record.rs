@@ -356,7 +356,8 @@ fn parse(args: &[String]) -> Result<Line, CommandOutput> {
 }
 
 /// A record's body as `record list` prints it: compact, without the id the row's own column
-/// says and the fields the daemon adds to an answer (`_id`, `_filed_at`, `_root`).
+/// says and the fields the daemon adds to an answer (`_id`, `_filed_at`, `_updated_at`,
+/// `_root`).
 fn body_said(record: &serde_json::Value) -> String {
     let mut body = record.clone();
     if let Some(obj) = body.as_object_mut() {
@@ -367,7 +368,7 @@ fn body_said(record: &serde_json::Value) -> String {
 
 /// A record as `record get` and `record list --json` print it: as the row holds it, its `id`
 /// among its fields, without the fields the daemon adds to an answer (`_id`, `_filed_at`,
-/// `_root`). Every verb here names Personal, so `_root` would be Personal's id on every row
+/// `_updated_at`, `_root`). Every verb here names Personal, so `_root` would be Personal's id on every row
 /// this surface can show: no information, and a durable identifier written to a stream meant
 /// for piping, which `record put` of the printed record would then store as a field.
 fn as_held(record: &serde_json::Value) -> serde_json::Value {
@@ -1044,7 +1045,7 @@ mod tests {
     #[test]
     fn list_names_each_id_and_prints_the_fields_it_was_given() {
         let answered = serde_json::json!({
-            "id": "r1", "title": "milk", "_id": "r1", "_filed_at": 7, "_root": "p0"
+            "id": "r1", "title": "milk", "_id": "r1", "_filed_at": 7, "_updated_at": 3, "_root": "p0"
         });
         let Out::Table { columns, rows } = table(std::slice::from_ref(&answered)) else { panic!("record list is a table") };
         assert_eq!(columns, ["id", "record"]);

@@ -105,10 +105,9 @@ pub(crate) async fn kept(
         .filter_map(|mut body| {
             let id = body["_id"].as_str()?.to_owned();
             let root = names.get(body["_root"].as_str()?)?.clone();
+            kotton_record::record_cmds::withhold_from_apps(&mut body);
             if let Some(obj) = body.as_object_mut() {
                 obj.remove("_id");
-                obj.remove("_root");
-                obj.remove("_filed_at");
             }
             Some(kotton_wire::runner::RunnerKeptRecord { id, data: body.to_string(), root })
         })
@@ -346,12 +345,14 @@ mod tests {
             let want = if r["title"] == "dentist" { &personal } else { &p.family };
             assert_eq!(r["_root"].as_str(), Some(want.as_str()), "{r}");
             assert!(r["_filed_at"].is_i64(), "the person is told where each row was filed: {r}");
+            assert!(r["_updated_at"].is_i64(), "the person is told when each row was last written: {r}");
         }
-        // Nor when the person's devices filed each row: attention data an app
-        // has no use for.
+        // Nor when the person's devices filed each row, or last wrote it:
+        // attention data an app has no use for.
         for r in ask(Some(APP.into())).await {
             assert!(r.get("_root").is_none(), "an app was handed a root id: {r}");
             assert!(r.get("_filed_at").is_none(), "an app was handed a filing time: {r}");
+            assert!(r.get("_updated_at").is_none(), "an app was handed a time of last write: {r}");
         }
         let UserResponse::RecordQueryResult { records } = record_search(
             &p.registry, &p.store, &access_from(&p.set, AID), None, None, None, Some(APP.into()),
@@ -624,7 +625,10 @@ mod tests {
             .map(|r| {
                 let body: serde_json::Value = serde_json::from_str(&r.data).unwrap();
                 assert!(
-                    body.get("_root").is_none() && body.get("_id").is_none() && body.get("_filed_at").is_none(),
+                    body.get("_root").is_none()
+                        && body.get("_id").is_none()
+                        && body.get("_filed_at").is_none()
+                        && body.get("_updated_at").is_none(),
                     "{body}"
                 );
                 (body["title"].as_str().unwrap().to_owned(), r.root.clone())
