@@ -35,7 +35,22 @@ pub struct AppGrants {
     pub requested_display: Vec<String>,
     pub approved: Option<Vec<CapabilityGrant>>,
     pub approved_display: Vec<String>,
+    /// For each of `approved`, whether its path is one the person bound rather than the
+    /// app's. An entry missing (a daemon that does not say) is the app's.
+    pub approved_bound: Vec<bool>,
     pub envelopes: Vec<kotton_wire::ipc::AppGrantEnvelope>,
+}
+
+/// What an install says it granted: [`UserResponse::AppInstalled`].
+#[derive(Debug, Clone)]
+pub struct AppInstalled {
+    pub app_id: String,
+    pub name: String,
+    /// What the app holds, rendered.
+    pub capabilities: Vec<String>,
+    /// For each of `capabilities`, whether its path is one the person bound rather than
+    /// the app's. An entry missing (a daemon that does not say) is the app's.
+    pub bound: Vec<bool>,
 }
 
 /// What an app package is asking for, before anything is installed.
@@ -283,7 +298,8 @@ impl KottonClient {
     /// Get the set to show them from [`KottonClient::app_install_preview`]; pass
     /// an empty vec to install with no capabilities at all.
     ///
-    /// Returns `(app_id, name, capabilities)` from the daemon's parsed manifest.
+    /// Returns `(app_id, name, capabilities)` from the daemon's parsed manifest; see
+    /// [`KottonClient::app_install_answer`] for the whole answer.
     pub async fn app_install(
         &mut self,
         user_id: &str,
@@ -292,6 +308,22 @@ impl KottonClient {
         approved: Vec<CapabilityGrant>,
         bindings: Vec<(String, String)>,
     ) -> io::Result<(String, String, Vec<String>)> {
+        let installed = self
+            .app_install_answer(user_id, manifest_toml, wasm_bytes, approved, bindings)
+            .await?;
+        Ok((installed.app_id, installed.name, installed.capabilities))
+    }
+
+    /// [`KottonClient::app_install`], answered whole: with which of the paths it granted
+    /// the person bound.
+    pub async fn app_install_answer(
+        &mut self,
+        user_id: &str,
+        manifest_toml: String,
+        wasm_bytes: Vec<u8>,
+        approved: Vec<CapabilityGrant>,
+        bindings: Vec<(String, String)>,
+    ) -> io::Result<AppInstalled> {
         let request = UserRequest::AppInstall {
             user_id: user_id.to_string(),
             manifest_toml,
@@ -304,7 +336,13 @@ impl KottonClient {
                 app_id,
                 name,
                 capabilities,
-            } => Ok((app_id, name, capabilities)),
+                bound,
+            } => Ok(AppInstalled {
+                app_id,
+                name,
+                capabilities,
+                bound,
+            }),
             UserResponse::Error { message } => Err(io::Error::other(message)),
             // This site is where the cost was first measured: a bare "unexpected
             // response" cost three debug cycles here when the answer was
@@ -374,6 +412,7 @@ impl KottonClient {
                 requested_display,
                 approved,
                 approved_display,
+                approved_bound,
                 envelopes,
             } => Ok(AppGrants {
                 app_id,
@@ -382,6 +421,7 @@ impl KottonClient {
                 requested_display,
                 approved,
                 approved_display,
+                approved_bound,
                 envelopes,
             }),
             UserResponse::Error { message } => Err(io::Error::other(message)),

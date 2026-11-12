@@ -507,7 +507,23 @@ fn verb(kind: &CapabilityKind) -> &'static str {
 /// kind it is, then the string, a [`words_line`]. A grant whose target carries no string is
 /// the device's own capability string. The match names every target, so a new one that
 /// carries a string cannot reach a device line unseen.
+///
+/// A path here is the app's ([`APPS_PATH`]): what an app asks for is its manifest's. What
+/// an app holds can be at a path the person bound instead, and is said by [`held_lines`].
 pub fn grant_lines(grant: &CapabilityGrant, signer: &Signer, known: &Known) -> Vec<String> {
+    held_lines(grant, false, signer, known)
+}
+
+/// Said of a path the app's manifest suggests.
+pub const APPS_PATH: &str = "the app's path";
+
+/// Said of a path the person bound in place of the app's.
+pub const YOUR_PATH: &str = "a path you bound";
+
+/// [`grant_lines`] for a grant an app holds, where the daemon said whose its path is: a path
+/// the person `bound` is said to be theirs ([`YOUR_PATH`]), any other the app's
+/// ([`APPS_PATH`]). `bound` says nothing of a grant that carries no path.
+pub fn held_lines(grant: &CapabilityGrant, bound: bool, signer: &Signer, known: &Known) -> Vec<String> {
     let rw = verb(&grant.kind);
     let with = |head: String, whose: &str, text: &str| {
         let mut lines = vec![head];
@@ -543,7 +559,7 @@ pub fn grant_lines(grant: &CapabilityGrant, signer: &Signer, known: &Known) -> V
         }
         CapabilityTarget::Vfs { path } => with(
             format!("  {rw} your files under this path"),
-            "the path (the app's, or one you bound)",
+            if bound { YOUR_PATH } else { APPS_PATH },
             path,
         ),
         CapabilityTarget::Quarantine { extension_id } => with(
@@ -1186,5 +1202,25 @@ mod tests {
         }
         let plain = CapabilityGrant::action(CapabilityTarget::Network);
         assert_eq!(grant_lines(&plain, &Signer::Nobody, &nothing_named()), vec!["  network.fetch"]);
+    }
+
+    /// **A path is said to be whoever's it is**: one the person bound as theirs, any other
+    /// as the app's, and what an app asks for is always the app's; a grant with no path
+    /// reads the same either way.
+    #[test]
+    fn a_path_is_said_as_the_persons_or_the_apps() {
+        let path = CapabilityGrant::vfs(CapabilityKind::Write, "/journal");
+        let known = nothing_named();
+        assert_eq!(
+            held_lines(&path, true, &Signer::Nobody, &known),
+            vec!["  write your files under this path", "  | a path you bound: \"/journal\""]
+        );
+        assert_eq!(
+            held_lines(&path, false, &Signer::Nobody, &known),
+            vec!["  write your files under this path", "  | the app's path: \"/journal\""]
+        );
+        assert_eq!(grant_lines(&path, &Signer::Nobody, &known), held_lines(&path, false, &Signer::Nobody, &known));
+        let plain = CapabilityGrant::action(CapabilityTarget::Network);
+        assert_eq!(held_lines(&plain, true, &Signer::Nobody, &known), vec!["  network.fetch"]);
     }
 }

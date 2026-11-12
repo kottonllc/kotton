@@ -998,6 +998,12 @@ pub enum UserResponse {
         name: String,
         /// Human-readable capability list, e.g. `"schema.read:<publisher>/<name>"`.
         capabilities: Vec<String>,
+        /// For each of `capabilities`, in order: whether it is a VFS grant whose path the
+        /// person bound, rather than one the app's manifest suggests. The daemon reads it
+        /// off the manifest it keeps beside the grant, so nothing more is recorded. Empty
+        /// from a daemon that does not say, and every entry it lacks reads as the app's.
+        #[serde(default)]
+        bound: Vec<bool>,
     },
     /// What an app package is asking for, before anything is minted or written.
     ///
@@ -1048,6 +1054,12 @@ pub enum UserResponse {
         approved: Option<Vec<CapabilityGrant>>,
         /// `approved`, rendered. Empty when `approved` is `None`.
         approved_display: Vec<String>,
+        /// For each of `approved`, in order: whether it is a VFS grant whose path the
+        /// person bound, rather than one the app's manifest suggests, as
+        /// [`Self::AppInstalled`]'s `bound` says it. Empty when `approved` is `None`, or
+        /// from a daemon that does not say; every entry it lacks reads as the app's.
+        #[serde(default)]
+        approved_bound: Vec<bool>,
         /// The signed envelopes backing this app's grants, if any.
         ///
         /// Separate from `approved` because they answer different questions: the

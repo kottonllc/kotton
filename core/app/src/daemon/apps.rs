@@ -16,7 +16,7 @@ use kotton_common::crypto::kdf_labels;
 use kotton_crypto::DidKeyMethod;
 use kotton_diag::service::{Event, EventBus, EventCategory, EventLevel, EventScope};
 use kotton_grant::daemon::db::grant_db;
-use kotton_schemas::{AppKind, AppManifest, ApprovedCapabilities, CapabilityGrant, CapabilityKind};
+use kotton_schemas::{AppKind, AppManifest, ApprovedCapabilities, CapabilityGrant, CapabilityKind, CapabilityTarget};
 use kotton_sys::secret::SecretsStore;
 use kotton_wire::did::Did;
 use kotton_wire::ipc::{SecretText, UserResponse};
@@ -1852,6 +1852,10 @@ pub async fn app_grants(
         .as_ref()
         .map(|g| g.iter().map(|x| x.display_string()).collect())
         .unwrap_or_default();
+    let approved_bound = approved
+        .as_ref()
+        .map(|g| g.iter().map(|x| bound_by_person(x, &manifest)).collect())
+        .unwrap_or_default();
 
     let mut envelopes = Vec::new();
     for env in grant_db::get_envelopes_for_app(user_db, &app_id)
@@ -1876,8 +1880,30 @@ pub async fn app_grants(
         requested_display,
         approved,
         approved_display,
+        approved_bound,
         envelopes,
     })
+}
+
+/// Whether `grant` is a VFS grant at a path the person bound: one `manifest` neither
+/// requests for that kind nor suggests as a target of a shape carrying it. A path the
+/// manifest suggests is the app's, whoever typed it; any other path reached the approval
+/// only by the person's binding (or a caller's own choice in `approved`), so it is theirs.
+///
+/// Read off the manifest kept beside the approval, so an install records nothing more for
+/// it, and a row from before this was asked answers as truly as a new one.
+fn bound_by_person(grant: &CapabilityGrant, manifest: &AppManifest) -> bool {
+    let CapabilityTarget::Vfs { path } = &grant.target else {
+        return false;
+    };
+    let requested = manifest.capabilities.iter().any(|g| {
+        g.kind == grant.kind && matches!(&g.target, CapabilityTarget::Vfs { path: p } if p == path)
+    });
+    let suggested = manifest
+        .vfs_shapes()
+        .iter()
+        .any(|s| &s.default_target == path && s.access.contains(&grant.kind));
+    !(requested || suggested)
 }
 
 /// Report what an app package is asking for. Mints nothing, writes nothing.
@@ -2106,10 +2132,16 @@ pub async fn app_install(
         )
         .in_scope(EventScope::User(user_id.to_string())));
     }
+    let bound = approved
+        .grants()
+        .iter()
+        .map(|g| bound_by_person(g, &manifest))
+        .collect();
     Ok(UserResponse::AppInstalled {
         app_id,
         name,
         capabilities: caps,
+        bound,
     })
 }
 
@@ -9048,6 +9080,40 @@ desc    = "The folder this editor reads and saves files in."
             live.lock().await.get(EDITOR).is_none(),
             "the first instance is gone from the map, not left behind the failed launch"
         );
+    }
+}
+
+#[cfg(test)]
+mod bound_by_person_tests {
+    use super::bound_by_person;
+    use kotton_schemas::{AppManifest, CapabilityGrant, CapabilityKind};
+
+    /// **A path the manifest suggests is the app's; any other is the person's**: a shape's
+    /// default, and a flat form's path, each for the kind it carries; a moved target, and a
+    /// suggested path for a kind its shape does not carry, are bound; no other grant is.
+    #[test]
+    fn a_path_is_the_persons_only_where_the_manifest_does_not_suggest_it() {
+        let shaped = AppManifest::from_toml(
+            "[app]\nid = \"com.example.ledger\"\nname = \"Ledger\"\nversion = \"1.0.0\"\n\n\
+             [[capabilities]]\nid = \"home\"\ntype = \"vfs-tree\"\naccess = [\"read\"]\ndefault = \"/notes\"\n",
+        )
+        .expect("a manifest declaring a shape");
+        let read = |p: &str| CapabilityGrant::vfs(CapabilityKind::Read, p);
+        assert!(!bound_by_person(&read("/notes"), &shaped));
+        assert!(bound_by_person(&read("/journal"), &shaped));
+        assert!(bound_by_person(&CapabilityGrant::vfs(CapabilityKind::Write, "/notes"), &shaped));
+        let flat = AppManifest::from_toml(
+            "[app]\nid = \"com.example.flat\"\nname = \"Flat\"\nversion = \"1.0.0\"\n\n\
+             [capabilities]\n\"files.read\" = [\"/docs\"]\n",
+        )
+        .expect("a flat manifest");
+        assert!(!bound_by_person(&read("/docs"), &flat));
+        assert!(bound_by_person(&read("/"), &flat));
+        let schema = CapabilityGrant::schema(
+            CapabilityKind::Read,
+            kotton_schemas::SchemaId::parse(kotton_common::namespace::NSID_NOTES).unwrap(),
+        );
+        assert!(!bound_by_person(&schema, &flat));
     }
 }
 

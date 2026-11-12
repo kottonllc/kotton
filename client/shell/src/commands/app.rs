@@ -473,8 +473,9 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
             app_id: &preview.app_id,
             requested: &preview.requested,
             shapes: &preview.shapes,
+            bindings: &bindings,
         };
-        let footer = sideload_footer(&path_str, !wildcards.is_empty());
+        let footer = sideload_footer(&path_str, &bindings, !wildcards.is_empty());
         // The first meeting: a key the prompt shows unnamed is offered to be named after the
         // prompt is shown, so the person names it knowing what it stands behind.
         let unnamed = grant_prompt::unnamed_keys(&signer, preview.requested, &known);
@@ -506,7 +507,7 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
     }
 
     if !wildcards.is_empty() && typed != Some("GRANT") {
-        return Ok(CommandOutput::error(1, whole_tree_refusal(&path_str, &preview.name).join("\n")));
+        return Ok(CommandOutput::error(1, whole_tree_refusal(&path_str, &bindings, &preview.name).join("\n")));
     }
 
     // The VFS grants are not echoed back: the daemon builds those from the
@@ -523,15 +524,22 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
     } else {
         effective
     };
-    let (app_id, name, capabilities) = match client
-        .app_install(&user_id, manifest_toml, wasm_bytes, non_vfs, send_bindings)
+    let installed = match client
+        .app_install_answer(&user_id, manifest_toml, wasm_bytes, non_vfs, send_bindings)
         .await
     {
         Ok(installed) => installed,
         Err(e) => return Ok(refused(INSTALL_REFUSED, &e.to_string())),
     };
     let known = known(&mut client, &user_id).await;
-    let lines = receipt(&name, &app_id, &capabilities, &signer, &known);
+    let lines = receipt(
+        &installed.name,
+        &installed.app_id,
+        &installed.capabilities,
+        &installed.bound,
+        &signer,
+        &known,
+    );
     Ok(CommandOutput::success_with_output(lines.join("\n")))
 }
 
@@ -580,24 +588,33 @@ fn no_such_shape(id: &str, shapes: &[kotton_schemas::CapabilityShape]) -> Vec<St
 }
 
 /// The refusal of a grant over the whole file tree approved without the word: the device's
-/// sentence first, then the app's name as its words, then what to type.
-fn whole_tree_refusal(path_str: &str, name: &str) -> Vec<String> {
+/// sentence first, then the app's name as its words, then what to type, with every `--bind`
+/// the person gave ([`sideload_line`]).
+fn whole_tree_refusal(path_str: &str, bindings: &[(String, String)], name: &str) -> Vec<String> {
     let mut lines = vec!["app sideload: this app asks for access to your whole file tree.".to_owned()];
     lines.extend(words_line("the app's name", name));
     lines.extend([
         "Approving that takes the word, not the flag:".to_owned(),
         String::new(),
-        format!("    app sideload {path_str} --approve GRANT"),
+        format!("    {} --approve GRANT", sideload_line(path_str, bindings)),
         String::new(),
         "Nothing has been installed.".to_owned(),
     ]);
     lines
 }
 
-/// What an install says it granted, in the prompt's own form ([`grant_prompt::grant_lines`]):
-/// each capability the daemon answers, read back as its grant; one this device cannot read
-/// back is shown as the daemon's words, behind the gutter.
-fn receipt(name: &str, app_id: &str, capabilities: &[String], signer: &Signer, known: &Known) -> Vec<String> {
+/// What an install says it granted, in the prompt's own form ([`grant_prompt::held_lines`]):
+/// each capability the daemon answers, read back as its grant, its path said to be the
+/// person's where the daemon's `bound` says they bound it and the app's otherwise; one this
+/// device cannot read back is shown as the daemon's words, behind the gutter.
+fn receipt(
+    name: &str,
+    app_id: &str,
+    capabilities: &[String],
+    bound: &[bool],
+    signer: &Signer,
+    known: &Known,
+) -> Vec<String> {
     let mut lines = vec!["✓ Sideloaded the app".to_string()];
     lines.extend(words_line("the app's name", name));
     lines.extend(words_line("the app's id", app_id));
@@ -606,9 +623,10 @@ fn receipt(name: &str, app_id: &str, capabilities: &[String], signer: &Signer, k
         return lines;
     }
     lines.push("It holds, as the daemon says:".to_string());
-    for cap in capabilities {
+    for (i, cap) in capabilities.iter().enumerate() {
+        let bound = bound.get(i).copied().unwrap_or(false);
         match CapabilityGrant::from_display_string(cap) {
-            Some(grant) => lines.extend(grant_prompt::grant_lines(&grant, signer, known)),
+            Some(grant) => lines.extend(grant_prompt::held_lines(&grant, bound, signer, known)),
             None => {
                 lines.push("  a grant this device cannot read back".to_string());
                 lines.extend(words_line("the daemon's words for it", cap));
@@ -634,11 +652,25 @@ struct Preview<'a> {
     app_id: &'a str,
     requested: &'a [kotton_schemas::CapabilityGrant],
     shapes: &'a [kotton_schemas::CapabilityShape],
+    /// The person's `--bind`s, `(shape id, path)`, as typed.
+    bindings: &'a [(String, String)],
+}
+
+/// The path the person bound `shape` to, when they bound it anywhere but where the app
+/// suggests: the first `--bind` naming it, as the install takes it.
+fn bound_path<'a>(shape: &kotton_schemas::CapabilityShape, bindings: &'a [(String, String)]) -> Option<&'a str> {
+    bindings
+        .iter()
+        .find(|(id, _)| id == &shape.id)
+        .map(|(_, path)| path.as_str())
+        .filter(|path| *path != shape.default_target)
 }
 
 /// The sideload preview, before its footer: the device's lines on who signed the code and
 /// what that does not cover, then the app's own words, then what it asks for, then where its
-/// files will live. Every string the app chose is on a [`grant_prompt::GUTTER`] line.
+/// files will live, as bound: a shape the person bound elsewhere at the path they gave, said
+/// to be theirs, and any other at the app's. Every string the app chose is on a
+/// [`grant_prompt::GUTTER`] line, and so is a path the person typed.
 fn sideload_prompt(preview: &Preview<'_>, signer: &Signer, known: &Known) -> Vec<String> {
     let mut lines = grant_prompt::signer_lines(signer, known);
     lines.push(String::new());
@@ -666,16 +698,24 @@ fn sideload_prompt(preview: &Preview<'_>, signer: &Signer, known: &Known) -> Vec
                 })
                 .collect::<Vec<_>>()
                 .join(" + ");
-            // A path tells the person where, and only the author can say what for; all of it
-            // is the app's own text, so each is a line of the app's words.
-            lines.push(format!("  {access} files at a place the app suggests"));
+            // A path tells the person where, and only the author can say what for; the label,
+            // description and id are the app's own text, and the path is the app's or the
+            // person's, so each is a line of whoever's words it is.
+            let bound = bound_path(s, preview.bindings);
+            match bound {
+                Some(_) => lines.push(format!("  {access} files at a path you bound")),
+                None => lines.push(format!("  {access} files at a place the app suggests")),
+            }
             if let Some(label) = &s.label {
                 lines.extend(words_line("the app's label", label));
             }
             if let Some(desc) = &s.desc {
                 lines.extend(words_line("the app's description", desc));
             }
-            lines.extend(words_line("the app's path", &s.default_target));
+            match bound {
+                Some(path) => lines.extend(words_line(grant_prompt::YOUR_PATH, path)),
+                None => lines.extend(words_line(grant_prompt::APPS_PATH, &s.default_target)),
+            }
             lines.extend(words_line("the app's id for it (for --bind)", &s.id));
         }
     }
@@ -683,19 +723,52 @@ fn sideload_prompt(preview: &Preview<'_>, signer: &Signer, known: &Known) -> Vec
 }
 
 /// The sideload preview's footer: the warning for a grant over the whole tree, and what to
-/// type to install.
-fn sideload_footer(path_str: &str, whole_tree: bool) -> Vec<String> {
+/// type to install, with every `--bind` the person gave ([`sideload_line`]).
+fn sideload_footer(path_str: &str, bindings: &[(String, String)], whole_tree: bool) -> Vec<String> {
     let mut lines = vec![String::new()];
+    let line = sideload_line(path_str, bindings);
     if whole_tree {
         lines.push("  !  This includes access to your whole file tree.".to_string());
         lines.push("     Only approve this for an app you trust completely.".to_string());
         lines.push(String::new());
-        lines.push(format!("To install:  app sideload {path_str} --approve GRANT"));
+        lines.push(format!("To install:  {line} --approve GRANT"));
     } else {
-        lines.push(format!("To install:  app sideload {path_str} --approve"));
+        lines.push(format!("To install:  {line} --approve"));
     }
     lines.push("Nothing has been installed.".to_string());
     lines
+}
+
+/// `app sideload <path>` and each of the person's `--bind id=path`, in the order they gave
+/// them, every word [`typed_back`] so the line, typed again, is the same arguments.
+fn sideload_line(path_str: &str, bindings: &[(String, String)]) -> String {
+    let mut line = format!("app sideload {}", typed_back(path_str));
+    for (id, path) in bindings {
+        line.push_str(&format!(" --bind {}", typed_back(&format!("{id}={path}"))));
+    }
+    line
+}
+
+/// `word` as it is typed to be read back as one argument, at this REPL (`crate::utils`'s
+/// `expand_vars` and `parse_command`, and the chain parser) and at a POSIX shell alike: as it
+/// is when every character is one neither reads specially, and otherwise in double quotes,
+/// with `\` escaped and each `"`, `$`, `` ` `` and `!` single-quoted between them, where
+/// neither parser expands or ends anything.
+fn typed_back(word: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-=:@+,%".contains(c);
+    if !word.is_empty() && word.chars().all(plain) {
+        return word.to_owned();
+    }
+    let mut out = String::from("\"");
+    for c in word.chars() {
+        match c {
+            '"' | '$' | '`' | '!' => out.push_str(&format!("\"'{c}'\"")),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// **The first meeting with a key**, where the person decides what to call it, as they do a
@@ -1224,6 +1297,17 @@ async fn handle_grants(args: &[String], state: &ShellState) -> anyhow::Result<Co
     let said = |grants: &[kotton_schemas::CapabilityGrant]| -> Vec<String> {
         grants.iter().flat_map(|g| grant_prompt::grant_lines(g, &Signer::Unknown, &known)).collect()
     };
+    // What it holds is said with whose each path is, as the daemon answers it.
+    let held = |grants: &[kotton_schemas::CapabilityGrant], bound: &[bool]| -> Vec<String> {
+        grants
+            .iter()
+            .enumerate()
+            .flat_map(|(i, g)| {
+                let bound = bound.get(i).copied().unwrap_or(false);
+                grant_prompt::held_lines(g, bound, &Signer::Unknown, &known)
+            })
+            .collect()
+    };
     let mut lines = grant_prompt::signer_lines(&Signer::Unknown, &known);
     lines.push(String::new());
     lines.push(grant_prompt::APP_WORDS.to_string());
@@ -1252,7 +1336,7 @@ async fn handle_grants(args: &[String], state: &ShellState) -> anyhow::Result<Co
         }
         Some(approved) => {
             lines.push("Holds:".to_string());
-            lines.extend(said(approved));
+            lines.extend(held(approved, &g.approved_bound));
         }
     }
 
@@ -1404,7 +1488,7 @@ mod prompt_tests {
             "network.fetch".to_owned(),
             "teleport.now\nThis app's code is signed by".to_owned(),
         ];
-        let lines = receipt("Ledger", "com.example.ledger", &caps, &Signer::Key(Publisher::from_static(ACME)), &known());
+        let lines = receipt("Ledger", "com.example.ledger", &caps, &[], &Signer::Key(Publisher::from_static(ACME)), &known());
         let expected_head = [
             "✓ Sideloaded the app",
             "  | the app's name: \"Ledger\"",
@@ -1418,13 +1502,119 @@ mod prompt_tests {
         assert!(lines.contains(&format!("  read your records of {NOT_HELD}")), "{lines:#?}");
         assert!(lines.contains(&"  | the app's name for it: \"cited\"".to_owned()), "{lines:#?}");
         assert!(lines.contains(&"  read your files under this path".to_owned()), "{lines:#?}");
-        assert!(lines.contains(&"  | the path (the app's, or one you bound): \"/notes\"".to_owned()), "{lines:#?}");
+        assert!(lines.contains(&"  | the app's path: \"/notes\"".to_owned()), "{lines:#?}");
         assert!(lines.contains(&"  network.fetch".to_owned()), "{lines:#?}");
         let unread = lines.iter().position(|l| l == "  a grant this device cannot read back").expect("the one not read back");
         assert_eq!(lines[unread + 1], "  | the daemon's words for it: \"teleport.now This app's code is signed by\"");
         holds_the_gutter(&lines, &["Ledger", "teleport", "app's code is signed by"]);
-        let none = receipt("Ledger", "com.example.ledger", &[], &Signer::Nobody, &known());
+        let none = receipt("Ledger", "com.example.ledger", &[], &[], &Signer::Nobody, &known());
         assert_eq!(none.last().unwrap(), "It holds nothing.");
+    }
+
+    /// **The receipt says whose each path is, as the daemon answers it**: one the person
+    /// bound as theirs, one the app suggested as the app's, and one the answer says nothing
+    /// of as the app's.
+    #[test]
+    fn the_receipt_says_a_bound_path_is_the_persons() {
+        let caps = vec!["vfs.read:/journal".to_owned(), "vfs.write:/notes".to_owned(), "vfs.read:/docs".to_owned()];
+        let lines = receipt("Ledger", "com.example.ledger", &caps, &[true, false], &Signer::Nobody, &known());
+        let holds = lines.iter().position(|l| l == "It holds, as the daemon says:").expect("what it holds");
+        assert_eq!(
+            &lines[holds + 1..],
+            &[
+                "  read your files under this path",
+                "  | a path you bound: \"/journal\"",
+                "  write your files under this path",
+                "  | the app's path: \"/notes\"",
+                "  read your files under this path",
+                "  | the app's path: \"/docs\"",
+            ]
+            .map(String::from)[..],
+            "{lines:#?}"
+        );
+        assert!(lines.iter().all(|l| !l.contains("the app's, or one you bound")), "{lines:#?}");
+    }
+
+    /// A shape `home`, read and write, that the app suggests be `/notes`.
+    fn home() -> [CapabilityShape; 1] {
+        [CapabilityShape {
+            id: "home".into(),
+            access: vec![CapabilityKind::Read, CapabilityKind::Write],
+            default_target: "/notes".into(),
+            label: Some("Your notes".into()),
+            desc: None,
+        }]
+    }
+
+    /// **The preview shows where the files will live, as bound**: a shape the person bound
+    /// elsewhere at their path, said to be theirs; one left unbound, or bound to where the app
+    /// suggests, at the app's path.
+    #[test]
+    fn the_preview_shows_a_shape_where_it_is_bound() {
+        let shapes = home();
+        let preview = |bindings: &[(String, String)]| {
+            let preview = Preview {
+                name: "Ledger",
+                version: "1.0.0",
+                app_id: "com.example.ledger",
+                requested: &[],
+                shapes: &shapes,
+                bindings,
+            };
+            let lines = sideload_prompt(&preview, &Signer::Nobody, &known());
+            let at = lines.iter().position(|l| l.starts_with("Where its files will live")).expect("where");
+            lines[at + 1..].to_vec()
+        };
+        let bound = [("home".to_owned(), "/journal".to_owned())];
+        assert_eq!(
+            preview(&bound),
+            [
+                "  read + write files at a path you bound",
+                "  | the app's label: \"Your notes\"",
+                "  | a path you bound: \"/journal\"",
+                "  | the app's id for it (for --bind): \"home\"",
+            ]
+            .map(String::from)
+        );
+        let unbound = [
+            "  read + write files at a place the app suggests",
+            "  | the app's label: \"Your notes\"",
+            "  | the app's path: \"/notes\"",
+            "  | the app's id for it (for --bind): \"home\"",
+        ]
+        .map(String::from);
+        assert_eq!(preview(&[]), unbound);
+        assert_eq!(preview(&[("home".to_owned(), "/notes".to_owned())]), unbound);
+    }
+
+    /// **The line to type repeats every `--bind`**, in the order given, each quoted so the
+    /// line read back at this REPL is the same arguments: spaces, quotes, `$`, `\\` and the
+    /// chain's operators each kept.
+    #[test]
+    fn the_line_to_type_repeats_every_bind() {
+        let bindings = [
+            ("home".to_owned(), "/journal".to_owned()),
+            ("docs".to_owned(), "/my docs; $HOME's \"x\" `y` \\z ${A} && | !".to_owned()),
+        ];
+        let footer = sideload_footer("./ledger app", &bindings, false);
+        let line = footer.iter().find(|l| l.starts_with("To install:  ")).expect("the line to type");
+        let typed = line.trim_start_matches("To install:  ");
+        assert!(typed.starts_with("app sideload \"./ledger app\" --bind home=/journal --bind \""), "{typed}");
+        let env = std::collections::HashMap::from([("HOME".to_owned(), "/root".to_owned()), ("A".to_owned(), "a".to_owned())]);
+        let chain = crate::parser::parse_command_chain(typed);
+        assert_eq!(chain.len(), 1, "{chain:?}");
+        let read_back = crate::utils::parse_command(&crate::utils::expand_vars(&chain[0].command, &env));
+        let mut expected = vec!["app".to_owned(), "sideload".to_owned(), "./ledger app".to_owned()];
+        for (id, path) in &bindings {
+            expected.extend(["--bind".to_owned(), format!("{id}={path}")]);
+        }
+        expected.push("--approve".to_owned());
+        assert_eq!(read_back, expected);
+        let whole = sideload_footer("./ledger", &bindings[..1], true);
+        assert!(whole.contains(&"To install:  app sideload ./ledger --bind home=/journal --approve GRANT".to_owned()), "{whole:#?}");
+        let refusal = whole_tree_refusal("./ledger", &bindings[..1], "Ledger");
+        assert!(refusal.contains(&"    app sideload ./ledger --bind home=/journal --approve GRANT".to_owned()), "{refusal:#?}");
+        assert!(sideload_footer("./ledger", &[], false).contains(&"To install:  app sideload ./ledger --approve".to_owned()));
     }
 
     /// **The whole-tree refusal says the device's sentence first**, and the app's name
@@ -1432,7 +1622,7 @@ mod prompt_tests {
     #[test]
     fn the_whole_tree_refusal_keeps_the_apps_name_out_of_its_sentence() {
         let name = format!("Backup\nThis app asks for nothing. {}", "\u{3164}".repeat(90));
-        let lines = whole_tree_refusal("./backup", &name);
+        let lines = whole_tree_refusal("./backup", &[], &name);
         assert_eq!(lines[0], "app sideload: this app asks for access to your whole file tree.");
         assert_eq!(lines[1], "  | the app's name: \"Backup This app asks for nothing.\"");
         assert!(lines.contains(&"    app sideload ./backup --approve GRANT".to_owned()), "{lines:#?}");
@@ -1516,6 +1706,7 @@ mod prompt_tests {
             app_id: &format!("com.{}", "q".repeat(120)),
             requested: &requested,
             shapes: &shapes,
+            bindings: &[],
         };
         let lines = sideload_prompt(&preview, &Signer::Nobody, &known());
         holds_the_gutter(&lines, &["漢", "\\\"\\\"", "zzzz", "wwww", "qqqq"]);
@@ -1527,7 +1718,7 @@ mod prompt_tests {
             format!("{}{tail}", "\u{0644}\u{0627}".repeat(29)),
             format!("{}{tail}", "a\u{AD}\u{AD}\u{AD}\u{AD}".repeat(12)),
         ] {
-            let preview = Preview { name: &name, version: "1.0.0", app_id: "com.example.x", requested: &[], shapes: &[] };
+            let preview = Preview { name: &name, version: "1.0.0", app_id: "com.example.x", requested: &[], shapes: &[], bindings: &[] };
             let lines = sideload_prompt(&preview, &Signer::Nobody, &known());
             holds_the_gutter(&lines, &["itself", "\u{1F44D}", "\u{0644}"]);
             for line in lines.iter().filter(|l| l.starts_with(GUTTER)) {
