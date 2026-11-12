@@ -118,6 +118,18 @@ Unpinned again, no new row leaves; a row already logged stays in the drive and n
 retracted. A row of it from another of the person's devices, one that pinned its log, is merged
 here as any row is.
 
+**A removal follows the record** (#484, a `decision` whose default, A, the maintainer
+approved). Unpinned, one thing of the log still leaves: the removal of a record the drive's log
+already carries, one that arrived from it or was sent while this device pinned. Which records
+those are is read off the log, the newest version of each row of `access-log` it carries, not
+from anything remembered beside it. The removal is that version made a tombstone one revision
+on, at the second the version was written, with its id, schema, root and filing stamp and an
+empty body (`replication::removal_of`): taken wherever the record is held, it adds no field
+and no time the record's arrival did not carry, and sends nothing of what was removed. It is
+logged once, and an unpinned snapshot carries it in the record's place. A device's own unpinned
+records, and its removals of records the drive never carried, still leave nothing. Whether
+unpinning should offer to remove what was already sent is not decided here.
+
 **Writing a log record starts no pass**, and tells no one it was written. The store wakes the
 sync engine itself after an insert or a delete of any schema but `access-log`
 (`SqliteRecordStore::with_write_signal`, `replication::a_write_wakes_a_pass`), and the wake is

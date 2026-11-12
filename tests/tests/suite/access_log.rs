@@ -4,8 +4,10 @@
 //! `personal` holds none of its bytes; once the first device's own setting pins its log to
 //! `personal`, its log reaches the second after a bare `sync` on each; unpinned again, no new
 //! record leaves. No app is granted the log, an app's record verbs on it are refused, and
-//! record search returns none of it. Every record here is written by the person's own
-//! session, at the local door, naming no app.
+//! record search returns none of it. A removal follows the record (kotton #484): a record the
+//! drive already carries, removed on a device that has not pinned its log, is removed from the
+//! drive and every device, and nothing else of that device's log leaves. Every record here is
+//! written by the person's own session, at the local door, naming no app.
 
 use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto, TestEnv};
 use crate::drive_sync::personal_tree;
@@ -55,7 +57,7 @@ struct TwoDevices {
     vault: RunningVault,
     tree: String,
     a: RunningDevice,
-    _b: RunningDevice,
+    b: RunningDevice,
     client_a: KottonClient,
     client_b: KottonClient,
 }
@@ -74,7 +76,7 @@ async fn two_devices() -> TwoDevices {
     synced(&mut client_a, "A").await;
     synced(&mut client_b, "B").await;
     let tree = personal_tree(&a, &first.pubkey_hex).await;
-    TwoDevices { vault, tree, a, _b: b, client_a, client_b }
+    TwoDevices { vault, tree, a, b, client_a, client_b }
 }
 
 /// **By default a log record written on one device never reaches a second**, after a bare
@@ -132,6 +134,72 @@ async fn a_log_pinned_to_personal_reaches_another_device_and_unpinned_stops() {
     synced(&mut d.client_b, "B").await;
     assert_eq!(held(&mut d.client_b).await, [BEFORE, PINNED], "a record written after the unpin left A");
     assert_eq!(held(&mut d.client_a).await, [AFTER, BEFORE, PINNED], "A keeps its whole log");
+}
+
+/// The person's own removal of their log record `id`, in Personal at `client`'s local door.
+async fn removed(client: &mut KottonClient, id: &str) {
+    client
+        .record_delete_in(USER, Some(PERSONAL_ROOT), None, LOG, id)
+        .await
+        .expect("the person's own removal of a log record");
+}
+
+/// **A removal follows the record** (kotton #484). B pins its log and writes R; A, which has
+/// not pinned, receives R and removes it, and writes a record of its own beside it. After a
+/// bare `sync` on each, R is gone from B, and gone from the drive: a third device, C, joined
+/// after the removal, never holds it. A's own record reaches neither. Neither device runs a
+/// peer listener, so every record reaches B and C by way of the vault keeping `personal`,
+/// which reads none of either record's bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_the_drive_carries_removed_on_an_unpinned_device_is_removed_everywhere() {
+    const R: &str = "access-log-pinned-on-b-then-removed-on-a-5e21";
+    const OWN: &str = "access-log-a-own-unpinned-7b90";
+    let mut d = two_devices().await;
+    let db_b = d.b.daemon.machine_db();
+    kotton_device::users::log_pin::set(&db_b, USER, Some(FIRST_DRIVE_NAME)).await.expect("B's pin");
+
+    let r = written(&mut d.client_b, R).await;
+    synced(&mut d.client_b, "B").await;
+    synced(&mut d.client_a, "A").await;
+    assert_eq!(held(&mut d.client_a).await, [R], "A did not receive B's pinned record");
+
+    removed(&mut d.client_a, &r).await;
+    written(&mut d.client_a, OWN).await;
+    assert_eq!(held(&mut d.client_a).await, [OWN], "A still holds R");
+    synced(&mut d.client_a, "A").await;
+    synced(&mut d.client_b, "B").await;
+    assert!(held(&mut d.client_b).await.is_empty(), "B keeps R, or holds A's own record");
+
+    let c = spawn_device("device C").await;
+    let client_c = connect_when_ready(&c.ipc, "client C").await;
+    let (_client_a, mut client_c, _node_c) =
+        enroll_streamed_as(d.client_a, client_c, USER, "device-a", "device-c", Posture::Full).await;
+    synced(&mut client_c, "C").await;
+    assert!(held(&mut client_c).await.is_empty(), "the drive keeps R, or carries A's own record");
+    the_vault_keeping_it_reads_none_of(&d.vault, &d.tree, &[R, OWN]).await;
+}
+
+/// **The same on one device that pinned, wrote R, unpinned, then removed R** (kotton #484):
+/// the drive carried R because it was sent while pinned, so the removal leaves, and B, which
+/// held R, holds it no more after a bare `sync` on each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_record_sent_while_pinned_and_removed_after_the_unpin_leaves_the_drive() {
+    const R: &str = "access-log-sent-pinned-removed-unpinned-2c4d";
+    let mut d = two_devices().await;
+    let db = d.a.daemon.machine_db();
+
+    kotton_device::users::log_pin::set(&db, USER, Some(FIRST_DRIVE_NAME)).await.expect("the pin");
+    let r = written(&mut d.client_a, R).await;
+    synced(&mut d.client_a, "A").await;
+    synced(&mut d.client_b, "B").await;
+    assert_eq!(held(&mut d.client_b).await, [R], "B did not receive A's pinned record");
+
+    kotton_device::users::log_pin::set(&db, USER, None).await.expect("the unpin");
+    removed(&mut d.client_a, &r).await;
+    synced(&mut d.client_a, "A").await;
+    synced(&mut d.client_b, "B").await;
+    assert!(held(&mut d.client_b).await.is_empty(), "the drive keeps R");
+    assert!(held(&mut d.client_a).await.is_empty());
 }
 
 /// **No app is granted the access log, and an app's record verb on it is refused**: a grant
