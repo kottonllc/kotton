@@ -724,7 +724,7 @@ async fn name_the_unnamed(
     let mut given: Vec<(kotton_schemas::Publisher, String)> = Vec::new();
     let mut answered = false;
     'keys: for key in unnamed {
-        let what = if signer.key() == Some(key) { "signed this app's code" } else { "publishes a schema it asks for" };
+        let what = if signer.key() == Some(key) { "signed this app's manifest and code" } else { "publishes a schema it asks for" };
         said.push(Out::Note(format!(
             "The key {key} {what}, and you have not named it. {OFFER_CAUTION} Name it now, as \
              you would a contact, and every prompt about it says that name; or press Enter to \
