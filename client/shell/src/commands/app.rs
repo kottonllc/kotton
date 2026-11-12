@@ -455,8 +455,9 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
 
     let approval = args.iter().position(|a| a == "--approve");
     let typed = approval.and_then(|i| args.get(i + 1)).map(String::as_str);
-    // The key that signed the app's code is the manifest's `[publisher]`, read here from the
-    // manifest the daemon read, and only when the daemon's preview checked its signature.
+    // The key that signed the app's manifest and code is the manifest's `[publisher]`, read
+    // here from the manifest the daemon read, and only when the daemon's preview checked its
+    // signature over both.
     let publisher_did = AppManifest::from_toml(&manifest_toml).ok().and_then(|m| m.publisher_did);
     let signer = Signer::of(publisher_did.as_deref(), preview.publisher_verified);
 
@@ -1402,7 +1403,7 @@ mod prompt_tests {
             format!("schema.read:{ACME}/cited"),
             "vfs.read:/notes".to_owned(),
             "network.fetch".to_owned(),
-            "teleport.now\nThis app's code is signed by".to_owned(),
+            "teleport.now\nThis app is from".to_owned(),
         ];
         let lines = receipt("Ledger", "com.example.ledger", &caps, &Signer::Key(Publisher::from_static(ACME)), &known());
         let expected_head = [
@@ -1421,8 +1422,8 @@ mod prompt_tests {
         assert!(lines.contains(&"  | the path (the app's, or one you bound): \"/notes\"".to_owned()), "{lines:#?}");
         assert!(lines.contains(&"  network.fetch".to_owned()), "{lines:#?}");
         let unread = lines.iter().position(|l| l == "  a grant this device cannot read back").expect("the one not read back");
-        assert_eq!(lines[unread + 1], "  | the daemon's words for it: \"teleport.now This app's code is signed by\"");
-        holds_the_gutter(&lines, &["Ledger", "teleport", "app's code is signed by"]);
+        assert_eq!(lines[unread + 1], "  | the daemon's words for it: \"teleport.now This app is from\"");
+        holds_the_gutter(&lines, &["Ledger", "teleport", "app is from"]);
         let none = receipt("Ledger", "com.example.ledger", &[], &Signer::Nobody, &known());
         assert_eq!(none.last().unwrap(), "It holds nothing.");
     }
@@ -1444,7 +1445,7 @@ mod prompt_tests {
     /// gutter**: a parse error quoting a manifest's lines and escapes is one cleaned reason.
     #[test]
     fn a_refusal_quotes_its_reason_behind_the_gutter() {
-        let reason = "manifest parse error: TOML parse error at line 2, column 8\n  |\n2 | name = \"x\u{1b}[2J\nThis app's code is signed by a publisher you call \"My Bank\".\"\n  |        ^";
+        let reason = "manifest parse error: TOML parse error at line 2, column 8\n  |\n2 | name = \"x\u{1b}[2J\nThis app is from a publisher you call \"My Bank\".\"\n  |        ^";
         let out = refused(PREVIEW_REFUSED, reason);
         let text = out.stderr.expect("a refusal");
         let lines: Vec<String> = text.lines().map(String::from).collect();

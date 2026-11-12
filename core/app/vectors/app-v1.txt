@@ -1,0 +1,16 @@
+# kotton-app-v1: an app's publisher signature over its manifest and its code.
+# The signed message is the 13 ASCII bytes `kotton-app-v1`, one zero byte, the BLAKE3 of the
+# manifest's canonical form (`[publisher]` set aside, read through the manifest's types, written
+# as RFC 8785 JSON), and the BLAKE3 of the code: 78 bytes. The signature is Ed25519 under the
+# key whose seed is `seed` (byte i is i + 1), base64 with the standard alphabet and padding.
+# `manifest` is the TOML as a JSON string; `code` is the code's bytes.
+# Held by `kotton_app::app_signature`'s `the_committed_vectors_are_what_signing_makes`.
+seed = 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20
+publisher = did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7
+manifest = "[app]\nid = \"com.example.known-answer\"\nname = \"Known Answer\"\nversion = \"1.0.0\"\nhandler_for = [\"did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7/example\"]\n\n[capabilities]\n\"schema.read\" = [\"did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7/example\"]\n\"files.read\" = [\"/exports\"]\n"
+code = 6b6f74746f6e2d6170702d7631206b6e6f776e20616e737765723a206e6f742061206d6f64756c65
+canonical = {"app":{"handler_for":["did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7/example"],"id":"com.example.known-answer","name":"Known Answer","version":"1.0.0"},"capabilities":{"files.read":["/exports"],"schema.read":["did:key:z6MkneMkZqwqRiU5mJzSG3kDwzt9P8C59N4NGTfBLfSGE7c7/example"]}}
+manifest_digest = 8686f7eccab478654cbee55f2b23be9a423ea2793d6675538bbcb93570d56dde
+code_digest = ae40980b4403fa2c3a6d6cbe93c0dd49ed3ef5336bfbc39b09b4382c203e2eab
+message = 6b6f74746f6e2d6170702d7631008686f7eccab478654cbee55f2b23be9a423ea2793d6675538bbcb93570d56ddeae40980b4403fa2c3a6d6cbe93c0dd49ed3ef5336bfbc39b09b4382c203e2eab
+signature = kfwxJFHVnFeF38TcozmLpGwyv9FJaf1rrTTeQqRzE0sPGqFGipY+qXd5QIYp/64F2TTs4eG0QqXwK+Vt5/HoDA==
