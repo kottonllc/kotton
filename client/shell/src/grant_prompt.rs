@@ -72,10 +72,10 @@ pub const APP_WORDS: &str = "The app's own words:";
 /// Said, on a line of its own, under a schema whose publisher is not the one the app is from.
 pub const DIFFERS: &str = "This app is not from this schema's publisher.";
 
-/// Said, on a line of its own, under a schema an app asks for when no signature on its code
+/// Said, on a line of its own, under a schema an app asks for when no signature on the app
 /// checked: an app nobody signed, or one whose signature failed.
 pub const DIFFERS_UNSIGNED: &str =
-    "No signature on the app's code checked, so nothing shows it comes from this schema's publisher.";
+    "No signature on the app checked, so nothing shows it comes from this schema's publisher.";
 
 /// Said in the offer to name a key, before the question: the prompt shows the key, and
 /// nothing in it (least of all the app's words) shows who holds it.
@@ -470,10 +470,10 @@ pub fn who(key: &Publisher, known: &Known) -> String {
 pub fn signer_lines(signer: &Signer, known: &Known) -> Vec<String> {
     let first = match signer {
         Signer::Key(key) => format!("This app is from {}.", who(key, known)),
-        Signer::Nobody => format!("This is {UNSIGNED}: no key signed its code."),
+        Signer::Nobody => format!("This is {UNSIGNED}: no key signed its manifest or its code."),
         Signer::NotChecked => {
-            "This app names a key, and the signature over its code does not check against it, so no \
-             one is shown as signing it."
+            "This app names a key, and its signature over its manifest and code does not check \
+             against it, so no one is shown as signing it."
                 .to_owned()
         }
         Signer::Unknown => {
@@ -783,7 +783,7 @@ mod tests {
         let known = named_acme();
         assert_eq!(
             signer_lines(&Signer::Nobody, &known)[0],
-            "This is an app nobody signed: no key signed its code."
+            "This is an app nobody signed: no key signed its manifest or its code."
         );
         for signer in [Signer::Nobody, Signer::NotChecked] {
             let lines = signer_lines(&signer, &known);
@@ -994,7 +994,7 @@ mod tests {
             lines.extend(app_words(text, text, text));
             let path = CapabilityGrant::vfs(CapabilityKind::Read, text.as_str());
             lines.extend(grant_lines(&path, &Signer::Nobody, &nothing_named()));
-            lines.extend(words_line("the app's id for it (for --bind) and a label long enough to fill most of a row", text));
+            lines.extend(words_line("the id for it (for --bind) and a label long enough to fill most of a row, written out", text));
         }
         lines.extend(reason_line(&reason));
         for line in &lines {

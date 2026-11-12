@@ -229,7 +229,7 @@ async fn a_petname_given_on_one_device_names_the_publisher_in_a_prompt_on_anothe
     // says nothing shows it comes from the schema's publisher.
     let bare = an_app(&apps.path().join("bare"), "Bare", None, std::slice::from_ref(&statement), &[]);
     let unsigned = done(on_b(line(&["app", "sideload", &bare])).await);
-    assert!(unsigned.text.trim_start().starts_with("This is an app nobody signed: no key signed its code."), "{}", unsigned.text);
+    assert!(unsigned.text.trim_start().starts_with("This is an app nobody signed: no key signed its manifest or its code."), "{}", unsigned.text);
     assert!(unsigned.text.contains(&reads_from("My Bank")), "{}", unsigned.text);
     assert!(unsigned.text.contains(DIFFERS_UNSIGNED), "{}", unsigned.text);
     // Every row of the app's words is behind the gutter: none of a device line is the app's.

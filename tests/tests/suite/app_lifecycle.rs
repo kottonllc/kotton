@@ -330,8 +330,9 @@ async fn a_signature_over_the_code_alone_is_refused() {
     assert!(err.contains("publisher signature invalid"), "{err}");
 }
 
-/// **A signed manifest with a key outside its types is refused as signed, naming the key**;
-/// an unsigned manifest with the same key installs, as before, with the key dropped.
+/// **A signed manifest with a key outside its types is refused as signed, naming the key**,
+/// in `[app]` or beside the two strings of `[publisher]`; an unsigned manifest with the same
+/// key installs, as before, with the key dropped.
 #[tokio::test]
 async fn a_key_outside_the_types_refuses_a_signed_manifest_and_not_an_unsigned_one() {
     let mut env = TestEnv::spawn_authed().await;
@@ -345,6 +346,14 @@ async fn a_key_outside_the_types_refuses_a_signed_manifest_and_not_an_unsigned_o
     assert!(!verified, "a signed manifest with a key outside its types was shown as signed");
     let err = installed.expect_err("a signed manifest with a key outside its types installed").to_string();
     assert!(err.contains("`app.role`"), "the refusal does not name the key: {err}");
+
+    // A good signature, with a key beside it in `[publisher]`, which no signature covers.
+    let good = kotton_app::app_signature::signed_manifest(SIGNED_MANIFEST, STUB_WASM, &key).unwrap();
+    let noted = format!("{good}note = \"signed by the bank\"\n");
+    let (verified, installed) = preview_then_install(&mut env, noted, STUB_WASM).await;
+    assert!(!verified, "a [publisher] with a key beside its two strings was shown as signed");
+    let err = installed.expect_err("a [publisher] with a key beside its two strings installed").to_string();
+    assert!(err.contains("`publisher.note`"), "the refusal does not name the key: {err}");
 
     let (verified, installed) = preview_then_install(&mut env, extra, STUB_WASM).await;
     assert!(!verified);

@@ -27,8 +27,9 @@
 //! manifest and the code together: [`APP_SIGNATURE_DOMAIN`] (`kotton-app-v1`), one zero
 //! byte, the BLAKE3 of the manifest's canonical form with `[publisher]` set aside
 //! ([`canonical_manifest`]), and the BLAKE3 of `app.wasm`, 78 bytes
-//! ([`app_signed_message`]). A signed manifest holds no key outside the types below: one that
-//! does has no canonical form, and is not signed by its publisher. The daemon's check of the
+//! ([`app_signed_message`]). A signed manifest holds no key outside the types below, and its
+//! `[publisher]` holds the two strings and nothing else: one that does not has no canonical
+//! form, and is not signed by its publisher. The daemon's check of the
 //! signature is `kotton_app::app_signature`.
 
 use std::collections::HashMap;
@@ -627,7 +628,10 @@ impl ManifestCanonicalError {
 
 /// The manifest's canonical form: what its publisher's signature covers of it.
 ///
-/// The TOML is read as a generic table and `[publisher]` is set aside. What remains is read
+/// The TOML is read as a generic table and `[publisher]` is set aside, once it is shown to
+/// hold the strings `did` and `signature` and nothing else: any other key in it, a nested
+/// table among them, means the manifest has no canonical form, and the error names the key
+/// (`publisher.note`), since what the block carries is not signed. What remains is read
 /// through the manifest's own types and written back as the JSON they serialise to, in the
 /// form RFC 8785 gives (the one a schema's definition is digested in, [`crate::canonical`],
 /// with its refusal of numbers that are not exact integers). The table and the types' JSON
@@ -640,7 +644,9 @@ impl ManifestCanonicalError {
 /// parses one with a key outside its types, and drops the key.
 pub fn canonical_manifest(manifest_toml: &str) -> Result<String, ManifestCanonicalError> {
     let mut table: toml::Table = toml::from_str(manifest_toml)?;
-    table.remove("publisher");
+    if let Some(publisher) = table.remove("publisher") {
+        refuse_publisher_beyond_its_two_strings(&publisher)?;
+    }
     let written = serde_json::to_value(&table)
         .map_err(|_| ManifestCanonicalError::ValueDiffers { key: "(the manifest)".to_owned() })?;
     let typed: RawManifest = toml::Value::Table(table).try_into()?;
@@ -649,6 +655,26 @@ pub fn canonical_manifest(manifest_toml: &str) -> Result<String, ManifestCanonic
         return Err(e);
     }
     Ok(crate::canonical::canonical_json(&typed)?)
+}
+
+/// `[publisher]` holds `did` and `signature`, each a string, and no other key: the block is
+/// set aside from the canonical form, so nothing else may sit in it unsigned.
+fn refuse_publisher_beyond_its_two_strings(publisher: &toml::Value) -> Result<(), ManifestCanonicalError> {
+    let toml::Value::Table(block) = publisher else {
+        return Err(ManifestCanonicalError::ValueDiffers { key: "publisher".to_owned() });
+    };
+    let mut keys: Vec<&String> = block.keys().collect();
+    keys.sort();
+    for key in keys {
+        let mut path = "publisher".to_owned();
+        push_key(&mut path, key);
+        match (key.as_str(), &block[key]) {
+            ("did" | "signature", toml::Value::String(_)) => {}
+            ("did" | "signature", _) => return Err(ManifestCanonicalError::ValueDiffers { key: path }),
+            _ => return Err(ManifestCanonicalError::KeyOutsideTypes { key: path }),
+        }
+    }
+    Ok(())
 }
 
 /// BLAKE3 over the manifest's canonical form ([`canonical_manifest`]).
@@ -1051,9 +1077,22 @@ id = "com.acme.notes-pro"
             assert!(err.to_string().contains(&format!("`{key}`")), "{err}");
             AppManifest::from_toml(&extra).expect("an unsigned manifest with a key outside its types still parses");
         }
-        // Inside `[publisher]`, set aside, a key is not the form's.
-        let publisher = format!("{bare}\n[publisher]\ndid = \"d\"\nsignature = \"s\"\nnote = \"n\"\n");
+        // `[publisher]` holding its two strings is set aside; anything else in it, a nested
+        // table too, is a key outside the types, named under `publisher`.
+        let publisher = format!("{bare}\n[publisher]\ndid = \"d\"\nsignature = \"s\"\n");
         assert_eq!(canonical_manifest(&publisher).unwrap(), canonical_manifest(bare).unwrap());
+        for (block, key) in [
+            ("did = \"d\"\nsignature = \"s\"\nnote = \"n\"\n", "publisher.note"),
+            ("did = \"d\"\nsignature = \"s\"\n\n[publisher.extra]\nx = \"y\"\n", "publisher.extra"),
+            ("did = \"d\"\nsignature = \"s\"\nextra = { x = \"y\" }\n", "publisher.extra"),
+        ] {
+            let extra = format!("{bare}\n[publisher]\n{block}");
+            let err = canonical_manifest(&extra).expect_err(key);
+            assert!(matches!(&err, ManifestCanonicalError::KeyOutsideTypes { key: k } if k == key), "{key}: {err}");
+            assert!(err.to_string().contains(&format!("`{key}`")), "{err}");
+        }
+        let not_a_string = format!("{bare}\n[publisher]\ndid = 1\nsignature = \"s\"\n");
+        assert_eq!(canonical_manifest(&not_a_string).unwrap_err().key(), Some("publisher.did"));
     }
 
     /// The system shell's manifest in this tree carries `role` under `[app]`, which nothing

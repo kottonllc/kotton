@@ -561,18 +561,18 @@ fn refused(head: &str, reason: &str) -> CommandOutput {
 const SHAPES_LISTED: usize = 20;
 
 /// A `--bind` naming no shape the app declares: the device's line, with the id the person
-/// typed, then the first [`SHAPES_LISTED`] ids the app declares, as the app's words, and how
-/// many more there are.
+/// typed, then the first [`SHAPES_LISTED`] ids of the app's shapes (the app's own, or the
+/// device's `vfs:<n>` for the flat form), each quoted, and how many more there are.
 fn no_such_shape(id: &str, shapes: &[kotton_schemas::CapabilityShape]) -> Vec<String> {
     let mut lines = vec![format!(
-        "app sideload: no shape {} in this app. The ids it declares:",
+        "app sideload: no shape {} in this app. The ids of its shapes:",
         quoted(id)
     )];
     if shapes.is_empty() {
         lines.push("  none".to_owned());
     }
     for shape in shapes.iter().take(SHAPES_LISTED) {
-        lines.extend(words_line("the app's id for it", &shape.id));
+        lines.extend(words_line("the id for it", &shape.id));
     }
     if shapes.len() > SHAPES_LISTED {
         lines.push(format!("  and {} more", shapes.len() - SHAPES_LISTED));
@@ -637,9 +637,10 @@ struct Preview<'a> {
     shapes: &'a [kotton_schemas::CapabilityShape],
 }
 
-/// The sideload preview, before its footer: the device's lines on who signed the code and
-/// what that does not cover, then the app's own words, then what it asks for, then where its
-/// files will live. Every string the app chose is on a [`grant_prompt::GUTTER`] line.
+/// The sideload preview, before its footer: the device's lines on who the app is from and
+/// what their signature over its manifest and code covers, or that no signature checked and
+/// nothing it asks for is signed; then the app's own words, then what it asks for, then where
+/// its files will live. Every string the app chose is on a [`grant_prompt::GUTTER`] line.
 fn sideload_prompt(preview: &Preview<'_>, signer: &Signer, known: &Known) -> Vec<String> {
     let mut lines = grant_prompt::signer_lines(signer, known);
     lines.push(String::new());
@@ -677,7 +678,9 @@ fn sideload_prompt(preview: &Preview<'_>, signer: &Signer, known: &Known) -> Vec
                 lines.extend(words_line("the app's description", desc));
             }
             lines.extend(words_line("the app's path", &s.default_target));
-            lines.extend(words_line("the app's id for it (for --bind)", &s.id));
+            // The id the shape was declared with, or `vfs:<n>`, the device's, for a manifest in
+            // the flat form: said as neither's, and quoted as another party's words are.
+            lines.extend(words_line("the id for it (for --bind)", &s.id));
         }
     }
     lines
@@ -1461,8 +1464,8 @@ mod prompt_tests {
             desc: None,
         }];
         let unknown = no_such_shape("hom", &shapes);
-        assert_eq!(unknown[0], "app sideload: no shape \"hom\" in this app. The ids it declares:");
-        assert_eq!(unknown[1], "  | the app's id for it: \"home read your records\"");
+        assert_eq!(unknown[0], "app sideload: no shape \"hom\" in this app. The ids of its shapes:");
+        assert_eq!(unknown[1], "  | the id for it: \"home read your records\"");
         assert_eq!(unknown.len(), 2);
         // At most twenty listed, and how many more said.
         let many: Vec<CapabilityShape> = (0..45)
@@ -1476,7 +1479,7 @@ mod prompt_tests {
             .collect();
         let listed = no_such_shape("hom", &many);
         assert_eq!(listed.len(), 1 + SHAPES_LISTED + 1, "{listed:#?}");
-        assert_eq!(listed[SHAPES_LISTED], "  | the app's id for it: \"shape-19\"");
+        assert_eq!(listed[SHAPES_LISTED], "  | the id for it: \"shape-19\"");
         assert_eq!(listed.last().unwrap(), "  and 25 more");
         // An install with no answer saying it went through does not say it did not.
         let lost = refused(INSTALL_REFUSED, "connection reset by peer").stderr.unwrap();

@@ -13,7 +13,8 @@
 //!
 //! [`verify`] checks it the way `kotton_crypto::schema_signature` checks a schema's: strictly,
 //! so a small-order key or `R` is refused. A signed manifest with no canonical form (a key
-//! outside its types) is refused as signed, naming the key ([`AppSignatureError::NotCanonical`]).
+//! outside its types, or in `[publisher]` beside `did` and `signature`) is refused as signed,
+//! naming the key ([`AppSignatureError::NotCanonical`]).
 //! An unsigned manifest never comes here.
 //!
 //! [`sign`] is the other half, for a publisher's tool and for tests: it takes the signing key
@@ -65,8 +66,8 @@ pub fn verify(
     let did = kotton_wire::did::Did::parse(publisher_did)
         .map_err(|e| AppSignatureError::PublisherKey(e.to_string()))?;
     let key = DidKeyMethod::to_public_key(&did).map_err(|e| AppSignatureError::PublisherKey(e.to_string()))?;
-    // Strict, as a schema's signature is checked: a small-order key or `R` is refused, so a
-    // key with no secret behind it cannot be named as a publisher.
+    // A publisher's key is checked as a schema's signature is, by the strict check: the key
+    // and `R` must each be a point of full order, and the signature must check against both.
     key.verify_strict(&message, &signature).map_err(|_| AppSignatureError::Invalid)
 }
 
