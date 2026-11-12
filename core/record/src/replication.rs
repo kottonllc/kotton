@@ -37,6 +37,16 @@
 //! for each pass. A row of it that arrives in a segment from another of the person's devices,
 //! one that pinned its log, is merged by [`apply_record_segments`] as any row is.
 //!
+//! **A removal follows the record** (kotton #484). Unpinned, one thing of the log still
+//! leaves: the removal of a record the drive's log already carries, which arrived from it or
+//! was sent while this device pinned. Which records those are is read off the log itself, the
+//! rows it carries, as the dedup reads what it has logged; nothing is remembered beside it.
+//! The removal is the record's newest logged version made a tombstone, one revision on
+//! ([`removal_of`]): it carries the record's id, schema, root and stamps as the drive already
+//! holds them, no body, and no time the arrival did not carry, so it tells a host nothing the
+//! record's arrival did not, beyond that a removal happened. Nothing else of an unpinned log
+//! leaves, a removal of a record the drive never carried included.
+//!
 //! The log is a linked history of what the person did, which principle VII warns about, so
 //! nothing here names a row of it, its id, or what it says in a process log or an error.
 
@@ -76,6 +86,66 @@ pub fn is_access_log(schema_nsid: &str) -> bool {
 /// before it signals a write (`SqliteRecordStore::with_write_signal`).
 pub fn a_write_wakes_a_pass(schema: &SchemaId) -> bool {
     *schema != SchemaId::from_static(kotton_common::namespace::NSID_ACCESS_LOG)
+}
+
+/// The removal of the log record `carried`, the newest version of it the drive's log carries,
+/// when `held`, this device's version of the same record, is a tombstone that version loses
+/// to; else `None` (kotton #484, module doc).
+///
+/// The removal is `carried` made a tombstone one revision on, at the second `carried` was
+/// written: `deleted_at` and `updated_at` are `carried`'s `updated_at`, and the id, schema,
+/// root and filing stamp are `carried`'s. So it is strictly newer than `carried`, and taken
+/// wherever `carried` is held, and it adds no field and no time the arrival did not carry.
+/// Its body is empty: what the person removed is not sent again, and a device that takes the
+/// removal keeps none of it. It is no newer than `held`, which beat `carried` and was written
+/// at least one revision on, so this device's own tombstone stays as it is.
+///
+/// `None` when `carried` is a tombstone already (the removal is logged, or another device
+/// removed it), when `held` is alive, or when `held` does not beat `carried`: then this
+/// device's store, once it merges the log, holds `carried` again, and there is nothing it
+/// removed.
+fn removal_of(carried: &ChangesetRow, held: &ChangesetRow) -> Option<ChangesetRow> {
+    let removed = carried.deleted_at.is_none()
+        && held.deleted_at.is_some()
+        && held.id == carried.id
+        && held.schema_nsid == carried.schema_nsid
+        && held.root == carried.root
+        && (held.updated_at, held.revision) > (carried.updated_at, carried.revision);
+    removed.then(|| ChangesetRow {
+        id: carried.id.clone(),
+        schema_nsid: carried.schema_nsid.clone(),
+        body: serde_json::Value::Object(Default::default()),
+        updated_at: carried.updated_at,
+        revision: carried.revision + 1,
+        deleted_at: Some(carried.updated_at),
+        root: carried.root.clone(),
+        filed_at: carried.filed_at,
+    })
+}
+
+/// The newest version of each row of the access log the drive's log carries, by id: what the
+/// drive already holds of the log, which is what a removal on an unpinned device may follow
+/// (kotton #484). Ordered by `(updated_at, revision)`, as a merge orders versions.
+fn carried_log_rows(logged: &[kotton_sys::store::RecordSegmentView]) -> BTreeMap<String, (ChangesetRow, &Vec<u8>)> {
+    let mut newest: BTreeMap<String, (ChangesetRow, &Vec<u8>)> = BTreeMap::new();
+    for seg in logged {
+        for payload in &seg.rows {
+            let Ok(row) = serde_json::from_slice::<ChangesetRow>(payload) else {
+                continue;
+            };
+            if !is_access_log(&row.schema_nsid) {
+                continue;
+            }
+            let at = (row.updated_at, row.revision);
+            let is_newest = newest
+                .get(&row.id)
+                .is_none_or(|(held, _)| at > (held.updated_at, held.revision));
+            if is_newest {
+                newest.insert(row.id.clone(), (row, payload));
+            }
+        }
+    }
+    newest
 }
 
 /// The identity of one version of one row, as the log's dedup compares it: the schema
@@ -151,7 +221,10 @@ impl VersionKey {
 /// **No row of `access-log` is logged unless `pin` is [`AccessLogPin::Personal`]** (module
 /// doc): unpinned, this device's rows of it, its own and any it merged in, stay in its store.
 /// A row merged in from a device that pinned its log is already logged at that version, so it
-/// is not logged again either way.
+/// is not logged again either way. **But a removal follows the record** (kotton #484):
+/// unpinned, a record of it the log carries and this device has removed is logged once as its
+/// removal ([`removal_of`]), and nothing more of it; a removal of a record the log never
+/// carried stays here with the rest.
 ///
 /// Returns the seq the segment committed at, `None` if nothing was unlogged (or
 /// the mount has no history log — a blind storage node).
@@ -174,14 +247,22 @@ pub async fn log_records(
     }
 
     // Everything currently in the store, minus what is already logged at that
-    // exact version.
-    let fresh: Vec<ChangesetRow> = store
-        .export_changeset(0)
-        .await?
-        .into_iter()
-        .filter(|row| pin == AccessLogPin::Personal || !is_access_log(&row.schema_nsid))
-        .filter(|row| !logged_versions.contains(&VersionKey::of(row)))
-        .collect();
+    // exact version. Unpinned, a row of the access log is not among it, and only its
+    // removal of a record the log carries is logged, in the removal's own form.
+    let pinned = pin == AccessLogPin::Personal;
+    let carried = if pinned { BTreeMap::new() } else { carried_log_rows(&logged) };
+    let mut fresh: Vec<ChangesetRow> = Vec::new();
+    for row in store.export_changeset(0).await? {
+        if !pinned && is_access_log(&row.schema_nsid) {
+            if let Some(removal) = carried.get(&row.id).and_then(|(c, _)| removal_of(c, &row)) {
+                fresh.push(removal);
+            }
+            continue;
+        }
+        if !logged_versions.contains(&VersionKey::of(&row)) {
+            fresh.push(row);
+        }
+    }
     if fresh.is_empty() {
         return Ok(None);
     }
@@ -285,8 +366,10 @@ pub async fn apply_record_segments(
 /// [`AccessLogPin::Unpinned`] the export's rows of `access-log` are left out, and the rows of
 /// it the log already carries, another device's pinned log's or this device's own from before
 /// it was unpinned, are carried verbatim, the newest logged version of each. So a snapshot
-/// neither sends this device's log to the drive nor drops what another device sent there.
-/// Pinned, the export's rows of it are the base as any schema's are.
+/// neither sends this device's log to the drive nor drops what another device sent there. A
+/// carried row this device has removed is carried as its removal instead (kotton #484), the
+/// one row of it [`log_records`] would log unpinned. Pinned, the export's rows of it are the
+/// base as any schema's are.
 ///
 /// Returns the snapshot summary, or `None` for a mount with no history log —
 /// a blind storage node cannot snapshot, because snapshotting is merging and merging
@@ -307,9 +390,8 @@ pub async fn snapshot_records(
     // Current merged state of every schema this device knows — the same opaque
     // encoding `log_records` seals, so scan/apply round-trip it unchanged.
     let pinned = pin == AccessLogPin::Personal;
-    let mut rows: Vec<Vec<u8>> = store
-        .export_changeset(0)
-        .await?
+    let exported = store.export_changeset(0).await?;
+    let mut rows: Vec<Vec<u8>> = exported
         .iter()
         .filter(|row| pinned || !is_access_log(&row.schema_nsid))
         .map(|row| serde_json::to_vec(row).map_err(|e| anyhow!("serialize changeset row: {e}")))
@@ -319,9 +401,6 @@ pub async fn snapshot_records(
     // row of the access log. `scan` is awaited first so the registry lock is held only over
     // in-memory work, never across an await.
     let logged = mount.scan_record_segments().await?;
-    // The newest logged version of each access-log row, by `(id, updated_at, revision)`: the
-    // base replaces a row's history with its current value, as the export does for the rest.
-    let mut log_rows: BTreeMap<String, (SyncWatermark, i64, &Vec<u8>)> = BTreeMap::new();
     {
         let reg = registry.read().unwrap();
         for seg in &logged {
@@ -330,11 +409,6 @@ pub async fn snapshot_records(
                     continue;
                 };
                 if !pinned && is_access_log(&row.schema_nsid) {
-                    let at = (row.updated_at, row.revision);
-                    let newest = log_rows.get(&row.id).is_none_or(|(u, r, _)| at > (*u, *r));
-                    if newest {
-                        log_rows.insert(row.id, (at.0, at.1, payload));
-                    }
                     continue;
                 }
                 let unknown = SchemaId::parse(&row.schema_nsid)
@@ -347,7 +421,26 @@ pub async fn snapshot_records(
             }
         }
     }
-    rows.extend(log_rows.into_values().map(|(_, _, payload)| payload.clone()));
+    // Unpinned, the newest logged version of each access-log row, by `(updated_at,
+    // revision)`: the base replaces a row's history with its current value, as the export
+    // does for the rest. A record of it this device has removed and the log does not yet
+    // carry removed is carried as its removal (kotton #484), as the next `log_records` would
+    // log it, so the base keeps nothing of what the person removed.
+    if !pinned {
+        let held: HashMap<&str, &ChangesetRow> = exported
+            .iter()
+            .filter(|row| is_access_log(&row.schema_nsid))
+            .map(|row| (row.id.as_str(), row))
+            .collect();
+        for (id, (carried, payload)) in carried_log_rows(&logged) {
+            match held.get(id.as_str()).and_then(|h| removal_of(&carried, h)) {
+                Some(removal) => rows.push(
+                    serde_json::to_vec(&removal).map_err(|e| anyhow!("serialize changeset row: {e}"))?,
+                ),
+                None => rows.push(payload.clone()),
+            }
+        }
+    }
 
     Ok(mount.snapshot(keep_full_secs, &rows).await?)
 }
@@ -812,6 +905,170 @@ mod tests {
 
         snapshot_records(&registry, &store, &mount, 0, AccessLogPin::Personal).await.unwrap();
         assert!(mount.rows().iter().any(|r| r.id == mine), "pinned, this device's log record is in the base");
+    }
+
+    /// The one row of the access log under `id` the drive's log carries the newest of.
+    fn newest_logged(mount: &LogOnly, id: &str) -> ChangesetRow {
+        let mut rows: Vec<ChangesetRow> =
+            mount.rows().into_iter().filter(|r| is_access_log(&r.schema_nsid) && r.id == id).collect();
+        rows.sort_by_key(|r| (r.updated_at, r.revision));
+        rows.pop().expect("the log carries the record")
+    }
+
+    /// **A removal follows the record** (kotton #484). Device Y pins and logs R; device X,
+    /// unpinned, merges R from the log and removes it. X's next pass logs one row, R's removal,
+    /// and nothing else of its log; Y merges it and holds R no more. The removal carries what
+    /// R's arrival carried and no more: R's id, schema, root, filing stamp and second, one
+    /// revision on, with no body and no time R did not carry. Logged once.
+    #[tokio::test]
+    async fn an_unpinned_removal_of_a_record_the_drive_carries_is_logged() {
+        let mount = LogOnly::default();
+        let (_ry, y) = a_device().await;
+        let r = y.insert(&access_log(), entry("pinned-on-y")).await.unwrap();
+        assert!(log_records(&y, &mount, AccessLogPin::Personal).await.unwrap().is_some());
+        let arrival = newest_logged(&mount, &r);
+
+        let (rx, x) = a_device().await;
+        apply_record_segments(&rx, &x, &mount).await.unwrap();
+        assert_eq!(x.query(&access_log(), Default::default()).await.unwrap().len(), 1, "X did not receive R");
+        let own = x.insert(&access_log(), entry("x-own-unpinned")).await.unwrap();
+        x.delete(&access_log(), &r).await.unwrap();
+
+        let before = mount.rows().len();
+        assert!(log_records(&x, &mount, AccessLogPin::Unpinned).await.unwrap().is_some(), "the removal stayed on X");
+        let sent: Vec<ChangesetRow> = mount.rows().split_off(before);
+        assert_eq!(sent.len(), 1, "more than the removal left X: {sent:?}");
+        let removal = &sent[0];
+        assert!(!sent.iter().any(|row| row.id == own), "X's own log record left");
+        assert_eq!(
+            (&removal.id, &removal.schema_nsid, &removal.root, removal.filed_at, removal.updated_at),
+            (&arrival.id, &arrival.schema_nsid, &arrival.root, arrival.filed_at, arrival.updated_at),
+            "the removal is not R's"
+        );
+        assert_eq!((removal.revision, removal.deleted_at), (arrival.revision + 1, Some(arrival.updated_at)));
+        assert_eq!(removal.body, json!({}), "the removal sent R's body again");
+        let fields = |row: &ChangesetRow| -> Vec<String> {
+            let serde_json::Value::Object(map) = serde_json::to_value(row).unwrap() else { unreachable!() };
+            map.keys().cloned().collect()
+        };
+        let mut arrived = fields(&arrival);
+        arrived.push("deleted_at".to_owned());
+        arrived.sort();
+        arrived.dedup();
+        assert_eq!(fields(removal), arrived, "the removal carries a field R's arrival did not");
+        assert_eq!(log_records(&x, &mount, AccessLogPin::Unpinned).await.unwrap(), None, "logged twice");
+
+        let (ry, _) = a_device().await;
+        apply_record_segments(&ry, &y, &mount).await.unwrap();
+        assert!(y.query(&access_log(), Default::default()).await.unwrap().is_empty(), "Y still holds R");
+        let on_y = y.export_changeset(0).await.unwrap();
+        let r_on_y = on_y.iter().find(|row| row.id == r).expect("Y's tombstone of R");
+        assert_eq!(r_on_y.body, json!({}), "Y keeps what the person removed");
+
+        // X's own tombstone is newer than the removal and stays.
+        apply_record_segments(&rx, &x, &mount).await.unwrap();
+        assert!(x.query(&access_log(), Default::default()).await.unwrap().iter().all(|row| row.id != r));
+    }
+
+    /// **The same, on one device that pinned, logged R, then unpinned and removed it**
+    /// (kotton #484): the log carries R because it was sent while pinned, so the removal is
+    /// logged and the drive's newest version of R is its tombstone. A snapshot after keeps
+    /// that tombstone, and none of R's body.
+    #[tokio::test]
+    async fn a_record_sent_while_pinned_and_removed_after_the_unpin_is_removed_from_the_drive() {
+        let mount = LogOnly::default();
+        let (registry, store) = a_device().await;
+        let r = store.insert(&access_log(), entry("sent-while-pinned")).await.unwrap();
+        assert!(log_records(&store, &mount, AccessLogPin::Personal).await.unwrap().is_some());
+        store.delete(&access_log(), &r).await.unwrap();
+
+        assert!(log_records(&store, &mount, AccessLogPin::Unpinned).await.unwrap().is_some(), "the drive keeps R");
+        let newest = newest_logged(&mount, &r);
+        assert!(newest.deleted_at.is_some(), "the drive's newest R is alive: {newest:?}");
+
+        snapshot_records(&registry, &store, &mount, 0, AccessLogPin::Unpinned).await.unwrap();
+        let base: Vec<ChangesetRow> = mount.rows().into_iter().filter(|row| row.id == r).collect();
+        assert_eq!(base.len(), 1, "{base:?}");
+        assert!(base[0].deleted_at.is_some() && base[0].body == json!({}), "the base keeps R: {base:?}");
+        let (_ro, other) = a_device().await;
+        apply_record_segments(&registry, &other, &mount).await.unwrap();
+        assert!(other.query(&access_log(), Default::default()).await.unwrap().is_empty());
+    }
+
+    /// **A snapshot taken before the removal is logged carries the removal** (kotton #484),
+    /// not the record: the base is the log's current value, and the record's current value
+    /// here is removed. The next pass then logs nothing.
+    #[tokio::test]
+    async fn an_unpinned_snapshot_carries_a_removal_not_yet_logged() {
+        let mount = LogOnly::default();
+        let (_ry, y) = a_device().await;
+        let r = y.insert(&access_log(), entry("removed-before-the-snapshot")).await.unwrap();
+        log_records(&y, &mount, AccessLogPin::Personal).await.unwrap();
+
+        let (rx, x) = a_device().await;
+        apply_record_segments(&rx, &x, &mount).await.unwrap();
+        x.delete(&access_log(), &r).await.unwrap();
+        snapshot_records(&rx, &x, &mount, 0, AccessLogPin::Unpinned).await.unwrap();
+        let base: Vec<ChangesetRow> = mount.rows().into_iter().filter(|row| row.id == r).collect();
+        assert_eq!(base.len(), 1, "{base:?}");
+        assert!(base[0].deleted_at.is_some() && base[0].body == json!({}), "the base keeps R: {base:?}");
+        assert_eq!(log_records(&x, &mount, AccessLogPin::Unpinned).await.unwrap(), None);
+    }
+
+    /// **Only that leaves** (kotton #484): unpinned, a device's own log records, kept or
+    /// removed, and its removals of records the drive never carried, leave nothing, by a pass
+    /// or by a snapshot, though the log carries another record of the log beside them. A
+    /// record carried and not removed is not sent again either.
+    #[tokio::test]
+    async fn an_unpinned_device_sends_nothing_of_its_own_log_and_no_removal_the_drive_never_carried() {
+        let mount = LogOnly::default();
+        let (_ry, y) = a_device().await;
+        let carried = y.insert(&access_log(), entry("carried-and-kept")).await.unwrap();
+        log_records(&y, &mount, AccessLogPin::Personal).await.unwrap();
+
+        let (rx, x) = a_device().await;
+        apply_record_segments(&rx, &x, &mount).await.unwrap();
+        let kept = x.insert(&access_log(), entry("x-own-kept")).await.unwrap();
+        let removed = x.insert(&access_log(), entry("x-own-removed")).await.unwrap();
+        x.delete(&access_log(), &removed).await.unwrap();
+        let logged = mount.rows();
+
+        assert_eq!(log_records(&x, &mount, AccessLogPin::Unpinned).await.unwrap(), None, "something of X's log left");
+        assert_eq!(mount.rows().len(), logged.len());
+
+        snapshot_records(&rx, &x, &mount, 0, AccessLogPin::Unpinned).await.unwrap();
+        let base = mount.rows();
+        let log: Vec<&ChangesetRow> = base.iter().filter(|row| is_access_log(&row.schema_nsid)).collect();
+        assert_eq!(log.len(), 1, "{base:?}");
+        assert_eq!(log[0].id, carried);
+        assert!(log[0].deleted_at.is_none());
+        assert!(!base.iter().any(|row| row.id == kept || row.id == removed), "X's own log is in the base");
+    }
+
+    /// **A removal the drive's log carries already is not logged again** (kotton #484): when
+    /// another device removed R first, X's own later removal of it sends nothing; and a record
+    /// X removed that the log then carries newer, alive, is not removed by X.
+    #[tokio::test]
+    async fn a_removal_is_logged_only_over_a_live_record_it_beats() {
+        let r = ChangesetRow {
+            id: "r".to_owned(),
+            schema_nsid: kotton_common::namespace::NSID_ACCESS_LOG.to_owned(),
+            body: json!({ "what": "r" }),
+            updated_at: 100,
+            revision: 1,
+            deleted_at: None,
+            root: None,
+            filed_at: Some(100_000),
+        };
+        let gone = ChangesetRow { updated_at: 120, revision: 2, deleted_at: Some(120), ..r.clone() };
+        assert!(removal_of(&r, &gone).is_some());
+        assert!(removal_of(&r, &r).is_none(), "a live record was removed");
+        let removed_there = removal_of(&r, &gone).unwrap();
+        assert!(removal_of(&removed_there, &gone).is_none(), "a carried removal was sent again");
+        let newer_there = ChangesetRow { updated_at: 130, revision: 2, ..r.clone() };
+        assert!(removal_of(&newer_there, &gone).is_none(), "a removal beaten by a newer write was sent");
+        let elsewhere = ChangesetRow { root: Some("another-root".to_owned()), ..gone.clone() };
+        assert!(removal_of(&r, &elsewhere).is_none(), "a removal in another root was sent");
     }
 
     /// **Writing a log record wakes no pass** (kotton #450): a store given a write signal
