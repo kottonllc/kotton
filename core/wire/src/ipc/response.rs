@@ -1026,9 +1026,11 @@ pub enum UserResponse {
         /// The VFS resources the app declared, each bindable to a path the user
         /// chooses. Pass the ones they changed back as `AppInstall { bindings }`.
         shapes: Vec<kotton_schemas::CapabilityShape>,
-        /// True when the publisher DID signature verified. `false` means the
-        /// binary is unsigned or self-published — worth saying out loud in a
-        /// consent prompt, since a signature is what ties it to a publisher.
+        /// True when the publisher's signature over the manifest and the code
+        /// together verified (`kotton_app::app_signature`). `false` means the
+        /// app is unsigned, or its signature does not check — worth saying out
+        /// loud in a consent prompt, since a signature is what ties it to a
+        /// publisher.
         publisher_verified: bool,
     },
     /// Answer to `AppGrants`: what an installed app asked for, and what it

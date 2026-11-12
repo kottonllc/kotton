@@ -71,8 +71,8 @@ pub struct AppInstallPreview {
     /// The VFS resources the app declared, each bindable to a path the user
     /// chooses. Pass the ones they changed to `app_install`'s `bindings`.
     pub shapes: Vec<kotton_schemas::CapabilityShape>,
-    /// Whether the publisher DID signature verified. `false` means unsigned or
-    /// self-published — say so in the prompt.
+    /// Whether the publisher's signature over the manifest and the code verified.
+    /// `false` means unsigned, or a signature that does not check — say so in the prompt.
     pub publisher_verified: bool,
 }
 use crate::extensions::InstallOutcome;

@@ -20,6 +20,17 @@
 //! "files.read"   = ["/exports"]
 //! "network.fetch" = []   # presence enables outbound network; value list is ignored
 //! ```
+//!
+//! ## What the publisher signs
+//!
+//! A `[publisher]` block carries a `did` and a `signature`. The signature is over the
+//! manifest and the code together: [`APP_SIGNATURE_DOMAIN`] (`kotton-app-v1`), one zero
+//! byte, the BLAKE3 of the manifest's canonical form with `[publisher]` set aside
+//! ([`canonical_manifest`]), and the BLAKE3 of `app.wasm`, 78 bytes
+//! ([`app_signed_message`]). A signed manifest holds no key outside the types below, and its
+//! `[publisher]` holds the two strings and nothing else: one that does not has no canonical
+//! form, and is not signed by its publisher. The daemon's check of the
+//! signature is `kotton_app::app_signature`.
 
 use std::collections::HashMap;
 
@@ -27,7 +38,7 @@ use crate::{
     capability::CapabilitySet, CallDirection, CapabilityGrant, CapabilityKind, CapabilityTarget,
     AppId, AppIdError, MediaDevice, MessageDirection, SchemaId, SchemaIdError,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // ── Error ─────────────────────────────────────────────────────────────────────
@@ -85,12 +96,17 @@ pub enum ManifestError {
 
 // ── Raw TOML shape ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+/// The manifest as written, and, with `[publisher]` set aside, the types its canonical form
+/// is serialised through ([`canonical_manifest`]). So every field the parse reads is one the
+/// canonical form writes, and a field left out of the TOML is left out of the form rather
+/// than written as its default: what is signed is what was written.
+#[derive(Debug, Deserialize, Serialize)]
 struct RawManifest {
     app: RawApp,
-    #[serde(default)]
-    capabilities: RawCapabilities,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<RawCapabilities>,
+    /// Set aside: never under the canonical form, which the signature in it is over.
+    #[serde(default, skip_serializing)]
     publisher: Option<RawPublisher>,
 }
 
@@ -105,7 +121,7 @@ struct RawManifest {
 /// Untagged: TOML distinguishes a table from an array of tables, so serde picks
 /// without a discriminator. A manifest using both is a manifest that parses as
 /// one of them and silently drops the other, so it is rejected below.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum RawCapabilities {
     /// RFC-0021: `[[capabilities]]` with a shape per entry. Tried first —
@@ -123,7 +139,7 @@ impl Default for RawCapabilities {
 }
 
 /// One `[[capabilities]]` entry.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RawShape {
     /// The author's name for this resource, e.g. `"home"`. Unique per manifest.
     id: String,
@@ -138,10 +154,10 @@ struct RawShape {
     /// binds it at install.
     default: String,
     /// A short name for a person, e.g. `"Notes storage"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     label: Option<String>,
     /// One sentence on what the app does there.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     desc: Option<String>,
 }
 
@@ -151,14 +167,14 @@ struct RawPublisher {
     signature: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RawApp {
     id: String,
     name: String,
     version: String,
-    #[serde(default)]
-    handler_for: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handler_for: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
 }
 
@@ -227,7 +243,8 @@ pub struct AppManifest {
     pub apps_launch: bool,
     /// Publisher DID declared in the `[publisher]` section, if present.
     pub publisher_did: Option<String>,
-    /// Publisher Ed25519 signature (base64) over `BLAKE3(app.wasm)`, if present.
+    /// Publisher Ed25519 signature (base64), if present: over the message
+    /// [`app_signed_message`] makes of the manifest's canonical form and the code's digest.
     pub publisher_signature: Option<String>,
 }
 
@@ -346,6 +363,7 @@ impl AppManifest {
         let handler_for = raw
             .app
             .handler_for
+            .unwrap_or_default()
             .iter()
             .map(|s| SchemaId::parse(s).map_err(|e| ManifestError::InvalidHandlerSchema(s.clone(), e)))
             .collect::<Result<Vec<_>, _>>()?;
@@ -383,7 +401,7 @@ impl AppManifest {
         // into the same grants the flat form produces, so everything downstream
         // — checks, envelopes, the linker — sees one vocabulary.
         let mut declared_shapes: Vec<CapabilityShape> = Vec::new();
-        let flat = match &raw.capabilities {
+        let flat = match &raw.capabilities.unwrap_or_default() {
             RawCapabilities::Flat(map) => map.clone(),
             RawCapabilities::Shapes(shapes) => {
                 for shape in shapes {
@@ -557,6 +575,186 @@ fn refuse_if_kept(claim: &'static str, schema: &SchemaId) -> Result<(), Manifest
             refusal: kept.kept_from_apps_refusal(),
         }),
         None => Ok(()),
+    }
+}
+
+// ── What the publisher signs ──────────────────────────────────────────────────
+
+/// The tag an app's publisher signature opens its message with: the signed message is these
+/// 13 ASCII bytes, one zero byte, the 32-byte digest of the manifest's canonical form
+/// ([`manifest_digest`]), and the 32-byte BLAKE3 of the app's code (`app.wasm`), 78 bytes
+/// in all ([`app_signed_message`]). The tag says what the signature is the publisher's word
+/// for, so a signature the same key makes for anything else (a schema's, under
+/// `kotton-schema-v1`, or 32 bytes of code digest alone) is not an app's. The `v1` is the
+/// message's form, not an app's version.
+pub const APP_SIGNATURE_DOMAIN: &[u8; 13] = b"kotton-app-v1";
+
+/// The length of an app's signed message: the tag, one zero byte, and two 32-byte digests.
+pub const APP_SIGNED_MESSAGE_LEN: usize = 13 + 1 + 32 + 32;
+
+/// Why a manifest has no canonical form, and so cannot carry a publisher's signature.
+#[derive(Debug, Error)]
+pub enum ManifestCanonicalError {
+    /// The TOML does not parse, or does not parse as the manifest's types.
+    #[error("manifest TOML parse error: {0}")]
+    Toml(#[from] toml::de::Error),
+    /// The manifest holds a key its types do not: it would be read past the signature, so
+    /// the manifest has no canonical form.
+    #[error("the manifest's `{key}` is not a key of an app manifest, so the manifest has no canonical form and is not signed by its publisher")]
+    KeyOutsideTypes {
+        /// Where the key is, as a dotted TOML path (`app.role`).
+        key: String,
+    },
+    /// A value the manifest's types write otherwise than the TOML holds it.
+    #[error("the manifest's `{key}` is not written as an app manifest's types write it, so the manifest has no canonical form and is not signed by its publisher")]
+    ValueDiffers {
+        /// Where the value is, as a dotted TOML path.
+        key: String,
+    },
+    /// The types' serialisation has no RFC 8785 form (a number that is not an exact integer).
+    #[error("{0}")]
+    Canonical(#[from] crate::canonical::CanonicalError),
+}
+
+impl ManifestCanonicalError {
+    /// The key the manifest does not canonicalise at, when one is to blame.
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            Self::KeyOutsideTypes { key } | Self::ValueDiffers { key } => Some(key),
+            Self::Toml(_) | Self::Canonical(_) => None,
+        }
+    }
+}
+
+/// The manifest's canonical form: what its publisher's signature covers of it.
+///
+/// The TOML is read as a generic table and `[publisher]` is set aside, once it is shown to
+/// hold the strings `did` and `signature` and nothing else: any other key in it, a nested
+/// table among them, means the manifest has no canonical form, and the error names the key
+/// (`publisher.note`), since what the block carries is not signed. What remains is read
+/// through the manifest's own types and written back as the JSON they serialise to, in the
+/// form RFC 8785 gives (the one a schema's definition is digested in, [`crate::canonical`],
+/// with its refusal of numbers that are not exact integers). The table and the types' JSON
+/// must then be the same: a key the types lack, or a value they write otherwise, means the
+/// manifest has no canonical form, and the error names the key. So nothing a reader could
+/// find in a signed manifest lies outside what was signed. Order and whitespace in the TOML
+/// do not reach the form, and neither does how a string was quoted.
+///
+/// A manifest that carries no signature never needs this: [`AppManifest::from_toml`] still
+/// parses one with a key outside its types, and drops the key.
+pub fn canonical_manifest(manifest_toml: &str) -> Result<String, ManifestCanonicalError> {
+    let mut table: toml::Table = toml::from_str(manifest_toml)?;
+    if let Some(publisher) = table.remove("publisher") {
+        refuse_publisher_beyond_its_two_strings(&publisher)?;
+    }
+    let written = serde_json::to_value(&table)
+        .map_err(|_| ManifestCanonicalError::ValueDiffers { key: "(the manifest)".to_owned() })?;
+    let typed: RawManifest = toml::Value::Table(table).try_into()?;
+    let typed = serde_json::to_value(&typed).expect("the manifest's types serialise to JSON");
+    if let Some(e) = first_difference(&written, &typed, &mut String::new()) {
+        return Err(e);
+    }
+    Ok(crate::canonical::canonical_json(&typed)?)
+}
+
+/// `[publisher]` holds `did` and `signature`, each a string, and no other key: the block is
+/// set aside from the canonical form, so nothing else may sit in it unsigned.
+fn refuse_publisher_beyond_its_two_strings(publisher: &toml::Value) -> Result<(), ManifestCanonicalError> {
+    let toml::Value::Table(block) = publisher else {
+        return Err(ManifestCanonicalError::ValueDiffers { key: "publisher".to_owned() });
+    };
+    let mut keys: Vec<&String> = block.keys().collect();
+    keys.sort();
+    for key in keys {
+        let mut path = "publisher".to_owned();
+        push_key(&mut path, key);
+        match (key.as_str(), &block[key]) {
+            ("did" | "signature", toml::Value::String(_)) => {}
+            ("did" | "signature", _) => return Err(ManifestCanonicalError::ValueDiffers { key: path }),
+            _ => return Err(ManifestCanonicalError::KeyOutsideTypes { key: path }),
+        }
+    }
+    Ok(())
+}
+
+/// BLAKE3 over the manifest's canonical form ([`canonical_manifest`]).
+pub fn manifest_digest(manifest_toml: &str) -> Result<[u8; 32], ManifestCanonicalError> {
+    Ok(*blake3::hash(canonical_manifest(manifest_toml)?.as_bytes()).as_bytes())
+}
+
+/// The message an app's publisher signs: [`APP_SIGNATURE_DOMAIN`], one zero byte, the
+/// manifest's digest ([`manifest_digest`]), and the code's digest (BLAKE3 of `app.wasm`).
+pub fn app_signed_message(manifest_digest: &[u8; 32], code_digest: &[u8; 32]) -> [u8; APP_SIGNED_MESSAGE_LEN] {
+    let mut m = [0u8; APP_SIGNED_MESSAGE_LEN];
+    m[..13].copy_from_slice(APP_SIGNATURE_DOMAIN);
+    m[14..46].copy_from_slice(manifest_digest);
+    m[46..].copy_from_slice(code_digest);
+    m
+}
+
+/// The message an app's publisher signs for `manifest_toml` and its code, `code`
+/// ([`app_signed_message`] over [`manifest_digest`] and BLAKE3 of `code`).
+pub fn app_signed_message_for(
+    manifest_toml: &str,
+    code: &[u8],
+) -> Result<[u8; APP_SIGNED_MESSAGE_LEN], ManifestCanonicalError> {
+    Ok(app_signed_message(&manifest_digest(manifest_toml)?, blake3::hash(code).as_bytes()))
+}
+
+/// The first place `written` (the TOML as a table) and `typed` (the types' serialisation of
+/// it) part, as the error that names it; `None` when they are the same.
+fn first_difference(
+    written: &serde_json::Value,
+    typed: &serde_json::Value,
+    path: &mut String,
+) -> Option<ManifestCanonicalError> {
+    use serde_json::Value;
+    match (written, typed) {
+        (Value::Object(w), Value::Object(t)) => {
+            let mut keys: Vec<&String> = w.keys().chain(t.keys()).collect();
+            keys.sort();
+            keys.dedup();
+            for key in keys {
+                let len = path.len();
+                push_key(path, key);
+                let found = match (w.get(key), t.get(key)) {
+                    (Some(_), None) => Some(ManifestCanonicalError::KeyOutsideTypes { key: path.clone() }),
+                    (Some(w), Some(t)) => first_difference(w, t, path),
+                    (None, _) => Some(ManifestCanonicalError::ValueDiffers { key: path.clone() }),
+                };
+                if found.is_some() {
+                    return found;
+                }
+                path.truncate(len);
+            }
+            None
+        }
+        (Value::Array(w), Value::Array(t)) if w.len() == t.len() => {
+            for (i, (w, t)) in w.iter().zip(t).enumerate() {
+                let len = path.len();
+                path.push_str(&format!("[{i}]"));
+                if let Some(found) = first_difference(w, t, path) {
+                    return Some(found);
+                }
+                path.truncate(len);
+            }
+            None
+        }
+        (w, t) if w == t => None,
+        _ => Some(ManifestCanonicalError::ValueDiffers { key: path.clone() }),
+    }
+}
+
+/// `key` appended to a dotted TOML path, quoted when it is not a bare key.
+fn push_key(path: &mut String, key: &str) {
+    if !path.is_empty() {
+        path.push('.');
+    }
+    let bare = !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if bare {
+        path.push_str(key);
+    } else {
+        path.push_str(&serde_json::Value::String(key.to_owned()).to_string());
     }
 }
 
@@ -793,5 +991,133 @@ version = "1.0.0"
 "#;
         let err = AppManifest::from_toml(src).unwrap_err();
         assert!(matches!(err, ManifestError::InvalidAppId(_, _)));
+    }
+
+    // ── What the publisher signs ─────────────────────────────────────────────
+
+    /// [`EXAMPLE`]'s canonical form.
+    const EXAMPLE_CANONICAL: &str = r#"{"app":{"handler_for":["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"],"id":"com.acme.notes-pro","name":"Notes Pro","version":"1.0.0"},"capabilities":{"files.read":["/exports"],"schema.read":["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"],"schema.write":["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]}}"#;
+
+    #[test]
+    fn the_canonical_form_is_the_types_json_in_rfc_8785_form() {
+        assert_eq!(canonical_manifest(EXAMPLE).unwrap(), EXAMPLE_CANONICAL);
+        assert_eq!(manifest_digest(EXAMPLE).unwrap(), *blake3::hash(EXAMPLE_CANONICAL.as_bytes()).as_bytes());
+    }
+
+    /// Order, whitespace, comments, quoting and `[publisher]` do not reach the form.
+    #[test]
+    fn a_reordered_or_respaced_manifest_has_the_same_digest() {
+        let reordered = r#"
+# The same manifest, written otherwise.
+[capabilities]
+"files.read" = [ '/exports' ]
+"schema.write"="did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"
+"schema.read" = [
+    "did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes",
+]
+
+[publisher]
+did = "did:key:z6MkTest"
+signature = "aGVsbG8="
+
+[app]
+version   =   "1.0.0"
+handler_for = ["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]
+name = 'Notes Pro'
+id = "com.acme.notes-pro"
+"#;
+        // A string where a list is: not the same manifest, and not one the types read.
+        assert!(canonical_manifest(reordered).is_err());
+        let reordered = reordered.replace(
+            r#""schema.write"="did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes""#,
+            r#""schema.write"=["did:key:z6MkiDN8JjmwvSCGfrmH9YdvBuJxVGyyEWBvECCp3cfDgCMB/notes"]"#,
+        );
+        assert_eq!(canonical_manifest(&reordered).unwrap(), EXAMPLE_CANONICAL);
+        assert_eq!(manifest_digest(&reordered).unwrap(), manifest_digest(EXAMPLE).unwrap());
+    }
+
+    #[test]
+    fn a_changed_value_changes_the_digest() {
+        let digest = manifest_digest(EXAMPLE).unwrap();
+        for (from, to) in [
+            ("Notes Pro", "Notes Pro "),
+            ("\"/exports\"", "\"/\""),
+            ("version = \"1.0.0\"", "version = \"1.0.1\""),
+            ("\"files.read\"   = [\"/exports\"]", "\"files.read\"   = [\"/exports\"]\n\"network.fetch\" = []"),
+        ] {
+            let changed = EXAMPLE.replace(from, to);
+            assert_ne!(changed, EXAMPLE, "{from}");
+            assert_ne!(manifest_digest(&changed).unwrap(), digest, "{from} -> {to}");
+        }
+        // A list absent and a list present but empty are written as they are.
+        let bare = "[app]\nid = \"com.acme.a\"\nname = \"A\"\nversion = \"1\"\n";
+        let empty = format!("{bare}handler_for = []\n");
+        assert_eq!(canonical_manifest(bare).unwrap(), r#"{"app":{"id":"com.acme.a","name":"A","version":"1"}}"#);
+        assert_eq!(canonical_manifest(&empty).unwrap(), r#"{"app":{"handler_for":[],"id":"com.acme.a","name":"A","version":"1"}}"#);
+    }
+
+    /// A key outside the types is named, wherever it is; the manifest still parses, as an
+    /// unsigned one is read.
+    #[test]
+    fn a_key_outside_the_types_has_no_canonical_form_and_is_named() {
+        let bare = "[app]\nid = \"com.acme.a\"\nname = \"A\"\nversion = \"1\"\n";
+        for (extra, key) in [
+            (format!("{bare}role = \"shell\"\n"), "app.role"),
+            (format!("homepage = \"https://example.com\"\n{bare}"), "homepage"),
+            (format!("{bare}\n[extra]\nx = 1\n"), "extra"),
+            (format!("{bare}\n[capabilities]\n\"files.read\" = [\"/\"]\n\n[app.more]\nx = \"y\"\n"), "app.more"),
+            (
+                format!("{bare}\n[[capabilities]]\nid = \"home\"\ntype = \"vfs-tree\"\naccess = [\"read\"]\ndefault = \"/notes\"\nicon = \"x\"\n"),
+                "capabilities[0].icon",
+            ),
+        ] {
+            let err = canonical_manifest(&extra).expect_err(key);
+            assert!(matches!(&err, ManifestCanonicalError::KeyOutsideTypes { key: k } if k == key), "{key}: {err}");
+            assert_eq!(err.key(), Some(key));
+            assert!(err.to_string().contains(&format!("`{key}`")), "{err}");
+            AppManifest::from_toml(&extra).expect("an unsigned manifest with a key outside its types still parses");
+        }
+        // `[publisher]` holding its two strings is set aside; anything else in it, a nested
+        // table too, is a key outside the types, named under `publisher`.
+        let publisher = format!("{bare}\n[publisher]\ndid = \"d\"\nsignature = \"s\"\n");
+        assert_eq!(canonical_manifest(&publisher).unwrap(), canonical_manifest(bare).unwrap());
+        for (block, key) in [
+            ("did = \"d\"\nsignature = \"s\"\nnote = \"n\"\n", "publisher.note"),
+            ("did = \"d\"\nsignature = \"s\"\n\n[publisher.extra]\nx = \"y\"\n", "publisher.extra"),
+            ("did = \"d\"\nsignature = \"s\"\nextra = { x = \"y\" }\n", "publisher.extra"),
+        ] {
+            let extra = format!("{bare}\n[publisher]\n{block}");
+            let err = canonical_manifest(&extra).expect_err(key);
+            assert!(matches!(&err, ManifestCanonicalError::KeyOutsideTypes { key: k } if k == key), "{key}: {err}");
+            assert!(err.to_string().contains(&format!("`{key}`")), "{err}");
+        }
+        let not_a_string = format!("{bare}\n[publisher]\ndid = 1\nsignature = \"s\"\n");
+        assert_eq!(canonical_manifest(&not_a_string).unwrap_err().key(), Some("publisher.did"));
+    }
+
+    /// The system shell's manifest in this tree carries `role` under `[app]`, which nothing
+    /// reads: it parses, unsigned, and has no canonical form, so it could not be signed.
+    #[test]
+    fn the_shell_fixture_is_unsigned_and_would_not_canonicalise() {
+        let shell = include_str!("../../../tests/fixtures/shell-manifest/manifest.toml");
+        let m = AppManifest::from_toml(shell).unwrap();
+        assert!(m.publisher_did.is_none() && m.publisher_signature.is_none());
+        let err = canonical_manifest(shell).unwrap_err();
+        assert_eq!(err.key(), Some("app.role"), "{err}");
+    }
+
+    /// The signed message is exactly the tag, one zero byte, and the two digests: 78 bytes.
+    #[test]
+    fn the_signed_message_is_the_tag_a_zero_byte_and_two_digests() {
+        let manifest: [u8; 32] = core::array::from_fn(|i| i as u8 + 0xa0);
+        let code: [u8; 32] = core::array::from_fn(|i| i as u8 + 0x10);
+        let m = app_signed_message(&manifest, &code);
+        assert_eq!(m.len(), 78);
+        let mut expected = b"kotton-app-v1\0".to_vec();
+        expected.extend_from_slice(&manifest);
+        expected.extend_from_slice(&code);
+        assert_eq!(m.as_slice(), expected.as_slice());
+        let made = app_signed_message_for(EXAMPLE, b"code").unwrap();
+        assert_eq!(made, app_signed_message(&manifest_digest(EXAMPLE).unwrap(), blake3::hash(b"code").as_bytes()));
     }
 }

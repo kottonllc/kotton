@@ -13,6 +13,7 @@
 //! installation, roles and handler registration live together — they are all
 //! answers to "what may this app be", and none of them is the app's own to
 //! decide.
+pub mod app_signature;
 pub mod daemon;
 pub mod extension_host;
 pub mod extension_install;

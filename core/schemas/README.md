@@ -82,8 +82,12 @@ provenance and not a type relation.
 The decision *A schema is named by the key that publishes it* has a grant prompt say who stands
 behind a schema or an app only by the person's own name for the key, marked as theirs (`a
 publisher you call "My Bank"`), or by its absence (`a publisher you have not named`, with the
-key). An app is shown by the key whose signature over its code checked; its manifest (its name,
-its id, what it asks for) is signed by no one, and the prompt says so. A schema is shown as its
+key). An app is shown as from the key whose signature checked over its manifest and its code
+together (the tag `kotton-app-v1`, a zero byte, the BLAKE3 of the manifest's canonical form with
+`[publisher]` set aside, and the BLAKE3 of its code; `app_manifest`); a signed manifest that
+holds a key outside its types has no canonical form and is not shown as signed. An app nobody
+signed, or whose signature does not check, is said to be so, with what it asks for signed by no
+one. A schema is shown as its
 publisher's only when the device holds its signed definition. A string a publisher or an app
 chose is never shown as who stands behind anything (`kotton_shell::grant_prompt`).
 

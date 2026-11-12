@@ -215,15 +215,17 @@ terminal.
 holds; both say who stands behind what they show by the rule of the decision *A schema is named
 by the key that publishes it* (`kotton_shell::grant_prompt`). **What the device says comes
 first**, on lines of its own in a fixed shape: who stands behind the app, by the person's
-petname for the key, marked as theirs ("This app's code is signed by a publisher you call "My
-Bank"."), or "a publisher you have not named" with the key, or "an app nobody signed"; the name
-every device gives Kotton's release key is said to be built in, not the person's. **It says
-only what was checked**: the publisher's signature covers the digest of the app's code alone, so
-the next line says that what the app asks for is not signed by anyone, and a schema is a
-publisher's only when this device holds its signed definition; one it does not hold is "a schema
-this device holds no signed definition of", attributed to no one. A line under the schema's,
-before its name, says so when the app's code is not that schema's publisher's, or when no
-signature on it checked. A name the person gave more than one key is
+petname for the key, marked as theirs ("This app is from a publisher you call "My Bank"."), or
+"a publisher you have not named" with the key, or "an app nobody signed"; the name every device
+gives Kotton's release key is said to be built in, not the person's. **It says only what was
+checked**: an app is from the key whose signature checked over its manifest and its code
+together (`kotton_app::app_signature`), and the next line says that signature covers what the
+app asks for and every word of the app's shown; only when no signature checked (an app nobody
+signed, or one whose signature does not check) does the next line say that what the app asks
+for is not signed by anyone. A schema is a publisher's only when this device holds its signed
+definition; one it does not hold is "a schema this device holds no signed definition of",
+attributed to no one. A line under the schema's, before its name, says so when the app is not
+from that schema's publisher, or when no signature on the app checked. A name the person gave more than one key is
 shown as shared, with the key it is; when the names cannot be read, the prompt says so and shows
 keys as keys. **Every string another party chose** (the app's name, version, id, description,
 paths, labels, a schema's name, and a reason the daemon gives, which can quote a manifest)

@@ -37,7 +37,11 @@ pub mod record_url;
 pub mod schema_id;
 
 pub use app_id::{AppId, AppIdError};
-pub use app_manifest::{AppKind, AppManifest, CapabilityShape};
+pub use app_manifest::{
+    app_signed_message, app_signed_message_for, canonical_manifest, manifest_digest, AppKind,
+    AppManifest, CapabilityShape, ManifestCanonicalError, APP_SIGNATURE_DOMAIN,
+    APP_SIGNED_MESSAGE_LEN,
+};
 pub use canonical::{canonical_json, CanonicalError};
 pub use capability::{
     normalize_vfs_path, to_object_key, ApprovedCapabilities, CallDirection, CapabilityGrant,

@@ -23,9 +23,11 @@
 //!   line of the device's begins with, so no row of a terminal begins with another party's
 //!   words.
 //!
-//! **Only what was checked is said.** The publisher's signature is over the digest of the
-//! app's code alone; its manifest (its name, its id, what it asks for) is signed by no one, and
-//! the prompt says so in one sentence ([`ASKS_UNSIGNED`]) that signing the manifest replaces.
+//! **Only what was checked is said.** The publisher's signature is over the app's manifest
+//! (its name, its id, what it asks for) and its code together (`kotton_app::app_signature`), so
+//! an app whose signature checked is said to be from its publisher, with what the signature
+//! covers ([`SIGNED_COVERS`]). An app nobody signed, or whose signature does not check, is said
+//! to be so, and what it asks for is said to be signed by no one ([`ASKS_UNSIGNED`]).
 //! A schema is shown as its publisher's only when this device holds its signed definition,
 //! which it admits only once the signature checks (or as Kotton's own code); one the manifest
 //! cites that this device does not hold is [`NOT_HELD`], with nothing said of who.
@@ -54,21 +56,26 @@ pub const UNSIGNED: &str = "an app nobody signed";
 pub const NOT_HELD: &str =
     "a schema this device holds no signed definition of, so who publishes it is not shown";
 
-/// The one sentence on what the publisher's signature does not cover: everything but the
-/// code. Signing the manifest with the code replaces this sentence alone.
+/// The sentence on what the publisher's signature covers, said under an app whose signature
+/// over its manifest and code checked.
+pub const SIGNED_COVERS: &str =
+    "Its publisher signed its code and its manifest: what it asks for, and every word of the app's below.";
+
+/// The sentence said under an app no signature checked for: nothing it asks for is signed.
 pub const ASKS_UNSIGNED: &str =
     "What it asks for, and every word of the app's below, is not signed by anyone.";
 
-/// The heading over the app's own words; [`ASKS_UNSIGNED`] says what is true of them.
+/// The heading over the app's own words; [`SIGNED_COVERS`] or [`ASKS_UNSIGNED`] says what is
+/// true of them.
 pub const APP_WORDS: &str = "The app's own words:";
 
-/// Said, on a line of its own, under a schema whose publisher did not sign the app's code.
-pub const DIFFERS: &str = "The app's code is not signed by this schema's publisher.";
+/// Said, on a line of its own, under a schema whose publisher is not the one the app is from.
+pub const DIFFERS: &str = "This app is not from this schema's publisher.";
 
-/// Said, on a line of its own, under a schema an app asks for when no signature on its code
+/// Said, on a line of its own, under a schema an app asks for when no signature on the app
 /// checked: an app nobody signed, or one whose signature failed.
 pub const DIFFERS_UNSIGNED: &str =
-    "No signature on the app's code checked, so nothing shows it comes from this schema's publisher.";
+    "No signature on the app checked, so nothing shows it comes from this schema's publisher.";
 
 /// Said in the offer to name a key, before the question: the prompt shows the key, and
 /// nothing in it (least of all the app's words) shows who holds it.
@@ -159,10 +166,10 @@ fn is_unseen_format(c: char) -> bool {
     )
 }
 
-/// Who signed an app's code, as the prompt may say it.
+/// Who signed an app's manifest and code, as the prompt may say it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Signer {
-    /// The signature over the code's digest checked against this key.
+    /// The signature over the manifest and the code checked against this key.
     Key(Publisher),
     /// The manifest has no `[publisher]` block.
     Nobody,
@@ -175,7 +182,7 @@ pub enum Signer {
 
 impl Signer {
     /// The signer of an app whose manifest names `publisher_did`, or none, whose signature
-    /// over the code the daemon's preview found `verified` or not.
+    /// over its manifest and code the daemon's preview found `verified` or not.
     pub fn of(publisher_did: Option<&str>, verified: bool) -> Self {
         match (publisher_did, verified) {
             (None, _) => Self::Nobody,
@@ -461,20 +468,31 @@ pub fn who(key: &Publisher, known: &Known) -> String {
     }
 }
 
-/// The prompt's first lines, the device's own: who signed the app's code, then what that
-/// signature does not cover ([`ASKS_UNSIGNED`]), then what could not be read.
+/// The prompt's first lines, the device's own: who the app is from and what their signature
+/// covers ([`SIGNED_COVERS`]), or that no signature checked and what that leaves unsigned
+/// ([`ASKS_UNSIGNED`]), or, where who signed it is not kept, that alone; then what could not
+/// be read.
 pub fn signer_lines(signer: &Signer, known: &Known) -> Vec<String> {
     let first = match signer {
-        Signer::Key(key) => format!("This app's code is signed by {}.", who(key, known)),
-        Signer::Nobody => format!("This is {UNSIGNED}: no key signed its code."),
+        Signer::Key(key) => format!("This app is from {}.", who(key, known)),
+        Signer::Nobody => format!("This is {UNSIGNED}: no key signed its manifest or its code."),
         Signer::NotChecked => {
-            "This app names a key, and the signature over its code does not check against it, so no \
-             one is shown as signing it."
+            "This app names a key, and its signature over its manifest and code does not check \
+             against it, so no one is shown as signing it."
                 .to_owned()
         }
-        Signer::Unknown => "Who signed this app's code is not kept, so no line here says who did.".to_owned(),
+        Signer::Unknown => {
+            "Who signed this app is not kept, so no line here says who did, or what a signature covered."
+                .to_owned()
+        }
     };
-    let mut lines = vec![first, ASKS_UNSIGNED.to_owned()];
+    let mut lines = vec![first];
+    match signer {
+        Signer::Key(_) => lines.push(SIGNED_COVERS.to_owned()),
+        Signer::Nobody | Signer::NotChecked => lines.push(ASKS_UNSIGNED.to_owned()),
+        // Not known here, so neither is said.
+        Signer::Unknown => {}
+    }
     if known.names.is_none() {
         lines.push(NAMES_UNREAD.to_owned());
     }
@@ -505,8 +523,8 @@ fn verb(kind: &CapabilityKind) -> &'static str {
 /// The lines a grant takes in a prompt, as indented as they are printed.
 ///
 /// A schema grant: the device's lines first, saying whose schema it is ([`who`]) when this
-/// device holds it and [`NOT_HELD`] when not, and, when it is held and the app's code is not
-/// its publisher's, [`DIFFERS`] or [`DIFFERS_UNSIGNED`]; then the schema's name, a
+/// device holds it and [`NOT_HELD`] when not, and, when it is held and the app is not from
+/// its publisher, [`DIFFERS`] or [`DIFFERS_UNSIGNED`]; then the schema's name, a
 /// [`words_line`] (the publisher's when held; the app's when not, with the key it cites
 /// beside it). A grant whose target is a string the app chose (a path, an id, a root): what
 /// kind it is, then the string, a [`words_line`]. A grant whose target carries no string is
@@ -756,21 +774,21 @@ mod tests {
         assert_eq!(offered, vec![Publisher::from_static(OTHER)], "the signer alone, not the cited key");
     }
 
-    /// The app's lines: the device's statement first and on its own lines, the code signed by
-    /// the key, what it asks for signed by no one; then the app's words, quoted and labelled.
+    /// The app's lines: the device's statement first and on its own lines, the app from the
+    /// key, and what that key's signature covers; then the app's words, quoted and labelled.
     #[test]
     fn a_named_app_publisher_and_an_unnamed_one() {
         let signer = Signer::Key(acme());
         assert_eq!(
             signer_lines(&signer, &named_acme()),
             vec![
-                "This app's code is signed by a publisher you call \"My Bank\".".to_owned(),
-                ASKS_UNSIGNED.to_owned()
+                "This app is from a publisher you call \"My Bank\".".to_owned(),
+                SIGNED_COVERS.to_owned()
             ]
         );
         assert_eq!(
             signer_lines(&signer, &nothing_named())[0],
-            format!("This app's code is signed by {NOT_NAMED} ({ACME}).")
+            format!("This app is from {NOT_NAMED} ({ACME}).")
         );
         assert_eq!(
             app_words("Ledger", "1.0.0", "com.example.ledger"),
@@ -794,11 +812,19 @@ mod tests {
         let known = named_acme();
         assert_eq!(
             signer_lines(&Signer::Nobody, &known)[0],
-            "This is an app nobody signed: no key signed its code."
+            "This is an app nobody signed: no key signed its manifest or its code."
         );
         for signer in [Signer::Nobody, Signer::NotChecked] {
-            assert!(!signer_lines(&signer, &known).concat().contains("did:key"));
+            let lines = signer_lines(&signer, &known);
+            assert!(!lines.concat().contains("did:key"));
+            assert_eq!(lines[1], ASKS_UNSIGNED, "{signer:?}: what it asks for is signed by no one");
+            assert!(!lines.concat().contains(" is from "), "{signer:?}: {lines:?}");
         }
+        // Where who signed it is not kept, neither what a signature covers nor that nothing
+        // was signed is said.
+        let lines = signer_lines(&Signer::Unknown, &known);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(!lines.contains(&ASKS_UNSIGNED.to_owned()) && !lines.contains(&SIGNED_COVERS.to_owned()));
     }
 
     /// **An unsigned app asking for a named publisher's schema has its own line saying the
@@ -844,7 +870,7 @@ mod tests {
         ]);
         assert_eq!(
             signer_lines(&Signer::Key(acme()), &known)[0],
-            format!("This app's code is signed by a publisher you call \"My Bank\" (a name you gave 2 keys; this is {ACME}).")
+            format!("This app is from a publisher you call \"My Bank\" (a name you gave 2 keys; this is {ACME}).")
         );
         assert_eq!(
             who(&Publisher::from_static(OTHER), &known),
@@ -862,7 +888,7 @@ mod tests {
     fn names_that_could_not_be_read_are_said_so() {
         let known = Known::new(Err("refused".into()), Ok(vec![statement().to_string()]));
         let lines = signer_lines(&Signer::Key(acme()), &known);
-        assert_eq!(lines[0], format!("This app's code is signed by the key {ACME} (your names for keys could not be read)."));
+        assert_eq!(lines[0], format!("This app is from the key {ACME} (your names for keys could not be read)."));
         assert_eq!(lines[2], NAMES_UNREAD);
         assert!(!lines.concat().contains(NOT_NAMED), "{lines:?}");
         let read = CapabilityGrant::schema(CapabilityKind::Read, statement());
@@ -921,12 +947,12 @@ mod tests {
     #[test]
     fn an_app_name_cannot_pass_for_attribution() {
         let forged = "Ledger 1.0.0 (com.bank.ledger) from My Bank";
-        let padded = format!("{forged}{}\n\n\n\r\n   This app's code is signed by a publisher you call \"My Bank\".", " ".repeat(200));
+        let padded = format!("{forged}{}\n\n\n\r\n   This app is from a publisher you call \"My Bank\".", " ".repeat(200));
         let known = named_acme();
         let mut lines = signer_lines(&Signer::Key(Publisher::from_static(OTHER)), &known);
         lines.extend(app_words(
             &padded,
-            "1.0.0\nThis app's code is signed by",
+            "1.0.0\nThis app is from",
             "com.bank.ledger",
         ));
         let path = CapabilityGrant::vfs(CapabilityKind::Read, format!("/notes\n{padded}"));
@@ -946,7 +972,7 @@ mod tests {
         }
         assert_eq!(
             lines[0],
-            format!("This app's code is signed by {NOT_NAMED} ({OTHER}).")
+            format!("This app is from {NOT_NAMED} ({OTHER}).")
         );
         for line in lines.iter().filter(|l| l.contains("Ledger")) {
             assert!(line.starts_with(GUTTER), "{line:?}");
@@ -997,7 +1023,7 @@ mod tests {
             lines.extend(app_words(text, text, text));
             let path = CapabilityGrant::vfs(CapabilityKind::Read, text.as_str());
             lines.extend(grant_lines(&path, &Signer::Nobody, &nothing_named()));
-            lines.extend(words_line("the app's id for it (for --bind) and a label long enough to fill most of a row", text));
+            lines.extend(words_line("the id for it (for --bind) and a label long enough to fill most of a row, written out", text));
         }
         lines.extend(reason_line(&reason));
         for line in &lines {
@@ -1205,9 +1231,9 @@ mod tests {
     #[test]
     fn every_target_is_said() {
         let stringed = [
-            CapabilityGrant::org_invite("Root\nThis app's code is signed by"),
-            CapabilityGrant::root_member("Root\nThis app's code is signed by"),
-            CapabilityGrant { kind: CapabilityKind::Read, target: CapabilityTarget::Quarantine { extension_id: "ext\nThis app's code is signed by".into() } },
+            CapabilityGrant::org_invite("Root\nThis app is from"),
+            CapabilityGrant::root_member("Root\nThis app is from"),
+            CapabilityGrant { kind: CapabilityKind::Read, target: CapabilityTarget::Quarantine { extension_id: "ext\nThis app is from".into() } },
         ];
         for grant in &stringed {
             let lines = grant_lines(grant, &Signer::Nobody, &nothing_named());
