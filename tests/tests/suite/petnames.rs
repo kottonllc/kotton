@@ -7,8 +7,7 @@
 
 use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto};
 use crate::vault::{enrol_vault_from, spawn_device, spawn_vault};
-use base64::Engine as _;
-use ed25519_dalek::{Signer as _, SigningKey};
+use ed25519_dalek::SigningKey;
 use kotton_schemas::membership::Posture;
 use kotton_schemas::Publisher;
 use kotton_shell::grant_prompt::{BUILT_IN, DIFFERS, DIFFERS_UNSIGNED, GUTTER, NOT_HELD, OFFER_CAUTION};
@@ -47,8 +46,9 @@ async fn typed(door: &IpcEndpoint, who: &str, token: &str, words: &[&str], answe
 }
 
 /// An app's directory, as `app sideload` reads one: `manifest.toml` asking `reads` and
-/// `writes`, and an `app.wasm` of `wasm`, signed by `signer` when there is one. The preview
-/// hashes the bytes and checks the signature; it runs nothing, so they need not be a module.
+/// `writes`, and an `app.wasm` of `wasm`, the two signed together by `signer` when there is
+/// one. The preview hashes the bytes and checks the signature; it runs nothing, so they need
+/// not be a module.
 fn an_app(dir: &std::path::Path, name: &str, signer: Option<&SigningKey>, reads: &[String], writes: &[String]) -> String {
     let wasm = format!("not a module: {name}").into_bytes();
     std::fs::create_dir_all(dir).unwrap();
@@ -62,10 +62,8 @@ fn an_app(dir: &std::path::Path, name: &str, signer: Option<&SigningKey>, reads:
         list(writes)
     );
     if let Some(key) = signer {
-        let did = publisher_of(key);
-        let signature = key.sign(blake3::hash(&wasm).as_bytes());
-        let b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
-        manifest.push_str(&format!("\n[publisher]\ndid = \"{did}\"\nsignature = \"{b64}\"\n"));
+        // Over the manifest and the code together, as a publisher's tool signs an app.
+        manifest = kotton_app::app_signature::signed_manifest(&manifest, &wasm, key).unwrap();
     }
     std::fs::write(dir.join("manifest.toml"), manifest).unwrap();
     dir.to_str().unwrap().to_string()
@@ -85,9 +83,9 @@ fn a_signed_schema(key: &SigningKey, name: &str) -> String {
     serde_json::to_string(&def).unwrap()
 }
 
-/// The device's line saying who signed an app's code, for a key the person calls `name`.
+/// The device's line saying who an app is from, for a key the person calls `name`.
 fn signed_by(name: &str) -> String {
-    format!("This app's code is signed by a publisher you call \"{name}\".")
+    format!("This app is from a publisher you call \"{name}\".")
 }
 
 /// The device's line for a held schema whose publisher the person calls `name`.
@@ -98,8 +96,8 @@ fn reads_from(name: &str) -> String {
 /// **A petname given on device A is on device B after a bare `sync` on each, and a grant
 /// prompt on B names the publisher by it; a prompt for a schema whose publisher the person
 /// has not named says so** (kotton #471's done-when). The device's own lines come first: who
-/// signed the app's code, by the person's name for the key, and that what the app asks for is
-/// signed by no one; the app's words follow, quoted. The first meeting with the bank's key is
+/// the app is from, by the person's name for the key that signed its manifest and code, and
+/// what that signature covers; the app's words follow, quoted. The first meeting with the bank's key is
 /// on A, after the prompt is shown, where the person names it; on B the same prompt names it
 /// with nothing asked. A schema neither device holds is attributed to no one, even when it
 /// cites the named bank's key; an app nobody signed asking for the bank's schema has its own
@@ -149,9 +147,10 @@ async fn a_petname_given_on_one_device_names_the_publisher_in_a_prompt_on_anothe
 
     // B first, before A names the key: not named, with the key, and nothing asked of nobody.
     let before = done(on_b(line(&["app", "sideload", &ledger])).await);
-    let unnamed_bank = format!("This app's code is signed by a publisher you have not named ({bank_key}).");
+    let unnamed_bank = format!("This app is from a publisher you have not named ({bank_key}).");
     assert!(before.text.trim_start().starts_with(&unnamed_bank), "the device's line is not first: {}", before.text);
-    assert!(before.text.contains(kotton_shell::grant_prompt::ASKS_UNSIGNED), "{}", before.text);
+    assert!(before.text.contains(kotton_shell::grant_prompt::SIGNED_COVERS), "{}", before.text);
+    assert!(!before.text.contains(kotton_shell::grant_prompt::ASKS_UNSIGNED), "{}", before.text);
     assert!(
         before.text.contains(&format!("  read your records of a schema published by a publisher you have not named ({bank_key})")),
         "{}",
@@ -209,7 +208,7 @@ async fn a_petname_given_on_one_device_names_the_publisher_in_a_prompt_on_anothe
     let odd = an_app(&apps.path().join("odd"), "Odd", Some(&stranger), std::slice::from_ref(&theirs), &[]);
     let unnamed = done(on_b(line(&["app", "sideload", &odd])).await);
     assert!(
-        unnamed.text.trim_start().starts_with(&format!("This app's code is signed by a publisher you have not named ({}).", publisher_of(&stranger))),
+        unnamed.text.trim_start().starts_with(&format!("This app is from a publisher you have not named ({}).", publisher_of(&stranger))),
         "{}",
         unnamed.text
     );
@@ -227,10 +226,10 @@ async fn a_petname_given_on_one_device_names_the_publisher_in_a_prompt_on_anothe
     assert!(ask.iter().all(|l| !l.contains("My Bank") && !l.contains("you call")), "{}", cited.text);
 
     // An app nobody signed, asking for the bank's schema: said so first, and a line of its own
-    // says the app's code is not the schema's publisher's.
+    // says nothing shows it comes from the schema's publisher.
     let bare = an_app(&apps.path().join("bare"), "Bare", None, std::slice::from_ref(&statement), &[]);
     let unsigned = done(on_b(line(&["app", "sideload", &bare])).await);
-    assert!(unsigned.text.trim_start().starts_with("This is an app nobody signed: no key signed its code."), "{}", unsigned.text);
+    assert!(unsigned.text.trim_start().starts_with("This is an app nobody signed: no key signed its manifest or its code."), "{}", unsigned.text);
     assert!(unsigned.text.contains(&reads_from("My Bank")), "{}", unsigned.text);
     assert!(unsigned.text.contains(DIFFERS_UNSIGNED), "{}", unsigned.text);
     // Every row of the app's words is behind the gutter: none of a device line is the app's.
@@ -251,7 +250,7 @@ async fn a_petname_given_on_one_device_names_the_publisher_in_a_prompt_on_anothe
     // **Two keys with one name in the prompt**: each line says the name is shared, and which
     // key it is.
     let shared = format!("a publisher you call \"my bank\" (a name you gave 2 keys; this is {imposter_key})");
-    assert!(taken.text.contains(&format!("This app's code is signed by {shared}.")), "{}", taken.text);
+    assert!(taken.text.contains(&format!("This app is from {shared}.")), "{}", taken.text);
     // Outside the prompt too: the shared name no longer resolves, in either spelling, and
     // the refusal names both keys.
     for typed in ["My Bank/statement", "my bank/statement"] {
@@ -261,7 +260,7 @@ async fn a_petname_given_on_one_device_names_the_publisher_in_a_prompt_on_anothe
     }
     let again = done(on_a(line(&["app", "sideload", &ledger]), &[]).await);
     let bank_shared = format!("a publisher you call \"My Bank\" (a name you gave 2 keys; this is {bank_key})");
-    assert!(again.text.trim_start().starts_with(&format!("This app's code is signed by {bank_shared}.")), "{}", again.text);
+    assert!(again.text.trim_start().starts_with(&format!("This app is from {bank_shared}.")), "{}", again.text);
     assert!(again.text.contains(&format!("  read your records of a schema published by {bank_shared}")), "{}", again.text);
 
     // A name already taken, answered with another: the other is the name.

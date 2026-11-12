@@ -455,8 +455,9 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
 
     let approval = args.iter().position(|a| a == "--approve");
     let typed = approval.and_then(|i| args.get(i + 1)).map(String::as_str);
-    // The key that signed the app's code is the manifest's `[publisher]`, read here from the
-    // manifest the daemon read, and only when the daemon's preview checked its signature.
+    // The key that signed the app's manifest and code is the manifest's `[publisher]`, read
+    // here from the manifest the daemon read, and only when the daemon's preview checked its
+    // signature over both.
     let publisher_did = AppManifest::from_toml(&manifest_toml).ok().and_then(|m| m.publisher_did);
     let signer = Signer::of(publisher_did.as_deref(), preview.publisher_verified);
 
@@ -560,18 +561,18 @@ fn refused(head: &str, reason: &str) -> CommandOutput {
 const SHAPES_LISTED: usize = 20;
 
 /// A `--bind` naming no shape the app declares: the device's line, with the id the person
-/// typed, then the first [`SHAPES_LISTED`] ids the app declares, as the app's words, and how
-/// many more there are.
+/// typed, then the first [`SHAPES_LISTED`] ids of the app's shapes (the app's own, or the
+/// device's `vfs:<n>` for the flat form), each quoted, and how many more there are.
 fn no_such_shape(id: &str, shapes: &[kotton_schemas::CapabilityShape]) -> Vec<String> {
     let mut lines = vec![format!(
-        "app sideload: no shape {} in this app. The ids it declares:",
+        "app sideload: no shape {} in this app. The ids of its shapes:",
         quoted(id)
     )];
     if shapes.is_empty() {
         lines.push("  none".to_owned());
     }
     for shape in shapes.iter().take(SHAPES_LISTED) {
-        lines.extend(words_line("the app's id for it", &shape.id));
+        lines.extend(words_line("the id for it", &shape.id));
     }
     if shapes.len() > SHAPES_LISTED {
         lines.push(format!("  and {} more", shapes.len() - SHAPES_LISTED));
@@ -636,9 +637,10 @@ struct Preview<'a> {
     shapes: &'a [kotton_schemas::CapabilityShape],
 }
 
-/// The sideload preview, before its footer: the device's lines on who signed the code and
-/// what that does not cover, then the app's own words, then what it asks for, then where its
-/// files will live. Every string the app chose is on a [`grant_prompt::GUTTER`] line.
+/// The sideload preview, before its footer: the device's lines on who the app is from and
+/// what their signature over its manifest and code covers, or that no signature checked and
+/// nothing it asks for is signed; then the app's own words, then what it asks for, then where
+/// its files will live. Every string the app chose is on a [`grant_prompt::GUTTER`] line.
 fn sideload_prompt(preview: &Preview<'_>, signer: &Signer, known: &Known) -> Vec<String> {
     let mut lines = grant_prompt::signer_lines(signer, known);
     lines.push(String::new());
@@ -676,7 +678,9 @@ fn sideload_prompt(preview: &Preview<'_>, signer: &Signer, known: &Known) -> Vec
                 lines.extend(words_line("the app's description", desc));
             }
             lines.extend(words_line("the app's path", &s.default_target));
-            lines.extend(words_line("the app's id for it (for --bind)", &s.id));
+            // The id the shape was declared with, or `vfs:<n>`, the device's, for a manifest in
+            // the flat form: said as neither's, and quoted as another party's words are.
+            lines.extend(words_line("the id for it (for --bind)", &s.id));
         }
     }
     lines
@@ -720,7 +724,7 @@ async fn name_the_unnamed(
     let mut given: Vec<(kotton_schemas::Publisher, String)> = Vec::new();
     let mut answered = false;
     'keys: for key in unnamed {
-        let what = if signer.key() == Some(key) { "signed this app's code" } else { "publishes a schema it asks for" };
+        let what = if signer.key() == Some(key) { "signed this app's manifest and code" } else { "publishes a schema it asks for" };
         said.push(Out::Note(format!(
             "The key {key} {what}, and you have not named it. {OFFER_CAUTION} Name it now, as \
              you would a contact, and every prompt about it says that name; or press Enter to \
@@ -1402,7 +1406,7 @@ mod prompt_tests {
             format!("schema.read:{ACME}/cited"),
             "vfs.read:/notes".to_owned(),
             "network.fetch".to_owned(),
-            "teleport.now\nThis app's code is signed by".to_owned(),
+            "teleport.now\nThis app is from".to_owned(),
         ];
         let lines = receipt("Ledger", "com.example.ledger", &caps, &Signer::Key(Publisher::from_static(ACME)), &known());
         let expected_head = [
@@ -1421,8 +1425,8 @@ mod prompt_tests {
         assert!(lines.contains(&"  | the path (the app's, or one you bound): \"/notes\"".to_owned()), "{lines:#?}");
         assert!(lines.contains(&"  network.fetch".to_owned()), "{lines:#?}");
         let unread = lines.iter().position(|l| l == "  a grant this device cannot read back").expect("the one not read back");
-        assert_eq!(lines[unread + 1], "  | the daemon's words for it: \"teleport.now This app's code is signed by\"");
-        holds_the_gutter(&lines, &["Ledger", "teleport", "app's code is signed by"]);
+        assert_eq!(lines[unread + 1], "  | the daemon's words for it: \"teleport.now This app is from\"");
+        holds_the_gutter(&lines, &["Ledger", "teleport", "app is from"]);
         let none = receipt("Ledger", "com.example.ledger", &[], &Signer::Nobody, &known());
         assert_eq!(none.last().unwrap(), "It holds nothing.");
     }
@@ -1444,7 +1448,7 @@ mod prompt_tests {
     /// gutter**: a parse error quoting a manifest's lines and escapes is one cleaned reason.
     #[test]
     fn a_refusal_quotes_its_reason_behind_the_gutter() {
-        let reason = "manifest parse error: TOML parse error at line 2, column 8\n  |\n2 | name = \"x\u{1b}[2J\nThis app's code is signed by a publisher you call \"My Bank\".\"\n  |        ^";
+        let reason = "manifest parse error: TOML parse error at line 2, column 8\n  |\n2 | name = \"x\u{1b}[2J\nThis app is from a publisher you call \"My Bank\".\"\n  |        ^";
         let out = refused(PREVIEW_REFUSED, reason);
         let text = out.stderr.expect("a refusal");
         let lines: Vec<String> = text.lines().map(String::from).collect();
@@ -1460,8 +1464,8 @@ mod prompt_tests {
             desc: None,
         }];
         let unknown = no_such_shape("hom", &shapes);
-        assert_eq!(unknown[0], "app sideload: no shape \"hom\" in this app. The ids it declares:");
-        assert_eq!(unknown[1], "  | the app's id for it: \"home read your records\"");
+        assert_eq!(unknown[0], "app sideload: no shape \"hom\" in this app. The ids of its shapes:");
+        assert_eq!(unknown[1], "  | the id for it: \"home read your records\"");
         assert_eq!(unknown.len(), 2);
         // At most twenty listed, and how many more said.
         let many: Vec<CapabilityShape> = (0..45)
@@ -1475,7 +1479,7 @@ mod prompt_tests {
             .collect();
         let listed = no_such_shape("hom", &many);
         assert_eq!(listed.len(), 1 + SHAPES_LISTED + 1, "{listed:#?}");
-        assert_eq!(listed[SHAPES_LISTED], "  | the app's id for it: \"shape-19\"");
+        assert_eq!(listed[SHAPES_LISTED], "  | the id for it: \"shape-19\"");
         assert_eq!(listed.last().unwrap(), "  and 25 more");
         // An install with no answer saying it went through does not say it did not.
         let lost = refused(INSTALL_REFUSED, "connection reset by peer").stderr.unwrap();

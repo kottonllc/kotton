@@ -1899,7 +1899,11 @@ pub fn app_install_preview(manifest_toml: &str, wasm_bytes: &[u8]) -> io::Result
 
     let wasm_hash = hex::encode(blake3::hash(wasm_bytes).as_bytes());
     let publisher_verified = match (&manifest.publisher_did, &manifest.publisher_signature) {
-        (Some(did), Some(sig)) => verify_publisher_signature(did, sig, &wasm_hash).is_ok(),
+        // Over the manifest and the code together (`crate::app_signature`): a signed manifest
+        // with no canonical form is not shown as signed.
+        (Some(did), Some(sig)) => {
+            crate::app_signature::verify(did, sig, manifest_toml, wasm_bytes).is_ok()
+        }
         _ => false,
     };
 
@@ -1922,7 +1926,9 @@ pub fn app_install_preview(manifest_toml: &str, wasm_bytes: &[u8]) -> io::Result
 ///
 /// 1. Parse `manifest_toml` → `AppManifest`
 /// 2. Compute BLAKE3 hash of `wasm_bytes`
-/// 3. Verify publisher DID signature if `[publisher]` section present; warn if absent
+/// 3. Verify the publisher's signature over the manifest and the code if `[publisher]` is
+///    present (`crate::app_signature`), refusing a signed manifest with no canonical form;
+///    warn if absent
 /// 4. Write `manifest.toml` to `{base}/apps/{app_id}/manifest.toml`
 /// 5. Write `.wasm` bytes to `{base}/apps/{app_id}/app.wasm`
 /// 6. Insert row in `app_registry`
@@ -1984,10 +1990,12 @@ pub async fn app_install(
     // Compute BLAKE3 hash of the WASM binary — this is the content-addressed identity.
     let wasm_hash = hex::encode(blake3::hash(&wasm_bytes).as_bytes());
 
-    // Verify or warn about publisher DID signature.
+    // Verify or warn about the publisher's signature, over the manifest and the code
+    // together. A signed manifest that does not canonicalise is refused as signed, naming
+    // the key, rather than installed as unsigned: its `[publisher]` says it is that key's.
     match (&manifest.publisher_did, &manifest.publisher_signature) {
         (Some(did), Some(sig_b64)) => {
-            verify_publisher_signature(did, sig_b64, &wasm_hash)
+            crate::app_signature::verify(did, sig_b64, &manifest_toml, &wasm_bytes)
                 .map_err(|e| io::Error::other(format!("publisher signature invalid: {e}")))?;
             tracing::info!(%app_id, %did, "publisher signature verified");
         }
@@ -2115,6 +2123,12 @@ pub async fn app_install(
 
 /// Verify that `sig_b64` is a valid Ed25519 signature over `BLAKE3(wasm_bytes)` by
 /// the DID key embedded in `publisher_did`.
+///
+/// **An extension's check, not an app's.** An app's publisher signs its manifest and its
+/// code together, checked by [`crate::app_signature::verify`]; what an extension's publisher
+/// signs is kottonllc/kotton#502's to settle, and until then an extension's message is this,
+/// the code's digest alone. `kuserd`'s extension install calls it through
+/// [`crate::extension_install::verify_package`].
 ///
 /// The signature bytes are standard base64-encoded (not URL-safe). The BLAKE3 hash
 /// is represented as the 32-byte raw digest, not a hex string.
