@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Network transport implementations
 
+pub mod admits;
 pub mod bind;
 pub mod bluetooth;
 pub mod quic;
@@ -12,9 +13,10 @@ pub mod websocket;
 
 pub use bind::outbound_bind_addr;
 pub use bluetooth::BluetoothTransport;
+pub use admits::{Admits, HeldKeys};
 pub use relayed::{
-    rendezvous_dial, rendezvous_reserve, RelayClient, RelayedByteStream, RelayedConnection,
-    RelayedDial, RelayedInbound, RendezvousReservation,
+    rendezvous_dial, rendezvous_reserve, CircuitOffer, Door, Openings, RelayClient, RelayedByteStream,
+    RelayedConnection, RelayedDial, RelayedInbound, RendezvousReservation,
 };
 pub use quic::{
     build_bootstrap_client_config, build_bootstrap_server_config,

@@ -57,6 +57,19 @@ pub fn ed25519_pub_to_x25519(ed_pub: &[u8; 32]) -> Result<X25519PublicKey> {
     Ok(X25519PublicKey::from(montgomery.to_bytes()))
 }
 
+/// The Ed25519 verifying key, of the two whose Montgomery form is `mont`, whose sign bit is
+/// clear; `None` where `mont` is no point's.
+///
+/// A handshake shows a responder the initiator's key in its Montgomery form only. Where the
+/// responder admits it by a key it already holds it names it by that key; where it admits it
+/// by a recovery claim, before any log names it, this is the name it is known by for that
+/// connection.
+pub fn x25519_pub_to_ed25519(mont: &[u8; 32]) -> Option<[u8; 32]> {
+    curve25519_dalek::montgomery::MontgomeryPoint(*mont)
+        .to_edwards(0)
+        .map(|p| p.compress().to_bytes())
+}
+
 /// Convert an Ed25519 signing key to an X25519 static secret.
 ///
 /// Follows RFC 7748 §6.4 / Libsodium `crypto_sign_ed25519_sk_to_curve25519`.

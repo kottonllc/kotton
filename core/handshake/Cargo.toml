@@ -18,6 +18,9 @@ kotton-wire = { path = "../wire" }
 snow = { version = "=0.9.6", default-features = false, features = ["ring-resolver"] }
 x25519-dalek = { workspace = true }
 zeroize = "1"
+# A recovery claim's tag (the handshake page's *Recovery keeps its door*).
+hkdf = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 workspace-hack = { path = "../../tools/workspace-hack" }

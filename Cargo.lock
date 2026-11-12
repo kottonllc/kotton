@@ -3181,9 +3181,11 @@ name = "kotton-handshake"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "hkdf",
  "kotton-crypto",
  "kotton-wire",
  "rand 0.8.8",
+ "sha2 0.10.9",
  "snow",
  "workspace-hack",
  "x25519-dalek",
@@ -3337,11 +3339,13 @@ dependencies = [
  "async-trait",
  "base64 0.21.7",
  "core-foundation 0.9.4",
+ "curve25519-dalek",
  "ed25519-dalek",
  "futures",
  "hex",
  "hmac 0.12.1",
  "kotton-crypto",
+ "kotton-handshake",
  "kotton-sys",
  "kotton-wire",
  "libp2p",
@@ -3365,6 +3369,7 @@ dependencies = [
  "url",
  "windows 0.58.0",
  "workspace-hack",
+ "x25519-dalek",
  "x509-parser",
 ]
 

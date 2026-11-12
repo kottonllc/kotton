@@ -37,8 +37,8 @@ use crate::relay_keys::{relay_id, RelayId};
 use anyhow::Result;
 use ed25519_dalek::SigningKey;
 use kotton_net::rendezvous::client::RendezvousClient;
-use kotton_net::transport::quic::tls::{Admission, Ed25519DeviceCert, PairedDeviceVerifier};
-use kotton_net::transport::{RelayClient, RelayedInbound};
+use kotton_net::transport::quic::tls::Admission;
+use kotton_net::transport::{Door, HeldKeys, RelayClient, RelayedInbound};
 use kotton_net::QuicTransport;
 use kotton_sys::net::{Address, Listener, Transport};
 use std::collections::HashSet;
@@ -76,7 +76,7 @@ const RESERVATION_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 ///
 /// The identity keys are the user's and the contact's — the same pair
 /// `dm_encrypt` runs its ECDH over — because a message is between *people*.
-/// What the circuit itself proves, on both ends, is the pair's key for the
+/// What the circuit's handshake is under, on both ends, is the pair's key for the
 /// epoch (`dm_door`), derived from those two and opening nothing: that is what
 /// lets a vault handed the same keys answer this door identically
 /// ([`DmDoor`]), while *who wrote* is proved inside the seal.
@@ -97,7 +97,7 @@ pub struct DmInbox {
 /// open nothing behind it.
 pub struct DmDoor {
     pub epoch: u64,
-    /// Reserves the label and is the certificate inside a served circuit.
+    /// Reserves the label, and is the key a served circuit's handshake answers under.
     pub handle: kotton_crypto::PairHandle,
     /// The one key the door admits: the contact's handle for the same epoch.
     pub admit: [u8; 32],
@@ -105,7 +105,8 @@ pub struct DmDoor {
 }
 
 pub struct Reachability {
-    /// The device's operational Ed25519 key. It authenticates the mTLS handshake,
+    /// The device's operational Ed25519 key. Its Montgomery form is the static a circuit's
+    /// handshake answers under, it authenticates the QUIC path's TLS,
     /// signs presence pushes, and *is* the identifier peers look this device up
     /// by — the relay extracts the verifying key from the DID it is given.
     signing_key: SigningKey,
@@ -151,8 +152,8 @@ pub struct Reachability {
     relay_wanted: std::sync::atomic::AtomicUsize,
 
     /// The live allowlist of paired device keys — raw Ed25519 public keys,
-    /// consulted at every TLS handshake, so removing one revokes access without a
-    /// restart.
+    /// consulted at every handshake, TLS or the circuit's, so removing one
+    /// revokes access without a restart.
     ///
     /// It lives here because it answers two questions that must not diverge: who
     /// may connect, and who this device announces itself to. The daemon seeds it
@@ -445,7 +446,8 @@ impl Reachability {
 
     /// Hold a reservation on the relay and serve the circuits that arrive on it
     /// — the inbound path for when direct, punch and
-    /// TURN all fail.
+    /// TURN all fail. Each circuit carries the handshake, answered under this
+    /// device's key.
     ///
     /// Always started, whether or not a relay is configured: it idles until one is
     /// and reconnects live when [`reconfigure`](Self::reconfigure) changes it,
@@ -527,7 +529,6 @@ impl Reachability {
     /// dialer that names the new epoch before this device reserved it falls back
     /// to the previous epoch's reservation, which is still held.
     async fn run_relay_listener(self: Arc<Self>, handler: PeerHandler) {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
         // "<relay> <fingerprint>" → the task holding that reservation.
         let mut held: std::collections::HashMap<String, tokio::task::JoinHandle<()>> =
             std::collections::HashMap::new();
@@ -646,7 +647,8 @@ impl Reachability {
                         reservation_key: handle.signing_key.clone(),
                         // The pair's key for this epoch, not the device's and
                         // not the identity's: the contact knows the pair and
-                        // nothing about the machine answering for it.
+                        // nothing about the machine answering for it. The door
+                        // is known by this key, and admits the one key below.
                         cert_key: handle.signing_key.clone(),
                         admit: Arc::new(RwLock::new(admit)),
                         // No admission-by-proof at a mailbox: the one key
@@ -688,7 +690,6 @@ impl Reachability {
                     w.admit,
                     w.admission,
                     w.handler,
-                    Arc::clone(&provider),
                     Arc::clone(&self.relay_live),
                     slot.clone(),
                     self.relay_keys(),
@@ -726,9 +727,9 @@ struct Wanted {
     fingerprint: String,
     /// Proves the label to the relay.
     reservation_key: SigningKey,
-    /// The certificate presented inside a served circuit.
+    /// The key a served circuit's handshake answers under.
     cert_key: SigningKey,
-    /// Whose keys the handshake admits there.
+    /// Whose keys the door admits there.
     admit: Arc<RwLock<HashSet<[u8; 32]>>>,
     admission: Admission,
     handler: PeerHandler,
@@ -736,10 +737,10 @@ struct Wanted {
 
 /// Hold one reservation under `fingerprint`, reconnecting until aborted.
 ///
-/// The reservation *label* is the identity given here (a pair handle, or the
-/// durable DID during coexistence); the mTLS inside a served circuit is always
-/// the device's own certificate against the live paired-key allowlist — the
-/// label is how a dial finds this device, never who it authenticates as.
+/// The reservation *label* is the identity given here (a pair handle); the
+/// handshake inside a served circuit answers under `device_key` and admits whom
+/// the live set and `admission` admit, asked at every circuit — the label is
+/// how a dial finds this door, never who answers there.
 #[allow(clippy::too_many_arguments)]
 async fn hold_reservation(
     relay_url: String,
@@ -750,7 +751,6 @@ async fn hold_reservation(
     paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
     admission: Admission,
     handler: PeerHandler,
-    provider: Arc<rustls::crypto::CryptoProvider>,
     live: Arc<RwLock<HashSet<String>>>,
     slot: String,
     keys: crate::relay_keys::RelayKeyring,
@@ -765,27 +765,18 @@ async fn hold_reservation(
         }
     });
 
+    let door = match Door::new(
+        std::slice::from_ref(&device_key),
+        Arc::new(HeldKeys::new(paired_keys, admission)),
+    ) {
+        Ok(door) => Arc::new(door),
+        Err(e) => {
+            tracing::error!(error = %e, "reservation: no door to answer at; giving up");
+            return;
+        }
+    };
     loop {
-        let device_cert = match Ed25519DeviceCert::from_signing_key(&device_key) {
-            Ok(cert) => cert,
-            Err(e) => {
-                tracing::error!(error = %e, "reservation: device cert build failed; giving up");
-                return;
-            }
-        };
-        let verifier = PairedDeviceVerifier::new_with_admission(
-            Arc::clone(&paired_keys),
-            admission.clone(),
-            Arc::clone(&provider),
-        );
-        let client = RelayClient::new(
-            &relay_url,
-            fingerprint.clone(),
-            reservation_key.clone(),
-            device_cert,
-            verifier,
-            Arc::clone(&provider),
-        )
+        let client = RelayClient::new(&relay_url, fingerprint.clone(), reservation_key.clone())
         // Read at every attempt, so a key learned or rotated while this waited
         // is the one the next reservation presents.
         .with_admission(relay.and_then(|r| keys.present_at(&r)));
@@ -794,7 +785,7 @@ async fn hold_reservation(
         match client.reserve().await {
             Ok(reservation) => {
                 live.write().unwrap().insert(slot.clone());
-                if let Err(e) = reservation.serve(tx.clone()).await {
+                if let Err(e) = reservation.serve(Arc::clone(&door), tx.clone()).await {
                     tracing::warn!(error = %e, "relay reservation ended; reconnecting");
                 }
                 live.write().unwrap().remove(&slot);

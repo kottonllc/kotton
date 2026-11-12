@@ -824,3 +824,87 @@ fn the_responder_tries_every_key_on_every_first_frame() {
     assert_eq!(trials(VERSION, &long), (0, Err(Closed::Refused)));
     assert_eq!((opening[3..50].len(), long.len()), (47, 49));
 }
+
+/// One run to the ask: the initiator waiting on the ask's answer, the responder asked.
+fn asked(initiator: &StaticSecret, responder: &SigningKey) -> (AwaitingAnswer, Asked, Vec<u8>) {
+    let (init, opening) =
+        Initiator::open(initiator, &mont_pub(responder), None, None).expect("open");
+    let Opening::Complete { version, first, .. } = read_opening(&opening) else {
+        panic!("the opening is whole");
+    };
+    let (resp, second) =
+        Responder::answer_opening(&[mont(responder)], version, first).expect("answer");
+    let (awaiting, third) = init.read_second(&second[2..]).expect("second");
+    let admitting = resp.read_third(&third[2..]).expect("third");
+    let (ask, asked) = admitting.ask().expect("ask");
+    (awaiting, asked.expect("the channel stays"), ask)
+}
+
+/// The handshake page's *Recovery keeps its door*: the tag the initiator makes from the
+/// authority's key and the responder's ephemeral value is the one the responder expects from
+/// its ephemeral value and the authority's public key, under the one hash; it is not the tag
+/// of another connection, nor of another authority.
+#[test]
+fn a_claims_tag_is_the_responders_on_this_connection_and_no_other() {
+    let authority = ed(0x31);
+    let authority_key = authority.verifying_key().to_bytes();
+    let (awaiting, mut responder, ask) = asked(&mont(&ed(2)), &ed(1));
+    let claim = awaiting
+        .claim(&mont(&authority), authority_key)
+        .expect("a contributory exchange");
+    let (mut channel, answer) = awaiting.read_first(&ask[2..]).expect("the ask");
+    assert_eq!(answer, Answer::AskForEvents);
+    let reply = channel
+        .seal(&AskReply::Claim(claim).encode().unwrap())
+        .unwrap();
+    let AskReply::Claim(read) = responder.read_reply(&reply[2..]).expect("the reply") else {
+        panic!("a claim");
+    };
+    assert_eq!(read.key(), &authority_key);
+    let expected = responder
+        .expected_claim_tag(&mont_pub(&authority), &authority_key)
+        .expect("a contributory exchange");
+    assert!(read.tag_matches(&expected), "the two sides make one tag");
+    let other = ed(0x32);
+    let wrong = responder
+        .expected_claim_tag(&mont_pub(&other), &other.verifying_key().to_bytes())
+        .unwrap();
+    assert!(!read.tag_matches(&wrong), "another authority's tag is another tag");
+
+    // The same initiator, responder and authority on a second connection.
+    let (again, responder_again, _) = asked(&mont(&ed(2)), &ed(1));
+    let replayed = again.claim(&mont(&authority), authority_key).unwrap();
+    assert!(!replayed.tag_matches(&expected), "a claim answers one connection");
+    let fresh = responder_again
+        .expected_claim_tag(&mont_pub(&authority), &authority_key)
+        .unwrap();
+    assert!(!claim.tag_matches(&fresh), "and is of no use on another");
+
+    // Once it has read the reply, the responder admits in the first frame's own form.
+    let (admitted, mut responder_channel) = responder.admit(Some(latest())).expect("admit");
+    assert_eq!(admitted.len(), 2 + RESPONDER_FRAME_LEN_SEALED);
+    assert_eq!(channel.read_admitted(&admitted[2..]), Ok(Some(latest())));
+    let back = channel.seal(b"after").unwrap();
+    assert_eq!(responder_channel.open(&back[2..]).unwrap(), b"after");
+}
+
+const RESPONDER_FRAME_LEN_SEALED: usize =
+    kotton_wire::handshake::RESPONDER_FRAME_LEN + TAG_LEN;
+
+/// A claim that names a key of low order has no tag the responder expects: the exchange is
+/// all zeros, and it is closed on as any refusal is.
+#[test]
+fn a_claim_under_a_low_order_key_has_no_tag() {
+    let (_, responder, _) = asked(&mont(&ed(2)), &ed(1));
+    let zero = PublicKey::from([0u8; 32]);
+    assert_eq!(responder.expected_claim_tag(&zero, &[0u8; 32]), None);
+}
+
+/// An ask's answer that is not the admitted frame is refused: an initiator reads one form.
+#[test]
+fn a_second_ask_is_not_an_admission() {
+    let (awaiting, _responder, ask) = asked(&mont(&ed(2)), &ed(1));
+    let (mut channel, _) = awaiting.read_first(&ask[2..]).expect("the ask");
+    // The ask itself, replayed as the second answer, does not open: the nonce has moved on.
+    assert!(channel.read_admitted(&ask[2..]).is_err());
+}

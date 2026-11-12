@@ -1,18 +1,36 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Relayed mTLS connection — the node side of the relayed connectivity fallback
-//! (RFC-0024 sprint 07 item 2).
+//! A relay's circuit, and the handshake it carries.
 //!
-//! When direct connection and NAT hole-punching both fail, two paired nodes reach
-//! each other through the Kotton relay, which bridges a WebSocket between them (see
-//! `infra/relay`). Over that bridged byte stream we run **TLS 1.3 mTLS** using the
-//! same device certificate and paired-key verifier as the QUIC path — so a relayed
-//! peer is authenticated identically to a direct one, and the relay, which only
-//! forwards opaque frames, can read nothing.
+//! When direct connection and NAT hole-punching both fail, two nodes reach each other
+//! through the Kotton relay, which bridges a WebSocket between them (see `infra/relay`).
+//! Over that bridged byte stream runs the one handshake every connection begins with
+//! (kotton-protocol's *One handshake admits a device, by the identity's log*;
+//! [`kotton_handshake`]): a version byte, three Noise XK messages each behind a two-byte
+//! length, then Noise's transport in sealed frames of at most 65535 bytes. A request and
+//! its answer each cross as one message across as many frames as it takes
+//! ([`kotton_wire::handshake::split_message`]), one at a time on a circuit.
 //!
-//! We use plain TLS (not QUIC) because the bridged channel is already reliable;
-//! running QUIC over it would stack congestion control on TCP. Request/response is
-//! framed directly over the single TLS stream (4-byte big-endian length prefix +
-//! payload) — the same framing the QUIC path uses per stream.
+//! **What the relay sees.** The version byte, two fresh ephemeral values, each frame's
+//! length, and sealed bytes with their tags. No static key in either form, no certificate,
+//! no name: the initiator's key, and whatever it offers to be admitted, cross only sealed,
+//! after the responder has shown it holds the key the initiator expected.
+//!
+//! **Each door's static.** A door answers under the Montgomery form of the Ed25519 key it
+//! presents: a device's reservation under the device's key, a contact's door under the
+//! pair's key for the hour. The dialer holds that key before it begins and the pattern
+//! never sends it. A door holds at most [`MAX_DOOR_KEYS`] keys, since every first frame of
+//! the right length costs one trial for each.
+//!
+//! **Who is admitted** is [`Admits`]'s answer, asked with the key the handshake delivered.
+//! A door that does not admit the initiator by the key asks, in one form whatever the
+//! reason, for its events; the frame that answers carries the events a recovered device
+//! offers, or a recovery claim, and is put to [`Admits`] again. A refusal is the circuit
+//! closing: no frame says why, and nothing here writes the initiator's key or identity down.
+//!
+//! **The first frame's wait.** A reservation holds at most [`MAX_OPENING`] circuits whose
+//! version byte and first frame are not yet whole, each for
+//! [`kotton_handshake::FIRST_FRAME_WAIT`] and no longer; a circuit past that bound is not
+//! dialled back, and one that runs out the wait is closed on having been written nothing.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -23,186 +41,338 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
 use futures::{Sink, Stream, StreamExt};
-use kotton_sys::net::TransportError;
 use kotton_crypto::DidKeyMethod;
+use kotton_handshake::handshake::{split_message, Answer, AskReply, MessageReader};
+use kotton_handshake::{read_opening, Channel, Initiator, Opening, Responder};
+use kotton_sys::net::TransportError;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::sync::{mpsc, Mutex};
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::warn;
+use x25519_dalek::StaticSecret;
+
+use super::admits::Admits;
+
+pub use kotton_handshake::FIRST_FRAME_WAIT;
 use crate::provider::rendezvous::AdmissionKey;
 
-use super::quic::{
-    build_peer_rustls_client_config, build_peer_rustls_server_config,
-    extract_ed25519_pubkey_from_cert, Ed25519DeviceCert, PairedDeviceVerifier,
-};
+/// The most static keys one door hands the responder. Every first frame of the right length
+/// costs one trial for each, whoever sent it.
+pub const MAX_DOOR_KEYS: usize = 8;
 
-/// Maximum framed message size (10 MB), matching the QUIC path.
-const MAX_MESSAGE_SIZE: u32 = 10 * 1024 * 1024;
+/// The most circuits one reservation holds before their version byte and first frame are
+/// whole. Each is held for [`FIRST_FRAME_WAIT`] at most; one past the bound is not dialled
+/// back.
+pub const MAX_OPENING: usize = 16;
 
-/// TLS server name the dialer presents. The peer is authenticated by its
-/// certificate's public key against the paired-key allowlist, never by name, so
-/// this is a fixed placeholder.
-const PEER_SERVER_NAME: &str = "kotton-peer";
+/// The one error a circuit that ends in the handshake gives, whatever ended it: a refusal
+/// says nothing of why, to the far side or to whoever reads this side's log.
+fn closed() -> TransportError {
+    TransportError::ConnectionFailed("the circuit closed".into())
+}
 
-/// An mTLS connection to a paired peer over a relay-bridged byte stream.
+/// The keys a door answers under, and who it admits.
+pub struct Door {
+    keys: Vec<StaticSecret>,
+    admits: Arc<dyn Admits>,
+}
+
+impl Door {
+    /// A door answering under the Montgomery form of each of `keys`, at least one and at most
+    /// [`MAX_DOOR_KEYS`], admitting whom `admits` admits.
+    pub fn new(keys: &[SigningKey], admits: Arc<dyn Admits>) -> Result<Self, TransportError> {
+        if keys.is_empty() || keys.len() > MAX_DOOR_KEYS {
+            return Err(TransportError::ConfigError(format!(
+                "a door answers under one to {MAX_DOOR_KEYS} keys, not {}",
+                keys.len()
+            )));
+        }
+        Ok(Self {
+            keys: keys
+                .iter()
+                .map(kotton_crypto::x25519::ed25519_priv_to_x25519)
+                .collect(),
+            admits,
+        })
+    }
+}
+
+/// What a dialer offers a door that asks for its events: the key events it holds that the
+/// door may not, or a recovery authority to make a claim with in their place. Empty for
+/// every ordinary dial, which is then asked nothing.
+#[derive(Clone, Default)]
+pub struct CircuitOffer {
+    /// The key events since the door's tip, oldest first: usually one, a recovery rotation.
+    pub events: Vec<kotton_wire::kel::KelEvent>,
+    /// A recovery authority the dialer holds, for a device that holds nothing else.
+    pub authority: Option<SigningKey>,
+}
+
+impl std::fmt::Debug for CircuitOffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircuitOffer")
+            .field("events", &self.events.len())
+            .field("authority", &self.authority.is_some())
+            .finish()
+    }
+}
+
+/// How many circuits a reservation holds in their opening.
+#[derive(Clone)]
+pub struct Openings(Arc<Semaphore>);
+
+impl Default for Openings {
+    fn default() -> Self {
+        Self(Arc::new(Semaphore::new(MAX_OPENING)))
+    }
+}
+
+impl Openings {
+    /// A place for one more circuit's opening, or `None` where [`MAX_OPENING`] are held.
+    pub fn admit(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.0).try_acquire_owned().ok()
+    }
+}
+
+/// A channel to a peer over a relay-bridged byte stream, the handshake done.
 ///
-/// `T` is the post-handshake TLS stream (`tokio_rustls::client::TlsStream<S>` for a
-/// dialer, `server::TlsStream<S>` for an accepter). The stream is behind a mutex so
-/// `request` / `serve_one_request` serialise framing over the single channel.
-pub struct RelayedConnection<T> {
-    stream: Mutex<T>,
+/// The stream and the channel are behind one mutex so `request` and `serve_one_request`
+/// carry one message at a time.
+pub struct RelayedConnection<S> {
+    inner: Mutex<Carried<S>>,
     peer_did: String,
 }
 
-impl<T> RelayedConnection<T> {
-    /// The verified DID (`did:key:z6Mk…`) of the peer, from its TLS certificate.
+struct Carried<S> {
+    stream: S,
+    channel: Channel,
+}
+
+impl<S> RelayedConnection<S> {
+    /// The `did:key` of the peer's Ed25519 key: on the dialer's side the key it dialled, on
+    /// the door's the key it admitted.
     pub fn peer_did(&self) -> &str {
         &self.peer_did
     }
 }
 
-impl<S> RelayedConnection<tokio_rustls::client::TlsStream<S>>
+fn did_of(key: &[u8; 32]) -> Result<String, TransportError> {
+    DidKeyMethod::from_public_key_bytes(key)
+        .map(|d| d.to_string())
+        .map_err(|_| closed())
+}
+
+/// One frame's body, after its two-byte length; `None` where the stream ended before it.
+async fn read_body<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Vec<u8>>, TransportError> {
+    let mut len = [0u8; 2];
+    match r.read_exact(&mut len).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(io_err(e)),
+    }
+    let mut body = vec![0u8; usize::from(u16::from_be_bytes(len))];
+    r.read_exact(&mut body).await.map_err(io_err)?;
+    Ok(Some(body))
+}
+
+async fn send<W: AsyncWrite + Unpin>(w: &mut W, frame: &[u8]) -> Result<(), TransportError> {
+    w.write_all(frame).await.map_err(io_err)?;
+    w.flush().await.map_err(io_err)
+}
+
+/// The version byte and the first frame, read whole and nothing past them.
+async fn read_opening_bytes<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut head = [0u8; 3];
+    r.read_exact(&mut head).await?;
+    let len = usize::from(u16::from_be_bytes([head[1], head[2]]));
+    let mut opening = Vec::with_capacity(3 + len);
+    opening.extend_from_slice(&head);
+    opening.resize(3 + len, 0);
+    r.read_exact(&mut opening[3..]).await?;
+    Ok(opening)
+}
+
+impl<S> RelayedConnection<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    /// Dial a paired peer over `stream` (the relay-bridged channel), running the
-    /// client side of the mTLS handshake and verifying the peer's key against the
-    /// allowlist.
+    /// Dial the door whose key is `responder` over `stream` (the relay-bridged channel), as
+    /// `own`, offering `offer` if the door asks for events.
     pub async fn connect(
-        stream: S,
-        device_cert: &Ed25519DeviceCert,
-        verifier: Arc<PairedDeviceVerifier>,
-        provider: Arc<rustls::crypto::CryptoProvider>,
+        mut stream: S,
+        own: &SigningKey,
+        responder: &[u8; 32],
+        offer: &CircuitOffer,
     ) -> Result<Self, TransportError> {
-        let config = build_peer_rustls_client_config(device_cert, verifier, provider)?;
-        let connector = TlsConnector::from(Arc::new(config));
-        let server_name = rustls::pki_types::ServerName::try_from(PEER_SERVER_NAME)
-            .map_err(|e| TransportError::ConfigError(e.to_string()))?;
-        let tls = connector
-            .connect(server_name, stream)
-            .await
-            .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
-        let peer_did = peer_did_from_certs(tls.get_ref().1.peer_certificates())?;
+        let own_static = kotton_crypto::x25519::ed25519_priv_to_x25519(own);
+        let responder_static = kotton_crypto::x25519::ed25519_pub_to_x25519(responder)
+            .map_err(|e| TransportError::ConfigError(format!("the door's key: {e}")))?;
+        let (initiator, opening) =
+            Initiator::open(&own_static, &responder_static, None, None).map_err(|_| closed())?;
+        send(&mut stream, &opening).await?;
+        let second = read_body(&mut stream).await?.ok_or_else(closed)?;
+        let (awaiting, third) = initiator.read_second(&second).map_err(|_| closed())?;
+        send(&mut stream, &third).await?;
+        let claim = offer.authority.as_ref().and_then(|authority| {
+            awaiting.claim(
+                &kotton_crypto::x25519::ed25519_priv_to_x25519(authority),
+                authority.verifying_key().to_bytes(),
+            )
+        });
+        let first = read_body(&mut stream).await?.ok_or_else(closed)?;
+        let (mut channel, answer) = awaiting.read_first(&first).map_err(|_| closed())?;
+        if answer == Answer::AskForEvents {
+            let reply = match claim {
+                Some(claim) => AskReply::Claim(claim),
+                None => {
+                    let events: Vec<Vec<u8>> = offer
+                        .events
+                        .iter()
+                        .map(serde_json::to_vec)
+                        .collect::<Result<_, _>>()
+                        .map_err(|e| TransportError::ConfigError(format!("an offered event: {e}")))?;
+                    AskReply::latest_of(&events)
+                }
+            };
+            let body = reply.encode().map_err(|_| closed())?;
+            send(&mut stream, &channel.seal(&body).map_err(|_| closed())?).await?;
+            let admitted = read_body(&mut stream).await?.ok_or_else(closed)?;
+            channel.read_admitted(&admitted).map_err(|_| closed())?;
+        }
         Ok(Self {
-            stream: Mutex::new(tls),
-            peer_did,
+            inner: Mutex::new(Carried { stream, channel }),
+            peer_did: did_of(responder)?,
         })
     }
-}
 
-impl<S> RelayedConnection<tokio_rustls::server::TlsStream<S>>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
-{
-    /// Accept a relayed circuit on `stream`, running the server side of the mTLS
-    /// handshake and verifying the dialing peer's key against the allowlist.
+    /// Answer a circuit on `stream` at `door`. `opening` is the place [`Openings`] gave this
+    /// circuit, held until its first frame is whole or the wait runs out. Every refusal is
+    /// the stream dropped, having written nothing past what the handshake writes to anyone
+    /// who holds the door's key, and reads the same.
     pub async fn accept(
-        stream: S,
-        device_cert: &Ed25519DeviceCert,
-        verifier: Arc<PairedDeviceVerifier>,
-        provider: Arc<rustls::crypto::CryptoProvider>,
+        mut stream: S,
+        door: &Door,
+        opening: OwnedSemaphorePermit,
     ) -> Result<Self, TransportError> {
-        let config = build_peer_rustls_server_config(device_cert, verifier, provider)?;
-        let acceptor = TlsAcceptor::from(Arc::new(config));
-        let tls = acceptor
-            .accept(stream)
+        let bytes = tokio::time::timeout(FIRST_FRAME_WAIT, read_opening_bytes(&mut stream))
             .await
-            .map_err(|e| TransportError::ConnectionFailed(e.to_string()))?;
-        let peer_did = peer_did_from_certs(tls.get_ref().1.peer_certificates())?;
+            .map_err(|_| closed())?
+            .map_err(|_| closed())?;
+        drop(opening);
+        let Opening::Complete { version, first, .. } = read_opening(&bytes) else {
+            return Err(closed());
+        };
+        let (responder, second) =
+            Responder::answer_opening(&door.keys, version, first).map_err(|_| closed())?;
+        send(&mut stream, &second).await?;
+        let third = read_body(&mut stream).await?.ok_or_else(closed)?;
+        let admitting = responder.read_third(&third).map_err(|_| closed())?;
+        let initiator = admitting.initiator().to_bytes();
+
+        let (peer, channel) = match door.admits.by_key(&initiator) {
+            Some(peer) => {
+                let (first, channel) = admitting
+                    .answer(Answer::Admitted { latest: None })
+                    .map_err(|_| closed())?;
+                send(&mut stream, &first).await?;
+                (peer, channel.map_err(|_| closed())?)
+            }
+            None => {
+                let (ask, asked) = admitting.ask().map_err(|_| closed())?;
+                send(&mut stream, &ask).await?;
+                let mut asked = asked.map_err(|_| closed())?;
+                let body = read_body(&mut stream).await?.ok_or_else(closed)?;
+                let peer = match asked.read_reply(&body).map_err(|_| closed())? {
+                    AskReply::Events(events) => door.admits.by_events(&initiator, &events),
+                    AskReply::Claim(claim) => {
+                        // The tag first: one who does not hold the key it names learns nothing
+                        // from how long the door took to look it up.
+                        let tagged = kotton_crypto::x25519::ed25519_pub_to_x25519(claim.key())
+                            .ok()
+                            .and_then(|authority| asked.expected_claim_tag(&authority, claim.key()))
+                            .is_some_and(|expected| claim.tag_matches(&expected));
+                        if tagged {
+                            door.admits.by_claim(&initiator, claim.key())
+                        } else {
+                            None
+                        }
+                    }
+                }
+                .ok_or_else(closed)?;
+                let (admitted, channel) = asked.admit(None).map_err(|_| closed())?;
+                send(&mut stream, &admitted).await?;
+                (peer, channel)
+            }
+        };
         Ok(Self {
-            stream: Mutex::new(tls),
-            peer_did,
+            inner: Mutex::new(Carried { stream, channel }),
+            peer_did: did_of(&peer)?,
         })
     }
-}
 
-impl<T> RelayedConnection<T>
-where
-    T: AsyncRead + AsyncWrite + Unpin + Send,
-{
-    /// Send a framed request and read the framed response (dialer side).
+    /// Send one request and read its answer (the dialer's side).
     pub async fn request(&self, req: &[u8]) -> Result<Vec<u8>, TransportError> {
-        let mut stream = self.stream.lock().await;
-        write_frame(&mut *stream, req).await?;
-        read_frame(&mut *stream).await
+        let mut carried = self.inner.lock().await;
+        carried.send_message(req).await?;
+        carried
+            .read_message()
+            .await?
+            .ok_or_else(|| TransportError::ConnectionFailed("peer closed mid-response".into()))
     }
 
-    /// Read one framed request, invoke `handler`, and write the framed response.
-    /// Returns `Ok(false)` when the peer closed the channel cleanly.
+    /// Read one request, invoke `handler`, and send its answer. Returns `Ok(false)` when the
+    /// peer closed the channel cleanly.
     pub async fn serve_one_request<F, Fut>(&self, handler: F) -> Result<bool, TransportError>
     where
         F: FnOnce(Vec<u8>) -> Fut,
         Fut: std::future::Future<Output = Vec<u8>>,
     {
-        let mut stream = self.stream.lock().await;
-        let req = match read_frame_opt(&mut *stream).await? {
-            Some(req) => req,
-            None => return Ok(false), // peer closed
+        let mut carried = self.inner.lock().await;
+        let Some(req) = carried.read_message().await? else {
+            return Ok(false);
         };
         let resp = handler(req).await;
-        write_frame(&mut *stream, &resp).await?;
+        carried.send_message(&resp).await?;
         Ok(true)
     }
 }
 
-/// Derive the peer DID from a TLS handshake's peer certificates.
-fn peer_did_from_certs(
-    certs: Option<&[rustls::pki_types::CertificateDer<'static>]>,
-) -> Result<String, TransportError> {
-    let cert = certs
-        .and_then(|c| c.first())
-        .ok_or_else(|| TransportError::AuthenticationFailed("peer presented no certificate".into()))?;
-    let pubkey = extract_ed25519_pubkey_from_cert(cert).ok_or_else(|| {
-        TransportError::AuthenticationFailed("peer certificate is not a Kotton Ed25519 cert".into())
-    })?;
-    let did = DidKeyMethod::from_public_key_bytes(&pubkey)
-        .map_err(|e| TransportError::AuthenticationFailed(format!("bad peer key: {e}")))?;
-    Ok(did.to_string())
-}
-
-async fn write_frame<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    payload: &[u8],
-) -> Result<(), TransportError> {
-    let len = payload.len() as u32;
-    if payload.len() as u64 > MAX_MESSAGE_SIZE as u64 {
-        return Err(TransportError::ConfigError(format!(
-            "message too large: {} bytes (max {MAX_MESSAGE_SIZE})",
-            payload.len()
-        )));
+impl<S> Carried<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    async fn send_message(&mut self, message: &[u8]) -> Result<(), TransportError> {
+        let plaintexts = split_message(message).map_err(|_| {
+            TransportError::ConfigError(format!("message too large: {} bytes", message.len()))
+        })?;
+        for plaintext in plaintexts {
+            let frame = self.channel.seal(&plaintext).map_err(|_| closed())?;
+            self.stream.write_all(&frame).await.map_err(io_err)?;
+        }
+        self.stream.flush().await.map_err(io_err)
     }
-    w.write_u32(len).await.map_err(io_err)?;
-    w.write_all(payload).await.map_err(io_err)?;
-    w.flush().await.map_err(io_err)?;
-    Ok(())
-}
 
-async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, TransportError> {
-    read_frame_opt(r)
-        .await?
-        .ok_or_else(|| TransportError::ConnectionFailed("peer closed mid-response".into()))
-}
-
-/// Read a framed message, or `None` if the peer closed cleanly before the length.
-async fn read_frame_opt<R: AsyncRead + Unpin>(
-    r: &mut R,
-) -> Result<Option<Vec<u8>>, TransportError> {
-    let len = match r.read_u32().await {
-        Ok(len) => len,
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(io_err(e)),
-    };
-    if len > MAX_MESSAGE_SIZE {
-        return Err(TransportError::ConfigError(format!(
-            "message too large: {len} bytes (max {MAX_MESSAGE_SIZE})"
-        )));
+    /// One whole message, or `None` where the peer closed before it began.
+    async fn read_message(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+        let mut reader = MessageReader::new();
+        let mut begun = false;
+        loop {
+            let Some(body) = read_body(&mut self.stream).await? else {
+                return if begun {
+                    Err(TransportError::ConnectionFailed("peer closed mid-message".into()))
+                } else {
+                    Ok(None)
+                };
+            };
+            begun = true;
+            let plaintext = self.channel.open(&body).map_err(|_| closed())?;
+            if let Some(message) = reader.push(&plaintext).map_err(|_| closed())? {
+                return Ok(Some(message));
+            }
+        }
     }
-    let mut buf = vec![0u8; len as usize];
-    r.read_exact(&mut buf).await.map_err(io_err)?;
-    Ok(Some(buf))
 }
 
 fn io_err(e: std::io::Error) -> TransportError {
@@ -214,11 +384,11 @@ fn io_err(e: std::io::Error) -> TransportError {
 // ---------------------------------------------------------------------------
 
 /// Presents a binary WebSocket as an `AsyncRead + AsyncWrite` byte stream, so the
-/// relayed mTLS layer can run TLS over the relay-bridged WebSocket.
+/// handshake and its channel run over the relay-bridged WebSocket.
 ///
 /// Each write is sent as one binary WebSocket frame; reads drain inbound binary
-/// frames in order (buffering any bytes a single `poll_read` cannot take). TLS
-/// supplies its own record framing on top, so frame boundaries do not matter.
+/// frames in order (buffering any bytes a single `poll_read` cannot take). The
+/// handshake frames its own bytes on top, so frame boundaries do not matter.
 /// Non-binary control frames (ping/pong/text) are ignored; a close frame or stream
 /// end is surfaced as EOF.
 pub struct WsByteStream<S> {
@@ -331,17 +501,13 @@ where
 /// The relay-bridged WebSocket type returned by `connect_async`.
 type RelayWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Outbound relayed connection (dialer side): mTLS client over the bridged WebSocket.
-pub type RelayedDial = RelayedConnection<tokio_rustls::client::TlsStream<WsByteStream<RelayWs>>>;
-/// Inbound relayed connection (reserved/accepter side): mTLS server over the bridge.
-pub type RelayedInbound =
-    RelayedConnection<tokio_rustls::server::TlsStream<WsByteStream<RelayWs>>>;
-
-/// Client for the relay's circuit endpoints (`/relay/reserve`, `/relay/open`,
-/// `/relay/accept`) — the node's side of the relayed connectivity fallback
-/// (RFC-0024 sprint 07 item 2; relay side in `infra/relay`).
 /// The relay-bridged byte stream itself, before anything runs over it.
 pub type RelayedByteStream = WsByteStream<RelayWs>;
+
+/// Outbound relayed connection (dialer side): the handshake's channel over the bridge.
+pub type RelayedDial = RelayedConnection<RelayedByteStream>;
+/// Inbound relayed connection (reserved side): the handshake's channel over the bridge.
+pub type RelayedInbound = RelayedConnection<RelayedByteStream>;
 
 /// `ws://` / `wss://` base for a relay's HTTP URL.
 fn ws_base_of(relay_url: &str) -> String {
@@ -375,7 +541,7 @@ fn auth_header_for(
 }
 
 /// A reservation held under a one-time handle, for a ceremony rather than a
-/// peer: the bridged bytes come back **raw**, with no mTLS, because the party
+/// peer: the bridged bytes come back **raw**, with no handshake, because the party
 /// on the other end is a stranger whose key the ceremony exists to learn
 /// (RFC-0022). What authenticates the stream is what runs over it — a PAKE
 /// keyed by the spoken code — and the handle itself is derived from that code,
@@ -436,36 +602,30 @@ pub async fn rendezvous_dial(
     Ok(WsByteStream::new(ws))
 }
 
+/// Client for the relay's circuit endpoints (`/relay/reserve`, `/relay/open`,
+/// `/relay/accept`) — the node's side of the relayed fallback (relay side in
+/// `infra/relay`), under one label: the handle it reserves or dials as.
+///
+/// The label is how the relay routes and nothing more. Who answers inside a circuit is the
+/// handshake's: the key a dial names ([`Self::dial`]) and the [`Door`] a reservation
+/// answers at ([`Reservation::serve`]).
 pub struct RelayClient {
     /// WebSocket base URL (`ws://` / `wss://`) derived from the relay URL.
     ws_base: String,
     fingerprint: String,
+    /// Proves the label to the relay.
     signing_key: SigningKey,
-    device_cert: Ed25519DeviceCert,
-    verifier: Arc<PairedDeviceVerifier>,
-    provider: Arc<rustls::crypto::CryptoProvider>,
     /// The relay's admission key this device holds, if any
     /// ([`Self::with_admission`]).
     admission: Option<AdmissionKey>,
 }
 
 impl RelayClient {
-    pub fn new(
-        relay_url: &str,
-        fingerprint: String,
-        signing_key: SigningKey,
-        device_cert: Ed25519DeviceCert,
-        verifier: Arc<PairedDeviceVerifier>,
-        provider: Arc<rustls::crypto::CryptoProvider>,
-    ) -> Self {
-        let ws_base = ws_base_of(relay_url);
+    pub fn new(relay_url: &str, fingerprint: String, signing_key: SigningKey) -> Self {
         Self {
-            ws_base,
+            ws_base: ws_base_of(relay_url),
             fingerprint,
             signing_key,
-            device_cert,
-            verifier,
-            provider,
             admission: None,
         }
     }
@@ -483,18 +643,18 @@ impl RelayClient {
         auth_header_for(&self.fingerprint, &self.signing_key, self.admission.as_ref())
     }
 
-    /// Dial a paired peer through the relay (the relayed fallback tier). Opens a
-    /// circuit to `target_did` and runs the mTLS client handshake over the bridge.
-    pub async fn dial(&self, target_did: &str) -> Result<RelayedDial, TransportError> {
+    /// Dial through the relay: open a circuit to `target_did` and run the handshake over it
+    /// as `own`, to the door whose key is `responder`, offering `offer` if it asks.
+    pub async fn dial(
+        &self,
+        target_did: &str,
+        own: &SigningKey,
+        responder: &[u8; 32],
+        offer: &CircuitOffer,
+    ) -> Result<RelayedDial, TransportError> {
         let url = format!("{}/relay/open?to={}", self.ws_base, target_did);
         let ws = connect_ws(&url, Some(&self.auth_header()?)).await?;
-        RelayedConnection::connect(
-            WsByteStream::new(ws),
-            &self.device_cert,
-            Arc::clone(&self.verifier),
-            Arc::clone(&self.provider),
-        )
-        .await
+        RelayedConnection::connect(WsByteStream::new(ws), own, responder, offer).await
     }
 
     /// Open a reservation on the relay. It exists from the moment this returns —
@@ -507,14 +667,15 @@ impl RelayClient {
         Ok(Reservation { client: self, control })
     }
 
-    /// Hold a reservation on the relay and accept inbound relayed circuits, sending
-    /// each established mTLS connection to `out`. Runs until the reservation drops
-    /// or `out` is closed. [`reserve`](Self::reserve) then [`Reservation::serve`].
+    /// Hold a reservation on the relay and answer inbound circuits at `door`, sending each
+    /// admitted connection to `out`. Runs until the reservation drops or `out` is closed.
+    /// [`reserve`](Self::reserve) then [`Reservation::serve`].
     pub async fn run_reservation(
         &self,
+        door: Door,
         out: mpsc::Sender<RelayedInbound>,
     ) -> Result<(), TransportError> {
-        self.reserve().await?.serve(out).await
+        self.reserve().await?.serve(Arc::new(door), out).await
     }
 }
 
@@ -525,11 +686,21 @@ pub struct Reservation<'a> {
 }
 
 impl Reservation<'_> {
-    /// Accept inbound relayed circuits for as long as the reservation holds,
-    /// sending each established mTLS connection to `out`. Returns when the relay
-    /// closes the control socket or `out` is closed.
-    pub async fn serve(mut self, out: mpsc::Sender<RelayedInbound>) -> Result<(), TransportError> {
-        let client = self.client;
+    /// Answer inbound circuits at `door` for as long as the reservation holds, sending each
+    /// admitted connection to `out`. Returns when the relay closes the control socket or
+    /// `out` is closed.
+    ///
+    /// Each circuit is answered on its own task, so one that sends nothing holds no other
+    /// up; at most [`MAX_OPENING`] are held before their first frame is whole, and a circuit
+    /// past that is not dialled back. A refused circuit is dropped without a line: what it
+    /// sent is nobody's record.
+    pub async fn serve(
+        mut self,
+        door: Arc<Door>,
+        out: mpsc::Sender<RelayedInbound>,
+    ) -> Result<(), TransportError> {
+        let ws_base = self.client.ws_base.clone();
+        let openings = Openings::default();
         while let Some(msg) = self.control.next().await {
             let circuit_id = match msg {
                 Ok(Message::Text(id)) => id,
@@ -537,30 +708,29 @@ impl Reservation<'_> {
                 Err(e) => return Err(TransportError::ConnectionFailed(e.to_string())),
                 Ok(_) => continue, // ping/pong/binary on the control channel: ignore
             };
-            // Dial back the data leg; the circuit id is the capability (no auth).
-            let accept_url = format!("{}/relay/accept?circuit={}", client.ws_base, circuit_id);
-            let data_ws = match connect_ws(&accept_url, None).await {
-                Ok(ws) => ws,
-                Err(e) => {
-                    warn!(circuit = %circuit_id, error = %e, "relay accept dial-back failed");
-                    continue;
-                }
-            };
-            match RelayedConnection::accept(
-                WsByteStream::new(data_ws),
-                &client.device_cert,
-                Arc::clone(&client.verifier),
-                Arc::clone(&client.provider),
-            )
-            .await
-            {
-                Ok(conn) => {
-                    if out.send(conn).await.is_err() {
-                        break; // consumer gone
-                    }
-                }
-                Err(e) => warn!(circuit = %circuit_id, error = %e, "relayed mTLS accept failed"),
+            if out.is_closed() {
+                break; // consumer gone
             }
+            let Some(opening) = openings.admit() else {
+                continue;
+            };
+            // Dial back the data leg; the circuit id is the capability (no auth).
+            let accept_url = format!("{ws_base}/relay/accept?circuit={circuit_id}");
+            let (door, out) = (Arc::clone(&door), out.clone());
+            tokio::spawn(async move {
+                let data_ws = match connect_ws(&accept_url, None).await {
+                    Ok(ws) => ws,
+                    Err(e) => {
+                        warn!(error = %e, "relay accept dial-back failed");
+                        return;
+                    }
+                };
+                if let Ok(conn) =
+                    RelayedConnection::accept(WsByteStream::new(data_ws), &door, opening).await
+                {
+                    let _ = out.send(conn).await;
+                }
+            });
         }
         Ok(())
     }
@@ -596,175 +766,266 @@ async fn connect_ws(url: &str, auth: Option<&str>) -> Result<RelayWs, TransportE
 
 #[cfg(test)]
 mod tests {
-    //! In-process verification with `tokio::io::duplex` (no relay, no WebSocket, no
-    //! two real nodes): paired peers complete the mTLS handshake and exchange a
-    //! framed request/response, and — the security invariant — an unpaired peer's
-    //! handshake is rejected.
+    //! In-process, over `tokio::io::duplex` and a real WebSocket pair (no relay): a door
+    //! admits the key it holds and exchanges requests, closes on a key it does not, admits a
+    //! recovery claim by its tag, and holds its bounds.
 
     use super::*;
-    use ed25519_dalek::SigningKey;
+    use crate::provider::transport::admits::HeldKeys;
+    use crate::provider::transport::quic::tls::{Admission, Admitted};
     use std::collections::HashSet;
     use std::sync::RwLock;
 
-    fn provider() -> Arc<rustls::crypto::CryptoProvider> {
-        Arc::new(rustls::crypto::ring::default_provider())
+    fn key(n: u8) -> SigningKey {
+        SigningKey::from_bytes(&[n; 32])
     }
 
-    fn cert_for(sk: &SigningKey) -> Ed25519DeviceCert {
-        Ed25519DeviceCert::from_signing_key(sk).unwrap()
+    fn pub_of(k: &SigningKey) -> [u8; 32] {
+        k.verifying_key().to_bytes()
     }
 
-    fn verifier(
-        allowed: HashSet<[u8; 32]>,
-        p: &Arc<rustls::crypto::CryptoProvider>,
-    ) -> Arc<PairedDeviceVerifier> {
-        PairedDeviceVerifier::new(Arc::new(RwLock::new(allowed)), Arc::clone(p))
+    fn door_admitting(own: &SigningKey, admitted: &[[u8; 32]], admission: Admission) -> Door {
+        let held = HeldKeys::new(
+            Arc::new(RwLock::new(admitted.iter().copied().collect::<HashSet<_>>())),
+            admission,
+        );
+        Door::new(std::slice::from_ref(own), Arc::new(held)).unwrap()
     }
 
-    fn did_of(pk: &[u8; 32]) -> String {
-        DidKeyMethod::from_public_key_bytes(pk).unwrap().to_string()
+    fn place() -> OwnedSemaphorePermit {
+        Openings::default().admit().unwrap()
+    }
+
+    async fn echo<S: AsyncRead + AsyncWrite + Unpin + Send>(conn: &RelayedConnection<S>) -> bool {
+        conn.serve_one_request(|req| async move {
+            let mut resp = b"echo:".to_vec();
+            resp.extend_from_slice(&req);
+            resp
+        })
+        .await
+        .expect("serve")
     }
 
     #[tokio::test]
-    async fn paired_peers_handshake_and_exchange_requests() {
-        let p = provider();
-        let server_sk = SigningKey::from_bytes(&[1u8; 32]);
-        let client_sk = SigningKey::from_bytes(&[2u8; 32]);
-        let server_pk = server_sk.verifying_key().to_bytes();
-        let client_pk = client_sk.verifying_key().to_bytes();
-
+    async fn an_admitted_key_completes_the_handshake_and_exchanges_requests() {
+        let (door_key, dialer_key) = (key(1), key(2));
         let (s_io, c_io) = tokio::io::duplex(64 * 1024);
-
-        // Server trusts the client's key.
-        let server_cert = cert_for(&server_sk);
-        let server_verifier = verifier(HashSet::from([client_pk]), &p);
-        let p2 = Arc::clone(&p);
+        let door = door_admitting(&door_key, &[pub_of(&dialer_key)], Admission::default());
+        let dialer_did = did_of(&pub_of(&dialer_key)).unwrap();
         let server = tokio::spawn(async move {
-            let conn = RelayedConnection::accept(s_io, &server_cert, server_verifier, p2)
+            let conn = RelayedConnection::accept(s_io, &door, place())
                 .await
-                .expect("server handshake");
-            assert_eq!(conn.peer_did(), did_of(&client_pk));
-            let served = conn
-                .serve_one_request(|req| async move {
-                    let mut resp = b"echo:".to_vec();
-                    resp.extend_from_slice(&req);
-                    resp
-                })
-                .await
-                .expect("serve");
-            assert!(served);
+                .expect("the door admits the key it holds");
+            assert_eq!(conn.peer_did(), dialer_did);
+            assert!(echo(&conn).await);
+            // A request longer than one frame crosses as one message.
+            assert!(echo(&conn).await);
         });
 
-        // Client trusts the server's key.
-        let client_cert = cert_for(&client_sk);
-        let client_verifier = verifier(HashSet::from([server_pk]), &p);
-        let conn = RelayedConnection::connect(c_io, &client_cert, client_verifier, Arc::clone(&p))
-            .await
-            .expect("client handshake");
-        assert_eq!(conn.peer_did(), did_of(&server_pk));
-        let resp = conn.request(b"ping").await.expect("request");
-        assert_eq!(resp, b"echo:ping");
-
+        let conn = RelayedConnection::connect(
+            c_io,
+            &dialer_key,
+            &pub_of(&door_key),
+            &CircuitOffer::default(),
+        )
+        .await
+        .expect("the dial completes");
+        assert_eq!(conn.peer_did(), did_of(&pub_of(&door_key)).unwrap());
+        assert_eq!(conn.request(b"ping").await.unwrap(), b"echo:ping");
+        let long = vec![0x5a; 200_000];
+        let resp = conn.request(&long).await.unwrap();
+        assert_eq!(&resp[..5], b"echo:");
+        assert_eq!(&resp[5..], &long[..]);
         server.await.unwrap();
     }
 
+    /// A key the door does not hold is asked for its events, offers none, and is closed on:
+    /// no request reaches the handler.
     #[tokio::test]
-    async fn unpaired_peer_is_rejected() {
-        let p = provider();
-        let server_sk = SigningKey::from_bytes(&[3u8; 32]);
-        let client_sk = SigningKey::from_bytes(&[4u8; 32]);
-        let server_pk = server_sk.verifying_key().to_bytes();
-
+    async fn a_key_the_door_does_not_admit_is_asked_and_closed_on() {
+        let (door_key, stranger) = (key(3), key(4));
         let (s_io, c_io) = tokio::io::duplex(64 * 1024);
+        let door = door_admitting(&door_key, &[pub_of(&key(5))], Admission::default());
+        let server = tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place()).await });
+        let dialled =
+            RelayedConnection::connect(c_io, &stranger, &pub_of(&door_key), &CircuitOffer::default())
+                .await;
+        assert!(dialled.is_err(), "the stranger's dial ends");
+        assert!(server.await.unwrap().is_err(), "and the door admitted nobody");
+    }
 
-        // Server allowlist is EMPTY — the client is not a paired device.
-        let server_cert = cert_for(&server_sk);
-        let server_verifier = verifier(HashSet::new(), &p);
-        let p2 = Arc::clone(&p);
-        let server =
-            tokio::spawn(
-                async move { RelayedConnection::accept(s_io, &server_cert, server_verifier, p2).await },
-            );
+    /// A dial to a door under the wrong key reads its own first frame back as nothing: the
+    /// door reads one frame and writes no byte.
+    #[tokio::test]
+    async fn a_door_dialled_under_another_key_writes_nothing() {
+        let (door_key, dialer_key) = (key(6), key(7));
+        let (s_io, mut c_io) = tokio::io::duplex(64 * 1024);
+        let door = door_admitting(&door_key, &[pub_of(&dialer_key)], Admission::default());
+        let server = tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place()).await });
+        let (_, opening) = Initiator::open(
+            &kotton_crypto::x25519::ed25519_priv_to_x25519(&dialer_key),
+            &kotton_crypto::x25519::ed25519_pub_to_x25519(&pub_of(&key(8))).unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+        c_io.write_all(&opening).await.unwrap();
+        assert!(server.await.unwrap().is_err());
+        let mut written = Vec::new();
+        c_io.read_to_end(&mut written).await.unwrap();
+        assert!(written.is_empty(), "the door wrote {} bytes", written.len());
+    }
 
-        // Client trusts the server, but the server will reject the client's cert.
-        let client_cert = cert_for(&client_sk);
-        let client_verifier = verifier(HashSet::from([server_pk]), &p);
-        let client_outcome = async {
-            let conn =
-                RelayedConnection::connect(c_io, &client_cert, client_verifier, Arc::clone(&p))
-                    .await?;
-            // Even if the client's handshake "completes" (TLS 1.3 finishes early),
-            // the first request must fail once the server aborts.
-            conn.request(b"ping").await?;
-            Ok::<(), TransportError>(())
+    /// A device that holds only a recovery authority is admitted by its claim, whose tag
+    /// answers this connection; the admission is left for the handler to read. A claim by an
+    /// authority the door holds no identity for is closed on as any refusal is.
+    #[tokio::test]
+    async fn a_recovery_claim_is_admitted_by_its_tag_and_the_authority_held() {
+        let (door_key, claimant, authority) = (key(9), key(10), key(11));
+        let admission = Admission::default();
+        admission
+            .authorities
+            .write()
+            .unwrap()
+            .insert(pub_of(&authority), "did:kotton:held".into());
+
+        for (offered, admitted) in [(authority.clone(), true), (key(12), false)] {
+            let (s_io, c_io) = tokio::io::duplex(64 * 1024);
+            let door = door_admitting(&door_key, &[], admission.clone());
+            let server =
+                tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place()).await });
+            let offer = CircuitOffer {
+                events: Vec::new(),
+                authority: Some(offered),
+            };
+            let dialled =
+                RelayedConnection::connect(c_io, &claimant, &pub_of(&door_key), &offer).await;
+            let accepted = server.await.unwrap();
+            assert_eq!(dialled.is_ok(), admitted);
+            assert_eq!(accepted.is_ok(), admitted);
         }
-        .await;
-
-        assert!(
-            server.await.unwrap().is_err(),
-            "server must reject an unpaired client's certificate"
-        );
-        assert!(
-            client_outcome.is_err(),
-            "client must not complete a request to a server that rejected it"
+        // Known for this connection by the Ed25519 key its Montgomery form names.
+        let montgomery = kotton_crypto::x25519::ed25519_pub_to_x25519(&pub_of(&claimant))
+            .unwrap()
+            .to_bytes();
+        let named = kotton_crypto::x25519::x25519_pub_to_ed25519(&montgomery).unwrap();
+        assert_eq!(admission.admitted.read().unwrap().len(), 1);
+        assert_eq!(
+            admission.admitted(&named),
+            Some(Admitted::ByClaim {
+                aid: "did:kotton:held".into()
+            })
         );
     }
 
+    /// A recovered device offers, inside the channel, the rotation that names its key, and
+    /// is admitted by it; the same rotation offered from another key admits nobody.
     #[tokio::test]
-    async fn mtls_runs_over_a_real_websocket() {
-        // Exercise the full node-side wire stack — WsByteStream + mTLS — over a real
-        // tokio-tungstenite WebSocket pair. These are the exact bytes the relay would
-        // bridge opaquely between two nodes; only the relay hop is absent here.
+    async fn a_recovered_device_is_admitted_by_the_events_it_offers_inside_the_channel() {
+        use kotton_crypto::kel_verify::{build_inception, build_mnemonic_rotation, kel_recovery_pubkey};
+        let seed = [42u8; 32];
+        let rung = |i| kel_recovery_pubkey(&kotton_crypto::kdf::derive_kel_recovery_key(&seed, i));
+        let tip = build_inception(&key(30), &[rung(0)]);
+        let recovered = key(31);
+        let rotation = build_mnemonic_rotation(&tip, &seed, 0, &recovered, 0, &[rung(0)]);
+        let door_key = key(32);
+
+        for (dialer, admitted) in [(recovered.clone(), true), (key(33), false)] {
+            let admission = Admission::default();
+            admission.tips.write().unwrap().insert(tip.aid.to_string(), tip.clone());
+            let (s_io, c_io) = tokio::io::duplex(64 * 1024);
+            let door = door_admitting(&door_key, &[], admission.clone());
+            let server =
+                tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place()).await });
+            let offer = CircuitOffer {
+                events: vec![rotation.clone()],
+                authority: None,
+            };
+            let dialled = RelayedConnection::connect(c_io, &dialer, &pub_of(&door_key), &offer).await;
+            let accepted = server.await.unwrap();
+            assert_eq!(dialled.is_ok(), admitted);
+            assert_eq!(accepted.is_ok(), admitted);
+            let pending = admission.admitted(&pub_of(&recovered));
+            assert_eq!(
+                pending,
+                admitted.then(|| Admitted::ByProof {
+                    aid: tip.aid.to_string(),
+                    events: vec![rotation.clone()],
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_handshake_runs_over_a_real_websocket() {
         use tokio::net::TcpListener;
-
-        let p = provider();
-        let server_sk = SigningKey::from_bytes(&[5u8; 32]);
-        let client_sk = SigningKey::from_bytes(&[6u8; 32]);
-        let server_pk = server_sk.verifying_key().to_bytes();
-        let client_pk = client_sk.verifying_key().to_bytes();
-
+        let (door_key, dialer_key) = (key(13), key(14));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-
-        let server_cert = cert_for(&server_sk);
-        let server_verifier = verifier(HashSet::from([client_pk]), &p);
-        let p2 = Arc::clone(&p);
+        let door = door_admitting(&door_key, &[pub_of(&dialer_key)], Admission::default());
         let server = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
-            let conn = RelayedConnection::accept(
-                WsByteStream::new(ws),
-                &server_cert,
-                server_verifier,
-                p2,
-            )
-            .await
-            .expect("server mTLS over ws");
-            assert_eq!(conn.peer_did(), did_of(&client_pk));
-            let served = conn
-                .serve_one_request(|req| async move {
-                    let mut resp = b"echo:".to_vec();
-                    resp.extend_from_slice(&req);
-                    resp
-                })
+            let conn = RelayedConnection::accept(WsByteStream::new(ws), &door, place())
                 .await
-                .expect("serve");
-            assert!(served);
+                .expect("the door over a websocket");
+            assert!(echo(&conn).await);
         });
-
         let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
             .await
             .unwrap();
-        let client_cert = cert_for(&client_sk);
-        let client_verifier = verifier(HashSet::from([server_pk]), &p);
-        let conn =
-            RelayedConnection::connect(WsByteStream::new(ws), &client_cert, client_verifier, p)
-                .await
-                .expect("client mTLS over ws");
-        assert_eq!(conn.peer_did(), did_of(&server_pk));
-        let resp = conn.request(b"ping").await.expect("request");
-        assert_eq!(resp, b"echo:ping");
-
+        let conn = RelayedConnection::connect(
+            WsByteStream::new(ws),
+            &dialer_key,
+            &pub_of(&door_key),
+            &CircuitOffer::default(),
+        )
+        .await
+        .expect("the dial over a websocket");
+        assert_eq!(conn.request(b"ping").await.unwrap(), b"echo:ping");
         server.await.unwrap();
+    }
+
+    /// A door holds one to [`MAX_DOOR_KEYS`] keys, and is not made with more.
+    #[test]
+    fn a_door_holds_at_most_its_bound_of_keys() {
+        let admits: Arc<dyn Admits> = Arc::new(HeldKeys::only(Arc::default()));
+        let keys: Vec<SigningKey> = (0..=MAX_DOOR_KEYS as u8).map(|n| key(100 + n)).collect();
+        assert!(Door::new(&keys[..MAX_DOOR_KEYS], Arc::clone(&admits)).is_ok());
+        assert!(Door::new(&keys, Arc::clone(&admits)).is_err());
+        assert!(Door::new(&[], admits).is_err());
+    }
+
+    /// A reservation holds at most [`MAX_OPENING`] circuits in their opening; a place frees
+    /// when a first frame is whole or its wait runs out.
+    #[test]
+    fn a_reservation_holds_at_most_its_bound_of_openings() {
+        let openings = Openings::default();
+        let held: Vec<_> = (0..MAX_OPENING).map(|_| openings.admit().expect("a place")).collect();
+        assert!(openings.admit().is_none(), "one past the bound has no place");
+        drop(held);
+        assert!(openings.admit().is_some());
+    }
+
+    /// A circuit that sends nothing is closed on once the first frame's wait runs out, and
+    /// is written nothing; its place in the openings is free again.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_circuit_is_closed_on_after_the_wait_having_been_written_nothing() {
+        let door = door_admitting(&key(20), &[pub_of(&key(21))], Admission::default());
+        let openings = Openings::default();
+        let held: Vec<_> = (0..MAX_OPENING - 1).map(|_| openings.admit().unwrap()).collect();
+        let (s_io, mut c_io) = tokio::io::duplex(1024);
+        let opening = openings.admit().expect("the last place");
+        assert!(openings.admit().is_none());
+        let started = tokio::time::Instant::now();
+        let server =
+            tokio::spawn(async move { RelayedConnection::accept(s_io, &door, opening).await });
+        let mut written = Vec::new();
+        c_io.read_to_end(&mut written).await.unwrap();
+        assert!(written.is_empty());
+        assert!(server.await.unwrap().is_err());
+        assert!(started.elapsed() >= FIRST_FRAME_WAIT);
+        assert!(openings.admit().is_some(), "the place is free again");
+        drop(held);
     }
 }

@@ -59,6 +59,8 @@ pub(crate) const SYSTEM_CRATES: &[&str] = &[
     "kotton-version",
     "kotton-sys",
     "kotton-pair",
+    // The one handshake every connection begins with.
+    "kotton-handshake",
     "kotton-proc",
     "kotton-context",
     "kotton-wire",
