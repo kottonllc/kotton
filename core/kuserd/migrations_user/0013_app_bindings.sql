@@ -1,0 +1,16 @@
+-- Keep which paths the person chose with what they approved.
+--
+-- An install through RFC-0021's binding builds each file grant from a shape the
+-- app declared and the path the person bound it to. The grant keeps the path and
+-- not the shape, so whose a path is (the app's suggestion, or one the person
+-- bound) could not be read back. This column keeps the bindings the grants were
+-- built from, as a JSON-encoded `Vec<(shape id, path)>`, beside `approved_json`.
+--
+-- They are the client's effective targets, not only what the person typed: the
+-- shell sends every shape's, the app's default for a shape the person left where
+-- it was. A binding here is the person's where its path differs, normalised,
+-- from its shape's default.
+--
+-- NULL means no record: an approval written before this column, a bundled app, or
+-- one approved without binding. Whose its paths are is then not said either way.
+ALTER TABLE app_registry ADD COLUMN bindings_json TEXT;

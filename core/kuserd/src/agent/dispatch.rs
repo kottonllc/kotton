@@ -2180,6 +2180,10 @@ async fn answer_request(
             // capability the app never declared has no way in — there is no
             // shape to name. `app_install` still refuses anything outside what
             // the manifest requested, which now covers the `approved` list only.
+            //
+            // The bindings travel with the approval `from_bindings` builds, and
+            // `app_install` keeps them beside it: the record of which paths the
+            // person chose. An approval made without binding records none.
             let approved = if bindings.is_empty() {
                 kotton_schemas::ApprovedCapabilities::approved_by_user(approved)
             } else {

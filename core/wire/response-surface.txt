@@ -17,6 +17,8 @@ AppGrants
     requested_display: Vec<String>
     approved: Option<Vec<CapabilityGrant>>
     approved_display: Vec<String>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approved_bound: Option<Vec<bool>>
     envelopes: Vec<AppGrantEnvelope>
 AppInstallPreview
     app_id: String
@@ -31,6 +33,8 @@ AppInstalled
     app_id: String
     name: String
     capabilities: Vec<String>
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bound: Option<Vec<bool>>
 AppLaunched
     app_id: String
     #[serde(default)]

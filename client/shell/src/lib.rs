@@ -46,6 +46,11 @@ pub use utils::{expand_vars, normalize_path, parse_command};
 #[cfg(feature = "cli")]
 pub use commands::{scaffold_files, typed_lines, TypedLines, SDK_FROM_REPOSITORY};
 
+/// A word as the line to type shows it, quoted so it reads back as one argument
+/// (`app sideload`'s line to type); a test outside this crate builds its expected line with it.
+#[cfg(feature = "cli")]
+pub use commands::typed_back;
+
 /// `device`'s grammar as data, its alternatives without the verb word, for the CLI door's
 /// argument help of `device`: one grammar, each door printing its own prefix, so the CLI
 /// re-spells no word of it.

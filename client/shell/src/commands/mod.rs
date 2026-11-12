@@ -346,7 +346,7 @@ pub use whoami::WhoamiCommand;
 
 // Re-exports — CLI-only commands
 #[cfg(feature = "cli")]
-pub use app::{scaffold_files, AppCommand, SDK_FROM_REPOSITORY};
+pub use app::{scaffold_files, typed_back, AppCommand, SDK_FROM_REPOSITORY};
 #[cfg(feature = "cli")]
 pub use cp::CpCommand;
 #[cfg(feature = "cli")]
