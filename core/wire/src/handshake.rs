@@ -301,10 +301,62 @@ pub const RECOVERY_CLAIM_LEN: usize = 32 + 32;
 ///
 /// What a claim carries is the public key of the recovery authority its maker holds, then the
 /// tag, 32 bytes each (the handshake page's *Recovery keeps its door*). kotton-protocol has no
-/// type for it yet, so this module carries the bytes in that order and reads neither: the
-/// caller that checks a claim reads them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RecoveryClaim(pub [u8; RECOVERY_CLAIM_LEN]);
+/// type for it yet, so this module carries the bytes in that order and checks neither: the
+/// caller that checks a claim reads the key by [`RecoveryClaim::key`] and checks the tag by
+/// [`RecoveryClaim::tag_matches`], which compares in constant time, as the handshake page
+/// requires of the check. Its `Debug` shows neither part.
+#[derive(Clone, Copy)]
+pub struct RecoveryClaim {
+    key: [u8; 32],
+    tag: [u8; 32],
+}
+
+impl RecoveryClaim {
+    /// The claim of the authority whose public key is `key`, with `tag`.
+    pub fn new(key: [u8; 32], tag: [u8; 32]) -> Self {
+        Self { key, tag }
+    }
+
+    /// The public key of the authority the claim is made under.
+    pub fn key(&self) -> &[u8; 32] {
+        &self.key
+    }
+
+    /// The tag, as the claim's maker sent it.
+    pub fn tag(&self) -> &[u8; 32] {
+        &self.tag
+    }
+
+    /// Whether the tag is `expected`, compared in constant time, as the handshake page requires
+    /// of the check: how long the comparison takes says nothing of where the two differ.
+    pub fn tag_matches(&self, expected: &[u8; 32]) -> bool {
+        use subtle::ConstantTimeEq;
+        self.tag.ct_eq(expected).into()
+    }
+
+    fn to_bytes(self) -> [u8; RECOVERY_CLAIM_LEN] {
+        let mut out = [0u8; RECOVERY_CLAIM_LEN];
+        out[..32].copy_from_slice(&self.key);
+        out[32..].copy_from_slice(&self.tag);
+        out
+    }
+
+    fn from_body(body: &[u8]) -> Result<Self, Malformed> {
+        if body.len() != RECOVERY_CLAIM_LEN {
+            return Err(Malformed::Length);
+        }
+        Ok(Self::new(
+            body[..32].try_into().expect("32 bytes"),
+            body[32..].try_into().expect("32 bytes"),
+        ))
+    }
+}
+
+impl std::fmt::Debug for RecoveryClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoveryClaim").finish_non_exhaustive()
+    }
+}
 
 /// The frame an initiator sends when the responder asks for its events: the events, or a
 /// recovery claim in their place.
@@ -313,8 +365,9 @@ pub struct RecoveryClaim(pub [u8; RECOVERY_CLAIM_LEN]);
 /// An events body is, for each event, its length as two bytes most significant first, then
 /// its bytes; no count, so an initiator that holds no event sends the kind byte alone. A
 /// claim's body is its [`RECOVERY_CLAIM_LEN`] bytes. A frame with no kind byte, or with any
-/// other kind, is refused.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// other kind, is refused. It derives no equality, since a claim has none; a caller matches
+/// on it.
+#[derive(Clone, Debug)]
 pub enum AskReply {
     /// At most [`MAX_EVENTS`], in the log's order, each as the bytes of its canonical form.
     Events(Vec<Vec<u8>>),
@@ -362,7 +415,7 @@ impl AskReply {
             Self::Claim(claim) => {
                 let mut out = Vec::with_capacity(1 + RECOVERY_CLAIM_LEN);
                 out.push(KIND_RECOVERY_CLAIM);
-                out.extend_from_slice(&claim.0);
+                out.extend_from_slice(&claim.to_bytes());
                 Ok(out)
             }
         }
@@ -398,9 +451,7 @@ impl AskReply {
                 }
                 Ok(Self::Events(events))
             }
-            KIND_RECOVERY_CLAIM => Ok(Self::Claim(RecoveryClaim(
-                body.try_into().map_err(|_| Malformed::Length)?,
-            ))),
+            KIND_RECOVERY_CLAIM => Ok(Self::Claim(RecoveryClaim::from_body(body)?)),
             _ => Err(Malformed::Tag),
         }
     }
@@ -594,23 +645,36 @@ mod tests {
         assert_eq!(ResponderFrame::decode(&b), Err(Malformed::Tag));
     }
 
+    /// The events of a reply that must carry events. `AskReply` derives no equality, since a
+    /// claim has none, so the tests compare what it carries.
+    fn events_of(reply: AskReply) -> Vec<Vec<u8>> {
+        match reply {
+            AskReply::Events(events) => events,
+            AskReply::Claim(_) => panic!("events, not a claim"),
+        }
+    }
+
+    /// The refusal of a decode that must be refused.
+    fn refused(decoded: Result<AskReply, Malformed>) -> Malformed {
+        decoded.expect_err("refused")
+    }
+
     #[test]
     fn the_ask_reply_holds_at_most_64_events_and_an_empty_one_is_its_kind_byte() {
         let none = AskReply::Events(vec![]);
         assert_eq!(hex(&none.encode().unwrap()), "01");
-        assert_eq!(AskReply::decode(&[KIND_EVENTS]).unwrap(), none);
-        let two = AskReply::Events(vec![vec![0xe1], vec![0xe2, 0xe3]]);
-        assert_eq!(hex(&two.encode().unwrap()), "010001e10002e2e3");
-        assert_eq!(AskReply::decode(&two.encode().unwrap()).unwrap(), two);
+        assert!(events_of(AskReply::decode(&[KIND_EVENTS]).unwrap()).is_empty());
+        let two = vec![vec![0xe1], vec![0xe2, 0xe3]];
+        let encoded = AskReply::Events(two.clone()).encode().unwrap();
+        assert_eq!(hex(&encoded), "010001e10002e2e3");
+        assert_eq!(events_of(AskReply::decode(&encoded).unwrap()), two);
 
         let log: Vec<Vec<u8>> = (0..100u8).map(|i| vec![i; 10]).collect();
-        let AskReply::Events(events) = AskReply::latest_of(&log) else {
-            panic!("latest_of makes events");
-        };
+        let events = events_of(AskReply::latest_of(&log));
         assert_eq!(events.len(), MAX_EVENTS);
         assert_eq!(events[0], vec![36u8; 10], "the latest 64, oldest first");
         assert_eq!(events[63], vec![99u8; 10]);
-        assert_eq!(AskReply::latest_of(&[]), none);
+        assert!(events_of(AskReply::latest_of(&[])).is_empty());
 
         let over = AskReply::Events(vec![vec![1]; MAX_EVENTS + 1]);
         assert_eq!(over.encode(), Err(Malformed::TooManyEvents));
@@ -618,24 +682,18 @@ mod tests {
         for _ in 0..=MAX_EVENTS {
             bytes.extend_from_slice(&[0, 1, 7]);
         }
-        assert_eq!(AskReply::decode(&bytes), Err(Malformed::TooManyEvents));
-        assert_eq!(AskReply::decode(&[1, 0, 0]), Err(Malformed::EmptyEvent));
-        assert_eq!(AskReply::decode(&[1, 0, 3, 1]), Err(Malformed::Length));
-        assert_eq!(AskReply::decode(&[1, 0]), Err(Malformed::Length));
+        assert_eq!(refused(AskReply::decode(&bytes)), Malformed::TooManyEvents);
+        assert_eq!(refused(AskReply::decode(&[1, 0, 0])), Malformed::EmptyEvent);
+        assert_eq!(refused(AskReply::decode(&[1, 0, 3, 1])), Malformed::Length);
+        assert_eq!(refused(AskReply::decode(&[1, 0])), Malformed::Length);
 
         // As many as one frame holds beside its kind byte: three events of 30000 bytes do not
         // fit, two do; and two that fill the frame exactly without it do not both fit with it.
         let big: Vec<Vec<u8>> = (0..3u8).map(|i| vec![i; 30000]).collect();
-        assert_eq!(
-            AskReply::latest_of(&big),
-            AskReply::Events(big[1..].to_vec())
-        );
+        assert_eq!(events_of(AskReply::latest_of(&big)), big[1..].to_vec());
         let half = (MAX_FRAME_PLAINTEXT - 4) / 2;
         let exact: Vec<Vec<u8>> = vec![vec![1; half], vec![2; MAX_FRAME_PLAINTEXT - 4 - half]];
-        assert_eq!(
-            AskReply::latest_of(&exact),
-            AskReply::Events(exact[1..].to_vec())
-        );
+        assert_eq!(events_of(AskReply::latest_of(&exact)), exact[1..].to_vec());
         assert!(AskReply::latest_of(&exact).encode().is_ok());
         assert_eq!(
             AskReply::Events(exact).encode(),
@@ -645,40 +703,76 @@ mod tests {
     }
 
     #[test]
+    fn an_ask_reply_longer_than_one_frame_is_refused() {
+        // One byte past the most one transport frame carries: 65520 bytes.
+        let mut over = vec![KIND_EVENTS];
+        while over.len() < MAX_FRAME_PLAINTEXT + 1 {
+            let len = (MAX_FRAME_PLAINTEXT + 1 - over.len() - 2).min(30000);
+            over.extend_from_slice(&u16::try_from(len).unwrap().to_be_bytes());
+            over.extend(std::iter::repeat_n(0xe1, len));
+        }
+        assert_eq!(over.len(), 65520);
+        assert_eq!(refused(AskReply::decode(&over)), Malformed::TooLong);
+        let mut claim = vec![KIND_RECOVERY_CLAIM];
+        claim.resize(65520, 0);
+        assert_eq!(refused(AskReply::decode(&claim)), Malformed::TooLong);
+    }
+
+    #[test]
     fn a_recovery_claim_is_its_kind_byte_and_64_bytes() {
-        let mut body = [0u8; RECOVERY_CLAIM_LEN];
-        body[..32].copy_from_slice(&[0xc1; 32]);
-        body[32..].copy_from_slice(&[0x7a; 32]);
-        let claim = AskReply::Claim(RecoveryClaim(body));
+        let claim = RecoveryClaim::new([0xc1; 32], [0x7a; 32]);
+        let bytes = AskReply::Claim(claim).encode().unwrap();
         // The vector: these bytes, and no others, are a claim.
         assert_eq!(
-            hex(&claim.encode().unwrap()),
+            hex(&bytes),
             format!("02{}{}", "c1".repeat(32), "7a".repeat(32))
         );
-        assert_eq!(AskReply::decode(&claim.encode().unwrap()).unwrap(), claim);
-        let bytes = claim.encode().unwrap();
+        let AskReply::Claim(read) = AskReply::decode(&bytes).unwrap() else {
+            panic!("a claim, not events");
+        };
+        assert_eq!(read.key(), &[0xc1; 32]);
+        assert_eq!(read.tag(), &[0x7a; 32]);
         assert_eq!(
-            AskReply::decode(&bytes[..bytes.len() - 1]),
-            Err(Malformed::Length)
+            refused(AskReply::decode(&bytes[..bytes.len() - 1])),
+            Malformed::Length
         );
         let mut long = bytes.clone();
         long.push(0);
-        assert_eq!(AskReply::decode(&long), Err(Malformed::Length));
+        assert_eq!(refused(AskReply::decode(&long)), Malformed::Length);
         assert_eq!(
-            AskReply::decode(&[KIND_RECOVERY_CLAIM]),
-            Err(Malformed::Length)
+            refused(AskReply::decode(&[KIND_RECOVERY_CLAIM])),
+            Malformed::Length
         );
     }
 
     #[test]
+    fn a_claims_tag_matches_only_its_own_and_its_debug_shows_neither_part() {
+        let claim = RecoveryClaim::new([0xc1; 32], [0x7a; 32]);
+        assert!(claim.tag_matches(&[0x7a; 32]));
+        assert!(!claim.tag_matches(&[0xc1; 32]), "the key is not the tag");
+        let mut last = [0x7a; 32];
+        last[31] ^= 1;
+        assert!(!claim.tag_matches(&last));
+        let mut first = [0x7a; 32];
+        first[0] ^= 0x80;
+        assert!(!claim.tag_matches(&first));
+
+        let shown = format!("{claim:?} {:?}", AskReply::Claim(claim));
+        assert!(shown.contains("RecoveryClaim { .. }"), "{shown}");
+        assert!(!shown.to_lowercase().contains("c1"), "no key: {shown}");
+        assert!(!shown.to_lowercase().contains("7a"), "no tag: {shown}");
+        assert!(!shown.contains("193") && !shown.contains("122"), "{shown}");
+    }
+
+    #[test]
     fn an_ask_reply_with_no_kind_or_another_kind_is_refused() {
-        assert_eq!(AskReply::decode(&[]), Err(Malformed::Length));
+        assert_eq!(refused(AskReply::decode(&[])), Malformed::Length);
         for kind in [0u8, 3, 0xff] {
-            assert_eq!(AskReply::decode(&[kind]), Err(Malformed::Tag));
-            assert_eq!(AskReply::decode(&[kind, 0, 1, 7]), Err(Malformed::Tag));
+            assert_eq!(refused(AskReply::decode(&[kind])), Malformed::Tag);
+            assert_eq!(refused(AskReply::decode(&[kind, 0, 1, 7])), Malformed::Tag);
         }
         // An events body without its kind byte is not an events frame.
-        assert_eq!(AskReply::decode(&[0, 1, 0xe1]), Err(Malformed::Tag));
+        assert_eq!(refused(AskReply::decode(&[0, 1, 0xe1])), Malformed::Tag);
     }
 
     #[test]

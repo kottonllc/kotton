@@ -7,10 +7,14 @@
 # and one request of four bytes ("ping") behind its four-byte length.
 # `ask_reply_*` are the frame an initiator sends when it is asked for its events, as plaintext:
 # its kind byte (01 events, 02 a recovery claim), then the body. Two events, e1 and e2e3, each
-# behind its two-byte length; no events, the kind byte alone; and a claim, an authority's key
-# of 77s and a tag of 88s. A reader refuses an empty frame and any other kind byte.
-# `first_frame_wait_seconds`, in decimal: how long a responder holds a first frame that is not
-# yet whole before it closes, writing nothing. Every responder waits this long.
+# behind its two-byte length; no events, the kind byte alone; and a claim, a key of 77s then a
+# tag of 88s. A reader refuses an empty frame and any other kind byte. These entries show the
+# layout only: the event bytes, the key and the tag are placeholders, and the tag is not the
+# one this file's handshake yields.
+# `first_frame_wait_seconds`, in decimal: how long a responder waits, counted from when it
+# accepts the connection, for the version byte and the whole of the first frame, before it
+# closes having written nothing. The wait is for the first frame alone; no later frame has one.
+# Every responder waits this long.
 # Every value is hex but the wait. Held by `the_committed_vectors_are_what_the_handshake_makes`.
 version = 01
 prologue = 6b6f74746f6e2d68616e647368616b652d01

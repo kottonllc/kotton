@@ -3,9 +3,7 @@
 
 use super::*;
 use ed25519_dalek::SigningKey;
-use kotton_wire::handshake::{
-    split_message, AskReply, MessageReader, RecoveryClaim, RECOVERY_CLAIM_LEN,
-};
+use kotton_wire::handshake::{split_message, AskReply, MessageReader, RecoveryClaim};
 use rand::rngs::OsRng;
 
 const VECTORS: &str = include_str!("../vectors/v1.txt");
@@ -124,11 +122,11 @@ fn whole(
     }
 }
 
-/// The claim in the vectors: an authority's key of 0x77s, then a tag of 0x88s.
-fn claim_body() -> [u8; RECOVERY_CLAIM_LEN] {
-    let mut body = [0x88; RECOVERY_CLAIM_LEN];
-    body[..32].copy_from_slice(&[0x77; 32]);
-    body
+/// The claim in the vectors, for its layout only: a key of 0x77s, then a tag of 0x88s. Both
+/// are placeholders. The key is no authority's, and the tag is not the one the vectors'
+/// handshake yields for any key.
+fn vector_claim() -> RecoveryClaim {
+    RecoveryClaim::new([0x77; 32], [0x88; 32])
 }
 
 fn parse_vectors() -> Vec<(String, String)> {
@@ -220,9 +218,7 @@ fn the_committed_vectors_are_what_the_handshake_makes() {
         ),
         (
             "ask_reply_claim_plaintext",
-            hex(&AskReply::Claim(RecoveryClaim(claim_body()))
-                .encode()
-                .expect("claim")),
+            hex(&AskReply::Claim(vector_claim()).encode().expect("claim")),
         ),
         (
             "first_frame_wait_seconds",
