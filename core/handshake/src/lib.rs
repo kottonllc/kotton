@@ -20,8 +20,8 @@
 //! under one.
 //! The prologue enters no key: Noise's chaining key mixes only the protocol name and the
 //! exchanges, so the cipher keys and the transport keys are the same under any version for
-//! the same exchanges. The handshake page's sentence "so the version is bound into every
-//! key" says more than that; kottonllc/kotton-protocol#57 decides its words.
+//! the same exchanges. So the version is bound into the handshake's hash, under which every
+//! message is sealed, as kottonllc/kotton-protocol#57 decided the handshake page says.
 //!
 //! Each message is one frame, its length first as two bytes, most significant first. After
 //! the third message the channel is Noise's transport, frames of at most 65535 bytes, the
