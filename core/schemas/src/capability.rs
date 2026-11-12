@@ -382,9 +382,12 @@ pub enum ConsentSource {
 pub struct ApprovedCapabilities {
     grants: Vec<CapabilityGrant>,
     source: ConsentSource,
-    /// The bindings the person gave, `(shape id, path)` as given, when the file grants were
-    /// built from them ([`Self::from_bindings`]): the record of which paths they chose.
-    /// `None` when nothing records it.
+    /// The bindings the file grants were built from ([`Self::from_bindings`]), `(shape id,
+    /// path)` as the client sent them: the record of which paths the person chose. A client
+    /// may send every shape's effective target, the app's default included for a shape the
+    /// person left where it was (the shell does), so a binding in it is not by itself one the
+    /// person typed; one whose path differs from its shape's default is. `None` when nothing
+    /// records it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bindings: Option<Vec<(String, String)>>,
 }
@@ -418,8 +421,9 @@ impl ApprovedCapabilities {
         self.source
     }
 
-    /// The bindings the person gave, as given, when the file grants were built from them;
-    /// `None` when nothing records which paths they chose.
+    /// The bindings the file grants were built from, as sent, every shape's effective target
+    /// among them when the client sent those; `None` when nothing records which paths the
+    /// person chose.
     pub fn bindings(&self) -> Option<&[(String, String)]> {
         self.bindings.as_deref()
     }

@@ -233,8 +233,9 @@ pub async fn get_approved(
 /// the record of which paths they chose (`migrations_user/0013_app_bindings.sql`).
 ///
 /// `Ok(None)` means **no record**: no row, an approval written before the record was kept,
-/// a bundled app, or an approval made without binding. That is not the same as a record of
-/// no bindings, and nothing reads it as one.
+/// a bundled app, an approval made without binding, or a record that does not parse, which
+/// says no more of whose a path is than an absent one does. That is not the same as a record
+/// of no bindings, and nothing reads it as one.
 pub async fn get_bindings(
     db: &Arc<SqlitePool>,
     app_id: &str,
@@ -248,7 +249,11 @@ pub async fn get_bindings(
     let Some((Some(json),)) = row else {
         return Ok(None);
     };
-    serde_json::from_str(&json)
-        .map(Some)
-        .map_err(|e| io::Error::other(format!("bindings_json for {app_id}: {e}")))
+    match serde_json::from_str(&json) {
+        Ok(record) => Ok(Some(record)),
+        Err(e) => {
+            tracing::warn!(%app_id, "bindings_json does not parse, read as no record: {e}");
+            Ok(None)
+        }
+    }
 }

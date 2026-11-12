@@ -2073,7 +2073,6 @@ pub async fn app_install(
         }
     }
     fs::write(&wasm_path, &wasm_bytes).await?;
-    fs::write(&manifest_path, manifest_toml.as_bytes()).await?;
 
     // Capability strings for display. These describe what the app **holds** —
     // the approved set — not what it asked for. `manifest.toml` is written to
@@ -2116,6 +2115,11 @@ pub async fn app_install(
         bindings_json.as_deref(),
     )
     .await?;
+    // The manifest only once the row that goes with it is written: the bindings recorded
+    // with an approval are read against the manifest beside it, so an insert that fails
+    // leaves the old row beside the old manifest rather than beside this one. The insert
+    // needs nothing of the file but its path, which the row does not hold.
+    fs::write(&manifest_path, manifest_toml.as_bytes()).await?;
 
     // Register handler_for entries in the handler registry
     for nsid in &manifest.app.handler_for {
@@ -9132,7 +9136,7 @@ desc    = "The folder this editor reads and saves files in."
 #[cfg(test)]
 mod bound_from_record_tests {
     use super::{ardb, bound_from_record};
-    use kotton_schemas::{ApprovedCapabilities, CapabilityGrant, CapabilityKind, CapabilityShape};
+    use kotton_schemas::{AppManifest, ApprovedCapabilities, CapabilityGrant, CapabilityKind, CapabilityShape};
     use std::sync::Arc;
 
     fn shape(id: &str, access: &[CapabilityKind], default: &str) -> CapabilityShape {
@@ -9221,6 +9225,51 @@ mod bound_from_record_tests {
             ardb::get_bindings(&pool, "com.example.new").await.unwrap(),
             Some(vec![("home".to_owned(), "/journal".to_owned())])
         );
+        // A record that does not parse says no more than none, and is not an error.
+        ardb::insert_app(&pool, "com.example.torn", "Torn", "1", "[]", "/x", "t", "", "[]", Some("[[\"home\""))
+            .await
+            .unwrap();
+        assert_eq!(ardb::get_bindings(&pool, "com.example.torn").await.unwrap(), None);
+    }
+
+    /// **The manifest is written only once its row is**: an install whose insert fails
+    /// leaves the manifest already beside the old row as it was.
+    #[tokio::test]
+    async fn an_install_whose_insert_fails_leaves_the_old_manifest() {
+        let base = tempfile::tempdir().unwrap();
+        // No `app_registry` here, so the insert fails.
+        let pool = Arc::new(sqlx::SqlitePool::connect(":memory:").await.expect("in-memory db"));
+        let manifest = |default: &str| {
+            format!(
+                "[app]\nid = \"com.example.order\"\nname = \"Order\"\nversion = \"1.0.0\"\n\n\
+                 [[capabilities]]\nid = \"home\"\ntype = \"vfs-tree\"\naccess = [\"read\"]\ndefault = \"{default}\"\n"
+            )
+        };
+        let on_disk = super::manifest_path_for(base.path(), "com.example.order");
+        std::fs::create_dir_all(on_disk.parent().unwrap()).unwrap();
+        std::fs::write(&on_disk, manifest("/notes")).unwrap();
+        let moved = manifest("/moved");
+        let shapes = AppManifest::from_toml(&moved).unwrap().vfs_shapes();
+        let approved = ApprovedCapabilities::from_bindings(&shapes, &[], Vec::new()).unwrap();
+        let err = super::app_install(&pool, base.path(), "", moved, b"code".to_vec(), None, &NoSecrets, approved)
+            .await
+            .expect_err("an insert into no table");
+        assert!(err.to_string().contains("app_registry"), "{err}");
+        assert_eq!(std::fs::read_to_string(&on_disk).unwrap(), manifest("/notes"));
+    }
+
+    struct NoSecrets;
+
+    impl kotton_sys::secret::SecretsStore for NoSecrets {
+        fn get_secret(&self, _k: &str) -> kotton_sys::secret::SecretsResult<Option<String>> {
+            Ok(None)
+        }
+        fn set_secret(&self, _k: &str, _v: &str) -> kotton_sys::secret::SecretsResult<()> {
+            Ok(())
+        }
+        fn delete_secret(&self, _k: &str) -> kotton_sys::secret::SecretsResult<()> {
+            Ok(())
+        }
     }
 }
 
