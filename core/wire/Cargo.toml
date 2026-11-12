@@ -35,6 +35,9 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # Error handling
 thiserror = "2.0"
 
+# A recovery claim's tag is checked in constant time. Already in the tree (workspace-hack).
+subtle = "2.6"
+
 [lints]
 workspace = true
 

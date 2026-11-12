@@ -5,7 +5,17 @@
 # most significant first, then its bytes. `responder_first` and `initiator_first` are the
 # first transport frame each side sends: the responder's answer (admitted, with event 7),
 # and one request of four bytes ("ping") behind its four-byte length.
-# Held by `the_committed_vectors_are_what_the_handshake_makes`.
+# `ask_reply_*` are the frame an initiator sends when it is asked for its events, as plaintext:
+# its kind byte (01 events, 02 a recovery claim), then the body. Two events, e1 and e2e3, each
+# behind its two-byte length; no events, the kind byte alone; and a claim, a key of 77s then a
+# tag of 88s. A reader refuses an empty frame and any other kind byte. These entries show the
+# layout only: the event bytes, the key and the tag are placeholders, and the tag is not the
+# one this file's handshake yields.
+# `first_frame_wait_seconds`, in decimal: how long a responder waits, counted from when it
+# accepts the connection, for the version byte and the whole of the first frame, before it
+# closes having written nothing. The wait is for the first frame alone; no later frame has one.
+# Every responder waits this long.
+# Every value is hex but the wait. Held by `the_committed_vectors_are_what_the_handshake_makes`.
 version = 01
 prologue = 6b6f74746f6e2d68616e647368616b652d01
 initiator_ed25519_seed = 1111111111111111111111111111111111111111111111111111111111111111
@@ -26,3 +36,7 @@ responder_first_plaintext = 0102000000000000000000000000000000000000000000000000
 responder_first = 005ad06ce85f771fe20c27d50db59d3635bb3252d7f3e3ca668cd96d974fd7ec8eb1537f677003265ec1f12b13fb5a7429c021b9823a1fde7a07c1a80b471e946eeeeb29153e1eb7880e706a46f7f10a9311b80b17bd641e1d261e85
 initiator_first_plaintext = 0000000470696e67
 initiator_first = 0018baca94d65dd6b7e541f81dd89991c1fbd8e154450cefca6b
+ask_reply_events_plaintext = 010001e10002e2e3
+ask_reply_no_events_plaintext = 01
+ask_reply_claim_plaintext = 0277777777777777777777777777777777777777777777777777777777777777778888888888888888888888888888888888888888888888888888888888888888
+first_frame_wait_seconds = 10

@@ -3,7 +3,7 @@
 
 use super::*;
 use ed25519_dalek::SigningKey;
-use kotton_wire::handshake::{split_message, MessageReader};
+use kotton_wire::handshake::{split_message, AskReply, MessageReader, RecoveryClaim};
 use rand::rngs::OsRng;
 
 const VECTORS: &str = include_str!("../vectors/v1.txt");
@@ -122,12 +122,19 @@ fn whole(
     }
 }
 
+/// The claim in the vectors, for its layout only: a key of 0x77s, then a tag of 0x88s. Both
+/// are placeholders. The key is no authority's, and the tag is not the one the vectors'
+/// handshake yields for any key.
+fn vector_claim() -> RecoveryClaim {
+    RecoveryClaim::new([0x77; 32], [0x88; 32])
+}
+
 fn parse_vectors() -> Vec<(String, String)> {
     VECTORS
         .lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(|l| {
-            let (k, v) = l.split_once(" = ").expect("`name = hex`");
+            let (k, v) = l.split_once(" = ").expect("`name = value`");
             (k.to_string(), v.to_string())
         })
         .collect()
@@ -199,6 +206,24 @@ fn the_committed_vectors_are_what_the_handshake_makes() {
         ("responder_first", hex(&t.responder_first)),
         ("initiator_first_plaintext", hex(&request[0])),
         ("initiator_first", hex(&initiator_first)),
+        (
+            "ask_reply_events_plaintext",
+            hex(&AskReply::Events(vec![vec![0xe1], vec![0xe2, 0xe3]])
+                .encode()
+                .expect("events")),
+        ),
+        (
+            "ask_reply_no_events_plaintext",
+            hex(&AskReply::Events(vec![]).encode().expect("events")),
+        ),
+        (
+            "ask_reply_claim_plaintext",
+            hex(&AskReply::Claim(vector_claim()).encode().expect("claim")),
+        ),
+        (
+            "first_frame_wait_seconds",
+            FIRST_FRAME_WAIT.as_secs().to_string(),
+        ),
     ];
     let made: Vec<(String, String)> = made.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
     let printed: String = made.iter().map(|(k, v)| format!("{k} = {v}\n")).collect();
@@ -213,6 +238,11 @@ fn the_committed_vectors_are_what_the_handshake_makes() {
         &t.opening[1..3],
         &[0, 48],
         "the first message is e and a tag"
+    );
+    assert_eq!(
+        FIRST_FRAME_WAIT,
+        Duration::from_secs(10),
+        "the one wait is 10 seconds"
     );
 }
 
@@ -548,7 +578,7 @@ fn a_low_order_value_closes_either_side() {
 }
 
 #[test]
-fn the_version_is_bound_into_every_key() {
+fn the_version_is_bound_into_the_handshake_hash() {
     // What holds: the prologue enters Noise's handshake hash, and every handshake message is
     // sealed under that hash as associated data, so no message made under one version opens
     // under another, and no side reaches the transport without reading all three under one.
@@ -557,9 +587,8 @@ fn the_version_is_bound_into_every_key() {
     // enters no key. Noise's chaining key mixes only the protocol name and the exchanges, so
     // with the same statics and ephemerals two versions seal under the same cipher keys (the
     // ciphertext is the same keystream; only the tags differ) and split into the same
-    // transport keys. The handshake page's sentence "so the version is bound into every key"
-    // says more;
-    // kottonllc/kotton-protocol#57 decides its words, and this test's name with them.
+    // transport keys. So the version is bound into the handshake's hash, under which every
+    // message is sealed, as kottonllc/kotton-protocol#57 decided the handshake page says.
     let (i_ed, r_ed) = (ed(0x11), ed(0x22));
     let (i_key, r_key) = (mont(&i_ed), mont(&r_ed));
     let run = |version: u8, e: u8| Run {
