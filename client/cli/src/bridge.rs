@@ -81,6 +81,10 @@ pub async fn run_verb(
 /// The one line of standard input this process may hand a verb as a value, when stdin is not
 /// a terminal (`echo … | kotton secret set <label>`), read only if the verb takes it.
 ///
+/// It reads the first line and then a second, if one was piped, and hands over both, so the
+/// verb sees that more than one line came and can refuse it ([`kotton_shell::PipedLine`]);
+/// it reads nothing past the second line, so a pipe that never ends is not read to its end.
+///
 /// This door alone builds one. A one-shot is its own process, run for one verb, so its stdin is
 /// the verb's to read. The REPL's stdin is its script, so it builds none, and a verb there
 /// cannot reach a read of it ([`kotton_shell::PipedLine`]).
@@ -90,9 +94,14 @@ fn piped_line() -> Option<kotton_shell::PipedLine> {
         return None;
     }
     Some(kotton_shell::PipedLine::new(|| {
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        Ok(line)
+        use io::BufRead as _;
+        let mut stdin = io::stdin().lock();
+        let mut read = String::new();
+        stdin.read_line(&mut read)?;
+        if read.ends_with('\n') {
+            stdin.read_line(&mut read)?;
+        }
+        Ok(read)
     }))
 }
 

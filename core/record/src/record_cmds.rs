@@ -22,6 +22,23 @@ use crate::provider::sqlite_record_store::SqliteRecordStore;
 use crate::registry::SchemaRegistry;
 use kotton_schemas::SchemaId;
 
+/// The fields [`Record::query`] adds to an answer's row that are the person's alone, and are
+/// withheld from an app wherever a row is handed to one: `_root` (a durable identifier of the
+/// person's roots), `_filed_at` (when the person's devices first filed the row) and
+/// `_updated_at` (when one last wrote it). The answer's fourth, `_id`, is the row's id, which
+/// an app is given (as `_id`, or beside the body). One list, so a field added to an answer is
+/// withheld at every app-facing site at once.
+pub const WITHHELD_FROM_APPS: [&str; 3] = ["_root", "_filed_at", "_updated_at"];
+
+/// Remove [`WITHHELD_FROM_APPS`] from a row as [`Record::query`] answered it.
+pub fn withhold_from_apps(row: &mut Value) {
+    if let Some(obj) = row.as_object_mut() {
+        for key in WITHHELD_FROM_APPS {
+            obj.remove(key);
+        }
+    }
+}
+
 /// The `record` domain, bound to one user's registry and store.
 ///
 /// These two travel together through every verb below, which is the test for
@@ -242,6 +259,14 @@ async fn replace_other_petnames(&self, nsid: &SchemaId, key: &kotton_schemas::Pu
     // (`TASK-a-conversation-is-ordered-by-a-clock-it-does-not-hold`). It is the
     // store's fact about the owner's own copy, so it goes to whoever may read
     // the row and no further: the guest paths strip it with `_id` and `_root`.
+    //
+    // And `_updated_at`: the row's last write, in whole seconds — the clock half
+    // of the version the row syncs with (`Record::updated_at`), which a merge
+    // keeps, so every device holding the row reads the same number. It is what
+    // tells two records apart by which was written last (the keychain's two
+    // under one label, kotton #483), which `_filed_at` cannot: a rewrite keeps
+    // the first filing. It goes where `_filed_at` goes and no further
+    // ([`WITHHELD_FROM_APPS`]).
     let records: Vec<Value> = self
         .store
         .query(&nsid, filter)
@@ -252,6 +277,7 @@ async fn replace_other_petnames(&self, nsid: &SchemaId, key: &kotton_schemas::Pu
             let mut body = r.body;
             body["_id"] = serde_json::json!(r.id);
             body["_filed_at"] = serde_json::json!(r.filed_at);
+            body["_updated_at"] = serde_json::json!(r.updated_at);
             if let Some(root) = root {
                 body["_root"] = serde_json::json!(root);
             }
@@ -393,8 +419,8 @@ async fn replace_other_petnames(&self, nsid: &SchemaId, key: &kotton_schemas::Pu
 }
 
 /// The first top-level field of `record` that an insert under `schema` refuses, if any: one
-/// beginning with `_`, which is the daemon's (a query's answer adds `_id`, `_root` and
-/// `_filed_at`), or one the schema does not declare. `id` is the store's, so it is allowed
+/// beginning with `_`, which is the daemon's (a query's answer adds `_id`, `_root`,
+/// `_filed_at` and `_updated_at`), or one the schema does not declare. `id` is the store's, so it is allowed
 /// whether the schema declares it or not. Only an insert asks this: replication's merge
 /// carries rows another device already accepted, and a row already stored is left as it is.
 fn undeclared_field<'r>(schema: &kotton_schemas::SchemaDefinition, record: &'r Value) -> Option<&'r str> {
@@ -435,6 +461,49 @@ mod tests {
 
         let id = records.insert(NSID_NOTES, json!({ "id": "n1", "title": "t", "body": "b" })).await.unwrap();
         assert_eq!(id, "n1");
+    }
+
+    /// **A query's answer says when each row was last written** (`_updated_at`, the row's
+    /// version's seconds), beside when it was first filed (`_filed_at`): a rewrite under the
+    /// row's id moves the first and keeps the second, so of two rows the one written last is
+    /// told from the one filed last (kotton #483). [`withhold_from_apps`] takes both, and the
+    /// root, and leaves the row and its `_id`.
+    #[tokio::test]
+    async fn an_answer_says_when_a_row_was_last_written_and_an_app_is_not_told() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let now = Arc::new(AtomicI64::new(1_000_000));
+        let clock = {
+            let now = Arc::clone(&now);
+            crate::provider::sqlite_record_store::StoreClock::new(move || now.load(Ordering::SeqCst))
+        };
+        let store = SqliteRecordStore::open(&dir.path().join("records.db"), None).expect("open").with_clock(clock);
+        let registry = RwLock::new(SchemaRegistry::new());
+        let records = Record::new(&registry, &store);
+        let row = |rows: Vec<Value>, id: &str| rows.into_iter().find(|r| r["_id"] == id).expect(id);
+
+        records.insert(NSID_NOTES, json!({ "id": "first", "title": "1" })).await.unwrap();
+        now.store(5_000_000, Ordering::SeqCst);
+        records.insert(NSID_NOTES, json!({ "id": "second", "title": "2" })).await.unwrap();
+        now.store(9_000_000, Ordering::SeqCst);
+        records.insert(NSID_NOTES, json!({ "id": "first", "title": "3" })).await.unwrap();
+
+        let rows = records.query(NSID_NOTES, vec![], None, None, None).await.unwrap();
+        let (first, second) = (row(rows.clone(), "first"), row(rows, "second"));
+        assert_eq!(first["_updated_at"], json!(9_000), "the rewrite's second: {first}");
+        assert_eq!(second["_updated_at"], json!(5_000), "{second}");
+        assert!(
+            first["_filed_at"].as_i64() < second["_filed_at"].as_i64(),
+            "a rewrite kept its first filing: {first} {second}"
+        );
+
+        let mut handed = first.clone();
+        withhold_from_apps(&mut handed);
+        for key in WITHHELD_FROM_APPS {
+            assert!(handed.get(key).is_none(), "{key} was left for an app: {handed}");
+        }
+        assert_eq!(handed, json!({ "id": "first", "title": "3", "_id": "first" }));
     }
 
     const ACME: &str = "did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76";

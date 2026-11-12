@@ -20,12 +20,22 @@
 //! whose `Debug` says nothing of it, and is printed by `get` alone, as the one line on stdout.
 //! No refusal here says it.
 //!
+//! **A value is one line.** A value with a line break in it, after the one end of line a pipe
+//! gives (`\n` or `\r\n`), is refused, saying so, and nothing is kept: a key in PEM form piped
+//! to `set` was kept as its first line with no word said (kotton #483). A key of several lines
+//! belongs in a file in a drive.
+//!
 //! **One record per label.** `set` on a label Personal holds writes that record again, under
 //! the id the store gave it; a label is never a record's id, so it is never written into a
 //! record's URL. Two records under one label (each device set it before either synced) are one
 //! again at the next `set`, which keeps the newest record's id and removes the other. Newest
-//! is by when the record was first filed (`_filed_at`, the filing device's clock, carried
-//! with the row), then by id ([`under`]), so every device holding both picks the same one.
+//! is the one written last (`_updated_at`, the whole second of the row's last write, on the
+//! writing device's clock, carried with the row as its version), then the one filed last
+//! (`_filed_at`), then the lower id ([`newest_first`]), so every device holding both picks the
+//! same one. Where two were written in one second, or the daemon did not say when, which was
+//! written last is not known: `get` prints the first in that order and says, on standard error
+//! (where a message goes whenever stdout is not a terminal), that the label holds more than one
+//! ([`undecided`]).
 //!
 //! [`parse`] is the one parser for these words: `kotton secret …` hands it the words after the
 //! noun (`kotton_cli::bridge`), and the REPL hands it the same.
@@ -235,12 +245,17 @@ enum NoValue {
     /// Nobody is at a terminal and no line was handed over: the REPL, whose stdin is its
     /// script and is never read by a verb.
     NobodyToAsk,
+    /// What was given holds a line break after its one end of line: more than one line was
+    /// piped, and a value is one.
+    SeveralLines,
 }
 
 /// The value for `set <label>`, read as [`Asking`] says: at the terminal, hidden and asked
 /// twice; when nobody is at one, the line the one-shot door handed over (`piped`, taken), and
 /// none in the REPL; or from an answer given beforehand. Nothing here reads stdin. The value is
-/// kept as entered: a space at either end is the value's.
+/// kept as entered: a space at either end is the value's. A value with a line break left in it
+/// (`\n` or `\r`, after the one end of line [`PipedLine::take`] drops) is no value: it is
+/// more than one line, and is refused whole rather than kept in part.
 fn read_value(asking: &mut Asking, piped: &mut Option<PipedLine>, label: &str) -> std::io::Result<Result<Value, NoValue>> {
     let entered = match asking {
         Asking::Terminal => {
@@ -260,7 +275,13 @@ fn read_value(asking: &mut Asking, piped: &mut Option<PipedLine>, label: &str) -
         },
         Asking::Given(answers) => answers.pop_front().unwrap_or_default(),
     };
-    Ok(if entered.is_empty() { Err(NoValue::Empty) } else { Ok(Value(entered)) })
+    Ok(if entered.is_empty() {
+        Err(NoValue::Empty)
+    } else if entered.contains(['\n', '\r']) {
+        Err(NoValue::SeveralLines)
+    } else {
+        Ok(Value(entered))
+    })
 }
 
 /// A secret's record as Personal holds it: its id, and its fields but the value.
@@ -291,21 +312,49 @@ async fn under(client: &mut kotton::KottonClient, user_id: &str, label: &str) ->
     Ok(records)
 }
 
+/// When a record was last written, as the answer says: `_updated_at`, whole seconds.
+fn written(record: &serde_json::Value) -> Option<i64> {
+    record["_updated_at"].as_i64()
+}
+
 /// Order records under one label newest first, the same on every device that holds them.
 ///
 /// The daemon answers in the order this device's table holds rows, which is the order they
 /// reached it: after two devices each set one label and synced, each would put its own
-/// first, and `get` on each would print the other's value. A row's version, `(updated_at,
-/// revision)`, is not in the answer; what is, of when, is `_filed_at`: when the device that
-/// first filed the record filed it, in milliseconds on that device's clock, carried with the
-/// row so every device reads the same number. So newest is the latest filed, and between two
-/// filed in one millisecond the lower `_id`. It orders by first filing, not by last write;
-/// the two differ only for a record rewritten under its id, and `set` leaves one record per
-/// label, so they differ only until the next `set`.
+/// first, and `get` on each would print the other's value. So the order is the rows' own.
+/// Newest is the one written last, by `_updated_at`: the whole second of the row's last write,
+/// on the writing device's clock, the clock half of the version the row syncs with, so every
+/// device reads the same number. Then the one filed last, by `_filed_at` (when the device that
+/// first filed it filed it, in milliseconds), and then the lower `_id`.
+///
+/// Last write and first filing differ for a record rewritten under its id, which is what `set`
+/// does: device A sets `bank`, device B, not yet synced, sets it too, and A sets it again,
+/// rewriting its own record. B's was filed last, A's written last, and A's is the value
+/// (kotton #483). A record the answer gives no `_updated_at` sorts below one it does, and
+/// [`undecided`] says when this order cannot tell.
 fn newest_first(records: &mut [serde_json::Value]) {
     let filed = |r: &serde_json::Value| r["_filed_at"].as_i64().unwrap_or(i64::MIN);
     let id = |r: &serde_json::Value| r["_id"].as_str().or_else(|| r["id"].as_str()).unwrap_or_default().to_string();
-    records.sort_by(|a, b| filed(b).cmp(&filed(a)).then_with(|| id(a).cmp(&id(b))));
+    records.sort_by(|a, b| {
+        written(b)
+            .cmp(&written(a))
+            .then_with(|| filed(b).cmp(&filed(a)))
+            .then_with(|| id(a).cmp(&id(b)))
+    });
+}
+
+/// Whether, of records [`newest_first`] ordered, which was written last is not known: there are
+/// two or more, and the first two were written in one second, or the answer does not say when
+/// one of them was. The first is still the one `get` prints and `set` keeps, the same on every
+/// device; the person is told the label holds more than one.
+fn undecided(records: &[serde_json::Value]) -> bool {
+    match records {
+        [first, second, ..] => match (written(first), written(second)) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        },
+        _ => false,
+    }
 }
 
 /// Put `value` under `label` in Personal: a new record, or the one already there written again
@@ -358,7 +407,16 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
                 Ok(Err(NoValue::Empty)) => {
                     return Ok(CommandOutput::fail(
                         format!("secret set: no value was given for '{label}'; nothing was kept"),
-                        Some("at a terminal it is asked for, hidden; `kotton secret set` reads the first line piped to it".into()),
+                        Some("at a terminal it is asked for, hidden; `kotton secret set` reads the one line piped to it".into()),
+                    ))
+                }
+                Ok(Err(NoValue::SeveralLines)) => {
+                    return Ok(CommandOutput::fail(
+                        format!(
+                            "secret set: the value given for '{label}' is more than one line, and a value is one \
+                             line; nothing was kept"
+                        ),
+                        Some("pipe the value as one line; a key of several lines belongs in a file in a drive".into()),
                     ))
                 }
                 Ok(Err(NoValue::NobodyToAsk)) => {
@@ -415,7 +473,23 @@ async fn run(line: Line, state: &mut ShellState) -> Result<CommandOutput> {
             let mut client = state.client.lock().await;
             match under(&mut client, &user_id, &label).await {
                 Ok(held) => match held.first().and_then(|r| r["value"].as_str()) {
-                    Some(value) => Ok(CommandOutput::shapes(vec![Out::Data(value.to_string())])),
+                    Some(value) => {
+                        let mut said = Vec::new();
+                        if undecided(&held) {
+                            said.push(Out::Warn {
+                                what: format!(
+                                    "personal holds {} secrets '{label}', and which was written last is not known",
+                                    held.len()
+                                ),
+                                consequence: format!(
+                                    "this is one of them, the same on every device; `secret set {label}` keeps \
+                                     one, and `secret rm {label}` removes them all"
+                                ),
+                            });
+                        }
+                        said.push(Out::Data(value.to_string()));
+                        Ok(CommandOutput::shapes(said))
+                    }
                     None => Ok(none_by(&label)),
                 },
                 Err(e) => Ok(refused("get", e)),
@@ -534,17 +608,21 @@ reads it, or finds it in a search: it is reached here, at your own terminal.
 `set` never takes the value on the line, where your shell's history and the
 process list would keep it. At a terminal it asks for the value, hidden, and
 asks again to confirm. With no terminal, `kotton secret set <label>` reads the
-first line piped to it; in the shell, whose input is its script, `set` reads
-nothing and is refused. The label and a note are typed on the line, so your
-shell keeps them in its history on this device; the value never is. One label
-is one secret: `set` on a label you keep replaces its value, and keeps its
-kind and note unless you give them. A new secret is a password, with no note.
+one line piped to it, and refuses more than one, keeping nothing: a key of
+several lines belongs in a file in a drive. In the shell, whose input is its
+script, `set` reads nothing and is refused. The label and a note are typed on
+the line, so your shell keeps them in its history on this device; the value
+never is. One label is one secret: `set` on a label you keep replaces its
+value, and keeps its kind and note unless you give them. A new secret is a
+password, with no note.
 
-`get` prints the value alone, one line on stdout, so it pipes. `list` never
-prints a value. `generate` makes a value of 56 letters and digits that are not
-read as one another, 32 characters long unless `--length` (8 to 256) says,
-from this computer's random source, and keeps it under a label you do not
-keep yet; it does not print it.
+`get` prints the value alone, one line on stdout, so it pipes. A label set on
+two devices before either synced holds two secrets until the next `set`; `get`
+prints the one written last, and says on stderr when it cannot tell which that
+is (both written in one second). `list` never prints a value. `generate` makes
+a value of 56 letters and digits that are not read as one another, 32
+characters long unless `--length` (8 to 256) says, from this computer's random
+source, and keeps it under a label you do not keep yet; it does not print it.
 
 FLAGS:
   --kind password|token  `set`, `generate`: what the secret is (a new one is a password)
@@ -552,8 +630,8 @@ FLAGS:
   --length <n>           `generate`: how many characters, 8 to 256 (32)
 
 Exit 0 when done, 1 when refused, when no secret has the label, or when no
-value was given (the reason on stderr), 2 for a line that is not one of the
-above.
+value, or a value of more than one line, was given (the reason on stderr), 2
+for a line that is not one of the above.
 
 EXAMPLES:
   secret set bank
@@ -688,18 +766,86 @@ mod tests {
         assert_eq!(format!("{:?}", PipedLine::new(|| Ok("hunter2".into()))), "PipedLine");
     }
 
-    /// **Newest is the same on every device**: the latest filed first, whatever order the
-    /// answer came in, and between two filed in one millisecond the lower id.
+    /// **A value is one line.** One end of line at its end is the pipe's, and dropped; any
+    /// other line break — a second line, an empty one, a `\r` alone — is more than one line,
+    /// refused whole, and a three-line key in PEM form is not kept as its first line.
     #[test]
-    fn records_under_one_label_are_newest_filed_first_then_by_id() {
-        let row = |id: &str, filed: i64| serde_json::json!({ "_id": id, "_filed_at": filed, "label": "bank" });
-        let order = |rows: &mut Vec<serde_json::Value>| {
-            newest_first(rows);
-            rows.iter().map(|r| r["_id"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+    fn a_value_of_more_than_one_line_is_refused_whole() {
+        let piped = |text: &'static str| {
+            let mut line = Some(PipedLine::new(move || Ok(text.to_string())));
+            read_value(&mut Asking::Nobody, &mut line, "key").unwrap()
         };
-        let want = ["b", "a", "c"];
-        assert_eq!(order(&mut vec![row("a", 200), row("b", 300), row("c", 200)]), want);
-        assert_eq!(order(&mut vec![row("c", 200), row("a", 200), row("b", 300)]), want);
+        let pem = "-----BEGIN KEY-----\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASC\n-----END KEY-----\n";
+        assert_eq!(piped(pem), Err(NoValue::SeveralLines));
+        assert_eq!(piped("one\r\ntwo\r\n"), Err(NoValue::SeveralLines));
+        assert_eq!(piped("one\n\n"), Err(NoValue::SeveralLines));
+        assert_eq!(piped("one\rtwo"), Err(NoValue::SeveralLines));
+        assert_eq!(piped("one\n"), Ok(Value("one".into())));
+        assert_eq!(piped("one\r\n"), Ok(Value("one".into())));
+        assert_eq!(piped("one"), Ok(Value("one".into())));
+        let mut given = Asking::Given(["a\nb".to_string()].into_iter().collect());
+        assert_eq!(read_value(&mut given, &mut None, "key").unwrap(), Err(NoValue::SeveralLines));
+    }
+
+    fn row(id: &str, written: Option<i64>, filed: i64) -> serde_json::Value {
+        let mut r = serde_json::json!({ "_id": id, "_filed_at": filed, "label": "bank" });
+        if let Some(w) = written {
+            r["_updated_at"] = serde_json::json!(w);
+        }
+        r
+    }
+
+    fn order(rows: &mut [serde_json::Value]) -> Vec<String> {
+        newest_first(rows);
+        rows.iter().map(|r| r["_id"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// **Newest is the one written last, the same on every device**: by `_updated_at`,
+    /// whatever order the answer came in; between two written in one second, the one filed
+    /// last; between two filed in one millisecond, the lower id.
+    #[test]
+    fn records_under_one_label_are_newest_written_first_then_filed_then_by_id() {
+        let want = ["b", "a", "c", "d"];
+        let rows = || vec![row("a", Some(9), 200), row("b", Some(10), 100), row("c", Some(9), 200), row("d", None, 900)];
+        assert_eq!(order(&mut rows()), want);
+        let mut reversed = rows();
+        reversed.reverse();
+        assert_eq!(order(&mut reversed), want);
+        assert_eq!(order(&mut [row("x", Some(5), 100), row("y", Some(5), 300)]), ["y", "x"]);
+    }
+
+    /// **The issue's two devices** (kotton #483): A sets `bank` (R1, filed at T1), B, not
+    /// yet synced, sets it (R2, filed at T2), and A sets it again, which rewrites R1 and keeps
+    /// T1. Each device holds both after a sync, in its own order; on each, R1 is first, so
+    /// `get` prints v3 and `set` keeps R1, and nothing is undecided.
+    #[test]
+    fn of_two_devices_the_value_written_last_is_first_on_each() {
+        let r1 = || serde_json::json!({ "_id": "r1", "_filed_at": 1_000, "_updated_at": 3, "value": "v3" });
+        let r2 = || serde_json::json!({ "_id": "r2", "_filed_at": 2_000, "_updated_at": 2, "value": "v2" });
+        for mut held in [vec![r1(), r2()], vec![r2(), r1()]] {
+            newest_first(&mut held);
+            assert_eq!(held[0]["value"], "v3", "{held:?}");
+            assert_eq!(Held::of(&held[0]).id, "r1");
+            assert!(!undecided(&held));
+        }
+    }
+
+    /// **Where which was written last is not known, it is said**: two written in one second,
+    /// or one the answer gives no `_updated_at`; never for one record, nor for two written in
+    /// different seconds.
+    #[test]
+    fn a_label_whose_last_write_is_not_known_is_undecided() {
+        let sorted = |mut rows: Vec<serde_json::Value>| {
+            newest_first(&mut rows);
+            rows
+        };
+        assert!(undecided(&sorted(vec![row("a", Some(7), 1), row("b", Some(7), 2)])));
+        assert!(undecided(&sorted(vec![row("a", Some(7), 1), row("b", None, 2)])));
+        assert!(undecided(&sorted(vec![row("a", None, 1), row("b", None, 2)])));
+        assert!(!undecided(&sorted(vec![row("a", Some(7), 1), row("b", Some(8), 2)])));
+        assert!(!undecided(&sorted(vec![row("a", Some(7), 1)])));
+        assert!(!undecided(&sorted(vec![row("a", None, 1)])));
+        assert!(!undecided(&[]));
     }
 
     /// A note is shown whole up to its bound and cut after it.

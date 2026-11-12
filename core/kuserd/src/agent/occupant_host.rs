@@ -1602,13 +1602,13 @@ pub(crate) async fn admitted_vaults(
 /// The keys the query verb added are the host's, not the record's: the guest
 /// asked for one root and knows which, and when the store filed a row is not a
 /// fact about the row: a conversation is not ordered by a clock it does not
-/// hold.
+/// hold. Nor is when one of the person's devices last wrote it
+/// ([`kotton_record::record_cmds::WITHHELD_FROM_APPS`]).
 fn runner_record(mut body: serde_json::Value) -> kotton_wire::runner::RunnerRecord {
     let id = body["_id"].as_str().unwrap_or_default().to_owned();
+    kotton_record::record_cmds::withhold_from_apps(&mut body);
     if let Some(obj) = body.as_object_mut() {
         obj.remove("_id");
-        obj.remove("_root");
-        obj.remove("_filed_at");
     }
     kotton_wire::runner::RunnerRecord {
         id,
@@ -1852,11 +1852,13 @@ mod message_tests {
     }
 
     /// A root's row reaches the occupant as the record and its id, and none of
-    /// the keys the query verb added — the root, and when the store filed it.
+    /// the keys the query verb added — the root, when the store filed it, and
+    /// when it was last written.
     #[test]
     fn a_root_row_reaches_the_guest_without_the_hosts_keys() {
         let r = runner_record(serde_json::json!({
-            "_id": "r1", "_root": "fam", "_filed_at": 1_757_000_000_123i64, "title": "dentist",
+            "_id": "r1", "_root": "fam", "_filed_at": 1_757_000_000_123i64, "_updated_at": 1_757_000_001i64,
+            "title": "dentist",
         }));
         assert_eq!(r.id, "r1");
         let body: serde_json::Value = serde_json::from_str(&r.data).unwrap();
