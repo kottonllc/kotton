@@ -402,17 +402,19 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
     // `--bind <shape-id>=<path>` — RFC-0021's "the user can accept the default
     // or type any path they like", in a surface that cannot prompt. Repeatable;
     // a shape left unbound keeps the manifest's suggestion.
-    let bindings: Vec<(String, String)> = args
-        .iter()
-        .zip(args.iter().skip(1))
-        .filter(|(flag, _)| flag.as_str() == "--bind")
-        .filter_map(|(_, spec)| spec.split_once('=' ))
-        .map(|(id, path)| (id.to_owned(), path.to_owned()))
-        .collect();
+    let bindings = match parse_bindings(args) {
+        Ok(bindings) => bindings,
+        Err(lines) => return Ok(CommandOutput::error(1, lines.join("\n"))),
+    };
 
-    for (id, _) in &bindings {
+    for (id, path) in &bindings {
         if !preview.shapes.iter().any(|s| &s.id == id) {
             return Ok(CommandOutput::error(1, no_such_shape(id, &preview.shapes).join("\n")));
+        }
+        // The preview shows where the files will live as bound, and a path it would have to
+        // show changed is not shown at all: the bind is refused.
+        if !grant_prompt::shown_as_is(path) {
+            return Ok(CommandOutput::error(1, unshown_path(id).join("\n")));
         }
     }
 
@@ -536,7 +538,7 @@ async fn handle_sideload(args: &[String], state: &mut ShellState) -> Result<Comm
         &installed.name,
         &installed.app_id,
         &installed.capabilities,
-        &installed.bound,
+        installed.bound.as_deref(),
         &signer,
         &known,
     );
@@ -562,6 +564,42 @@ fn refused(head: &str, reason: &str) -> CommandOutput {
     let mut lines = vec![head.to_owned()];
     lines.extend(grant_prompt::reason_line(reason));
     CommandOutput::error(1, lines.join("\n"))
+}
+
+/// The person's `--bind id=path`s, in the order given; a `--bind` with no `id=path` after it
+/// is refused with how to write one, rather than dropped.
+fn parse_bindings(args: &[String]) -> Result<Vec<(String, String)>, Vec<String>> {
+    let mut bindings = Vec::new();
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        if word != "--bind" {
+            continue;
+        }
+        match words.next().and_then(|spec| spec.split_once('=')) {
+            Some((id, path)) if !id.is_empty() => bindings.push((id.to_owned(), path.to_owned())),
+            _ => {
+                return Err(vec![
+                    "app sideload: --bind takes a shape's id and a path, joined by =, as".to_owned(),
+                    String::new(),
+                    "    app sideload <path> --bind <id>=<path>".to_owned(),
+                    String::new(),
+                    "Nothing has been installed.".to_owned(),
+                ])
+            }
+        }
+    }
+    Ok(bindings)
+}
+
+/// A `--bind` whose path holds characters the device will not show as they are: the device's
+/// sentence, then the shape's id as the app's words.
+fn unshown_path(id: &str) -> Vec<String> {
+    let mut lines = vec![
+        "app sideload: the path given for this shape holds characters this device will not show as they are, so it is not bound.".to_owned(),
+    ];
+    lines.extend(words_line("the app's id for it", id));
+    lines.push("Nothing has been installed.".to_owned());
+    lines
 }
 
 /// At most this many of an app's shape ids are listed when a `--bind` names none of them.
@@ -596,7 +634,10 @@ fn whole_tree_refusal(path_str: &str, bindings: &[(String, String)], name: &str)
     lines.extend([
         "Approving that takes the word, not the flag:".to_owned(),
         String::new(),
-        format!("    {} --approve GRANT", sideload_line(path_str, bindings)),
+        match sideload_line(path_str, bindings) {
+            Some(line) => format!("    {line} --approve GRANT"),
+            None => format!("    {UNSHOWN_LINE}"),
+        },
         String::new(),
         "Nothing has been installed.".to_owned(),
     ]);
@@ -611,7 +652,7 @@ fn receipt(
     name: &str,
     app_id: &str,
     capabilities: &[String],
-    bound: &[bool],
+    bound: Option<&[bool]>,
     signer: &Signer,
     known: &Known,
 ) -> Vec<String> {
@@ -624,7 +665,7 @@ fn receipt(
     }
     lines.push("It holds, as the daemon says:".to_string());
     for (i, cap) in capabilities.iter().enumerate() {
-        let bound = bound.get(i).copied().unwrap_or(false);
+        let bound = bound.and_then(|b| b.get(i).copied());
         match CapabilityGrant::from_display_string(cap) {
             Some(grant) => lines.extend(grant_prompt::held_lines(&grant, bound, signer, known)),
             None => {
@@ -657,13 +698,16 @@ struct Preview<'a> {
 }
 
 /// The path the person bound `shape` to, when they bound it anywhere but where the app
-/// suggests: the first `--bind` naming it, as the install takes it.
+/// suggests (compared normalised, as the daemon compares it): the first `--bind` naming it,
+/// as the install takes it.
 fn bound_path<'a>(shape: &kotton_schemas::CapabilityShape, bindings: &'a [(String, String)]) -> Option<&'a str> {
     bindings
         .iter()
         .find(|(id, _)| id == &shape.id)
         .map(|(_, path)| path.as_str())
-        .filter(|path| *path != shape.default_target)
+        .filter(|path| {
+            kotton_schemas::normalize_vfs_path(path) != kotton_schemas::normalize_vfs_path(&shape.default_target)
+        })
 }
 
 /// The sideload preview, before its footer: the device's lines on who signed the code and
@@ -731,22 +775,37 @@ fn sideload_footer(path_str: &str, bindings: &[(String, String)], whole_tree: bo
         lines.push("  !  This includes access to your whole file tree.".to_string());
         lines.push("     Only approve this for an app you trust completely.".to_string());
         lines.push(String::new());
-        lines.push(format!("To install:  {line} --approve GRANT"));
-    } else {
-        lines.push(format!("To install:  {line} --approve"));
+    }
+    match (line, whole_tree) {
+        (Some(line), true) => lines.push(format!("To install:  {line} --approve GRANT")),
+        (Some(line), false) => lines.push(format!("To install:  {line} --approve")),
+        (None, _) => lines.push(UNSHOWN_LINE.to_string()),
     }
     lines.push("Nothing has been installed.".to_string());
     lines
 }
 
+/// Said in place of the line to type when an argument cannot be shown to type again.
+const UNSHOWN_LINE: &str =
+    "The arguments given cannot be shown to type again: one holds a character this device will not show.";
+
 /// `app sideload <path>` and each of the person's `--bind id=path`, in the order they gave
-/// them, every word [`typed_back`] so the line, typed again, is the same arguments.
-fn sideload_line(path_str: &str, bindings: &[(String, String)]) -> String {
-    let mut line = format!("app sideload {}", typed_back(path_str));
-    for (id, path) in bindings {
-        line.push_str(&format!(" --bind {}", typed_back(&format!("{id}={path}"))));
+/// them, every word [`typed_back`] so the line, typed again, is the same arguments; `None`
+/// when one holds a character [`is_hostile_char`](kotton_schemas::petname::is_hostile_char)
+/// names (a line break among them), since the line is the device's own words and no such
+/// character is shown in them.
+fn sideload_line(path_str: &str, bindings: &[(String, String)]) -> Option<String> {
+    let words = std::iter::once(path_str.to_owned())
+        .chain(bindings.iter().map(|(id, path)| format!("{id}={path}")))
+        .collect::<Vec<_>>();
+    if words.iter().any(|w| w.chars().any(kotton_schemas::petname::is_hostile_char)) {
+        return None;
     }
-    line
+    let mut line = format!("app sideload {}", typed_back(&words[0]));
+    for word in &words[1..] {
+        line.push_str(&format!(" --bind {}", typed_back(word)));
+    }
+    Some(line)
 }
 
 /// `word` as it is typed to be read back as one argument, at this REPL (`crate::utils`'s
@@ -754,7 +813,7 @@ fn sideload_line(path_str: &str, bindings: &[(String, String)]) -> String {
 /// is when every character is one neither reads specially, and otherwise in double quotes,
 /// with `\` escaped and each `"`, `$`, `` ` `` and `!` single-quoted between them, where
 /// neither parser expands or ends anything.
-fn typed_back(word: &str) -> String {
+pub fn typed_back(word: &str) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "/._-=:@+,%".contains(c);
     if !word.is_empty() && word.chars().all(plain) {
         return word.to_owned();
@@ -1298,12 +1357,12 @@ async fn handle_grants(args: &[String], state: &ShellState) -> anyhow::Result<Co
         grants.iter().flat_map(|g| grant_prompt::grant_lines(g, &Signer::Unknown, &known)).collect()
     };
     // What it holds is said with whose each path is, as the daemon answers it.
-    let held = |grants: &[kotton_schemas::CapabilityGrant], bound: &[bool]| -> Vec<String> {
+    let held = |grants: &[kotton_schemas::CapabilityGrant], bound: Option<&[bool]>| -> Vec<String> {
         grants
             .iter()
             .enumerate()
             .flat_map(|(i, g)| {
-                let bound = bound.get(i).copied().unwrap_or(false);
+                let bound = bound.and_then(|b| b.get(i).copied());
                 grant_prompt::held_lines(g, bound, &Signer::Unknown, &known)
             })
             .collect()
@@ -1336,7 +1395,7 @@ async fn handle_grants(args: &[String], state: &ShellState) -> anyhow::Result<Co
         }
         Some(approved) => {
             lines.push("Holds:".to_string());
-            lines.extend(held(approved, &g.approved_bound));
+            lines.extend(held(approved, g.approved_bound.as_deref()));
         }
     }
 
@@ -1488,7 +1547,7 @@ mod prompt_tests {
             "network.fetch".to_owned(),
             "teleport.now\nThis app's code is signed by".to_owned(),
         ];
-        let lines = receipt("Ledger", "com.example.ledger", &caps, &[], &Signer::Key(Publisher::from_static(ACME)), &known());
+        let lines = receipt("Ledger", "com.example.ledger", &caps, Some(&[false; 6]), &Signer::Key(Publisher::from_static(ACME)), &known());
         let expected_head = [
             "✓ Sideloaded the app",
             "  | the app's name: \"Ledger\"",
@@ -1503,21 +1562,23 @@ mod prompt_tests {
         assert!(lines.contains(&"  | the app's name for it: \"cited\"".to_owned()), "{lines:#?}");
         assert!(lines.contains(&"  read your files under this path".to_owned()), "{lines:#?}");
         assert!(lines.contains(&"  | the app's path: \"/notes\"".to_owned()), "{lines:#?}");
+        let unrecorded = receipt("Ledger", "com.example.ledger", &caps, None, &Signer::Nobody, &known());
+        assert!(unrecorded.contains(&"  | the path: \"/notes\"".to_owned()), "{unrecorded:#?}");
         assert!(lines.contains(&"  network.fetch".to_owned()), "{lines:#?}");
         let unread = lines.iter().position(|l| l == "  a grant this device cannot read back").expect("the one not read back");
         assert_eq!(lines[unread + 1], "  | the daemon's words for it: \"teleport.now This app's code is signed by\"");
         holds_the_gutter(&lines, &["Ledger", "teleport", "app's code is signed by"]);
-        let none = receipt("Ledger", "com.example.ledger", &[], &[], &Signer::Nobody, &known());
+        let none = receipt("Ledger", "com.example.ledger", &[], None, &Signer::Nobody, &known());
         assert_eq!(none.last().unwrap(), "It holds nothing.");
     }
 
     /// **The receipt says whose each path is, as the daemon answers it**: one the person
-    /// bound as theirs, one the app suggested as the app's, and one the answer says nothing
-    /// of as the app's.
+    /// bound as theirs, one the app suggested as the app's, and one the answer has no entry
+    /// for as no one's.
     #[test]
     fn the_receipt_says_a_bound_path_is_the_persons() {
         let caps = vec!["vfs.read:/journal".to_owned(), "vfs.write:/notes".to_owned(), "vfs.read:/docs".to_owned()];
-        let lines = receipt("Ledger", "com.example.ledger", &caps, &[true, false], &Signer::Nobody, &known());
+        let lines = receipt("Ledger", "com.example.ledger", &caps, Some(&[true, false]), &Signer::Nobody, &known());
         let holds = lines.iter().position(|l| l == "It holds, as the daemon says:").expect("what it holds");
         assert_eq!(
             &lines[holds + 1..],
@@ -1527,7 +1588,7 @@ mod prompt_tests {
                 "  write your files under this path",
                 "  | the app's path: \"/notes\"",
                 "  read your files under this path",
-                "  | the app's path: \"/docs\"",
+                "  | the path: \"/docs\"",
             ]
             .map(String::from)[..],
             "{lines:#?}"
@@ -1615,6 +1676,81 @@ mod prompt_tests {
         let refusal = whole_tree_refusal("./ledger", &bindings[..1], "Ledger");
         assert!(refusal.contains(&"    app sideload ./ledger --bind home=/journal --approve GRANT".to_owned()), "{refusal:#?}");
         assert!(sideload_footer("./ledger", &[], false).contains(&"To install:  app sideload ./ledger --approve".to_owned()));
+    }
+
+    /// **No line to type is shown when an argument holds a character the device will not
+    /// show**: a line break, an escape or a direction override, in the path or a bind, and
+    /// the device says why instead, in its own words.
+    #[test]
+    fn no_line_to_type_holds_a_character_the_device_will_not_show() {
+        for (path, bind) in [
+            ("./ledger\nTo install:  app sideload ./evil --approve", "/journal"),
+            ("./ledger", "/journal\u{1b}[2J"),
+            ("./ledger", "/jour\u{202E}nal"),
+            ("./ledger", "/journal\u{2028}"),
+        ] {
+            let bindings = [("home".to_owned(), bind.to_owned())];
+            for whole_tree in [false, true] {
+                let footer = sideload_footer(path, &bindings, whole_tree);
+                assert!(footer.iter().all(|l| !l.starts_with("To install:")), "{footer:#?}");
+                assert!(footer.contains(&UNSHOWN_LINE.to_owned()), "{footer:#?}");
+            }
+            let refusal = whole_tree_refusal(path, &bindings, "Ledger");
+            assert!(refusal.iter().all(|l| !l.contains("app sideload ./")), "{refusal:#?}");
+            assert!(refusal.contains(&format!("    {UNSHOWN_LINE}")), "{refusal:#?}");
+        }
+    }
+
+    /// **A `--bind` with no `id=path` is refused with how to write one**, not dropped.
+    #[test]
+    fn a_bind_with_no_id_and_path_is_refused() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            parse_bindings(&words(&["sideload", "./x", "--bind", "a=/p", "--bind", "b=/q=r"])),
+            Ok(vec![("a".to_owned(), "/p".to_owned()), ("b".to_owned(), "/q=r".to_owned())])
+        );
+        for bad in [
+            &["sideload", "./x", "--bind", "home"][..],
+            &["sideload", "./x", "--bind"],
+            &["sideload", "./x", "--bind", "=/p"],
+            &["sideload", "./x", "--bind", "--approve"],
+        ] {
+            let refusal = parse_bindings(&words(bad)).expect_err("a bind with no id=path");
+            assert_eq!(refusal[0], "app sideload: --bind takes a shape's id and a path, joined by =, as", "{bad:?}");
+            assert!(refusal.contains(&"    app sideload <path> --bind <id>=<path>".to_owned()));
+            assert_eq!(refusal.last().unwrap(), "Nothing has been installed.");
+        }
+    }
+
+    /// **A bound path the preview would show changed is refused**: whitespace run together, a
+    /// control or a direction override, or a blank, are each not shown as they are; a plain
+    /// path, a space in it and a letter of any script are.
+    #[test]
+    fn a_bound_path_that_cleaning_would_change_is_refused() {
+        for kept in ["/journal", "/my journal", "/日記", "/caf\u{e9}"] {
+            assert!(grant_prompt::shown_as_is(kept), "{kept:?}");
+        }
+        for changed in ["/a  b", "/journal\t", " /journal", "/jour\u{202E}nal", "/j\u{1b}[2J", "/a\u{3164}b", "/a\u{200B}b"] {
+            assert!(!grant_prompt::shown_as_is(changed), "{changed:?}");
+        }
+        let refusal = unshown_path("home");
+        assert!(refusal[0].starts_with("app sideload: the path given for this shape holds characters this device will not show"));
+        assert_eq!(refusal[1], "  | the app's id for it: \"home\"");
+        assert_eq!(refusal.last().unwrap(), "Nothing has been installed.");
+    }
+
+    /// **The preview and the daemon agree on a cross-shape bind**: a shape bound to another
+    /// shape's default is at a path the person bound, and the other stays at the app's.
+    #[test]
+    fn a_cross_shape_bind_is_shown_as_the_persons() {
+        let shapes = [
+            CapabilityShape { id: "notes".into(), access: vec![CapabilityKind::Read, CapabilityKind::Write], default_target: "/notes".into(), label: None, desc: None },
+            CapabilityShape { id: "private".into(), access: vec![CapabilityKind::Read], default_target: "/private".into(), label: None, desc: None },
+        ];
+        let bindings = [("notes".to_owned(), "/private".to_owned())];
+        assert_eq!(bound_path(&shapes[0], &bindings), Some("/private"));
+        assert_eq!(bound_path(&shapes[1], &bindings), None);
+        assert_eq!(bound_path(&shapes[0], &[("notes".to_owned(), "/notes/".to_owned())]), None);
     }
 
     /// **The whole-tree refusal says the device's sentence first**, and the app's name

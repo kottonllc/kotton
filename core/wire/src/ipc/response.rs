@@ -998,12 +998,13 @@ pub enum UserResponse {
         name: String,
         /// Human-readable capability list, e.g. `"schema.read:<publisher>/<name>"`.
         capabilities: Vec<String>,
-        /// For each of `capabilities`, in order: whether it is a VFS grant whose path the
-        /// person bound, rather than one the app's manifest suggests. The daemon reads it
-        /// off the manifest it keeps beside the grant, so nothing more is recorded. Empty
-        /// from a daemon that does not say, and every entry it lacks reads as the app's.
-        #[serde(default)]
-        bound: Vec<bool>,
+        /// For each of `capabilities`, in order: whether it is a file grant from a shape
+        /// the person bound to a path other than the app's, as the bindings recorded with
+        /// the approval say. `None` when nothing records whose the paths are (an approval
+        /// made without binding, a bundled app, or a daemon that does not say); then, and
+        /// for an entry missing, no path is said to be anyone's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bound: Option<Vec<bool>>,
     },
     /// What an app package is asking for, before anything is minted or written.
     ///
@@ -1054,12 +1055,13 @@ pub enum UserResponse {
         approved: Option<Vec<CapabilityGrant>>,
         /// `approved`, rendered. Empty when `approved` is `None`.
         approved_display: Vec<String>,
-        /// For each of `approved`, in order: whether it is a VFS grant whose path the
-        /// person bound, rather than one the app's manifest suggests, as
-        /// [`Self::AppInstalled`]'s `bound` says it. Empty when `approved` is `None`, or
-        /// from a daemon that does not say; every entry it lacks reads as the app's.
-        #[serde(default)]
-        approved_bound: Vec<bool>,
+        /// For each of `approved`, in order, what [`Self::AppInstalled`]'s `bound` says,
+        /// from the bindings recorded with the approval. `None` when `approved` is, or
+        /// nothing records whose the paths are (an approval from before the record was
+        /// kept among them); then, and for an entry missing, no path is said to be
+        /// anyone's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approved_bound: Option<Vec<bool>>,
         /// The signed envelopes backing this app's grants, if any.
         ///
         /// Separate from `approved` because they answer different questions: the

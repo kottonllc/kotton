@@ -382,6 +382,11 @@ pub enum ConsentSource {
 pub struct ApprovedCapabilities {
     grants: Vec<CapabilityGrant>,
     source: ConsentSource,
+    /// The bindings the person gave, `(shape id, path)` as given, when the file grants were
+    /// built from them ([`Self::from_bindings`]): the record of which paths they chose.
+    /// `None` when nothing records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bindings: Option<Vec<(String, String)>>,
 }
 
 impl ApprovedCapabilities {
@@ -392,7 +397,7 @@ impl ApprovedCapabilities {
     /// the guarantee here is "the daemon signs only a set a caller named", not
     /// "consent is proven". What this removes is the path where nobody named one.
     pub fn approved_by_user(grants: Vec<CapabilityGrant>) -> Self {
-        Self { grants, source: ConsentSource::User }
+        Self { grants, source: ConsentSource::User, bindings: None }
     }
 
     /// An app compiled into the binary, installed at boot with no user present.
@@ -400,7 +405,7 @@ impl ApprovedCapabilities {
     /// Named separately so that a reader of the install path can see, at the call
     /// site, that no human approved this and no user key signs it.
     pub fn system_bundled(grants: Vec<CapabilityGrant>) -> Self {
-        Self { grants, source: ConsentSource::SystemBundled }
+        Self { grants, source: ConsentSource::SystemBundled, bindings: None }
     }
 
     /// The approved grants.
@@ -411,6 +416,12 @@ impl ApprovedCapabilities {
     /// Who approved them.
     pub fn source(&self) -> ConsentSource {
         self.source
+    }
+
+    /// The bindings the person gave, as given, when the file grants were built from them;
+    /// `None` when nothing records which paths they chose.
+    pub fn bindings(&self) -> Option<&[(String, String)]> {
+        self.bindings.as_deref()
     }
 
     /// Build the approved set from **bindings**, not from grants a caller sent.
@@ -467,6 +478,7 @@ impl ApprovedCapabilities {
         Ok(Self {
             grants,
             source: ConsentSource::User,
+            bindings: Some(bindings.to_vec()),
         })
     }
 

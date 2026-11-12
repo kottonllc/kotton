@@ -1852,10 +1852,12 @@ pub async fn app_grants(
         .as_ref()
         .map(|g| g.iter().map(|x| x.display_string()).collect())
         .unwrap_or_default();
-    let approved_bound = approved
-        .as_ref()
-        .map(|g| g.iter().map(|x| bound_by_person(x, &manifest)).collect())
-        .unwrap_or_default();
+    let approved_bound = match &approved {
+        Some(grants) => ardb::get_bindings(user_db, &app_id)
+            .await?
+            .and_then(|record| bound_from_record(&manifest.vfs_shapes(), grants, &record)),
+        None => None,
+    };
 
     let mut envelopes = Vec::new();
     for env in grant_db::get_envelopes_for_app(user_db, &app_id)
@@ -1885,25 +1887,46 @@ pub async fn app_grants(
     })
 }
 
-/// Whether `grant` is a VFS grant at a path the person bound: one `manifest` neither
-/// requests for that kind nor suggests as a target of a shape carrying it. A path the
-/// manifest suggests is the app's, whoever typed it; any other path reached the approval
-/// only by the person's binding (or a caller's own choice in `approved`), so it is theirs.
+/// For each of `grants`, whether it is a file grant from a shape the person bound: one the
+/// `record` of their bindings names with a path other than the shape's default, compared
+/// normalised. A bind in the record is the person's whatever path it names, another shape's
+/// default among them; one equal to its own shape's default leaves the app's path.
 ///
-/// Read off the manifest kept beside the approval, so an install records nothing more for
-/// it, and a row from before this was asked answers as truly as a new one.
-fn bound_by_person(grant: &CapabilityGrant, manifest: &AppManifest) -> bool {
-    let CapabilityTarget::Vfs { path } = &grant.target else {
-        return false;
-    };
-    let requested = manifest.capabilities.iter().any(|g| {
-        g.kind == grant.kind && matches!(&g.target, CapabilityTarget::Vfs { path: p } if p == path)
-    });
-    let suggested = manifest
-        .vfs_shapes()
+/// Each file grant is attributed to the shape it was built from, as
+/// [`ApprovedCapabilities::from_bindings`] builds them: one target per shape, in declaration
+/// order, one grant per kind the shape carries, each grant taking the first such slot its
+/// kind and path fill. `None` when a file grant answers to no slot, since nothing then says
+/// whose its path is.
+fn bound_from_record(
+    shapes: &[kotton_schemas::CapabilityShape],
+    grants: &[CapabilityGrant],
+    record: &[(String, String)],
+) -> Option<Vec<bool>> {
+    let norm = kotton_schemas::normalize_vfs_path;
+    // (kind, target, bound, taken), in the order `from_bindings` builds the grants.
+    let mut slots: Vec<(CapabilityKind, String, bool, bool)> = Vec::new();
+    for shape in shapes {
+        let given = record.iter().find(|(id, _)| id == &shape.id).map(|(_, p)| p.as_str());
+        let target = norm(given.unwrap_or(&shape.default_target));
+        let bound = given.is_some_and(|p| norm(p) != norm(&shape.default_target));
+        for kind in &shape.access {
+            slots.push((kind.clone(), target.clone(), bound, false));
+        }
+    }
+    grants
         .iter()
-        .any(|s| &s.default_target == path && s.access.contains(&grant.kind));
-    !(requested || suggested)
+        .map(|grant| {
+            let CapabilityTarget::Vfs { path } = &grant.target else {
+                return Some(false);
+            };
+            let path = norm(path);
+            let slot = slots
+                .iter_mut()
+                .find(|(kind, target, _, taken)| !*taken && *kind == grant.kind && *target == path)?;
+            slot.3 = true;
+            Some(slot.2)
+        })
+        .collect()
 }
 
 /// Report what an app package is asking for. Mints nothing, writes nothing.
@@ -2063,6 +2086,13 @@ pub async fn app_install(
     // reading `manifest.toml` (TASK-the-approval-is-signed-but-not-enforced).
     let approved_json = serde_json::to_string(approved.grants())
         .map_err(|e| io::Error::other(format!("approved serialization: {e}")))?;
+    // Which paths the person chose, kept with the decision: the bindings they gave, when
+    // the file grants were built from them, and no record otherwise.
+    let bindings_json = approved
+        .bindings()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| io::Error::other(format!("bindings serialization: {e}")))?;
 
     let installed_at = now_rfc3339();
     ardb::insert_app(
@@ -2075,6 +2105,7 @@ pub async fn app_install(
         &installed_at,
         &wasm_hash,
         &approved_json,
+        bindings_json.as_deref(),
     )
     .await?;
 
@@ -2133,10 +2164,8 @@ pub async fn app_install(
         .in_scope(EventScope::User(user_id.to_string())));
     }
     let bound = approved
-        .grants()
-        .iter()
-        .map(|g| bound_by_person(g, &manifest))
-        .collect();
+        .bindings()
+        .and_then(|record| bound_from_record(&manifest.vfs_shapes(), approved.grants(), record));
     Ok(UserResponse::AppInstalled {
         app_id,
         name,
@@ -7974,7 +8003,8 @@ mod one_shell_tests {
                 wasm_path     TEXT NOT NULL,
                 installed_at  TEXT NOT NULL,
                 wasm_hash     TEXT NOT NULL,
-                approved_json TEXT
+                approved_json TEXT,
+                bindings_json TEXT
              )",
         )
         .execute(&pool)
@@ -7996,6 +8026,7 @@ mod one_shell_tests {
             "2026-09-01T00:00:00Z",
             "deadbeef",
             "[]",
+            None,
         )
         .await
         .expect("install the shell the way an identity's birth did");
@@ -8094,6 +8125,7 @@ mod one_shell_tests {
             "2026-09-25T00:00:00Z",
             "",
             "[]",
+            None,
         )
         .await
         .expect("the editor is installed");
@@ -8376,12 +8408,12 @@ desc    = "The folder this editor reads and saves files in."
              version TEXT NOT NULL, capabilities TEXT NOT NULL DEFAULT '[]', \
              wasm_path TEXT NOT NULL, installed_at TEXT NOT NULL, \
              wasm_hash TEXT NOT NULL DEFAULT '', bundle_path TEXT, \
-             dev INTEGER NOT NULL DEFAULT 0, approved_json TEXT)",
+             dev INTEGER NOT NULL DEFAULT 0, approved_json TEXT, bindings_json TEXT)",
         )
         .execute(db.as_ref())
         .await
         .expect("create app_registry");
-        ardb::insert_app(&db, EDITOR, "Editor", "0.1.0", "[]", "/x.wasm", "2026-09-25T00:00:00Z", "", "[]")
+        ardb::insert_app(&db, EDITOR, "Editor", "0.1.0", "[]", "/x.wasm", "2026-09-25T00:00:00Z", "", "[]", None)
             .await
             .expect("the editor is installed");
         let dir = tmp.path().join("apps").join(EDITOR);
@@ -8474,7 +8506,7 @@ desc    = "The folder this editor reads and saves files in."
     /// Install `app_id` under `name` with `manifest` on disk where the daemon
     /// keeps it, beside the editor [`the_editor_installed`] put there.
     async fn install(tmp: &Path, db: &Arc<SqlitePool>, app_id: &str, name: &str, at: &str, manifest: &str) {
-        ardb::insert_app(db, app_id, name, "0.1.0", "[]", "/x.wasm", at, "", "[]")
+        ardb::insert_app(db, app_id, name, "0.1.0", "[]", "/x.wasm", at, "", "[]", None)
             .await
             .expect("installed");
         let dir = tmp.join("apps").join(app_id);
@@ -8540,7 +8572,7 @@ desc    = "The folder this editor reads and saves files in."
              [capabilities]\n\"files.read\" = [\"/\"]\n\"files.write\" = [\"/\"]\n",
         )
         .await;
-        ardb::insert_app(&db, "sh.example.broken", "Broken", "0.1.0", "[]", "/x.wasm", "2026-10-05T00:00:00Z", "", "[]")
+        ardb::insert_app(&db, "sh.example.broken", "Broken", "0.1.0", "[]", "/x.wasm", "2026-10-05T00:00:00Z", "", "[]", None)
             .await
             .expect("installed with no manifest on disk");
         role_db::set_role(&db, "shell", "sh.kotton.shell").await.expect("the shell is designated");
@@ -8927,7 +8959,7 @@ desc    = "The folder this editor reads and saves files in."
     async fn a_bundle_launch_announces_no_path() {
         const BUNDLE: &str = "sh.example.bundle";
         let (tmp, db) = the_editor_installed().await;
-        ardb::insert_app(&db, BUNDLE, "Bundle", "0.1.0", "[]", "", "2026-10-01T00:00:00Z", "", "[]")
+        ardb::insert_app(&db, BUNDLE, "Bundle", "0.1.0", "[]", "", "2026-10-01T00:00:00Z", "", "[]", None)
             .await
             .expect("a bundle is installed with no body");
 
@@ -9084,36 +9116,97 @@ desc    = "The folder this editor reads and saves files in."
 }
 
 #[cfg(test)]
-mod bound_by_person_tests {
-    use super::bound_by_person;
-    use kotton_schemas::{AppManifest, CapabilityGrant, CapabilityKind};
+mod bound_from_record_tests {
+    use super::{ardb, bound_from_record};
+    use kotton_schemas::{ApprovedCapabilities, CapabilityGrant, CapabilityKind, CapabilityShape};
+    use std::sync::Arc;
 
-    /// **A path the manifest suggests is the app's; any other is the person's**: a shape's
-    /// default, and a flat form's path, each for the kind it carries; a moved target, and a
-    /// suggested path for a kind its shape does not carry, are bound; no other grant is.
+    fn shape(id: &str, access: &[CapabilityKind], default: &str) -> CapabilityShape {
+        CapabilityShape { id: id.into(), access: access.to_vec(), default_target: default.into(), label: None, desc: None }
+    }
+
+    /// What an install through binding grants, and whose each path is said to be.
+    fn bound(shapes: &[CapabilityShape], record: &[(&str, &str)]) -> Option<Vec<bool>> {
+        let record: Vec<(String, String)> = record.iter().map(|(i, p)| (i.to_string(), p.to_string())).collect();
+        let approved = ApprovedCapabilities::from_bindings(shapes, &record, Vec::new()).expect("the bindings");
+        assert_eq!(approved.bindings(), Some(&record[..]));
+        bound_from_record(shapes, approved.grants(), &record)
+    }
+
+    use CapabilityKind::{Read, Write};
+
+    /// **A bind to another shape's default is the person's, for every kind its shape
+    /// carries**: `notes` (read and write) bound to `/private`, which `private` (read)
+    /// suggests, holds both its grants at a path the person bound, and `private` holds its
+    /// own at the app's.
     #[test]
-    fn a_path_is_the_persons_only_where_the_manifest_does_not_suggest_it() {
-        let shaped = AppManifest::from_toml(
-            "[app]\nid = \"com.example.ledger\"\nname = \"Ledger\"\nversion = \"1.0.0\"\n\n\
-             [[capabilities]]\nid = \"home\"\ntype = \"vfs-tree\"\naccess = [\"read\"]\ndefault = \"/notes\"\n",
-        )
-        .expect("a manifest declaring a shape");
-        let read = |p: &str| CapabilityGrant::vfs(CapabilityKind::Read, p);
-        assert!(!bound_by_person(&read("/notes"), &shaped));
-        assert!(bound_by_person(&read("/journal"), &shaped));
-        assert!(bound_by_person(&CapabilityGrant::vfs(CapabilityKind::Write, "/notes"), &shaped));
-        let flat = AppManifest::from_toml(
-            "[app]\nid = \"com.example.flat\"\nname = \"Flat\"\nversion = \"1.0.0\"\n\n\
-             [capabilities]\n\"files.read\" = [\"/docs\"]\n",
-        )
-        .expect("a flat manifest");
-        assert!(!bound_by_person(&read("/docs"), &flat));
-        assert!(bound_by_person(&read("/"), &flat));
-        let schema = CapabilityGrant::schema(
-            CapabilityKind::Read,
-            kotton_schemas::SchemaId::parse(kotton_common::namespace::NSID_NOTES).unwrap(),
+    fn a_cross_shape_bind_is_the_persons_for_each_kind() {
+        let shapes = [shape("notes", &[Read, Write], "/notes"), shape("private", &[Read], "/private")];
+        assert_eq!(bound(&shapes, &[("notes", "/private")]), Some(vec![true, true, false]));
+        // The shell sends every shape's target: an unbound one at its default.
+        assert_eq!(
+            bound(&shapes, &[("notes", "/private"), ("private", "/private")]),
+            Some(vec![true, true, false])
         );
-        assert!(!bound_by_person(&schema, &flat));
+    }
+
+    /// **Two shapes of one kind are told apart**: each answers for its own grant.
+    #[test]
+    fn two_shapes_of_one_kind_are_each_their_own() {
+        let shapes = [shape("a", &[Read], "/a"), shape("b", &[Read], "/b")];
+        assert_eq!(bound(&shapes, &[("b", "/elsewhere")]), Some(vec![false, true]));
+        assert_eq!(bound(&shapes, &[("a", "/b")]), Some(vec![true, false]));
+    }
+
+    /// **A bind to another shape's default whose access differs** is the person's.
+    #[test]
+    fn a_bind_to_a_default_of_other_access_is_the_persons() {
+        let shapes = [shape("drafts", &[Write], "/drafts"), shape("library", &[Read], "/library")];
+        assert_eq!(bound(&shapes, &[("drafts", "/library")]), Some(vec![true, false]));
+    }
+
+    /// **A bind equal to its own default, normalised, leaves the app's path.**
+    #[test]
+    fn a_bind_to_the_default_is_the_apps() {
+        let shapes = [shape("home", &[Read, Write], "/notes")];
+        assert_eq!(bound(&shapes, &[("home", "/notes")]), Some(vec![false, false]));
+        assert_eq!(bound(&shapes, &[("home", "/notes/")]), Some(vec![false, false]));
+        assert_eq!(bound(&shapes, &[]), Some(vec![false, false]));
+    }
+
+    /// **A grant no slot answers to leaves whose its path is unsaid**, and a grant with no
+    /// path is never the person's.
+    #[test]
+    fn a_grant_that_answers_to_no_shape_is_said_by_no_one() {
+        let shapes = [shape("home", &[Read], "/notes")];
+        let stray = [CapabilityGrant::vfs(Read, "/elsewhere")];
+        assert_eq!(bound_from_record(&shapes, &stray, &[]), None);
+        let plain = [CapabilityGrant::action(kotton_schemas::CapabilityTarget::Network)];
+        assert_eq!(bound_from_record(&shapes, &plain, &[]), Some(vec![false]));
+        assert!(ApprovedCapabilities::approved_by_user(stray.to_vec()).bindings().is_none());
+    }
+
+    /// **A row with no record reads as none**, and a record reads back as given.
+    #[tokio::test]
+    async fn a_row_with_no_record_has_none() {
+        let pool = Arc::new(sqlx::SqlitePool::connect(":memory:").await.expect("in-memory db"));
+        sqlx::query(
+            "CREATE TABLE app_registry (app_id TEXT PRIMARY KEY, name TEXT NOT NULL, version TEXT NOT NULL, \
+             capabilities TEXT NOT NULL, wasm_path TEXT NOT NULL, installed_at TEXT NOT NULL, \
+             wasm_hash TEXT NOT NULL, approved_json TEXT, bindings_json TEXT)",
+        )
+        .execute(pool.as_ref())
+        .await
+        .expect("create app_registry");
+        ardb::insert_app(&pool, "com.example.old", "Old", "1", "[]", "/x", "t", "", "[]", None).await.unwrap();
+        assert_eq!(ardb::get_bindings(&pool, "com.example.old").await.unwrap(), None);
+        assert_eq!(ardb::get_bindings(&pool, "com.example.absent").await.unwrap(), None);
+        let record = r#"[["home","/journal"]]"#;
+        ardb::insert_app(&pool, "com.example.new", "New", "1", "[]", "/x", "t", "", "[]", Some(record)).await.unwrap();
+        assert_eq!(
+            ardb::get_bindings(&pool, "com.example.new").await.unwrap(),
+            Some(vec![("home".to_owned(), "/journal".to_owned())])
+        );
     }
 }
 

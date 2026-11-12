@@ -299,7 +299,10 @@ async fn a_bound_path_is_said_to_be_the_persons_in_the_receipt_and_in_app_grants
     assert!(preview.contains("  read + write files at a path you bound\n"), "{preview}");
     assert!(preview.contains("  | a path you bound: \"/journal\"\n"), "{preview}");
     assert!(
-        preview.contains(&format!("To install:  app sideload {bound} --bind home=/journal --approve\n")),
+        preview.contains(&format!(
+            "To install:  app sideload {} --bind home=/journal --approve\n",
+            kotton_shell::typed_back(&bound)
+        )),
         "{preview}"
     );
     let (exit, receipt) = typed(&env, &["app", "sideload", &bound, "--bind", "home=/journal", "--approve"]).await;
@@ -323,7 +326,10 @@ async fn a_bound_path_is_said_to_be_the_persons_in_the_receipt_and_in_app_grants
     let (exit, preview) = typed(&env, &["app", "sideload", &unbound]).await;
     assert_eq!(exit, kotton_shell::ExitCode::Success, "{preview}");
     assert!(preview.contains("  read + write files at a place the app suggests\n"), "{preview}");
-    assert!(preview.contains(&format!("To install:  app sideload {unbound} --approve\n")), "{preview}");
+    assert!(
+        preview.contains(&format!("To install:  app sideload {} --approve\n", kotton_shell::typed_back(&unbound))),
+        "{preview}"
+    );
     let (exit, receipt) = typed(&env, &["app", "sideload", &unbound, "--approve"]).await;
     assert_eq!(exit, kotton_shell::ExitCode::Success, "{receipt}");
     assert!(receipt.contains("  | the app's path: \"/notes\""), "{receipt}");
@@ -337,4 +343,29 @@ async fn a_bound_path_is_said_to_be_the_persons_in_the_receipt_and_in_app_grants
     for said in [&receipt, &grants, &preview] {
         assert!(!said.contains(both_ways), "{said}");
     }
+
+    // A shape bound to another shape's default: both its grants are at a path the person
+    // bound, and the other shape's grant at the same path is the app's.
+    let dir = apps.path().join("cross");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("app.wasm"), STUB_WASM).unwrap();
+    std::fs::write(
+        dir.join("manifest.toml"),
+        "[app]\nid = \"com.example.cross\"\nname = \"Ledger\"\nversion = \"1.0.0\"\n\n\
+         [[capabilities]]\nid = \"notes\"\ntype = \"vfs-tree\"\naccess = [\"read\", \"write\"]\ndefault = \"/notes\"\n\n\
+         [[capabilities]]\nid = \"private\"\ntype = \"vfs-tree\"\naccess = [\"read\"]\ndefault = \"/private\"\n",
+    )
+    .unwrap();
+    let cross = dir.to_str().unwrap().to_string();
+    let held = [
+        "  read your files under this path\n  | a path you bound: \"/private\"\n  \
+         write your files under this path\n  | a path you bound: \"/private\"\n  \
+         read your files under this path\n  | the app's path: \"/private\"",
+    ];
+    let (exit, receipt) = typed(&env, &["app", "sideload", &cross, "--bind", "notes=/private", "--approve"]).await;
+    assert_eq!(exit, kotton_shell::ExitCode::Success, "{receipt}");
+    assert!(receipt.contains(held[0]), "{receipt}");
+    let (exit, grants) = typed(&env, &["app", "grants", "com.example.cross"]).await;
+    assert_eq!(exit, kotton_shell::ExitCode::Success, "{grants}");
+    assert!(grants.split("Holds:").nth(1).expect("what it holds").contains(held[0]), "{grants}");
 }

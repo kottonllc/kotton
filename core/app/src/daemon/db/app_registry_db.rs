@@ -30,11 +30,13 @@ pub async fn insert_app(
     installed_at: &str,
     wasm_hash: &str,
     approved_json: &str,
+    bindings_json: Option<&str>,
 ) -> io::Result<()> {
     sqlx::query(
         "INSERT OR REPLACE INTO app_registry \
-         (app_id, name, version, capabilities, wasm_path, installed_at, wasm_hash, approved_json) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         (app_id, name, version, capabilities, wasm_path, installed_at, wasm_hash, approved_json, \
+          bindings_json) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(app_id)
     .bind(name)
@@ -44,6 +46,7 @@ pub async fn insert_app(
     .bind(installed_at)
     .bind(wasm_hash)
     .bind(approved_json)
+    .bind(bindings_json)
     .execute(db.as_ref())
     .await
     .map_err(db_err)?;
@@ -224,4 +227,28 @@ pub async fn get_approved(
     let grants: Vec<kotton_schemas::CapabilityGrant> = serde_json::from_str(&json)
         .map_err(|e| io::Error::other(format!("approved_json for {app_id}: {e}")))?;
     Ok(Some(kotton_schemas::CapabilitySet::new(grants)))
+}
+
+/// The bindings the person gave when they approved `app_id`, `(shape id, path)` as given:
+/// the record of which paths they chose (`migrations_user/0013_app_bindings.sql`).
+///
+/// `Ok(None)` means **no record**: no row, an approval written before the record was kept,
+/// a bundled app, or an approval made without binding. That is not the same as a record of
+/// no bindings, and nothing reads it as one.
+pub async fn get_bindings(
+    db: &Arc<SqlitePool>,
+    app_id: &str,
+) -> io::Result<Option<Vec<(String, String)>>> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT bindings_json FROM app_registry WHERE app_id = ?")
+            .bind(app_id)
+            .fetch_optional(db.as_ref())
+            .await
+            .map_err(db_err)?;
+    let Some((Some(json),)) = row else {
+        return Ok(None);
+    };
+    serde_json::from_str(&json)
+        .map(Some)
+        .map_err(|e| io::Error::other(format!("bindings_json for {app_id}: {e}")))
 }

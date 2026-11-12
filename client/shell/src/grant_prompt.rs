@@ -303,6 +303,11 @@ fn others_within(text: &str, max: usize) -> (String, Option<usize>) {
     (shown, None)
 }
 
+/// Whether `text` is shown as it is, with nothing [`cleaned`] away or changed.
+pub fn shown_as_is(text: &str) -> bool {
+    cleaned(text) == text
+}
+
 /// `text`, another party's, quoted as a prompt shows it ([`others`]), with `"` and `\`
 /// escaped so the quote is the one the prompt closed, and the fact that it was cut.
 pub fn quoted(text: &str) -> String {
@@ -511,7 +516,7 @@ fn verb(kind: &CapabilityKind) -> &'static str {
 /// A path here is the app's ([`APPS_PATH`]): what an app asks for is its manifest's. What
 /// an app holds can be at a path the person bound instead, and is said by [`held_lines`].
 pub fn grant_lines(grant: &CapabilityGrant, signer: &Signer, known: &Known) -> Vec<String> {
-    held_lines(grant, false, signer, known)
+    held_lines(grant, Some(false), signer, known)
 }
 
 /// Said of a path the app's manifest suggests.
@@ -520,10 +525,14 @@ pub const APPS_PATH: &str = "the app's path";
 /// Said of a path the person bound in place of the app's.
 pub const YOUR_PATH: &str = "a path you bound";
 
-/// [`grant_lines`] for a grant an app holds, where the daemon said whose its path is: a path
-/// the person `bound` is said to be theirs ([`YOUR_PATH`]), any other the app's
-/// ([`APPS_PATH`]). `bound` says nothing of a grant that carries no path.
-pub fn held_lines(grant: &CapabilityGrant, bound: bool, signer: &Signer, known: &Known) -> Vec<String> {
+/// Said of a path when nothing records whose it is: true of the app's and the person's.
+pub const SOMEONES_PATH: &str = "the path";
+
+/// [`grant_lines`] for a grant an app holds, said with whose its path is as the daemon
+/// answered: `Some(true)` the person's ([`YOUR_PATH`]), `Some(false)` the app's
+/// ([`APPS_PATH`]), and `None`, where nothing records it, no one's ([`SOMEONES_PATH`]).
+/// `bound` says nothing of a grant that carries no path.
+pub fn held_lines(grant: &CapabilityGrant, bound: Option<bool>, signer: &Signer, known: &Known) -> Vec<String> {
     let rw = verb(&grant.kind);
     let with = |head: String, whose: &str, text: &str| {
         let mut lines = vec![head];
@@ -559,7 +568,11 @@ pub fn held_lines(grant: &CapabilityGrant, bound: bool, signer: &Signer, known: 
         }
         CapabilityTarget::Vfs { path } => with(
             format!("  {rw} your files under this path"),
-            if bound { YOUR_PATH } else { APPS_PATH },
+            match bound {
+                Some(true) => YOUR_PATH,
+                Some(false) => APPS_PATH,
+                None => SOMEONES_PATH,
+            },
             path,
         ),
         CapabilityTarget::Quarantine { extension_id } => with(
@@ -1204,23 +1217,27 @@ mod tests {
         assert_eq!(grant_lines(&plain, &Signer::Nobody, &nothing_named()), vec!["  network.fetch"]);
     }
 
-    /// **A path is said to be whoever's it is**: one the person bound as theirs, any other
-    /// as the app's, and what an app asks for is always the app's; a grant with no path
-    /// reads the same either way.
+    /// **A path is said to be whoever's it is**: one the person bound as theirs, one the app
+    /// suggested as the app's, one nothing records as no one's, and what an app asks for is
+    /// always the app's; a grant with no path reads the same every way.
     #[test]
     fn a_path_is_said_as_the_persons_or_the_apps() {
         let path = CapabilityGrant::vfs(CapabilityKind::Write, "/journal");
         let known = nothing_named();
         assert_eq!(
-            held_lines(&path, true, &Signer::Nobody, &known),
+            held_lines(&path, Some(true), &Signer::Nobody, &known),
             vec!["  write your files under this path", "  | a path you bound: \"/journal\""]
         );
         assert_eq!(
-            held_lines(&path, false, &Signer::Nobody, &known),
+            held_lines(&path, Some(false), &Signer::Nobody, &known),
             vec!["  write your files under this path", "  | the app's path: \"/journal\""]
         );
-        assert_eq!(grant_lines(&path, &Signer::Nobody, &known), held_lines(&path, false, &Signer::Nobody, &known));
+        assert_eq!(
+            held_lines(&path, None, &Signer::Nobody, &known),
+            vec!["  write your files under this path", "  | the path: \"/journal\""]
+        );
+        assert_eq!(grant_lines(&path, &Signer::Nobody, &known), held_lines(&path, Some(false), &Signer::Nobody, &known));
         let plain = CapabilityGrant::action(CapabilityTarget::Network);
-        assert_eq!(held_lines(&plain, true, &Signer::Nobody, &known), vec!["  network.fetch"]);
+        assert_eq!(held_lines(&plain, Some(true), &Signer::Nobody, &known), vec!["  network.fetch"]);
     }
 }

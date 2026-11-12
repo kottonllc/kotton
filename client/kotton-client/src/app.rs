@@ -36,8 +36,8 @@ pub struct AppGrants {
     pub approved: Option<Vec<CapabilityGrant>>,
     pub approved_display: Vec<String>,
     /// For each of `approved`, whether its path is one the person bound rather than the
-    /// app's. An entry missing (a daemon that does not say) is the app's.
-    pub approved_bound: Vec<bool>,
+    /// app's; `None`, or an entry missing, when nothing records whose it is.
+    pub approved_bound: Option<Vec<bool>>,
     pub envelopes: Vec<kotton_wire::ipc::AppGrantEnvelope>,
 }
 
@@ -49,8 +49,8 @@ pub struct AppInstalled {
     /// What the app holds, rendered.
     pub capabilities: Vec<String>,
     /// For each of `capabilities`, whether its path is one the person bound rather than
-    /// the app's. An entry missing (a daemon that does not say) is the app's.
-    pub bound: Vec<bool>,
+    /// the app's; `None`, or an entry missing, when nothing records whose it is.
+    pub bound: Option<Vec<bool>>,
 }
 
 /// What an app package is asking for, before anything is installed.
