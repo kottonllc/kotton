@@ -3,8 +3,8 @@
 // that cannot read kotton-protocol (`verb_check.rs` says why). Generated: with a checkout,
 // `cargo xtask-docs verb-check --pinned` prints this from it.
 pub const PINNED: Pinned = Pinned {
-    commit: "c24a041",
-    decision_names: &[".ics", "always", "cat", "channel", "contact", "cp", "default", "device", "diff", "doctor", "drive", "edit", "find", "grep", "head", "host", "id", "identity", "inbox", "log", "ls", "message", "mint", "mkdir", "mv", "open", "pin", "receive", "record", "repl", "restore", "rm", "rmdir", "schema", "search", "secret", "send", "session", "share", "sort", "status", "sync", "tail", "touch", "trash", "versions", "wc"],
+    commit: "3646fed",
+    decision_names: &["cat", "contact", "cp", "device", "diff", "doctor", "drive", "edit", "find", "grep", "head", "host", "id", "identity", "log", "ls", "message", "mkdir", "mv", "open", "pin", "receive", "record", "repl", "restore", "rm", "rmdir", "schema", "search", "secret", "send", "session", "share", "sort", "status", "sync", "tail", "touch", "trash", "versions", "wc"],
     decision_verbs: &[
         ("drive", &["create", "enrol", "export", "list", "move", "show"]),
         ("pin", &["<drive>", "default", "list"]),

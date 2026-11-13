@@ -125,21 +125,40 @@ fn verbs_after(words: &[&str]) -> Vec<String> {
     vec![String::new()]
 }
 
-/// The backticked spans of `text`, each with whether the text before it ends on `·`.
-fn spans(text: &str) -> Vec<(String, bool)> {
+/// One backticked span of a paragraph, as the Decision's reading needs it.
+struct Span {
+    text: String,
+    /// The text before it ends on `·`: it is the next form of a run.
+    chained: bool,
+    /// It opens inside `(…)` in the prose around it: a comment on the form before it.
+    aside: bool,
+}
+
+/// The backticked spans of `text`. Parentheses are counted in the prose between spans only,
+/// so a `(` inside a form is not an aside.
+fn spans(text: &str) -> Vec<Span> {
     let mut out = Vec::new();
     let mut rest = text;
     let mut before = String::new();
+    let mut depth = 0i32;
     while let Some(open) = rest.find('`') {
-        before.push_str(&rest[..open]);
+        let prose = &rest[..open];
+        depth = (depth + prose.matches('(').count() as i32 - prose.matches(')').count() as i32).max(0);
+        before.push_str(prose);
         let after = &rest[open + 1..];
         let Some(close) = after.find('`') else { break };
         let chained = before.trim_end().ends_with('·');
-        out.push((after[..close].replace("\\|", "|"), chained));
+        out.push(Span { text: after[..close].replace("\\|", "|"), chained, aside: depth > 0 });
         before.clear();
         rest = &after[close + 1..];
     }
     out
+}
+
+/// Whether `word` can be a name a person types first: a word, not a flag (`--at`), a
+/// placeholder (`<drive>`) or a file's extension (`.ics`).
+fn is_name(word: &str) -> bool {
+    word.chars().next().is_some_and(|c| c.is_ascii_lowercase())
 }
 
 impl Rfc {
@@ -151,18 +170,32 @@ impl Rfc {
     /// after a `·` is that noun's verb (`· `list``), or a noun of its own when it has a verb
     /// of its own (`· `message send <contact>``); of one word (`ls`), the spans after a `·`
     /// are names of their own (the files' verbs). A span anywhere else is a whole form
-    /// (`` `identity rotate` ``). **A Today cell** is spans of whole forms, `/` and `|`
-    /// between verbs (`sync add/list/remove`).
+    /// (`` `identity rotate` ``, `` `sync` syncs ``).
+    ///
+    /// **What is not the command tree.** A span inside `(…)` is the comment a form carries
+    /// (`` `receive off|10m|always` (… `always` is said back …) ``), and the words it quotes
+    /// are the comment's, not forms: `always`, `default` and `.ics` there are not names, and
+    /// neither was `inbox` when the decision said "shown here and by `inbox`". A form whose
+    /// first word is not a word (`--at`, `<drive>`, `.ics`) names nothing. A span outside a
+    /// comment is still read as a form wherever it stands, since the decision gives `sync` and
+    /// `id` only in sentences; so "there is no `share revoke`" reads `share` as the name it is.
+    ///
+    /// **A Today cell** is spans of whole forms, `/` and `|` between verbs
+    /// (`sync add/list/remove`).
     pub fn parse(text: &str) -> Rfc {
         let mut rfc = Rfc::default();
         let decision = section(text, "### What a person can do");
         for paragraph in decision.split("\n\n") {
             let joined = paragraph.split_whitespace().collect::<Vec<_>>().join(" ");
             let mut noun: Option<String> = None;
-            for (i, (span, chained)) in spans(&joined).into_iter().enumerate() {
+            let forms = spans(&joined).into_iter().filter(|s| !s.aside);
+            for (i, Span { text: span, chained, .. }) in forms.enumerate() {
                 let words: Vec<&str> = span.split_whitespace().collect();
                 let Some(first) = words.first().copied() else { continue };
                 let whole = |rfc: &mut Rfc, words: &[&str]| {
+                    if !is_name(words[0]) {
+                        return;
+                    }
                     rfc.decision_names.insert(words[0].to_string());
                     rfc.decision_verbs.entry(words[0].to_string()).or_default().extend(verbs_after(&words[1..]));
                 };
@@ -203,10 +236,10 @@ impl Rfc {
             if today.trim_start().starts_with("---") {
                 continue;
             }
-            for (span, _) in spans(today) {
+            for Span { text: span, .. } in spans(today) {
                 let words: Vec<&str> = span.split_whitespace().collect();
                 let Some(first) = words.first() else { continue };
-                if !first.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+                if !is_name(first) {
                     continue;
                 }
                 rfc.today_names.insert(first.to_string());
@@ -610,6 +643,45 @@ whole` is \"collect all my things\". `sync` syncs this device's drives, now.
         }
         assert!(!rfc.decision_names.contains("list"), "a verb read as a name: {:?}", rfc.decision_names);
         assert!(!rfc.decision_names.contains("not-a-verb"), "read past the section");
+    }
+
+    /// **Planted: words of the prose read as top-level names.** A word an aside quotes
+    /// (`inbox`, `always`), a flag (`--at`) and an extension (`.ics`) are not names, in an aside,
+    /// in a run of forms or in a sentence; the forms around them, and a name a sentence gives
+    /// (`sync`), still are.
+    #[test]
+    fn a_word_of_the_prose_is_not_a_name() {
+        let text = "\
+### What a person can do
+
+**Files.** `ls` · `--at <time>` (when; `--at` takes a time) · `open <path>` · `restore <path>
+--version <n>`. `--at` is a flag, and an `.ics` file is a file.
+
+**Devices.** `device add` · `bind` (off until told; `always` is said back at every `status`)
+· `rm <device>` (if it may be in someone else's hands, `identity rotate`).
+
+**Seeing it.** `status` (what arrived, shown here and by `inbox`) · `log` · `repl`. `sync` syncs
+this device's drives, now.
+";
+        let rfc = Rfc::parse(text);
+        for word in ["inbox", "always", "--at", ".ics", "<path>", "identity"] {
+            assert!(!rfc.decision_names.contains(word), "{word} read as a name: {:?}", rfc.decision_names);
+        }
+        assert_eq!(
+            rfc.decision_names,
+            set(&["ls", "open", "restore", "device", "status", "log", "repl", "sync"]),
+            "the forms are the names"
+        );
+        assert_eq!(rfc.decision("device"), set(&["add", "bind", "rm"]));
+        assert_eq!(rfc.decision("sync"), set(&[""]));
+    }
+
+    /// The fixture's aside quotes `default`, the word a `pin` verb is; it is not a name.
+    #[test]
+    fn an_aside_of_the_decision_names_nothing() {
+        let rfc = Rfc::parse(DECISION);
+        assert!(!rfc.decision_names.contains("default"), "{:?}", rfc.decision_names);
+        assert!(rfc.decision("pin").contains("default"), "the form `pin default …` still is a verb");
     }
 
     #[test]
