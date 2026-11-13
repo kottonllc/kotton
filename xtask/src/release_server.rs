@@ -2385,7 +2385,7 @@ fn start_vault(root: &Path, scratch: &Path, relay_port: u16, uid: Option<u32>) -
         let bin = root.join("usr/local/bin").join(VAULT.binary);
         verb_reaches(&bin, None, "root")?;
         // Run as root, the door is the vault's uid's, in a directory only it may enter,
-        // and root's verb above reached it anyway: the door asks nothing of its caller.
+        // and root's verb above reached it: the door admits root and its own uid.
         #[cfg(unix)]
         if let Some(n) = uid {
             // The door is where the vault put it, asked of the rule it asked, over the

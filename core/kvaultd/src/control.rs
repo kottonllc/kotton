@@ -24,7 +24,7 @@
 
 use crate::peer::{capacity, PeerContext};
 use kotton_device::users::pairing::JoinPolicy;
-use kotton_ipc::{ChannelAcceptor, HandlerOutput};
+use kotton_ipc::{ChannelAcceptor, HandlerOutput, OsConnection, PeerUsers};
 use kotton_peer::daemon::nodes::PendingConfirms;
 use kotton_session::service::tokens::SessionMap;
 use kotton_sys::ipc::IpcEndpoint;
@@ -116,11 +116,36 @@ impl Shown {
     }
 }
 
+/// **The door admits root and the vault's own OS user, at accept.** The vault runs as
+/// a user of its own (`kotton-vault.service`), and its verbs are typed at the host's
+/// shell as root or as that user; on Unix a connection whose peer the kernel names
+/// as any other uid, or does not name, is closed as it is accepted, before a frame is
+/// read and with no reply (`kotton_ipc::ChannelAcceptor`). Within those two, who may
+/// hand a code to the door is the landlord's policy. On Windows the pipe's caller is
+/// not checked here.
+pub const ADMITS: PeerUsers = PeerUsers::OwnUserOrRoot;
+
+/// Open the vault's door at `endpoint` as one of its clients, for a
+/// [`kotton_ipc::IpcClient`] to be built over (`IpcClient::from_connection`).
+///
+/// On Unix a client that is not root goes no further unless the door is served by
+/// its own OS user, the vault's (`PeerUsers::OwnUser`): it writes nothing to a door
+/// another user serves. A root client is not told the vault's user, and holds the
+/// server to no user here.
+pub async fn connect_to_door(endpoint: &IpcEndpoint) -> io::Result<OsConnection> {
+    #[cfg(unix)]
+    if kotton_ipc::own_uid() != 0 {
+        return OsConnection::connect_holding(endpoint, PeerUsers::OwnUser).await;
+    }
+    OsConnection::connect(endpoint).await.map_err(io::Error::other)
+}
+
 /// Serve the control socket until the listener fails.
 pub async fn serve(endpoint: IpcEndpoint, ctx: Arc<ControlContext>) -> io::Result<()> {
     // The door's own request type (RFC-0082 rule 2): a verb the vault has not
-    // got is not refused here, it fails to decode.
-    let server = ChannelAcceptor::<VaultRequest, UserResponse>::listen(endpoint).await?;
+    // got is not refused here, it fails to decode. Who connected was held to
+    // `ADMITS` at accept; nothing after reads it.
+    let server = ChannelAcceptor::<VaultRequest, UserResponse>::listen(endpoint, ADMITS).await?;
     server
         .accept_with_session_streaming::<_, _, String>(move |request, _caller, _conn_session| {
             let ctx = Arc::clone(&ctx);
@@ -473,6 +498,23 @@ async fn confirmed_on_sight(
 pub(crate) mod tests {
     use super::*;
 
+    /// **The vault's door admits its own uid and root, and no other**: another
+    /// uid and a caller the kernel did not name are refused at accept.
+    #[cfg(unix)]
+    #[test]
+    fn the_door_admits_its_own_uid_and_root_and_no_other() {
+        use kotton_ipc::{Caller, OsUserId};
+        let me = kotton_ipc::own_uid();
+        let at = |uid| Caller { user: OsUserId::Uid(uid), pid: Some(1), gid: None };
+        let other = (1..=2).map(|d| me.wrapping_add(d)).find(|u| *u != 0).unwrap();
+        assert_eq!(ADMITS, PeerUsers::OwnUserOrRoot);
+        assert!(ADMITS.require(&at(me)).is_ok());
+        assert!(ADMITS.require(&at(0)).is_ok(), "root is refused");
+        let refused = ADMITS.require(&at(other)).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert!(ADMITS.require(&kotton_ipc::Caller::anonymous()).is_err(), "an unnamed caller was admitted");
+    }
+
     /// **An operator's invite keeps its six digits for the operator's desktop
     /// while its ceremony waits, and forgets them when it ends.** Nobody
     /// stands at a vault to read a `sas=` line, so the digits the person
@@ -733,9 +775,8 @@ pub(crate) mod tests {
 
         let mut client = None;
         for _ in 0..100 {
-            if let Ok(c) = IpcClient::<VaultRequest, UserResponse>::connect(endpoint.clone()).await
-            {
-                client = Some(c);
+            if let Ok(c) = connect_to_door(&endpoint).await {
+                client = Some(IpcClient::<VaultRequest, UserResponse>::from_connection(c));
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

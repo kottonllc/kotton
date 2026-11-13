@@ -995,9 +995,7 @@ pub(crate) mod tests {
         let serving = tokio::spawn(crate::control::serve(endpoint.clone(), Arc::clone(&vault.control)));
         let mut bound = false;
         for _ in 0..100 {
-            if kotton_ipc::IpcClient::<kotton_wire::ipc::VaultRequest, kotton_wire::ipc::UserResponse>::connect(endpoint.clone())
-                .await
-                .is_ok()
+            if crate::control::connect_to_door(&endpoint).await.is_ok()
             {
                 bound = true;
                 break;

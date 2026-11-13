@@ -13,7 +13,7 @@ use kotton_device::users::DeviceUsers as _;
 use kotton_device::DeviceRuntime;
 use kotton_diag::service::spawn_subscriber_task;
 use kotton_diag::service::EventScope;
-use kotton_ipc::{ChannelAcceptor, HandlerOutput};
+use kotton_ipc::{ChannelAcceptor, HandlerOutput, PeerUsers};
 use kotton_peer::door::{Peer, PeerDoor};
 use kotton_peer::PeerHandler;
 use kotton_schemas::AppManifest;
@@ -281,6 +281,16 @@ pub struct Supervision {
     /// `kdeviced`'s socket; `None` is the machine's own.
     pub kdeviced: Option<IpcEndpoint>,
 }
+
+/// **kuserd admits only its own OS user, at accept.** kdeviced starts it with no
+/// change of user, and every client of its door — kctl, the desktop, kuid, ksyncd,
+/// kquicd — runs as that user; on Unix a connection whose peer the kernel names as
+/// any other uid, or does not name, is closed as it is accepted, before a frame is
+/// read and with no reply (`kotton_ipc::ChannelAcceptor`). The rule is kdeviced's
+/// (`kotton_wire::sys_ipc`), and every client holds kuserd to it as well
+/// (`kotton_ipc::IpcClient::connect_to_own_user`). On Windows the pipe's caller is
+/// not checked here.
+pub(crate) const ADMITS: PeerUsers = PeerUsers::OwnUser;
 
 pub struct DeviceDaemon {
     runtime: Arc<DeviceRuntime>,
@@ -1426,7 +1436,7 @@ impl DeviceDaemon {
         let fs_watch_state = fs_watcher.state();
 
         let server =
-            ChannelAcceptor::<UserRequest, UserResponse>::listen(this.endpoint.clone()).await?;
+            ChannelAcceptor::<UserRequest, UserResponse>::listen(this.endpoint.clone(), ADMITS).await?;
 
         // â"€â"€ Spawn ksyncd sidecar if paired nodes exist â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         {
@@ -4087,6 +4097,24 @@ fn bundled_manifest_capabilities(manifest_toml: &str) -> Vec<kotton_schemas::Cap
 
 #[cfg(test)]
 mod unlock_tests;
+
+/// **kuserd's door admits its own uid and no other**: another uid, root when this
+/// is not root, and a caller the kernel did not name are refused at accept.
+#[cfg(all(test, unix))]
+#[test]
+fn the_door_admits_its_own_uid_and_no_other() {
+    use kotton_ipc::{Caller, OsUserId};
+    let me = kotton_ipc::own_uid();
+    let at = |user| Caller { user, pid: Some(1), gid: None };
+    assert_eq!(ADMITS, PeerUsers::OwnUser);
+    assert!(ADMITS.require(&at(OsUserId::Uid(me))).is_ok());
+    let other = ADMITS.require(&at(OsUserId::Uid(me.wrapping_add(1)))).unwrap_err();
+    assert_eq!(other.kind(), std::io::ErrorKind::PermissionDenied);
+    if me != 0 {
+        assert!(ADMITS.require(&at(OsUserId::Uid(0))).is_err(), "root was admitted");
+    }
+    assert!(ADMITS.require(&Caller::anonymous()).is_err(), "an unnamed caller was admitted");
+}
 
 #[cfg(test)]
 mod set_lock_policy_tests;

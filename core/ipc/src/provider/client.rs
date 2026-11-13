@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-use crate::OsConnection;
+use crate::{OsConnection, PeerUsers};
 use kotton_sys::ipc::IpcEndpoint;
 use kotton_sys::ipc::Connection;
 use serde::{Deserialize, Serialize};
@@ -28,40 +28,20 @@ where
     Req: Serialize,
     Resp: for<'de> Deserialize<'de>,
 {
-    /// Connect to an IPC server at the given endpoint
-    pub async fn connect(endpoint: IpcEndpoint) -> io::Result<Self> {
-        let connection = OsConnection::connect(&endpoint)
-            .await
-            .map_err(io::Error::other)?;
-        Ok(Self {
-            connection,
-            _phantom: std::marker::PhantomData,
-        })
+    /// Connect to a daemon that runs as **this process's own user**, and go no further
+    /// unless it does: [`Self::connect_holding`] with [`PeerUsers::OwnUser`].
+    ///
+    /// For a client of a door that is the same user by design: every client of
+    /// kdeviced and of kuserd (`kotton_wire::sys_ipc`).
+    pub async fn connect_to_own_user(endpoint: IpcEndpoint) -> io::Result<Self> {
+        Self::connect_holding(endpoint, PeerUsers::OwnUser).await
     }
 
-    /// Connect to a daemon that runs as **this process's own user**, and go no further
-    /// unless it does.
-    ///
-    /// On Unix the kernel's answer for the peer of the connected stream
-    /// ([`OsConnection::peer`]) is held to [`crate::Caller::require_own_user`]; any
-    /// other uid, or no answer, is refused before a single frame is sent, so nothing
-    /// this client would sign or say reaches a process of another user. For a client of a
-    /// daemon that is the same user by design: `kctl` and `kuserd`'s device
-    /// operator reaching `kdeviced` (`kotton_wire::sys_ipc`).
-    ///
-    /// On Windows it is [`Self::connect`]: the pipe's server is not identified here.
-    pub async fn connect_to_own_user(endpoint: IpcEndpoint) -> io::Result<Self> {
-        let connection = OsConnection::connect(&endpoint)
-            .await
-            .map_err(io::Error::other)?;
-        #[cfg(unix)]
-        connection.peer().require_own_user().map_err(|e| {
-            let IpcEndpoint::UnixSocket(path) = &endpoint;
-            io::Error::new(
-                e.kind(),
-                format!("the server at {}: {e}; nothing was sent to it", path.display()),
-            )
-        })?;
+    /// Connect, and go no further unless the server is one of `users`
+    /// ([`OsConnection::connect_holding`]): nothing is written to a server of any
+    /// other user.
+    pub async fn connect_holding(endpoint: IpcEndpoint, users: PeerUsers) -> io::Result<Self> {
+        let connection = OsConnection::connect_holding(&endpoint, users).await?;
         Ok(Self {
             connection,
             _phantom: std::marker::PhantomData,

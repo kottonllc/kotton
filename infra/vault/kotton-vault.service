@@ -17,8 +17,8 @@
 # next start. `kvaultd invite`,
 # `tenants`, `drop` and `operator` are typed bare at the host's shell, as root or
 # as kotton-vault: they read /etc/kotton/vault.env as this unit does, write
-# nothing themselves, only speak to the door this service makes, and the door
-# asks nothing of its caller's uid.
+# nothing themselves, and only speak to the door this service makes, which
+# admits root and kotton-vault and closes a connection from any other uid unread.
 
 [Unit]
 Description=Kotton vault: keeps a person's sealed pools and cannot read them
@@ -75,8 +75,8 @@ SystemCallErrorNumber=EPERM
 # Traced outside systemd while it served at a relay with `kvaultd tenants` at
 # its door, it made no SysV or POSIX IPC object and no writable and executable
 # mapping, asked for no realtime scheduling, and read no /proc file but its
-# own. PrivateUsers= maps only root and this unit's user; the door asks nothing
-# of its caller's uid, and the verbs typed at it run outside the unit.
+# own. PrivateUsers= maps only root and this unit's user; the door admits only
+# those two uids, and the verbs typed at it run outside the unit.
 # None of these six has run under systemd yet: a host that will not start with
 # one names it in the journal. Why RootDirectory=, PrivateNetwork=,
 # IPAddressDeny= and DeviceAllow= are not set is in that record.

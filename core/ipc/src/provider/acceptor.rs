@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-use crate::{Caller, OsListener};
+use crate::{Caller, OsListener, PeerUsers};
 use kotton_sys::ipc::IpcEndpoint;
 use kotton_sys::ipc::Connection;
 use serde::{Deserialize, Serialize};
@@ -52,8 +52,18 @@ const MAX_FRAME_LEN: usize = 32 * 1024 * 1024;
 /// frame existed: a streaming client reads until the stream ends, and one
 /// that does not know the error frame must still see the end it always saw
 /// rather than wait on a connection the door is holding open.
+///
+/// **A door admits only the OS users it names, at accept.** [`Self::listen`] takes
+/// the door's [`PeerUsers`], and each connection whose peer the kernel does not
+/// name as one of them is closed as it is accepted: before a frame is read, with
+/// no reply, and the handler never sees it. The rule is here, once, so kdeviced's,
+/// kuserd's and kvaultd's doors hold it alike; a door says which users it admits in
+/// its own source, where a reviewer sees it. On Windows the pipe's caller is not
+/// held to it here.
 pub struct ChannelAcceptor<Req, Resp> {
     listener: OsListener,
+    #[cfg(unix)]
+    admits: PeerUsers,
     _phantom: std::marker::PhantomData<(Req, Resp)>,
 }
 
@@ -62,15 +72,31 @@ where
     Req: for<'de> Deserialize<'de>,
     Resp: Serialize + From<io::Error>,
 {
-    /// Create a new IPC server listening at the given endpoint
-    pub async fn listen(endpoint: IpcEndpoint) -> io::Result<Self> {
+    /// Bind the endpoint, admitting connections only from `admits`. Off Unix the
+    /// acceptor holds no user set and admits every peer, as [`PeerUsers`] says.
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    pub async fn listen(endpoint: IpcEndpoint, admits: PeerUsers) -> io::Result<Self> {
         let listener = OsListener::bind(endpoint)
             .await
             .map_err(io::Error::other)?;
         Ok(Self {
             listener,
+            #[cfg(unix)]
+            admits,
             _phantom: std::marker::PhantomData,
         })
+    }
+
+    /// Whether this door admits `peer` ([`PeerUsers::require`]). A refusal is
+    /// logged with who it was, and the caller closes the connection unread.
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    fn admits(&self, peer: &Caller) -> bool {
+        #[cfg(unix)]
+        if let Err(e) = self.admits.require(peer) {
+            tracing::warn!(refused = %e, "a connection was closed at accept, unread");
+            return false;
+        }
+        true
     }
 
     pub async fn accept_with_session<F, Fut, S>(&self, handler: F) -> io::Result<()>
@@ -88,6 +114,10 @@ where
                 .await
                 .map_err(io::Error::other)?;
 
+            // Closed here, by dropping it, before anything is read or written.
+            if !self.admits(&accepted.peer) {
+                continue;
+            }
             let mut connection = accepted.connection;
             let peer = accepted.peer;
             let handler = handler.clone();
@@ -214,6 +244,10 @@ where
                 .await
                 .map_err(io::Error::other)?;
 
+            // Closed here, by dropping it, before anything is read or written.
+            if !self.admits(&accepted.peer) {
+                continue;
+            }
             let mut connection = accepted.connection;
             let peer = accepted.peer;
             let handler = handler.clone();
@@ -373,7 +407,7 @@ mod tests {
 
     async fn a_client(endpoint: &IpcEndpoint) -> IpcClient<Req, Resp> {
         for _ in 0..100 {
-            if let Ok(c) = IpcClient::connect(endpoint.clone()).await {
+            if let Ok(c) = IpcClient::connect_to_own_user(endpoint.clone()).await {
                 return c;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -392,7 +426,7 @@ mod tests {
     #[tokio::test]
     async fn a_handlers_error_reaches_the_client_as_a_frame() {
         let (_dir, endpoint) = a_socket();
-        let server = ChannelAcceptor::<Req, Resp>::listen(endpoint.clone()).await.expect("bind");
+        let server = ChannelAcceptor::<Req, Resp>::listen(endpoint.clone(), PeerUsers::OwnUser).await.expect("bind");
         let serving = tokio::spawn(async move {
             server
                 .accept_with_session::<_, _, ()>(|req, _caller, _session| async move {
@@ -434,7 +468,7 @@ mod tests {
     async fn a_handlers_error_text_reaches_the_client_and_not_the_log() {
         let capture = crate::provider::log_capture::Capture::start();
         let (_dir, endpoint) = a_socket();
-        let server = ChannelAcceptor::<Req, Resp>::listen(endpoint.clone()).await.expect("bind");
+        let server = ChannelAcceptor::<Req, Resp>::listen(endpoint.clone(), PeerUsers::OwnUser).await.expect("bind");
         let serving = tokio::spawn(async move {
             server
                 .accept_with_session::<_, _, ()>(|_req, _caller, _session| async move {
@@ -471,7 +505,7 @@ mod tests {
     #[tokio::test]
     async fn a_streaming_handlers_error_is_said_before_the_stream_ends() {
         let (_dir, endpoint) = a_socket();
-        let server = ChannelAcceptor::<Req, Resp>::listen(endpoint.clone()).await.expect("bind");
+        let server = ChannelAcceptor::<Req, Resp>::listen(endpoint.clone(), PeerUsers::OwnUser).await.expect("bind");
         let serving = tokio::spawn(async move {
             server
                 .accept_with_session_streaming::<_, _, ()>(|req, _caller, _session| async move {
@@ -506,7 +540,7 @@ mod tests {
     #[tokio::test]
     async fn a_one_frame_answer_to_a_stream_ends_the_stream_after_its_frame() {
         let (_dir, endpoint) = a_socket();
-        let server = ChannelAcceptor::<Req, Resp>::listen(endpoint.clone()).await.expect("bind");
+        let server = ChannelAcceptor::<Req, Resp>::listen(endpoint.clone(), PeerUsers::OwnUser).await.expect("bind");
         let serving = tokio::spawn(async move {
             server
                 .accept_with_session_streaming::<_, _, ()>(|req, _caller, _session| async move {
@@ -531,5 +565,93 @@ mod tests {
         let after = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
         assert!(after.is_err(), "a `Single` ended the stream after all: {after:?}");
         serving.abort();
+    }
+
+    /// A uid that is not this process's: the peer a test with one uid stands in.
+    fn another_uid() -> u32 {
+        crate::own_uid().wrapping_add(1)
+    }
+
+    /// **A door closes a peer of another OS user at accept, unread and unanswered**,
+    /// on both accept loops. The door is told to admit only another uid, so this
+    /// process, connecting over a real socket, is the peer of another user. It
+    /// writes nothing and still reads the end of the stream: the door closed it
+    /// without waiting for a frame, and the handler never ran.
+    #[tokio::test]
+    async fn a_peer_of_another_user_is_closed_at_accept_unread_and_unanswered() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for streaming in [false, true] {
+            let (_dir, endpoint) = a_socket();
+            let server = ChannelAcceptor::<Req, Resp>::listen(endpoint.clone(), PeerUsers::Only(another_uid()))
+                .await
+                .expect("bind");
+            let ran = Arc::new(AtomicBool::new(false));
+            let seen = Arc::clone(&ran);
+            let serving = tokio::spawn(async move {
+                if streaming {
+                    server
+                        .accept_with_session_streaming::<_, _, ()>(move |_req, _caller, _session| {
+                            seen.store(true, Ordering::SeqCst);
+                            async move { Ok(HandlerOutput::Single(Resp::Pong)) }
+                        })
+                        .await
+                } else {
+                    server
+                        .accept_with_session::<_, _, ()>(move |_req, _caller, _session| {
+                            seen.store(true, Ordering::SeqCst);
+                            async move { Ok(Resp::Pong) }
+                        })
+                        .await
+                }
+            });
+            let mut raw = crate::OsConnection::connect(&endpoint).await.expect("connect");
+            let mut buf = [0u8; 16];
+            let read = tokio::time::timeout(Duration::from_secs(5), raw.read(&mut buf))
+                .await
+                .expect("the door closed the connection without waiting for a frame");
+            assert!(matches!(read, Ok(0)), "the door said something: {read:?}");
+            // A frame written now reaches nobody, and nothing answers it.
+            let mut client = IpcClient::<Req, Resp, crate::OsConnection>::from_connection(raw);
+            let answer = tokio::time::timeout(Duration::from_secs(5), client.send(&Req::Ping))
+                .await
+                .expect("bounded");
+            assert!(answer.is_err(), "a refused peer was answered: {answer:?}");
+            assert!(!ran.load(Ordering::SeqCst), "the handler ran for a refused peer");
+            serving.abort();
+        }
+    }
+
+    /// **A client refuses a server of another OS user and writes nothing.** The
+    /// client is told to hold the server to another uid, so this process, serving
+    /// over a real socket, is a server of another user: the connect is refused,
+    /// saying nothing was sent, and the server reads the end of the stream with not
+    /// one byte before it.
+    #[tokio::test]
+    async fn a_client_refuses_a_server_of_another_user_and_writes_nothing() {
+        let (_dir, endpoint) = a_socket();
+        let listener = crate::OsListener::bind(endpoint.clone()).await.expect("bind");
+        let served = tokio::spawn(async move {
+            let mut accepted = listener.accept_with_peer().await.expect("accept");
+            let mut got = Vec::new();
+            let mut buf = [0u8; 64];
+            loop {
+                match accepted.connection.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+            }
+            got
+        });
+        let refused = IpcClient::<Req, Resp>::connect_holding(endpoint.clone(), PeerUsers::Only(another_uid()))
+            .await
+            .err()
+            .expect("the client went on to a server of another user");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert!(refused.to_string().contains("nothing was sent"), "{refused}");
+        let got = tokio::time::timeout(Duration::from_secs(5), served)
+            .await
+            .expect("the client's connection ended")
+            .expect("join");
+        assert!(got.is_empty(), "the refusing client wrote {} bytes", got.len());
     }
 }

@@ -440,7 +440,7 @@ fn opening<'a>(
 mod tests {
     use super::*;
     use crate::agent::sessions;
-    use kotton_ipc::{ChannelAcceptor, IpcClient};
+    use kotton_ipc::{ChannelAcceptor, IpcClient, PeerUsers};
     use kotton_sys::ipc::IpcEndpoint;
     use kotton_wire::ipc::{Principal, SecretText};
     use std::time::Duration;
@@ -551,7 +551,7 @@ mod tests {
     /// This module's answer, at a door of its own on a real socket, with every
     /// connection holding what `session` makes, as if it had authenticated.
     async fn a_door(ctx: AgentContext, endpoint: IpcEndpoint, session: fn() -> Option<ConnSessionData>) {
-        let server = ChannelAcceptor::<UserRequest, UserResponse>::listen(endpoint).await.expect("bind");
+        let server = ChannelAcceptor::<UserRequest, UserResponse>::listen(endpoint, PeerUsers::OwnUser).await.expect("bind");
         let (changes, _) = broadcast::channel(16);
         let (_watching, watcher) = watch::channel(kotton_sync::engine::FsWatchState::Watching);
         let _ = server
@@ -575,7 +575,7 @@ mod tests {
 
     async fn a_client(endpoint: &IpcEndpoint) -> IpcClient<UserRequest, UserResponse> {
         for _ in 0..100 {
-            if let Ok(c) = IpcClient::connect(endpoint.clone()).await {
+            if let Ok(c) = IpcClient::connect_to_own_user(endpoint.clone()).await {
                 return c;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

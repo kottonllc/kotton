@@ -20,9 +20,9 @@ const USER: &str = "httpgwtest";
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 async fn raw_client(endpoint: &IpcEndpoint) -> IpcClient<UserRequest, UserResponse> {
-    IpcClient::connect(endpoint.clone())
+    IpcClient::connect_to_own_user(endpoint.clone())
         .await
-        .expect("IpcClient::connect")
+        .expect("IpcClient::connect_to_own_user")
 }
 
 async fn auth_client(

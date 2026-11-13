@@ -361,7 +361,7 @@ async fn a_headless_desktop_operates_a_vault_and_a_relay_from_the_terminal_alone
         IpcEndpoint::UnixSocket(kotton_common::paths::daemon_socket_path_in(&env, &name).expect("the vault's door"))
     };
     let mut asked = loop {
-        if let Ok(c) = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(door.clone()).await {
+        if let Ok(c) = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect_to_own_user(door.clone()).await {
             break c;
         }
         assert!(Instant::now() < deadline, "the vault's door did not open:\n{}", std::fs::read_to_string(&vault_log).unwrap_or_default());

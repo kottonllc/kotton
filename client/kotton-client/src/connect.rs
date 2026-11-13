@@ -172,10 +172,13 @@ impl KottonClient {
     /// Connect to a daemon at an explicit [`IpcEndpoint`].
     ///
     /// Useful for integration tests and development instances running on
-    /// non-default sockets.
+    /// non-default sockets. On Unix nothing is written — no token, PIN or phrase —
+    /// unless kuserd's door is served by this process's own OS user
+    /// (`IpcClient::connect_to_own_user`), as on every connection this crate opens
+    /// to it.
     #[doc(hidden)]
     pub async fn connect_to(endpoint: IpcEndpoint) -> io::Result<Self> {
-        let client = IpcClient::connect(endpoint.clone()).await?;
+        let client = IpcClient::connect_to_own_user(endpoint.clone()).await?;
         Ok(Self {
             client,
             endpoint,
