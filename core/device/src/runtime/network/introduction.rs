@@ -259,7 +259,7 @@ async fn serve(conn: Box<dyn Connection>, handler: PeerHandler, served: &AtomicU
     loop {
         let h = handler.clone();
         let pf = peer.clone();
-        let one: OneRequest = Box::new(move |req: Vec<u8>| Box::pin(async move { h.serve(pf, req).await }));
+        let one: OneRequest = Box::new(move |req: Vec<u8>| Box::pin(async move { h.serve(kotton_peer::door::Peer::Key(pf), req).await }));
         match conn.serve_one_request(one).await {
             Ok(true) => {
                 served.fetch_add(1, Ordering::Relaxed);

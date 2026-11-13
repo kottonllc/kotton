@@ -69,7 +69,7 @@ impl DeviceRuntime {
                                     move |req: Vec<u8>| -> Pin<
                                         Box<dyn Future<Output = Vec<u8>> + Send + 'static>,
                                     > {
-                                        Box::pin(async move { h.serve(pf, req).await })
+                                        Box::pin(async move { h.serve(kotton_peer::door::Peer::Key(pf), req).await })
                                     },
                                 );
 

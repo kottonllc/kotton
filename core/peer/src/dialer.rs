@@ -25,7 +25,7 @@ use kotton_wire::{UserRequest, UserResponse};
 use kotton_net::transport::quic::tls::{
     self, Ed25519DeviceCert, PairedDeviceVerifier,
 };
-use kotton_net::transport::{RelayClient, RelayedDial};
+use kotton_net::transport::{CircuitOffer, MakesClaim, RelayClient, RelayedDial};
 use kotton_net::TurnUdpSocket;
 use crate::channel::PeerChannel;
 use crate::{KottonPeerObjectStorage, QuicPeerChannel};
@@ -50,6 +50,11 @@ pub struct Dialer {
     /// byte-identical to carrying nothing — unless the caller is recovering,
     /// which is the only dial that has something to offer.
     offer: tls::CertOffer,
+    /// What makes a circuit's recovery claim, for a dial whose offer is one: answered by the
+    /// caller that holds the authority, which is never handed here. A circuit asks it for one
+    /// claim, inside the handshake's channel, for that one connection; the certificate carries
+    /// the signed claim in `offer`.
+    claim: Option<Arc<dyn MakesClaim>>,
 }
 
 impl Dialer {
@@ -67,6 +72,7 @@ impl Dialer {
             reachability,
             events,
             offer: tls::CertOffer::default(),
+            claim: None,
         }
     }
 
@@ -76,6 +82,26 @@ impl Dialer {
     pub fn with_offer(mut self, offer: tls::CertOffer) -> Self {
         self.offer = offer;
         self
+    }
+
+    /// Claim a recovery authority, in place of events, on every path the dial can take: in
+    /// the certificate as `signed`, the claim the authority's holder signed over this device's
+    /// key, and on a circuit as the claim `maker` makes for that connection. The authority's
+    /// key stays with its holder; neither form carries it.
+    #[must_use]
+    pub fn with_recovery_claim(mut self, signed: tls::RecoveryClaim, maker: Arc<dyn MakesClaim>) -> Self {
+        self.offer = tls::CertOffer::claim(signed);
+        self.claim = Some(maker);
+        self
+    }
+
+    /// What a circuit offers a door that asks: the same events the certificate carries, or
+    /// the claim.
+    fn circuit_offer(&self) -> CircuitOffer {
+        CircuitOffer {
+            events: self.offer.admission.clone(),
+            claim: self.claim.clone(),
+        }
     }
 
     /// Open a live [`KottonPeerObjectStorage`] to a paired peer.
@@ -265,8 +291,8 @@ async fn open_channel(
             Arc::new(QuicPeerChannel::new(conn))
         }
         NatResult::Failed(e) => {
-            // Tier 4: relayed fallback through the Kotton relay. The relay bridges a WebSocket; mTLS runs end-to-end inside,
-            // so the peer is authenticated exactly as on the direct path.
+            // Tier 4: relayed fallback through the Kotton relay. The relay bridges a WebSocket;
+            // the handshake runs end to end inside it, to the peer's key.
             if peer_relay(node, &config).is_empty() {
                 return Err(anyhow::anyhow!(
                     "NAT traversal to peer '{}' failed: {}",
@@ -396,19 +422,15 @@ fn peer_relay<'a>(node: &'a PairedNode, config: &'a NatConfig) -> &'a str {
 /// clock running ahead of the target's. While the coexistence window holds, a
 /// final attempt uses the durable DIDs at both ends, so an un-upgraded peer
 /// (or a membership-mode relay, which cannot admit a rotating identifier) is
-/// still reachable. The mTLS inside the circuit is the device certificate
-/// against this pair's key either way — the label is how the relay routes,
-/// never who the peer authenticates.
+/// still reachable. The handshake inside the circuit is under this device's key, to the
+/// peer's key, either way — the label is how the relay routes, never who answers.
 async fn relayed_dial(
     rt: &Dialer,
     node: &PairedNode,
     config: &NatConfig,
     admission: Option<kotton_net::rendezvous::AdmissionKey>,
 ) -> anyhow::Result<RelayedDial> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut paired = std::collections::HashSet::new();
-    paired.insert(node.public_key);
-    let verifier = PairedDeviceVerifier::new(Arc::new(RwLock::new(paired)), Arc::clone(&provider));
+    let offer = rt.circuit_offer();
 
     // The attempt order — (handle, handle) current then previous epoch, then
     // durable at both ends while the coexistence window holds — is
@@ -422,21 +444,13 @@ async fn relayed_dial(
 
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in attempts {
-        let device_cert =
-            Ed25519DeviceCert::from_signing_key_with_offer(&rt.signing_key, &rt.offer)
-                .map_err(|e| anyhow::anyhow!("relayed TLS cert: {e}"))?;
         let relay = peer_relay(node, config);
-        let admission = admission.clone();
-        let client = RelayClient::new(
-            relay,
-            attempt.auth_did,
-            attempt.auth_key,
-            device_cert,
-            Arc::clone(&verifier),
-            Arc::clone(&provider),
-        )
-        .with_admission(admission);
-        match client.dial(&attempt.target).await {
+        let client = RelayClient::new(relay, attempt.auth_did, attempt.auth_key)
+            .with_admission(admission.clone());
+        match client
+            .dial(&attempt.target, &rt.signing_key, &node.public_key, &offer)
+            .await
+        {
             Ok(conn) => return Ok(conn),
             Err(e) => last_err = Some(anyhow::anyhow!("relay dial: {e}")),
         }
@@ -444,13 +458,13 @@ async fn relayed_dial(
     Err(last_err.expect("circuit_attempts is never empty"))
 }
 
-/// A [`PeerChannel`] backed by a relayed mTLS connection — the tier-4 relayed
+/// A [`PeerChannel`] backed by a relayed connection — the tier-4 relayed
 /// fallback. Defined here, in `peer`, because it bridges two tier-03 providers (the `PeerChannel` trait from peer-storage and the
 /// `RelayedDial` transport from network) that may not depend on one another.
 ///
-/// The relayed channel is a single mTLS stream (not multiplexed like QUIC), so its
+/// The relayed channel is one handshake's channel (not multiplexed like QUIC), so its
 /// requests serialise on the connection's internal mutex; the blind relay only
-/// forwards the opaque mTLS frames.
+/// forwards sealed frames.
 struct RelayedPeerChannel {
     conn: Arc<RelayedDial>,
 }
@@ -475,7 +489,7 @@ impl PeerChannel for RelayedPeerChannel {
 
 #[cfg(test)]
 mod tests {
-    //! The dialler's half of an introduction, over the relayed mTLS it really runs
+    //! The dialler's half of an introduction, over the relayed handshake it really runs
     //! on, with a relay in the middle that keeps every byte it carries.
 
     use super::*;
@@ -488,10 +502,6 @@ mod tests {
 
     fn key(n: u8) -> ed25519_dalek::SigningKey {
         ed25519_dalek::SigningKey::from_bytes(&[n; 32])
-    }
-
-    fn provider() -> Arc<rustls::crypto::CryptoProvider> {
-        Arc::new(rustls::crypto::ring::default_provider())
     }
 
     fn dialer(k: &ed25519_dalek::SigningKey) -> Dialer {
@@ -537,19 +547,20 @@ mod tests {
     /// A relayed channel from device 2 to device 1 through a tapping relay, device 1
     /// answering with `answer`. Returns the channel and what the relay saw.
     async fn relayed_to(answer: Answer) -> (Arc<dyn crate::channel::PeerChannel>, Arc<std::sync::Mutex<Vec<u8>>>) {
-        let p = provider();
         let (near, relay_left) = tokio::io::duplex(64 * 1024);
         let (relay_right, far) = tokio::io::duplex(64 * 1024);
         let seen = tapping_relay(relay_left, relay_right);
 
-        let far_cert = Ed25519DeviceCert::from_signing_key(&key(1)).unwrap();
-        let far_verifier = PairedDeviceVerifier::new(
-            Arc::new(RwLock::new(HashSet::from([key(2).verifying_key().to_bytes()]))),
-            Arc::clone(&p),
-        );
-        let p2 = Arc::clone(&p);
+        let far_door = kotton_net::transport::Door::new(
+            &[key(1)],
+            Arc::new(kotton_net::transport::HeldKeys::only(Arc::new(RwLock::new(
+                HashSet::from([key(2).verifying_key().to_bytes()]),
+            )))),
+        )
+        .unwrap();
         tokio::spawn(async move {
-            let conn = RelayedConnection::accept(far, &far_cert, far_verifier, p2)
+            let opening = kotton_net::transport::relayed::Openings::default().admit().unwrap();
+            let conn = RelayedConnection::accept(far, &far_door, opening)
                 .await
                 .expect("far handshake");
             let _ = conn
@@ -562,14 +573,14 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let near_cert = Ed25519DeviceCert::from_signing_key(&key(2)).unwrap();
-        let near_verifier = PairedDeviceVerifier::new(
-            Arc::new(RwLock::new(HashSet::from([key(1).verifying_key().to_bytes()]))),
-            Arc::clone(&p),
-        );
-        let conn = RelayedConnection::connect(near, &near_cert, near_verifier, p)
-            .await
-            .expect("near handshake");
+        let conn = RelayedConnection::connect(
+            near,
+            &key(2),
+            &key(1).verifying_key().to_bytes(),
+            &CircuitOffer::default(),
+        )
+        .await
+        .expect("near handshake");
         struct Relayed<T>(T);
         #[async_trait::async_trait]
         impl<T: Send + Sync> crate::channel::PeerChannel for Relayed<RelayedConnection<T>>

@@ -9,6 +9,7 @@ authors.workspace = true
 kotton-sys = { path = "../sys" }
 kotton-wire = { path = "../wire" }
 kotton-crypto = { path = "../crypto" }
+kotton-handshake = { path = "../handshake" }
 
 async-trait = "0.1"
 tokio = { version = "1.48", features = ["net", "io-util", "time", "sync", "macros", "rt-multi-thread"] }
@@ -33,6 +34,7 @@ rcgen = "0.13"
 # parser-differential where a byte-scan matches a key planted elsewhere in the DER.
 x509-parser = "0.16"
 ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
 sha1 = "0.10"
 hmac = "0.12"
 sha2 = { workspace = true }
@@ -59,6 +61,7 @@ system-configuration = "0.6"
 workspace-hack = { path = "../../tools/workspace-hack" }
 tokio = { version = "1.48", features = ["full"] }
 anyhow = "1.0"
+curve25519-dalek = { workspace = true }
 
 
 [lints]

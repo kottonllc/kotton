@@ -42,6 +42,18 @@
 //! the first message, holds nothing to answer. [`read_opening`] says `Incomplete` until it
 //! has; the caller holds the bytes in that state for [`FIRST_FRAME_WAIT`] and no longer, then
 //! closes as it closes on any refusal: having written nothing.
+//!
+//! **The ask, and a recovery claim.** A responder that does not admit the initiator by what it
+//! holds asks for its events ([`Admitting::ask`]), and reads the one frame that answers
+//! ([`Asked::read_reply`]). That frame may be a recovery claim in place of events. Its tag is
+//! the 32 bytes HKDF-SHA256 yields from an exchange between the Montgomery form of the claimed
+//! authority's key and the responder's ephemeral value, with the handshake's hash once the
+//! third message is read as the salt and [`CLAIM_INFO`] followed by the 32 bytes of the
+//! authority's key as the info. The initiator makes it ([`AwaitingAnswer::claim`]); the
+//! responder makes the one it expects ([`Asked::expected_claim_tag`]) and its caller compares
+//! with [`kotton_wire::handshake::RecoveryClaim::tag_matches`]. The responder keeps its
+//! ephemeral value for that and drops it with the [`Asked`]: once it has read the reply, or
+//! not at all where it answers without asking.
 
 mod dh;
 
@@ -51,6 +63,9 @@ use kotton_wire::handshake::{
     Answer, EventRef, ResponderFrame, ThirdPayload, Versions, MAX_FRAME_LEN, MAX_FRAME_PLAINTEXT,
     TAG_LEN, THIRD_PAYLOAD_LEN, VERSION_1,
 };
+use hkdf::Hkdf;
+use kotton_wire::handshake::{AskReply, RecoveryClaim};
+use sha2::Sha256;
 use snow::{Builder, HandshakeState, TransportState};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
@@ -71,6 +86,9 @@ pub const FIRST_FRAME_WAIT: Duration = Duration::from_secs(10);
 
 /// The first message: an ephemeral value and an empty payload's tag.
 const FIRST_LEN: usize = 32 + TAG_LEN;
+
+/// What a recovery claim's info begins with; the 32 bytes of the authority's key follow.
+pub const CLAIM_INFO: &[u8] = b"kotton-recovery-claim";
 
 /// The prologue for `version`.
 pub fn prologue(version: u8) -> Vec<u8> {
@@ -186,9 +204,17 @@ impl Default for Run {
     }
 }
 
-fn builder<'a>(run: &'a Run, prologue: &'a [u8]) -> Builder<'a> {
+fn builder<'a>(
+    run: &'a Run,
+    prologue: &'a [u8],
+    keep: Option<dh::EphemeralSlot>,
+) -> Builder<'a> {
     let params = PROTOCOL_NAME.parse().expect("the protocol name parses");
-    let b = Builder::with_resolver(params, dh::resolver()).prologue(prologue);
+    let resolver = match keep {
+        Some(slot) => dh::responder_resolver(slot),
+        None => dh::resolver(),
+    };
+    let b = Builder::with_resolver(params, resolver).prologue(prologue);
     #[cfg(test)]
     let b = match &run.ephemeral {
         Some(e) => b.fixed_ephemeral_key_for_testing_only(&e[..]),
@@ -244,7 +270,7 @@ impl Initiator {
         ThirdPayload::decode(&payload.encode()).map_err(|_| Closed::Malformed)?;
         let own = secret_bytes(own);
         let prologue = prologue(run.version);
-        let mut hs = builder(&run, &prologue)
+        let mut hs = builder(&run, &prologue, None)
             .local_private_key(&own[..])
             .remote_public_key(responder.as_bytes())
             .build_initiator()?;
@@ -260,25 +286,78 @@ impl Initiator {
         if n != 0 {
             return Err(Closed::Malformed);
         }
+        // The responder's ephemeral value, the first 32 bytes of the message that just opened.
+        let responder_ephemeral: [u8; 32] = second
+            .get(..32)
+            .and_then(|e| e.try_into().ok())
+            .ok_or(Closed::Malformed)?;
         let third = write(&mut self.hs, &self.payload.encode())?;
+        let hash = handshake_hash(&self.hs)?;
         let transport = self.hs.into_transport_mode()?;
         Ok((
             AwaitingAnswer {
                 channel: Channel { transport },
                 run: self.run,
+                responder_ephemeral,
+                hash,
             },
             third,
         ))
     }
 }
 
+/// Noise's `h` once the third message is made or read.
+fn handshake_hash(hs: &HandshakeState) -> Result<[u8; 32], Closed> {
+    hs.get_handshake_hash()
+        .try_into()
+        .map_err(|_| Closed::Malformed)
+}
+
+/// A recovery claim's tag from the exchange `shared`, under the handshake's `hash`, for the
+/// authority whose key is `authority_key`. The PRK and the tag are zeroed when dropped.
+fn claim_tag(shared: &[u8; 32], hash: &[u8; 32], authority_key: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    let (extracted, _) = Hkdf::<Sha256>::extract(Some(hash), shared);
+    let prk: Zeroizing<[u8; 32]> = Zeroizing::new(extracted.into());
+    let hk = Hkdf::<Sha256>::from_prk(&prk[..]).expect("a PRK of SHA-256's length");
+    let mut info = Vec::with_capacity(CLAIM_INFO.len() + 32);
+    info.extend_from_slice(CLAIM_INFO);
+    info.extend_from_slice(authority_key);
+    let mut tag = Zeroizing::new([0u8; 32]);
+    hk.expand(&info, &mut tag[..])
+        .expect("32 bytes is a length HKDF-SHA256 yields");
+    tag
+}
+
+/// An exchange, or `None` where it yields all zeros.
+fn exchange(secret: &StaticSecret, public: &PublicKey) -> Option<Zeroizing<[u8; 32]>> {
+    let shared = secret.diffie_hellman(public);
+    shared
+        .was_contributory()
+        .then(|| Zeroizing::new(*shared.as_bytes()))
+}
+
 /// An initiator that has sent the third message and waits for the responder's first frame.
 pub struct AwaitingAnswer {
     channel: Channel,
     run: Run,
+    /// What a recovery claim is made over: the responder's ephemeral value and the hash.
+    responder_ephemeral: [u8; 32],
+    hash: [u8; 32],
 }
 
 impl AwaitingAnswer {
+    /// A recovery claim for this connection, by the authority whose key is `authority_key`
+    /// and whose Montgomery form is `authority`. `None` where the exchange yields all zeros.
+    /// It answers this connection and no other: the hash covers both ephemeral values and
+    /// both statics.
+    pub fn claim(&self, authority: &StaticSecret, authority_key: [u8; 32]) -> Option<RecoveryClaim> {
+        let shared = exchange(authority, &PublicKey::from(self.responder_ephemeral))?;
+        Some(RecoveryClaim::new(
+            authority_key,
+            *claim_tag(&shared, &self.hash, &authority_key),
+        ))
+    }
+
     /// Read the responder's first frame body. A side that finds both speak a later version
     /// than the one in use closes.
     pub fn read_first(mut self, body: &[u8]) -> Result<(Channel, Answer), Closed> {
@@ -304,6 +383,8 @@ pub struct Responder {
     hs: HandshakeState,
     run: Run,
     key: usize,
+    /// Its ephemeral value's private half, checked against the second message.
+    ephemeral: Zeroizing<[u8; 32]>,
 }
 
 #[cfg(test)]
@@ -314,12 +395,17 @@ thread_local! {
 }
 
 /// Try one key on the first message, under the prologue of the version byte it came with.
-fn try_key(run: &Run, key: &StaticSecret, first: &[u8]) -> Result<HandshakeState, snow::Error> {
+fn try_key(
+    run: &Run,
+    key: &StaticSecret,
+    first: &[u8],
+) -> Result<(HandshakeState, dh::EphemeralSlot), snow::Error> {
     #[cfg(test)]
     TRIALS.with(|t| t.set(t.get() + 1));
     let own = secret_bytes(key);
     let prologue = prologue(run.version);
-    let mut hs = builder(run, &prologue)
+    let slot = dh::EphemeralSlot::default();
+    let mut hs = builder(run, &prologue, Some(slot.clone()))
         .local_private_key(&own[..])
         .build_responder()?;
     let mut scratch = vec![0u8; MAX_FRAME_LEN];
@@ -327,7 +413,21 @@ fn try_key(run: &Run, key: &StaticSecret, first: &[u8]) -> Result<HandshakeState
     if n != 0 {
         return Err(snow::Error::Input);
     }
-    Ok(hs)
+    Ok((hs, slot))
+}
+
+/// The ephemeral value the slot holds, where it is the one `second` (a whole frame) carries.
+fn kept_ephemeral(slot: &dh::EphemeralSlot, second: &[u8]) -> Result<Zeroizing<[u8; 32]>, Closed> {
+    let kept = slot
+        .lock()
+        .map_err(|_| Closed::Malformed)?
+        .take()
+        .ok_or(Closed::Malformed)?;
+    let sent = second.get(2..34).ok_or(Closed::Malformed)?;
+    if PublicKey::from(&StaticSecret::from(*kept)).as_bytes() != sent {
+        return Err(Closed::Malformed);
+    }
+    Ok(kept)
 }
 
 impl Responder {
@@ -363,7 +463,7 @@ impl Responder {
             return Err(Closed::Refused);
         }
         // Every trial runs before any is read: no early stop.
-        let trials: Vec<Result<HandshakeState, snow::Error>> =
+        let trials: Vec<Result<(HandshakeState, dh::EphemeralSlot), snow::Error>> =
             keys.iter().map(|k| try_key(&run, k, first)).collect();
         let opened = trials
             .into_iter()
@@ -372,9 +472,18 @@ impl Responder {
         if !run.speaks.contains(run.version) {
             return Err(Closed::Refused);
         }
-        let (key, mut hs) = opened.ok_or(Closed::Refused)?;
+        let (key, (mut hs, slot)) = opened.ok_or(Closed::Refused)?;
         let second = write(&mut hs, &[])?;
-        Ok((Self { hs, run, key }, second))
+        let ephemeral = kept_ephemeral(&slot, &second)?;
+        Ok((
+            Self {
+                hs,
+                run,
+                key,
+                ephemeral,
+            },
+            second,
+        ))
     }
 
     /// Which of the keys handed in the first message opened under.
@@ -396,14 +505,26 @@ impl Responder {
             .get_remote_static()
             .and_then(|s| s.try_into().ok())
             .ok_or(Closed::Malformed)?;
+        let hash = handshake_hash(&self.hs)?;
         let transport = self.hs.into_transport_mode()?;
         Ok(Admitting {
             channel: Channel { transport },
             run: self.run,
             initiator: PublicKey::from(initiator),
             payload,
+            claim: ClaimKey {
+                ephemeral: self.ephemeral,
+                hash,
+            },
         })
     }
+}
+
+/// What a responder checks a recovery claim with: its ephemeral value and the hash. Zeroed
+/// when dropped.
+struct ClaimKey {
+    ephemeral: Zeroizing<[u8; 32]>,
+    hash: [u8; 32],
 }
 
 /// A responder that has read the third message and has yet to answer it.
@@ -412,6 +533,7 @@ pub struct Admitting {
     run: Run,
     initiator: PublicKey,
     payload: ThirdPayload,
+    claim: ClaimKey,
 }
 
 impl Admitting {
@@ -439,6 +561,69 @@ impl Admitting {
         }
         Ok((sent, Ok(self.channel)))
     }
+
+    /// Answer with the one ask for events, keeping the ephemeral value until the frame that
+    /// answers it is read. Returns that first frame and what reads the answer; or, as
+    /// [`Self::answer`] does, [`Closed::LaterVersion`] once the frame is sent.
+    pub fn ask(mut self) -> Result<(Vec<u8>, Result<Asked, Closed>), Closed> {
+        let first = ResponderFrame {
+            versions: self.run.speaks,
+            answer: Answer::AskForEvents,
+        }
+        .encode();
+        let sent = self.channel.seal(&first)?;
+        if later_in_common(&self.run, &self.payload.versions) {
+            return Ok((sent, Err(Closed::LaterVersion)));
+        }
+        Ok((
+            sent,
+            Ok(Asked {
+                channel: self.channel,
+                speaks: self.run.speaks,
+                claim: self.claim,
+            }),
+        ))
+    }
+}
+
+/// A responder that has asked for the initiator's events.
+pub struct Asked {
+    channel: Channel,
+    speaks: Versions,
+    claim: ClaimKey,
+}
+
+impl Asked {
+    /// Read the frame that answers the ask: events, or a recovery claim.
+    pub fn read_reply(&mut self, body: &[u8]) -> Result<AskReply, Closed> {
+        let plain = self.channel.open(body)?;
+        AskReply::decode(&plain).map_err(|_| Closed::Malformed)
+    }
+
+    /// The tag a claim by the authority whose key is `authority_key`, and whose Montgomery
+    /// form is `authority`, must carry on this connection. `None` where the exchange yields
+    /// all zeros, which is closed on as any refusal is. The caller compares with
+    /// [`RecoveryClaim::tag_matches`], and does so before it looks the authority up.
+    pub fn expected_claim_tag(
+        &self,
+        authority: &PublicKey,
+        authority_key: &[u8; 32],
+    ) -> Option<Zeroizing<[u8; 32]>> {
+        let shared = exchange(&StaticSecret::from(*self.claim.ephemeral), authority)?;
+        Some(claim_tag(&shared, &self.claim.hash, authority_key))
+    }
+
+    /// The initiator is now admitted: the frame that says so, as the first frame would have,
+    /// and the channel. The ephemeral value is dropped with this.
+    pub fn admit(mut self, latest: Option<EventRef>) -> Result<(Vec<u8>, Channel), Closed> {
+        let frame = ResponderFrame {
+            versions: self.speaks,
+            answer: Answer::Admitted { latest },
+        }
+        .encode();
+        let sent = self.channel.seal(&frame)?;
+        Ok((sent, self.channel))
+    }
 }
 
 // ── The channel ───────────────────────────────────────────────────────────────
@@ -459,6 +644,16 @@ impl Channel {
         let n = self.transport.write_message(plaintext, &mut out)?;
         out.truncate(n);
         frame(&out)
+    }
+
+    /// Read the frame a responder sends once it has read the answer to its ask: the
+    /// initiator is admitted, and the latest event the responder holds, or none.
+    pub fn read_admitted(&mut self, body: &[u8]) -> Result<Option<EventRef>, Closed> {
+        let plain = self.open(body)?;
+        match ResponderFrame::decode(&plain).map_err(|_| Closed::Malformed)?.answer {
+            Answer::Admitted { latest } => Ok(latest),
+            Answer::AskForEvents => Err(Closed::Malformed),
+        }
     }
 
     /// Open one frame's body.

@@ -66,12 +66,11 @@ async fn a_pair_handle_is_published_and_found_through_a_real_relay() {
 /// Step 6's claim, measured the way step 3's was: a reservation labelled by a
 /// pair handle is reserved, dialed, and served by the relay exactly as a durable
 /// one — the reserve auth verifies against the handle's own key, the dial names
-/// the handle, and the mTLS inside is still the device certificates. No relay
-/// change.
+/// the handle, and the handshake inside is still under the devices' keys. No
+/// relay change.
 #[tokio::test]
 async fn a_relayed_circuit_connects_under_pair_handles() {
-    use kotton_net::transport::quic::tls::{Ed25519DeviceCert, PairedDeviceVerifier};
-    use kotton_net::transport::RelayClient;
+    use kotton_net::transport::{CircuitOffer, Door, HeldKeys, RelayClient};
     use std::collections::HashSet;
     use std::sync::{Arc, RwLock};
 
@@ -81,7 +80,6 @@ async fn a_relayed_circuit_connects_under_pair_handles() {
         SigningKey::generate(&mut rand::rngs::OsRng),
     );
     let (a_pub, b_pub) = (a.verifying_key().to_bytes(), b.verifying_key().to_bytes());
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
 
     // A (target): hold a reservation under the handle only B derives, and serve
     // one echo request off it.
@@ -89,20 +87,15 @@ async fn a_relayed_circuit_connects_under_pair_handles() {
         .into_iter()
         .next()
         .expect("a current-epoch reservation handle derives");
-    let a_client = RelayClient::new(
-        &url,
-        handle.did.to_string(),
-        handle.signing_key,
-        Ed25519DeviceCert::from_signing_key(&a).unwrap(),
-        PairedDeviceVerifier::new(
-            Arc::new(RwLock::new(HashSet::from([b_pub]))),
-            Arc::clone(&provider),
-        ),
-        Arc::clone(&provider),
-    );
+    let a_client = RelayClient::new(&url, handle.did.to_string(), handle.signing_key);
+    let door = Door::new(
+        std::slice::from_ref(&a),
+        Arc::new(HeldKeys::only(Arc::new(RwLock::new(HashSet::from([b_pub]))))),
+    )
+    .unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let reservation = tokio::spawn(async move {
-        let _ = a_client.run_reservation(tx).await;
+        let _ = a_client.run_reservation(door, tx).await;
     });
     let server = tokio::spawn(async move {
         let conn = rx.recv().await.expect("an inbound circuit arrives");
@@ -122,20 +115,13 @@ async fn a_relayed_circuit_connects_under_pair_handles() {
         .into_iter()
         .next()
         .unwrap();
-    let b_client = RelayClient::new(
-        &url,
-        attempt.auth_did,
-        attempt.auth_key,
-        Ed25519DeviceCert::from_signing_key(&b).unwrap(),
-        PairedDeviceVerifier::new(
-            Arc::new(RwLock::new(HashSet::from([a_pub]))),
-            Arc::clone(&provider),
-        ),
-        provider,
-    );
+    let b_client = RelayClient::new(&url, attempt.auth_did, attempt.auth_key);
     let mut conn = None;
     for _ in 0..20 {
-        match b_client.dial(&attempt.target).await {
+        match b_client
+            .dial(&attempt.target, &b, &a_pub, &CircuitOffer::default())
+            .await
+        {
             Ok(c) => {
                 conn = Some(c);
                 break;

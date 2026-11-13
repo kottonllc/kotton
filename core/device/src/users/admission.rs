@@ -12,6 +12,7 @@ use crate::DeviceRuntime;
 use kotton_crypto::kel_verify::{resolve_current_key, LocalArbiter};
 use kotton_identity::kel_store;
 use kotton_net::transport::quic::tls::{Admission, Admitted};
+use kotton_net::transport::Peer;
 use kotton_wire::kel::KelEvent;
 use sqlx::SqlitePool;
 use std::collections::HashSet;
@@ -248,8 +249,14 @@ pub const NOT_PAIRED_WITH: &str = "is not paired with user";
 
 /// Classify a peer the handshake admitted, for one user.
 ///
-/// `peer_pubkey` is the raw key behind the peer's `did:key`, `None` when the DID
-/// did not parse — such a peer is a stranger, never an error. A proof-admitted
+/// `peer` is who the connection says it is from. A claim's standing is read
+/// from the connection (#511): a peer admitted on a recovery claim stands as
+/// that claim to a user, and is asked about no key, since it has none, so no
+/// key check — paired, operator or proof — can give it another standing. A key
+/// is the raw key behind its `did:key`; one whose DID does not parse is a
+/// stranger, never an error. (The QUIC path still names a claimant by its
+/// certificate's key, and its claim is read from the admission table under that
+/// key, until step 12 of #496.) A proof-admitted
 /// peer is persisted here, on its first request, so it is an ordinary paired
 /// device from then on; a claim is not persisted, because a claim proves less.
 ///
@@ -262,11 +269,10 @@ pub async fn peer_standing(
     runtime: &DeviceRuntime,
     db: &Arc<SqlitePool>,
     paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
-    peer_did: &str,
-    peer_pubkey: Option<[u8; 32]>,
+    peer: &Peer,
     user_id: Option<&str>,
 ) -> io::Result<PeerStanding> {
-    peer_standing_in(&Chains::of(runtime), db, paired_keys, peer_did, peer_pubkey, user_id).await
+    peer_standing_in(&Chains::of(runtime), db, paired_keys, peer, user_id).await
 }
 
 /// [`peer_standing`], on the chains alone ([`Chains`]): what a caller that holds
@@ -275,10 +281,23 @@ pub async fn peer_standing_in(
     chains: &Chains,
     db: &Arc<SqlitePool>,
     paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
-    peer_did: &str,
-    peer_pubkey: Option<[u8; 32]>,
+    peer: &Peer,
     user_id: Option<&str>,
 ) -> io::Result<PeerStanding> {
+    let peer_did = match peer {
+        // A claim stands to a user and to nothing addressed to the node as a whole.
+        Peer::Claim { aid } => {
+            return Ok(match user_id {
+                Some(_) => PeerStanding::Claim { aid: aid.clone() },
+                None => PeerStanding::Stranger,
+            })
+        }
+        Peer::Key(did) => did.as_str(),
+    };
+    let peer_pubkey: Option<[u8; 32]> = kotton_wire::did::Did::parse(peer_did)
+        .ok()
+        .and_then(|d| kotton_crypto::did::DidKeyMethod::to_public_key(&d).ok())
+        .map(|vk| vk.to_bytes());
     let Some(pk) = peer_pubkey else {
         return Ok(PeerStanding::Stranger);
     };
