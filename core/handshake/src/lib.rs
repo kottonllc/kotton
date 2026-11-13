@@ -314,14 +314,16 @@ fn handshake_hash(hs: &HandshakeState) -> Result<[u8; 32], Closed> {
 }
 
 /// A recovery claim's tag from the exchange `shared`, under the handshake's `hash`, for the
-/// authority whose key is `authority_key`.
-fn claim_tag(shared: &[u8; 32], hash: &[u8; 32], authority_key: &[u8; 32]) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(Some(hash), shared);
+/// authority whose key is `authority_key`. The PRK and the tag are zeroed when dropped.
+fn claim_tag(shared: &[u8; 32], hash: &[u8; 32], authority_key: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    let (extracted, _) = Hkdf::<Sha256>::extract(Some(hash), shared);
+    let prk: Zeroizing<[u8; 32]> = Zeroizing::new(extracted.into());
+    let hk = Hkdf::<Sha256>::from_prk(&prk[..]).expect("a PRK of SHA-256's length");
     let mut info = Vec::with_capacity(CLAIM_INFO.len() + 32);
     info.extend_from_slice(CLAIM_INFO);
     info.extend_from_slice(authority_key);
-    let mut tag = [0u8; 32];
-    hk.expand(&info, &mut tag)
+    let mut tag = Zeroizing::new([0u8; 32]);
+    hk.expand(&info, &mut tag[..])
         .expect("32 bytes is a length HKDF-SHA256 yields");
     tag
 }
@@ -352,7 +354,7 @@ impl AwaitingAnswer {
         let shared = exchange(authority, &PublicKey::from(self.responder_ephemeral))?;
         Some(RecoveryClaim::new(
             authority_key,
-            claim_tag(&shared, &self.hash, &authority_key),
+            *claim_tag(&shared, &self.hash, &authority_key),
         ))
     }
 
@@ -602,7 +604,11 @@ impl Asked {
     /// form is `authority`, must carry on this connection. `None` where the exchange yields
     /// all zeros, which is closed on as any refusal is. The caller compares with
     /// [`RecoveryClaim::tag_matches`], and does so before it looks the authority up.
-    pub fn expected_claim_tag(&self, authority: &PublicKey, authority_key: &[u8; 32]) -> Option<[u8; 32]> {
+    pub fn expected_claim_tag(
+        &self,
+        authority: &PublicKey,
+        authority_key: &[u8; 32],
+    ) -> Option<Zeroizing<[u8; 32]>> {
         let shared = exchange(&StaticSecret::from(*self.claim.ephemeral), authority)?;
         Some(claim_tag(&shared, &self.claim.hash, authority_key))
     }

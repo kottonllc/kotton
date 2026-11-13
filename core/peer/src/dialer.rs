@@ -25,7 +25,7 @@ use kotton_wire::{UserRequest, UserResponse};
 use kotton_net::transport::quic::tls::{
     self, Ed25519DeviceCert, PairedDeviceVerifier,
 };
-use kotton_net::transport::{CircuitOffer, RelayClient, RelayedDial};
+use kotton_net::transport::{CircuitOffer, MakesClaim, RelayClient, RelayedDial};
 use kotton_net::TurnUdpSocket;
 use crate::channel::PeerChannel;
 use crate::{KottonPeerObjectStorage, QuicPeerChannel};
@@ -50,10 +50,11 @@ pub struct Dialer {
     /// byte-identical to carrying nothing — unless the caller is recovering,
     /// which is the only dial that has something to offer.
     offer: tls::CertOffer,
-    /// The recovery authority a claim is made under, for a dial whose offer is one. A
-    /// circuit makes its claim inside the handshake's channel, under this key, for that one
-    /// connection; the certificate carries the signed claim in `offer`.
-    authority: Option<ed25519_dalek::SigningKey>,
+    /// What makes a circuit's recovery claim, for a dial whose offer is one: answered by the
+    /// caller that holds the authority, which is never handed here. A circuit asks it for one
+    /// claim, inside the handshake's channel, for that one connection; the certificate carries
+    /// the signed claim in `offer`.
+    claim: Option<Arc<dyn MakesClaim>>,
 }
 
 impl Dialer {
@@ -71,7 +72,7 @@ impl Dialer {
             reachability,
             events,
             offer: tls::CertOffer::default(),
-            authority: None,
+            claim: None,
         }
     }
 
@@ -83,14 +84,14 @@ impl Dialer {
         self
     }
 
-    /// Claim the recovery authority `authority` holds, in place of events, on every path
-    /// the dial can take: signed over this device's key in the certificate, and on a
-    /// circuit as the claim the handshake makes for that connection.
+    /// Claim a recovery authority, in place of events, on every path the dial can take: in
+    /// the certificate as `signed`, the claim the authority's holder signed over this device's
+    /// key, and on a circuit as the claim `maker` makes for that connection. The authority's
+    /// key stays with its holder; neither form carries it.
     #[must_use]
-    pub fn with_recovery_authority(mut self, authority: ed25519_dalek::SigningKey) -> Self {
-        let device = self.signing_key.verifying_key().to_bytes();
-        self.offer = tls::CertOffer::claim(tls::RecoveryClaim::sign(&authority, &device));
-        self.authority = Some(authority);
+    pub fn with_recovery_claim(mut self, signed: tls::RecoveryClaim, maker: Arc<dyn MakesClaim>) -> Self {
+        self.offer = tls::CertOffer::claim(signed);
+        self.claim = Some(maker);
         self
     }
 
@@ -99,7 +100,7 @@ impl Dialer {
     fn circuit_offer(&self) -> CircuitOffer {
         CircuitOffer {
             events: self.offer.admission.clone(),
-            authority: self.authority.clone(),
+            claim: self.claim.clone(),
         }
     }
 

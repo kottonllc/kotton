@@ -333,9 +333,9 @@ impl Vault {
     fn peer_handler(&self) -> kotton_peer::PeerHandler {
         let ctx = Arc::clone(&self.control);
         kotton_peer::door::PeerDoor::<kotton_wire::ipc::VaultPeerRequest, kotton_wire::ipc::UserResponse>::serving(
-            move |peer_did, request| {
+            move |from, request| {
                 let ctx = Arc::clone(&ctx);
-                async move { peer::handle(&ctx, &peer_did, request).await }
+                async move { peer::handle(&ctx, &from, request).await }
             },
             |e| kotton_wire::ipc::UserResponse::Error {
                 message: format!("invalid peer request: {e}"),

@@ -27,7 +27,7 @@ use ed25519_dalek::SigningKey;
 use kotton_crypto::DidKeyMethod;
 use kotton_net::transport::quic::tls::Admission;
 use kotton_net::transport::relayed::{CircuitOffer, Door, RelayClient, FIRST_FRAME_WAIT};
-use kotton_net::transport::{rendezvous_dial, HeldKeys};
+use kotton_net::transport::{rendezvous_dial, AwaitingAnswer, HeldKeys, MakesClaim, RecoveryClaim};
 use kotton_wire::handshake::{RESPONDER_FRAME_LEN, TAG_LEN, THIRD_PAYLOAD_LEN};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -47,6 +47,26 @@ fn montgomery(k: &SigningKey) -> [u8; 32] {
     kotton_crypto::x25519::ed25519_pub_to_x25519(&pub_of(k))
         .unwrap()
         .to_bytes()
+}
+
+/// A recovery authority held by the test, as `recover` holds one: the circuit is handed this,
+/// and it makes one claim for the connection it is shown.
+struct Authority(SigningKey);
+
+impl MakesClaim for Authority {
+    fn claim(&self, awaiting: &AwaitingAnswer) -> Option<RecoveryClaim> {
+        awaiting.claim(
+            &kotton_crypto::x25519::ed25519_priv_to_x25519(&self.0),
+            pub_of(&self.0),
+        )
+    }
+}
+
+fn claiming(authority: &SigningKey) -> CircuitOffer {
+    CircuitOffer {
+        events: Vec::new(),
+        claim: Some(Arc::new(Authority(authority.clone()))),
+    }
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -302,7 +322,7 @@ async fn relayed_circuit_through_real_relay_carries_the_handshake() {
     let conn = dial(&relay_url, &label, &a, &b, &CircuitOffer::default())
         .await
         .expect("A: dial via relay");
-    assert_eq!(conn.peer_did(), did_of(&pub_of(&b)), "A names the key it dialled");
+    assert_eq!(conn.peer_did(), Some(did_of(&pub_of(&b)).as_str()), "A names the key it dialled");
     let resp = conn.request(b"ping").await.expect("A: request");
     assert_eq!(resp, b"echo:ping");
     assert_eq!(served.load(Ordering::SeqCst), 1);
@@ -310,10 +330,11 @@ async fn relayed_circuit_through_real_relay_carries_the_handshake() {
 }
 
 /// The relay sees a version, two fresh values, lengths and ciphertext. A tap records both
-/// legs of three circuits: two from a device the door admits by its key, one from a
-/// recovered device admitted by the rotation it offers. Neither side's static key is in what
-/// it saw, in either form or as a `did:key`; nor a certificate, a server name, the event,
-/// or the request.
+/// legs of four circuits: two from a device the door admits by its key, one from a
+/// recovered device admitted by the rotation it offers, and one from a device that holds only
+/// a recovery authority, admitted by its claim. Neither side's static key is in what it saw,
+/// in either form or as a `did:key`, nor the authority's; nor a certificate, a server name,
+/// the event, the identity, or the request.
 #[tokio::test]
 async fn the_relay_sees_a_version_two_fresh_values_lengths_and_ciphertext() {
     use kotton_crypto::kel_verify::{build_inception, build_mnemonic_rotation, kel_recovery_pubkey};
@@ -323,13 +344,20 @@ async fn the_relay_sees_a_version_two_fresh_values_lengths_and_ciphertext() {
     let relay_url = format!("http://{tap_addr}");
 
     let (a, b, recovered) = (random_key(), random_key(), random_key());
+    let (claimant, authority) = (random_key(), random_key());
     let seed = [7u8; 32];
     let rung = |i| kel_recovery_pubkey(&kotton_crypto::kdf::derive_kel_recovery_key(&seed, i));
     let tip = build_inception(&random_key(), &[rung(0)]);
     let rotation = build_mnemonic_rotation(&tip, &seed, 0, &recovered, 0, &[rung(0)]);
     let admission = Admission::default();
     admission.tips.write().unwrap().insert(tip.aid.to_string(), tip.clone());
-    let (label, door, served) = hold_door(&relay_url, &b, admitting(&[pub_of(&a)], admission)).await;
+    admission
+        .authorities
+        .write()
+        .unwrap()
+        .insert(pub_of(&authority), tip.aid.to_string());
+    let (label, door, served) =
+        hold_door(&relay_url, &b, admitting(&[pub_of(&a)], admission.clone())).await;
 
     let secret = b"a request the relay must not read".to_vec();
     for (own, offer) in [
@@ -339,21 +367,27 @@ async fn the_relay_sees_a_version_two_fresh_values_lengths_and_ciphertext() {
             &recovered,
             CircuitOffer {
                 events: vec![rotation.clone()],
-                authority: None,
+                claim: None,
             },
         ),
+        (&claimant, claiming(&authority)),
     ] {
         let conn = dial(&relay_url, &label, own, &b, &offer).await.expect("the dial");
         assert_eq!(conn.request(&secret).await.unwrap()[5..], secret[..]);
     }
-    assert_eq!(served.load(Ordering::SeqCst), 3);
+    assert_eq!(served.load(Ordering::SeqCst), 4);
+    let pending = admission.admitted.read().unwrap().clone();
+    assert!(
+        !pending.contains_key(&pub_of(&claimant)) && pending.len() == 1,
+        "the claim is the circuit's, and is written to no shared table"
+    );
     door.abort();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // The control: the tap sees what the relay sees, the label a dial names included.
     let opens = data_legs(&legs, "/relay/open");
     let accepts = data_legs(&legs, "/relay/accept");
-    assert_eq!((opens.len(), accepts.len()), (3, 3), "three circuits, both legs each");
+    assert_eq!((opens.len(), accepts.len()), (4, 4), "four circuits, both legs each");
     for open in &opens {
         assert!(contains(&open.up.head, label.as_bytes()), "the tap reads the dial's label");
     }
@@ -384,7 +418,13 @@ async fn the_relay_sees_a_version_two_fresh_values_lengths_and_ciphertext() {
     let saw = everything(&legs);
     let event = serde_json::to_vec(&rotation).unwrap();
     let mut needles: Vec<(String, Vec<u8>)> = Vec::new();
-    for (who, k) in [("the door", &b), ("the dialer", &a), ("the recovered device", &recovered)] {
+    for (who, k) in [
+        ("the door", &b),
+        ("the dialer", &a),
+        ("the recovered device", &recovered),
+        ("the claimant", &claimant),
+        ("the recovery authority", &authority),
+    ] {
         needles.push((format!("{who}'s key"), pub_of(k).to_vec()));
         needles.push((format!("{who}'s key, Montgomery form"), montgomery(k).to_vec()));
         needles.push((format!("{who}'s did:key"), did_of(&pub_of(k)).into_bytes()));
@@ -482,12 +522,9 @@ async fn a_key_the_door_does_not_admit_is_closed_on_without_a_word() {
         CircuitOffer::default(),
         CircuitOffer {
             events: vec![rotation],
-            authority: None,
+            claim: None,
         },
-        CircuitOffer {
-            events: Vec::new(),
-            authority: Some(random_key()),
-        },
+        claiming(&random_key()),
     ] {
         let refused = dial(&relay_url, &label, &stranger, &b, &offer).await;
         assert!(refused.is_err(), "{offer:?}: the stranger is not admitted");

@@ -25,10 +25,10 @@ where
     Fut: Future<Output = ContactResponse> + Send + 'static,
 {
     PeerDoor::<ContactRequest, ContactResponse>::serving(
-        move |_peer_did, request| {
-            // Handed the peer's DID by the transport, and ignoring it: the
-            // door's verifier admits exactly one key, so *who* arrived is
-            // settled before this runs.
+        move |_peer, request| {
+            // Handed the peer by the transport, and ignoring it: the door
+            // admits exactly one key, so *who* arrived is settled before this
+            // runs.
             take(request)
         },
         // The only thing nameable here is a delivery, so anything else is not a

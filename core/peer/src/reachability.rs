@@ -797,13 +797,19 @@ async fn hold_reservation(
 }
 
 /// Serve requests from one inbound relayed circuit until the peer closes it.
+///
+/// The handler is handed who the circuit is from as the door admitted it: a
+/// key, or a recovery claim's standing, which names no key (#511). A claim's
+/// circuit is written down by no line that names a key or the identity.
 async fn serve_relayed_conn(conn: RelayedInbound, handler: PeerHandler) {
-    let peer_did = conn.peer_did().to_string();
+    let peer = conn.peer().clone();
+    // What a line may name the peer by: its key, and nothing for a claimant.
+    let named = peer.did().unwrap_or_default().to_string();
     loop {
         let h = handler.clone();
-        let pd = peer_did.clone();
+        let p = peer.clone();
         match conn
-            .serve_one_request(move |req| async move { h.serve(pd, req).await })
+            .serve_one_request(move |req| async move { h.serve(p, req).await })
             .await
         {
             Ok(true) => {}      // served one request; continue
@@ -814,9 +820,9 @@ async fn serve_relayed_conn(conn: RelayedInbound, handler: PeerHandler) {
                 // the ordinary end of a session, not a fault.
                 let text = e.to_string();
                 if text.contains("reset") || text.contains("closed") {
-                    tracing::info!(peer = %peer_did, "relayed circuit ended without a close");
+                    tracing::info!(peer = %named, "relayed circuit ended without a close");
                 } else {
-                    tracing::warn!(peer = %peer_did, error = %e, "relayed request error");
+                    tracing::warn!(peer = %named, error = %e, "relayed request error");
                 }
                 break;
             }

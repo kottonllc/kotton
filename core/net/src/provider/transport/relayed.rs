@@ -27,10 +27,26 @@
 //! offers, or a recovery claim, and is put to [`Admits`] again. A refusal is the circuit
 //! closing: no frame says why, and nothing here writes the initiator's key or identity down.
 //!
-//! **The first frame's wait.** A reservation holds at most [`MAX_OPENING`] circuits whose
-//! version byte and first frame are not yet whole, each for
-//! [`kotton_handshake::FIRST_FRAME_WAIT`] and no longer; a circuit past that bound is not
-//! dialled back, and one that runs out the wait is closed on having been written nothing.
+//! **A claimant has no name** (#511). A device admitted on a recovery claim is known on its
+//! connection by the claim's standing ([`Peer::Claim`]) and by no key; nothing about it is
+//! written to a table shared across connections. A dialer makes its claim through
+//! [`MakesClaim`], which the caller that holds the authority answers: no key of the
+//! authority's crosses into this crate.
+//!
+//! **Every stage at a door has a bound, in places and in time.** Each expiry closes the
+//! circuit as every refusal does: no frame, no reason, no line.
+//! - *The dial-back.* A circuit takes one of the reservation's [`MAX_OPENING`] places before
+//!   its data leg is dialled back, and the dial-back has [`DIAL_BACK_WAIT`]; a circuit past
+//!   the bound is not dialled back.
+//! - *The first frame.* The place is held until the version byte and first frame are whole,
+//!   for [`kotton_handshake::FIRST_FRAME_WAIT`] at most; one that runs out the wait is closed
+//!   on having been written nothing.
+//! - *Admission.* A circuit whose first frame is whole takes one of [`MAX_ADMITTING`] places
+//!   and gives up its opening place; one past that bound is closed on, written nothing. The
+//!   whole of [`RelayedConnection::accept`], from its start to the frame that admits, has
+//!   [`ADMIT_WAIT`], which covers the third message and the answer to an ask.
+//! - *The dialer.* [`RelayedConnection::connect`] has [`ADMIT_WAIT`] too, from its first
+//!   frame to being admitted.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -55,17 +71,33 @@ use x25519_dalek::StaticSecret;
 
 use super::admits::Admits;
 
-pub use kotton_handshake::FIRST_FRAME_WAIT;
+pub use kotton_handshake::{AwaitingAnswer, FIRST_FRAME_WAIT};
+pub use kotton_wire::handshake::RecoveryClaim;
+pub use super::admits::Peer;
 use crate::provider::rendezvous::AdmissionKey;
+use std::time::Duration;
 
 /// The most static keys one door hands the responder. Every first frame of the right length
 /// costs one trial for each, whoever sent it.
 pub const MAX_DOOR_KEYS: usize = 8;
 
 /// The most circuits one reservation holds before their version byte and first frame are
-/// whole. Each is held for [`FIRST_FRAME_WAIT`] at most; one past the bound is not dialled
-/// back.
+/// whole, the dial-back of their data leg included. Each is held for [`DIAL_BACK_WAIT`] and
+/// then [`FIRST_FRAME_WAIT`] at most; one past the bound is not dialled back.
 pub const MAX_OPENING: usize = 16;
+
+/// The most circuits one reservation holds once their first frame is whole and before they
+/// are admitted or refused. Each is held for what is left of [`ADMIT_WAIT`] at most; one
+/// past the bound is closed on, having been written nothing.
+pub const MAX_ADMITTING: usize = 16;
+
+/// How long a door waits for the relay to answer the dial-back of a circuit's data leg.
+pub const DIAL_BACK_WAIT: Duration = FIRST_FRAME_WAIT;
+
+/// How long a circuit's handshake may take, from its start to the frame that admits: on the
+/// door's side from the first byte read, on the dialer's from the first frame sent. Three
+/// first frames' waits: the first frame, then the third message and the answer to an ask.
+pub const ADMIT_WAIT: Duration = Duration::from_secs(3 * FIRST_FRAME_WAIT.as_secs());
 
 /// The one error a circuit that ends in the handshake gives, whatever ended it: a refusal
 /// says nothing of why, to the far side or to whoever reads this side's log.
@@ -99,40 +131,77 @@ impl Door {
     }
 }
 
+/// What makes a recovery claim for one connection: answered by whoever holds the recovery
+/// authority, which never hands it here. The door's side has [`Admits`]; this is the dialer's.
+///
+/// Called at most once per connection, with that connection's handshake: the claim it makes
+/// answers that connection and no other ([`AwaitingAnswer::claim`]).
+pub trait MakesClaim: Send + Sync {
+    /// A claim for the connection `awaiting` is the handshake of; `None` where none is made.
+    fn claim(&self, awaiting: &AwaitingAnswer) -> Option<RecoveryClaim>;
+}
+
 /// What a dialer offers a door that asks for its events: the key events it holds that the
-/// door may not, or a recovery authority to make a claim with in their place. Empty for
-/// every ordinary dial, which is then asked nothing.
+/// door may not, or a recovery claim in their place. Empty for every ordinary dial, which is
+/// then asked nothing.
 #[derive(Clone, Default)]
 pub struct CircuitOffer {
     /// The key events since the door's tip, oldest first: usually one, a recovery rotation.
     pub events: Vec<kotton_wire::kel::KelEvent>,
-    /// A recovery authority the dialer holds, for a device that holds nothing else.
-    pub authority: Option<SigningKey>,
+    /// What makes a recovery claim, for a device that holds nothing else.
+    pub claim: Option<Arc<dyn MakesClaim>>,
 }
 
 impl std::fmt::Debug for CircuitOffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CircuitOffer")
             .field("events", &self.events.len())
-            .field("authority", &self.authority.is_some())
+            .field("claim", &self.claim.is_some())
             .finish()
     }
 }
 
-/// How many circuits a reservation holds in their opening.
+/// The places a reservation holds circuits in: [`MAX_OPENING`] before a first frame is whole,
+/// and [`MAX_ADMITTING`] after it and before admission.
 #[derive(Clone)]
-pub struct Openings(Arc<Semaphore>);
+pub struct Openings {
+    opening: Arc<Semaphore>,
+    admitting: Arc<Semaphore>,
+}
 
 impl Default for Openings {
     fn default() -> Self {
-        Self(Arc::new(Semaphore::new(MAX_OPENING)))
+        Self {
+            opening: Arc::new(Semaphore::new(MAX_OPENING)),
+            admitting: Arc::new(Semaphore::new(MAX_ADMITTING)),
+        }
     }
 }
 
 impl Openings {
     /// A place for one more circuit's opening, or `None` where [`MAX_OPENING`] are held.
-    pub fn admit(&self) -> Option<OwnedSemaphorePermit> {
-        Arc::clone(&self.0).try_acquire_owned().ok()
+    pub fn admit(&self) -> Option<Place> {
+        let opening = Arc::clone(&self.opening).try_acquire_owned().ok()?;
+        Some(Place {
+            opening,
+            admitting: Arc::clone(&self.admitting),
+        })
+    }
+}
+
+/// One circuit's place in a reservation's opening ([`Openings::admit`]). Its first frame
+/// whole, it moves to an admitting place, if one is free.
+pub struct Place {
+    opening: OwnedSemaphorePermit,
+    admitting: Arc<Semaphore>,
+}
+
+impl Place {
+    /// Give up the opening place for an admitting one; `None` where [`MAX_ADMITTING`] are
+    /// held, and the opening place is given up either way.
+    fn advance(self) -> Option<OwnedSemaphorePermit> {
+        drop(self.opening);
+        self.admitting.try_acquire_owned().ok()
     }
 }
 
@@ -142,7 +211,7 @@ impl Openings {
 /// carry one message at a time.
 pub struct RelayedConnection<S> {
     inner: Mutex<Carried<S>>,
-    peer_did: String,
+    peer: Peer,
 }
 
 struct Carried<S> {
@@ -151,10 +220,15 @@ struct Carried<S> {
 }
 
 impl<S> RelayedConnection<S> {
-    /// The `did:key` of the peer's Ed25519 key: on the dialer's side the key it dialled, on
-    /// the door's the key it admitted.
-    pub fn peer_did(&self) -> &str {
-        &self.peer_did
+    /// Who the peer is: on the dialer's side the key it dialled; on the door's the key it
+    /// admitted, or the standing of the recovery claim it admitted on, which names no key.
+    pub fn peer(&self) -> &Peer {
+        &self.peer
+    }
+
+    /// The `did:key` of the peer's Ed25519 key, where the peer is a key; a claimant has none.
+    pub fn peer_did(&self) -> Option<&str> {
+        self.peer.did()
     }
 }
 
@@ -199,8 +273,20 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     /// Dial the door whose key is `responder` over `stream` (the relay-bridged channel), as
-    /// `own`, offering `offer` if the door asks for events.
+    /// `own`, offering `offer` if the door asks for events. Admitted within [`ADMIT_WAIT`], or
+    /// closed.
     pub async fn connect(
+        stream: S,
+        own: &SigningKey,
+        responder: &[u8; 32],
+        offer: &CircuitOffer,
+    ) -> Result<Self, TransportError> {
+        tokio::time::timeout(ADMIT_WAIT, Self::dial_in(stream, own, responder, offer))
+            .await
+            .map_err(|_| closed())?
+    }
+
+    async fn dial_in(
         mut stream: S,
         own: &SigningKey,
         responder: &[u8; 32],
@@ -215,18 +301,15 @@ where
         let second = read_body(&mut stream).await?.ok_or_else(closed)?;
         let (awaiting, third) = initiator.read_second(&second).map_err(|_| closed())?;
         send(&mut stream, &third).await?;
-        let claim = offer.authority.as_ref().and_then(|authority| {
-            awaiting.claim(
-                &kotton_crypto::x25519::ed25519_priv_to_x25519(authority),
-                authority.verifying_key().to_bytes(),
-            )
-        });
+        let claim = offer.claim.as_ref().and_then(|maker| maker.claim(&awaiting));
         let first = read_body(&mut stream).await?.ok_or_else(closed)?;
         let (mut channel, answer) = awaiting.read_first(&first).map_err(|_| closed())?;
         if answer == Answer::AskForEvents {
             let reply = match claim {
                 Some(claim) => AskReply::Claim(claim),
                 None => {
+                    // Each event's JSON until step 1 of #496 gives events their binary form
+                    // (#512); step 1 replaces this encoding.
                     let events: Vec<Vec<u8>> = offer
                         .events
                         .iter()
@@ -243,24 +326,28 @@ where
         }
         Ok(Self {
             inner: Mutex::new(Carried { stream, channel }),
-            peer_did: did_of(responder)?,
+            peer: Peer::Key(did_of(responder)?),
         })
     }
 
-    /// Answer a circuit on `stream` at `door`. `opening` is the place [`Openings`] gave this
-    /// circuit, held until its first frame is whole or the wait runs out. Every refusal is
-    /// the stream dropped, having written nothing past what the handshake writes to anyone
-    /// who holds the door's key, and reads the same.
-    pub async fn accept(
-        mut stream: S,
-        door: &Door,
-        opening: OwnedSemaphorePermit,
-    ) -> Result<Self, TransportError> {
+    /// Answer a circuit on `stream` at `door`. `place` is the place [`Openings`] gave this
+    /// circuit, held until its first frame is whole or the wait runs out; then an admitting
+    /// place is held until it is admitted or refused. The whole has [`ADMIT_WAIT`]. Every
+    /// refusal, and every expiry, is the stream dropped, having written nothing past what the
+    /// handshake writes to anyone who holds the door's key, and reads the same.
+    pub async fn accept(stream: S, door: &Door, place: Place) -> Result<Self, TransportError> {
+        tokio::time::timeout(ADMIT_WAIT, Self::admit(stream, door, place))
+            .await
+            .map_err(|_| closed())?
+    }
+
+    async fn admit(mut stream: S, door: &Door, place: Place) -> Result<Self, TransportError> {
         let bytes = tokio::time::timeout(FIRST_FRAME_WAIT, read_opening_bytes(&mut stream))
             .await
             .map_err(|_| closed())?
             .map_err(|_| closed())?;
-        drop(opening);
+        // Held until this returns: admitted, refused or expired.
+        let _admitting = place.advance().ok_or_else(closed)?;
         let Opening::Complete { version, first, .. } = read_opening(&bytes) else {
             return Err(closed());
         };
@@ -272,12 +359,12 @@ where
         let initiator = admitting.initiator().to_bytes();
 
         let (peer, channel) = match door.admits.by_key(&initiator) {
-            Some(peer) => {
+            Some(key) => {
                 let (first, channel) = admitting
                     .answer(Answer::Admitted { latest: None })
                     .map_err(|_| closed())?;
                 send(&mut stream, &first).await?;
-                (peer, channel.map_err(|_| closed())?)
+                (Peer::Key(did_of(&key)?), channel.map_err(|_| closed())?)
             }
             None => {
                 let (ask, asked) = admitting.ask().map_err(|_| closed())?;
@@ -285,7 +372,11 @@ where
                 let mut asked = asked.map_err(|_| closed())?;
                 let body = read_body(&mut stream).await?.ok_or_else(closed)?;
                 let peer = match asked.read_reply(&body).map_err(|_| closed())? {
-                    AskReply::Events(events) => door.admits.by_events(&initiator, &events),
+                    AskReply::Events(events) => door
+                        .admits
+                        .by_events(&initiator, &events)
+                        .map(|key| did_of(&key).map(Peer::Key))
+                        .transpose()?,
                     AskReply::Claim(claim) => {
                         // The tag first: one who does not hold the key it names learns nothing
                         // from how long the door took to look it up.
@@ -294,7 +385,7 @@ where
                             .and_then(|authority| asked.expected_claim_tag(&authority, claim.key()))
                             .is_some_and(|expected| claim.tag_matches(&expected));
                         if tagged {
-                            door.admits.by_claim(&initiator, claim.key())
+                            door.admits.by_claim(claim.key()).map(|aid| Peer::Claim { aid })
                         } else {
                             None
                         }
@@ -308,7 +399,7 @@ where
         };
         Ok(Self {
             inner: Mutex::new(Carried { stream, channel }),
-            peer_did: did_of(&peer)?,
+            peer,
         })
     }
 
@@ -691,9 +782,9 @@ impl Reservation<'_> {
     /// `out` is closed.
     ///
     /// Each circuit is answered on its own task, so one that sends nothing holds no other
-    /// up; at most [`MAX_OPENING`] are held before their first frame is whole, and a circuit
-    /// past that is not dialled back. A refused circuit is dropped without a line: what it
-    /// sent is nobody's record.
+    /// up. Its places and waits are the module's *Every stage at a door has a bound*: a
+    /// circuit past [`MAX_OPENING`] is not dialled back. A refused or expired circuit is
+    /// dropped without a line: what it sent is nobody's record.
     pub async fn serve(
         mut self,
         door: Arc<Door>,
@@ -711,28 +802,36 @@ impl Reservation<'_> {
             if out.is_closed() {
                 break; // consumer gone
             }
-            let Some(opening) = openings.admit() else {
+            let Some(place) = openings.admit() else {
                 continue;
             };
             // Dial back the data leg; the circuit id is the capability (no auth).
             let accept_url = format!("{ws_base}/relay/accept?circuit={circuit_id}");
-            let (door, out) = (Arc::clone(&door), out.clone());
-            tokio::spawn(async move {
-                let data_ws = match connect_ws(&accept_url, None).await {
-                    Ok(ws) => ws,
-                    Err(e) => {
-                        warn!(error = %e, "relay accept dial-back failed");
-                        return;
-                    }
-                };
-                if let Ok(conn) =
-                    RelayedConnection::accept(WsByteStream::new(data_ws), &door, opening).await
-                {
-                    let _ = out.send(conn).await;
-                }
-            });
+            tokio::spawn(answer_circuit(accept_url, Arc::clone(&door), place, out.clone()));
         }
         Ok(())
+    }
+}
+
+/// Dial back one circuit's data leg at `accept_url`, within [`DIAL_BACK_WAIT`], holding
+/// `place` while it does; answer it at `door`, and send it to `out` if admitted.
+async fn answer_circuit(
+    accept_url: String,
+    door: Arc<Door>,
+    place: Place,
+    out: mpsc::Sender<RelayedInbound>,
+) {
+    let data_ws = match tokio::time::timeout(DIAL_BACK_WAIT, connect_ws(&accept_url, None)).await {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(e)) => {
+            warn!(error = %e, "relay accept dial-back failed");
+            return;
+        }
+        // Expired: let go of the place, as every expiry does, without a line.
+        Err(_) => return,
+    };
+    if let Ok(conn) = RelayedConnection::accept(WsByteStream::new(data_ws), &door, place).await {
+        let _ = out.send(conn).await;
     }
 }
 
@@ -792,8 +891,42 @@ mod tests {
         Door::new(std::slice::from_ref(own), Arc::new(held)).unwrap()
     }
 
-    fn place() -> OwnedSemaphorePermit {
+    fn place() -> Place {
         Openings::default().admit().unwrap()
+    }
+
+    /// The device side's claim-maker, as `recover` answers it: the authority is held here and
+    /// makes one claim for the connection it is asked about.
+    struct Authority(SigningKey);
+
+    impl MakesClaim for Authority {
+        fn claim(&self, awaiting: &AwaitingAnswer) -> Option<RecoveryClaim> {
+            awaiting.claim(
+                &kotton_crypto::x25519::ed25519_priv_to_x25519(&self.0),
+                self.0.verifying_key().to_bytes(),
+            )
+        }
+    }
+
+    fn claiming(authority: SigningKey) -> CircuitOffer {
+        CircuitOffer {
+            events: Vec::new(),
+            claim: Some(Arc::new(Authority(authority))),
+        }
+    }
+
+    /// A valid opening to `door_key` from `dialer_key`, sent on `io`; then the door's second
+    /// message is read and nothing more is sent.
+    async fn open_and_stall(io: &mut tokio::io::DuplexStream, door_key: &SigningKey, dialer_key: &SigningKey) {
+        let (_, opening) = Initiator::open(
+            &kotton_crypto::x25519::ed25519_priv_to_x25519(dialer_key),
+            &kotton_crypto::x25519::ed25519_pub_to_x25519(&pub_of(door_key)).unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+        io.write_all(&opening).await.unwrap();
+        read_body(io).await.unwrap().expect("the door's second message");
     }
 
     async fn echo<S: AsyncRead + AsyncWrite + Unpin + Send>(conn: &RelayedConnection<S>) -> bool {
@@ -816,7 +949,7 @@ mod tests {
             let conn = RelayedConnection::accept(s_io, &door, place())
                 .await
                 .expect("the door admits the key it holds");
-            assert_eq!(conn.peer_did(), dialer_did);
+            assert_eq!(conn.peer(), &Peer::Key(dialer_did));
             assert!(echo(&conn).await);
             // A request longer than one frame crosses as one message.
             assert!(echo(&conn).await);
@@ -830,7 +963,7 @@ mod tests {
         )
         .await
         .expect("the dial completes");
-        assert_eq!(conn.peer_did(), did_of(&pub_of(&door_key)).unwrap());
+        assert_eq!(conn.peer_did(), Some(did_of(&pub_of(&door_key)).unwrap().as_str()));
         assert_eq!(conn.request(b"ping").await.unwrap(), b"echo:ping");
         let long = vec![0x5a; 200_000];
         let resp = conn.request(&long).await.unwrap();
@@ -877,11 +1010,17 @@ mod tests {
     }
 
     /// A device that holds only a recovery authority is admitted by its claim, whose tag
-    /// answers this connection; the admission is left for the handler to read. A claim by an
-    /// authority the door holds no identity for is closed on as any refusal is.
+    /// answers this connection; the claim's standing is the connection's, and it is named by
+    /// no key. A claim by an authority the door holds no identity for is closed on as any
+    /// refusal is.
+    ///
+    /// The claimant is `key(2)`, whose key's sign bit is set: the key a name derived from its
+    /// Montgomery form would give is not its own (#511). It is given none, and nothing is
+    /// written to the admission's shared table.
     #[tokio::test]
     async fn a_recovery_claim_is_admitted_by_its_tag_and_the_authority_held() {
-        let (door_key, claimant, authority) = (key(9), key(10), key(11));
+        let (door_key, claimant, authority) = (key(9), key(2), key(11));
+        assert_ne!(pub_of(&claimant)[31] & 0x80, 0, "the claimant's key has its sign bit set");
         let admission = Admission::default();
         admission
             .authorities
@@ -894,27 +1033,25 @@ mod tests {
             let door = door_admitting(&door_key, &[], admission.clone());
             let server =
                 tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place()).await });
-            let offer = CircuitOffer {
-                events: Vec::new(),
-                authority: Some(offered),
-            };
             let dialled =
-                RelayedConnection::connect(c_io, &claimant, &pub_of(&door_key), &offer).await;
+                RelayedConnection::connect(c_io, &claimant, &pub_of(&door_key), &claiming(offered))
+                    .await;
             let accepted = server.await.unwrap();
             assert_eq!(dialled.is_ok(), admitted);
             assert_eq!(accepted.is_ok(), admitted);
+            if let Ok(conn) = accepted {
+                assert_eq!(
+                    conn.peer(),
+                    &Peer::Claim {
+                        aid: "did:kotton:held".into()
+                    }
+                );
+                assert_eq!(conn.peer_did(), None, "a claimant has no name");
+            }
         }
-        // Known for this connection by the Ed25519 key its Montgomery form names.
-        let montgomery = kotton_crypto::x25519::ed25519_pub_to_x25519(&pub_of(&claimant))
-            .unwrap()
-            .to_bytes();
-        let named = kotton_crypto::x25519::x25519_pub_to_ed25519(&montgomery).unwrap();
-        assert_eq!(admission.admitted.read().unwrap().len(), 1);
-        assert_eq!(
-            admission.admitted(&named),
-            Some(Admitted::ByClaim {
-                aid: "did:kotton:held".into()
-            })
+        assert!(
+            admission.admitted.read().unwrap().is_empty(),
+            "a circuit's claim writes nothing to the shared table"
         );
     }
 
@@ -939,7 +1076,7 @@ mod tests {
                 tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place()).await });
             let offer = CircuitOffer {
                 events: vec![rotation.clone()],
-                authority: None,
+                claim: None,
             };
             let dialled = RelayedConnection::connect(c_io, &dialer, &pub_of(&door_key), &offer).await;
             let accepted = server.await.unwrap();
@@ -1027,5 +1164,109 @@ mod tests {
         assert!(started.elapsed() >= FIRST_FRAME_WAIT);
         assert!(openings.admit().is_some(), "the place is free again");
         drop(held);
+    }
+
+    /// A circuit that sends a whole first frame and then nothing is closed on once
+    /// [`ADMIT_WAIT`] has run from its start, though no single read has a wait of its own;
+    /// it is written only the second message, and its admitting place is free again.
+    #[tokio::test(start_paused = true)]
+    async fn a_circuit_that_stalls_after_its_first_frame_is_closed_on_at_the_admit_wait() {
+        let (door_key, dialer_key) = (key(22), key(23));
+        let door = door_admitting(&door_key, &[pub_of(&dialer_key)], Admission::default());
+        let openings = Openings::default();
+        let place = openings.admit().unwrap();
+        let (s_io, mut c_io) = tokio::io::duplex(64 * 1024);
+        let started = tokio::time::Instant::now();
+        let server = tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place).await });
+        open_and_stall(&mut c_io, &door_key, &dialer_key).await;
+        assert!(server.await.unwrap().is_err());
+        assert!(started.elapsed() >= ADMIT_WAIT);
+        assert!(started.elapsed() < ADMIT_WAIT + FIRST_FRAME_WAIT);
+        let mut rest = Vec::new();
+        c_io.read_to_end(&mut rest).await.unwrap();
+        assert!(rest.is_empty(), "nothing after the second message: {} bytes", rest.len());
+        let held: Vec<_> = (0..MAX_ADMITTING)
+            .map(|_| openings.admitting.clone().try_acquire_owned().expect("every admitting place free"))
+            .collect();
+        drop(held);
+    }
+
+    /// A dial-back the relay never answers holds its opening place for [`DIAL_BACK_WAIT`] and
+    /// then lets it go, having sent nothing on.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_dial_back_lets_its_place_go_at_its_wait() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Takes the connection and never answers the upgrade.
+        let silent = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(tcp);
+        });
+        let door = Arc::new(door_admitting(&key(24), &[], Admission::default()));
+        let openings = Openings::default();
+        let held: Vec<_> = (0..MAX_OPENING - 1).map(|_| openings.admit().unwrap()).collect();
+        let place = openings.admit().expect("the last place");
+        let (out, mut admitted) = mpsc::channel(1);
+        let started = tokio::time::Instant::now();
+        let answering = tokio::spawn(answer_circuit(
+            format!("ws://{addr}/relay/accept?circuit=x"),
+            door,
+            place,
+            out,
+        ));
+        tokio::task::yield_now().await;
+        assert!(openings.admit().is_none(), "the dial-back holds its place");
+        answering.await.unwrap();
+        assert!(started.elapsed() >= DIAL_BACK_WAIT);
+        assert!(openings.admit().is_some(), "and lets it go");
+        assert!(admitted.recv().await.is_none(), "nothing was sent on");
+        drop(held);
+        silent.abort();
+    }
+
+    /// At most [`MAX_ADMITTING`] circuits are held past their first frame and before
+    /// admission; one more, its first frame whole and under the door's key, is closed on
+    /// having been written nothing, and does not hold an opening place.
+    #[tokio::test(start_paused = true)]
+    async fn a_reservation_holds_at_most_its_bound_of_circuits_being_admitted() {
+        let (door_key, dialer_key) = (key(25), key(26));
+        let door = Arc::new(door_admitting(&door_key, &[pub_of(&dialer_key)], Admission::default()));
+        let openings = Openings::default();
+        let mut stalled = Vec::new();
+        for _ in 0..MAX_ADMITTING {
+            let (s_io, mut c_io) = tokio::io::duplex(64 * 1024);
+            let (door, place) = (Arc::clone(&door), openings.admit().unwrap());
+            let server = tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place).await });
+            open_and_stall(&mut c_io, &door_key, &dialer_key).await;
+            stalled.push((server, c_io));
+        }
+
+        let (s_io, mut c_io) = tokio::io::duplex(64 * 1024);
+        let place = openings.admit().expect("an opening place is free");
+        let one_more = {
+            let door = Arc::clone(&door);
+            tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place).await })
+        };
+        let (_, opening) = Initiator::open(
+            &kotton_crypto::x25519::ed25519_priv_to_x25519(&dialer_key),
+            &kotton_crypto::x25519::ed25519_pub_to_x25519(&pub_of(&door_key)).unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+        c_io.write_all(&opening).await.unwrap();
+        assert!(one_more.await.unwrap().is_err(), "one past the bound is closed on");
+        let mut written = Vec::new();
+        c_io.read_to_end(&mut written).await.unwrap();
+        assert!(written.is_empty(), "and written nothing: {} bytes", written.len());
+        let opening_places: Vec<_> = (0..MAX_OPENING)
+            .map(|_| openings.admit().expect("no opening place is held by a circuit being admitted"))
+            .collect();
+        drop(opening_places);
+
+        for (server, _c_io) in stalled {
+            assert!(server.await.unwrap().is_err(), "each stalled circuit expires");
+        }
     }
 }
