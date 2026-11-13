@@ -528,3 +528,46 @@ fn a_root_verb_holds_the_door_and_its_settings_file_to_root_and_the_vaults_user(
     mode(&run, was);
     reaches(None, &named);
 }
+
+/// Whether this runs as root: the root-only half of the settings file's hold.
+fn is_root() -> bool {
+    forked(|| Command::new("id").arg("-u").output()).is_ok_and(|me| String::from_utf8_lossy(&me.stdout).trim() == "0")
+}
+
+/// **A root verb holds the settings file's directories before it asks for the file**
+/// (kottonllc/kotton#527): with no settings file there, under a directory others may
+/// write, the verb is refused in one sentence naming that directory. Anyone who can
+/// write it could put a file there, so its being absent now says nothing.
+#[test]
+fn a_root_verb_with_no_settings_file_under_a_directory_that_does_not_hold_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !is_root() {
+        eprintln!("skipped: not root — a verb holds the settings file's directories only as root");
+        return;
+    }
+    let b = Host::installed();
+    std::fs::remove_file(b.env_file()).unwrap();
+    let etc = b.root.join("etc/kotton");
+    std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o777)).unwrap();
+    refused_in_one_sentence(
+        &typed(&b.bin(), None, &[], &["tenants"]),
+        &format!("{} is writable by other users (mode 0777)", etc.display()),
+    );
+}
+
+/// **With no settings file there, under directories that hold, a root verb reads
+/// nothing** (kottonllc/kotton#527) and goes on as a binary with no installed
+/// settings does: it looks where root's login says, and nothing answers there.
+#[test]
+fn a_root_verb_with_no_settings_file_under_directories_that_hold_reads_nothing() {
+    if !is_root() {
+        eprintln!("skipped: not root — a verb holds the settings file's directories only as root");
+        return;
+    }
+    let b = Host::installed();
+    std::fs::remove_file(b.env_file()).unwrap();
+    refused_in_one_sentence(
+        &typed(&b.bin(), None, &[], &["tenants"]),
+        "nothing answers at /run/user/0/kotton/kvaultd.sock",
+    );
+}

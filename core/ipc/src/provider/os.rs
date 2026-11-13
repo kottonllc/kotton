@@ -265,9 +265,11 @@ fn check_socket_dir(dir: &std::path::Path, owner: u32) -> Result<(), String> {
 /// hold). Then only those two users can change what `path` names. `path` itself is
 /// not read here: its caller holds it to its own rule.
 ///
-/// `path` is absolute and has no `.` or `..` in it, or it is refused: the walk is of
-/// the entries the kernel resolves, from `/`. A refusal names the entry that does
-/// not hold and what is wrong with it, and its kind is
+/// `path` is absolute and has no `..` in it, or it is refused. An interior `.` is not
+/// refused: [`std::path::Path::components`] drops it, so `/a/./b` is walked as
+/// `/a/b`, which is the entry the kernel resolves; the walk is of those entries,
+/// from `/`. A refusal names the entry that does not hold and what is wrong with
+/// it, and its kind is
 /// [`std::io::ErrorKind::PermissionDenied`].
 ///
 /// What a root client holds the ancestors of a door's directory to
@@ -289,7 +291,7 @@ pub fn check_ancestors(path: &std::path::Path, owner: u32) -> std::io::Result<()
         ))
     };
     if !path.is_absolute() || !path.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_))) {
-        return refuse(path, "is not an absolute path free of `.` and `..`".into());
+        return refuse(path, "is not an absolute path free of `..`".into());
     }
     let path = kotton_common::fs::own_entry(path);
     for above in path.ancestors().skip(1) {
@@ -506,6 +508,11 @@ impl OsConnection {
     /// hold, the short `/tmp` fallback's among them, is refused naming the entry,
     /// and so is a server of any other user: the connection is dropped before a byte
     /// is written.
+    ///
+    /// What is held is who the server is: root, or the uid that owns the held
+    /// directory at the door's path; not that the connected socket is the entry
+    /// inside that directory, since the connect resolved the path before the walk
+    /// read it.
     #[cfg(unix)]
     pub async fn connect_holding_root_or_door_owner(endpoint: &IpcEndpoint) -> std::io::Result<Self> {
         Self::connect_holding_door(endpoint, 0).await
@@ -1141,8 +1148,9 @@ pub(crate) mod tests {
 
     /// **Each ancestor of a door's directory is held, up to `/`, and a refusal names
     /// the entry**: one group- or other-writable (`/tmp`, sticky bit and all, and a
-    /// `0775` directory of this user's), a symlink, and a relative path are each
-    /// refused by name; a clean path holds.
+    /// `0775` directory of this user's), a symlink, a relative path and a path with
+    /// `..` are each refused by name; a clean path holds, and so does one with an
+    /// interior `.`, which is walked as the kernel resolves it.
     #[cfg(unix)]
     #[test]
     fn every_ancestor_of_a_door_is_held_and_a_refusal_names_the_entry() {
@@ -1176,7 +1184,9 @@ pub(crate) mod tests {
         assert!(said.contains("is not an absolute path"), "{said}");
         let dotted = base.path().join("a").join("..").join("a").join("kotton");
         let said = check_ancestors(&dotted, me).unwrap_err().to_string();
-        assert!(said.contains("is not an absolute path free of `.` and `..`"), "{said}");
+        assert!(said.contains("is not an absolute path free of `..`"), "{said}");
+        let interior = base.path().join("a").join(".").join("kotton");
+        check_ancestors(&interior, me).expect("an interior `.` is walked as the kernel resolves it");
     }
 
     /// **An ancestor owned by a third uid is refused by name**; one owned by the
