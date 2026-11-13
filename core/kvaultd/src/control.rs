@@ -128,16 +128,19 @@ pub const ADMITS: PeerUsers = PeerUsers::OwnUserOrRoot;
 /// Open the vault's door at `endpoint` as one of its clients, for a
 /// [`kotton_ipc::IpcClient`] to be built over (`IpcClient::from_connection`).
 ///
-/// On Unix a client that is not root goes no further unless the door is served by
-/// its own OS user, the vault's (`PeerUsers::OwnUser`): it writes nothing to a door
-/// another user serves. A root client is not told the vault's user, and holds the
-/// server to no user here.
+/// **Its clients hold the server likewise** (kottonllc/kotton#514, #527). On Unix a
+/// client that is not root goes no further unless the door is served by its own OS
+/// user, the vault's (`PeerUsers::OwnUser`). A root client, for whom `OwnUser` names
+/// root, goes no further unless the door is served by root, or by the uid that owns
+/// the door's directory once that directory and every ancestor up to `/` hold one
+/// predicate (`OsConnection::connect_holding_root_or_door_owner`). Either writes
+/// nothing to a door it refuses. On Windows the pipe's server is not identified here.
 pub async fn connect_to_door(endpoint: &IpcEndpoint) -> io::Result<OsConnection> {
     #[cfg(unix)]
-    if kotton_ipc::own_uid() != 0 {
-        return OsConnection::connect_holding(endpoint, PeerUsers::OwnUser).await;
+    if kotton_ipc::own_uid() == 0 {
+        return OsConnection::connect_holding_root_or_door_owner(endpoint).await;
     }
-    OsConnection::connect(endpoint).await.map_err(io::Error::other)
+    OsConnection::connect_holding(endpoint, PeerUsers::OwnUser).await
 }
 
 /// Serve the control socket until the listener fails.

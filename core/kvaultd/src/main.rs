@@ -154,7 +154,8 @@ fn installed_env_file(exe: &Path) -> Option<PathBuf> {
 /// Nothing is read when the caller names a door (`KVAULTD_IPC_NAME`) or when
 /// this binary was not installed; a file that is there and closed to the caller
 /// is refused in one sentence rather than silently skipped, which would send
-/// the verb to a door nobody made. Called before the runtime starts a thread,
+/// the verb to a door nobody made. Root reads it only when root alone can change
+/// it ([`hold_root_settings`]). Called before the runtime starts a thread,
 /// so setting the environment races nothing.
 fn take_installed_env() -> Result<(), String> {
     if std::env::var_os("KVAULTD_IPC_NAME").is_some() {
@@ -163,6 +164,10 @@ fn take_installed_env() -> Result<(), String> {
     let Some(file) = std::env::current_exe().ok().as_deref().and_then(installed_env_file) else {
         return Ok(());
     };
+    #[cfg(unix)]
+    if kotton_ipc::own_uid() == 0 {
+        hold_root_settings(&file)?;
+    }
     let text = match std::fs::read(&file) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -183,6 +188,44 @@ fn take_installed_env() -> Result<(), String> {
     })?;
     for (key, value) in pairs {
         std::env::set_var(key, value);
+    }
+    Ok(())
+}
+
+/// **Root takes a door's path from the settings file only when root alone can
+/// change it** (kottonllc/kotton#527): the file is a regular file, not a symlink,
+/// owned by root and granting group and other no write, and every directory above
+/// it, up to `/`, is root's and grants them no write
+/// ([`kotton_ipc::check_ancestors`] with root as the owner). A root client holds the
+/// door it is pointed at to the owner of the door's directory, so where it is
+/// pointed is held first. A file that is not there is not a refusal: nothing is
+/// read, as for any caller. Otherwise one sentence naming the entry that does not
+/// hold, and the file is not read.
+#[cfg(unix)]
+fn hold_root_settings(file: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let rule = "root takes the vault's door from a settings file only when it is a file, not a symlink, \
+                owned by root and granting group and other no write, under directories that are root's and grant them no write";
+    match std::fs::symlink_metadata(file) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        _ => {}
+    }
+    kotton_ipc::check_ancestors(file, 0).map_err(|e| format!("{e}; {rule}"))?;
+    // Read again now that nobody but root can change what the path names.
+    let refuse = |why: String| format!("{} {why}; {rule}", file.display());
+    let entry = std::fs::symlink_metadata(file).map_err(|e| refuse(format!("cannot be read ({e})")))?;
+    if entry.file_type().is_symlink() {
+        return Err(refuse("is a symlink".into()));
+    }
+    if !entry.is_file() {
+        return Err(refuse("is not a file".into()));
+    }
+    if entry.uid() != 0 {
+        return Err(refuse(format!("is owned by uid {}", entry.uid())));
+    }
+    let mode = entry.mode() & 0o7777;
+    if mode & 0o022 != 0 {
+        return Err(refuse(format!("is writable by other users (mode {mode:04o})")));
     }
     Ok(())
 }

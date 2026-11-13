@@ -447,3 +447,84 @@ fn a_box_too_deep_for_its_joined_door_is_reached_at_the_door_the_vault_opened() 
     assert!(!dir.starts_with(&b.root), "{} is inside the host", dir.display());
     assert!(!dir.exists(), "{} outlived the vault", dir.display());
 }
+
+/// **A root verb speaks only to root or to the owner of the door's directory, and
+/// only by a path root alone could have pointed it at** (kottonllc/kotton#527). The
+/// vault runs as its own uid, as on a host. Root's verb reaches it while the door's
+/// directory and its ancestors hold and the settings file is root's and closed to
+/// others' writes; it is refused in one sentence naming the entry when any of these
+/// does not hold — the settings file writable by its group, the file's directory
+/// writable by others, the file a symlink, a directory above the door writable by
+/// others — and the vault's own uid still reaches the door throughout.
+#[test]
+fn a_root_verb_holds_the_door_and_its_settings_file_to_root_and_the_vaults_user() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(n) = service_uid() else {
+        eprintln!("skipped: not root, or no setpriv — nothing to run as the vault's uid");
+        return;
+    };
+    let b = Host::installed();
+    for d in ["var/lib/kotton-vault", "run/kotton-vault"] {
+        let d = b.root.join(d);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::chown(&d, Some(n), Some(n)).unwrap();
+    }
+    std::fs::set_permissions(&b.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let env = b.env_file();
+    std::os::unix::fs::chown(&env, Some(0), Some(n)).unwrap();
+    std::fs::set_permissions(&env, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    let reaches = |uid: Option<u32>, extra: &[(&str, &str)]| {
+        let out = typed(&b.bin(), uid, extra, &["tenants"]);
+        assert!(out.status.success(), "{}", said(&out));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("this vault keeps for no one"), "{}", said(&out));
+    };
+
+    let _vault = b.start(Some(n));
+    reaches(None, &[]);
+
+    // The settings file, writable by its group.
+    mode(&env, 0o660);
+    refused_in_one_sentence(
+        &typed(&b.bin(), None, &[], &["tenants"]),
+        &format!("{} is writable by other users (mode 0660)", env.display()),
+    );
+    mode(&env, 0o640);
+    reaches(None, &[]);
+
+    // The settings file's directory, writable by others.
+    let etc = b.root.join("etc/kotton");
+    let was = std::fs::metadata(&etc).unwrap().permissions().mode() & 0o7777;
+    mode(&etc, 0o777);
+    refused_in_one_sentence(
+        &typed(&b.bin(), None, &[], &["tenants"]),
+        &format!("{} is writable by other users (mode 0777)", etc.display()),
+    );
+    mode(&etc, was);
+
+    // The settings file, a symlink to a file that holds.
+    let real = b.root.join("etc/kotton/vault.env.real");
+    std::fs::rename(&env, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &env).unwrap();
+    refused_in_one_sentence(&typed(&b.bin(), None, &[], &["tenants"]), &format!("{} is a symlink", env.display()));
+    std::fs::remove_file(&env).unwrap();
+    std::fs::rename(&real, &env).unwrap();
+    reaches(None, &[]);
+
+    // A directory above the door, writable by others. The door is named in the
+    // caller's own environment, so the settings file is not read: the door's own
+    // path is what is held.
+    let runtime = b.root.join("run/kotton-vault").display().to_string();
+    let named = [("KVAULTD_IPC_NAME", "vault"), ("XDG_RUNTIME_DIR", runtime.as_str())];
+    reaches(None, &named);
+    let run = b.root.join("run");
+    let was = std::fs::metadata(&run).unwrap().permissions().mode() & 0o7777;
+    mode(&run, 0o777);
+    refused_in_one_sentence(
+        &typed(&b.bin(), None, &named, &["tenants"]),
+        &format!("{} is writable by other users (mode 0777)", run.display()),
+    );
+    reaches(Some(n), &named);
+    mode(&run, was);
+    reaches(None, &named);
+}
