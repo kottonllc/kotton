@@ -14,7 +14,7 @@ use kotton_device::DeviceRuntime;
 use kotton_diag::service::spawn_subscriber_task;
 use kotton_diag::service::EventScope;
 use kotton_ipc::{ChannelAcceptor, HandlerOutput, PeerUsers};
-use kotton_peer::door::PeerDoor;
+use kotton_peer::door::{Peer, PeerDoor};
 use kotton_peer::PeerHandler;
 use kotton_schemas::AppManifest;
 use kotton_session::service::tokens as sessions;
@@ -1994,10 +1994,10 @@ impl DeviceDaemon {
         // which only a key the named person pairs as their gateway enters.
         let gateway = Arc::new(self.agent_context());
         PeerDoor::<PeerRequest, UserResponse>::serving(
-            move |peer_did, request| {
+            move |from, request| {
                 let peer = Arc::clone(&peer);
                 let gateway = Arc::clone(&gateway);
-                async move { serve_peer_request(&peer, &gateway, &peer_did, request).await }
+                async move { serve_peer_request(&peer, &gateway, &from, request).await }
             },
             |e| UserResponse::Error {
                 message: format!("invalid peer request: {e}"),
@@ -2101,14 +2101,21 @@ pub(super) struct PeerContext {
 /// a gateway's request goes to [`handle_gateway_request`] with the agent, and
 /// every other to [`handle_peer_request`] with [`PeerContext`] alone. The
 /// agent is passed through here and nowhere below the person's path.
+///
+/// A peer admitted on a recovery claim names no key (#511), so it is neither
+/// path's: it is answered by [`serve_claim_request`], from its standing alone.
 async fn serve_peer_request(
     peer: &PeerContext,
     gateway: &AgentContext,
-    peer_did: &str,
+    from: &Peer,
     request: PeerRequest,
 ) -> UserResponse {
     use kotton_crypto::did::DidKeyMethod;
     use kotton_wire::did::Did;
+    let peer_did = match from {
+        Peer::Key(did) => did.as_str(),
+        Peer::Claim { .. } => return serve_claim_request(peer, from, request).await,
+    };
     let peer_pubkey_bytes: Option<[u8; 32]> = Did::parse(peer_did)
         .ok()
         .and_then(|d| DidKeyMethod::to_public_key(&d).ok())
@@ -2128,6 +2135,45 @@ async fn serve_peer_request(
             handle_gateway_request(gateway, peer_did, gateway_user.as_str(), request).await
         }
         Err(message) => UserResponse::Error { message },
+    }
+}
+
+/// A request from a peer admitted on a recovery claim, which the connection
+/// carries and which names no key: the recovery fetch of the identity it
+/// claimed, and nothing else. No line here names the identity or a key.
+async fn serve_claim_request(peer: &PeerContext, from: &Peer, request: PeerRequest) -> UserResponse {
+    // No key, so no posture: the request is the person's path, for the person
+    // it names.
+    let user_id = match peer_ask(&peer.db, None, &request).await {
+        Ok(PeerAsk::Person(user_id)) => user_id,
+        Ok(PeerAsk::Gateway(_)) => return claim_refusal(),
+        Err(message) => return UserResponse::Error { message },
+    };
+    let aid = match peer.standing.of(from, &user_id).await {
+        Ok(kotton_device::users::admission::PeerStanding::Claim { aid }) => aid,
+        Ok(_) => return claim_refusal(),
+        Err(e) => {
+            return UserResponse::Error {
+                message: format!("authorization check failed: {e}"),
+            }
+        }
+    };
+    if !claim_reaches(&peer.standing, &aid, &user_id, &request) {
+        return claim_refusal();
+    }
+    peer.recovery.fetch(&user_id)
+}
+
+/// Whether a peer admitted on a claim for `aid` may say `request` to
+/// `user_id`: the recovery fetch, of exactly the identity it claimed.
+fn claim_reaches(standing: &peer_reach::Standing, aid: &str, user_id: &UserId, request: &PeerRequest) -> bool {
+    matches!(request, PeerRequest::RecoveryFetch { .. }) && standing.aid_of(user_id).as_deref() == Some(aid)
+}
+
+/// What a peer admitted on a claim reads for anything but its fetch.
+fn claim_refusal() -> UserResponse {
+    UserResponse::Error {
+        message: "a device admitted on a recovery claim may only fetch the identity it claimed".to_string(),
     }
 }
 
@@ -2389,7 +2435,7 @@ async fn handle_peer_request(
     // of those. The classification is the device crate's — a vault makes the
     // same call — and what follows a `Stranger` is this daemon's alone: a
     // guest session, which a vault never grants.
-    let standing = match standing_of.of(peer_did, peer_pubkey_bytes, &user_id).await {
+    let standing = match standing_of.of(&Peer::Key(peer_did.to_string()), &user_id).await {
         Ok(s) => s,
         Err(e) => {
             return UserResponse::Error {
@@ -2404,14 +2450,8 @@ async fn handle_peer_request(
         _ => None,
     };
     if let (Some(aid), false) = (&claim_for, paired) {
-        if !matches!(request, PeerRequest::RecoveryFetch { .. })
-            || standing_of.aid_of(&user_id).as_deref() != Some(aid.as_str())
-        {
-            return UserResponse::Error {
-                message: "a device admitted on a recovery claim may only fetch the identity \
-                          it claimed"
-                    .to_string(),
-            };
+        if !claim_reaches(standing_of, aid, &user_id, &request) {
+            return claim_refusal();
         }
     }
 

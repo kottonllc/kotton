@@ -747,13 +747,10 @@ pub fn build_peer_client_config(
     Ok(client_config)
 }
 
-/// Build a plain rustls `ServerConfig` for peer mTLS over a reliable byte stream —
-/// the relayed-circuit fallback (RFC-0024 sprint 07 item 2). Same device cert +
-/// paired-key verifier as the QUIC path, but without the quinn wrapping: it runs
-/// TLS 1.3 directly over a relay-bridged WebSocket, where QUIC's UDP transport is
-/// unavailable and its congestion control would be redundant over the reliable
-/// channel. The paired-key allowlist gate is identical, so a relayed peer is
-/// authenticated exactly as a direct one.
+/// Build a plain rustls `ServerConfig` for peer mTLS: the device cert and the
+/// paired-key verifier, without the quinn wrapping [`build_peer_server_config`]
+/// gives it. A relay's circuit does not run it: that carries the handshake
+/// (`transport::relayed`).
 ///
 /// It keeps no session and issues no ticket, so no connection resumes one. A
 /// resumed TLS 1.3 handshake carries no client certificate and rustls asks no

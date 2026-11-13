@@ -64,6 +64,7 @@ use crate::host::VaultHost;
 use crate::meter::Meter;
 use crate::residency::Pools;
 use kotton_device::users::admission::{paired_as_another, peer_standing, PeerStanding, NOT_PAIRED_WITH};
+use kotton_peer::door::Peer;
 use kotton_device::users::files::SealedReassembly;
 use kotton_device::users::residency::Residency as _;
 use kotton_device::users::DeviceUsers as _;
@@ -123,10 +124,17 @@ pub fn reaches(standing: &PeerStanding, request: &VaultVerb) -> bool {
     }
 }
 
-pub async fn handle(control: &ControlContext, peer_did: &str, request: VaultPeerRequest) -> UserResponse {
+/// Answer `request` from `from`, the peer the connection admitted: a key, or a
+/// recovery claim's standing, which names no key (#511) and is answered from
+/// that standing alone ([`handle_claim`]).
+pub async fn handle(control: &ControlContext, from: &Peer, request: VaultPeerRequest) -> UserResponse {
     use kotton_crypto::did::DidKeyMethod;
     use kotton_wire::did::Did;
     let ctx: &PeerContext = &control.peer;
+    let peer_did = match from {
+        Peer::Key(did) => did.as_str(),
+        Peer::Claim { .. } => return handle_claim(ctx, from, request).await,
+    };
 
     // Which pool the request names — `None` for one addressed to the vault as
     // a whole, the operator's `Tenants` and `StandAt`. Every verb that decodes
@@ -175,8 +183,7 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: VaultPeer
         &ctx.runtime,
         &ctx.db,
         &ctx.runtime.paired_keys(),
-        peer_did,
-        peer_pubkey,
+        from,
         pool.as_deref(),
     )
     .await
@@ -311,13 +318,7 @@ pub async fn handle(control: &ControlContext, peer_did: &str, request: VaultPeer
             }
             resp
         }
-        TenantVerb::RecoveryFetch { user_id } => {
-            let base = ctx.runtime.base_dir();
-            let kel = kotton_identity::kel_store::load_chain(base, &user_id).unwrap_or_default();
-            let bundle =
-                kotton_identity::provisioning::read_recovery_bundle_raw(base, &user_id).unwrap_or_default();
-            Ok(UserResponse::RecoveryMaterial { kel, bundle })
-        }
+        TenantVerb::RecoveryFetch { user_id } => Ok(recovery_material(ctx, &user_id)),
         TenantVerb::RecoveryStore { user_id, bundle, kel } => {
             // The events that authorize the copy, before the copy. A vault that
             // cannot extend its chain is a vault that will refuse to serve what
@@ -440,6 +441,52 @@ async fn held_by(
     }
 }
 
+/// The identity `user_id`'s public chain and phrase-sealed copy, verbatim; the
+/// vault opens neither.
+fn recovery_material(ctx: &PeerContext, user_id: &str) -> UserResponse {
+    let base = ctx.runtime.base_dir();
+    let kel = kotton_identity::kel_store::load_chain(base, user_id).unwrap_or_default();
+    let bundle = kotton_identity::provisioning::read_recovery_bundle_raw(base, user_id).unwrap_or_default();
+    UserResponse::RecoveryMaterial { kel, bundle }
+}
+
+/// A request from a peer admitted on a recovery claim, which names no key: its
+/// standing is the connection's (`peer_standing`), what it reaches is
+/// [`reaches`]' row for a claim, and the identity fetched must be the one
+/// claimed. Every refusal reads the claim's one sentence, and no line here
+/// names the identity or a key.
+async fn handle_claim(ctx: &PeerContext, from: &Peer, request: VaultPeerRequest) -> UserResponse {
+    let request = request.split();
+    let pool = match &request {
+        VaultVerb::Tenant(TenantVerb::RecoveryFetch { user_id }) => Some(user_id.clone()),
+        _ => None,
+    };
+    // Standing is decided under this, as for every peer (`PeerContext::tenancy`).
+    let _steady = ctx.tenancy.read().await;
+    let standing = match peer_standing(&ctx.runtime, &ctx.db, &ctx.runtime.paired_keys(), from, pool.as_deref()).await {
+        Ok(s) => s,
+        Err(e) => {
+            return UserResponse::Error {
+                message: format!("authorization check failed: {e}"),
+            }
+        }
+    };
+    let refused = || UserResponse::Error {
+        message: CLAIM_REFUSAL.to_string(),
+    };
+    let PeerStanding::Claim { aid } = &standing else {
+        return refused();
+    };
+    let own = pool.as_deref().and_then(|p| ctx.runtime.user_aid(p));
+    match (reaches(&standing, &request), own.as_deref() == Some(aid.as_str()), &request) {
+        (true, true, VaultVerb::Tenant(TenantVerb::RecoveryFetch { user_id })) => recovery_material(ctx, user_id),
+        _ => refused(),
+    }
+}
+
+/// What a peer admitted on a recovery claim reads, whatever it was refused.
+const CLAIM_REFUSAL: &str = "a device admitted on a recovery claim may only fetch the identity it claimed";
+
 /// The sentence a refused caller reads. `held` is the pool a stranger's key
 /// is paired to at this vault ([`held_by`]), `None` for a key paired nowhere.
 fn refusal(
@@ -454,9 +501,7 @@ fn refusal(
             "{verb} is the landlord's, said under the vault's operator credential; a tenant's device does \
              not say it"
         ),
-        PeerStanding::Claim { .. } => "a device admitted on a recovery claim may only fetch the identity \
-                                       it claimed"
-            .to_string(),
+        PeerStanding::Claim { .. } => CLAIM_REFUSAL.to_string(),
         PeerStanding::Operator => format!(
             "the operator credential says the landlord's six verbs and nothing else; {verb} is a \
              tenant's"
@@ -737,5 +782,39 @@ mod tests {
             .await
             .expect("a second pool's row for sam's key");
         assert_eq!(held_by(&db, &PeerStanding::Stranger, Some(sams), Some("alice")).await, None);
+    }
+
+    /// A claimant has no name (#511). A claim made from `key(2)`, whose key's sign bit is
+    /// set so that a name derived from its Montgomery form would not be its own, stands as
+    /// the claim the connection carries, though its own key is paired here to the very pool
+    /// it names: no key is asked about, so no key paired here can give it a device's standing.
+    /// Nothing is written to the admission's shared table, and the standing reaches the
+    /// recovery fetch and nothing else.
+    #[tokio::test]
+    async fn a_claimant_stands_as_its_claim_and_reaches_the_fetch_alone() {
+        use kotton_device::users::admission::{peer_standing_in, Chains};
+        let claimant = ed25519_dalek::SigningKey::from_bytes(&[2; 32]).verifying_key().to_bytes();
+        assert_ne!(claimant[31] & 0x80, 0, "the claimant's key has its sign bit set");
+        let db = a_vault_with_sams_device(claimant).await;
+        let base = tempfile::tempdir().expect("a base directory");
+        let admission = kotton_net::transport::quic::tls::Admission::default();
+        let chains = Chains::new(base.path().to_path_buf(), admission.clone());
+        let paired = Arc::new(std::sync::RwLock::new(std::collections::HashSet::from([claimant])));
+        let from = Peer::Claim { aid: "did:kel:sams".into() };
+
+        let standing = peer_standing_in(&chains, &db, &paired, &from, Some("sam")).await.expect("a standing");
+        assert_eq!(standing, PeerStanding::Claim { aid: "did:kel:sams".into() });
+        let to_the_node = peer_standing_in(&chains, &db, &paired, &from, None).await.expect("a standing");
+        assert_eq!(to_the_node, PeerStanding::Stranger, "a claim stands to a pool, not to the node");
+        assert!(admission.admitted.read().unwrap().is_empty(), "nothing is written for a claim");
+
+        for verb in tenant_verbs().into_iter().chain(landlord_verbs()) {
+            let name = verb.variant_name();
+            assert_eq!(
+                reaches(&standing, &verb.split()),
+                name == "RecoveryFetch",
+                "a claimant says the recovery fetch and nothing else: {name}"
+            );
+        }
     }
 }

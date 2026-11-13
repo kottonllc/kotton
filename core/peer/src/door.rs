@@ -31,12 +31,18 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// What a peer transport serves: one request's bytes, from the peer whose DID
-/// the transport proved, to the response's bytes.
+/// Who a request on a peer circuit is from, as the transport admitted it: a key
+/// (its `did:key`), or a recovery claim's standing, which names no key (#511).
+pub use kotton_net::transport::Peer;
+
+/// What a peer transport serves: one request's bytes, from the peer the
+/// transport admitted, to the response's bytes.
 ///
-/// The first argument of [`Self::serve`] is the connecting peer's DID string
-/// (e.g. `did:key:z6Mk…`), derived from the peer's TLS certificate; the second
-/// is the raw request bytes.
+/// The first argument of [`Self::serve`] is who the connection is from
+/// ([`Peer`]): the key it proved, as its `did:key` string (e.g.
+/// `did:key:z6Mk…`), or, on a relay's circuit, the standing of a recovery claim
+/// it was admitted on, which carries no key and no name. The second is the raw
+/// request bytes.
 ///
 /// Built only by [`PeerDoor::serving`]: the field is private to this module and
 /// there is no other constructor, so every handler decodes its door's `Req`
@@ -56,11 +62,11 @@ use std::sync::Arc;
 /// argument, a `Result` — because it does not coerce to a struct (kotton #279):
 ///
 /// ```compile_fail,E0308
-/// use kotton_peer::door::Answer;
+/// use kotton_peer::door::{Answer, Peer};
 /// use kotton_peer::PeerHandler;
 /// use std::sync::Arc;
 ///
-/// let raw: PeerHandler = Arc::new(|_: String, b: Vec<u8>| -> Answer {
+/// let raw: PeerHandler = Arc::new(|_: Peer, b: Vec<u8>| -> Answer {
 ///     Box::pin(async move { b })
 /// });
 /// ```
@@ -68,11 +74,11 @@ use std::sync::Arc;
 /// and the field is private, so it cannot be wrapped by hand either:
 ///
 /// ```compile_fail,E0423
-/// use kotton_peer::door::Answer;
+/// use kotton_peer::door::{Answer, Peer};
 /// use kotton_peer::PeerHandler;
 /// use std::sync::Arc;
 ///
-/// let raw = PeerHandler(Arc::new(|_: String, b: Vec<u8>| -> Answer {
+/// let raw = PeerHandler(Arc::new(|_: Peer, b: Vec<u8>| -> Answer {
 ///     Box::pin(async move { b })
 /// }));
 /// ```
@@ -84,15 +90,15 @@ use std::sync::Arc;
 /// struct with private fields) at `PeerHandler(..)`. A snippet that stopped
 /// compiling for some other reason would still pass here.
 #[derive(Clone)]
-pub struct PeerHandler(Arc<dyn Fn(String, Vec<u8>) -> Answer + Send + Sync>);
+pub struct PeerHandler(Arc<dyn Fn(Peer, Vec<u8>) -> Answer + Send + Sync>);
 
 /// The response a [`PeerHandler`] answers with, as bytes.
 pub type Answer = Pin<Box<dyn Future<Output = Vec<u8>> + Send>>;
 
 impl PeerHandler {
-    /// Answer one request from `peer_did`.
-    pub fn serve(&self, peer_did: String, bytes: Vec<u8>) -> Answer {
-        (self.0)(peer_did, bytes)
+    /// Answer one request from `peer`.
+    pub fn serve(&self, peer: Peer, bytes: Vec<u8>) -> Answer {
+        (self.0)(peer, bytes)
     }
 }
 
@@ -111,18 +117,18 @@ where
     /// refuse — so it is given its own arm rather than folded into `serve`.
     pub fn serving<F, Fut, U>(serve: F, undecodable: U) -> PeerHandler
     where
-        F: Fn(String, Req) -> Fut + Send + Sync + 'static,
+        F: Fn(Peer, Req) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Resp> + Send + 'static,
         U: Fn(String) -> Resp + Send + Sync + 'static,
     {
         let serve = Arc::new(serve);
         let undecodable = Arc::new(undecodable);
-        PeerHandler(Arc::new(move |peer_did: String, bytes: Vec<u8>| {
+        PeerHandler(Arc::new(move |peer: Peer, bytes: Vec<u8>| {
             let serve = Arc::clone(&serve);
             let undecodable = Arc::clone(&undecodable);
             Box::pin(async move {
                 let response = match serde_json::from_slice::<Req>(&bytes) {
-                    Ok(request) => serve(peer_did, request).await,
+                    Ok(request) => serve(peer, request).await,
                     Err(e) => undecodable(e.to_string()),
                 };
                 serde_json::to_vec(&response).unwrap_or_default()

@@ -370,6 +370,8 @@ impl std::fmt::Debug for RecoveryClaim {
 #[derive(Clone, Debug)]
 pub enum AskReply {
     /// At most [`MAX_EVENTS`], in the log's order, each as the bytes of its canonical form.
+    /// Until step 1 of #496 gives events their binary form, those bytes are each event's JSON
+    /// (#512).
     Events(Vec<Vec<u8>>),
     /// A recovery claim, in place of events.
     Claim(RecoveryClaim),

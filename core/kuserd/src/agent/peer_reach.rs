@@ -72,18 +72,12 @@ impl Standing {
     }
 
     /// `kotton_device::users::admission::peer_standing`, on what this handle holds.
-    pub(super) async fn of(
-        &self,
-        peer_did: &str,
-        peer_pubkey: Option<[u8; 32]>,
-        user_id: &UserId,
-    ) -> io::Result<PeerStanding> {
+    pub(super) async fn of(&self, peer: &kotton_peer::door::Peer, user_id: &UserId) -> io::Result<PeerStanding> {
         kotton_device::users::admission::peer_standing_in(
             &self.chains,
             &self.db,
             &self.paired_keys,
-            peer_did,
-            peer_pubkey,
+            peer,
             Some(user_id.as_str()),
         )
         .await

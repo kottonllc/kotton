@@ -7,14 +7,14 @@
 //!
 //! **What the relay sees.** Two per-pair, per-epoch labels — the sender's own
 //! mailbox handle as the dial's identity, the recipient's as its target — and
-//! an opaque mTLS stream between them. Neither label is durable and neither
+//! the handshake's version byte, fresh values, lengths and sealed frames between them. Neither label is durable and neither
 //! composes with anything (Article VII). What the relay carries
 //! it cannot open, and it keeps nothing.
 //!
-//! **What the certificate proves.** The pair's key for the epoch, and nothing
-//! durable: the sender presents its own mailbox handle for the pair, and the
-//! far end must prove the recipient's — which the recipient's vault may hold as
-//! well as their device. So the handshake proves *this pair*, and who wrote is
+//! **What the handshake proves.** The pair's key for the epoch, and nothing
+//! durable: the sender is its own mailbox handle for the pair, and the far end
+//! must hold the recipient's — which the recipient's vault may hold as well as
+//! their device. Neither end shows the other a device's key. So the handshake proves *this pair*, and who wrote is
 //! proved inside the seal, signed. That is also
 //! why a sender may dial the same door at every relay a person is reached at:
 //! each relay sees the same two rotating labels, and learns no identity it did
@@ -24,11 +24,8 @@
 use crate::rendezvous;
 use anyhow::{anyhow, Result};
 use ed25519_dalek::SigningKey;
-use kotton_net::transport::quic::tls::{Ed25519DeviceCert, PairedDeviceVerifier};
-use kotton_net::transport::RelayClient;
+use kotton_net::transport::{CircuitOffer, RelayClient};
 use kotton_wire::ipc::{ContactRequest, ContactResponse};
-use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
 
 /// Hand `request` to the node answering for `contact_pub` at `relay_url`,
 /// presenting a tag under `admission` when the sender holds a key for that
@@ -81,35 +78,25 @@ pub async fn deliver_by(
     if attempts.is_empty() {
         return Err(anyhow!("no door is known for this pair at this hour"));
     }
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
     let body = serde_json::to_vec(request)?;
     let mut last: Option<anyhow::Error> = None;
     for attempt in attempts {
-        // Both ends of the circuit prove the pair's key for this epoch, not an
+        // Both ends of the circuit are the pair's keys for this epoch, not an
         // identity: the far end may be the recipient's vault, which holds the
         // handle and nothing that opens. Who *wrote* is proved inside the seal,
         // never by this handshake.
-        let mut admit = HashSet::new();
-        admit.insert(attempt.target_pub);
-        let verifier =
-            PairedDeviceVerifier::new(Arc::new(RwLock::new(admit)), Arc::clone(&provider));
-        let cert = Ed25519DeviceCert::from_signing_key(&attempt.auth_key)
-            .map_err(|e| anyhow!("delivery certificate: {e}"))?;
-        let client = RelayClient::new(
-            relay_url,
-            attempt.auth_did,
-            attempt.auth_key,
-            cert,
-            verifier,
-            Arc::clone(&provider),
-        )
-        .with_admission(admission.clone());
+        let own = attempt.auth_key.clone();
+        let client = RelayClient::new(relay_url, attempt.auth_did, attempt.auth_key)
+            .with_admission(admission.clone());
         tracing::debug!(
             target = %attempt.target,
             relay = %relay_url,
             "dialling a contact's door"
         );
-        match client.dial(&attempt.target).await {
+        match client
+            .dial(&attempt.target, &own, &attempt.target_pub, &CircuitOffer::default())
+            .await
+        {
             Ok(conn) => match conn.request(&body).await {
                 Ok(bytes) => {
                     return serde_json::from_slice(&bytes)

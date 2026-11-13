@@ -7,10 +7,16 @@
 //! good, in the order the constitution requires — **prove before install**:
 //!
 //! 1. Ask the user's paired nodes for the identity's public chain and phrase-sealed
-//!    recovery copy. A node serves those only to a device that proved, in the TLS
-//!    handshake, that it holds a recovery authority the chain committed
-//!    ([`RecoveryClaim`]) — so a guessed phrase learns nothing, not even whether the
-//!    node hosts the name it asked for.
+//!    recovery copy. A node serves those only to a device that proved, at the
+//!    handshake, that it holds a recovery authority the chain committed: by a signed
+//!    claim in its certificate on the QUIC path
+//!    ([`kotton_net::transport::quic::tls::RecoveryClaim`]), and inside the
+//!    channel on a relay's circuit — so a guessed phrase learns nothing, not even
+//!    whether the node hosts the name it asked for. The authority's key stays
+//!    here: the circuit is handed `AuthorityClaim`, which makes one claim for
+//!    the connection it is asked about. The signed form is an interim, and ends
+//!    with the certificate that carries it: at step 4 of #496, when QUIC carries
+//!    the handshake, and step 6, when the certificate extensions are deleted.
 //! 2. Replay the chain and check the phrase against its committed recovery set.
 //!    Whatever handed the chain over cannot lie: the check is against the commitment.
 //! 3. Open the recovery copy with the phrase; install the data roots.
@@ -81,6 +87,7 @@ use kotton_identity::provisioning::{
     write_recovery_bundle_raw,
 };
 use kotton_net::transport::quic::tls::{CertOffer, RecoveryClaim};
+use kotton_net::transport::{AwaitingAnswer, MakesClaim};
 use kotton_wire::ipc::{SealedVerb, UserResponse};
 use kotton_wire::kel::KelEvent;
 use kotton_wire::peer::PairedNode;
@@ -405,6 +412,20 @@ async fn prove_and_rotate(
     })
 }
 
+/// A recovery authority, held here, that makes a circuit's claim: one claim for the
+/// connection whose handshake it is shown, and no other. The transport is handed this and
+/// never the key.
+struct AuthorityClaim(ed25519_dalek::SigningKey);
+
+impl MakesClaim for AuthorityClaim {
+    fn claim(&self, awaiting: &AwaitingAnswer) -> Option<kotton_net::transport::RecoveryClaim> {
+        awaiting.claim(
+            &kotton_crypto::x25519::ed25519_priv_to_x25519(&self.0),
+            self.0.verifying_key().to_bytes(),
+        )
+    }
+}
+
 /// Step 1: the chain and copy, from the first node that serves them.
 ///
 /// Every refusal a node gives is the same string by design (`admit_by_proof`), so
@@ -416,15 +437,17 @@ async fn fetch_material(
     user_id: &str,
     seed32: &[u8; 32],
 ) -> Result<(Vec<KelEvent>, Option<String>, String)> {
-    let device_pub = runtime.device_signing_key().verifying_key().to_bytes();
     let mut last_err: Option<anyhow::Error> = None;
     for node in nodes {
         for rung in 0..CLAIM_RUNGS {
             let reserve = ed25519_dalek::SigningKey::from_bytes(
                 &kotton_crypto::kdf::derive_kel_recovery_key(seed32, rung),
             );
-            let claim = RecoveryClaim::sign(&reserve, &device_pub);
-            let dialer = runtime.dialer().with_offer(CertOffer::claim(claim));
+            let device = runtime.device_signing_key().verifying_key().to_bytes();
+            let signed = RecoveryClaim::sign(&reserve, &device);
+            let dialer = runtime
+                .dialer()
+                .with_recovery_claim(signed, Arc::new(AuthorityClaim(reserve)));
             let client = match dialer.connect(node.clone(), user_id).await {
                 Ok(c) => c,
                 Err(e) => {
