@@ -456,9 +456,12 @@ pub struct OsConnection {
 }
 
 impl OsConnection {
-    /// Open the endpoint's socket or pipe.
+    /// Open the endpoint's socket or pipe. **This is the unheld open**: nothing
+    /// about who serves the door is held here, so it is `pub(crate)`, and a client
+    /// outside this crate opens a door only through [`Self::connect_holding`] or
+    /// [`Self::connect_holding_root_or_door_owner`].
     #[cfg(unix)]
-    pub async fn connect(endpoint: &IpcEndpoint) -> IpcResult<Self> {
+    pub(crate) async fn connect(endpoint: &IpcEndpoint) -> IpcResult<Self> {
         let IpcEndpoint::UnixSocket(path) = endpoint;
         let stream = UnixStream::connect(path)
             .await
@@ -475,7 +478,8 @@ impl OsConnection {
     /// nothing a client would sign or say — a token, a PIN, a phrase, a code —
     /// reaches a process of another user.
     ///
-    /// On Windows it is [`Self::connect`]: the pipe's server is not identified here.
+    /// On Windows it is the crate's unheld `connect`: the pipe's server is not
+    /// identified here.
     #[cfg_attr(not(unix), allow(unused_variables))]
     pub async fn connect_holding(endpoint: &IpcEndpoint, users: PeerUsers) -> std::io::Result<Self> {
         let connection = Self::connect(endpoint).await.map_err(std::io::Error::other)?;
@@ -529,8 +533,11 @@ impl OsConnection {
         unix_peer(&self.stream)
     }
 
+    /// Open the endpoint's pipe. **This is the unheld open**, as on Unix, and is
+    /// `pub(crate)`: a client outside this crate opens a door only through
+    /// [`Self::connect_holding`].
     #[cfg(windows)]
-    pub async fn connect(endpoint: &IpcEndpoint) -> IpcResult<Self> {
+    pub(crate) async fn connect(endpoint: &IpcEndpoint) -> IpcResult<Self> {
         use tokio::time::{sleep, Duration};
 
         let IpcEndpoint::NamedPipe(name) = endpoint;
