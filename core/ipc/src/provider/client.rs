@@ -28,17 +28,6 @@ where
     Req: Serialize,
     Resp: for<'de> Deserialize<'de>,
 {
-    /// Connect to an IPC server at the given endpoint
-    pub async fn connect(endpoint: IpcEndpoint) -> io::Result<Self> {
-        let connection = OsConnection::connect(&endpoint)
-            .await
-            .map_err(io::Error::other)?;
-        Ok(Self {
-            connection,
-            _phantom: std::marker::PhantomData,
-        })
-    }
-
     /// Connect to a daemon that runs as **this process's own user**, and go no further
     /// unless it does: [`Self::connect_holding`] with [`PeerUsers::OwnUser`].
     ///
