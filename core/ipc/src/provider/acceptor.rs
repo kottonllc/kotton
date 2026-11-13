@@ -62,6 +62,7 @@ const MAX_FRAME_LEN: usize = 32 * 1024 * 1024;
 /// held to it here.
 pub struct ChannelAcceptor<Req, Resp> {
     listener: OsListener,
+    #[cfg(unix)]
     admits: PeerUsers,
     _phantom: std::marker::PhantomData<(Req, Resp)>,
 }
@@ -71,13 +72,16 @@ where
     Req: for<'de> Deserialize<'de>,
     Resp: Serialize + From<io::Error>,
 {
-    /// Bind the endpoint, admitting connections only from `admits`.
+    /// Bind the endpoint, admitting connections only from `admits`. Off Unix the
+    /// acceptor holds no user set and admits every peer, as [`PeerUsers`] says.
+    #[cfg_attr(not(unix), allow(unused_variables))]
     pub async fn listen(endpoint: IpcEndpoint, admits: PeerUsers) -> io::Result<Self> {
         let listener = OsListener::bind(endpoint)
             .await
             .map_err(io::Error::other)?;
         Ok(Self {
             listener,
+            #[cfg(unix)]
             admits,
             _phantom: std::marker::PhantomData,
         })
