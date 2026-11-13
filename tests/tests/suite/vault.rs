@@ -960,7 +960,7 @@ async fn a_pool_fills_to_its_quota_and_the_number_is_shown() {
 /// minted, and what `kvaultd capacity <user> --set <bytes>` sends: the door's
 /// own verb, which no device's wire can say. Answers the pool's readout.
 async fn set_quota_at_the_door(ipc: &IpcEndpoint, user: &str, quota: u64) -> (u64, Option<u64>) {
-    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(ipc.clone())
+    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect_to_own_user(ipc.clone())
         .await
         .expect("the landlord reaches the door");
     match door
@@ -1168,7 +1168,7 @@ async fn two_tenants_are_each_held_to_the_quota_set_aside_for_them() {
 /// does at its terminal.
 async fn admit_at_the_door(vault: &RunningVault, key: &ed25519_dalek::SigningKey) {
     let public = hex::encode(key.verifying_key().to_bytes());
-    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(vault.ipc.clone())
+    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect_to_own_user(vault.ipc.clone())
         .await
         .expect("the landlord reaches the door");
     match door
@@ -2014,7 +2014,7 @@ async fn revoke_one_at_the_door(vault: &RunningVault, key: &ed25519_dalek::Signi
 }
 
 async fn revoke_at_the_door_as(vault: &RunningVault, request: VaultRequest) {
-    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(vault.ipc.clone())
+    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect_to_own_user(vault.ipc.clone())
         .await
         .expect("the landlord reaches the door");
     match door.send(&request).await.expect("the door answers") {
@@ -2143,7 +2143,7 @@ async fn a_desktop_holding_the_operator_credential_invites_and_sets_a_quota_and_
     );
     // The terminal's `kvaultd invite alice`: the same body, the same refusal,
     // in the stream's first frame and with no invite before it.
-    let terminal = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(vault.ipc.clone())
+    let terminal = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect_to_own_user(vault.ipc.clone())
         .await
         .expect("the landlord reaches the door");
     let mut frames = terminal
@@ -2537,7 +2537,7 @@ async fn waiting_for(client: &mut kotton::KottonClient, user: &str, service: kot
 /// `kvaultd operator enrol <public>` at `vault`'s door, for a key minted on a
 /// desktop — the public half is all the vault is ever handed.
 async fn admit_public_at_the_door(vault: &RunningVault, public: &str) {
-    let mut admit = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(vault.ipc.clone())
+    let mut admit = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect_to_own_user(vault.ipc.clone())
         .await
         .expect("the landlord reaches the door");
     match admit
@@ -3226,7 +3226,7 @@ async fn a_vault_with_no_reach_set_and_a_stale_relay_url_in_its_environment_stan
 
     let nat = vault.vault.runtime().reachability().nat();
     assert_eq!((nat.relay_url.as_str(), nat.relay_key), ("", None), "the vault read a relay from its environment");
-    let mut raw = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(vault.ipc.clone())
+    let mut raw = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect_to_own_user(vault.ipc.clone())
         .await
         .expect("the landlord reaches the door");
     let door = within("the landlord's door", connect_when_ready(&vault.ipc, "door")).await;
@@ -4037,7 +4037,7 @@ async fn a_desktop_that_drops_a_pool_keeps_its_standing_across_the_rebuild_the_d
 /// What the landlord's door answers for `VaultRequest::Tenants` — what
 /// `kvaultd tenants` prints.
 pub(crate) async fn tenants_at_the_door(ipc: &IpcEndpoint) -> Vec<kotton_wire::ipc::VaultTenant> {
-    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(ipc.clone())
+    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect_to_own_user(ipc.clone())
         .await
         .expect("the landlord reaches the door");
     match door.send(&VaultRequest::Tenants).await.expect("the door answers") {
@@ -4181,7 +4181,7 @@ async fn a_landlord_drops_one_of_two_tenants(
     let rung = rung.expect("before the drop, alice's phrase is admitted on a claim and fetches her copy");
 
     // The landlord drops alice.
-    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(vault.ipc.clone())
+    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect_to_own_user(vault.ipc.clone())
         .await
         .expect("the landlord reaches the door");
     let dropped = match within(
@@ -5409,7 +5409,7 @@ async fn a_key_already_kept_completes_no_second_service() {
     let came = enrol_lines(&mut desk.client, "lee", &[&lines[1]]).await;
     assert!(matches!(&came[0].came_to, LineCame::Kept { name, .. } if name == "attic"), "the second vault completes under a key of its own: {came:?}");
     // …and the reused key revoked there, at its door (`kvaultd operator revoke <key>`).
-    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(second.ipc.clone()).await.expect("the second vault's door");
+    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect_to_own_user(second.ipc.clone()).await.expect("the second vault's door");
     match door.send(&VaultRequest::OperatorRevoke { key: public.clone() }).await.expect("the door answers") {
         UserResponse::Ok => {}
         other => panic!("the second vault did not revoke the reused key: {other:?}"),
@@ -5946,7 +5946,7 @@ async fn an_instance_still_running_under_its_key_is_not_forgotten() {
     }
 
     // Revoked at the vault's terminal: the vault answers, and no longer stands the key.
-    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect(vault.ipc.clone()).await.expect("the vault's door");
+    let mut door = kotton_ipc::IpcClient::<VaultRequest, UserResponse>::connect_to_own_user(vault.ipc.clone()).await.expect("the vault's door");
     match door.send(&VaultRequest::OperatorRevoke { key: vault_public.clone() }).await.expect("the door answers") {
         UserResponse::Ok => {}
         other => panic!("the vault did not revoke the key: {other:?}"),

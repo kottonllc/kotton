@@ -279,7 +279,7 @@ async fn a_log_record_written_tells_a_subscriber_nothing() {
     env.client.create_user(USER, crate::common::TEST_PASSPHRASE).await.expect("create_user");
     let token = env.client.session_token.clone().expect("session token");
     let mut watch: kotton_ipc::IpcClient<UserRequest, UserResponse> =
-        kotton_ipc::IpcClient::connect(env.endpoint.clone()).await.expect("a second connection");
+        kotton_ipc::IpcClient::connect_to_own_user(env.endpoint.clone()).await.expect("a second connection");
     let auth = UserRequest::Authenticate { token: kotton_wire::ipc::SecretText::new(token), scope: None };
     assert!(matches!(watch.send(&auth).await.expect("auth"), UserResponse::ActiveSession { .. }));
     let mut frames = watch

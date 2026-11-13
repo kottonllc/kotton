@@ -15,7 +15,7 @@ use kotton_wire::did::Did;
 use kotton_wire::sys_ipc::{login_message, LOGIN_CHALLENGE_LEN};
 use kotton_wire::{DeviceInfo, DeviceIpcSessionInfo, SysDaemonStatus, DeviceRequest, DeviceResponse, UserSessionInfo};
 use kotton_crypto::DidKeyMethod;
-use kotton_ipc::ChannelAcceptor;
+use kotton_ipc::{ChannelAcceptor, PeerUsers};
 use kotton_common::base_dir;
 use kotton_common::crypto::kdf_labels;
 use rand::RngCore;
@@ -376,7 +376,7 @@ impl SystemDaemon {
         // account's DID answers for that account.
         operators_db::bind_own_keys(&device_db, &registered_user_dids(&self.base)).await?;
 
-        let server = ChannelAcceptor::<DeviceRequest, DeviceResponse>::listen(self.endpoint.clone()).await?;
+        let server = ChannelAcceptor::<DeviceRequest, DeviceResponse>::listen(self.endpoint.clone(), ADMITS).await?;
         println!("kdeviced listening on {:?}", self.endpoint);
 
         // ── Boot topology (RFC-0063 stage 2) ─────────────────────────────────
@@ -418,7 +418,8 @@ impl SystemDaemon {
         let supervised_children = Arc::clone(&self.supervised_children);
 
         server
-            .accept_with_session(move |request, caller, session| {
+            // Who connected was held to `ADMITS` at accept; nothing after reads it.
+            .accept_with_session(move |request, _caller, session| {
                 let children = Arc::clone(&children);
                 let base = base.clone();
                 let kuserd_bin = kuserd_bin.clone();
@@ -427,7 +428,6 @@ impl SystemDaemon {
                 let kctl_sessions = Arc::clone(&kctl_sessions);
                 let supervised_children = Arc::clone(&supervised_children);
                 async move {
-                    answers_only_its_own_user(&caller)?;
                     handle_sys_request(
                         request,
                         session,
@@ -447,21 +447,13 @@ impl SystemDaemon {
     }
 }
 
-/// **kdeviced answers only its own OS user.** kdeviced, the `kuserd`s it spawns
-/// (with no change of user) and `kctl` are one user; on Unix a connection whose peer
-/// the kernel names as any other uid, or does not name, is refused at its first frame,
-/// before a challenge is issued or anything else is answered, and the connection
-/// closes (`kotton_wire::sys_ipc`). On Windows the pipe's caller is not checked here.
-/// The check is [`kotton_ipc::Caller::require_own_user`], the one the client side holds
-/// the server to as well.
-#[cfg_attr(not(unix), allow(unused_variables))]
-fn answers_only_its_own_user(caller: &kotton_ipc::Caller) -> io::Result<()> {
-    #[cfg(unix)]
-    caller.require_own_user().map_err(|e| {
-        io::Error::new(e.kind(), format!("kdeviced answers no other user: {e}"))
-    })?;
-    Ok(())
-}
+/// **kdeviced admits only its own OS user, at accept.** kdeviced, the `kuserd`s it
+/// spawns (with no change of user) and `kctl` are one user; on Unix a connection whose
+/// peer the kernel names as any other uid, or does not name, is closed as it is
+/// accepted, before a frame is read and with no reply (`kotton_ipc::ChannelAcceptor`,
+/// `kotton_wire::sys_ipc`). The check is [`PeerUsers::OwnUser`], the one every client
+/// holds kdeviced to as well. On Windows the pipe's caller is not checked here.
+const ADMITS: PeerUsers = PeerUsers::OwnUser;
 
 // ── Supervised-child requests ─────────────────────────────────────────────────
 
@@ -1892,21 +1884,22 @@ mod tests {
         assert!(matches!(admitted, DeviceResponse::Authenticated { .. }), "{admitted:?}");
     }
 
-    /// **The door answers its own uid and no other**: a caller the kernel names as
-    /// this process's uid is answered; another uid, or a caller the kernel did not
-    /// name, is refused before any request is handled.
+    /// **The door admits its own uid and no other**: a caller the kernel names as
+    /// this process's uid is admitted; another uid, root when this is not root, and a
+    /// caller the kernel did not name are refused, at accept (`ADMITS`).
     #[cfg(unix)]
     #[test]
-    fn the_door_answers_its_own_uid_and_no_other() {
+    fn the_door_admits_its_own_uid_and_no_other() {
         use kotton_ipc::{Caller, OsUserId};
         let me = kotton_ipc::own_uid();
         let at = |user| Caller { user, pid: Some(1), gid: None };
-        assert!(answers_only_its_own_user(&at(OsUserId::Uid(me))).is_ok());
-        let another = at(OsUserId::Uid(me.wrapping_add(1)));
-        let other = answers_only_its_own_user(&another).unwrap_err();
+        assert_eq!(ADMITS, PeerUsers::OwnUser);
+        assert!(ADMITS.require(&at(OsUserId::Uid(me))).is_ok());
+        let other = ADMITS.require(&at(OsUserId::Uid(me.wrapping_add(1)))).unwrap_err();
         assert_eq!(other.kind(), io::ErrorKind::PermissionDenied);
-        assert!(other.to_string().contains("answers no other user"), "{other}");
-        let unnamed = answers_only_its_own_user(&Caller::anonymous());
-        assert!(unnamed.is_err(), "an unnamed caller was answered");
+        if me != 0 {
+            assert!(ADMITS.require(&at(OsUserId::Uid(0))).is_err(), "root was admitted");
+        }
+        assert!(ADMITS.require(&Caller::anonymous()).is_err(), "an unnamed caller was admitted");
     }
 }

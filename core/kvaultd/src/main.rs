@@ -59,7 +59,7 @@
 //! socket ([`installed_env_file`], [`take_installed_env`]). A caller who names
 //! a door in `KVAULTD_IPC_NAME` gets that door, and the file is not read.
 
-use kotton_ipc::IpcClient;
+use kotton_ipc::{IpcClient, OsConnection};
 use kotton_sys::ipc::IpcEndpoint;
 use kotton_wire::ipc::{UserRequest, UserResponse, VaultRequest, VaultTenant};
 #[cfg(unix)]
@@ -86,10 +86,22 @@ fn endpoint() -> io::Result<IpcEndpoint> {
 macro_rules! door {
     ($req:ty) => {{
         let ep = endpoint()?;
-        IpcClient::<$req, UserResponse>::connect(ep.clone())
-            .await
-            .map_err(|_| unanswered(&ep))
+        open_door(&ep).await.map(IpcClient::<$req, UserResponse>::from_connection)
     }};
+}
+
+/// The vault's door at `ep`, opened as its clients open it
+/// ([`kvaultd::control::connect_to_door`]): a door served by another user is refused
+/// in the refusal's own words, and a door that does not answer ends in the sentence
+/// [`unanswered`] says.
+async fn open_door(ep: &IpcEndpoint) -> io::Result<OsConnection> {
+    kvaultd::control::connect_to_door(ep).await.map_err(|e| {
+        if e.kind() == io::ErrorKind::PermissionDenied {
+            e
+        } else {
+            unanswered(ep)
+        }
+    })
 }
 
 /// The sentence a verb ends with when the door does not answer. The client's
@@ -343,9 +355,7 @@ fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, String> {
 /// refused by the vault itself, not by this tool.
 async fn join(user: &str, code: &str) -> io::Result<()> {
     let ep = endpoint()?;
-    let client = IpcClient::<UserRequest, UserResponse>::connect(ep.clone())
-        .await
-        .map_err(|_| unanswered(&ep))?;
+    let client = IpcClient::<UserRequest, UserResponse>::from_connection(open_door(&ep).await?);
     let rx = client
         .send_streaming(&UserRequest::DeviceJoin {
             user_id: user.to_string(),
@@ -383,7 +393,9 @@ async fn joined(user: &str, ep: &IpcEndpoint, mut rx: tokio::sync::mpsc::Receive
                 let mut line = String::new();
                 io::stdin().read_line(&mut line)?;
                 let matches = matches!(line.trim(), "y" | "Y" | "yes");
-                let mut confirm = IpcClient::<UserRequest, UserResponse>::connect(ep.clone()).await?;
+                let mut confirm = IpcClient::<UserRequest, UserResponse>::from_connection(
+                    kvaultd::control::connect_to_door(ep).await?,
+                );
                 confirm
                     .send(&UserRequest::PairConfirmCode {
                         user_id: user.to_string(),
@@ -425,9 +437,7 @@ async fn joined(user: &str, ep: &IpcEndpoint, mut rx: tokio::sync::mpsc::Receive
 /// landlord's number, because nobody can take an invite not yet printed.
 async fn invite(user: &str, ttl_seconds: u64, quota: Option<u64>) -> io::Result<()> {
     let ep = endpoint()?;
-    let client = IpcClient::<UserRequest, UserResponse>::connect(ep.clone())
-        .await
-        .map_err(|_| unanswered(&ep))?;
+    let client = IpcClient::<UserRequest, UserResponse>::from_connection(open_door(&ep).await?);
     let rx = client
         .send_streaming(&UserRequest::DeviceInvite {
             user_id: user.to_string(),
@@ -470,7 +480,9 @@ async fn admitted(
             UserResponse::PairShowCode { token, sas, .. } => {
                 println!("sas={sas:06}");
                 eprintln!("type these six on the person's device. nothing is handed over until they match there.");
-                let mut confirm = IpcClient::<UserRequest, UserResponse>::connect(ep.clone()).await?;
+                let mut confirm = IpcClient::<UserRequest, UserResponse>::from_connection(
+                    kvaultd::control::connect_to_door(ep).await?,
+                );
                 confirm
                     .send(&UserRequest::PairConfirmCode {
                         user_id: user.to_string(),
@@ -634,8 +646,10 @@ async fn door_when_ready() -> io::Result<IpcClient<VaultRequest, UserResponse>> 
     let ep = endpoint()?;
     let mut tries = 0;
     loop {
-        match IpcClient::<VaultRequest, UserResponse>::connect(ep.clone()).await {
-            Ok(c) => return Ok(c),
+        match kvaultd::control::connect_to_door(&ep).await {
+            Ok(c) => return Ok(IpcClient::from_connection(c)),
+            // A door another user serves is refused now, not waited on.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(e),
             Err(e) if tries < 30 => {
                 tries += 1;
                 tracing::debug!(error = %e, "the door is not up yet");

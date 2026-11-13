@@ -117,7 +117,7 @@ impl KottonClient {
             kotton_common::kuserd_door().map_err(io::Error::other)?,
         );
 
-        let mut raw: IpcClient<UserRequest, UserResponse> = IpcClient::connect(endpoint).await?;
+        let mut raw: IpcClient<UserRequest, UserResponse> = IpcClient::connect_to_own_user(endpoint).await?;
 
         // Authenticate on the new connection.
         match raw

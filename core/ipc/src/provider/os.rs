@@ -87,10 +87,10 @@ impl Caller {
     /// ([`own_uid`]), or the peer is refused: any other uid, and a peer the kernel
     /// did not name ([`OsUserId::Unknown`]), which is never read as permission.
     ///
-    /// The one check for both ends of a door that serves only its own user: kdeviced
-    /// holds each connection's caller to it before answering, and
-    /// `IpcClient::connect_to_own_user` holds the server it reached to it before
-    /// sending (`kotton_wire::sys_ipc`). Each wraps the refusal in what it was doing.
+    /// The one check for both ends of a door that serves only its own user
+    /// ([`PeerUsers::OwnUser`]): kdeviced's and kuserd's acceptors hold each
+    /// connection to it at accept, and `IpcClient::connect_to_own_user` holds the
+    /// server it reached to it before sending (`kotton_wire::sys_ipc`).
     #[cfg(unix)]
     pub fn require_own_user(&self) -> std::io::Result<()> {
         let me = own_uid();
@@ -104,6 +104,56 @@ impl Caller {
         Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!("{who} is not uid {me}, the user this process runs as"),
+        ))
+    }
+}
+
+/// **Which OS users one end of a door holds the other end to**, by the kernel's
+/// answer for its peer ([`Caller`]). An acceptor holds each connection to it at
+/// accept, before a frame is read, and closes one it refuses with no reply
+/// ([`crate::ChannelAcceptor::listen`]); a client holds the server it reached to it
+/// before it writes a frame ([`OsConnection::connect_holding`]). A peer the
+/// kernel does not name ([`OsUserId::Unknown`]) is never one of them.
+///
+/// Unix only in effect: on Windows the pipe's peer is not held to it here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerUsers {
+    /// This process's own effective uid ([`own_uid`]) and no other: kdeviced's and
+    /// kuserd's doors, and every client of them (`kotton_wire::sys_ipc`).
+    OwnUser,
+    /// This process's own effective uid, or root: kvaultd's door, which the host's
+    /// shell reaches as root or as the vault's own user.
+    OwnUserOrRoot,
+    /// Exactly this uid: how a test with one uid stands in a peer of another.
+    #[cfg(test)]
+    Only(u32),
+}
+
+impl PeerUsers {
+    /// `peer` is one of these users, or the refusal says who it was and who is
+    /// answered; its kind is [`std::io::ErrorKind::PermissionDenied`].
+    #[cfg(unix)]
+    pub fn require(self, peer: &Caller) -> std::io::Result<()> {
+        let me = own_uid();
+        let (admitted, wanted) = match self {
+            Self::OwnUser => return peer.require_own_user(),
+            Self::OwnUserOrRoot => (
+                peer.user == OsUserId::Uid(me) || peer.user == OsUserId::Uid(0),
+                format!("uid {me}, the user this process runs as, nor root"),
+            ),
+            #[cfg(test)]
+            Self::Only(uid) => (peer.user == OsUserId::Uid(uid), format!("uid {uid}")),
+        };
+        if admitted {
+            return Ok(());
+        }
+        let who = match peer.user {
+            OsUserId::Unknown => format!("a peer the kernel does not name ({peer})"),
+            _ => format!("{peer}"),
+        };
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{who} is not {wanted}"),
         ))
     }
 }
@@ -296,6 +346,29 @@ impl OsConnection {
             .map_err(|e| map_io_error(e, "connect"))?;
 
         Ok(Self { stream })
+    }
+
+    /// Open the endpoint, and go no further unless its server is one of `users`.
+    ///
+    /// On Unix the kernel's answer for the peer of the connected stream
+    /// ([`Self::peer`]) is held to [`PeerUsers::require`]; any other uid, or no
+    /// answer, is refused and the connection dropped before a byte is written, so
+    /// nothing a client would sign or say — a token, a PIN, a phrase, a code —
+    /// reaches a process of another user.
+    ///
+    /// On Windows it is [`Self::connect`]: the pipe's server is not identified here.
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    pub async fn connect_holding(endpoint: &IpcEndpoint, users: PeerUsers) -> std::io::Result<Self> {
+        let connection = Self::connect(endpoint).await.map_err(std::io::Error::other)?;
+        #[cfg(unix)]
+        users.require(&connection.peer()).map_err(|e| {
+            let IpcEndpoint::UnixSocket(path) = endpoint;
+            std::io::Error::new(
+                e.kind(),
+                format!("the server at {}: {e}; nothing was sent to it", path.display()),
+            )
+        })?;
+        Ok(connection)
     }
 
     /// Who serves this connection, as the kernel says: the uid, gid and pid of the
@@ -854,5 +927,34 @@ pub(crate) mod tests {
         let unnamed = Caller::anonymous().require_own_user().unwrap_err();
         assert_eq!(unnamed.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(unnamed.to_string().contains("the kernel does not name"), "{unnamed}");
+    }
+
+    /// **kvaultd's door admits its own uid and root, and no other**: another uid
+    /// and a peer the kernel does not name are refused, each saying who it was and
+    /// who is admitted. `OwnUser` is [`Caller::require_own_user`] exactly.
+    #[cfg(unix)]
+    #[test]
+    fn own_user_or_root_admits_those_two_and_no_other() {
+        let me = own_uid();
+        let at = |uid| Caller { user: OsUserId::Uid(uid), pid: Some(7), gid: None };
+        // A uid that is neither this one nor root.
+        let other = (1..=2).map(|d| me.wrapping_add(d)).find(|u| *u != 0).unwrap();
+
+        assert!(PeerUsers::OwnUserOrRoot.require(&at(me)).is_ok());
+        assert!(PeerUsers::OwnUserOrRoot.require(&at(0)).is_ok());
+        let refused = PeerUsers::OwnUserOrRoot.require(&at(other)).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        let said = refused.to_string();
+        assert!(said.contains(&format!("uid:{other}")), "{said}");
+        assert!(said.contains(&format!("is not uid {me}")) && said.contains("nor root"), "{said}");
+        let unnamed = PeerUsers::OwnUserOrRoot.require(&Caller::anonymous()).unwrap_err();
+        assert!(unnamed.to_string().contains("the kernel does not name"), "{unnamed}");
+
+        assert!(PeerUsers::OwnUser.require(&at(me)).is_ok());
+        assert!(PeerUsers::OwnUser.require(&at(other)).is_err());
+        assert!(PeerUsers::OwnUser.require(&Caller::anonymous()).is_err());
+        if me != 0 {
+            assert!(PeerUsers::OwnUser.require(&at(0)).is_err(), "root is not this user");
+        }
     }
 }

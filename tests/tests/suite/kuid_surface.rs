@@ -19,9 +19,9 @@ const USER: &str = "kuid_surface_test";
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 async fn auth_client(endpoint: &IpcEndpoint, token: &str) -> IpcClient<UserRequest, UserResponse> {
-    let mut client = IpcClient::<UserRequest, UserResponse>::connect(endpoint.clone())
+    let mut client = IpcClient::<UserRequest, UserResponse>::connect_to_own_user(endpoint.clone())
         .await
-        .expect("IpcClient::connect");
+        .expect("IpcClient::connect_to_own_user");
     match client
         .send(&UserRequest::Authenticate {
             token: kotton_wire::ipc::SecretText::new(token),

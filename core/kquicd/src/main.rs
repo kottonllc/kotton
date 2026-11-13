@@ -77,7 +77,7 @@ async fn main() -> io::Result<()> {
 
     // ── Administrative IPC connection (setup + periodic refresh) ────────────
     let mut admin: IpcClient<UserRequest, UserResponse> =
-        IpcClient::connect(endpoint.clone()).await?;
+        IpcClient::connect_to_own_user(endpoint.clone()).await?;
 
     let scope: Option<Vec<String>> = Some(KQUICD_SCOPE.iter().map(|s| s.to_string()).collect());
     match admin
@@ -275,7 +275,7 @@ async fn mint_principal_session(
     pubkey_hex: &str,
 ) -> io::Result<String> {
     let mut ipc: IpcClient<UserRequest, UserResponse> =
-        IpcClient::connect(endpoint.clone()).await?;
+        IpcClient::connect_to_own_user(endpoint.clone()).await?;
 
     match ipc
         .send(&UserRequest::Authenticate {
@@ -432,7 +432,7 @@ async fn do_stream(
     let request: UserRequest = request.into();
 
     // 4. Open a fresh IPC connection for this stream and forward the request.
-    let mut ipc = IpcClient::<UserRequest, UserResponse>::connect(ipc_endpoint.clone())
+    let mut ipc = IpcClient::<UserRequest, UserResponse>::connect_to_own_user(ipc_endpoint.clone())
         .await
         .map_err(|e| io::Error::other(format!("IPC connect failed: {e}")))?;
 
@@ -514,7 +514,7 @@ async fn refresh_allowed_keys(
     user_id: &str,
 ) -> io::Result<HashSet<[u8; 32]>> {
     let mut client: IpcClient<UserRequest, UserResponse> =
-        IpcClient::connect(ipc_endpoint.clone()).await?;
+        IpcClient::connect_to_own_user(ipc_endpoint.clone()).await?;
     client
         .send(&UserRequest::Authenticate {
             token: kotton_wire::ipc::SecretText::new(token.to_string()),

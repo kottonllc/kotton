@@ -55,7 +55,7 @@ fn inet_sockets_of_this_process() -> Vec<String> {
 
 async fn operator(env: &TestEnv) -> kotton_ipc::IpcClient<UserRequest, UserResponse> {
     let session = env.client.session_token.clone().expect("session token");
-    let mut op = kotton_ipc::IpcClient::<UserRequest, UserResponse>::connect(env.endpoint.clone())
+    let mut op = kotton_ipc::IpcClient::<UserRequest, UserResponse>::connect_to_own_user(env.endpoint.clone())
         .await
         .expect("connect");
     match op.send(&UserRequest::Authenticate { token: kotton_wire::ipc::SecretText::new(session), scope: None }).await {

@@ -71,7 +71,7 @@ pub(crate) async fn call(
 }
 
 pub(crate) async fn gateway(env: &TestEnv) -> IpcClient<UserRequest, UserResponse> {
-    let mut gw = IpcClient::connect(env.endpoint.clone()).await.expect("connect gateway");
+    let mut gw = IpcClient::connect_to_own_user(env.endpoint.clone()).await.expect("connect gateway");
     // A gateway token for THIS user (the harness mints one for "owner" by default).
     let token = env.daemon.mint_gateway_bootstrap_token(USER);
     match gw
@@ -96,7 +96,7 @@ pub(crate) async fn open_desk(env: &TestEnv) -> (tokio::sync::oneshot::Receiver<
     let session = env.client.session_token.clone().expect("session token");
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
-        let operator = IpcClient::<UserRequest, UserResponse>::connect(endpoint.clone())
+        let operator = IpcClient::<UserRequest, UserResponse>::connect_to_own_user(endpoint.clone())
             .await
             .expect("operator connect");
         // Local operator session — the desk is Local-tier.
@@ -117,7 +117,7 @@ pub(crate) async fn open_desk(env: &TestEnv) -> (tokio::sync::oneshot::Receiver<
             .await
             .expect("WebShellPair stream");
         let mut ready_tx = Some(ready_tx);
-        let mut confirm = IpcClient::<UserRequest, UserResponse>::connect(endpoint)
+        let mut confirm = IpcClient::<UserRequest, UserResponse>::connect_to_own_user(endpoint)
             .await
             .expect("confirm connect");
         // A confirm connection needs a Local session too.

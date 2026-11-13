@@ -19,9 +19,9 @@ const USER: &str = "vfstest";
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 async fn open_raw(endpoint: &IpcEndpoint) -> IpcClient<UserRequest, UserResponse> {
-    IpcClient::connect(endpoint.clone())
+    IpcClient::connect_to_own_user(endpoint.clone())
         .await
-        .expect("IpcClient::connect")
+        .expect("IpcClient::connect_to_own_user")
 }
 
 /// Wait for the daemon to say the watch is established, and fail loudly if it

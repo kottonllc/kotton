@@ -14,7 +14,7 @@
 use crate::common::TestEnv;
 use kotton_sys::ipc::Connection;
 use kotton_wire::{UserRequest, UserResponse};
-use kotton_ipc::OsConnection;
+use kotton_ipc::{OsConnection, PeerUsers};
 use kotton::KottonClient;
 use std::io;
 
@@ -54,10 +54,11 @@ fn write_file(path: &str, data: Vec<u8>) -> UserRequest {
 async fn oversized_frame_closes_connection() {
     let env = TestEnv::spawn().await;
 
-    // Use the platform IPC connection (handles OS-specific path formatting).
-    let mut raw = OsConnection::connect(&env.endpoint)
+    // Use the platform IPC connection (handles OS-specific path formatting),
+    // held to the door's own user as every client of kuserd is.
+    let mut raw = OsConnection::connect_holding(&env.endpoint, PeerUsers::OwnUser)
         .await
-        .expect("OsConnection::connect");
+        .expect("OsConnection::connect_holding");
 
     // Write a length prefix just over MAX_FRAME_LEN (32 * 1024 * 1024).
     let oversized_len: u32 = 32 * 1024 * 1024 + 1;

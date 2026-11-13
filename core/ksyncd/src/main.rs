@@ -43,7 +43,7 @@ async fn main() -> io::Result<()> {
 
     // -- Authentication connection (used for SyncNow polling) ----------------
     let mut auth_client: IpcClient<UserRequest, UserResponse> =
-        IpcClient::connect(endpoint.clone()).await?;
+        IpcClient::connect_to_own_user(endpoint.clone()).await?;
 
     let scope: Option<Vec<String>> =
         Some(KSYNCD_SCOPE.iter().map(|s| s.to_string()).collect());
@@ -77,7 +77,7 @@ async fn main() -> io::Result<()> {
 
     // -- VfsWatch subscription connection ------------------------------------
     let mut watch_client: IpcClient<UserRequest, UserResponse> =
-        IpcClient::connect(endpoint.clone()).await?;
+        IpcClient::connect_to_own_user(endpoint.clone()).await?;
 
     match watch_client
         .send(&UserRequest::Authenticate {

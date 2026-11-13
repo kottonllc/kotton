@@ -24,7 +24,7 @@ pub use inherited::{
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_peer;
 #[cfg(feature = "os-provider")]
-pub use os::{AcceptedConnection, Caller, OsConnection, OsListener, OsUserId};
+pub use os::{AcceptedConnection, Caller, OsConnection, OsListener, OsUserId, PeerUsers};
 #[cfg(all(feature = "os-provider", unix))]
 pub use os::own_uid;
 #[cfg(feature = "os-provider")]

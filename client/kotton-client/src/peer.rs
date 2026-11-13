@@ -285,7 +285,7 @@ impl KottonClient {
     /// yet another). Uses the retained endpoint so it works against a test/dev
     /// daemon on a non-default socket, not just the default `kuserd`.
     async fn fresh_connection(&self) -> io::Result<IpcClient<UserRequest, UserResponse>> {
-        IpcClient::connect(self.endpoint.clone()).await
+        IpcClient::connect_to_own_user(self.endpoint.clone()).await
     }
 
     /// Start the streamed `device add` ceremony (issuer). Returns a channel of

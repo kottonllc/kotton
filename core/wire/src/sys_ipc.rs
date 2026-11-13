@@ -10,9 +10,11 @@
 //!
 //! kdeviced runs as the same OS user as its clients, and spawns each `kuserd` with no
 //! change of user. On Unix the socket's directory is that user's alone (the bind
-//! refuses one that is not), kdeviced answers a connection from no other uid, and a
-//! client reads the peer credentials of the socket it reached and goes no further
-//! unless kdeviced is its own uid (`kotton_ipc::IpcClient::connect_to_own_user`).
+//! refuses one that is not), kdeviced closes a connection from any other uid as it is
+//! accepted, before a frame is read and with no reply (`kotton_ipc::PeerUsers::OwnUser`),
+//! and a client reads the peer credentials of the socket it reached and writes
+//! nothing unless kdeviced is its own uid (`kotton_ipc::IpcClient::connect_to_own_user`).
+//! kuserd's door and its clients hold to the same rule.
 //!
 //! This socket is distinct from the per-user `kuserd-{did_short}` socket:
 //!
