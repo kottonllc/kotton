@@ -1225,10 +1225,10 @@ pub(crate) mod tests {
         let dir = base.path().join("kotton");
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let door = dir.join("vault.sock");
+        let door = dir.join("sock");
 
         // Root is answered with no directory read: a door nowhere is no refusal.
-        hold_door_server(&at(root), std::path::Path::new("/nowhere/at/all/vault.sock"), root).expect("root");
+        hold_door_server(&at(root), std::path::Path::new("/nowhere/at/all/sock"), root).expect("root");
         // The directory's owner is answered.
         hold_door_server(&at(me), &door, root).expect("the directory's owner");
         // A third uid, and a server the kernel does not name, are not.
@@ -1271,7 +1271,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_root_client_refusing_a_door_writes_nothing() {
         let tmp = socket_dir();
-        let endpoint = IpcEndpoint::UnixSocket(tmp.path().join("vault.sock"));
+        let endpoint = IpcEndpoint::UnixSocket(tmp.path().join("sock"));
         let served = bytes_read_at(OsListener::bind(endpoint.clone()).await.expect("bind"));
         let refused = OsConnection::connect_holding_door(&endpoint, another_uid())
             .await
@@ -1295,7 +1295,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_root_client_reaches_the_door_directorys_owner_and_root() {
         let held = held_dir();
-        let endpoint = IpcEndpoint::UnixSocket(held.path().join("kotton").join("vault.sock"));
+        let endpoint = IpcEndpoint::UnixSocket(held.path().join("kotton").join("sock"));
         let listener = OsListener::bind(endpoint.clone()).await.expect("bind");
         let accept = tokio::spawn(async move { listener.accept_with_peer().await });
         let mut client = OsConnection::connect_holding_door(&endpoint, another_uid()).await.expect("the owner");
@@ -1306,7 +1306,7 @@ pub(crate) mod tests {
         assert_eq!(&buf, b"hi");
 
         let tmp = socket_dir();
-        let endpoint = IpcEndpoint::UnixSocket(tmp.path().join("vault.sock"));
+        let endpoint = IpcEndpoint::UnixSocket(tmp.path().join("sock"));
         let listener = OsListener::bind(endpoint.clone()).await.expect("bind");
         let accept = tokio::spawn(async move { listener.accept_with_peer().await });
         OsConnection::connect_holding_door(&endpoint, own_uid()).await.expect("root, with no directory read");
