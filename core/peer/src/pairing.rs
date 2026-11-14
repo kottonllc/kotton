@@ -1194,7 +1194,8 @@ fn verify_op_key(transcript: &[u8], record: &OpKeyRecord) -> Result<([u8; 32], O
         .as_slice()
         .try_into()
         .map_err(|_| anyhow!("operational-key signature must be 64 bytes"))?;
-    vk.verify_strict(
+    kotton_crypto::ed25519::verify(
+        &vk,
         &op_key_message(transcript, &record.relay_url),
         &ed25519_dalek::Signature::from_bytes(&sig_bytes),
     )
@@ -2071,8 +2072,7 @@ where
         .try_into()
         .map_err(|_| anyhow!("attestation signature must be 64 bytes"))?;
     let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-    identity_vk
-        .verify_strict(&attest_message(channel.transcript()), &signature)
+    kotton_crypto::ed25519::verify(&identity_vk, &attest_message(channel.transcript()), &signature)
         .map_err(|_| anyhow!("attestation failed to verify (possible MITM or wrong identity)"))?;
 
     // Rung 2/4: if the issuer's identity key was pinned out-of-band (QR / code),

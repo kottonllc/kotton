@@ -39,6 +39,8 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 workspace-hack = { path = "../../tools/workspace-hack" }
+# Test-only: the signatures a strict check refuses, for the tests that hold each check.
+kotton-crypto = { path = "../crypto", features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # Test-only: `MemoryObjectStorage` backs the quarantine and extension-host
 # tests. Dev-only on purpose — this domain must not reach the object store in

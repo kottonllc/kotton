@@ -398,6 +398,11 @@ lint:
     # No code under core/ spells `device add --`, outside tests and comments: the words come from
     # device_add_word, a total map over Posture. A text check; its doc says what it misses.
     cargo xtask device-add-check
+    # Every Ed25519 check in the tree is strict. The clippy runs above refuse the unstrict check
+    # (`clippy.toml`, read by the workspace and the relay alike); this holds that file, the one
+    # exemption it allows, and the seam: `kotton_crypto::ed25519::verify` in a crate that links
+    # kotton-crypto, `verify_strict` only in one that does not.
+    cargo xtask ed25519-check
     # Every file under tests/tests/suite/ is compiled into the one integration binary.
     cargo xtask suite-check
     # GitHub Actions runs the release workflow on a pushed tag, and the lint, sign-off and

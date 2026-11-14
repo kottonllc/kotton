@@ -24,7 +24,7 @@
 //! signature over an acknowledgement can never be mistaken for one over
 //! anything else a device key signs.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 pub use kotton_schemas::membership::ReachNote;
 pub use kotton_wire::ipc::DeliveryAck;
 
@@ -99,7 +99,7 @@ pub fn verify(
         .ok()
         .and_then(|b| Signature::from_slice(&b).ok())
         .ok_or_else(|| "that acknowledgement carries no readable signature".to_string())?;
-    key.verify(&signed_bytes(ack), &sig)
+    crate::ed25519::verify(&key, &signed_bytes(ack), &sig)
         .map_err(|_| "that acknowledgement was not signed by the device it names".to_string())
 }
 
@@ -199,5 +199,34 @@ mod tests {
             refused.as_ref().is_err_and(|e| e.contains("not signed by the device")),
             "{refused:?}"
         );
+    }
+
+    /// An acknowledgement under a device key of small order is refused, even when the note
+    /// lists that key.
+    #[test]
+    fn an_acknowledgement_under_a_small_order_key_is_refused() {
+        let small = hex::encode(crate::ed25519::refused::SMALL_ORDER_KEY);
+        let note = reach_note::next(None, BOB, &[], std::slice::from_ref(&small), &key(2), NOW).unwrap();
+        let ack = DeliveryAck {
+            message_id: MSG.into(),
+            from_did: BOB.into(),
+            to_did: ALICE.into(),
+            device: small,
+            sig: hex::encode(crate::ed25519::refused::under_small_order_key().to_bytes()),
+        };
+        let refused = verify(&ack, Some(&note), BOB, ALICE, MSG, NOW);
+        assert!(refused.as_ref().is_err_and(|e| e.contains("not signed by the device")), "{refused:?}");
+    }
+
+    /// A non-canonical signature by a device the note lists is refused.
+    #[test]
+    fn an_acknowledgement_with_a_non_canonical_signature_is_refused() {
+        let note = bobs_note(&[20]);
+        let ack = sign(MSG, BOB, ALICE, &key(20));
+        for sig in crate::ed25519::refused::non_canonical(&key(20), &signed_bytes(&ack)) {
+            let forged = DeliveryAck { sig: hex::encode(sig.to_bytes()), ..ack.clone() };
+            let refused = verify(&forged, Some(&note), BOB, ALICE, MSG, NOW);
+            assert!(refused.as_ref().is_err_and(|e| e.contains("not signed by the device")), "{refused:?}");
+        }
     }
 }

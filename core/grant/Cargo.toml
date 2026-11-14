@@ -19,6 +19,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# Test-only: the signatures a strict check refuses, for the tests that hold each check.
+kotton-crypto = { path = "../crypto", features = ["test-utils"] }
 workspace-hack = { path = "../../tools/workspace-hack" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

@@ -114,10 +114,7 @@ pub fn verify_warm_key_delegation(
         .try_into()
         .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
     let signature = Signature::from_bytes(&sig_arr);
-    root_key
-        // verify_strict rejects malleable / non-canonical signatures and
-        // small-order keys on this identity-delegation path (audit).
-        .verify_strict(delegation.signing_message().as_bytes(), &signature)
+    crate::ed25519::verify(&root_key, delegation.signing_message().as_bytes(), &signature)
         .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
 
     Ok(())
@@ -195,12 +192,12 @@ pub fn verify_enrollment_cert(
         .try_into()
         .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
     let signature = Signature::from_bytes(&sig_arr);
-    root_key
-        .verify_strict(
-            enrollment_cert_message(share_hex, warm_pubkey).as_bytes(),
-            &signature,
-        )
-        .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
+    crate::ed25519::verify(
+        &root_key,
+        enrollment_cert_message(share_hex, warm_pubkey).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
     Ok(())
 }
 

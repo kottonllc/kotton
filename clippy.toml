@@ -1,0 +1,11 @@
+# Read by `cargo clippy` for every crate in this tree, the relay's workspace included: clippy
+# looks for this file from a crate's directory upwards, and no other is kept
+# (`cargo xtask ed25519-check` holds that, and that both entries below are here).
+
+disallowed-methods = [
+    # Every Ed25519 check in the tree is strict: `kotton_crypto::ed25519::verify` where a crate
+    # depends on kotton-crypto, `verify_strict` below it and in the relay. The one exemption is
+    # named in `cargo xtask ed25519-check`.
+    { path = "ed25519_dalek::Verifier::verify", reason = "every Ed25519 check is strict: call kotton_crypto::ed25519::verify, or verify_strict where kotton-crypto is not linked" },
+    { path = "ed25519_dalek::SigningKey::verify", reason = "every Ed25519 check is strict: call kotton_crypto::ed25519::verify, or verify_strict where kotton-crypto is not linked" },
+]

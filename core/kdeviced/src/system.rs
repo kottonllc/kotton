@@ -864,7 +864,7 @@ async fn handle_sys_request(
 
             // 6. Verify the Ed25519 signature, strictly, over the login message and
             // nothing else: a signature over the bare challenge is refused here.
-            if verifying_key.verify_strict(&message, &ed_sig).is_err() {
+            if kotton_crypto::ed25519::verify(&verifying_key, &message, &ed_sig).is_err() {
                 return Ok(DeviceResponse::AuthFailed {
                     reason: "signature verification failed".into(),
                 });

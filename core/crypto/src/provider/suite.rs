@@ -90,8 +90,7 @@ impl CryptoSuite for Ed25519Suite {
         };
         let sig = Ed25519Sig::from_bytes(&sig_bytes);
         let vk = self.signing_key().verifying_key();
-        // verify_strict rejects malleable / non-canonical signatures (audit).
-        vk.verify_strict(msg, &sig).is_ok()
+        crate::ed25519::verify(&vk, msg, &sig).is_ok()
     }
 
     fn public_key_bytes(&self) -> Vec<u8> {

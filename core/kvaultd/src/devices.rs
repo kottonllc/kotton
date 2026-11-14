@@ -114,7 +114,7 @@ pub async fn accept(
         .and_then(|k| VerifyingKey::from_bytes(&k).map_err(|e| e.to_string()))
         .map_err(|e| format!("the tenant's key log does not resolve to a key: {e}"))?;
     let signature = Signature::from_slice(signature).map_err(|_| "the signature is not an Ed25519 signature".to_string())?;
-    if identity.verify_strict(&change.signed_bytes(user_id), &signature).is_err() {
+    if kotton_crypto::ed25519::verify(&identity, &change.signed_bytes(user_id), &signature).is_err() {
         return Err("it is not signed under the tenant's identity".to_string());
     }
 

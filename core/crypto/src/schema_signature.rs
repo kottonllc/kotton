@@ -98,9 +98,10 @@ pub fn verify(def: &SchemaDefinition) -> Result<(), SchemaSignatureError> {
     let signature = Signature::from_bytes(&bytes);
     let key = key_of(&def.publisher)?;
     let digest = def.digest()?;
-    // This module checks strictly: a small-order key or `R` is refused, so a key with no
-    // secret behind it cannot be named as a publisher whose "signature" anyone can write.
-    key.verify_strict(&message(&digest), &signature).map_err(|_| SchemaSignatureError::Invalid)
+    // This module checks strictly, through the tree's one check: a small-order key or `R` is
+    // refused, so a key with no secret behind it cannot be named as a publisher whose
+    // "signature" anyone can write.
+    crate::ed25519::verify(&key, &message(&digest), &signature).map_err(|_| SchemaSignatureError::Invalid)
 }
 
 /// Sign `def` with `key`, which must be the key `def.publisher` names, and set its
@@ -212,7 +213,12 @@ mod tests {
     /// them: it checks `[S]B = R + [k]A`, and with `S = 0`, `R` the identity and `A` the
     /// identity both sides are the identity whatever `k` is. The strict check refuses a
     /// small-order key, so the forgery is refused.
+    ///
+    /// The tree's one exemption from the workspace's refusal of the unstrict check, named in
+    /// `cargo xtask ed25519-check`: this test holds the difference between the two checks, so
+    /// it makes the other one.
     #[test]
+    #[allow(clippy::disallowed_methods)]
     fn a_small_order_publisher_key_with_a_forged_signature_is_refused() {
         let mut identity = [0u8; 32];
         identity[0] = 1;
@@ -256,7 +262,7 @@ mod tests {
         verify(&def).unwrap();
         let bare = key.sign(&def.digest().unwrap());
         // The signature is good for what it signed, so the refusal is about the message.
-        key.verifying_key().verify_strict(&def.digest().unwrap(), &bare).unwrap();
+        crate::ed25519::verify(&key.verifying_key(), &def.digest().unwrap(), &bare).unwrap();
         def.signature = Some(STANDARD.encode(bare.to_bytes()));
         assert_eq!(verify(&def), Err(SchemaSignatureError::Invalid));
     }

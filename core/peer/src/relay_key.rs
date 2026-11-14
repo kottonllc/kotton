@@ -119,7 +119,7 @@ fn verify(
         .and_then(|b| b.try_into().ok())
         .ok_or_else(|| not_proven("its signature is not 64 bytes of hex"))?;
     let vk = VerifyingKey::from_bytes(&key).map_err(|_| not_proven("its key is not a point"))?;
-    vk.verify_strict(&identity_signing_input(nonce, &id.addr), &Signature::from_bytes(&sig))
+    kotton_crypto::ed25519::verify(&vk, &identity_signing_input(nonce, &id.addr), &Signature::from_bytes(&sig))
         .map_err(|_| not_proven("the signature does not verify over this device's nonce"))?;
     Ok(key)
 }

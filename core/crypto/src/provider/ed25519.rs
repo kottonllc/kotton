@@ -1,11 +1,89 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Ed25519 signature implementation
+//! Ed25519 signature implementation, and the tree's one Ed25519 check.
+//!
+//! [`verify`] is the check every crate that depends on this one calls: strict verification,
+//! which refuses a public key of small order and a signature whose `R` is of small order, on
+//! top of what any Ed25519 check refuses. A crate below this one (`kotton-pair`) and the relay,
+//! which is its own workspace, call `verify_strict` themselves. `cargo xtask ed25519-check`, in
+//! `just lint`, holds both, and the workspace's `clippy.toml` refuses the unstrict check.
 
-use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, SignatureError, Signer as _, SigningKey, VerifyingKey};
 use kotton_sys::crypto::{
     KeygenResult, KeypairGenerator, SignError, SignResult, Signer, Verifier, VerifyError,
     VerifyResult,
 };
+
+/// Verify `signature` over `message` under `key`, strictly: the one Ed25519 check for every
+/// crate that depends on this one.
+pub fn verify(key: &VerifyingKey, message: &[u8], signature: &Signature) -> Result<(), SignatureError> {
+    key.verify_strict(message, signature)
+}
+
+/// Signatures a strict check refuses, for the tests that hold each check strict.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod refused {
+    use curve25519_dalek::scalar::{clamp_integer, Scalar};
+    use ed25519_dalek::{Signature, Signer as _, SigningKey};
+    use sha2::{Digest as _, Sha512};
+
+    /// The encoding of the curve's identity point: a public key of small order.
+    pub const SMALL_ORDER_KEY: [u8; 32] = {
+        let mut k = [0u8; 32];
+        k[0] = 1;
+        k
+    };
+
+    /// A signature for [`SMALL_ORDER_KEY`]: `R` the identity point, `S` zero.
+    pub fn under_small_order_key() -> Signature {
+        Signature::from_bytes(&under_small_order_key_bytes())
+    }
+
+    /// [`under_small_order_key`] as its 64 bytes.
+    pub fn under_small_order_key_bytes() -> [u8; 64] {
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&SMALL_ORDER_KEY);
+        sig
+    }
+
+    /// Two non-canonical signatures by `key` over `message`: one whose `R` is the identity
+    /// point (with the `S` that completes the equation), and one whose `S` is not reduced
+    /// (the canonical signature's `S` plus the group order).
+    pub fn non_canonical(key: &SigningKey, message: &[u8]) -> [Signature; 2] {
+        [small_order_r(key, message), unreduced_s(key, message)]
+    }
+
+    fn small_order_r(key: &SigningKey, message: &[u8]) -> Signature {
+        let expanded: [u8; 64] = Sha512::digest(key.to_bytes()).into();
+        let mut lower = [0u8; 32];
+        lower.copy_from_slice(&expanded[..32]);
+        let a = Scalar::from_bytes_mod_order(clamp_integer(lower));
+        let r = SMALL_ORDER_KEY;
+        let k: [u8; 64] = Sha512::new()
+            .chain_update(r)
+            .chain_update(key.verifying_key().as_bytes())
+            .chain_update(message)
+            .finalize()
+            .into();
+        let s = Scalar::from_bytes_mod_order_wide(&k) * a;
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&r);
+        sig[32..].copy_from_slice(s.as_bytes());
+        Signature::from_bytes(&sig)
+    }
+
+    fn unreduced_s(key: &SigningKey, message: &[u8]) -> Signature {
+        let mut sig = key.sign(message).to_bytes();
+        // The group order: one more than the largest scalar.
+        let order_minus_one = (Scalar::ZERO - Scalar::ONE).to_bytes();
+        let mut carry = 1u16;
+        for i in 0..32 {
+            let sum = sig[32 + i] as u16 + order_minus_one[i] as u16 + carry;
+            sig[32 + i] = sum as u8;
+            carry = sum >> 8;
+        }
+        Signature::from_bytes(&sig)
+    }
+}
 
 /// Ed25519 keypair generator
 #[derive(Debug, Clone, Copy, Default)]
@@ -149,7 +227,7 @@ impl Verifier for Ed25519Verifier {
 
         let signature = Signature::from_bytes(&sig_bytes);
 
-        match verifying_key.verify(message, &signature) {
+        match verify(&verifying_key, message, &signature) {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
@@ -188,6 +266,29 @@ mod tests {
             .verify(&public_key, b"wrong message", &signature)
             .unwrap();
         assert!(!invalid);
+    }
+
+    /// The `kotton_sys` verifier refuses a signature under a key of small order.
+    #[test]
+    fn the_verifier_refuses_a_small_order_key() {
+        let valid = Ed25519Verifier::new()
+            .verify(&refused::SMALL_ORDER_KEY, b"any message", &refused::under_small_order_key_bytes())
+            .unwrap();
+        assert!(!valid);
+    }
+
+    /// The `kotton_sys` verifier refuses a non-canonical signature by a key it would otherwise
+    /// believe.
+    #[test]
+    fn the_verifier_refuses_a_non_canonical_signature() {
+        let key = SigningKey::from_bytes(&[42; 32]);
+        let public = key.verifying_key().to_bytes();
+        let message = b"test message";
+        let verifier = Ed25519Verifier::new();
+        assert!(verifier.verify(&public, message, &key.sign(message).to_bytes()).unwrap());
+        for sig in refused::non_canonical(&key, message) {
+            assert!(!verifier.verify(&public, message, &sig.to_bytes()).unwrap());
+        }
     }
 
     #[test]

@@ -15,7 +15,6 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use crate::common::TestEnv;
-use ed25519_dalek::Verifier as _;
 use kotton_wire::GrantEnvelope;
 use kotton::{org_grant_issue_full, OrgGrantIssueResult};
 
@@ -254,7 +253,7 @@ async fn frost_signing_round_trip_2_of_2() {
         .expect("decode base64 signature");
     let sig = ed25519_dalek::Signature::from_slice(&sig_bytes).expect("parse signature");
     let canonical = envelope.canonical_json().expect("canonical_json");
-    vk.verify(canonical.as_bytes(), &sig)
+    kotton_crypto::ed25519::verify(&vk, canonical.as_bytes(), &sig)
         .expect("FROST signature must verify against the org group key");
 }
 
