@@ -90,8 +90,7 @@ impl CryptoSuite for Ed25519Suite {
         };
         let sig = Ed25519Sig::from_bytes(&sig_bytes);
         let vk = self.signing_key().verifying_key();
-        // verify_strict rejects malleable / non-canonical signatures (audit).
-        vk.verify_strict(msg, &sig).is_ok()
+        crate::ed25519::verify(&vk, msg, &sig).is_ok()
     }
 
     fn public_key_bytes(&self) -> Vec<u8> {
@@ -142,6 +141,19 @@ mod tests {
     fn ed25519_contract() {
         let seed = [7u8; 32];
         crypto_suite_contract(Ed25519Suite::new(seed));
+    }
+
+    /// A non-canonical signature by the suite's own key is refused. (The suite checks only
+    /// under its own key, which its seed derives, so no key of small order can be put to it.)
+    #[test]
+    fn the_suite_refuses_a_non_canonical_signature() {
+        let seed = [7u8; 32];
+        let suite = Ed25519Suite::new(seed);
+        let msg = b"kotton contract test message";
+        assert!(suite.verify(msg, &suite.sign(msg)));
+        for sig in crate::ed25519::refused::non_canonical(&SigningKey::from_bytes(&seed), msg) {
+            assert!(!suite.verify(msg, &sig.to_bytes()));
+        }
     }
 
     #[test]

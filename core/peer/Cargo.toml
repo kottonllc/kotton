@@ -62,6 +62,8 @@ tracing = "0.1"
 blake3 = "1"
 
 [dev-dependencies]
+# Test-only: the signatures a strict check refuses, for the tests that hold each check.
+kotton-crypto = { path = "../crypto", features = ["test-utils"] }
 workspace-hack = { path = "../../tools/workspace-hack" }
 rand = "0.8"
 tempfile = "3.8"

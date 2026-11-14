@@ -68,7 +68,7 @@ pub fn verify(
     let key = DidKeyMethod::to_public_key(&did).map_err(|e| AppSignatureError::PublisherKey(e.to_string()))?;
     // A publisher's key is checked as a schema's signature is, by the strict check: the key
     // and `R` must each be a point of full order, and the signature must check against both.
-    key.verify_strict(&message, &signature).map_err(|_| AppSignatureError::Invalid)
+    kotton_crypto::ed25519::verify(&key, &message, &signature).map_err(|_| AppSignatureError::Invalid)
 }
 
 /// The publisher `key` is, as a manifest's `[publisher] did` names it.
@@ -95,7 +95,6 @@ pub fn signed_manifest(manifest_toml: &str, code: &[u8], key: &SigningKey) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::Verifier as _;
     use kotton_schemas::{manifest_digest, AppManifest};
 
     const MANIFEST: &str = "[app]\nid = \"com.example.ledger\"\nname = \"Ledger\"\nversion = \"1.0.0\"\n\n\
@@ -173,7 +172,7 @@ mod tests {
     fn a_signature_over_the_code_alone_is_refused() {
         let key = a_key(7);
         let code_only = key.sign(blake3::hash(CODE).as_bytes());
-        key.verifying_key().verify(blake3::hash(CODE).as_bytes(), &code_only).unwrap();
+        kotton_crypto::ed25519::verify(&key.verifying_key(), blake3::hash(CODE).as_bytes(), &code_only).unwrap();
         let did = publisher_of(&key);
         let sig = STANDARD.encode(code_only.to_bytes());
         assert!(matches!(verify(did.as_str(), &sig, MANIFEST, CODE), Err(AppSignatureError::Invalid)));

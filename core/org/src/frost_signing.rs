@@ -496,14 +496,14 @@ mod tests {
     use super::*;
     use kotton_crypto::frost;
     use kotton_crypto::DidKeyMethod;
-    use ed25519_dalek::{Signature, Verifier};
+    use ed25519_dalek::Signature;
 
     /// Verify a 64-byte aggregate as a standard Ed25519 signature under the group
     /// key (derived from the group DID).
     fn verify_under_group(did: &str, sig: &[u8], message: &[u8]) {
         let vk = DidKeyMethod::to_public_key(&did.parse().unwrap()).unwrap();
         let arr: [u8; 64] = sig.try_into().expect("64-byte signature");
-        vk.verify(message, &Signature::from_bytes(&arr))
+        kotton_crypto::ed25519::verify(&vk, message, &Signature::from_bytes(&arr))
             .expect("threshold signature verifies under the group key");
     }
 

@@ -14,7 +14,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use crate::common::cli::{said, Cli};
 use crate::common::TestEnv;
-use ed25519_dalek::Verifier as _;
 use kotton_wire::GrantEnvelope;
 use kotton::KottonClient;
 
@@ -249,7 +248,7 @@ async fn org_grant_issue_signature_verifies() {
         .expect("decode signature");
     let sig = ed25519_dalek::Signature::from_slice(&sig_bytes).expect("valid sig bytes");
 
-    vk.verify(canonical.as_bytes(), &sig)
+    kotton_crypto::ed25519::verify(&vk, canonical.as_bytes(), &sig)
         .expect("signature must verify against the org's public key");
 }
 

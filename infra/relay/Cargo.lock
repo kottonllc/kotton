@@ -1096,6 +1096,7 @@ dependencies = [
  "base64 0.21.7",
  "bs58",
  "clap",
+ "curve25519-dalek",
  "dashmap",
  "ed25519-dalek",
  "futures-util",

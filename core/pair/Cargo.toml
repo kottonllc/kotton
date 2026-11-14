@@ -34,3 +34,5 @@ workspace = true
 
 [dev-dependencies]
 workspace-hack = { path = "../../tools/workspace-hack" }
+# Test-only: the scalar arithmetic that builds the signatures a strict check refuses.
+curve25519-dalek = { workspace = true }

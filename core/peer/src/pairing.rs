@@ -1194,7 +1194,8 @@ fn verify_op_key(transcript: &[u8], record: &OpKeyRecord) -> Result<([u8; 32], O
         .as_slice()
         .try_into()
         .map_err(|_| anyhow!("operational-key signature must be 64 bytes"))?;
-    vk.verify_strict(
+    kotton_crypto::ed25519::verify(
+        &vk,
         &op_key_message(transcript, &record.relay_url),
         &ed25519_dalek::Signature::from_bytes(&sig_bytes),
     )
@@ -2071,8 +2072,7 @@ where
         .try_into()
         .map_err(|_| anyhow!("attestation signature must be 64 bytes"))?;
     let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-    identity_vk
-        .verify_strict(&attest_message(channel.transcript()), &signature)
+    kotton_crypto::ed25519::verify(&identity_vk, &attest_message(channel.transcript()), &signature)
         .map_err(|_| anyhow!("attestation failed to verify (possible MITM or wrong identity)"))?;
 
     // Rung 2/4: if the issuer's identity key was pinned out-of-band (QR / code),
@@ -3274,6 +3274,35 @@ mod relayed_tests {
         let mut relay_swapped = sign_op_key(&t, &me);
         relay_swapped.relay_url = "http://somewhere-else".into();
         assert!(verify_op_key(&t, &relay_swapped).is_err(), "the relay is under the signature too");
+    }
+
+    /// A record naming an operational key of small order is refused: the key proves nothing.
+    #[test]
+    fn an_operational_key_of_small_order_is_refused() {
+        use kotton_crypto::ed25519::refused;
+        let t = b"this ceremony's transcript".to_vec();
+        let record = OpKeyRecord {
+            pubkey: refused::SMALL_ORDER_KEY,
+            relay_url: String::new(),
+            sig: refused::under_small_order_key_bytes().to_vec(),
+        };
+        let refused = verify_op_key(&t, &record).unwrap_err().to_string();
+        assert!(refused.contains("did not prove it holds"), "{refused}");
+    }
+
+    /// A non-canonical signature by the announced operational key is refused.
+    #[test]
+    fn an_operational_key_record_with_a_non_canonical_signature_is_refused() {
+        let t = b"this ceremony's transcript".to_vec();
+        let op = SigningKey::from_bytes(&[6; 32]);
+        let me = SelfAnnounce { op_key: &op, relay_url: "https://relay.example:7700".into() };
+        let honest = sign_op_key(&t, &me);
+        assert!(verify_op_key(&t, &honest).is_ok());
+        for sig in kotton_crypto::ed25519::refused::non_canonical(&op, &op_key_message(&t, &me.relay_url)) {
+            let record = OpKeyRecord { pubkey: honest.pubkey, relay_url: honest.relay_url.clone(), sig: sig.to_bytes().to_vec() };
+            let refused = verify_op_key(&t, &record).unwrap_err().to_string();
+            assert!(refused.contains("did not prove it holds"), "{refused}");
+        }
     }
 }
 

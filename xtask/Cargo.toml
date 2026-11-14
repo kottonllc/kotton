@@ -26,6 +26,11 @@ colored = "2.1"
 # Rust, three small dependencies, maintained — 0.13.0 published 2026-09-11. Pinned exactly: a
 # gate's parser changing under it changes what the gate admits.
 yaml-rust2 = { version = "=0.13.0", default-features = false }
+# `ed25519-check` reads manifests and `clippy.toml` with a real TOML parser, for the same reason:
+# a hand-rolled reader lost every section after a multi-line array with a trailing comment.
+# The version the workspace already locks (kotton-schemas, kotton-store, kotton-wire), so no
+# crate is added; pinned exactly, like the YAML parser above.
+toml = { version = "=0.8.2", default-features = false, features = ["parse"] }
 
 # `gen-docs` / `docs-check` are the only subcommands that need the real command
 # tree, and depending on it unconditionally made every *other* check pay for

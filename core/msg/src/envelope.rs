@@ -29,7 +29,7 @@
 //! (`TASK-a-channel-copy-carries-its-sealed-bytes-base64-twice`).
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use kotton_crypto::x25519::{dm_decrypt, dm_encrypt};
 use kotton_wire::ipc::SealedDm;
 use serde::{Deserialize, Serialize};
@@ -265,7 +265,7 @@ pub fn open(
 ) -> Result<DmInner, String> {
     let (bytes, sig) = unseal(sealed, recipient)?;
     let key = VerifyingKey::from_bytes(sender_pub).map_err(|_| "sender key is not a valid Ed25519 key".to_string())?;
-    key.verify(&signed_bytes(&bytes), &sig)
+    kotton_crypto::ed25519::verify(&key, &signed_bytes(&bytes), &sig)
         .map_err(|_| "the message was not signed by the contact it arrived from".to_string())?;
     parse(&bytes)
 }
@@ -286,7 +286,7 @@ impl Claimed {
     pub fn verify(&self, sender_pub: &[u8; 32]) -> Result<(), String> {
         let key = VerifyingKey::from_bytes(sender_pub)
             .map_err(|_| "sender key is not a valid Ed25519 key".to_string())?;
-        key.verify(&signed_bytes(&self.bytes), &self.sig)
+        kotton_crypto::ed25519::verify(&key, &signed_bytes(&self.bytes), &self.sig)
             .map_err(|_| "the message was not signed by the contact it claims".to_string())
     }
 }
@@ -662,7 +662,43 @@ mod tests {
         let bytes = serde_json::to_vec(&i).unwrap();
         let (_, sig) = unseal(&sealed, &bob).unwrap();
         let key = alice.verifying_key();
-        assert!(key.verify(&signed_bytes(&bytes), &sig).is_err());
+        assert!(kotton_crypto::ed25519::verify(&key, &signed_bytes(&bytes), &sig).is_err());
+    }
+
+    /// `inner` sealed to `recipient_pub` with `sig` as its signature, whoever made it.
+    fn sealed_with(i: &DmInner, sig: [u8; 64], recipient_pub: &[u8; 32]) -> SealedDm {
+        let mut plaintext = envelope_form(i).unwrap();
+        plaintext.extend_from_slice(&sig);
+        let (ciphertext, nonce, eph_pub) = dm_encrypt(&plaintext, recipient_pub).unwrap();
+        SealedDm { ephemeral_pub: B64.encode(eph_pub), nonce: B64.encode(nonce), body: B64.encode(ciphertext) }
+    }
+
+    /// A message under a sender key of small order is refused, at the door and as a claim.
+    #[test]
+    fn a_message_under_a_small_order_key_is_refused() {
+        use kotton_crypto::ed25519::refused;
+        let bob = key(2);
+        let sealed = sealed_with(&inner(), refused::under_small_order_key_bytes(), &bob.verifying_key().to_bytes());
+        assert!(open(&sealed, &bob, &refused::SMALL_ORDER_KEY).is_err());
+        let claimed = open_claimed(&sealed, &bob).unwrap();
+        assert!(claimed.verify(&refused::SMALL_ORDER_KEY).is_err());
+    }
+
+    /// A non-canonical signature by the sender's own key is refused, at the door and as a
+    /// claim.
+    #[test]
+    fn a_message_with_a_non_canonical_signature_is_refused() {
+        use kotton_crypto::ed25519::refused;
+        let alice = key(1);
+        let bob = key(2);
+        let i = inner();
+        let signed = signed_bytes(&envelope_form(&i).unwrap());
+        for sig in refused::non_canonical(&alice, &signed) {
+            let sealed = sealed_with(&i, sig.to_bytes(), &bob.verifying_key().to_bytes());
+            assert!(open(&sealed, &bob, &alice.verifying_key().to_bytes()).is_err());
+            let claimed = open_claimed(&sealed, &bob).unwrap();
+            assert!(claimed.verify(&alice.verifying_key().to_bytes()).is_err());
+        }
     }
 
     #[test]

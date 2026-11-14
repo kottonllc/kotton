@@ -150,8 +150,57 @@ pub fn verify_envelope_signature(envelope: &GrantEnvelope) -> bool {
         Err(_) => return false,
     };
 
-    use ed25519_dalek::Verifier as _;
-    verifying_key
-        .verify(canonical.as_bytes(), &signature)
-        .is_ok()
+    kotton_crypto::ed25519::verify(&verifying_key, canonical.as_bytes(), &signature).is_ok()
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+    use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
+    use kotton_crypto::ed25519::refused;
+    use kotton_wire::did::Did;
+
+    /// An envelope issued under `issuer`, carrying `sig` as its signature.
+    fn envelope(issuer: &VerifyingKey) -> GrantEnvelope {
+        GrantEnvelope {
+            id: "2f1c5f3e-0000-4000-8000-000000000001".into(),
+            issuer_did: DidKeyMethod::from_public_key(issuer),
+            subject_did: Did::parse("did:kel:z6MkBobsAid").unwrap(),
+            node_did: None,
+            grants: Vec::new(),
+            issued_at: 1_790_000_000,
+            expires_at: Some(1_790_000_100),
+            app_id: None,
+            issuer_signature: String::new(),
+        }
+    }
+
+    #[test]
+    fn an_envelope_its_issuer_signed_is_believed() {
+        let issuer = SigningKey::from_bytes(&[1; 32]);
+        let mut e = envelope(&issuer.verifying_key());
+        e.issuer_signature = URL_SAFE_NO_PAD.encode(issuer.sign(e.canonical_json().unwrap().as_bytes()).to_bytes());
+        assert!(verify_envelope_signature(&e));
+    }
+
+    /// An envelope whose issuer's key is of small order is refused.
+    #[test]
+    fn an_issuer_key_of_small_order_is_refused() {
+        let small = VerifyingKey::from_bytes(&refused::SMALL_ORDER_KEY).unwrap();
+        let mut e = envelope(&small);
+        e.issuer_signature = URL_SAFE_NO_PAD.encode(refused::under_small_order_key_bytes());
+        assert!(!verify_envelope_signature(&e));
+    }
+
+    /// A non-canonical signature by the issuer's own key is refused.
+    #[test]
+    fn a_non_canonical_signature_is_refused() {
+        let issuer = SigningKey::from_bytes(&[1; 32]);
+        let mut e = envelope(&issuer.verifying_key());
+        let canonical = e.canonical_json().unwrap();
+        for sig in refused::non_canonical(&issuer, canonical.as_bytes()) {
+            e.issuer_signature = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+            assert!(!verify_envelope_signature(&e));
+        }
+    }
 }

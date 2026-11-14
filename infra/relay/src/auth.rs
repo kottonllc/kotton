@@ -142,10 +142,16 @@ pub fn verify_push_sig(
         fingerprint, addr, timestamp, relay, relayable
     );
 
-    use ed25519_dalek::Verifier as _;
-    verifying_key
-        .verify(message.as_bytes(), &signature)
-        .map_err(|_| AuthError::BadSignature)
+    check(verifying_key, message.as_bytes(), &signature)
+}
+
+/// The relay's one Ed25519 check, strict: a public key of small order, a signature whose `R`
+/// is of small order, and one whose `S` is not reduced are each refused. The relay is its own
+/// workspace and links no `kotton-crypto`, so it calls `verify_strict` here, where every
+/// signature it checks comes; the root `clippy.toml` refuses the unstrict check here as in the
+/// workspace.
+pub fn check(key: &VerifyingKey, message: &[u8], signature: &Signature) -> Result<(), AuthError> {
+    key.verify_strict(message, signature).map_err(|_| AuthError::BadSignature)
 }
 
 /// A handle that proved itself: its fingerprint, the timestamp it signed, and the
@@ -207,10 +213,7 @@ pub fn verify_lookup_auth(header: &str) -> Result<Handle, AuthError> {
         .try_into()
         .map_err(|_| AuthError::SigDecode(format!("expected 64 bytes, got {}", sig_bytes.len())))?;
     let signature = Signature::from_bytes(&sig_arr);
-    use ed25519_dalek::Verifier as _;
-    verifying_key
-        .verify(message.as_bytes(), &signature)
-        .map_err(|_| AuthError::BadSignature)?;
+    check(&verifying_key, message.as_bytes(), &signature)?;
 
     Ok(Handle {
         fingerprint: fp,
@@ -256,13 +259,11 @@ pub fn verify_operator_auth(header: &str, body: &[u8]) -> Result<(String, i64), 
         .as_slice()
         .try_into()
         .map_err(|_| AuthError::SigDecode(format!("expected 64 bytes, got {}", sig_bytes.len())))?;
-    use ed25519_dalek::Verifier as _;
-    verifying_key
-        .verify(
-            &kotton_wire::rendezvous::operator_signing_input(key, ts, body),
-            &Signature::from_bytes(&sig_arr),
-        )
-        .map_err(|_| AuthError::BadSignature)?;
+    check(
+        &verifying_key,
+        &kotton_wire::rendezvous::operator_signing_input(key, ts, body),
+        &Signature::from_bytes(&sig_arr),
+    )?;
     Ok((key.to_owned(), ts))
 }
 
@@ -334,5 +335,127 @@ mod tests {
         // Use a different addr — signature should fail
         let result = verify_push_sig(&vk, &did, "10.0.0.1:9999", ts, None, true, &sig_b64);
         assert!(matches!(result, Err(AuthError::BadSignature)));
+    }
+
+    /// The encoding of the curve's identity point: a public key of small order.
+    const SMALL_ORDER_KEY: [u8; 32] = {
+        let mut k = [0u8; 32];
+        k[0] = 1;
+        k
+    };
+
+    /// A signature for [`SMALL_ORDER_KEY`]: `R` the identity point, `S` zero.
+    fn under_small_order_key() -> String {
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&SMALL_ORDER_KEY);
+        URL_SAFE_NO_PAD.encode(sig)
+    }
+
+    /// Two non-canonical signatures by `key` over `msg`, base64url: one whose `R` is the
+    /// identity point (with the `S` that completes the equation), and one whose `S` is not
+    /// reduced (the canonical `S` plus the group order).
+    fn non_canonical(key: &SigningKey, msg: &[u8]) -> [String; 2] {
+        use curve25519_dalek::scalar::{clamp_integer, Scalar};
+        use ed25519_dalek::Signer as _;
+        use sha2::{Digest as _, Sha512};
+        let expanded: [u8; 64] = Sha512::digest(key.to_bytes()).into();
+        let mut lower = [0u8; 32];
+        lower.copy_from_slice(&expanded[..32]);
+        let a = Scalar::from_bytes_mod_order(clamp_integer(lower));
+        let k: [u8; 64] = Sha512::new()
+            .chain_update(SMALL_ORDER_KEY)
+            .chain_update(key.verifying_key().as_bytes())
+            .chain_update(msg)
+            .finalize()
+            .into();
+        let mut small_r = [0u8; 64];
+        small_r[..32].copy_from_slice(&SMALL_ORDER_KEY);
+        small_r[32..].copy_from_slice((Scalar::from_bytes_mod_order_wide(&k) * a).as_bytes());
+
+        let mut unreduced = key.sign(msg).to_bytes();
+        let order_minus_one = (Scalar::ZERO - Scalar::ONE).to_bytes();
+        let mut carry = 1u16;
+        for i in 0..32 {
+            let sum = unreduced[32 + i] as u16 + order_minus_one[i] as u16 + carry;
+            unreduced[32 + i] = sum as u8;
+            carry = sum >> 8;
+        }
+        [URL_SAFE_NO_PAD.encode(small_r), URL_SAFE_NO_PAD.encode(unreduced)]
+    }
+
+    fn did_of(key: &[u8; 32]) -> String {
+        let mut prefixed = vec![0xed_u8, 0x01];
+        prefixed.extend_from_slice(key);
+        format!("did:key:z{}", bs58::encode(&prefixed).into_string())
+    }
+
+    fn now() -> i64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn a_push_under_a_small_order_key_is_refused() {
+        let vk = VerifyingKey::from_bytes(&SMALL_ORDER_KEY).unwrap();
+        let did = did_of(&SMALL_ORDER_KEY);
+        let result = verify_push_sig(&vk, &did, "203.0.113.45:4444", now(), None, true, &under_small_order_key());
+        assert!(matches!(result, Err(AuthError::BadSignature)), "{result:?}");
+    }
+
+    #[test]
+    fn a_push_with_a_non_canonical_signature_is_refused() {
+        let (sk, did) = make_key();
+        let (addr, ts) = ("203.0.113.45:4444", now());
+        let msg = format!("{}\n{}\n{}\n\n{}", did, addr, ts, true);
+        for sig in non_canonical(&sk, msg.as_bytes()) {
+            let result = verify_push_sig(&sk.verifying_key(), &did, addr, ts, None, true, &sig);
+            assert!(matches!(result, Err(AuthError::BadSignature)), "{result:?}");
+        }
+    }
+
+    #[test]
+    fn a_lookup_under_a_small_order_key_is_refused() {
+        let header = format!("Ed25519 fingerprint={} ts={} sig={}", did_of(&SMALL_ORDER_KEY), now(), under_small_order_key());
+        let result = verify_lookup_auth(&header);
+        assert!(matches!(result, Err(AuthError::BadSignature)), "{result:?}");
+    }
+
+    #[test]
+    fn a_lookup_with_a_non_canonical_signature_is_refused() {
+        use ed25519_dalek::Signer as _;
+        let (sk, did) = make_key();
+        let ts = now();
+        let msg = format!("{}\n{}", did, ts);
+        let good = URL_SAFE_NO_PAD.encode(sk.sign(msg.as_bytes()).to_bytes());
+        verify_lookup_auth(&format!("Ed25519 fingerprint={did} ts={ts} sig={good}")).unwrap();
+        for sig in non_canonical(&sk, msg.as_bytes()) {
+            let result = verify_lookup_auth(&format!("Ed25519 fingerprint={did} ts={ts} sig={sig}"));
+            assert!(matches!(result, Err(AuthError::BadSignature)), "{result:?}");
+        }
+    }
+
+    #[test]
+    fn an_operator_under_a_small_order_key_is_refused() {
+        let header = format!("KottonOperator key={} ts={} sig={}", hex(&SMALL_ORDER_KEY), now(), under_small_order_key());
+        let result = verify_operator_auth(&header, b"{}");
+        assert!(matches!(result, Err(AuthError::BadSignature)), "{result:?}");
+    }
+
+    #[test]
+    fn an_operator_with_a_non_canonical_signature_is_refused() {
+        use ed25519_dalek::Signer as _;
+        let (sk, _) = make_key();
+        let key = hex(sk.verifying_key().as_bytes());
+        let ts = now();
+        let msg = kotton_wire::rendezvous::operator_signing_input(&key, ts, b"{}");
+        let good = URL_SAFE_NO_PAD.encode(sk.sign(&msg).to_bytes());
+        verify_operator_auth(&format!("KottonOperator key={key} ts={ts} sig={good}"), b"{}").unwrap();
+        for sig in non_canonical(&sk, &msg) {
+            let result = verify_operator_auth(&format!("KottonOperator key={key} ts={ts} sig={sig}"), b"{}");
+            assert!(matches!(result, Err(AuthError::BadSignature)), "{result:?}");
+        }
     }
 }

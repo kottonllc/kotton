@@ -27,6 +27,8 @@ tracing-subscriber = { workspace = true }
 tracing-log = "0.2"
 
 [dev-dependencies]
+# Test-only: the signatures a strict check refuses, for the tests that hold each check.
+kotton-crypto = { path = "../crypto", features = ["test-utils"] }
 workspace-hack = { path = "../../tools/workspace-hack" }
 tempfile = "3.8"
 

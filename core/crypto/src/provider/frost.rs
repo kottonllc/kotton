@@ -622,7 +622,6 @@ mod tests {
     /// FROST threshold signature must verify under that original identity key.
     #[test]
     fn spike_ed25519_identity_bridges_to_frost_preserving_did() {
-        use ed25519_dalek::Verifier as _;
         use sha2::{Digest, Sha512};
 
         // The n=1 identity as the system creates it: ed25519 from a 32-byte seed
@@ -674,7 +673,7 @@ mod tests {
         let ed_vk = ed25519_dalek::VerifyingKey::from_bytes(&ed_pub).unwrap();
         let sig_arr: [u8; 64] = sig.as_slice().try_into().unwrap();
         let ed_sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
-        ed_vk.verify(msg, &ed_sig).expect(
+        crate::ed25519::verify(&ed_vk, msg, &ed_sig).expect(
             "FROST threshold signature must verify under the original ed25519 identity key",
         );
     }

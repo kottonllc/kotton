@@ -365,7 +365,7 @@ fn derive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, Verifier};
+    use ed25519_dalek::Signer;
     use rand::rngs::OsRng;
 
     fn pair() -> (SigningKey, SigningKey) {
@@ -389,9 +389,7 @@ mod tests {
 
         // Exactly what the relay does: recover the key from the DID it was handed.
         let recovered = DidKeyMethod::to_public_key(&h.did).expect("handle is a did:key");
-        assert!(recovered
-            .verify(b"addr=203.0.113.9:7700", &signature)
-            .is_ok());
+        assert!(crate::ed25519::verify(&recovered, b"addr=203.0.113.9:7700", &signature).is_ok());
     }
 
     /// The door's name: what A announces on a router today is what B expects, and
@@ -634,7 +632,7 @@ mod tests {
 
         let signature = h.signing_key.sign(b"poll");
         let recovered = DidKeyMethod::to_public_key(&h.did).expect("address is a did:key");
-        assert!(recovered.verify(b"poll", &signature).is_ok());
+        assert!(crate::ed25519::verify(&recovered, b"poll", &signature).is_ok());
     }
 
     /// A lookup spans the boundary, so a device a few minutes out still connects.
