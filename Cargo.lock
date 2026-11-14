@@ -8554,6 +8554,7 @@ dependencies = [
  "kotton-pty-drive",
  "serde_json",
  "tempfile",
+ "toml 0.8.2",
  "workspace-hack",
  "yaml-rust2",
 ]

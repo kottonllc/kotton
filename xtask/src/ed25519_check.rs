@@ -41,14 +41,21 @@
 //! Every `.rs` file and `Cargo.toml` under the code roots (`tree::CODE_ROOTS`), tests
 //! included; and, for what lowers the lint, the root manifest, `Justfile`, `just/*.just`, every
 //! cargo configuration (`.cargo/config.toml` or `.cargo/config`) at the root or under the code
-//! roots, and the workflows. It skips comment lines, and its own source, whose tests spell
-//! what it refuses. A manifest's dependency is read in inline and in table form, renamed or
-//! not, the root manifest's `[workspace.dependencies]` entry included; a dependency inherited
-//! from the workspace is read under the name the member gives it.
+//! roots, and the workflows. It skips its own source, whose tests spell what it refuses.
+//!
+//! Every `Cargo.toml` and `clippy.toml` is parsed as TOML (the `toml` crate), so how an entry
+//! is spelled does not matter there: a dependency inline or in table form, renamed or not, in
+//! any dependency table, the root manifest's `[workspace.dependencies]` entry included, and a
+//! `[lints]` level as a tool's table, a lint's own table, a dotted key or an inline table, are
+//! each read the same way. A dependency inherited from the workspace is read under the name
+//! the member gives it. A manifest or `clippy.toml` that does not parse is a finding, naming
+//! the file. The rest is read as text, skipping comment lines: attributes in `.rs` files, and
+//! the lines of the `Justfile`, `just/`, the cargo configurations and the workflows.
 //!
 //! ## What it does not read
 //!
-//! It reads text, file by file, so it is a list of spellings, and these are outside it:
+//! What it reads as text it reads file by file, so there it is a list of spellings, and these
+//! are outside it:
 //!
 //! - an attribute in a file brought in by `include!` that is not a `.rs` file under the code
 //!   roots, and an `allow` built by a macro;
@@ -64,6 +71,8 @@
 //! type that offers only the strict check.
 
 use std::path::Path;
+
+use toml::{Table, Value};
 
 use crate::user_database_check::{rel, walk};
 
@@ -211,22 +220,24 @@ fn config_findings(config: Option<&str>, shadows: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     match config {
         None => out.push(format!("{CLIPPY_TOML} is not at the root of the tree")),
-        Some(text) => {
-            let mut section = String::new();
-            let mut named = Vec::new();
-            for (_, key, value) in entries(text) {
-                if key.is_empty() {
-                    section = value;
-                } else if section.is_empty() && key == "disallowed-methods" {
-                    named.extend(strings(&value));
+        Some(text) => match parse(text) {
+            Err(e) => out.push(format!("{CLIPPY_TOML}: {e}")),
+            Ok(config) => {
+                // An entry is a path, or a table with one: `"a::b"` or `{ path = "a::b", .. }`.
+                let named: Vec<&str> = config
+                    .get("disallowed-methods")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().or_else(|| v.get("path").and_then(Value::as_str)))
+                    .collect();
+                for m in REFUSED {
+                    if !named.contains(m) {
+                        out.push(format!("{CLIPPY_TOML} does not refuse `{m}` (disallowed-methods)"));
+                    }
                 }
             }
-            for m in REFUSED {
-                if !named.iter().any(|n| n == m) {
-                    out.push(format!("{CLIPPY_TOML} does not refuse `{m}` (disallowed-methods)"));
-                }
-            }
-        }
+        },
     }
     for s in shadows {
         out.push(format!("{s}: a clippy configuration beside or below the root's, which clippy would read instead"));
@@ -408,49 +419,29 @@ fn allowance_findings(sources: &[(String, String)], manifests: &[(String, String
         ));
     }
     for (file, text) in manifests.iter().chain(others) {
-        // The lint a `[lints]` table is under, as `tool.lint`, read from the header and the
-        // key: `[lints.clippy]` with `style = ..`, `[lints]` with `clippy.style = ..` (or
-        // `clippy = { style = .. }`), and `[lints.clippy.style]` with `level = ..`.
-        let mut table: Option<String> = None;
-        for (i, line) in text.lines().enumerate() {
-            let t = line.trim();
-            if t.starts_with('#') {
-                continue;
-            }
-            if t.starts_with('[') {
-                let header: String = t.chars().filter(|c| !c.is_whitespace() && *c != '"' && *c != '\'').collect();
-                let header = header.trim_start_matches('[').split(']').next().unwrap_or("");
-                let header = header.strip_prefix("workspace.").unwrap_or(header);
-                table = header.strip_prefix("lints").map(|rest| rest.trim_start_matches('.').to_string());
-                continue;
-            }
-            let lowers = t.contains("allow") || t.contains("expect");
-            let mut named = Vec::new();
-            if let Some(table) = &table {
-                let key: String = t.split('=').next().unwrap_or("").chars().filter(|c| !c.is_whitespace() && *c != '"' && *c != '\'').collect();
-                let value = t.split_once('=').map(|(_, v)| v.trim()).unwrap_or("");
-                let path = [table.as_str(), key.as_str()].iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(".");
-                match path.strip_suffix(".level") {
-                    Some(lint) => named.push(lint.to_string()),
-                    None if value.starts_with('{') && (path == "clippy" || path == "rust") => {
-                        for lint in ["all", "style", "warnings"] {
-                            if inline_value(value, lint).is_some_and(|v| v.contains("allow") || v.contains("expect")) {
-                                named.push(format!("{path}.{lint}"));
-                            }
-                        }
-                    }
-                    None => named.push(path),
+        if !is_manifest(file) {
+            // A file that runs the lint, read as text: a line that names the lint.
+            for (i, line) in text.lines().enumerate() {
+                let t = line.trim();
+                if !t.starts_with('#') && OFF.iter().any(|w| t.contains(w)) {
+                    out.push(format!("{file}:{}: turns off the refusal of the unstrict check: {t}", i + 1));
                 }
             }
-            let group = lowers
-                && named.iter().any(|p| {
-                    matches!(
-                        p.as_str(),
-                        "clippy.all" | "clippy.style" | "clippy.disallowed_methods" | "clippy.disallowed-methods" | "rust.warnings"
-                    )
-                });
-            if OFF.iter().any(|w| t.contains(w)) || group {
-                out.push(format!("{file}:{}: turns off the refusal of the unstrict check: {t}", i + 1));
+            continue;
+        }
+        // A manifest, parsed: a `[lints]` entry in any of its forms is one (table, tool.lint,
+        // level). A manifest that does not parse is `feature_findings`' finding.
+        let Ok(m) = Manifest::read(text) else { continue };
+        for (table, lint, level) in &m.lints {
+            let lowers = level == "allow" || level == "expect";
+            let the_lint = OFF.iter().any(|w| *lint == format!("clippy.{w}"));
+            let group = matches!(lint.as_str(), "clippy.all" | "clippy.style" | "rust.warnings");
+            if the_lint && !lowers {
+                out.push(format!(
+                    "{file}: [{table}] {lint} = \"{level}\": sets the refusal's level, which clippy.toml and -D warnings hold"
+                ));
+            } else if (the_lint || group) && lowers {
+                out.push(format!("{file}: [{table}] {lint} = \"{level}\": turns off the refusal of the unstrict check"));
             }
         }
     }
@@ -467,26 +458,33 @@ fn allowance_findings(sources: &[(String, String)], manifests: &[(String, String
 
 /// No manifest turns on a feature in [`FEATURES`] of [`LIBRARY`]: on the dependency itself
 /// (inline or table form, renamed or not) or through a feature of its own (`dalek/feature`).
+/// A manifest that does not parse is a finding: what it turns on cannot be read.
 fn feature_findings<'a>(manifests: impl Iterator<Item = &'a (String, String)>) -> Vec<String> {
     let mut out = Vec::new();
     for (file, text) in manifests {
-        let parsed = Manifest::read(text);
+        let parsed = match Manifest::read(text) {
+            Ok(m) => m,
+            Err(e) => {
+                out.push(format!("{file}: {e}"));
+                continue;
+            }
+        };
         let names: Vec<&str> = parsed.deps.iter().filter(|d| d.package == LIBRARY).map(|d| d.key.as_str()).collect();
-        let mut refuse = |line: usize, feature: &str| {
+        let mut refuse = |at: String, feature: &str| {
             if let Some((f, why)) = FEATURES.iter().find(|(f, _)| *f == feature) {
-                out.push(format!("{file}:{line}: turns on {LIBRARY}'s `{f}` feature, which {why}"));
+                out.push(format!("{file}: {at} turns on {LIBRARY}'s `{f}` feature, which {why}"));
             }
         };
         for d in parsed.deps.iter().filter(|d| d.package == LIBRARY) {
             for f in &d.features {
-                refuse(d.line, f);
+                refuse(format!("[{}] {}", d.table, d.key), f);
             }
         }
-        for (line, value) in &parsed.feature_values {
+        for (name, value) in &parsed.feature_values {
             let Some((dep, feature)) = value.split_once('/') else { continue };
             let dep = dep.trim_end_matches('?');
             if dep == LIBRARY || names.contains(&dep) {
-                refuse(*line, feature);
+                refuse(format!("[features] {name}"), feature);
             }
         }
     }
@@ -533,182 +531,104 @@ fn crates_linking_crypto(manifests: &[(String, String)]) -> Vec<String> {
         .collect()
 }
 
-/// Whether a manifest is `kotton-crypto`'s or names it as a dependency of any kind.
+/// Whether a manifest is `kotton-crypto`'s or names it as a dependency of any kind. A manifest
+/// that does not parse is `feature_findings`' finding.
 fn manifest_links_crypto(text: &str) -> bool {
-    let m = Manifest::read(text);
-    m.package.as_deref() == Some("kotton-crypto") || m.deps.iter().any(|d| d.package == "kotton-crypto")
+    Manifest::read(text)
+        .is_ok_and(|m| m.package.as_deref() == Some("kotton-crypto") || m.deps.iter().any(|d| d.package == "kotton-crypto"))
+}
+
+/// Whether a file, by its relative path, is a crate's or the workspace's manifest.
+fn is_manifest(file: &str) -> bool {
+    file == "Cargo.toml" || file.ends_with("/Cargo.toml")
+}
+
+/// `text` parsed as TOML, or why it does not parse (the parser's message and the line).
+fn parse(text: &str) -> Result<Table, String> {
+    text.parse::<Table>().map_err(|e| {
+        let line = e.span().map(|s| text[..s.start.min(text.len())].lines().count().max(1));
+        let at = line.map(|l| format!(" at line {l}")).unwrap_or_default();
+        format!("does not parse as TOML{at}, so nothing in it can be read: {}", e.message().trim())
+    })
 }
 
 /// A dependency as a manifest names it: the key it is named by, the package it is, the
-/// features it turns on, and the line it starts on.
+/// features it turns on, and the table it is in (`dependencies`, `workspace.dependencies`,
+/// `target.'cfg(unix)'.dev-dependencies`, ..).
 struct Dep {
     key: String,
     package: String,
     features: Vec<String>,
-    line: usize,
+    table: String,
 }
 
-/// What this check reads of a `Cargo.toml`: its package's name, its dependencies in every
-/// dependency table (inline and table form), and the values of its `[features]`.
+/// What this check reads of a parsed `Cargo.toml`: its package's name, its dependencies in
+/// every dependency table, the values of its `[features]`, and its lint levels.
 struct Manifest {
     package: Option<String>,
     deps: Vec<Dep>,
-    feature_values: Vec<(usize, String)>,
+    /// (the feature, a value it turns on).
+    feature_values: Vec<(String, String)>,
+    /// (the table, `tool.lint`, its level), from `[lints]` and `[workspace.lints]`. A tool's
+    /// table, a lint's own table with `level`, a dotted key and an inline table all parse to
+    /// the same shape, so each is read the same way.
+    lints: Vec<(String, String, String)>,
 }
+
+/// The dependency tables, as cargo spells them (the `_` forms are cargo's older spelling, which
+/// it still reads).
+const DEPENDENCY_TABLES: &[&str] = &["dependencies", "dev-dependencies", "build-dependencies", "dev_dependencies", "build_dependencies"];
 
 impl Manifest {
-    fn read(text: &str) -> Manifest {
-        let mut m = Manifest { package: None, deps: Vec::new(), feature_values: Vec::new() };
-        let mut section = String::new();
-        // A dependency in table form: its index in `deps`.
-        let mut table_dep: Option<usize> = None;
-        for (line, key, value) in entries(text) {
-            if key.is_empty() {
-                section = value;
-                table_dep = None;
-                if let Some(name) = dependency_table(&section) {
-                    m.deps.push(Dep { key: name.clone(), package: name, features: Vec::new(), line });
-                    table_dep = Some(m.deps.len() - 1);
+    fn read(text: &str) -> Result<Manifest, String> {
+        let t = parse(text)?;
+        let table = |v: Option<&Value>| v.and_then(Value::as_table).cloned().unwrap_or_default();
+        let strings = |v: Option<&Value>| -> Vec<String> {
+            v.and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+        };
+        let mut m = Manifest {
+            package: t.get("package").and_then(|p| p.get("name")).and_then(Value::as_str).map(str::to_string),
+            deps: Vec::new(),
+            feature_values: Vec::new(),
+            lints: Vec::new(),
+        };
+
+        // Every dependency table: at the top, under `workspace`, and under each target.
+        let workspace = table(t.get("workspace"));
+        let mut tables: Vec<(String, Table)> = Vec::new();
+        for kind in DEPENDENCY_TABLES {
+            tables.push((kind.to_string(), table(t.get(*kind))));
+            tables.push((format!("workspace.{kind}"), table(workspace.get(*kind))));
+            for (cfg, target) in table(t.get("target")) {
+                tables.push((format!("target.'{cfg}'.{kind}"), table(target.get(*kind))));
+            }
+        }
+        for (name, deps) in tables {
+            for (key, entry) in deps {
+                // `name = "1"` names the package by its key and turns on no feature.
+                let package = entry.get("package").and_then(Value::as_str).unwrap_or(&key).to_string();
+                let features = strings(entry.get("features"));
+                m.deps.push(Dep { key, package, features, table: name.clone() });
+            }
+        }
+
+        for (feature, values) in table(t.get("features")) {
+            for v in strings(Some(&values)) {
+                m.feature_values.push((feature.clone(), v));
+            }
+        }
+
+        for (name, lints) in [("lints", table(t.get("lints"))), ("workspace.lints", table(workspace.get("lints")))] {
+            // `[lints] workspace = true` is a bool, not a tool's table, and sets nothing here.
+            for (tool, levels) in lints {
+                for (lint, level) in table(Some(&levels)) {
+                    let level = level.as_str().or_else(|| level.get("level").and_then(Value::as_str)).unwrap_or("");
+                    m.lints.push((format!("{name}.{tool}"), format!("{tool}.{lint}"), level.to_string()));
                 }
-                continue;
-            }
-            if let Some(at) = table_dep {
-                match key.as_str() {
-                    "package" => m.deps[at].package = strings(&value).into_iter().next().unwrap_or_default(),
-                    "features" => m.deps[at].features = strings(&value),
-                    _ => {}
-                }
-            } else if is_dependency_section(&section) {
-                let value = value.trim();
-                let (package, features) = if value.starts_with('{') {
-                    (inline_value(value, "package").and_then(|v| strings(&v).into_iter().next()), inline_value(value, "features").map(|v| strings(&v)).unwrap_or_default())
-                } else {
-                    (None, Vec::new())
-                };
-                m.deps.push(Dep { package: package.unwrap_or_else(|| key.clone()), key, features, line });
-            } else if section == "features" {
-                for s in strings(&value) {
-                    m.feature_values.push((line, s));
-                }
-            } else if section == "package" && key == "name" {
-                m.package = strings(&value).into_iter().next();
             }
         }
-        m
+        Ok(m)
     }
-}
-
-/// Whether a section is a dependency table: `dependencies`, `dev-dependencies` or
-/// `build-dependencies`, under `workspace` or a `target` or at the top.
-fn is_dependency_section(section: &str) -> bool {
-    ["dependencies", "dev-dependencies", "build-dependencies"]
-        .iter()
-        .any(|d| section == *d || section.ends_with(&format!(".{d}")))
-}
-
-/// The dependency a section names in table form (`dependencies.name`), if it names one.
-fn dependency_table(section: &str) -> Option<String> {
-    let (table, name) = section.rsplit_once('.')?;
-    is_dependency_section(table).then(|| name.trim_matches('"').trim_matches('\'').to_string())
-}
-
-/// A manifest's entries as (line, key, value): a section header is ("", its name), and a value
-/// that spans lines (an array) is read to its close. Comment lines are skipped.
-fn entries(text: &str) -> Vec<(usize, String, String)> {
-    let mut out = Vec::new();
-    let lines: Vec<&str> = text.lines().collect();
-    let mut i = 0;
-    while i < lines.len() {
-        let t = lines[i].trim();
-        let line = i + 1;
-        i += 1;
-        if t.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        if t.starts_with('[') {
-            let name = t.trim_start_matches('[').split(']').next().unwrap_or("").trim();
-            let name = name.split('.').map(|p| p.trim()).collect::<Vec<_>>().join(".");
-            out.push((line, String::new(), name));
-            continue;
-        }
-        let Some((key, value)) = t.split_once('=') else { continue };
-        let mut value = value.trim().to_string();
-        while depth(&value) > 0 && i < lines.len() {
-            let next = lines[i].trim();
-            i += 1;
-            if !next.starts_with('#') {
-                value.push(' ');
-                value.push_str(next);
-            }
-        }
-        out.push((line, key.trim().trim_matches('"').trim_matches('\'').to_string(), value));
-    }
-    out
-}
-
-/// How many brackets and braces `text` leaves open, outside strings.
-fn depth(text: &str) -> i32 {
-    let mut d = 0;
-    let mut quote = None;
-    for c in text.chars() {
-        match (quote, c) {
-            (None, '"' | '\'') => quote = Some(c),
-            (Some(q), c) if c == q => quote = None,
-            (None, '[' | '{') => d += 1,
-            (None, ']' | '}') => d -= 1,
-            (None, '#') => break,
-            _ => {}
-        }
-    }
-    d
-}
-
-/// The quoted strings in `value`, in order.
-fn strings(value: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut quote = None;
-    let mut cur = String::new();
-    for c in value.chars() {
-        match quote {
-            None if c == '"' || c == '\'' => quote = Some(c),
-            None if c == '#' => break,
-            Some(q) if c == q => {
-                out.push(std::mem::take(&mut cur));
-                quote = None;
-            }
-            Some(_) => cur.push(c),
-            None => {}
-        }
-    }
-    out
-}
-
-/// The value of `key` in an inline table `{ .. }`, to the next top-level comma.
-fn inline_value(table: &str, key: &str) -> Option<String> {
-    let inner = table.trim().strip_prefix('{')?.trim_end().strip_suffix('}')?;
-    let mut parts = Vec::new();
-    let mut cur = String::new();
-    let mut d = 0;
-    let mut quote = None;
-    for c in inner.chars() {
-        match (quote, c) {
-            (None, '"' | '\'') => quote = Some(c),
-            (Some(q), c) if c == q => quote = None,
-            (None, '[' | '{') => d += 1,
-            (None, ']' | '}') => d -= 1,
-            (None, ',') if d == 0 => {
-                parts.push(std::mem::take(&mut cur));
-                continue;
-            }
-            _ => {}
-        }
-        cur.push(c);
-    }
-    parts.push(cur);
-    parts.into_iter().find_map(|p| {
-        let (k, v) = p.split_once('=')?;
-        (k.trim().trim_matches('"') == key).then(|| v.trim().to_string())
-    })
 }
 
 #[cfg(test)]
@@ -904,7 +824,9 @@ mod tests {
     fn findings_with(path: &str, text: &str) -> Vec<String> {
         let dir = tempfile::tempdir().unwrap();
         a_tree(dir.path());
-        std::fs::write(dir.path().join(path), text).unwrap();
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
         findings(dir.path()).1
     }
 
@@ -1009,6 +931,71 @@ mod tests {
         assert_eq!(module.len(), 1, "{module:#?}");
         assert!(module[0].starts_with("just/lint.just:3:"), "{module:#?}");
         assert_eq!(findings_with("Justfile", &relay_gone).len(), 1);
+    }
+
+    /// A root manifest as the tree's is shaped: a `members` array over several lines whose
+    /// entries carry trailing comments (one with a bracket in it), and only then
+    /// `[workspace.dependencies]`.
+    fn a_root_with_members(dependencies: &str) -> String {
+        format!(
+            "[workspace]\nresolver = \"2\"\nmembers = [\n    # core/ — grouped by authority\n    \"core/crypto\", # the seam's crate\n    \"core/msg\",    # a [bracket] in a comment\n\n    # tools\n    \"tools/pty-drive\",\n]\n\n[workspace.package]\nlicense = \"AGPL-3.0-or-later\"\n\n{dependencies}"
+        )
+    }
+
+    #[test]
+    fn a_root_manifest_with_a_commented_members_array_is_read_past_it() {
+        for (f, _) in FEATURES {
+            let inline = a_root_with_members(&format!(
+                "[workspace.dependencies]\nserde = \"1\" # serialization\ned25519-dalek = {{ version = \"2.1\", features = [\"rand_core\", \"{f}\"] }}\n"
+            ));
+            let found = findings_with("Cargo.toml", &inline);
+            assert_eq!(found.len(), 1, "{f}: {found:#?}");
+            assert!(found[0].starts_with("Cargo.toml:"), "{found:#?}");
+            let table = a_root_with_members(&format!(
+                "[workspace.dependencies.ed25519-dalek]\nversion = \"2.1\"\nfeatures = [\n    \"rand_core\", # the default\n    \"{f}\",\n]\n"
+            ));
+            assert_eq!(findings_with("Cargo.toml", &table).len(), 1, "{f}");
+        }
+        // The same root with only the features the tree turns on holds.
+        let good = a_root_with_members("[workspace.dependencies]\ned25519-dalek = { version = \"2.1\", features = [\"rand_core\"] }\n");
+        assert!(findings_with("Cargo.toml", &good).is_empty(), "{:#?}", findings_with("Cargo.toml", &good));
+    }
+
+    #[test]
+    fn a_member_manifest_with_a_commented_array_is_read_past_it() {
+        for (f, _) in FEATURES {
+            let member = |deps: &str| {
+                format!("[package]\nname = \"kotton-msg\"\nkeywords = [\n    \"crypto\", # a keyword\n    \"msg\",    # [another]\n]\n\n{deps}")
+            };
+            let inline = member(&format!("[dependencies]\ned25519-dalek = {{ workspace = true, features = [\"{f}\"] }}\n"));
+            let found = findings_with("core/msg/Cargo.toml", &inline);
+            assert_eq!(found.len(), 1, "{f}: {found:#?}");
+            assert!(found[0].starts_with("core/msg/Cargo.toml:"), "{found:#?}");
+            let table = member(&format!("[dependencies.ed25519-dalek]\nworkspace = true\nfeatures = [\"{f}\"]\n"));
+            assert_eq!(findings_with("core/msg/Cargo.toml", &table).len(), 1, "{f}");
+        }
+    }
+
+    /// The reader finds the library's entry in the tree's own root manifest: a reader that
+    /// silently reads nothing there fails here, not only when a feature is added.
+    #[test]
+    fn the_real_root_manifest_names_the_library() {
+        let text = std::fs::read_to_string(crate::out::root().join("Cargo.toml")).unwrap();
+        let m = Manifest::read(&text).unwrap();
+        let entry = m.deps.iter().find(|d| d.package == LIBRARY && d.table == "workspace.dependencies");
+        let entry = entry.unwrap_or_else(|| panic!("no {LIBRARY} entry read in the root manifest's [workspace.dependencies]"));
+        assert!(entry.features.iter().any(|f| f == "rand_core"), "{:?}", entry.features);
+    }
+
+    #[test]
+    fn a_manifest_or_config_that_does_not_parse_is_a_finding() {
+        for path in ["Cargo.toml", "core/msg/Cargo.toml", CLIPPY_TOML] {
+            let found = findings_with(path, "[dependencies\ned25519-dalek = { features = [\"digest\" }\n");
+            assert!(
+                found.iter().any(|f| f.starts_with(&format!("{path}: does not parse"))),
+                "{path}: {found:#?}"
+            );
+        }
     }
 
     /// The tree as it is: every hold above holds.
