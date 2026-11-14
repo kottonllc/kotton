@@ -154,8 +154,12 @@ fn installed_env_file(exe: &Path) -> Option<PathBuf> {
 /// Nothing is read when the caller names a door (`KVAULTD_IPC_NAME`) or when
 /// this binary was not installed; a file that is there and closed to the caller
 /// is refused in one sentence rather than silently skipped, which would send
-/// the verb to a door nobody made. Called before the runtime starts a thread,
-/// so setting the environment races nothing.
+/// the verb to a door nobody made. Root reads it only when root alone can change
+/// it, and reads the entry it held ([`read_root_settings`]); a door named by
+/// `KVAULTD_IPC_NAME` in root's own environment is taken at root's own word, the
+/// settings file is not read, and only the door's own path is held
+/// (`OsConnection::connect_holding_root_or_door_owner`). Called before the
+/// runtime starts a thread, so setting the environment races nothing.
 fn take_installed_env() -> Result<(), String> {
     if std::env::var_os("KVAULTD_IPC_NAME").is_some() {
         return Ok(());
@@ -163,15 +167,8 @@ fn take_installed_env() -> Result<(), String> {
     let Some(file) = std::env::current_exe().ok().as_deref().and_then(installed_env_file) else {
         return Ok(());
     };
-    let text = match std::fs::read(&file) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => {
-            return Err(format!(
-                "cannot read {}, where the running vault is named ({e}): run this as root or as the vault's own user",
-                file.display()
-            ))
-        }
+    let Some(text) = read_settings(&file)? else {
+        return Ok(());
     };
     // Read as the installer and systemd read it, or not at all: a line in another form is
     // refused naming it, never trimmed into a setting or taken with its quotes.
@@ -185,6 +182,105 @@ fn take_installed_env() -> Result<(), String> {
         std::env::set_var(key, value);
     }
     Ok(())
+}
+
+/// The settings file's bytes, or `None` when it is not there: as root, only by
+/// [`read_root_settings`]; as any other user, as the file's mode lets it read.
+fn read_settings(file: &Path) -> Result<Option<Vec<u8>>, String> {
+    #[cfg(unix)]
+    if kotton_ipc::own_uid() == 0 {
+        return read_root_settings(file);
+    }
+    match std::fs::read(file) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!(
+            "cannot read {}, where the running vault is named ({e}): run this as root or as the vault's own user",
+            file.display()
+        )),
+    }
+}
+
+/// **Root takes a door's path from the settings file only when root alone can
+/// change it** (kottonllc/kotton#527): every directory above the file, up to `/`,
+/// is root's and grants group and other no write ([`kotton_ipc::check_ancestors`]
+/// with root as the owner), and the file is a regular file, not a symlink, owned by
+/// root and granting group and other no write. A root client holds the door it is
+/// pointed at to the owner of the door's directory, so where it is pointed is held
+/// first.
+///
+/// The hold and the read are one observation, in this order:
+///
+/// - **The ancestors are held before the file is asked for.** If one that is there
+///   does not hold, the verb is refused in one sentence naming it, whether or not
+///   the file or the directories below it are there.
+/// - **A directory above the file that is not there, under ancestors that hold, is
+///   nothing to read**, as an absent file is: every ancestor that is there is held,
+///   up to `/`, and only root could make the missing one ([`first_missing_above`]).
+/// - **The file is opened once**, not following a symlink at its own name
+///   (`O_NOFOLLOW`; `O_NONBLOCK`, so a FIFO there is refused rather than waited
+///   on). Not there under ancestors that hold: `None`, nothing to read, and the
+///   caller reads nothing. A symlink there is refused by name.
+/// - **Its type, owner and mode are read from the open file** (`fstat`), and its
+///   bytes from that same file: what is read is the entry that was held, not the
+///   path looked up again.
+///
+/// What is held by path rather than by handle is the ancestors: the walk reads
+/// each by name, then the open resolves the path again. Under the walk's
+/// predicate only root can change any of them in between, so what the open
+/// resolves is what root left there.
+#[cfg(unix)]
+fn read_root_settings(file: &Path) -> Result<Option<Vec<u8>>, String> {
+    use rustix::fs::{Mode, OFlags};
+    use rustix::io::Errno;
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let rule = "root takes the vault's door from a settings file only when it is a file, not a symlink, \
+                owned by root and granting group and other no write, under directories that are root's and grant them no write";
+    let missing = first_missing_above(file);
+    kotton_ipc::check_ancestors(missing.as_deref().unwrap_or(file), 0).map_err(|e| format!("{e}; {rule}"))?;
+    if missing.is_some() {
+        return Ok(None);
+    }
+    let refuse = |why: String| format!("{} {why}; {rule}", file.display());
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let mut opened = match rustix::fs::open(file, flags, Mode::empty()) {
+        Ok(fd) => std::fs::File::from(fd),
+        Err(Errno::NOENT) => return Ok(None),
+        Err(Errno::LOOP) => return Err(refuse("is a symlink".into())),
+        Err(e) => return Err(refuse(format!("cannot be read ({})", io::Error::from(e)))),
+    };
+    let entry = opened.metadata().map_err(|e| refuse(format!("cannot be read ({e})")))?;
+    if !entry.is_file() {
+        return Err(refuse("is not a file".into()));
+    }
+    if entry.uid() != 0 {
+        return Err(refuse(format!("is owned by uid {}", entry.uid())));
+    }
+    let mode = entry.mode() & 0o7777;
+    if mode & 0o022 != 0 {
+        return Err(refuse(format!("is writable by other users (mode {mode:04o})")));
+    }
+    let mut text = Vec::new();
+    opened.read_to_end(&mut text).map_err(|e| refuse(format!("cannot be read ({e})")))?;
+    Ok(Some(text))
+}
+
+/// The highest directory above `file` that is not there, when the directory
+/// `file` is in is not there: its ancestors are then the ones that are, and
+/// holding them holds every entry above `file` that exists. `None` when the
+/// file's directory is there, or when an entry above cannot be looked at for
+/// any reason but its absence — the walk over `file` itself then names it.
+#[cfg(unix)]
+fn first_missing_above(file: &Path) -> Option<PathBuf> {
+    let mut missing = None;
+    for above in kotton_common::fs::own_entry(file).ancestors().skip(1) {
+        match std::fs::symlink_metadata(above) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => missing = Some(above.to_path_buf()),
+            _ => break,
+        }
+    }
+    missing
 }
 
 fn main() -> io::Result<()> {

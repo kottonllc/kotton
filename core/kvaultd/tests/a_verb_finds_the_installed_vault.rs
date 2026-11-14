@@ -447,3 +447,207 @@ fn a_box_too_deep_for_its_joined_door_is_reached_at_the_door_the_vault_opened() 
     assert!(!dir.starts_with(&b.root), "{} is inside the host", dir.display());
     assert!(!dir.exists(), "{} outlived the vault", dir.display());
 }
+
+/// **A root verb speaks only to root or to the owner of the door's directory, and
+/// only by a path root alone could have pointed it at** (kottonllc/kotton#527). The
+/// vault runs as its own uid, as on a host. Root's verb reaches it while the door's
+/// directory and its ancestors hold and the settings file is root's and closed to
+/// others' writes; it is refused in one sentence naming the entry when any of these
+/// does not hold — the settings file writable by its group, the file's directory
+/// writable by others, the file a symlink, a directory above the door writable by
+/// others — and the vault's own uid still reaches the door throughout.
+#[test]
+fn a_root_verb_holds_the_door_and_its_settings_file_to_root_and_the_vaults_user() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(n) = service_uid() else {
+        eprintln!("skipped: not root, or no setpriv — nothing to run as the vault's uid");
+        return;
+    };
+    let b = Host::installed();
+    for d in ["var/lib/kotton-vault", "run/kotton-vault"] {
+        let d = b.root.join(d);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::chown(&d, Some(n), Some(n)).unwrap();
+    }
+    std::fs::set_permissions(&b.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let env = b.env_file();
+    std::os::unix::fs::chown(&env, Some(0), Some(n)).unwrap();
+    std::fs::set_permissions(&env, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    let reaches = |uid: Option<u32>, extra: &[(&str, &str)]| {
+        let out = typed(&b.bin(), uid, extra, &["tenants"]);
+        assert!(out.status.success(), "{}", said(&out));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("this vault keeps for no one"), "{}", said(&out));
+    };
+
+    let _vault = b.start(Some(n));
+    reaches(None, &[]);
+
+    // The settings file, writable by its group.
+    mode(&env, 0o660);
+    refused_in_one_sentence(
+        &typed(&b.bin(), None, &[], &["tenants"]),
+        &format!("{} is writable by other users (mode 0660)", env.display()),
+    );
+    mode(&env, 0o640);
+    reaches(None, &[]);
+
+    // The settings file's directory, writable by others.
+    let etc = b.root.join("etc/kotton");
+    let was = std::fs::metadata(&etc).unwrap().permissions().mode() & 0o7777;
+    mode(&etc, 0o777);
+    refused_in_one_sentence(
+        &typed(&b.bin(), None, &[], &["tenants"]),
+        &format!("{} is writable by other users (mode 0777)", etc.display()),
+    );
+    mode(&etc, was);
+
+    // The settings file, a symlink to a file that holds.
+    let real = b.root.join("etc/kotton/vault.env.real");
+    std::fs::rename(&env, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &env).unwrap();
+    refused_in_one_sentence(&typed(&b.bin(), None, &[], &["tenants"]), &format!("{} is a symlink", env.display()));
+    std::fs::remove_file(&env).unwrap();
+    std::fs::rename(&real, &env).unwrap();
+    reaches(None, &[]);
+
+    // A directory above the door, writable by others. The door is named in the
+    // caller's own environment, so the settings file is not read: the door's own
+    // path is what is held.
+    let runtime = b.root.join("run/kotton-vault").display().to_string();
+    let named = [("KVAULTD_IPC_NAME", "vault"), ("XDG_RUNTIME_DIR", runtime.as_str())];
+    reaches(None, &named);
+    let run = b.root.join("run");
+    let was = std::fs::metadata(&run).unwrap().permissions().mode() & 0o7777;
+    mode(&run, 0o777);
+    refused_in_one_sentence(
+        &typed(&b.bin(), None, &named, &["tenants"]),
+        &format!("{} is writable by other users (mode 0777)", run.display()),
+    );
+    reaches(Some(n), &named);
+    mode(&run, was);
+    reaches(None, &named);
+}
+
+/// Whether this runs as root: the root-only half of the settings file's hold.
+fn is_root() -> bool {
+    forked(|| Command::new("id").arg("-u").output()).is_ok_and(|me| String::from_utf8_lossy(&me.stdout).trim() == "0")
+}
+
+/// **A root verb holds the settings file's directories before it asks for the file**
+/// (kottonllc/kotton#527): with no settings file there, under a directory others may
+/// write, the verb is refused in one sentence naming that directory. Anyone who can
+/// write it could put a file there, so its being absent now says nothing.
+#[test]
+fn a_root_verb_with_no_settings_file_under_a_directory_that_does_not_hold_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !is_root() {
+        eprintln!("skipped: not root — a verb holds the settings file's directories only as root");
+        return;
+    }
+    let b = Host::installed();
+    std::fs::remove_file(b.env_file()).unwrap();
+    let etc = b.root.join("etc/kotton");
+    std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o777)).unwrap();
+    refused_in_one_sentence(
+        &typed(&b.bin(), None, &[], &["tenants"]),
+        &format!("{} is writable by other users (mode 0777)", etc.display()),
+    );
+}
+
+/// **With no settings file there, under directories that hold, a root verb reads
+/// nothing** (kottonllc/kotton#527) and goes on as a binary with no installed
+/// settings does: it looks where root's login says, and nothing answers there.
+#[test]
+fn a_root_verb_with_no_settings_file_under_directories_that_hold_reads_nothing() {
+    if !is_root() {
+        eprintln!("skipped: not root — a verb holds the settings file's directories only as root");
+        return;
+    }
+    let b = Host::installed();
+    std::fs::remove_file(b.env_file()).unwrap();
+    refused_in_one_sentence(
+        &typed(&b.bin(), None, &[], &["tenants"]),
+        "nothing answers at /run/user/0/kotton/kvaultd.sock",
+    );
+}
+
+/// **A root verb takes the settings file only when it is root's** (kottonllc/kotton#527):
+/// owned by the vault's uid, at the mode `0640` that is closed to others' writes, it is
+/// refused in one sentence naming that uid. The owner is read from the file opened.
+#[test]
+fn a_root_verb_refuses_a_settings_file_another_uid_owns() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(n) = service_uid() else {
+        eprintln!("skipped: not root, or no setpriv — nothing to own the file as the vault's uid");
+        return;
+    };
+    let b = Host::installed();
+    let env = b.env_file();
+    std::os::unix::fs::chown(&env, Some(n), Some(n)).unwrap();
+    std::fs::set_permissions(&env, std::fs::Permissions::from_mode(0o640)).unwrap();
+    refused_in_one_sentence(&typed(&b.bin(), None, &[], &["tenants"]), &format!("{} is owned by uid {n}", env.display()));
+}
+
+/// **A root verb takes the settings file only when it is a regular file**
+/// (kottonllc/kotton#527): a directory at `vault.env`, or a FIFO there, is refused in
+/// one sentence as not a file. The FIFO is opened without blocking, so the verb ends
+/// with no writer at its other end.
+#[test]
+fn a_root_verb_refuses_a_settings_entry_that_is_not_a_file() {
+    if !is_root() {
+        eprintln!("skipped: not root — a verb holds the settings file only as root");
+        return;
+    }
+    let b = Host::installed();
+    let env = b.env_file();
+    std::fs::remove_file(&env).unwrap();
+    std::fs::create_dir(&env).unwrap();
+    refused_in_one_sentence(&typed(&b.bin(), None, &[], &["tenants"]), &format!("{} is not a file", env.display()));
+    std::fs::remove_dir(&env).unwrap();
+
+    let made = forked(|| Command::new("mkfifo").args(["-m", "0600"]).arg(&env).status()).unwrap();
+    assert!(made.success(), "mkfifo {}", env.display());
+    let out = typed_within(Duration::from_secs(60), &b.bin(), &["tenants"]);
+    refused_in_one_sentence(&out, &format!("{} is not a file", env.display()));
+}
+
+/// **With no settings directory there, under directories that hold, a root verb reads
+/// nothing** (kottonllc/kotton#527), as with no settings file: only root could make the
+/// missing directory, so its absence is root's own word. An installed binary with no
+/// `etc/kotton` beside it, or no `etc`, goes on as a binary with no installed settings
+/// does: it looks where root's login says, and nothing answers there.
+#[test]
+fn a_root_verb_with_no_settings_directory_under_directories_that_hold_reads_nothing() {
+    if !is_root() {
+        eprintln!("skipped: not root — a verb holds the settings file's directories only as root");
+        return;
+    }
+    let b = Host::installed();
+    std::fs::remove_dir_all(b.root.join("etc/kotton")).unwrap();
+    refused_in_one_sentence(&typed(&b.bin(), None, &[], &["tenants"]), "nothing answers at /run/user/0/kotton/kvaultd.sock");
+    std::fs::remove_dir(b.root.join("etc")).unwrap();
+    refused_in_one_sentence(&typed(&b.bin(), None, &[], &["tenants"]), "nothing answers at /run/user/0/kotton/kvaultd.sock");
+}
+
+/// **A directory that is there and does not hold is refused, though the settings
+/// directory below it is not there** (kottonllc/kotton#527): with no `etc/kotton`,
+/// under an `etc` others may write, the verb is refused in one sentence naming `etc`.
+/// Anyone who can write it could make the directory and the file, so their absence
+/// now says nothing.
+#[test]
+fn a_root_verb_with_no_settings_directory_under_a_directory_that_does_not_hold_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !is_root() {
+        eprintln!("skipped: not root — a verb holds the settings file's directories only as root");
+        return;
+    }
+    let b = Host::installed();
+    std::fs::remove_dir_all(b.root.join("etc/kotton")).unwrap();
+    let etc = b.root.join("etc");
+    std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o777)).unwrap();
+    refused_in_one_sentence(
+        &typed(&b.bin(), None, &[], &["tenants"]),
+        &format!("{} is writable by other users (mode 0777)", etc.display()),
+    );
+}

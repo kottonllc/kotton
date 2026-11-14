@@ -64,9 +64,11 @@ libsqlite3-sys = { version = "0.28", features = ["bundled-sqlcipher-vendored-ope
 
 # The uid a vault runs as, which its state directory must be owned by
 # (`instance::own_state_dir`): `geteuid`, safely, as the workspace denies
-# `unsafe`. Already in the tree.
+# `unsafe`. Already in the tree. `fs`, for the one open of the settings file a
+# root verb reads (`read_root_settings`: `O_NOFOLLOW`, then the open file's own
+# owner and mode).
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1", features = ["process"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
 
 [dev-dependencies]
 workspace-hack = { path = "../../tools/workspace-hack" }

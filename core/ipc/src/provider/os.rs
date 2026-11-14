@@ -211,8 +211,8 @@ const SOCKET_DIR_WAY_OUT: &str = "a daemon and its clients move their sockets to
 const SOCKET_DIR_WAY_OUT: &str = "a daemon and its clients move their sockets together \
      when started with the same TMPDIR naming a directory of this user's own";
 
-/// A refusal of the socket directory `dir`: the path, what is wrong (`why`), the rule
-/// and the way out, in one message.
+/// A refusal of the socket directory `dir` at the bind: the path, what is wrong
+/// (`why`), the rule and the way out, in one message.
 #[cfg(unix)]
 fn refuse_socket_dir(dir: &std::path::Path, why: &str) -> IpcError {
     IpcError::BindFailed(format!(
@@ -224,35 +224,156 @@ fn refuse_socket_dir(dir: &std::path::Path, why: &str) -> IpcError {
     ))
 }
 
-/// **A socket's directory is this user's alone, or the socket is not bound in it**:
-/// its own entry (a symlink there is not followed) is a directory, owned by
-/// [`own_uid`], granting group and other nothing (`mode & 0o077 == 0`). Holds for a
-/// directory the bind just made `0o700` and for one that was already there, whatever
-/// tier of `kotton_common::paths::runtime_dir` or its short `/tmp` fallback chose it.
-/// Nothing is changed when it does not hold: the refusal names the path and what is
-/// wrong with it ([`refuse_socket_dir`]).
+/// **A socket's directory is its owner's alone**: its own entry (a symlink there is
+/// not followed) is a directory, owned by `owner`, granting group and other nothing
+/// (`mode & 0o077 == 0`). `Err` says what is wrong with it, for the caller to name
+/// the path in its own refusal.
+///
+/// The one predicate for a door's directory, at both ends. The bind holds the
+/// directory it binds in to it for its own uid ([`own_uid`]), whether it just made
+/// it `0o700` or found it there, whatever tier of `kotton_common::paths::runtime_dir`
+/// or its short `/tmp` fallback chose it, and changes nothing when it does not hold.
+/// A root client holds the directory of the door it reached to it for the uid it
+/// read from that same entry ([`door_dir_owner`]).
 #[cfg(unix)]
-fn check_socket_dir(dir: &std::path::Path) -> IpcResult<()> {
+fn check_socket_dir(dir: &std::path::Path, owner: u32) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt as _;
-    let refuse = |why: String| Err(refuse_socket_dir(dir, &why));
     let entry = match std::fs::symlink_metadata(kotton_common::fs::own_entry(dir)) {
         Ok(entry) => entry,
-        Err(e) => return refuse(format!("cannot be read ({e})")),
+        Err(e) => return Err(format!("cannot be read ({e})")),
     };
     if entry.file_type().is_symlink() {
-        return refuse("is a symlink".into());
+        return Err("is a symlink".into());
     }
     if !entry.is_dir() {
-        return refuse("is not a directory".into());
+        return Err("is not a directory".into());
     }
-    if entry.uid() != own_uid() {
-        return refuse(format!("is owned by uid {}", entry.uid()));
+    if entry.uid() != owner {
+        return Err(format!("is owned by uid {}", entry.uid()));
     }
     let mode = entry.mode() & 0o7777;
     if mode & 0o077 != 0 {
-        return refuse(format!("is open to other users (mode {mode:04o})"));
+        return Err(format!("is open to other users (mode {mode:04o})"));
     }
     Ok(())
+}
+
+/// **Every directory above `path`, up to `/`, is root's or `owner`'s, and no one
+/// else may write it**: each ancestor's own entry (a symlink is not followed) is a
+/// directory, owned by root or by `owner`, granting group and other no write
+/// (`mode & 0o022 == 0`; a sticky bit does not stand in for it, so `/tmp` does not
+/// hold). Then only those two users can change what `path` names. `path` itself is
+/// not read here: its caller holds it to its own rule.
+///
+/// `path` is absolute and has no `..` in it, or it is refused. An interior `.` is not
+/// refused: [`std::path::Path::components`] drops it, so `/a/./b` is walked as
+/// `/a/b`, which is the entry the kernel resolves; the walk is of those entries,
+/// from `/`. A refusal names the entry that does not hold and what is wrong with
+/// it, and its kind is
+/// [`std::io::ErrorKind::PermissionDenied`].
+///
+/// What a root client holds the ancestors of a door's directory to
+/// ([`door_dir_owner`]), and what a root `kvaultd` verb holds the ancestors of the
+/// settings file it takes a door's path from to, with `owner` root.
+#[cfg(unix)]
+pub fn check_ancestors(path: &std::path::Path, owner: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::path::Component;
+    let whose = if owner == 0 { "root".to_string() } else { format!("root or uid {owner}") };
+    let refuse = |entry: &std::path::Path, why: String| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} {why}; every directory above it, up to /, must be a directory, not a \
+                 symlink, owned by {whose} and granting group and other no write",
+                entry.display()
+            ),
+        ))
+    };
+    if !path.is_absolute() || !path.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_))) {
+        return refuse(path, "is not an absolute path free of `..`".into());
+    }
+    let path = kotton_common::fs::own_entry(path);
+    for above in path.ancestors().skip(1) {
+        let entry = match std::fs::symlink_metadata(above) {
+            Ok(entry) => entry,
+            Err(e) => return refuse(above, format!("cannot be read ({e})")),
+        };
+        if entry.file_type().is_symlink() {
+            return refuse(above, "is a symlink".into());
+        }
+        if !entry.is_dir() {
+            return refuse(above, "is not a directory".into());
+        }
+        if entry.uid() != 0 && entry.uid() != owner {
+            return refuse(above, format!("is owned by uid {}", entry.uid()));
+        }
+        let mode = entry.mode() & 0o7777;
+        if mode & 0o022 != 0 {
+            return refuse(above, format!("is writable by other users (mode {mode:04o})"));
+        }
+    }
+    Ok(())
+}
+
+/// **The uid that owns the directory `door` is in**, once that directory holds
+/// [`check_socket_dir`] for the uid read from its own entry and every ancestor holds
+/// [`check_ancestors`] for it. Under both, only root and that uid can change what
+/// `door` names. A refusal names the entry that does not hold, and its kind is
+/// [`std::io::ErrorKind::PermissionDenied`].
+#[cfg(unix)]
+fn door_dir_owner(door: &std::path::Path) -> std::io::Result<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    let dir = door.parent().unwrap_or(door);
+    let refuse = |why: String| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "the door's directory {} {why}; a root client speaks only at a door whose \
+                 directory is not a symlink, is owned by one uid and grants group and other \
+                 no permission bits",
+                dir.display()
+            ),
+        )
+    };
+    let owner = std::fs::symlink_metadata(kotton_common::fs::own_entry(dir))
+        .map_err(|e| refuse(format!("cannot be read ({e})")))?
+        .uid();
+    check_socket_dir(dir, owner).map_err(refuse)?;
+    check_ancestors(dir, owner)?;
+    Ok(owner)
+}
+
+/// **A root client speaks only to root, or to the uid that owns the door's
+/// directory** (kottonllc/kotton#527): `peer` is the server the kernel names for the
+/// connection to `door`, and `root` the uid that counts as root here (`0`; a test
+/// stands another in, as `PeerUsers::Only` stands in a peer).
+///
+/// A server that is root is held as [`PeerUsers::OwnUser`] holds it for a root
+/// client, and no directory is read. Any other server is answered only when the
+/// door's directory and its ancestors hold ([`door_dir_owner`]) and the kernel names
+/// the server as the uid that owns that directory. A door in the short `/tmp`
+/// fallback does not hold, and is reached by its own user.
+#[cfg(unix)]
+fn hold_door_server(peer: &Caller, door: &std::path::Path, root: u32) -> std::io::Result<()> {
+    if peer.user == OsUserId::Uid(root) {
+        return Ok(());
+    }
+    let owner = door_dir_owner(door)?;
+    if peer.user == OsUserId::Uid(owner) {
+        return Ok(());
+    }
+    let who = match peer.user {
+        OsUserId::Unknown => format!("a peer the kernel does not name ({peer})"),
+        _ => format!("{peer}"),
+    };
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "{who} is not root, nor uid {owner}, which owns the door's directory {}",
+            door.parent().unwrap_or(door).display()
+        ),
+    ))
 }
 
 #[cfg(windows)]
@@ -337,9 +458,12 @@ pub struct OsConnection {
 }
 
 impl OsConnection {
-    /// Open the endpoint's socket or pipe.
+    /// Open the endpoint's socket or pipe. **This is the unheld open**: nothing
+    /// about who serves the door is held here, so it is `pub(crate)`, and a client
+    /// outside this crate opens a door only through [`Self::connect_holding`] or
+    /// [`Self::connect_holding_root_or_door_owner`].
     #[cfg(unix)]
-    pub async fn connect(endpoint: &IpcEndpoint) -> IpcResult<Self> {
+    pub(crate) async fn connect(endpoint: &IpcEndpoint) -> IpcResult<Self> {
         let IpcEndpoint::UnixSocket(path) = endpoint;
         let stream = UnixStream::connect(path)
             .await
@@ -356,13 +480,51 @@ impl OsConnection {
     /// nothing a client would sign or say — a token, a PIN, a phrase, a code —
     /// reaches a process of another user.
     ///
-    /// On Windows it is [`Self::connect`]: the pipe's server is not identified here.
+    /// On Windows it is the crate's unheld `connect`: the pipe's server is not
+    /// identified here.
     #[cfg_attr(not(unix), allow(unused_variables))]
     pub async fn connect_holding(endpoint: &IpcEndpoint, users: PeerUsers) -> std::io::Result<Self> {
         let connection = Self::connect(endpoint).await.map_err(std::io::Error::other)?;
         #[cfg(unix)]
         users.require(&connection.peer()).map_err(|e| {
             let IpcEndpoint::UnixSocket(path) = endpoint;
+            std::io::Error::new(
+                e.kind(),
+                format!("the server at {}: {e}; nothing was sent to it", path.display()),
+            )
+        })?;
+        Ok(connection)
+    }
+
+    /// Open the door at `endpoint` as a root client does, and go no further unless
+    /// its server is root, or is the uid that owns the door's directory once that
+    /// directory and every ancestor up to `/` hold one predicate
+    /// ([`check_socket_dir`] for that uid, then [`check_ancestors`]).
+    ///
+    /// For a root client of a door served by a user of its own (kvaultd's): from
+    /// root's side [`PeerUsers::OwnUser`] names root, so the user the door is held to
+    /// is the one the host's filesystem names, read by number. A door root serves is
+    /// held as `OwnUser` holds it, with no directory read. A door whose path does not
+    /// hold, the short `/tmp` fallback's among them, is refused naming the entry,
+    /// and so is a server of any other user: the connection is dropped before a byte
+    /// is written.
+    ///
+    /// What is held is who the server is: root, or the uid that owns the held
+    /// directory at the door's path; not that the connected socket is the entry
+    /// inside that directory, since the connect resolved the path before the walk
+    /// read it.
+    #[cfg(unix)]
+    pub async fn connect_holding_root_or_door_owner(endpoint: &IpcEndpoint) -> std::io::Result<Self> {
+        Self::connect_holding_door(endpoint, 0).await
+    }
+
+    /// [`Self::connect_holding_root_or_door_owner`], with `root` the uid that counts
+    /// as root: `0`, or another a test stands in.
+    #[cfg(unix)]
+    async fn connect_holding_door(endpoint: &IpcEndpoint, root: u32) -> std::io::Result<Self> {
+        let connection = Self::connect(endpoint).await.map_err(std::io::Error::other)?;
+        let IpcEndpoint::UnixSocket(path) = endpoint;
+        hold_door_server(&connection.peer(), path, root).map_err(|e| {
             std::io::Error::new(
                 e.kind(),
                 format!("the server at {}: {e}; nothing was sent to it", path.display()),
@@ -378,8 +540,11 @@ impl OsConnection {
         unix_peer(&self.stream)
     }
 
+    /// Open the endpoint's pipe. **This is the unheld open**, as on Unix, and is
+    /// `pub(crate)`: a client outside this crate opens a door only through
+    /// [`Self::connect_holding`].
     #[cfg(windows)]
-    pub async fn connect(endpoint: &IpcEndpoint) -> IpcResult<Self> {
+    pub(crate) async fn connect(endpoint: &IpcEndpoint) -> IpcResult<Self> {
         use tokio::time::{sleep, Duration};
 
         let IpcEndpoint::NamedPipe(name) = endpoint;
@@ -511,7 +676,7 @@ impl OsListener {
                 .create(parent)
                 .map_err(|e| refuse_socket_dir(parent, &format!("cannot be made ({e})")))?;
         }
-        check_socket_dir(parent)?;
+        check_socket_dir(parent, own_uid()).map_err(|why| refuse_socket_dir(parent, &why))?;
 
         // Remove existing socket file if it exists
         if path.exists() {
@@ -956,5 +1121,195 @@ pub(crate) mod tests {
         if me != 0 {
             assert!(PeerUsers::OwnUser.require(&at(0)).is_err(), "root is not this user");
         }
+    }
+
+    /// A uid that is neither this process's nor root's.
+    #[cfg(unix)]
+    fn another_uid() -> u32 {
+        (1..=2).map(|d| own_uid().wrapping_add(d)).find(|u| *u != 0).unwrap()
+    }
+
+    /// A directory whose ancestors, up to `/`, hold [`check_ancestors`] for this
+    /// process's uid: under the directory this test binary was built into, which a
+    /// checkout's build leaves owned by its user and closed to others' writes, not
+    /// under `/tmp`, which is open to everyone's. `0700`, removed when it drops.
+    #[cfg(unix)]
+    fn held_dir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt as _;
+        let exe = std::env::current_exe().expect("this test's binary");
+        let base = exe.parent().expect("its directory");
+        check_ancestors(&base.join("x"), own_uid())
+            .unwrap_or_else(|e| panic!("this checkout's build directory does not hold, so nothing here can: {e}"));
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(base)
+            .expect("a directory beside this test's binary")
+    }
+
+    /// **Each ancestor of a door's directory is held, up to `/`, and a refusal names
+    /// the entry**: one group- or other-writable (`/tmp`, sticky bit and all, and a
+    /// `0775` directory of this user's), a symlink, a relative path and a path with
+    /// `..` are each refused by name; a clean path holds, and so does one with an
+    /// interior `.`, which is walked as the kernel resolves it.
+    #[cfg(unix)]
+    #[test]
+    fn every_ancestor_of_a_door_is_held_and_a_refusal_names_the_entry() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let me = own_uid();
+        let base = held_dir();
+        let dir = base.path().join("a").join("kotton");
+        std::fs::create_dir_all(&dir).unwrap();
+        check_ancestors(&dir, me).expect("a clean path holds");
+
+        let open = base.path().join("a");
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let refused = check_ancestors(&dir, me).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        let said = refused.to_string();
+        assert!(said.starts_with(&format!("{} is writable by other users (mode 0775)", open.display())), "{said}");
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let real = base.path().join("real");
+        std::fs::create_dir_all(real.join("kotton")).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let said = check_ancestors(&link.join("kotton"), me).unwrap_err().to_string();
+        assert!(said.starts_with(&format!("{} is a symlink", link.display())), "{said}");
+
+        let tmp = socket_dir();
+        let said = check_ancestors(&tmp.path().join("kotton"), me).unwrap_err().to_string();
+        assert!(said.starts_with("/tmp is writable by other users (mode 1777)"), "{said}");
+
+        let said = check_ancestors(std::path::Path::new("run/kotton"), me).unwrap_err().to_string();
+        assert!(said.contains("is not an absolute path"), "{said}");
+        let dotted = base.path().join("a").join("..").join("a").join("kotton");
+        let said = check_ancestors(&dotted, me).unwrap_err().to_string();
+        assert!(said.contains("is not an absolute path free of `..`"), "{said}");
+        let interior = base.path().join("a").join(".").join("kotton");
+        check_ancestors(&interior, me).expect("an interior `.` is walked as the kernel resolves it");
+    }
+
+    /// **An ancestor owned by a third uid is refused by name**; one owned by the
+    /// directory's owner holds. Root only: no other user can give a directory away.
+    #[cfg(unix)]
+    #[test]
+    fn an_ancestor_another_user_owns_is_refused_by_name() {
+        if own_uid() != 0 {
+            eprintln!("skipped: only root can make a directory owned by another uid");
+            return;
+        }
+        let base = held_dir();
+        let theirs = base.path().join("theirs");
+        let dir = theirs.join("kotton");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (owner, third) = (another_uid(), another_uid().wrapping_add(7));
+        std::os::unix::fs::chown(&theirs, Some(owner), None).unwrap();
+        check_ancestors(&dir, owner).expect("an ancestor the directory's owner owns holds");
+        std::os::unix::fs::chown(&theirs, Some(third), None).unwrap();
+        let said = check_ancestors(&dir, owner).unwrap_err().to_string();
+        assert!(said.starts_with(&format!("{} is owned by uid {third}", theirs.display())), "{said}");
+        assert!(said.contains(&format!("owned by root or uid {owner}")), "{said}");
+    }
+
+    /// **A root client answers root, or the door directory's owner, and no other**:
+    /// held to the kernel's answer for the server and the uid the directory's own
+    /// entry names, after the directory holds [`check_socket_dir`] for that uid.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_client_answers_root_or_the_door_directorys_owner_and_no_other() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let me = own_uid();
+        let at = |uid| Caller { user: OsUserId::Uid(uid), pid: Some(7), gid: None };
+        let root = another_uid();
+        let base = held_dir();
+        let dir = base.path().join("kotton");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let door = dir.join("sock");
+
+        // Root is answered with no directory read: a door nowhere is no refusal.
+        hold_door_server(&at(root), std::path::Path::new("/nowhere/at/all/sock"), root).expect("root");
+        // The directory's owner is answered.
+        hold_door_server(&at(me), &door, root).expect("the directory's owner");
+        // A third uid, and a server the kernel does not name, are not.
+        let third = root.wrapping_add(1);
+        let said = hold_door_server(&at(third), &door, root).unwrap_err().to_string();
+        assert!(said.contains(&format!("uid:{third} pid:7 is not root, nor uid {me}")), "{said}");
+        let said = hold_door_server(&Caller::anonymous(), &door, root).unwrap_err().to_string();
+        assert!(said.contains("the kernel does not name"), "{said}");
+        // The owner too, once the directory is open to others: the one predicate.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let refused = hold_door_server(&at(me), &door, root).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        let said = refused.to_string();
+        assert!(said.contains(&format!("the door's directory {} is open to other users (mode 0750)", dir.display())), "{said}");
+    }
+
+    /// The bytes a server at `endpoint` reads from its first connection, to its end.
+    #[cfg(unix)]
+    fn bytes_read_at(listener: OsListener) -> tokio::task::JoinHandle<Vec<u8>> {
+        tokio::spawn(async move {
+            let mut accepted = listener.accept_with_peer().await.expect("accept");
+            let mut got = Vec::new();
+            let mut buf = [0u8; 64];
+            loop {
+                match accepted.connection.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+            }
+            got
+        })
+    }
+
+    /// **A refusing root client writes nothing**, over a real socket. Root is stood
+    /// in by another uid, so this process, serving, is not root; its door is in a
+    /// directory under `/tmp`, whose ancestors do not hold. The connect is refused
+    /// naming `/tmp` and saying nothing was sent, and the server reads the end of
+    /// the stream with not one byte before it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_root_client_refusing_a_door_writes_nothing() {
+        let tmp = socket_dir();
+        let endpoint = IpcEndpoint::UnixSocket(tmp.path().join("sock"));
+        let served = bytes_read_at(OsListener::bind(endpoint.clone()).await.expect("bind"));
+        let refused = OsConnection::connect_holding_door(&endpoint, another_uid())
+            .await
+            .err()
+            .expect("the root client went on at a door whose path does not hold");
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        let said = refused.to_string();
+        assert!(said.contains("/tmp is writable by other users"), "{said}");
+        assert!(said.contains("nothing was sent"), "{said}");
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), served)
+            .await
+            .expect("the client's connection ended")
+            .expect("join");
+        assert!(got.is_empty(), "the refusing root client wrote {} bytes", got.len());
+    }
+
+    /// **A root client reaches a door its directory's owner serves, and one root
+    /// serves**, over real sockets: this process serves in a directory whose path
+    /// holds, as that directory's owner; and, stood in as root, in one under `/tmp`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_root_client_reaches_the_door_directorys_owner_and_root() {
+        let held = held_dir();
+        let endpoint = IpcEndpoint::UnixSocket(held.path().join("kotton").join("sock"));
+        let listener = OsListener::bind(endpoint.clone()).await.expect("bind");
+        let accept = tokio::spawn(async move { listener.accept_with_peer().await });
+        let mut client = OsConnection::connect_holding_door(&endpoint, another_uid()).await.expect("the owner");
+        let mut accepted = accept.await.expect("join").expect("accept");
+        client.write(b"hi").await.expect("write");
+        let mut buf = [0u8; 2];
+        accepted.connection.read(&mut buf).await.expect("read");
+        assert_eq!(&buf, b"hi");
+
+        let tmp = socket_dir();
+        let endpoint = IpcEndpoint::UnixSocket(tmp.path().join("sock"));
+        let listener = OsListener::bind(endpoint.clone()).await.expect("bind");
+        let accept = tokio::spawn(async move { listener.accept_with_peer().await });
+        OsConnection::connect_holding_door(&endpoint, own_uid()).await.expect("root, with no directory read");
+        accept.await.expect("join").expect("accept");
     }
 }

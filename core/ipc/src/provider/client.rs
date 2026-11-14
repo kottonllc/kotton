@@ -57,7 +57,14 @@ where
 {
     /// Build a client over an already-established connection.
     ///
-    /// The seam for tests and for any transport that is not the host OS.
+    /// The seam for tests and for any transport that is not the host OS, and for a
+    /// client over an [`OsConnection`] opened by a holding constructor
+    /// ([`OsConnection::connect_holding`], or on Unix
+    /// `OsConnection::connect_holding_root_or_door_owner`): the vault's verbs build
+    /// theirs this way over the door `kvaultd`'s `control::connect_to_door` opened and
+    /// held. Outside this crate a client's `OsConnection` is made no other way (a
+    /// listener's accept hands out the server's end, not a door opened), so this
+    /// opens nothing and holds nothing itself.
     pub fn from_connection(connection: C) -> Self {
         Self {
             connection,
