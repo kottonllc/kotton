@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `ed25519-check`: every Ed25519 check made with `ed25519-dalek`, the tree's signature library,
-//! is strict, and goes through one seam.
+//! `ed25519-check`: every Ed25519 check made with `ed25519-dalek` is strict, and in a crate that
+//! links `kotton-crypto` goes through one seam.
 //!
 //! Not under this rule yet: the check of the handshake signature on a peer connection, which
 //! rustls makes with ring in `core/net`'s TLS verifiers, and the threshold-signing provider's
@@ -18,12 +18,17 @@
 //!   workspace, `--all-targets`, so tests are held too, and with `-D warnings`, so a refusal
 //!   fails the gate.
 //! - **This check** holds what clippy cannot hold of itself:
-//!   - the file is there and names both methods, and no other `clippy.toml` shadows it for a
-//!     crate below it;
+//!   - the file is there and names both methods in its top-level `disallowed-methods`, and no
+//!     other `clippy.toml` or `.clippy.toml` (at the root or below it) shadows it;
+//!   - the two lint runs are there: in the `Justfile` and `just/`, a `cargo clippy` run over
+//!     the workspace and one with `--manifest-path infra/relay/Cargo.toml`, each
+//!     `--all-targets` with `-D warnings` after `--`;
 //!   - nothing lowers the refusal but the one exemption named here ([`EXEMPTION`]): no `allow`
 //!     or `expect` of the lint, of a group that holds it, or of `warnings` ([`LOWERED`]), in an
-//!     attribute or a manifest's `[lints]`; and, in the files that configure or run the lint,
-//!     no `-A`/`--allow` of those, no `--cap-lints` and no `CLIPPY_CONF_DIR`;
+//!     attribute (read without its whitespace) or a manifest's `[lints]` (a tool's table, a
+//!     lint's own table with `level`, a dotted key or an inline table); and, in the files that
+//!     configure or run the lint, no `-A`/`--allow` of those, no `--cap-lints` and no
+//!     `CLIPPY_CONF_DIR`;
 //!   - no manifest turns on a feature of the library that adds a check other than the two
 //!     methods `clippy.toml` names, or loosens the strict one ([`FEATURES`]);
 //!   - the seam: in a crate that depends on `kotton-crypto` a check is
@@ -38,11 +43,25 @@
 //! cargo configuration (`.cargo/config.toml` or `.cargo/config`) at the root or under the code
 //! roots, and the workflows. It skips comment lines, and its own source, whose tests spell
 //! what it refuses. A manifest's dependency is read in inline and in table form, renamed or
-//! not; a dependency inherited from the workspace is read under the name the member gives it.
-//! It reads text: an `allow` built by a macro, a lint level or `CLIPPY_CONF_DIR` set in an
-//! environment at run time, and a feature turned on by a crate outside the tree are outside it
-//! (for the workspace, `workspace-hack-check` holds the resolved feature set to
-//! `tools/workspace-hack`'s manifest, which this reads). `just lint` and the workflows set none.
+//! not, the root manifest's `[workspace.dependencies]` entry included; a dependency inherited
+//! from the workspace is read under the name the member gives it.
+//!
+//! ## What it does not read
+//!
+//! It reads text, file by file, so it is a list of spellings, and these are outside it:
+//!
+//! - an attribute in a file brought in by `include!` that is not a `.rs` file under the code
+//!   roots, and an `allow` built by a macro;
+//! - a lint level, `CLIPPY_CONF_DIR` or a flag set in the environment at run time (`just lint`
+//!   and the workflows set none);
+//! - a clippy run reached other than as a `cargo clippy` line in the `Justfile` or `just/`
+//!   (through a variable, say);
+//! - a feature turned on by a crate outside the tree (for the workspace,
+//!   `workspace-hack-check` holds the resolved feature set to `tools/workspace-hack`'s
+//!   manifest, which this reads).
+//!
+//! What holds the rule at its cause, so that no spelling matters, is #564's: a verifying-key
+//! type that offers only the strict check.
 
 use std::path::Path;
 
@@ -99,7 +118,7 @@ pub fn run(root: &Path) {
     if found.is_empty() {
         println!(
             "ed25519-check: OK: {count} source file(s); every check made with {LIBRARY} is strict: clippy.toml \
-             refuses the unstrict check, nothing lowers that but one named exemption, no manifest turns on \
+             refuses the unstrict check, both clippy runs are --all-targets with -D warnings, nothing lowers that but one named exemption, no manifest turns on \
              a feature that adds another check, and verify_strict is called only in the seam and in crates \
              that do not link kotton-crypto. The handshake's check and aggregate are #564's."
         );
@@ -109,7 +128,7 @@ pub fn run(root: &Path) {
         eprintln!("ed25519-check: {f}");
     }
     eprintln!(
-        "\nEvery Ed25519 check made with {LIBRARY}, the tree's signature library, is strict: \
+        "\nEvery Ed25519 check made with {LIBRARY} is strict: \
          kotton_crypto::ed25519::verify ({SEAM}) in a crate that depends on kotton-crypto, verify_strict \
          in one that does not. (The handshake's check and aggregate are #564's.)"
     );
@@ -165,9 +184,14 @@ fn findings(root: &Path) -> (usize, Vec<String>) {
         }
     }
 
+    // Clippy reads `.clippy.toml` in a directory as readily as `clippy.toml`.
+    if root.join(".clippy.toml").exists() {
+        shadows.push(".clippy.toml".to_string());
+    }
     let config = std::fs::read_to_string(root.join(CLIPPY_TOML)).ok();
     let mut found = config_findings(config.as_deref(), &shadows);
     found.extend(allowance_findings(&sources, &manifests, &others));
+    found.extend(lint_run_findings(&others));
     let root_manifest: Vec<(String, String)> = others.iter().filter(|(f, _)| f == "Cargo.toml").cloned().collect();
     found.extend(feature_findings(manifests.iter().chain(&root_manifest)));
     found.extend(seam_findings(&sources, &crates_linking_crypto(&manifests)));
@@ -181,70 +205,135 @@ fn is_cargo_config(path: &Path) -> bool {
     parent.as_deref() == Some(".cargo") && (name == "config.toml" || name == "config")
 }
 
-/// `clippy.toml` is at the root, names every refused method, and no other shadows it.
+/// `clippy.toml` is at the root, names every refused method in its top-level
+/// `disallowed-methods`, and no other shadows it.
 fn config_findings(config: Option<&str>, shadows: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     match config {
         None => out.push(format!("{CLIPPY_TOML} is not at the root of the tree")),
         Some(text) => {
-            let code: String = text.lines().filter(|l| !l.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n");
+            let mut section = String::new();
+            let mut named = Vec::new();
+            for (_, key, value) in entries(text) {
+                if key.is_empty() {
+                    section = value;
+                } else if section.is_empty() && key == "disallowed-methods" {
+                    named.extend(strings(&value));
+                }
+            }
             for m in REFUSED {
-                if !code.contains(&format!("path = \"{m}\"")) {
+                if !named.iter().any(|n| n == m) {
                     out.push(format!("{CLIPPY_TOML} does not refuse `{m}` (disallowed-methods)"));
                 }
             }
         }
     }
     for s in shadows {
-        out.push(format!("{s}: a clippy configuration below the root's, which the crates under it would read instead"));
+        out.push(format!("{s}: a clippy configuration beside or below the root's, which clippy would read instead"));
     }
     out
 }
 
-/// The lint levels an `allow(..)` or `expect(..)` starting on `lines[i]` names, read to its
-/// closing parenthesis across lines.
-fn lowered_in_attribute(lines: &[&str], i: usize) -> Vec<String> {
+/// The lint levels each `allow(..)` or `expect(..)` in `src` names, by the line (0-based) it
+/// opens on. Whitespace is not read, so `allow (warnings)` and `clippy :: all` are read as
+/// `allow(warnings)` and `clippy::all`, and an attribute is read to its closing parenthesis
+/// across lines. Lines starting with `//` are skipped.
+fn lowered_attributes(src: &str) -> Vec<(usize, Vec<String>)> {
+    let chars: Vec<(char, usize)> = src
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim_start().starts_with("//"))
+        .flat_map(|(i, l)| l.chars().filter(|c| !c.is_whitespace()).map(move |c| (c, i)))
+        .collect();
+    let text: String = chars.iter().map(|(c, _)| *c).collect();
+    let at_char: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
     let mut out = Vec::new();
-    let text = lines[i];
     for opener in ["allow(", "expect("] {
-        let mut from = 0;
-        while let Some(at) = text[from..].find(opener) {
-            let start = from + at + opener.len();
-            from = start;
+        for (byte, _) in text.match_indices(opener) {
+            let first = at_char.binary_search(&byte).unwrap_or(0);
             // Not `disallow(` or another word ending in it.
-            let before = text[..start - opener.len()].chars().last();
-            if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            if first > 0 && (chars[first - 1].0.is_alphanumeric() || chars[first - 1].0 == '_') {
                 continue;
             }
             let mut inner = String::new();
             let mut depth = 1;
-            'lines: for (n, line) in lines[i..].iter().enumerate() {
-                let rest = if n == 0 { &text[start..] } else { line };
-                for c in rest.chars() {
-                    match c {
-                        '(' => depth += 1,
-                        ')' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break 'lines;
-                            }
-                        }
-                        _ => {}
-                    }
-                    inner.push(c);
+            for (c, _) in &chars[first + opener.len()..] {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
                 }
-                inner.push(' ');
-                if n > 20 {
+                if depth == 0 {
                     break;
                 }
+                inner.push(*c);
             }
-            for token in inner.split(|c: char| c == ',' || c.is_whitespace()) {
-                let token = token.trim();
-                if LOWERED.contains(&token) || OFF.contains(&token) {
-                    out.push(token.to_string());
-                }
+            let named: Vec<String> = inner
+                .split(',')
+                .filter(|t| LOWERED.contains(t) || OFF.contains(t))
+                .map(str::to_string)
+                .collect();
+            if !named.is_empty() {
+                out.push((chars[first].1, named));
             }
         }
+    }
+    out.sort();
+    out
+}
+
+/// The lint runs `just lint` makes, in the Justfile and `just/`: a workspace clippy run (one
+/// without `--manifest-path`) and the relay's (`--manifest-path infra/relay/Cargo.toml`) are
+/// each there, and each such run is `--all-targets` with `-D warnings` after `--`. A run is a
+/// `cargo clippy` line, with any lines it continues with `\`; comment lines are skipped.
+fn lint_run_findings(others: &[(String, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    let (mut workspace, mut relay) = (0, 0);
+    for (file, text) in others.iter().filter(|(f, _)| f == "Justfile" || f.starts_with("just/")) {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut i = 0;
+        while i < lines.len() {
+            let start = i;
+            let mut run = lines[i].trim().to_string();
+            i += 1;
+            while run.ends_with('\\') && i < lines.len() {
+                run.pop();
+                run.push(' ');
+                run.push_str(lines[i].trim());
+                i += 1;
+            }
+            if run.starts_with('#') || !run.contains("cargo clippy") {
+                continue;
+            }
+            let words: Vec<&str> = run.split_whitespace().collect();
+            let is_relay = words.windows(2).any(|w| w[0] == "--manifest-path" && w[1] == "infra/relay/Cargo.toml")
+                || words.contains(&"--manifest-path=infra/relay/Cargo.toml");
+            if is_relay {
+                relay += 1;
+            } else if words.iter().any(|w| w.starts_with("--manifest-path")) {
+                continue;
+            } else {
+                workspace += 1;
+            }
+            let (before, after) = match words.iter().position(|w| *w == "--") {
+                Some(at) => (&words[..at], &words[at + 1..]),
+                None => (&words[..], &[][..]),
+            };
+            let denied = after.windows(2).any(|w| w[0] == "-D" && w[1] == "warnings") || after.contains(&"-Dwarnings");
+            let which = if is_relay { "the relay's" } else { "the workspace's" };
+            if !before.contains(&"--all-targets") {
+                out.push(format!("{file}:{}: {which} clippy run is not --all-targets", start + 1));
+            }
+            if !denied {
+                out.push(format!("{file}:{}: {which} clippy run does not hold -D warnings after --", start + 1));
+            }
+        }
+    }
+    if workspace == 0 {
+        out.push("Justfile: no clippy run over the workspace".to_string());
+    }
+    if relay == 0 {
+        out.push("Justfile: no clippy run over the relay (--manifest-path infra/relay/Cargo.toml)".to_string());
     }
     out
 }
@@ -292,13 +381,13 @@ fn allowance_findings(sources: &[(String, String)], manifests: &[(String, String
             continue;
         }
         let lines: Vec<&str> = src.lines().collect();
-        for (i, text) in lines.iter().enumerate() {
-            if text.trim_start().starts_with("//") {
+        let mut seen = None;
+        for (i, _) in lowered_attributes(src) {
+            if seen == Some(i) {
                 continue;
             }
-            if lowered_in_attribute(&lines, i).is_empty() {
-                continue;
-            }
+            seen = Some(i);
+            let text = lines[i];
             let on_exempt_test = file == EXEMPTION.0
                 && text.trim() == "#[allow(clippy::disallowed_methods)]"
                 && lines[i + 1..]
@@ -319,23 +408,47 @@ fn allowance_findings(sources: &[(String, String)], manifests: &[(String, String
         ));
     }
     for (file, text) in manifests.iter().chain(others) {
-        let mut lints = None;
+        // The lint a `[lints]` table is under, as `tool.lint`, read from the header and the
+        // key: `[lints.clippy]` with `style = ..`, `[lints]` with `clippy.style = ..` (or
+        // `clippy = { style = .. }`), and `[lints.clippy.style]` with `level = ..`.
+        let mut table: Option<String> = None;
         for (i, line) in text.lines().enumerate() {
             let t = line.trim();
             if t.starts_with('#') {
                 continue;
             }
             if t.starts_with('[') {
-                lints = ["clippy", "rust"].into_iter().find(|tool| t.ends_with(&format!("lints.{tool}]")));
+                let header: String = t.chars().filter(|c| !c.is_whitespace() && *c != '"' && *c != '\'').collect();
+                let header = header.trim_start_matches('[').split(']').next().unwrap_or("");
+                let header = header.strip_prefix("workspace.").unwrap_or(header);
+                table = header.strip_prefix("lints").map(|rest| rest.trim_start_matches('.').to_string());
                 continue;
             }
-            let key = t.split('=').next().unwrap_or("").trim().trim_matches('"');
             let lowers = t.contains("allow") || t.contains("expect");
-            let group = match lints {
-                Some("clippy") => (key == "all" || key == "style") && lowers,
-                Some(_) => key == "warnings" && lowers,
-                None => false,
-            };
+            let mut named = Vec::new();
+            if let Some(table) = &table {
+                let key: String = t.split('=').next().unwrap_or("").chars().filter(|c| !c.is_whitespace() && *c != '"' && *c != '\'').collect();
+                let value = t.split_once('=').map(|(_, v)| v.trim()).unwrap_or("");
+                let path = [table.as_str(), key.as_str()].iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(".");
+                match path.strip_suffix(".level") {
+                    Some(lint) => named.push(lint.to_string()),
+                    None if value.starts_with('{') && (path == "clippy" || path == "rust") => {
+                        for lint in ["all", "style", "warnings"] {
+                            if inline_value(value, lint).is_some_and(|v| v.contains("allow") || v.contains("expect")) {
+                                named.push(format!("{path}.{lint}"));
+                            }
+                        }
+                    }
+                    None => named.push(path),
+                }
+            }
+            let group = lowers
+                && named.iter().any(|p| {
+                    matches!(
+                        p.as_str(),
+                        "clippy.all" | "clippy.style" | "clippy.disallowed_methods" | "clippy.disallowed-methods" | "rust.warnings"
+                    )
+                });
             if OFF.iter().any(|w| t.contains(w)) || group {
                 out.push(format!("{file}:{}: turns off the refusal of the unstrict check: {t}", i + 1));
             }
@@ -767,6 +880,135 @@ mod tests {
         assert!(manifest_links_crypto("[target.'cfg(unix)'.dependencies]\nkotton-crypto = { path = \"../crypto\" }\n"));
         // A feature that names it is not a dependency, and another package's name is not it.
         assert!(!manifest_links_crypto("[package]\nname = \"kotton-msg\"\n[features]\nx = [\"kotton-crypto\"]\n"));
+    }
+
+    const GOOD_CONFIG: &str = "disallowed-methods = [\n  { path = \"ed25519_dalek::Verifier::verify\", reason = \"r\" },\n  { path = \"ed25519_dalek::SigningKey::verify\", reason = \"r\" },\n]\n";
+    const GOOD_JUSTFILE: &str = "lint:\n    # cargo clippy, in prose\n    cargo clippy --all-targets -- -D warnings\n    cargo clippy --manifest-path infra/relay/Cargo.toml --target-dir {{relay_target}} --all-targets -- -D warnings\n";
+
+    /// A tree that holds, at `dir`: `clippy.toml`, the seam, the exemption, a root manifest
+    /// and a Justfile, each as the tree has it in the part this check reads.
+    fn a_tree(dir: &Path) {
+        let write = |path: &str, text: &str| {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(CLIPPY_TOML, GOOD_CONFIG);
+        write(SEAM, "pub fn verify() { key.verify_strict(m, s) }\n");
+        write(EXEMPTION.0, EXEMPT_SRC);
+        write("core/crypto/Cargo.toml", "[package]\nname = \"kotton-crypto\"\n");
+        write("Cargo.toml", "[workspace.dependencies]\ned25519-dalek = { version = \"2.1\", features = [\"rand_core\"] }\n");
+        write("Justfile", GOOD_JUSTFILE);
+    }
+
+    fn findings_with(path: &str, text: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        a_tree(dir.path());
+        std::fs::write(dir.path().join(path), text).unwrap();
+        findings(dir.path()).1
+    }
+
+    #[test]
+    fn a_tree_as_the_fixture_has_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        a_tree(dir.path());
+        let (count, found) = findings(dir.path());
+        assert_eq!(count, 2);
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    #[test]
+    fn the_root_manifests_workspace_entry_is_read_for_features() {
+        for (f, _) in FEATURES {
+            let inline = format!("[workspace.dependencies]\ned25519-dalek = {{ version = \"2.1\", features = [\"rand_core\", \"{f}\"] }}\n");
+            assert_eq!(findings_with("Cargo.toml", &inline).len(), 1, "{f}");
+            let table = format!("[workspace.dependencies.ed25519-dalek]\nversion = \"2.1\"\nfeatures = [\n    \"{f}\",\n]\n");
+            assert_eq!(findings_with("Cargo.toml", &table).len(), 1, "{f}");
+        }
+    }
+
+    #[test]
+    fn a_root_dot_clippy_toml_is_a_finding() {
+        let found = findings_with(".clippy.toml", "");
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].starts_with(".clippy.toml:"), "{found:#?}");
+    }
+
+    #[test]
+    fn the_methods_are_read_only_under_disallowed_methods() {
+        assert!(config_findings(Some(GOOD_CONFIG), &[]).is_empty());
+        // Named under another key, or under a table's key of the same name, is not refusing.
+        let other_key = GOOD_CONFIG.replace("disallowed-methods", "disallowed-types");
+        assert_eq!(config_findings(Some(&other_key), &[]).len(), 2);
+        let in_a_table = format!("[elsewhere]\n{GOOD_CONFIG}");
+        assert_eq!(config_findings(Some(&in_a_table), &[]).len(), 2);
+        let split = "disallowed-methods = [\n  { path = \"ed25519_dalek::Verifier::verify\", reason = \"r\" },\n]\nmsrv = \"1.80\" # ed25519_dalek::SigningKey::verify\ndisallowed-types = [\"ed25519_dalek::SigningKey::verify\"]\n";
+        assert_eq!(config_findings(Some(split), &[]).len(), 1);
+    }
+
+    #[test]
+    fn whitespace_in_an_attribute_is_not_read() {
+        let with = |src: &str| {
+            let mut v = one(EXEMPTION.0, EXEMPT_SRC);
+            v.push(("core/msg/src/x.rs".into(), src.into()));
+            allowance_findings(&v, &[], &[]).len()
+        };
+        assert_eq!(with("#[allow (warnings)]\nfn f() {}\n"), 1);
+        assert_eq!(with("#[ expect ( warnings ) ]\nfn f() {}\n"), 1);
+        assert_eq!(with("#[allow(clippy :: all)]\nfn f() {}\n"), 1);
+        assert_eq!(with("#[allow(clippy:: disallowed_methods)]\nfn f() {}\n"), 1);
+        assert_eq!(with("#![allow(dead_code, clippy ::\n    style)]\n"), 1);
+        assert_eq!(with("#[allow\n(warnings)]\nfn f() {}\n"), 1);
+        assert_eq!(with("#[allow (dead_code)]\nfn f() {}\n"), 0);
+        assert_eq!(with("fn disallow (warnings: u8) {}\n"), 0);
+    }
+
+    #[test]
+    fn a_lint_set_in_table_form_or_by_dotted_key_is_a_finding() {
+        let with = |text: &str| {
+            let manifests = vec![("core/msg/Cargo.toml".to_string(), text.to_string())];
+            allowance_findings(&one(EXEMPTION.0, EXEMPT_SRC), &manifests, &[]).len()
+        };
+        assert_eq!(with("[lints.clippy.style]\nlevel = \"allow\"\npriority = -1\n"), 1);
+        assert_eq!(with("[workspace.lints.clippy.all]\nlevel = \"expect\"\n"), 1);
+        assert_eq!(with("[lints.rust.warnings]\nlevel = \"allow\"\n"), 1);
+        assert_eq!(with("[lints.clippy.disallowed_methods]\nlevel = \"allow\"\n"), 1);
+        assert_eq!(with("[lints]\nclippy.style = \"allow\"\n"), 1);
+        assert_eq!(with("[workspace.lints]\nrust.warnings = { level = \"allow\" }\n"), 1);
+        assert_eq!(with("[lints]\nclippy = { all = \"allow\" }\n"), 1);
+        assert_eq!(with("[ lints . clippy ]\nstyle = \"allow\"\n"), 1);
+        // Held, or another lint, or inherited, is not a finding.
+        assert_eq!(with("[lints.clippy.style]\nlevel = \"deny\"\n"), 0);
+        assert_eq!(with("[lints]\nclippy.needless_return = \"allow\"\nrust.unsafe_code = \"allow\"\n"), 0);
+        assert_eq!(with("[lints]\nworkspace = true\n"), 0);
+    }
+
+    #[test]
+    fn the_lint_runs_are_held() {
+        let with = |text: &str| lint_run_findings(&[("Justfile".to_string(), text.to_string())]);
+        assert!(with(GOOD_JUSTFILE).is_empty(), "{:#?}", with(GOOD_JUSTFILE));
+        // The workspace run without --all-targets, or without -D warnings after `--`.
+        assert_eq!(with(&GOOD_JUSTFILE.replace("cargo clippy --all-targets --", "cargo clippy --")).len(), 1);
+        assert_eq!(with(&GOOD_JUSTFILE.replace("cargo clippy --all-targets -- -D warnings\n", "cargo clippy --all-targets\n")).len(), 1);
+        assert_eq!(with(&GOOD_JUSTFILE.replace("cargo clippy --all-targets -- -D warnings\n", "cargo clippy --all-targets -- -W warnings\n")).len(), 1);
+        // The workspace run gone, or only in a comment.
+        assert_eq!(with(&GOOD_JUSTFILE.replace("    cargo clippy --all-targets -- -D warnings\n", "    # cargo clippy --all-targets -- -D warnings\n")).len(), 1);
+        // The relay's run gone, or without -D warnings, or without --all-targets.
+        let relay_gone: String = GOOD_JUSTFILE.lines().filter(|l| !l.contains("infra/relay")).map(|l| format!("{l}\n")).collect();
+        assert_eq!(with(&relay_gone).len(), 1);
+        assert_eq!(with(&GOOD_JUSTFILE.replace("--all-targets -- -D warnings\n", "--all-targets -- -D warnings -A clippy::pedantic\n").replace("relay_target}} --all-targets -- -D warnings", "relay_target}} --all-targets")).len(), 1);
+        assert_eq!(with(&GOOD_JUSTFILE.replace("relay_target}} --all-targets", "relay_target}}")).len(), 1);
+        // A run continued over lines is one run, and `-Dwarnings` is `-D warnings`.
+        let continued = "lint:\n    cargo clippy \\\n        --all-targets \\\n        -- -Dwarnings\n    cargo clippy --manifest-path infra/relay/Cargo.toml --all-targets -- -D warnings\n";
+        assert!(with(continued).is_empty(), "{:#?}", with(continued));
+        // In a recipe module as well as the Justfile; and through the whole check.
+        let module = lint_run_findings(&[
+            ("Justfile".to_string(), "mod lint 'just/lint.just'\n".to_string()),
+            ("just/lint.just".to_string(), GOOD_JUSTFILE.replace("--all-targets -- -D warnings\n    cargo", "-- -D warnings\n    cargo")),
+        ]);
+        assert_eq!(module.len(), 1, "{module:#?}");
+        assert!(module[0].starts_with("just/lint.just:3:"), "{module:#?}");
+        assert_eq!(findings_with("Justfile", &relay_gone).len(), 1);
     }
 
     /// The tree as it is: every hold above holds.

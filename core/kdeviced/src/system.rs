@@ -1816,8 +1816,7 @@ mod tests {
     }
 
     /// **A login under a key of small order is refused**: the login check is strict, so a
-    /// key of small order authenticates nobody, on an empty device that would otherwise enrol
-    /// the first verified key.
+    /// key of small order authenticates nobody, and nothing is enrolled.
     #[tokio::test]
     async fn a_login_under_a_small_order_key_is_refused() {
         use kotton_crypto::ed25519::refused;

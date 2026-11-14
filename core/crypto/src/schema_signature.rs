@@ -98,9 +98,8 @@ pub fn verify(def: &SchemaDefinition) -> Result<(), SchemaSignatureError> {
     let signature = Signature::from_bytes(&bytes);
     let key = key_of(&def.publisher)?;
     let digest = def.digest()?;
-    // This module checks strictly, through the tree's one check: a small-order key or `R` is
-    // refused, so a key with no secret behind it cannot be named as a publisher whose
-    // "signature" anyone can write.
+    // The strict check made with `ed25519-dalek` (the checks made otherwise are #564's): a
+    // publisher key or `R` of small order is refused.
     crate::ed25519::verify(&key, &message(&digest), &signature).map_err(|_| SchemaSignatureError::Invalid)
 }
 
