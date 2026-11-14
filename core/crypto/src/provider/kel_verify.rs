@@ -400,8 +400,7 @@ fn verify_sig(pubkey: &[u8; 32], event: &KelEvent, sig: &[u8]) -> bool {
     let Ok(sig) = Signature::from_slice(sig) else {
         return false;
     };
-    // verify_strict: reject malleable signatures on identity KEL events.
-    vk.verify_strict(event.canonical().as_bytes(), &sig).is_ok()
+    crate::ed25519::verify(&vk, event.canonical().as_bytes(), &sig).is_ok()
 }
 
 /// Validate an inception event (seq 0): no prev digest, self-signed by its own

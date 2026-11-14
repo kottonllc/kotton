@@ -48,7 +48,7 @@ use crate::pair_channel::{issuer_establish_with, joiner_establish_with, SasConfi
 use crate::relay_keys::{FirstContact, Presenting, RefusedAtTheRelay};
 use crate::rendezvous::unix_now;
 use anyhow::{anyhow, bail, Context, Result};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use kotton_crypto::kel_verify::{resolve_current_key, LocalArbiter};
 use kotton_crypto::provider::daily_credential::spoken_word_list;
@@ -257,7 +257,7 @@ fn sign_identity(transcript: &[u8], ours: &ContactIdentity, key: &SigningKey) ->
 fn verify_identity(transcript: &[u8], r: &ContactIdentityRecord) -> Result<PairedContact> {
     let vk = VerifyingKey::from_bytes(&r.public_key).context("contact public key")?;
     let sig = Signature::from_slice(&r.sig).context("contact signature")?;
-    vk.verify(&identity_signed_bytes(transcript, r)?, &sig)
+    kotton_crypto::ed25519::verify(&vk, &identity_signed_bytes(transcript, r)?, &sig)
         .map_err(|_| anyhow!("the contact's identity record is not signed by the key it presents, over this ceremony"))?;
     if r.kel.is_empty() {
         let did_key = DidKeyMethod::from_public_key_bytes(&r.public_key)
@@ -609,6 +609,33 @@ mod tests {
         forged.aid = "did:key:z6MkSomebodyElse".into();
         forged.sig = ka.sign(&identity_signed_bytes(b"t", &forged).unwrap()).to_bytes().to_vec();
         assert!(verify_identity(b"t", &forged).is_err());
+    }
+
+    /// A record under a key of small order is refused at its signature.
+    #[tokio::test]
+    async fn an_identity_record_under_a_small_order_key_is_refused() {
+        use kotton_crypto::ed25519::refused;
+        let (alice, ka) = identity("alice");
+        let mut r = sign_identity(b"t", &alice, &ka).unwrap();
+        r.public_key = refused::SMALL_ORDER_KEY;
+        r.aid = DidKeyMethod::from_public_key_bytes(&r.public_key).unwrap().to_string();
+        r.sig = refused::under_small_order_key_bytes().to_vec();
+        let refused = verify_identity(b"t", &r).unwrap_err().to_string();
+        assert!(refused.contains("not signed by the key it presents"), "{refused}");
+    }
+
+    /// A non-canonical signature by the contact's own key is refused.
+    #[tokio::test]
+    async fn an_identity_record_with_a_non_canonical_signature_is_refused() {
+        use kotton_crypto::ed25519::refused;
+        let (alice, ka) = identity("alice");
+        let r = sign_identity(b"t", &alice, &ka).unwrap();
+        for sig in refused::non_canonical(&ka, &identity_signed_bytes(b"t", &r).unwrap()) {
+            let mut forged = sign_identity(b"t", &alice, &ka).unwrap();
+            forged.sig = sig.to_bytes().to_vec();
+            let refused = verify_identity(b"t", &forged).unwrap_err().to_string();
+            assert!(refused.contains("not signed by the key it presents"), "{refused}");
+        }
     }
 
     /// A relay at a loopback port that answers its first `answered` upgrades

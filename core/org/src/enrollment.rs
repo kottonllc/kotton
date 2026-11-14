@@ -266,7 +266,7 @@ mod tests {
     /// distributed group key actually unblocks distributed signing (RFC-0036).
     #[test]
     fn distributed_group_key_enables_a_verifying_threshold_signature() {
-        use ed25519_dalek::{Signature, Verifier};
+        use ed25519_dalek::Signature;
 
         let issuer_seed = [11u8; 32];
         let new_warm = SigningKey::from_bytes(&[2u8; 32]);
@@ -317,8 +317,7 @@ mod tests {
         // identity public key (the DID).
         let group_pubkey = SigningKey::from_bytes(&issuer_seed).verifying_key();
         let sig_arr: [u8; 64] = sig.try_into().unwrap();
-        group_pubkey
-            .verify(msg, &Signature::from_bytes(&sig_arr))
+        kotton_crypto::ed25519::verify(&group_pubkey, msg, &Signature::from_bytes(&sig_arr))
             .expect("threshold signature verifies under the group identity key");
     }
 

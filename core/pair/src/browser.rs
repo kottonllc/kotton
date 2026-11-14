@@ -46,7 +46,7 @@
 //! this crate, or from a Rust test through a real gateway.
 
 use anyhow::{anyhow, bail, Result};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -164,10 +164,13 @@ fn node_sig_msg(transcript: &Transcript, device_pub: &[u8; 32]) -> Vec<u8> {
     m
 }
 
+/// The ceremony's Ed25519 check, strict: this crate is below `kotton-crypto`, whose
+/// `ed25519::verify` every crate above calls, so it calls `verify_strict` itself
+/// (`cargo xtask ed25519-check` holds both).
 fn verify(pubkey: &[u8; 32], msg: &[u8], sig: &[u8]) -> Result<()> {
     let vk = VerifyingKey::from_bytes(pubkey).map_err(|_| anyhow!("malformed public key"))?;
     let sig = Signature::from_slice(sig).map_err(|_| anyhow!("malformed signature"))?;
-    vk.verify(msg, &sig)
+    vk.verify_strict(msg, &sig)
         .map_err(|_| anyhow!("signature does not verify"))
 }
 
@@ -612,6 +615,69 @@ mod tests {
 
     fn key() -> SigningKey {
         SigningKey::generate(&mut OsRng)
+    }
+
+    /// The encoding of the curve's identity point: a public key of small order.
+    const SMALL_ORDER_KEY: [u8; 32] = {
+        let mut k = [0u8; 32];
+        k[0] = 1;
+        k
+    };
+
+    /// A signature by `key` over `msg` whose `R` is the identity point, with the `S` that
+    /// completes the equation.
+    fn small_order_r(key: &SigningKey, msg: &[u8]) -> [u8; 64] {
+        use curve25519_dalek::scalar::{clamp_integer, Scalar};
+        use sha2::{Digest as _, Sha512};
+        let expanded: [u8; 64] = Sha512::digest(key.to_bytes()).into();
+        let mut lower = [0u8; 32];
+        lower.copy_from_slice(&expanded[..32]);
+        let a = Scalar::from_bytes_mod_order(clamp_integer(lower));
+        let k: [u8; 64] = Sha512::new()
+            .chain_update(SMALL_ORDER_KEY)
+            .chain_update(key.verifying_key().as_bytes())
+            .chain_update(msg)
+            .finalize()
+            .into();
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&SMALL_ORDER_KEY);
+        sig[32..].copy_from_slice((Scalar::from_bytes_mod_order_wide(&k) * a).as_bytes());
+        sig
+    }
+
+    /// A signature by `key` over `msg` whose `S` is not reduced: the canonical `S` plus the
+    /// group order.
+    fn unreduced_s(key: &SigningKey, msg: &[u8]) -> [u8; 64] {
+        use curve25519_dalek::scalar::Scalar;
+        let mut sig = key.sign(msg).to_bytes();
+        let order_minus_one = (Scalar::ZERO - Scalar::ONE).to_bytes();
+        let mut carry = 1u16;
+        for i in 0..32 {
+            let sum = sig[32 + i] as u16 + order_minus_one[i] as u16 + carry;
+            sig[32 + i] = sum as u8;
+            carry = sum >> 8;
+        }
+        sig
+    }
+
+    /// The ceremony's check refuses a signature under a key of small order.
+    #[test]
+    fn the_check_refuses_a_small_order_key() {
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&SMALL_ORDER_KEY);
+        assert!(verify(&SMALL_ORDER_KEY, b"a ceremony's message", &sig).is_err());
+    }
+
+    /// The ceremony's check refuses a non-canonical signature by a key it would otherwise
+    /// believe.
+    #[test]
+    fn the_check_refuses_a_non_canonical_signature() {
+        let k = key();
+        let msg = b"a ceremony's message";
+        let public = k.verifying_key().to_bytes();
+        verify(&public, msg, &k.sign(msg).to_bytes()).unwrap();
+        assert!(verify(&public, msg, &small_order_r(&k, msg)).is_err());
+        assert!(verify(&public, msg, &unreduced_s(&k, msg)).is_err());
     }
 
     /// Drive one full ceremony in memory, the way a gateway would relay it.

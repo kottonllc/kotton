@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use kotton_wire::rendezvous::{identity_signing_input, RelayIdentity};
 
 use crate::admission::Admission;
@@ -152,11 +152,11 @@ async fn a_relay_answers_its_key_and_the_signature_verifies() {
         assert_eq!(id.addr, advertise, "the address it announces, empty when none");
         let vk = VerifyingKey::from_bytes(&unhex::<32>(&id.key)).unwrap();
         let sig = Signature::from_bytes(&unhex::<64>(&id.sig));
-        vk.verify(&identity_signing_input(&nonce, advertise), &sig)
+        crate::auth::check(&vk, &identity_signing_input(&nonce, advertise), &sig)
             .expect("the signature is over the nonce and the announced address");
         // And over those, not others: another nonce, or another address, fails.
-        assert!(vk.verify(&identity_signing_input(&[0u8; 32], advertise), &sig).is_err());
-        assert!(vk.verify(&identity_signing_input(&nonce, "elsewhere:7700"), &sig).is_err());
+        assert!(crate::auth::check(&vk, &identity_signing_input(&[0u8; 32], advertise), &sig).is_err());
+        assert!(crate::auth::check(&vk, &identity_signing_input(&nonce, "elsewhere:7700"), &sig).is_err());
     }
 }
 

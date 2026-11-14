@@ -286,14 +286,13 @@ impl RecoveryClaim {
 
     /// Does this claim's signature hold for the device presenting it?
     pub fn verifies_for(&self, device_pub: &[u8; 32]) -> bool {
-        use ed25519_dalek::Verifier;
         let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&self.reserve_pub) else {
             return false;
         };
         let Ok(sig) = ed25519_dalek::Signature::from_slice(&self.sig) else {
             return false;
         };
-        vk.verify(&Self::message(device_pub), &sig).is_ok()
+        kotton_crypto::ed25519::verify(&vk, &Self::message(device_pub), &sig).is_ok()
     }
 }
 
@@ -1131,6 +1130,30 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
+
+    /// A claim under a reserve key of small order holds for no device.
+    #[test]
+    fn a_claim_under_a_small_order_reserve_key_is_refused() {
+        use kotton_crypto::ed25519::refused;
+        let claim = RecoveryClaim {
+            reserve_pub: refused::SMALL_ORDER_KEY,
+            sig: refused::under_small_order_key_bytes().to_vec(),
+        };
+        assert!(!claim.verifies_for(&SigningKey::from_bytes(&[3; 32]).verifying_key().to_bytes()));
+    }
+
+    /// A non-canonical signature by the reserve key holds for no device.
+    #[test]
+    fn a_claim_with_a_non_canonical_signature_is_refused() {
+        use kotton_crypto::ed25519::refused;
+        let reserve = SigningKey::from_bytes(&[4; 32]);
+        let device = SigningKey::from_bytes(&[3; 32]).verifying_key().to_bytes();
+        assert!(RecoveryClaim::sign(&reserve, &device).verifies_for(&device));
+        for sig in refused::non_canonical(&reserve, &RecoveryClaim::message(&device)) {
+            let claim = RecoveryClaim { reserve_pub: reserve.verifying_key().to_bytes(), sig: sig.to_bytes().to_vec() };
+            assert!(!claim.verifies_for(&device));
+        }
+    }
 
     fn init_crypto() {
         use std::sync::Once;

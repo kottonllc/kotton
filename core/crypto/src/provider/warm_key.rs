@@ -114,10 +114,7 @@ pub fn verify_warm_key_delegation(
         .try_into()
         .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
     let signature = Signature::from_bytes(&sig_arr);
-    root_key
-        // verify_strict rejects malleable / non-canonical signatures and
-        // small-order keys on this identity-delegation path (audit).
-        .verify_strict(delegation.signing_message().as_bytes(), &signature)
+    crate::ed25519::verify(&root_key, delegation.signing_message().as_bytes(), &signature)
         .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
 
     Ok(())
@@ -195,12 +192,12 @@ pub fn verify_enrollment_cert(
         .try_into()
         .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
     let signature = Signature::from_bytes(&sig_arr);
-    root_key
-        .verify_strict(
-            enrollment_cert_message(share_hex, warm_pubkey).as_bytes(),
-            &signature,
-        )
-        .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
+    crate::ed25519::verify(
+        &root_key,
+        enrollment_cert_message(share_hex, warm_pubkey).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
     Ok(())
 }
 
@@ -301,6 +298,60 @@ mod tests {
             verify_warm_key_delegation(&d, &root_did, 1_000),
             Err(WarmKeyDenied::InconsistentWarmKey)
         );
+    }
+
+    /// A delegation under a root key of small order is refused.
+    #[test]
+    fn a_delegation_under_a_small_order_root_key_is_refused() {
+        use crate::ed25519::refused;
+        let small = ed25519_dalek::VerifyingKey::from_bytes(&refused::SMALL_ORDER_KEY).unwrap();
+        let root_did = DidKeyMethod::from_public_key(&small);
+        let warm = key(2);
+        let d = WarmKeyDelegation {
+            warm_did: DidKeyMethod::from_public_key(&warm.verifying_key()),
+            warm_pubkey: warm.verifying_key().to_bytes(),
+            expires_at: 9_999_999_999,
+            root_did: root_did.clone(),
+            quorum_signature: URL_SAFE_NO_PAD.encode(refused::under_small_order_key_bytes()),
+        };
+        assert_eq!(verify_warm_key_delegation(&d, &root_did, 1_000), Err(WarmKeyDenied::BadQuorumSignature));
+    }
+
+    /// A non-canonical signature by the root key over the delegation is refused.
+    #[test]
+    fn a_delegation_with_a_non_canonical_signature_is_refused() {
+        let root = key(1);
+        let mut d = make_delegation(&root, &key(2), 9_999_999_999);
+        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        for sig in crate::ed25519::refused::non_canonical(&root, d.signing_message().as_bytes()) {
+            d.quorum_signature = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+            assert_eq!(verify_warm_key_delegation(&d, &root_did, 1_000), Err(WarmKeyDenied::BadQuorumSignature));
+        }
+    }
+
+    /// An enrollment certificate under a root key of small order is refused.
+    #[test]
+    fn an_enrollment_cert_under_a_small_order_root_key_is_refused() {
+        use crate::ed25519::refused;
+        let small = ed25519_dalek::VerifyingKey::from_bytes(&refused::SMALL_ORDER_KEY).unwrap();
+        let root_did = DidKeyMethod::from_public_key(&small);
+        let warm_pub = key(2).verifying_key().to_bytes();
+        let cert = URL_SAFE_NO_PAD.encode(refused::under_small_order_key_bytes());
+        assert_eq!(verify_enrollment_cert(&cert, &root_did, "ab12", &warm_pub), Err(WarmKeyDenied::BadQuorumSignature));
+    }
+
+    /// A non-canonical signature by the root key over the enrollment certificate is refused.
+    #[test]
+    fn an_enrollment_cert_with_a_non_canonical_signature_is_refused() {
+        let root = key(1);
+        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let warm_pub = key(2).verifying_key().to_bytes();
+        assert_eq!(verify_enrollment_cert(&sign_enrollment_cert(&root, "ab12", &warm_pub), &root_did, "ab12", &warm_pub), Ok(()));
+        let message = enrollment_cert_message("ab12", &warm_pub);
+        for sig in crate::ed25519::refused::non_canonical(&root, message.as_bytes()) {
+            let cert = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+            assert_eq!(verify_enrollment_cert(&cert, &root_did, "ab12", &warm_pub), Err(WarmKeyDenied::BadQuorumSignature));
+        }
     }
 
     #[test]

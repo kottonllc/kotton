@@ -114,7 +114,7 @@ pub async fn accept(
         .and_then(|k| VerifyingKey::from_bytes(&k).map_err(|e| e.to_string()))
         .map_err(|e| format!("the tenant's key log does not resolve to a key: {e}"))?;
     let signature = Signature::from_slice(signature).map_err(|_| "the signature is not an Ed25519 signature".to_string())?;
-    if identity.verify_strict(&change.signed_bytes(user_id), &signature).is_err() {
+    if kotton_crypto::ed25519::verify(&identity, &change.signed_bytes(user_id), &signature).is_err() {
         return Err("it is not signed under the tenant's identity".to_string());
     }
 
@@ -389,6 +389,73 @@ mod tests {
 
         accept(base.path(), &db, &keys, "alice", &change, &signed(&identity, &change)).await.unwrap();
         assert!(paired(&db, "alice", &key).await);
+    }
+
+    /// Through the whole acceptance: a non-canonical signature by the identity, in
+    /// either form, is refused, and the canonical one over the same change is taken.
+    #[tokio::test]
+    async fn an_admit_with_a_non_canonical_signature_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let identity = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        a_tenant_at(base.path(), &identity);
+        let db = a_vault_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        let (key, did) = a_device(2);
+        let change = TenantDeviceChange { act: TenantDeviceAct::Admit, device_did: did, public_key: key, said_at_ms: 1 };
+
+        for sig in kotton_crypto::ed25519::refused::non_canonical(&identity, &change.signed_bytes("alice")) {
+            let why = accept(base.path(), &db, &keys, "alice", &change, &sig.to_bytes()).await.unwrap_err();
+            assert!(why.contains("not signed under the tenant's identity"), "{why}");
+            assert!(!paired(&db, "alice", &key).await);
+        }
+
+        accept(base.path(), &db, &keys, "alice", &change, &signed(&identity, &change)).await.unwrap();
+        assert!(paired(&db, "alice", &key).await);
+    }
+
+    /// Through the whole acceptance: a tenant whose key log resolves to a key of small
+    /// order (a cooperative rotation onto it, signed by the inception's key) has an admit
+    /// under that key refused as not signed under its identity, and nothing is paired.
+    #[tokio::test]
+    async fn an_admit_under_a_small_order_key_is_refused() {
+        use ed25519_dalek::Signer as _;
+        use kotton_crypto::ed25519::refused;
+        use kotton_wire::kel::{Authorization, EventKind, KelEvent, KeyState};
+
+        let base = tempfile::tempdir().unwrap();
+        let inception_key = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        let inception = kotton_crypto::kel_verify::build_fresh_inception(&inception_key);
+        let mut rotation = KelEvent {
+            aid: inception.aid.clone(),
+            seq: 1,
+            prev_event_digest: Some(kotton_crypto::kel_verify::digest(&inception)),
+            kind: EventKind::RotationCooperative,
+            key_state: KeyState { group_key: refused::SMALL_ORDER_KEY, threshold: 1, participants: 1 },
+            recovery_commitment: inception.recovery_commitment,
+            recovery_set: Vec::new(),
+            authorization: Authorization::Quorum { sig: vec![0u8; 64] },
+            contest_window: None,
+        };
+        let sig = inception_key.sign(rotation.canonical().as_bytes()).to_bytes().to_vec();
+        rotation.authorization = Authorization::Quorum { sig };
+        let chain = [inception, rotation];
+        assert_eq!(
+            resolve_current_key(&chain, &LocalArbiter, false).unwrap(),
+            refused::SMALL_ORDER_KEY,
+            "the key log does not resolve to the small-order key"
+        );
+        kotton_identity::kel_store::save_chain(base.path(), "alice", &chain).expect("the key log");
+
+        let db = a_vault_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        let (key, did) = a_device(2);
+        let change = TenantDeviceChange { act: TenantDeviceAct::Admit, device_did: did, public_key: key, said_at_ms: 1 };
+        let why = accept(base.path(), &db, &keys, "alice", &change, &refused::under_small_order_key_bytes())
+            .await
+            .unwrap_err();
+        assert!(why.contains("not signed under the tenant's identity"), "{why}");
+        assert!(!paired(&db, "alice", &key).await);
+        assert!(!keys.read().unwrap().contains(&key));
     }
 
     /// **Condition 2, through the whole acceptance**: an admit the identity

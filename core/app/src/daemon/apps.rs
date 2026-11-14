@@ -10,7 +10,7 @@ use super::db::{app_registry_db as ardb, handler_registry_db as hrdb, role_db};
 use base64::engine::general_purpose::{STANDARD as BASE64_STD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use chrono::Utc;
-use ed25519_dalek::{Signer as _, Verifier as _};
+use ed25519_dalek::Signer as _;
 use hex;
 use kotton_common::crypto::kdf_labels;
 use kotton_crypto::DidKeyMethod;
@@ -2223,8 +2223,7 @@ pub fn verify_publisher_signature(
     let verifying_key = DidKeyMethod::to_public_key(&did)
         .map_err(|e| format!("could not extract public key from DID: {e}"))?;
 
-    verifying_key
-        .verify(&hash_bytes, &signature)
+    kotton_crypto::ed25519::verify(&verifying_key, &hash_bytes, &signature)
         .map_err(|e| format!("signature verification failed: {e}"))
 }
 
@@ -9687,5 +9686,47 @@ mod files_call_tests {
             .await
             .unwrap();
         assert!(matches!(answer, RunnerHostReply::FileFailed { .. }), "{answer:?}");
+    }
+}
+
+#[cfg(test)]
+mod publisher_signature_tests {
+    use super::verify_publisher_signature;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use kotton_crypto::ed25519::refused;
+    use kotton_crypto::DidKeyMethod;
+
+    const HASH: [u8; 32] = [0x5a; 32];
+
+    fn did_of(key: &ed25519_dalek::VerifyingKey) -> String {
+        DidKeyMethod::from_public_key(key).to_string()
+    }
+
+    #[test]
+    fn a_signature_over_the_digest_by_the_publisher_is_believed() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let sig = STANDARD.encode(key.sign(&HASH).to_bytes());
+        assert_eq!(verify_publisher_signature(&did_of(&key.verifying_key()), &sig, &hex::encode(HASH)), Ok(()));
+    }
+
+    /// A publisher whose key is of small order is refused.
+    #[test]
+    fn a_publisher_key_of_small_order_is_refused() {
+        let small = ed25519_dalek::VerifyingKey::from_bytes(&refused::SMALL_ORDER_KEY).unwrap();
+        let sig = STANDARD.encode(refused::under_small_order_key_bytes());
+        assert!(verify_publisher_signature(&did_of(&small), &sig, &hex::encode(HASH)).is_err());
+    }
+
+    /// A non-canonical signature by the publisher's own key is refused.
+    #[test]
+    fn a_non_canonical_signature_is_refused() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let did = did_of(&key.verifying_key());
+        for sig in refused::non_canonical(&key, &HASH) {
+            let sig = STANDARD.encode(sig.to_bytes());
+            assert!(verify_publisher_signature(&did, &sig, &hex::encode(HASH)).is_err());
+        }
     }
 }

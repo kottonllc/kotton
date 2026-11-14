@@ -22,7 +22,7 @@
 //! signature over bytes that are rebuilt must not depend on how they were
 //! rebuilt.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 pub use kotton_schemas::membership::{AdmitKey, ReachNote, RelayRef};
 
 /// Domain tag under a note's signature, so a signature over a note can never
@@ -208,7 +208,7 @@ pub fn verify(note: &ReachNote, signer: &[u8; 32], did: &str, now: u64) -> Resul
         .ok()
         .and_then(|b| Signature::from_slice(&b).ok())
         .ok_or_else(|| "that reach note carries no readable signature".to_string())?;
-    key.verify(&signed_bytes(note), &sig)
+    crate::ed25519::verify(&key, &signed_bytes(note), &sig)
         .map_err(|_| "that reach note was not signed by the person it names".to_string())
 }
 
@@ -536,5 +536,26 @@ mod tests {
         let first = next(None, DID, &one, &[], &key(1), NOW).unwrap();
         let again = next(Some(&first), DID, &one, &[], &key(2), NOW + 5).expect("rotated");
         assert_eq!(verify(&again, &pubkey(2), DID, NOW + 5), Ok(()));
+    }
+
+    /// A note under a key of small order is refused.
+    #[test]
+    fn a_note_under_a_small_order_key_is_refused() {
+        let mut note = sign(DID, vec![relay("https://relay.one")], vec![], 7, NOW + 60, &key(1));
+        note.sig = hex::encode(crate::ed25519::refused::under_small_order_key().to_bytes());
+        let small = crate::ed25519::refused::SMALL_ORDER_KEY;
+        let refused = verify(&note, &small, DID, NOW);
+        assert!(refused.as_ref().is_err_and(|e| e.contains("not signed by the person")), "{refused:?}");
+    }
+
+    /// A non-canonical signature by the person's own key is refused.
+    #[test]
+    fn a_note_with_a_non_canonical_signature_is_refused() {
+        let note = sign(DID, vec![relay("https://relay.one")], vec![], 7, NOW + 60, &key(1));
+        for sig in crate::ed25519::refused::non_canonical(&key(1), &signed_bytes(&note)) {
+            let forged = ReachNote { sig: hex::encode(sig.to_bytes()), ..note.clone() };
+            let refused = verify(&forged, &pubkey(1), DID, NOW);
+            assert!(refused.as_ref().is_err_and(|e| e.contains("not signed by the person")), "{refused:?}");
+        }
     }
 }

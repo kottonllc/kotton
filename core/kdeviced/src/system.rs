@@ -864,7 +864,7 @@ async fn handle_sys_request(
 
             // 6. Verify the Ed25519 signature, strictly, over the login message and
             // nothing else: a signature over the bare challenge is refused here.
-            if verifying_key.verify_strict(&message, &ed_sig).is_err() {
+            if kotton_crypto::ed25519::verify(&verifying_key, &message, &ed_sig).is_err() {
                 return Ok(DeviceResponse::AuthFailed {
                     reason: "signature verification failed".into(),
                 });
@@ -1813,6 +1813,59 @@ mod tests {
         assert!(refused, "{answer:?}");
         let operators = operators_db::list(&device.db).await.unwrap();
         assert!(operators.is_empty(), "a bare signature enrolled a key: {operators:?}");
+    }
+
+    /// **A login under a key of small order is refused**: the login check is strict, so a
+    /// key of small order authenticates nobody, and nothing is enrolled.
+    #[tokio::test]
+    async fn a_login_under_a_small_order_key_is_refused() {
+        use kotton_crypto::ed25519::refused;
+        let small = ed25519_dalek::VerifyingKey::from_bytes(&refused::SMALL_ORDER_KEY).unwrap();
+        let who = Person {
+            key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            did: DidKeyMethod::from_public_key(&small).to_string(),
+        };
+        let device = device_with(&[&who]).await;
+        let conn: Conn = Arc::new(Mutex::new(None));
+        let DeviceResponse::ChallengeIssued { nonce } = device.say(&conn, DeviceRequest::Challenge).await else {
+            panic!("no challenge");
+        };
+        let signature = refused::under_small_order_key_bytes().to_vec();
+        let answer = authenticate_with(&device, &conn, &who, nonce, signature).await;
+        let refused = matches!(
+            &answer,
+            DeviceResponse::AuthFailed { reason } if reason == "signature verification failed"
+        );
+        assert!(refused, "{answer:?}");
+        let operators = operators_db::list(&device.db).await.unwrap();
+        assert!(operators.is_empty(), "a key of small order enrolled: {operators:?}");
+    }
+
+    /// **A non-canonical login signature is refused**: the person's own key, over the
+    /// login message, in either non-canonical form, authenticates nobody.
+    #[tokio::test]
+    async fn a_non_canonical_login_signature_is_refused() {
+        use kotton_crypto::ed25519::refused;
+        let ana = person();
+        let device = device_with(&[&ana]).await;
+        for form in 0..2 {
+            let conn: Conn = Arc::new(Mutex::new(None));
+            let DeviceResponse::ChallengeIssued { nonce } = device.say(&conn, DeviceRequest::Challenge).await else {
+                panic!("no challenge");
+            };
+            let message = login_message(&URL_SAFE_NO_PAD.decode(&nonce).unwrap()).unwrap();
+            let signature = refused::non_canonical(&ana.key, &message)[form].to_bytes().to_vec();
+            let answer = authenticate_with(&device, &conn, &ana, nonce, signature).await;
+            let refused = matches!(
+                &answer,
+                DeviceResponse::AuthFailed { reason } if reason == "signature verification failed"
+            );
+            assert!(refused, "form {form}: {answer:?}");
+        }
+        let operators = operators_db::list(&device.db).await.unwrap();
+        assert!(operators.is_empty(), "a non-canonical signature enrolled a key: {operators:?}");
+        // The canonical signature over the same message is admitted.
+        assert!(matches!(device.connect(&ana).await.1, DeviceResponse::Authenticated { .. }));
     }
 
     /// **A challenge of another length is refused by the verifier too**: a
