@@ -148,7 +148,8 @@ pub fn verify_push_sig(
 /// The relay's one Ed25519 check, strict: a public key of small order, a signature whose `R`
 /// is of small order, and one whose `S` is not reduced are each refused. The relay is its own
 /// workspace and links no `kotton-crypto`, so it calls `verify_strict` here, where every
-/// signature it checks comes; `cargo xtask ed25519-check` holds that.
+/// signature it checks comes; the root `clippy.toml` refuses the unstrict check here as in the
+/// workspace.
 pub fn check(key: &VerifyingKey, message: &[u8], signature: &Signature) -> Result<(), AuthError> {
     key.verify_strict(message, signature).map_err(|_| AuthError::BadSignature)
 }

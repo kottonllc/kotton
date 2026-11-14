@@ -391,6 +391,28 @@ mod tests {
         assert!(paired(&db, "alice", &key).await);
     }
 
+    /// Through the whole acceptance: a non-canonical signature by the identity, in
+    /// either form, is refused, and the canonical one over the same change is taken.
+    #[tokio::test]
+    async fn an_admit_with_a_non_canonical_signature_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let identity = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        a_tenant_at(base.path(), &identity);
+        let db = a_vault_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        let (key, did) = a_device(2);
+        let change = TenantDeviceChange { act: TenantDeviceAct::Admit, device_did: did, public_key: key, said_at_ms: 1 };
+
+        for sig in kotton_crypto::ed25519::refused::non_canonical(&identity, &change.signed_bytes("alice")) {
+            let why = accept(base.path(), &db, &keys, "alice", &change, &sig.to_bytes()).await.unwrap_err();
+            assert!(why.contains("not signed under the tenant's identity"), "{why}");
+            assert!(!paired(&db, "alice", &key).await);
+        }
+
+        accept(base.path(), &db, &keys, "alice", &change, &signed(&identity, &change)).await.unwrap();
+        assert!(paired(&db, "alice", &key).await);
+    }
+
     /// **Condition 2, through the whole acceptance**: an admit the identity
     /// signed, whose DID names another key, is refused by name.
     #[tokio::test]

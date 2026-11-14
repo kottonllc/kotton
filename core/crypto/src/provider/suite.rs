@@ -143,6 +143,19 @@ mod tests {
         crypto_suite_contract(Ed25519Suite::new(seed));
     }
 
+    /// A non-canonical signature by the suite's own key is refused. (The suite checks only
+    /// under its own key, which its seed derives, so no key of small order can be put to it.)
+    #[test]
+    fn the_suite_refuses_a_non_canonical_signature() {
+        let seed = [7u8; 32];
+        let suite = Ed25519Suite::new(seed);
+        let msg = b"kotton contract test message";
+        assert!(suite.verify(msg, &suite.sign(msg)));
+        for sig in crate::ed25519::refused::non_canonical(&SigningKey::from_bytes(&seed), msg) {
+            assert!(!suite.verify(msg, &sig.to_bytes()));
+        }
+    }
+
     #[test]
     fn ed25519_deterministic_keys() {
         let seed = [42u8; 32];

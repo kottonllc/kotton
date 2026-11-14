@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Ed25519 signature implementation, and the tree's one Ed25519 check.
+//! Ed25519 signature implementation, and the one Ed25519 check made with `ed25519-dalek` in
+//! every crate that depends on this one.
 //!
 //! [`verify`] is the check every crate that depends on this one calls: strict verification,
 //! which refuses a public key of small order and a signature whose `R` is of small order, on
 //! top of what any Ed25519 check refuses. A crate below this one (`kotton-pair`) and the relay,
 //! which is its own workspace, call `verify_strict` themselves. `cargo xtask ed25519-check`, in
-//! `just lint`, holds both, and the workspace's `clippy.toml` refuses the unstrict check.
+//! `just lint`, holds both, and the workspace's `clippy.toml` refuses the unstrict check. Not
+//! under this rule yet, because neither is made with `ed25519-dalek`: the check of the
+//! handshake signature on a peer connection (rustls, with ring) and the threshold provider's
+//! `aggregate` (`frost_ed25519`); both are #564's.
 
 use ed25519_dalek::{Signature, SignatureError, Signer as _, SigningKey, VerifyingKey};
 use kotton_sys::crypto::{

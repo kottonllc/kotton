@@ -3275,5 +3275,34 @@ mod relayed_tests {
         relay_swapped.relay_url = "http://somewhere-else".into();
         assert!(verify_op_key(&t, &relay_swapped).is_err(), "the relay is under the signature too");
     }
+
+    /// A record naming an operational key of small order is refused: the key proves nothing.
+    #[test]
+    fn an_operational_key_of_small_order_is_refused() {
+        use kotton_crypto::ed25519::refused;
+        let t = b"this ceremony's transcript".to_vec();
+        let record = OpKeyRecord {
+            pubkey: refused::SMALL_ORDER_KEY,
+            relay_url: String::new(),
+            sig: refused::under_small_order_key_bytes().to_vec(),
+        };
+        let refused = verify_op_key(&t, &record).unwrap_err().to_string();
+        assert!(refused.contains("did not prove it holds"), "{refused}");
+    }
+
+    /// A non-canonical signature by the announced operational key is refused.
+    #[test]
+    fn an_operational_key_record_with_a_non_canonical_signature_is_refused() {
+        let t = b"this ceremony's transcript".to_vec();
+        let op = SigningKey::from_bytes(&[6; 32]);
+        let me = SelfAnnounce { op_key: &op, relay_url: "https://relay.example:7700".into() };
+        let honest = sign_op_key(&t, &me);
+        assert!(verify_op_key(&t, &honest).is_ok());
+        for sig in kotton_crypto::ed25519::refused::non_canonical(&op, &op_key_message(&t, &me.relay_url)) {
+            let record = OpKeyRecord { pubkey: honest.pubkey, relay_url: honest.relay_url.clone(), sig: sig.to_bytes().to_vec() };
+            let refused = verify_op_key(&t, &record).unwrap_err().to_string();
+            assert!(refused.contains("did not prove it holds"), "{refused}");
+        }
+    }
 }
 

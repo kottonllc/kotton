@@ -283,4 +283,35 @@ mod tests {
         let respelled = format!("{}/", url.replace("http://", "HTTP://"));
         assert_eq!(prove_relay(&respelled, Some(&known)).await, Ok(Some(known)));
     }
+
+    /// A proof under a relay key of small order is refused: the key proves nothing.
+    #[test]
+    fn a_proof_under_a_small_order_key_is_refused() {
+        use kotton_crypto::ed25519::refused;
+        let id = RelayIdentity {
+            key: hex::encode(refused::SMALL_ORDER_KEY),
+            addr: "relay.example:7700".into(),
+            sig: hex::encode(refused::under_small_order_key_bytes()),
+        };
+        let proved = verify("http://relay.example", b"a nonce", &id);
+        assert!(matches!(proved, Err(RelayKeyError::NotProven { ref why, .. }) if why.contains("does not verify")), "{proved:?}");
+    }
+
+    /// A non-canonical signature by the relay's own key over the nonce is refused.
+    #[test]
+    fn a_proof_with_a_non_canonical_signature_is_refused() {
+        let relay = SigningKey::from_bytes(&[5; 32]);
+        let (nonce, addr) = (b"a nonce".as_slice(), "relay.example:7700");
+        let honest = RelayIdentity {
+            key: hex::encode(relay.verifying_key().as_bytes()),
+            addr: addr.into(),
+            sig: hex::encode(relay.sign(&identity_signing_input(nonce, addr)).to_bytes()),
+        };
+        assert_eq!(verify("http://relay.example", nonce, &honest), Ok(relay.verifying_key().to_bytes()));
+        for sig in kotton_crypto::ed25519::refused::non_canonical(&relay, &identity_signing_input(nonce, addr)) {
+            let id = RelayIdentity { sig: hex::encode(sig.to_bytes()), ..honest.clone() };
+            let proved = verify("http://relay.example", nonce, &id);
+            assert!(matches!(proved, Err(RelayKeyError::NotProven { ref why, .. }) if why.contains("does not verify")), "{proved:?}");
+        }
+    }
 }
