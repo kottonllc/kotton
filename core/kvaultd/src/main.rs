@@ -211,10 +211,12 @@ fn read_settings(file: &Path) -> Result<Option<Vec<u8>>, String> {
 ///
 /// The hold and the read are one observation, in this order:
 ///
-/// - **The ancestors are held before the file is asked for.** If they do not hold —
-///   one missing among them, since an entry that cannot be read does not hold — the
-///   verb is refused in one sentence naming the entry, whether or not the file is
-///   there.
+/// - **The ancestors are held before the file is asked for.** If one that is there
+///   does not hold, the verb is refused in one sentence naming it, whether or not
+///   the file or the directories below it are there.
+/// - **A directory above the file that is not there, under ancestors that hold, is
+///   nothing to read**, as an absent file is: every ancestor that is there is held,
+///   up to `/`, and only root could make the missing one ([`first_missing_above`]).
 /// - **The file is opened once**, not following a symlink at its own name
 ///   (`O_NOFOLLOW`; `O_NONBLOCK`, so a FIFO there is refused rather than waited
 ///   on). Not there under ancestors that hold: `None`, nothing to read, and the
@@ -235,7 +237,11 @@ fn read_root_settings(file: &Path) -> Result<Option<Vec<u8>>, String> {
     use std::os::unix::fs::MetadataExt as _;
     let rule = "root takes the vault's door from a settings file only when it is a file, not a symlink, \
                 owned by root and granting group and other no write, under directories that are root's and grant them no write";
-    kotton_ipc::check_ancestors(file, 0).map_err(|e| format!("{e}; {rule}"))?;
+    let missing = first_missing_above(file);
+    kotton_ipc::check_ancestors(missing.as_deref().unwrap_or(file), 0).map_err(|e| format!("{e}; {rule}"))?;
+    if missing.is_some() {
+        return Ok(None);
+    }
     let refuse = |why: String| format!("{} {why}; {rule}", file.display());
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     let mut opened = match rustix::fs::open(file, flags, Mode::empty()) {
@@ -258,6 +264,23 @@ fn read_root_settings(file: &Path) -> Result<Option<Vec<u8>>, String> {
     let mut text = Vec::new();
     opened.read_to_end(&mut text).map_err(|e| refuse(format!("cannot be read ({e})")))?;
     Ok(Some(text))
+}
+
+/// The highest directory above `file` that is not there, when the directory
+/// `file` is in is not there: its ancestors are then the ones that are, and
+/// holding them holds every entry above `file` that exists. `None` when the
+/// file's directory is there, or when an entry above cannot be looked at for
+/// any reason but its absence — the walk over `file` itself then names it.
+#[cfg(unix)]
+fn first_missing_above(file: &Path) -> Option<PathBuf> {
+    let mut missing = None;
+    for above in kotton_common::fs::own_entry(file).ancestors().skip(1) {
+        match std::fs::symlink_metadata(above) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => missing = Some(above.to_path_buf()),
+            _ => break,
+        }
+    }
+    missing
 }
 
 fn main() -> io::Result<()> {
