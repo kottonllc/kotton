@@ -403,7 +403,9 @@ lint:
     # check (`clippy.toml`, read by the workspace and the relay alike); this holds that file,
     # the one exemption it allows, that nothing else lowers the refusal or turns on a feature of
     # the library that adds another check, and the seam: `verify_strict` is called in one file in
-    # the tree, the relay included, `kotton-ed25519`'s (`VerifyingKey::verify`).
+    # the tree, the relay included, `kotton-ed25519`'s (`VerifyingKey::verify`). It holds too that
+    # no manifest but kotton-crypto's lists the threshold library, and that `clippy.toml` refuses
+    # the library's own signature checks.
     cargo xtask ed25519-check
     # Every file under tests/tests/suite/ is compiled into the one integration binary.
     cargo xtask suite-check
