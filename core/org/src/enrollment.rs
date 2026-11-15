@@ -68,7 +68,7 @@ pub fn verify_received_frost_share(
     // think we are joining, independent of the issuer's certificate.
     let group_vk = frost::key_package_verifying_key(&share.0)
         .map_err(|e| anyhow!("frost share has no readable group key: {e}"))?;
-    let share_did = DidKeyMethod::from_public_key_bytes(&group_vk)
+    let share_did = DidKeyMethod::from_public_key_bytes(group_vk.as_bytes())
         .map_err(|e| anyhow!("derive did from share group key: {e}"))?;
     if &share_did != expected_root_did {
         return Err(anyhow!(
