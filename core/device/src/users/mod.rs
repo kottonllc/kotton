@@ -508,6 +508,7 @@ impl DeviceUsers for DeviceRuntime {
         kel_store::resolve_current_key_for(self.base_dir(), user_id, false)
             .ok()
             .flatten()
+            .map(|key| *key.as_bytes())
     }
 
     /// Admit another identity on this device as a **contact** of `user_rt`.

@@ -1605,7 +1605,7 @@ mod tests {
             .verifying_key()
             .to_bytes();
         assert_eq!(
-            kel_store::resolve_current_key_for(rt.base_dir(), "alice", false).unwrap(),
+            kel_store::resolve_current_key_for(rt.base_dir(), "alice", false).unwrap().map(|key| *key.as_bytes()),
             Some(identity_pubkey),
         );
         assert_eq!(
@@ -1649,7 +1649,7 @@ mod tests {
         let current = kel_store::resolve_current_key_for(rt.base_dir(), "alice", false)
             .unwrap()
             .unwrap();
-        assert_eq!(current, new_key, "the new key now speaks for the identity");
+        assert_eq!(*current.as_bytes(), new_key, "the new key now speaks for the identity");
         assert_ne!(current, old_key, "the old (compromised) key no longer speaks");
 
         // The stored operational signing key (the private scalar) was replaced, and

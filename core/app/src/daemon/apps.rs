@@ -2393,7 +2393,7 @@ fn own_kel_keys(base: &Path, user_id: Option<&str>) -> Vec<(String, [u8; 32])> {
         Err(_) => return Vec::new(),
     };
     match kotton_identity::kel_store::resolve_current_key_for(base, uid, false) {
-        Ok(Some(key)) => vec![(aid, key)],
+        Ok(Some(key)) => vec![(aid, *key.as_bytes())],
         _ => Vec::new(),
     }
 }

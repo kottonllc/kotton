@@ -15,7 +15,8 @@
 //! as *validly authorized* ([`Verdict::PendingRecovery`]) and hands finalization to
 //! the arbiter.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use crate::ed25519::{Signature, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use kotton_wire::did::Did;
 use kotton_wire::kel::{Aid, Authorization, EventKind, KelEvent, KeyState, ContestWindow};
 use sha2::{Digest, Sha256};
@@ -27,7 +28,7 @@ use sha2::{Digest, Sha256};
 /// issuers' KELs arrive via the identity-core packet (RFC-0034). Returns `None`
 /// when the AID's KEL is unavailable — callers must then **fail closed**.
 pub trait KelResolver: Send + Sync {
-    fn current_key(&self, aid: &Did) -> Option<[u8; 32]>;
+    fn current_key(&self, aid: &Did) -> Option<VerifyingKey>;
 }
 
 /// The result of validating a candidate event against its predecessor.
@@ -41,10 +42,6 @@ pub enum Verdict {
     PendingRecovery,
     /// Rejected, with a reason.
     Invalid(String),
-}
-
-fn invalid(msg: impl Into<String>) -> Verdict {
-    Verdict::Invalid(msg.into())
 }
 
 /// SHA-256 of the event's canonical pre-image (the chain digest).
@@ -393,67 +390,125 @@ pub fn build_mnemonic_rotation(
     e
 }
 
-fn verify_sig(pubkey: &[u8; 32], event: &KelEvent, sig: &[u8]) -> bool {
-    let Ok(vk) = VerifyingKey::from_bytes(pubkey) else {
-        return false;
-    };
+// ── Which of a log's values are keys ─────────────────────────────────────────
+//
+// kotton-protocol's rule for every Ed25519 key says what a log does with 32 bytes that are to
+// be a key: a log's identity key, and each authority it carries, is a key that passes, or the
+// event is invalid; a device value that does not pass is no device, and the event stands.
+// So every place below where a log's bytes become a key goes through `VerifyingKey::from_bytes`,
+// and what validation hands on is the constructed key, never the bytes it came from.
+//
+// The identity key is `key_state.group_key`, on every event kind: the inception's own, the
+// one a rotation installs, and the one an interaction or an add-recovery carries forward.
+// An authority is a member of the set an event carries where that set makes the event's
+// commitment, which the digest covers; and a revealed authority, when a recovery rotation
+// shows it. A set that does not make its event's commitment is not that event's authorities
+// and is read as before: add-recovery refuses it, and validation of the other kinds does not
+// read it.
+//
+// The log as built names no device value apart from its identity key: the device a log
+// admits is the one that holds that key (`admits_device`), so no value here is dropped as
+// no device. An event that names device values beside its identity key is not built yet.
+
+/// `bytes` as the identity key an event sets, or why the event is invalid.
+fn identity_key(bytes: &[u8; 32]) -> Result<VerifyingKey, String> {
+    VerifyingKey::from_bytes(bytes).map_err(|_| "the identity key is no Ed25519 key".to_string())
+}
+
+/// Every authority `event` carries passes as a key, or why the event is invalid. The carried
+/// set is the event's authorities where it makes the event's commitment.
+fn authorities_pass(event: &KelEvent) -> Result<(), String> {
+    if event.recovery_set.is_empty() || recovery_root(&event.recovery_set) != event.recovery_commitment {
+        return Ok(());
+    }
+    if event.recovery_set.iter().all(|m| VerifyingKey::from_bytes(m).is_ok()) {
+        Ok(())
+    } else {
+        Err("a recovery authority the event carries is no Ed25519 key".to_string())
+    }
+}
+
+fn verify_sig(key: &VerifyingKey, event: &KelEvent, sig: &[u8]) -> bool {
     let Ok(sig) = Signature::from_slice(sig) else {
         return false;
     };
-    crate::ed25519::verify(&vk, event.canonical().as_bytes(), &sig).is_ok()
+    key.verify(event.canonical().as_bytes(), &sig).is_ok()
 }
 
 /// Validate an inception event (seq 0): no prev digest, self-signed by its own
 /// key-state, and its `aid` matches the self-addressing derivation.
 pub fn validate_inception(event: &KelEvent) -> Verdict {
+    match check_inception(event) {
+        Ok(_) => Verdict::Valid,
+        Err(why) => Verdict::Invalid(why),
+    }
+}
+
+/// [`validate_inception`], handing on the identity key the inception sets.
+fn check_inception(event: &KelEvent) -> Result<VerifyingKey, String> {
     if event.seq != 0 {
-        return invalid("inception must have seq 0");
+        return Err("inception must have seq 0".into());
     }
     if event.prev_event_digest.is_some() {
-        return invalid("inception must have no prev_event_digest");
+        return Err("inception must have no prev_event_digest".into());
     }
     if !matches!(event.kind, EventKind::Inception) {
-        return invalid("seq 0 event must be an Inception");
+        return Err("seq 0 event must be an Inception".into());
     }
     if event.aid != derive_aid(event) {
-        return invalid("aid is not the self-addressing digest of the inception");
+        return Err("aid is not the self-addressing digest of the inception".into());
     }
+    let key = identity_key(&event.key_state.group_key)?;
+    authorities_pass(event)?;
     // Inception is self-signed by the key-state it establishes.
     match &event.authorization {
-        Authorization::Quorum { sig } if verify_sig(&event.key_state.group_key, event, sig) => {
-            Verdict::Valid
-        }
-        Authorization::Quorum { .. } => invalid("inception self-signature is invalid"),
-        _ => invalid("inception must be Quorum-authorized (self-signed)"),
+        Authorization::Quorum { sig } if verify_sig(&key, event, sig) => Ok(key),
+        Authorization::Quorum { .. } => Err("inception self-signature is invalid".into()),
+        _ => Err("inception must be Quorum-authorized (self-signed)".into()),
     }
 }
 
 /// Validate a candidate event `event` against its predecessor `prev`.
 pub fn validate(prev: &KelEvent, event: &KelEvent) -> Verdict {
+    let checked = identity_key(&prev.key_state.group_key)
+        .map_err(|_| "the predecessor's identity key is no Ed25519 key".to_string())
+        .and_then(|prev_key| check(prev, &prev_key, event));
+    match checked {
+        Ok((verdict, _)) => verdict,
+        Err(why) => Verdict::Invalid(why),
+    }
+}
+
+/// [`validate`] under `prev_key`, the identity key `prev` set, handing on the verdict
+/// (`Valid` or `PendingRecovery`) and the identity key `event` sets.
+fn check(prev: &KelEvent, prev_key: &VerifyingKey, event: &KelEvent) -> Result<(Verdict, VerifyingKey), String> {
     if event.aid != prev.aid {
-        return invalid("aid mismatch");
+        return Err("aid mismatch".into());
     }
     if event.seq != prev.seq + 1 {
-        return invalid("seq must increment by 1");
+        return Err("seq must increment by 1".into());
     }
     if event.prev_event_digest != Some(digest(prev)) {
-        return invalid("prev_event_digest does not chain to the predecessor");
+        return Err("prev_event_digest does not chain to the predecessor".into());
     }
+    let key = identity_key(&event.key_state.group_key)?;
+    authorities_pass(event)?;
 
-    match (event.kind, &event.authorization) {
+    let verdict = match (event.kind, &event.authorization) {
         // Cooperative rotation: quorum-signed; recovery lineage carried forward.
         (EventKind::RotationCooperative, Authorization::Quorum { sig }) => {
-            if !verify_sig(&prev.key_state.group_key, event, sig) {
-                return invalid("cooperative rotation: bad quorum signature");
+            if !verify_sig(prev_key, event, sig) {
+                return Err("cooperative rotation: bad quorum signature".into());
             }
             if event.recovery_commitment != prev.recovery_commitment {
-                return invalid(
+                return Err(
                     "cooperative rotation may not change recovery_commitment \
-                     (only a recovery event advances the recovery lineage)",
+                     (only a recovery event advances the recovery lineage)"
+                        .into(),
                 );
             }
             if event.contest_window.is_some() {
-                return invalid("cooperative rotation carries no contest window");
+                return Err("cooperative rotation carries no contest window".into());
             }
             Verdict::Valid
         }
@@ -472,20 +527,20 @@ pub fn validate(prev: &KelEvent, event: &KelEvent) -> Verdict {
         // both sets, so the event carries the one it is installing and the verifier
         // recomputes the root from it.
         (EventKind::RotationAddRecovery, Authorization::Quorum { sig }) => {
-            if !verify_sig(&prev.key_state.group_key, event, sig) {
-                return invalid("add-recovery: bad quorum signature");
+            if !verify_sig(prev_key, event, sig) {
+                return Err("add-recovery: bad quorum signature".into());
             }
             if event.key_state != prev.key_state {
-                return invalid("add-recovery must not change key_state");
+                return Err("add-recovery must not change key_state".into());
             }
             if event.contest_window.is_some() {
-                return invalid("add-recovery carries no contest window");
+                return Err("add-recovery carries no contest window".into());
             }
             if event.recovery_set.is_empty() {
-                return invalid("add-recovery must carry the set it installs");
+                return Err("add-recovery must carry the set it installs".into());
             }
             if recovery_root(&event.recovery_set) != event.recovery_commitment {
-                return invalid("add-recovery: commitment does not match the carried set");
+                return Err("add-recovery: commitment does not match the carried set".into());
             }
             // Growth, checked directly against the predecessor's own set.
             //
@@ -498,16 +553,18 @@ pub fn validate(prev: &KelEvent, event: &KelEvent) -> Verdict {
             // is simply available.
             if prev.recovery_commitment != empty_recovery_root() {
                 if prev.recovery_set.is_empty() {
-                    return invalid(
+                    return Err(
                         "add-recovery: predecessor commits a non-empty set but did not \
-                         carry it, so growth cannot be checked",
+                         carry it, so growth cannot be checked"
+                            .into(),
                     );
                 }
                 let new_members: std::collections::BTreeSet<_> = event.recovery_set.iter().collect();
                 if !prev.recovery_set.iter().all(|m| new_members.contains(m)) {
-                    return invalid(
+                    return Err(
                         "add-recovery may only grow the set — every prior authority must \
-                         still be present",
+                         still be present"
+                            .into(),
                     );
                 }
             }
@@ -516,37 +573,38 @@ pub fn validate(prev: &KelEvent, event: &KelEvent) -> Verdict {
 
         // Interaction: quorum-signed; changes nothing.
         (EventKind::Interaction, Authorization::Quorum { sig }) => {
-            if !verify_sig(&prev.key_state.group_key, event, sig) {
-                return invalid("interaction: bad quorum signature");
+            if !verify_sig(prev_key, event, sig) {
+                return Err("interaction: bad quorum signature".into());
             }
             if event.key_state != prev.key_state
                 || event.recovery_commitment != prev.recovery_commitment
             {
-                return invalid("interaction must not change key_state or recovery_commitment");
+                return Err("interaction must not change key_state or recovery_commitment".into());
             }
             Verdict::Valid
         }
 
         // Guardian recovery: reveal the pre-committed guardian key; sign with it.
         (EventKind::RotationGuardian, Authorization::Guardian { revealed_group_key, proof, sig }) => {
-            validate_recovery(event, prev, revealed_group_key, proof, sig)
+            validate_recovery(event, prev, revealed_group_key, proof, sig)?
         }
 
         // Mnemonic recovery: reveal the pre-committed mnemonic reserve key; sign.
         (EventKind::RotationMnemonic, Authorization::Mnemonic { revealed_rec_pubkey, proof, sig }) => {
-            validate_recovery(event, prev, revealed_rec_pubkey, proof, sig)
+            validate_recovery(event, prev, revealed_rec_pubkey, proof, sig)?
         }
 
-        (EventKind::Inception, _) => invalid("inception cannot follow a predecessor"),
+        (EventKind::Inception, _) => return Err("inception cannot follow a predecessor".into()),
         (EventKind::Contest, _) => {
-            invalid("contest events are resolved by the RecoveryArbiter, not the chain")
+            return Err("contest events are resolved by the RecoveryArbiter, not the chain".into())
         }
-        _ => invalid("event kind and authorization do not match"),
-    }
+        _ => return Err("event kind and authorization do not match".into()),
+    };
+    Ok((verdict, key))
 }
 
-/// Shared recovery-event check: the revealed key must hash to the prior
-/// `recovery_commitment` (pre-rotation), sign this event, and carry a contest
+/// Shared recovery-event check: the revealed key must pass as a key, be a member of the
+/// prior `recovery_commitment` (pre-rotation), sign this event, and carry a contest
 /// window. Returns `PendingRecovery` (finalization is the arbiter's job).
 fn validate_recovery(
     event: &KelEvent,
@@ -554,17 +612,22 @@ fn validate_recovery(
     revealed_pubkey: &[u8; 32],
     proof: &[[u8; 32]],
     sig: &[u8],
-) -> Verdict {
+) -> Result<Verdict, String> {
+    // An authority committed under a root and not carried in the clear is held to the rule
+    // here, where it is shown.
+    let Ok(revealed) = VerifyingKey::from_bytes(revealed_pubkey) else {
+        return Err("the revealed recovery authority is no Ed25519 key".into());
+    };
     if !verify_recovery_inclusion(&prev.recovery_commitment, revealed_pubkey, proof) {
-        return invalid("revealed recovery key is not a member of the prior commitment set");
+        return Err("revealed recovery key is not a member of the prior commitment set".into());
     }
-    if !verify_sig(revealed_pubkey, event, sig) {
-        return invalid("recovery signature is invalid for the revealed key");
+    if !verify_sig(&revealed, event, sig) {
+        return Err("recovery signature is invalid for the revealed key".into());
     }
     if event.contest_window.is_none() {
-        return invalid("a recovery event must carry a contest window");
+        return Err("a recovery event must carry a contest window".into());
     }
-    Verdict::PendingRecovery
+    Ok(Verdict::PendingRecovery)
 }
 
 // ── The RecoveryArbiter seam (RECOVERY-ARBITER.md) ──────────────────────────────
@@ -622,28 +685,24 @@ pub fn resolve_current_key<A: RecoveryArbiter>(
     events: &[KelEvent],
     arbiter: &A,
     has_other_factors: bool,
-) -> Result<[u8; 32], String> {
+) -> Result<VerifyingKey, String> {
     let first = events.first().ok_or_else(|| "empty KEL".to_string())?;
-    match validate_inception(first) {
-        Verdict::Valid => {}
-        v => return Err(format!("invalid inception: {v:?}")),
-    }
+    let mut key = check_inception(first)
+        .map_err(|why| format!("invalid inception: {:?}", Verdict::Invalid(why)))?;
     let mut current = first;
     for e in &events[1..] {
-        match validate(current, e) {
-            Verdict::Valid => current = e,
-            Verdict::PendingRecovery => match arbiter.finalization(e, has_other_factors) {
-                Finalization::Finalized => current = e,
+        match check(current, &key, e) {
+            Ok((Verdict::PendingRecovery, next)) => match arbiter.finalization(e, has_other_factors) {
+                Finalization::Finalized => (current, key) = (e, next),
                 // An unfinalized recovery is not yet authoritative — the current
                 // key remains the pre-recovery state; stop replaying past it.
                 Finalization::Pending => break,
             },
-            Verdict::Invalid(why) => {
-                return Err(format!("invalid event at seq {}: {why}", e.seq))
-            }
+            Ok((_, next)) => (current, key) = (e, next),
+            Err(why) => return Err(format!("invalid event at seq {}: {why}", e.seq)),
         }
     }
-    Ok(current.key_state.group_key)
+    Ok(key)
 }
 
 /// How many mnemonic recoveries a chain has already performed — the `recovery_index` the
@@ -782,22 +841,24 @@ pub fn admits_device<A: RecoveryArbiter>(
     arbiter: &A,
     has_other_factors: bool,
 ) -> Result<(), String> {
+    let mut key = identity_key(&tip.key_state.group_key)
+        .map_err(|why| format!("the tip does not stand: {why}"))?;
     let mut current = tip;
     for e in since_tip {
-        match validate(current, e) {
-            Verdict::Valid => current = e,
-            Verdict::PendingRecovery => match arbiter.finalization(e, has_other_factors) {
-                Finalization::Finalized => current = e,
+        match check(current, &key, e) {
+            Ok((Verdict::PendingRecovery, next)) => match arbiter.finalization(e, has_other_factors) {
+                Finalization::Finalized => (current, key) = (e, next),
                 // An unfinalized recovery is not authoritative yet. Stop here rather than
                 // continue: everything chained off it inherits that.
                 Finalization::Pending => break,
             },
-            Verdict::Invalid(why) => {
+            Ok((_, next)) => (current, key) = (e, next),
+            Err(why) => {
                 return Err(format!("event at seq {} does not continue the tip: {why}", e.seq))
             }
         }
     }
-    if current.key_state.group_key != *device_key {
+    if key.as_bytes() != device_key {
         return Err("presented events verify but do not authorize this device key".to_string());
     }
     Ok(())
@@ -834,7 +895,7 @@ pub fn contact_key_from_log(
     held_key: &[u8; 32],
     aid: &str,
     offered: &[KelEvent],
-) -> Result<[u8; 32], String> {
+) -> Result<VerifyingKey, String> {
     let first = offered.first().ok_or_else(|| "the key log is empty".to_string())?;
     if first.aid.0 != aid {
         return Err(format!("that key log is {}'s, and it arrived from {aid}", first.aid));
@@ -843,45 +904,45 @@ pub fn contact_key_from_log(
         // Replayed here rather than by `resolve_current_key`, because the answer
         // must be a key installed at or after the one the card holds — a replay
         // that stops before reaching it would otherwise move the card backwards.
-        match validate_inception(first) {
-            Verdict::Valid => {}
-            v => return Err(format!("invalid inception: {v:?}")),
-        }
+        let mut key = check_inception(first)
+            .map_err(|why| format!("invalid inception: {:?}", Verdict::Invalid(why)))?;
         let mut current = first;
-        let mut reached = current.key_state.group_key == *held_key;
+        let mut reached = key.as_bytes() == held_key;
         for e in &offered[1..] {
-            match validate(current, e) {
-                Verdict::Valid => current = e,
-                Verdict::PendingRecovery => match LocalArbiter.finalization(e, false) {
-                    Finalization::Finalized => current = e,
+            match check(current, &key, e) {
+                Ok((Verdict::PendingRecovery, next)) => match LocalArbiter.finalization(e, false) {
+                    Finalization::Finalized => (current, key) = (e, next),
                     Finalization::Pending => break,
                 },
-                Verdict::Invalid(why) => return Err(format!("invalid event at seq {}: {why}", e.seq)),
+                Ok((_, next)) => (current, key) = (e, next),
+                Err(why) => return Err(format!("invalid event at seq {}: {why}", e.seq)),
             }
-            reached |= current.key_state.group_key == *held_key;
+            reached |= key.as_bytes() == held_key;
         }
         if !reached {
             return Err("that key log never installs the key this card holds".to_string());
         }
-        return Ok(current.key_state.group_key);
+        return Ok(key);
     }
     if offered.len() < held.len() || offered[..held.len()] != *held {
         return Err("that key log does not continue the one this card holds".to_string());
     }
     let mut current = held.last().expect("held is not empty");
+    let mut key = identity_key(&current.key_state.group_key)
+        .map_err(|why| format!("the held log does not stand: {why}"))?;
     for e in &offered[held.len()..] {
-        match validate(current, e) {
-            Verdict::Valid => current = e,
-            Verdict::PendingRecovery => match LocalArbiter.finalization(e, false) {
-                Finalization::Finalized => current = e,
+        match check(current, &key, e) {
+            Ok((Verdict::PendingRecovery, next)) => match LocalArbiter.finalization(e, false) {
+                Finalization::Finalized => (current, key) = (e, next),
                 Finalization::Pending => break,
             },
-            Verdict::Invalid(why) => {
+            Ok((_, next)) => (current, key) = (e, next),
+            Err(why) => {
                 return Err(format!("event at seq {} does not continue the held log: {why}", e.seq))
             }
         }
     }
-    Ok(current.key_state.group_key)
+    Ok(key)
 }
 
 #[cfg(test)]
@@ -946,8 +1007,9 @@ mod tests {
 
     // ── The recovery set ──────────────────────────────────────────────────────
 
+    /// The key of the seed `[n; 32]`: an authority that passes as a key.
     fn pk(n: u8) -> [u8; 32] {
-        [n; 32]
+        SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes()
     }
 
     #[test]
@@ -1146,9 +1208,9 @@ mod tests {
         let inc = build_fresh_inception(&sk);
         assert_eq!(inc.recovery_commitment, empty_recovery_root());
 
-        let add = add_recovery(&inc, &[[1u8; 32]], &sk);
+        let add = add_recovery(&inc, &[pk(1)], &sk);
         assert_eq!(validate(&inc, &add), Verdict::Valid);
-        assert_eq!(add.recovery_commitment, recovery_root(&[[1u8; 32]]));
+        assert_eq!(add.recovery_commitment, recovery_root(&[pk(1)]));
     }
 
     /// And a second, later, just as easily — "add a device, add a guardian, add a
@@ -1158,8 +1220,8 @@ mod tests {
     fn a_second_authority_is_no_harder_than_the_first() {
         let sk = SigningKey::from_bytes(&[7u8; 32]);
         let inc = build_fresh_inception(&sk);
-        let first = add_recovery(&inc, &[[1u8; 32]], &sk);
-        let second = add_recovery(&first, &[[1u8; 32], [2u8; 32]], &sk);
+        let first = add_recovery(&inc, &[pk(1)], &sk);
+        let second = add_recovery(&first, &[pk(1), pk(2)], &sk);
         assert_eq!(validate(&first, &second), Verdict::Valid);
     }
 
@@ -1172,14 +1234,14 @@ mod tests {
     fn add_recovery_may_not_drop_an_existing_authority() {
         let sk = SigningKey::from_bytes(&[7u8; 32]);
         let inc = build_fresh_inception(&sk);
-        let first = add_recovery(&inc, &[[1u8; 32], [2u8; 32]], &sk);
+        let first = add_recovery(&inc, &[pk(1), pk(2)], &sk);
 
         // Replacing the set with one of the intruder's choosing.
-        let evict = add_recovery(&first, &[[9u8; 32]], &sk);
+        let evict = add_recovery(&first, &[pk(9)], &sk);
         assert!(matches!(validate(&first, &evict), Verdict::Invalid(_)));
 
         // Even dropping one while keeping another, and even while adding.
-        let partial = add_recovery(&first, &[[1u8; 32], [9u8; 32]], &sk);
+        let partial = add_recovery(&first, &[pk(1), pk(9)], &sk);
         assert!(matches!(validate(&first, &partial), Verdict::Invalid(_)));
     }
 
@@ -1189,8 +1251,8 @@ mod tests {
     fn add_recovery_rejects_a_commitment_that_does_not_match_its_set() {
         let sk = SigningKey::from_bytes(&[7u8; 32]);
         let inc = build_fresh_inception(&sk);
-        let mut lying = add_recovery(&inc, &[[1u8; 32]], &sk);
-        lying.recovery_commitment = recovery_root(&[[5u8; 32]]);
+        let mut lying = add_recovery(&inc, &[pk(1)], &sk);
+        lying.recovery_commitment = recovery_root(&[pk(5)]);
         let sig = sk.sign(lying.canonical().as_bytes()).to_bytes().to_vec();
         lying.authorization = Authorization::Quorum { sig };
         assert!(matches!(validate(&inc, &lying), Verdict::Invalid(_)));
@@ -1351,7 +1413,7 @@ mod tests {
         let r1 = coop_rotation(&inc, &g1, &g0);
         let r2 = coop_rotation(&r1, &g2, &g1);
 
-        let key = resolve_current_key(&[inc, r1, r2], &LocalArbiter, false).unwrap();
+        let key = *resolve_current_key(&[inc, r1, r2], &LocalArbiter, false).unwrap().as_bytes();
         assert_eq!(
             key,
             g2.verifying_key().to_bytes(),
@@ -1402,12 +1464,12 @@ mod tests {
 
         // Lone factor → finalizes → current key is the survivor's.
         assert_eq!(
-            resolve_current_key(&chain, &LocalArbiter, false).unwrap(),
+            *resolve_current_key(&chain, &LocalArbiter, false).unwrap().as_bytes(),
             survivor.verifying_key().to_bytes()
         );
         // Multi-factor → pending → current key stays the pre-recovery (inception) key.
         assert_eq!(
-            resolve_current_key(&chain, &LocalArbiter, true).unwrap(),
+            *resolve_current_key(&chain, &LocalArbiter, true).unwrap().as_bytes(),
             g0.verifying_key().to_bytes()
         );
     }
@@ -1424,12 +1486,12 @@ mod tests {
 
         // Lone factor (single device) → finalizes → the NEW key now speaks.
         assert_eq!(
-            resolve_current_key(&chain, &LocalArbiter, false).unwrap(),
+            *resolve_current_key(&chain, &LocalArbiter, false).unwrap().as_bytes(),
             new_key.verifying_key().to_bytes()
         );
         // Multi-factor → the recovery holds pending → the pre-recovery key still speaks.
         assert_eq!(
-            resolve_current_key(&chain, &LocalArbiter, true).unwrap(),
+            *resolve_current_key(&chain, &LocalArbiter, true).unwrap().as_bytes(),
             inc.key_state.group_key
         );
         // A rotation revealing the WRONG reserve index cannot forge the key change.
@@ -1690,12 +1752,12 @@ mod tests {
         let offered = a_log_rotating_to(&old, &[&new]);
         let aid = held[0].aid.0.clone();
         assert_eq!(
-            contact_key_from_log(&held, &old.verifying_key().to_bytes(), &aid, &offered),
+            contact_key_from_log(&held, &old.verifying_key().to_bytes(), &aid, &offered).map(|k| *k.as_bytes()),
             Ok(new.verifying_key().to_bytes())
         );
         // The same log again teaches what the card already holds, and nothing else.
         assert_eq!(
-            contact_key_from_log(&offered, &new.verifying_key().to_bytes(), &aid, &offered),
+            contact_key_from_log(&offered, &new.verifying_key().to_bytes(), &aid, &offered).map(|k| *k.as_bytes()),
             Ok(new.verifying_key().to_bytes())
         );
     }
@@ -1768,10 +1830,366 @@ mod tests {
         let offered = a_log_rotating_to(&old, &[&new]);
         let aid = offered[0].aid.0.clone();
         assert_eq!(
-            contact_key_from_log(&[], &old.verifying_key().to_bytes(), &aid, &offered),
+            contact_key_from_log(&[], &old.verifying_key().to_bytes(), &aid, &offered).map(|k| *k.as_bytes()),
             Ok(new.verifying_key().to_bytes())
         );
         let stranger = SigningKey::from_bytes(&[14u8; 32]).verifying_key().to_bytes();
         assert!(contact_key_from_log(&[], &stranger, &aid, &offered).is_err());
+    }
+
+    // ── A log's keys pass, or the event is invalid (#564) ─────────────────────
+    //
+    // kotton-protocol's rule for every Ed25519 key: a log's identity key and each of its
+    // authorities is a key that passes, or the event that names it is invalid. Each test
+    // below puts every key vector the rule refuses into one place a log names a key, and
+    // finds the event invalid; where the event is otherwise signed as the log's rule asks, the
+    // key rule is the only thing that refuses it.
+
+    use crate::ed25519::refused;
+
+    /// Every key vector the rule refuses, by name.
+    fn refused_keys() -> Vec<(String, [u8; 32])> {
+        let mut keys: Vec<(String, [u8; 32])> = refused::SMALL_ORDER_KEYS
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (format!("small order #{i}"), *k))
+            .collect();
+        keys.extend(
+            refused::IDENTITY_OTHER_ENCODINGS
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (format!("the identity, other encoding #{i}"), *k)),
+        );
+        keys.push(("mixed order".into(), refused::mixed_order_key()));
+        keys.push(("not canonical".into(), refused::NON_CANONICAL_KEY));
+        keys.push(("not a point".into(), refused::NOT_A_POINT));
+        assert_eq!(keys.len(), 14);
+        keys
+    }
+
+    /// A signature over `message` under the 32 bytes `key` that satisfies `[S]B = R + [k]A`
+    /// as written, where the key decodes and its part in the prime-order subgroup is known:
+    /// the zero multiple for a key of small order, and seed 42's scalar for the mixed-order
+    /// vector. `None` for a key that does not decode, or whose part in the subgroup no one
+    /// holds (the non-canonical vector). So where a test is handed one, the event's
+    /// signature checks by the equation and only the key rule refuses the event.
+    fn signature_under(key: &[u8; 32], message: &[u8]) -> Option<Vec<u8>> {
+        use curve25519_dalek::constants::EIGHT_TORSION;
+        use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
+        use curve25519_dalek::scalar::{clamp_integer, Scalar};
+        use sha2::Sha512;
+
+        let a = if *key == refused::mixed_order_key() {
+            let expanded: [u8; 64] = Sha512::digest([42u8; 32]).into();
+            let mut lower = [0u8; 32];
+            lower.copy_from_slice(&expanded[..32]);
+            Scalar::from_bytes_mod_order(clamp_integer(lower))
+        } else if *key == refused::NON_CANONICAL_KEY {
+            return None;
+        } else {
+            Scalar::ZERO
+        };
+        let point = CompressedEdwardsY(*key).decompress()?;
+        let torsion = point - EdwardsPoint::mul_base(&a);
+        assert!(torsion.is_small_order(), "the key's part outside the subgroup is of small order");
+        for r in 1u64..4096 {
+            for t in EIGHT_TORSION {
+                let big_r = EdwardsPoint::mul_base(&Scalar::from(r)) + t;
+                let r_bytes = big_r.compress().to_bytes();
+                let k = Scalar::from_hash(Sha512::new().chain_update(r_bytes).chain_update(key).chain_update(message));
+                if -(k * torsion) != t {
+                    continue;
+                }
+                let s = Scalar::from(r) + k * a;
+                // The equation without the cofactor, over the bytes as given.
+                let check = EdwardsPoint::mul_base(&s) - k * point;
+                assert_eq!(check.compress().to_bytes(), r_bytes);
+                let mut sig = r_bytes.to_vec();
+                sig.extend_from_slice(s.as_bytes());
+                return Some(sig);
+            }
+        }
+        panic!("no signature found under {key:02x?}");
+    }
+
+    /// An inception whose identity key is `key`, carrying `set` under `commitment`, signed
+    /// by `signer` or, where none is given, by [`signature_under`] `key` if there is one.
+    fn an_inception_naming(key: [u8; 32], set: &[[u8; 32]], commitment: [u8; 32], signer: Option<&SigningKey>) -> KelEvent {
+        let mut e = KelEvent {
+            aid: Aid(String::new()),
+            seq: 0,
+            prev_event_digest: None,
+            kind: EventKind::Inception,
+            key_state: KeyState { group_key: key, threshold: 1, participants: 1 },
+            recovery_commitment: commitment,
+            recovery_set: set.to_vec(),
+            authorization: Authorization::Quorum { sig: vec![0u8; 64] },
+            contest_window: None,
+        };
+        e.aid = derive_aid(&e);
+        let sig = match signer {
+            Some(sk) => sk.sign(e.canonical().as_bytes()).to_bytes().to_vec(),
+            None => signature_under(&key, e.canonical().as_bytes()).unwrap_or_else(|| vec![0u8; 64]),
+        };
+        e.authorization = Authorization::Quorum { sig };
+        e
+    }
+
+    /// A rotation of `kind` after `prev` installing `key` and committing `set`, signed by
+    /// `signer` (for a recovery, the revealed reserve of `prev`'s commitment).
+    fn a_rotation_naming(prev: &KelEvent, kind: EventKind, key: [u8; 32], set: &[[u8; 32]], signer: &SigningKey) -> KelEvent {
+        let revealed = signer.verifying_key().to_bytes();
+        let mut e = KelEvent {
+            aid: prev.aid.clone(),
+            seq: prev.seq + 1,
+            prev_event_digest: Some(digest(prev)),
+            kind,
+            key_state: KeyState { group_key: key, threshold: 1, participants: 1 },
+            recovery_commitment: if set.is_empty() { prev.recovery_commitment } else { recovery_root(set) },
+            recovery_set: set.to_vec(),
+            authorization: Authorization::Quorum { sig: vec![0u8; 64] },
+            contest_window: match kind {
+                EventKind::RotationMnemonic | EventKind::RotationGuardian => Some(ContestWindow { min_seconds: 0 }),
+                _ => None,
+            },
+        };
+        let sig = signer.sign(e.canonical().as_bytes()).to_bytes().to_vec();
+        e.authorization = match kind {
+            EventKind::RotationMnemonic => Authorization::Mnemonic { revealed_rec_pubkey: revealed, proof: Vec::new(), sig },
+            EventKind::RotationGuardian => Authorization::Guardian { revealed_group_key: revealed, proof: Vec::new(), sig },
+            _ => Authorization::Quorum { sig },
+        };
+        e
+    }
+
+    fn is_invalid(v: &Verdict) -> bool {
+        matches!(v, Verdict::Invalid(_))
+    }
+
+    /// The names of the vectors for which `accepted` holds, for a message that lists them.
+    fn accepted_by(accepted: impl Fn(&[u8; 32]) -> bool) -> Vec<String> {
+        refused_keys().into_iter().filter(|(_, k)| accepted(k)).map(|(n, _)| n).collect()
+    }
+
+    /// A log built as every builder here builds one, through each kind of event, passes as it
+    /// did: each event is valid, the log resolves to the key it last installs, and that key
+    /// is the one a contact and a door are handed.
+    #[test]
+    fn an_honest_log_passes_unchanged() {
+        let first = SigningKey::from_bytes(&[7u8; 32]);
+        let second = SigningKey::from_bytes(&[8u8; 32]);
+        let third = SigningKey::from_bytes(&[9u8; 32]);
+        let inc = build_user_inception(&seed32());
+        let start = SigningKey::from_bytes(&crate::kdf::derive_identity_key(&seed32()));
+        let add = build_add_recovery(&inc, &[rung(0), pk(3)], &start);
+        let coop = a_rotation_naming(&add, EventKind::RotationCooperative, first.verifying_key().to_bytes(), &[], &start);
+        let rot = build_mnemonic_rotation(&coop, &seed32(), 0, &second, 0, &[rung(0), pk(3)]);
+        let coop2 = a_rotation_naming(&rot, EventKind::RotationCooperative, third.verifying_key().to_bytes(), &[], &second);
+        let chain = vec![inc.clone(), add.clone(), coop.clone(), rot.clone(), coop2.clone()];
+
+        assert_eq!(validate_inception(&inc), Verdict::Valid);
+        assert_eq!(validate(&inc, &add), Verdict::Valid);
+        assert_eq!(validate(&add, &coop), Verdict::Valid);
+        assert_eq!(validate(&coop, &rot), Verdict::PendingRecovery);
+        assert_eq!(validate(&rot, &coop2), Verdict::Valid);
+        let key = resolve_current_key(&chain, &LocalArbiter, false).expect("an honest log resolves");
+        assert_eq!(key.as_bytes(), third.verifying_key().as_bytes());
+        assert_eq!(
+            contact_key_from_log(&[], &start.verifying_key().to_bytes(), &inc.aid.0, &chain).map(|k| *k.as_bytes()),
+            Ok(third.verifying_key().to_bytes())
+        );
+        assert_eq!(admits_device(&inc, &chain[1..], &third.verifying_key().to_bytes(), &LocalArbiter, false), Ok(()));
+    }
+
+    /// An inception whose identity key the rule refuses is invalid, and its log resolves to
+    /// nothing. Where the vector decodes and a signature satisfies the equation under it,
+    /// the inception is so signed.
+    #[test]
+    fn an_inception_whose_identity_key_is_no_key_is_invalid() {
+        let accepted = accepted_by(|key| {
+            let inc = an_inception_naming(*key, &[], empty_recovery_root(), None);
+            !is_invalid(&validate_inception(&inc)) || resolve_current_key(&[inc], &LocalArbiter, false).is_ok()
+        });
+        assert!(accepted.is_empty(), "an inception stood under: {accepted:?}");
+        // The fixture is what it says: a signature satisfies the equation under every vector
+        // but the two no one can sign under.
+        let unsigned: Vec<String> = refused_keys().into_iter().filter(|(_, k)| signature_under(k, b"m").is_none()).map(|(n, _)| n).collect();
+        assert_eq!(unsigned, ["not canonical", "not a point"]);
+    }
+
+    /// An event after the inception that installs an identity key the rule refuses is
+    /// invalid, whichever kind installs it: a cooperative rotation signed by the current key,
+    /// and a mnemonic or guardian rotation signed by the revealed authority. Nothing that
+    /// replays the log is handed that key.
+    #[test]
+    fn a_rotation_onto_an_identity_key_that_is_no_key_is_invalid() {
+        let current = SigningKey::from_bytes(&[7u8; 32]);
+        let reserve = SigningKey::from_bytes(&[5u8; 32]);
+        let inc = an_inception_naming(
+            current.verifying_key().to_bytes(),
+            &[reserve.verifying_key().to_bytes()],
+            recovery_root(&[reserve.verifying_key().to_bytes()]),
+            Some(&current),
+        );
+        assert_eq!(validate_inception(&inc), Verdict::Valid);
+        let mut stood = Vec::new();
+        for (kind, signer) in [
+            (EventKind::RotationCooperative, &current),
+            (EventKind::RotationMnemonic, &reserve),
+            (EventKind::RotationGuardian, &reserve),
+        ] {
+            let honest = a_rotation_naming(&inc, kind, pk(9), &[], signer);
+            assert!(!is_invalid(&validate(&inc, &honest)), "{kind:?}: the honest rotation stands");
+            let accepted = accepted_by(|key| {
+                let rot = a_rotation_naming(&inc, kind, *key, &[], signer);
+                let chain = [inc.clone(), rot.clone()];
+                !is_invalid(&validate(&inc, &rot))
+                    || resolve_current_key(&chain, &LocalArbiter, false).is_ok()
+                    || contact_key_from_log(&[], &current.verifying_key().to_bytes(), &inc.aid.0, &chain).is_ok()
+                    || admits_device(&inc, &[rot], key, &LocalArbiter, false).is_ok()
+            });
+            stood.extend(accepted.into_iter().map(|n| format!("{kind:?}: {n}")));
+        }
+        assert!(stood.is_empty(), "a rotation stood onto: {stood:?}");
+    }
+
+    /// An event that carries recovery authorities, one of which the rule refuses, is
+    /// invalid: an inception, an add-recovery, and a recovery rotation committing its next
+    /// set. Each is signed as the log's rule asks and carries the set its commitment makes.
+    #[test]
+    fn an_event_carrying_an_authority_that_is_no_key_is_invalid() {
+        let current = SigningKey::from_bytes(&[7u8; 32]);
+        let reserve = SigningKey::from_bytes(&[5u8; 32]);
+        let honest = reserve.verifying_key().to_bytes();
+        let inc = an_inception_naming(current.verifying_key().to_bytes(), &[honest], recovery_root(&[honest]), Some(&current));
+        assert_eq!(validate_inception(&inc), Verdict::Valid);
+        let accepted = accepted_by(|key| {
+            let set = [honest, *key];
+            let at_inception = an_inception_naming(current.verifying_key().to_bytes(), &set, recovery_root(&set), Some(&current));
+            let added = build_add_recovery(&inc, &set, &current);
+            let next = a_rotation_naming(&inc, EventKind::RotationMnemonic, pk(9), &set, &reserve);
+            !is_invalid(&validate_inception(&at_inception))
+                || !is_invalid(&validate(&inc, &added))
+                || !is_invalid(&validate(&inc, &next))
+                || resolve_current_key(&[inc.clone(), added], &LocalArbiter, false).is_ok()
+        });
+        assert!(accepted.is_empty(), "an event carried as an authority: {accepted:?}");
+        // The same events with an honest second authority stand.
+        let set = [honest, pk(3)];
+        let at_inception = an_inception_naming(current.verifying_key().to_bytes(), &set, recovery_root(&set), Some(&current));
+        assert_eq!(validate_inception(&at_inception), Verdict::Valid);
+        assert_eq!(validate(&inc, &build_add_recovery(&inc, &set, &current)), Verdict::Valid);
+        assert_eq!(
+            validate(&inc, &a_rotation_naming(&inc, EventKind::RotationMnemonic, pk(9), &set, &reserve)),
+            Verdict::PendingRecovery
+        );
+    }
+
+    /// An authority committed under a root and not carried in the clear is held to the rule
+    /// when a recovery rotation reveals it: a mnemonic or guardian rotation revealing a key
+    /// the rule refuses is invalid. Where the vector decodes and a signature satisfies the
+    /// equation under it, the rotation is so signed, and its proof of membership holds.
+    #[test]
+    fn a_recovery_revealing_an_authority_that_is_no_key_is_invalid() {
+        let current = SigningKey::from_bytes(&[7u8; 32]);
+        let installed = pk(9);
+        let mut stood = Vec::new();
+        for kind in [EventKind::RotationMnemonic, EventKind::RotationGuardian] {
+            let accepted = accepted_by(|authority| {
+                // Committed, not carried.
+                let inc = an_inception_naming(current.verifying_key().to_bytes(), &[], recovery_root(&[*authority]), Some(&current));
+                assert_eq!(validate_inception(&inc), Verdict::Valid);
+                let mut rot = a_rotation_naming(&inc, kind, installed, &[], &current);
+                let sig = signature_under(authority, rot.canonical().as_bytes()).unwrap_or_else(|| vec![0u8; 64]);
+                rot.authorization = match kind {
+                    EventKind::RotationMnemonic => Authorization::Mnemonic { revealed_rec_pubkey: *authority, proof: Vec::new(), sig },
+                    _ => Authorization::Guardian { revealed_group_key: *authority, proof: Vec::new(), sig },
+                };
+                assert!(verify_recovery_inclusion(&inc.recovery_commitment, authority, &[]));
+                let chain = [inc.clone(), rot.clone()];
+                !is_invalid(&validate(&inc, &rot))
+                    || resolve_current_key(&chain, &LocalArbiter, false).is_ok_and(|k| k.as_bytes() == &installed)
+                    || admits_device(&inc, &[rot], &installed, &LocalArbiter, false).is_ok()
+            });
+            stood.extend(accepted.into_iter().map(|n| format!("{kind:?}: {n}")));
+        }
+        assert!(stood.is_empty(), "a recovery revealed as an authority: {stood:?}");
+    }
+
+    /// A set an event carries that does not make the event's commitment is not that event's
+    /// authorities: an inception, and a recovery rotation carrying its next set, are not refused
+    /// for what such a set holds. An add-recovery is refused for carrying one
+    /// (`add_recovery_rejects_a_commitment_that_does_not_match_its_set`).
+    #[test]
+    fn a_carried_set_that_does_not_make_the_commitment_is_not_read_as_authorities() {
+        let current = SigningKey::from_bytes(&[7u8; 32]);
+        let reserve = SigningKey::from_bytes(&[5u8; 32]);
+        let committed = reserve.verifying_key().to_bytes();
+        let tip = an_inception_naming(current.verifying_key().to_bytes(), &[committed], recovery_root(&[committed]), Some(&current));
+        let mut refused_for_the_set = Vec::new();
+        for (name, key) in refused_keys() {
+            let inc = an_inception_naming(current.verifying_key().to_bytes(), &[key], recovery_root(&[committed]), Some(&current));
+            if validate_inception(&inc) != Verdict::Valid {
+                refused_for_the_set.push(format!("inception: {name}"));
+            }
+            for kind in [EventKind::RotationMnemonic, EventKind::RotationGuardian] {
+                // Commits `{pk(4)}` and carries `{key}`.
+                let mut rot = a_rotation_naming(&tip, kind, pk(9), &[pk(4)], &reserve);
+                rot.recovery_set = vec![key];
+                assert_ne!(recovery_root(&rot.recovery_set), rot.recovery_commitment);
+                if validate(&tip, &rot) != Verdict::PendingRecovery {
+                    refused_for_the_set.push(format!("{kind:?}: {name}"));
+                }
+            }
+        }
+        assert!(refused_for_the_set.is_empty(), "refused for a set that is not its authorities: {refused_for_the_set:?}");
+    }
+
+    /// `validate` refuses a cooperative rotation onto an honest key after a predecessor whose
+    /// identity key the rule refuses. The rotation is signed under the predecessor's key by
+    /// the equation as written wherever such a signature exists, and the key it installs
+    /// passes, so the predecessor's key is the only thing that refuses it.
+    #[test]
+    fn a_rotation_onto_an_honest_key_after_a_predecessor_whose_identity_key_is_no_key_is_invalid() {
+        let accepted = accepted_by(|key| {
+            let prev = an_inception_naming(*key, &[], empty_recovery_root(), None);
+            let mut e = KelEvent {
+                aid: prev.aid.clone(),
+                seq: 1,
+                prev_event_digest: Some(digest(&prev)),
+                kind: EventKind::RotationCooperative,
+                key_state: KeyState { group_key: pk(9), threshold: 1, participants: 1 },
+                recovery_commitment: prev.recovery_commitment,
+                recovery_set: Vec::new(),
+                authorization: Authorization::Quorum { sig: vec![0u8; 64] },
+                contest_window: None,
+            };
+            let sig = signature_under(key, e.canonical().as_bytes()).unwrap_or_else(|| vec![0u8; 64]);
+            e.authorization = Authorization::Quorum { sig };
+            !is_invalid(&validate(&prev, &e))
+        });
+        assert!(accepted.is_empty(), "an event stood after: {accepted:?}");
+    }
+
+    /// A door whose held tip names an identity key the rule refuses admits nothing by that tip,
+    /// not even a device presenting that very key with nothing to offer.
+    #[test]
+    fn a_tip_whose_identity_key_is_no_key_admits_no_device() {
+        let accepted = accepted_by(|key| {
+            let tip = an_inception_naming(*key, &[], empty_recovery_root(), None);
+            admits_device(&tip, &[], key, &LocalArbiter, false).is_ok()
+        });
+        assert!(accepted.is_empty(), "a tip admitted: {accepted:?}");
+    }
+
+    /// A card whose held log ends on an identity key the rule refuses learns no key from that
+    /// log, not even the one it holds.
+    #[test]
+    fn a_held_log_whose_tip_key_is_no_key_teaches_no_key() {
+        let accepted = accepted_by(|key| {
+            let held = vec![an_inception_naming(*key, &[], empty_recovery_root(), None)];
+            contact_key_from_log(&held, key, &held[0].aid.0, &held).is_ok()
+        });
+        assert!(accepted.is_empty(), "a held log taught: {accepted:?}");
     }
 }

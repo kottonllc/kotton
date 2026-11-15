@@ -231,6 +231,7 @@ async fn id_rotate_at_the_repl_asks_at_hidden_prompts_and_keeps_neither_secret_i
     let replayed = kotton_identity::kel_store::resolve_current_key_for(&env.base_dir, USER, false)
         .unwrap_or_else(|e| panic!("the key log does not replay after the next command signed it: {e:#}\n{session}"))
         .expect("a key log");
+    let replayed = *replayed.as_bytes();
     assert_eq!(replayed, public_of(&key_after), "the key log does not resolve to the new key.\n{session}");
     assert_ne!(replayed, public_of(&key_before), "the key log still resolves to the retired key.\n{session}");
     assert!(
@@ -311,9 +312,10 @@ async fn id_recover_where_a_sealed_copy_was_kept_asks_for_a_new_passphrase_at_a_
 
     let sealed = open_vault_under(env.runtime.as_ref(), USER, NEW_PASSPHRASE)
         .unwrap_or_else(|e| panic!("the copy on disk does not open under the new passphrase: {e:#}\n{session}"));
-    let installed = kotton_identity::kel_store::resolve_current_key_for(&env.base_dir, USER, false)
+    let installed = *kotton_identity::kel_store::resolve_current_key_for(&env.base_dir, USER, false)
         .expect("the key log replays")
-        .expect("a key log");
+        .expect("a key log")
+        .as_bytes();
     assert_eq!(
         ed25519_dalek::SigningKey::from_bytes(&sealed.identity_key).verifying_key().to_bytes(),
         installed,

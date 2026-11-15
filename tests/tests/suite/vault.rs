@@ -436,7 +436,9 @@ async fn recovering_on_a_device_that_kept_its_sealed_copy_reseals_under_the_new_
     );
     let replaced = kotton_identity::kel_store::resolve_current_key_for(&base, "alice", false)
         .expect("the key log replays")
-        .expect("a key before the recovery");
+        .expect("a key before the recovery")
+        .as_bytes()
+        .to_owned();
 
     let recovered = client
         .recover("alice", &phrase, NEW_PASSPHRASE, &identity.line())
