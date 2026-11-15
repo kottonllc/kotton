@@ -2117,15 +2117,78 @@ mod tests {
     }
 
     /// A set an event carries that does not make the event's commitment is not that event's
-    /// authorities, and an inception or a recovery rotation is not refused for what such a set
-    /// holds; an add-recovery is refused for carrying one, as before.
+    /// authorities: an inception, and a recovery rotation carrying its next set, are not refused
+    /// for what such a set holds. An add-recovery is refused for carrying one
+    /// (`add_recovery_rejects_a_commitment_that_does_not_match_its_set`).
     #[test]
     fn a_carried_set_that_does_not_make_the_commitment_is_not_read_as_authorities() {
         let current = SigningKey::from_bytes(&[7u8; 32]);
-        let honest = pk(5);
+        let reserve = SigningKey::from_bytes(&[5u8; 32]);
+        let committed = reserve.verifying_key().to_bytes();
+        let tip = an_inception_naming(current.verifying_key().to_bytes(), &[committed], recovery_root(&[committed]), Some(&current));
+        let mut refused_for_the_set = Vec::new();
         for (name, key) in refused_keys() {
-            let inc = an_inception_naming(current.verifying_key().to_bytes(), &[key], recovery_root(&[honest]), Some(&current));
-            assert_eq!(validate_inception(&inc), Verdict::Valid, "{name}");
+            let inc = an_inception_naming(current.verifying_key().to_bytes(), &[key], recovery_root(&[committed]), Some(&current));
+            if validate_inception(&inc) != Verdict::Valid {
+                refused_for_the_set.push(format!("inception: {name}"));
+            }
+            for kind in [EventKind::RotationMnemonic, EventKind::RotationGuardian] {
+                // Commits `{pk(4)}` and carries `{key}`; the set is not in what the signature covers.
+                let mut rot = a_rotation_naming(&tip, kind, pk(9), &[pk(4)], &reserve);
+                rot.recovery_set = vec![key];
+                assert_ne!(recovery_root(&rot.recovery_set), rot.recovery_commitment);
+                if validate(&tip, &rot) != Verdict::PendingRecovery {
+                    refused_for_the_set.push(format!("{kind:?}: {name}"));
+                }
+            }
         }
+        assert!(refused_for_the_set.is_empty(), "refused for a set that is not its authorities: {refused_for_the_set:?}");
+    }
+
+    /// `validate` refuses an event whose predecessor's identity key the rule refuses, even where
+    /// the event is signed under that key by the equation as written: an interaction that
+    /// carries the predecessor's key state forward.
+    #[test]
+    fn an_event_after_a_predecessor_whose_identity_key_is_no_key_is_invalid() {
+        let accepted = accepted_by(|key| {
+            let prev = an_inception_naming(*key, &[], empty_recovery_root(), None);
+            let mut e = KelEvent {
+                aid: prev.aid.clone(),
+                seq: 1,
+                prev_event_digest: Some(digest(&prev)),
+                kind: EventKind::Interaction,
+                key_state: prev.key_state.clone(),
+                recovery_commitment: prev.recovery_commitment,
+                recovery_set: Vec::new(),
+                authorization: Authorization::Quorum { sig: vec![0u8; 64] },
+                contest_window: None,
+            };
+            let sig = signature_under(key, e.canonical().as_bytes()).unwrap_or_else(|| vec![0u8; 64]);
+            e.authorization = Authorization::Quorum { sig };
+            !is_invalid(&validate(&prev, &e))
+        });
+        assert!(accepted.is_empty(), "an event stood after: {accepted:?}");
+    }
+
+    /// A door whose held tip names an identity key the rule refuses admits nothing by that tip,
+    /// not even a device presenting that very key with nothing to offer.
+    #[test]
+    fn a_tip_whose_identity_key_is_no_key_admits_no_device() {
+        let accepted = accepted_by(|key| {
+            let tip = an_inception_naming(*key, &[], empty_recovery_root(), None);
+            admits_device(&tip, &[], key, &LocalArbiter, false).is_ok()
+        });
+        assert!(accepted.is_empty(), "a tip admitted: {accepted:?}");
+    }
+
+    /// A card whose held log ends on an identity key the rule refuses learns no key from that
+    /// log, not even the one it holds.
+    #[test]
+    fn a_held_log_whose_tip_key_is_no_key_teaches_no_key() {
+        let accepted = accepted_by(|key| {
+            let held = vec![an_inception_naming(*key, &[], empty_recovery_root(), None)];
+            contact_key_from_log(&held, key, &held[0].aid.0, &held).is_ok()
+        });
+        assert!(accepted.is_empty(), "a held log taught: {accepted:?}");
     }
 }
