@@ -273,7 +273,7 @@ fn verify_identity(transcript: &[u8], r: &ContactIdentityRecord) -> Result<Paire
         }
         let resolved = resolve_current_key(&r.kel, &LocalArbiter, false)
             .map_err(|e| anyhow!("the contact's key log does not replay: {e}"))?;
-        if resolved != r.public_key {
+        if *resolved.as_bytes() != r.public_key {
             bail!("the contact's key log resolves to a different key than the one it presented");
         }
     }

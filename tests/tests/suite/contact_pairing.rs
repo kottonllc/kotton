@@ -556,7 +556,8 @@ async fn a_contact_learns_a_rotated_key_from_the_persons_own_key_log() {
     // The key came from her log: the one the card kept now resolves to it.
     let kept = kotton_identity::kel_store::load_contact_chain(&b.base_dir, "bob", &alice_did).expect("the kept log");
     assert_eq!(
-        kotton_crypto::kel_verify::resolve_current_key(&kept, &kotton_crypto::kel_verify::LocalArbiter, false),
+        kotton_crypto::kel_verify::resolve_current_key(&kept, &kotton_crypto::kel_verify::LocalArbiter, false)
+            .map(|key| *key.as_bytes()),
         Ok(new_pub),
         "the card's key is what the kept log resolves to"
     );

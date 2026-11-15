@@ -42,7 +42,7 @@
 
 use kotton_record::immediate::Immediate;
 use crate::peer::PeerContext;
-use ed25519_dalek::{Signature, VerifyingKey};
+use kotton_crypto::ed25519::Signature;
 use kotton_crypto::did::DidKeyMethod;
 use kotton_crypto::kel_verify::{resolve_current_key, LocalArbiter};
 use kotton_wire::did::Did;
@@ -110,11 +110,9 @@ pub async fn accept(
         Err(e) => return Err(format!("the tenant's key log does not read: {e}")),
     };
     let identity = resolve_current_key(&chain, &LocalArbiter, false)
-        .map_err(|e| e.to_string())
-        .and_then(|k| VerifyingKey::from_bytes(&k).map_err(|e| e.to_string()))
         .map_err(|e| format!("the tenant's key log does not resolve to a key: {e}"))?;
     let signature = Signature::from_slice(signature).map_err(|_| "the signature is not an Ed25519 signature".to_string())?;
-    if kotton_crypto::ed25519::verify(&identity, &change.signed_bytes(user_id), &signature).is_err() {
+    if identity.verify(&change.signed_bytes(user_id), &signature).is_err() {
         return Err("it is not signed under the tenant's identity".to_string());
     }
 
@@ -413,9 +411,10 @@ mod tests {
         assert!(paired(&db, "alice", &key).await);
     }
 
-    /// Through the whole acceptance: a tenant whose key log resolves to a key of small
-    /// order (a cooperative rotation onto it, signed by the inception's key) has an admit
-    /// under that key refused as not signed under its identity, and nothing is paired.
+    /// Through the whole acceptance: a tenant whose key log rotates onto a key of small
+    /// order (a cooperative rotation onto it, signed by the inception's key) has a log that
+    /// does not resolve, since that rotation is invalid, so an admit under that key is
+    /// refused and nothing is paired.
     #[tokio::test]
     async fn an_admit_under_a_small_order_key_is_refused() {
         use ed25519_dalek::Signer as _;
@@ -439,11 +438,8 @@ mod tests {
         let sig = inception_key.sign(rotation.canonical().as_bytes()).to_bytes().to_vec();
         rotation.authorization = Authorization::Quorum { sig };
         let chain = [inception, rotation];
-        assert_eq!(
-            resolve_current_key(&chain, &LocalArbiter, false).unwrap(),
-            refused::SMALL_ORDER_KEY,
-            "the key log does not resolve to the small-order key"
-        );
+        let why = resolve_current_key(&chain, &LocalArbiter, false).unwrap_err();
+        assert!(why.contains("invalid event at seq 1"), "{why}");
         kotton_identity::kel_store::save_chain(base.path(), "alice", &chain).expect("the key log");
 
         let db = a_vault_db().await;
@@ -453,7 +449,7 @@ mod tests {
         let why = accept(base.path(), &db, &keys, "alice", &change, &refused::under_small_order_key_bytes())
             .await
             .unwrap_err();
-        assert!(why.contains("not signed under the tenant's identity"), "{why}");
+        assert!(why.contains("does not resolve to a key"), "{why}");
         assert!(!paired(&db, "alice", &key).await);
         assert!(!keys.read().unwrap().contains(&key));
     }

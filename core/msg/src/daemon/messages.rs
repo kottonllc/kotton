@@ -537,7 +537,7 @@ pub struct RosterMember {
 /// `did`, every event after it is the identity's own, and the last key it
 /// installs is `key`. Nothing else is believed of a roster's key.
 pub(crate) fn log_yields(did: &str, key: &[u8; 32], log: &[kotton_wire::kel::KelEvent]) -> bool {
-    !log.is_empty() && kotton_crypto::kel_verify::contact_key_from_log(&[], key, did, log).as_ref() == Ok(key)
+    !log.is_empty() && kotton_crypto::kel_verify::contact_key_from_log(&[], key, did, log).is_ok_and(|k| k.as_bytes() == key)
 }
 
 impl RosterMember {
@@ -6276,8 +6276,9 @@ mod tests_co_member {
         let (retired, current) = (SigningKey::from_bytes(&[6; 32]), SigningKey::from_bytes(&[7; 32]));
         let inception = build_inception(&retired, &[rung(0)]);
         let rotation = build_mnemonic_rotation(&inception, &phrase, 0, &current, 0, &[rung(0)]);
-        let grown = build_add_recovery(&inception, &[rung(0), [8; 32]], &retired);
-        let grown_again = build_add_recovery(&grown, &[rung(0), [8; 32], [9; 32]], &retired);
+        let authority = |n: u8| SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes();
+        let grown = build_add_recovery(&inception, &[rung(0), authority(8)], &retired);
+        let grown_again = build_add_recovery(&grown, &[rung(0), authority(8), authority(9)], &retired);
         let pat2 = inception.aid.0.clone();
         let real = vec![inception.clone(), rotation];
         let fork = vec![inception, grown, grown_again];
@@ -6352,7 +6353,8 @@ mod tests_co_member {
         let (retired, current) = (SigningKey::from_bytes(&[6; 32]), SigningKey::from_bytes(&[7; 32]));
         let inception = build_inception(&retired, &[rung(0)]);
         let rotation = build_mnemonic_rotation(&inception, &phrase, 0, &current, 0, &[rung(0)]);
-        let grown = build_add_recovery(&inception, &[rung(0), [8; 32]], &retired);
+        let authority = |n: u8| SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes();
+        let grown = build_add_recovery(&inception, &[rung(0), authority(8)], &retired);
         let pat2 = inception.aid.0.clone();
         let (real, fork) = (vec![inception.clone(), rotation], vec![inception, grown]);
         let roster = |pat2_key: [u8; 32], pat2_log: &Vec<kotton_wire::kel::KelEvent>| {

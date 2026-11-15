@@ -1015,8 +1015,8 @@ fn sender_key(
     let held = host.contact_key_log(user_id, contact_did);
     let key = kotton_crypto::kel_verify::contact_key_from_log(&held, held_key, contact_did, carried)
         .map_err(|e| format!("the key log that came with it does not hold: {e}"))?;
-    let teaches = key != *held_key || carried.len() > held.len();
-    Ok(HeldTo { key, learned: teaches.then(|| carried.to_vec()) })
+    let teaches = key.as_bytes() != held_key || carried.len() > held.len();
+    Ok(HeldTo { key: *key.as_bytes(), learned: teaches.then(|| carried.to_vec()) })
 }
 
 /// Hold a reach note that arrived at the door on the card for its sender.

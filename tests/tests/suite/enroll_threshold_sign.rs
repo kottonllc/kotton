@@ -23,7 +23,7 @@
 //! Self-contained: two in-process daemons on loopback, direct QUIC, no relay.
 //! Reachability over a relay is covered separately by `introduction`.
 
-use ed25519_dalek::{Signature, VerifyingKey};
+use kotton_crypto::ed25519::{Signature, VerifyingKey};
 use kotton_sys::secret::SecretsStore;
 use kotton_wire::remote::RemoteBackend;
 use kotton_secret::MemorySecrets;
@@ -79,10 +79,9 @@ async fn assert_recorded_at(
 /// chain is the source. That is also what a real verifier uses: the group key is
 /// public and lives in the KEL, not in anybody's secret.
 fn group_vk_from_chain(base_dir: &std::path::Path, user_id: &str) -> VerifyingKey {
-    let group_key = kotton_identity::kel_store::resolve_current_key_for(base_dir, user_id, false)
+    kotton_identity::kel_store::resolve_current_key_for(base_dir, user_id, false)
         .expect("reading the key history")
-        .expect("an identity with a key-state");
-    VerifyingKey::from_bytes(&group_key).expect("group key is a valid ed25519 pubkey")
+        .expect("an identity with a key-state")
 }
 
 #[tokio::test]
@@ -190,7 +189,7 @@ async fn enroll_then_threshold_sign_across_two_nodes() {
     // equal to alice's identity key; her did:kel AID is the inception, not the key).
     let group_vk = group_vk_from_chain(base_e.path(), "alice");
     let sig_arr: [u8; 64] = sig.as_slice().try_into().unwrap();
-    kotton_crypto::ed25519::verify(&group_vk, message, &Signature::from_bytes(&sig_arr))
+    group_vk.verify(message, &Signature::from_bytes(&sig_arr))
         .expect("distributed threshold signature verifies under the group key");
 }
 
@@ -307,7 +306,7 @@ async fn a_locked_coordinator_says_it_is_locked_rather_than_that_it_has_no_co_si
         .expect("once unlocked, the same two nodes sign");
     let group_vk = group_vk_from_chain(base_e.path(), "alice");
     let sig_arr: [u8; 64] = sig.as_slice().try_into().unwrap();
-    kotton_crypto::ed25519::verify(&group_vk, message, &Signature::from_bytes(&sig_arr))
+    group_vk.verify(message, &Signature::from_bytes(&sig_arr))
         .expect("the signature after the unlock verifies under the group key");
 }
 
@@ -397,7 +396,7 @@ async fn enroll_then_threshold_sign_over_relay() {
 
     let group_vk = group_vk_from_chain(base_e.path(), "alice");
     let sig_arr: [u8; 64] = sig.as_slice().try_into().unwrap();
-    kotton_crypto::ed25519::verify(&group_vk, message, &Signature::from_bytes(&sig_arr))
+    group_vk.verify(message, &Signature::from_bytes(&sig_arr))
         .expect("relay-reached threshold signature verifies under the group key");
 }
 
@@ -1161,7 +1160,7 @@ async fn blind_enroll_delivers_the_chain_but_no_key_material_e2e() {
     )
     .expect("the delivered chain must replay");
     assert_eq!(
-        resolved.len(),
+        resolved.as_bytes().len(),
         32,
         "a replayed chain yields a 32-byte public key and nothing else"
     );
@@ -1268,7 +1267,7 @@ async fn cosigner_holds_a_share_but_no_data_keys_and_can_co_sign() {
     assert_eq!(sig.len(), 64);
     let group_vk = group_vk_from_chain(base_e.path(), "alice");
     let sig_arr: [u8; 64] = sig.as_slice().try_into().unwrap();
-    kotton_crypto::ed25519::verify(&group_vk, message, &Signature::from_bytes(&sig_arr))
+    group_vk.verify(message, &Signature::from_bytes(&sig_arr))
         .expect("cosigner-co-signed threshold signature verifies under the group key");
 }
 
@@ -1346,7 +1345,7 @@ async fn a_reenrolled_device_resolves_the_rotated_key() {
             .unwrap()
             .unwrap();
     assert_eq!(
-        hex::encode(current),
+        hex::encode(current.as_bytes()),
         rotated_key_hex,
         "the re-enrolled device resolves the rotated key, not the retired one"
     );

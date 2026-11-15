@@ -2135,7 +2135,7 @@ where
                     false,
                 )
                 .map_err(|e| anyhow!("delivered KEL failed to replay: {e}"))?;
-                if current != attestation.identity_pubkey {
+                if *current.as_bytes() != attestation.identity_pubkey {
                     return Err(anyhow!(
                         "delivered KEL resolves to a different key than the attestation"
                     ));
@@ -2183,7 +2183,7 @@ where
                     false,
                 )
                 .map_err(|e| anyhow!("delivered KEL failed to replay: {e}"))?;
-                if current != attestation.identity_pubkey {
+                if *current.as_bytes() != attestation.identity_pubkey {
                     return Err(anyhow!(
                         "delivered KEL resolves to a different key than the attestation"
                     ));

@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result};
 use kotton_wire::kel::KelEvent;
+use kotton_crypto::ed25519::VerifyingKey;
 use kotton_crypto::kel_verify::{resolve_current_key, LocalArbiter};
 use std::path::{Path, PathBuf};
 
@@ -152,7 +153,7 @@ pub fn load_contact_chain(base_dir: &Path, user_id: &str, contact_aid: &str) -> 
 
 /// A contact's current key by replaying the chain kept for them. `Ok(None)` when
 /// no chain was kept (a `did:key` contact carries its key in its name).
-pub fn resolve_contact_key(base_dir: &Path, user_id: &str, contact_aid: &str) -> Result<Option<[u8; 32]>> {
+pub fn resolve_contact_key(base_dir: &Path, user_id: &str, contact_aid: &str) -> Result<Option<VerifyingKey>> {
     let chain = load_contact_chain(base_dir, user_id, contact_aid)?;
     if chain.is_empty() {
         return Ok(None);
@@ -168,7 +169,7 @@ pub fn resolve_current_key_for(
     base_dir: &Path,
     user_id: &str,
     has_other_factors: bool,
-) -> Result<Option<[u8; 32]>> {
+) -> Result<Option<VerifyingKey>> {
     let chain = load_chain(base_dir, user_id)?;
     if chain.is_empty() {
         return Ok(None);
@@ -210,8 +211,9 @@ mod tests {
         assert_eq!(
             resolve_current_key_for(dir.path(), user, false)
                 .unwrap()
-                .unwrap(),
-            group.verifying_key().to_bytes()
+                .unwrap()
+                .as_bytes(),
+            group.verifying_key().as_bytes()
         );
     }
 
