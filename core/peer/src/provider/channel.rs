@@ -317,10 +317,7 @@ pub(crate) mod redial_tests {
     fn allowing(key: &ed25519_dalek::SigningKey) -> Arc<PairedDeviceVerifier> {
         let mut keys = HashSet::new();
         keys.insert(key.verifying_key().to_bytes());
-        PairedDeviceVerifier::new(
-            Arc::new(RwLock::new(keys)),
-            Arc::new(rustls::crypto::ring::default_provider()),
-        )
+        PairedDeviceVerifier::new(Arc::new(RwLock::new(keys)))
     }
 
     /// A paired peer on loopback that answers every request with its own
@@ -345,7 +342,7 @@ pub(crate) mod redial_tests {
         let cert = Ed25519DeviceCert::from_signing_key(server).unwrap();
         let mut config = tls::build_peer_server_config(
             &cert,
-            PairedDeviceVerifier::new(allowed, Arc::new(rustls::crypto::ring::default_provider())),
+            PairedDeviceVerifier::new(allowed),
             Arc::new(rustls::crypto::ring::default_provider()),
             None,
         )

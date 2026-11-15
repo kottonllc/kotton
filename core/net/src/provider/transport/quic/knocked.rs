@@ -136,7 +136,7 @@ impl KnockFront {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let cert = Ed25519DeviceCert::from_signing_key(cert_key)?;
         let mut server =
-            tls::build_peer_server_config(&cert, one_key(admit, &provider), provider, None)?;
+            tls::build_peer_server_config(&cert, one_key(admit), provider, None)?;
         server.transport_config(introduced_transport());
 
         let (tx, rx) = mpsc::channel(DOOR_QUEUE);
@@ -292,7 +292,7 @@ impl Listener for KnockedDoor {
             .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())
             .and_then(|certs| certs.into_iter().next())
             .and_then(|cert| tls::extract_ed25519_pubkey_from_cert(&cert))
-            .and_then(|pubkey| DidKeyMethod::from_public_key_bytes(&pubkey).ok())
+            .and_then(|pubkey| DidKeyMethod::from_public_key_bytes(pubkey.as_bytes()).ok())
             .map(|did| did.to_string())
             .ok_or_else(|| {
                 TransportError::ConnectionFailed("a knocked peer presented no key".into())

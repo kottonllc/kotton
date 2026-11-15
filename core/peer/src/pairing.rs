@@ -2223,7 +2223,7 @@ pub fn extract_peer_pubkey_from_conn(connection: &quinn::Connection) -> Option<[
     let identity = connection.peer_identity()?;
     let certs = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
     let first = certs.first()?;
-    extract_ed25519_pubkey_from_cert(first)
+    extract_ed25519_pubkey_from_cert(first).map(|key| *key.as_bytes())
 }
 
 // ---------------------------------------------------------------------------

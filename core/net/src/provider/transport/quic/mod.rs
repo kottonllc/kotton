@@ -99,11 +99,7 @@ impl QuicTransport {
     ) -> Result<Self, TransportError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let device_cert = tls::Ed25519DeviceCert::from_signing_key(device_key)?;
-        let verifier = tls::PairedDeviceVerifier::new_with_admission(
-            paired_keys,
-            admission,
-            Arc::clone(&provider),
-        );
+        let verifier = tls::PairedDeviceVerifier::new_with_admission(paired_keys, admission);
 
         let server_config = tls::build_peer_server_config(
             &device_cert,

@@ -217,7 +217,7 @@ impl Listener for QuicListenerImpl {
             .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())
             .and_then(|certs| certs.into_iter().next())
             .and_then(|cert| super::tls::extract_ed25519_pubkey_from_cert(&cert))
-            .and_then(|pubkey| DidKeyMethod::from_public_key_bytes(&pubkey).ok())
+            .and_then(|pubkey| DidKeyMethod::from_public_key_bytes(pubkey.as_bytes()).ok())
             .map(|did| did.to_string())
             .unwrap_or_else(|| remote_addr.to_string());
 

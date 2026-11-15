@@ -45,13 +45,10 @@ fn random_signing_key() -> SigningKey {
     SigningKey::generate(&mut rand::rngs::OsRng)
 }
 
-fn make_verifier(
-    peer_pubkey: [u8; 32],
-    provider: Arc<rustls::crypto::CryptoProvider>,
-) -> Arc<PairedDeviceVerifier> {
+fn make_verifier(peer_pubkey: [u8; 32]) -> Arc<PairedDeviceVerifier> {
     let mut set = HashSet::new();
     set.insert(peer_pubkey);
-    PairedDeviceVerifier::new(Arc::new(RwLock::new(set)), provider)
+    PairedDeviceVerifier::new(Arc::new(RwLock::new(set)))
 }
 
 // ── test ──────────────────────────────────────────────────────────────────────
@@ -137,7 +134,7 @@ async fn quic_over_turn_relay() {
     // Server B: presents cert_b, requires client to present a cert with pubkey_a
     let server_cfg = build_peer_server_config(
         &cert_b,
-        make_verifier(pubkey_a, Arc::clone(&provider_b)),
+        make_verifier(pubkey_a),
         Arc::clone(&provider_b),
         None,
     )
@@ -146,7 +143,7 @@ async fn quic_over_turn_relay() {
     // Client A: presents cert_a, requires server to present a cert with pubkey_b
     let client_cfg = build_peer_client_config(
         &cert_a,
-        make_verifier(pubkey_b, Arc::clone(&provider_a)),
+        make_verifier(pubkey_b),
         Arc::clone(&provider_a),
         None,
     )

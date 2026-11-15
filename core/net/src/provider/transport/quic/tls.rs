@@ -19,7 +19,15 @@
 //!    connection is a full one and meets the allowlist as it stands.
 //!
 //! Both sides present and verify certificates (mTLS), so trust is symmetric.
+//!
+//! 3. **Hold the peer's key and the handshake's signature to the Ed25519 rule.** The key a
+//!    peer's certificate carries is constructed as a [`VerifyingKey`] where it is read
+//!    ([`extract_ed25519_pubkey_from_cert`]), so a key the rule refuses admits nothing; and
+//!    the handshake's `CertificateVerify` signature is checked under that key by the rule
+//!    ([`verify_handshake_signature`]), Ed25519 alone, for every verifier here. The TLS
+//!    library's own signature check is not called.
 
+use kotton_crypto::ed25519::{Signature, VerifyingKey};
 use kotton_sys::net::TransportError;
 use quinn::{ClientConfig, ServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -285,14 +293,18 @@ impl RecoveryClaim {
     }
 
     /// Does this claim's signature hold for the device presenting it?
+    ///
+    /// The reserve key enters here, from the dialler's certificate, and is constructed as a
+    /// [`VerifyingKey`] before anything is checked under it: a key the Ed25519 rule refuses
+    /// makes no claim hold, and the signature is checked by the rule.
     pub fn verifies_for(&self, device_pub: &[u8; 32]) -> bool {
-        let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&self.reserve_pub) else {
+        let Ok(reserve) = VerifyingKey::from_bytes(&self.reserve_pub) else {
             return false;
         };
-        let Ok(sig) = ed25519_dalek::Signature::from_slice(&self.sig) else {
+        let Ok(sig) = Signature::from_slice(&self.sig) else {
             return false;
         };
-        kotton_crypto::ed25519::verify(&vk, &Self::message(device_pub), &sig).is_ok()
+        reserve.verify(&Self::message(device_pub), &sig).is_ok()
     }
 }
 
@@ -420,6 +432,10 @@ impl Admission {
 /// The allowlist is a live `Arc<RwLock<HashSet<[u8; 32]>>>`. Revoking a device is
 /// instant: remove its key, and the next connection attempt is rejected at the TLS
 /// handshake with no daemon restart needed.
+///
+/// The presented key is admitted only once it has passed the Ed25519 rule as a key, and the
+/// handshake's signature is checked under it by the rule ([`verify_handshake_signature`]), so
+/// the verifier holds no crypto provider of its own.
 /// AID → the latest key event this node holds for that identity.
 ///
 /// A **tip**, not a log: `validate` reads only the immediately preceding event, so a verifier
@@ -432,27 +448,22 @@ pub struct PairedDeviceVerifier {
     /// Empty for every peer that is not a replica of somebody's identity — a verifier with no
     /// tips and no authorities behaves exactly as it did before admission-by-proof existed.
     admission: Admission,
-    provider: Arc<rustls::crypto::CryptoProvider>,
 }
 
 impl PairedDeviceVerifier {
-    /// Create a verifier backed by the given allowlist and crypto provider.
+    /// Create a verifier backed by the given allowlist.
     ///
     /// Admits on the allowlist alone. A node that holds a user's identity tip should use
     /// [`Self::new_with_tips`] so a recovered device can be admitted on proof of control of
     /// the root rather than on a key the node was told about in advance.
-    pub fn new(
-        allowed_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
-        provider: Arc<rustls::crypto::CryptoProvider>,
-    ) -> Arc<Self> {
-        Self::new_with_tips(allowed_keys, Default::default(), provider)
+    pub fn new(allowed_keys: Arc<RwLock<HashSet<[u8; 32]>>>) -> Arc<Self> {
+        Self::new_with_tips(allowed_keys, Default::default())
     }
 
     /// As [`Self::new`], plus the identity tips this node holds (`RFC-0081` gap 3).
     pub fn new_with_tips(
         allowed_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
         known_tips: KnownTips,
-        provider: Arc<rustls::crypto::CryptoProvider>,
     ) -> Arc<Self> {
         Self::new_with_admission(
             allowed_keys,
@@ -460,7 +471,6 @@ impl PairedDeviceVerifier {
                 tips: known_tips,
                 ..Default::default()
             },
-            provider,
         )
     }
 
@@ -470,20 +480,22 @@ impl PairedDeviceVerifier {
     pub fn new_with_admission(
         allowed_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
         admission: Admission,
-        provider: Arc<rustls::crypto::CryptoProvider>,
     ) -> Arc<Self> {
         Arc::new(Self {
             allowed_keys,
             admission,
-            provider,
         })
     }
 
+    /// The presented key enters here, and is admitted by nothing until it has passed the
+    /// Ed25519 rule: [`extract_ed25519_pubkey_from_cert`] constructs it as a [`VerifyingKey`].
     fn check_cert(&self, cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
         let pubkey = extract_ed25519_pubkey_from_cert(cert).ok_or_else(|| {
-            rustls::Error::General("Cannot extract Ed25519 public key from certificate".into())
+            rustls::Error::General(
+                "Certificate carries no Ed25519 public key that passes the rule".into(),
+            )
         })?;
-        if self.allowed_keys.read().unwrap().contains(&pubkey) {
+        if self.allowed_keys.read().unwrap().contains(pubkey.as_bytes()) {
             return Ok(());
         }
         self.admit_by_proof(cert, &pubkey)
@@ -513,7 +525,7 @@ impl PairedDeviceVerifier {
     fn admit_by_proof(
         &self,
         cert: &CertificateDer<'_>,
-        pubkey: &[u8; 32],
+        pubkey: &VerifyingKey,
     ) -> Result<(), rustls::Error> {
         let refuse = || rustls::Error::General(Self::REFUSED.into());
 
@@ -534,7 +546,7 @@ impl PairedDeviceVerifier {
         kotton_crypto::kel_verify::admits_device(
             &tip,
             &offered,
-            pubkey,
+            pubkey.as_bytes(),
             &kotton_crypto::kel_verify::LocalArbiter,
             false,
         )
@@ -544,7 +556,7 @@ impl PairedDeviceVerifier {
         // verifier holds is the old one, and a second connection from the same device
         // re-proves against it and lands here again — harmless, and short-lived.
         self.admission.admitted.write().unwrap().insert(
-            *pubkey,
+            *pubkey.as_bytes(),
             Admitted::ByProof {
                 aid,
                 events: offered,
@@ -563,7 +575,7 @@ impl PairedDeviceVerifier {
     fn admit_by_claim(
         &self,
         cert: &CertificateDer<'_>,
-        pubkey: &[u8; 32],
+        pubkey: &VerifyingKey,
     ) -> Result<(), rustls::Error> {
         let refuse = || rustls::Error::General(Self::REFUSED.into());
         let claim = extract_recovery_claim(cert).ok_or_else(refuse)?;
@@ -575,14 +587,14 @@ impl PairedDeviceVerifier {
             .get(&claim.reserve_pub)
             .cloned()
             .ok_or_else(refuse)?;
-        if !claim.verifies_for(pubkey) {
+        if !claim.verifies_for(pubkey.as_bytes()) {
             return Err(refuse());
         }
         self.admission
             .admitted
             .write()
             .unwrap()
-            .insert(*pubkey, Admitted::ByClaim { aid });
+            .insert(*pubkey.as_bytes(), Admitted::ByClaim { aid });
         Ok(())
     }
 }
@@ -623,18 +635,11 @@ impl rustls::server::danger::ClientCertVerifier for PairedDeviceVerifier {
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        verify_handshake_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider
-            .signature_verification_algorithms
-            .supported_schemes()
+        HANDSHAKE_SCHEMES.to_vec()
     }
 }
 
@@ -668,18 +673,11 @@ impl rustls::client::danger::ServerCertVerifier for PairedDeviceVerifier {
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        verify_handshake_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider
-            .signature_verification_algorithms
-            .supported_schemes()
+        HANDSHAKE_SCHEMES.to_vec()
     }
 }
 
@@ -821,15 +819,17 @@ pub fn build_peer_rustls_client_config(
 /// Any MITM will fail at the ECDH / AEAD decrypt step.
 ///
 /// Do NOT use this verifier for anything other than the pairing bootstrap.
+///
+/// It does hold the handshake to the Ed25519 rule, as [`PairedDeviceVerifier`] does: the
+/// signature must be Ed25519, under a key that passes the rule, and check by the rule
+/// ([`verify_handshake_signature`]). A certificate that is not Ed25519 is refused.
 #[derive(Debug)]
-pub struct BootstrapCertVerifier {
-    provider: Arc<rustls::crypto::CryptoProvider>,
-}
+pub struct BootstrapCertVerifier(());
 
 impl BootstrapCertVerifier {
-    /// Create a new bootstrap verifier backed by the given crypto provider.
-    pub fn new(provider: Arc<rustls::crypto::CryptoProvider>) -> Arc<Self> {
-        Arc::new(Self { provider })
+    /// Create a new bootstrap verifier.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self(()))
     }
 }
 
@@ -868,18 +868,11 @@ impl rustls::server::danger::ClientCertVerifier for BootstrapCertVerifier {
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        verify_handshake_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider
-            .signature_verification_algorithms
-            .supported_schemes()
+        HANDSHAKE_SCHEMES.to_vec()
     }
 }
 
@@ -912,18 +905,11 @@ impl rustls::client::danger::ServerCertVerifier for BootstrapCertVerifier {
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
+        verify_handshake_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider
-            .signature_verification_algorithms
-            .supported_schemes()
+        HANDSHAKE_SCHEMES.to_vec()
     }
 }
 
@@ -935,7 +921,7 @@ pub fn build_bootstrap_server_config(
     device_cert: &Ed25519DeviceCert,
     provider: Arc<rustls::crypto::CryptoProvider>,
 ) -> Result<ServerConfig, TransportError> {
-    let verifier = BootstrapCertVerifier::new(Arc::clone(&provider));
+    let verifier = BootstrapCertVerifier::new();
     let rustls_server = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| TransportError::ConfigError(e.to_string()))?
@@ -967,7 +953,7 @@ pub fn build_bootstrap_client_config(
     device_cert: &Ed25519DeviceCert,
     provider: Arc<rustls::crypto::CryptoProvider>,
 ) -> Result<ClientConfig, TransportError> {
-    let verifier = BootstrapCertVerifier::new(Arc::clone(&provider));
+    let verifier = BootstrapCertVerifier::new();
     let rustls_client = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| TransportError::ConfigError(e.to_string()))?
@@ -996,11 +982,41 @@ pub fn build_bootstrap_client_config(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Extract a raw 32-byte Ed25519 public key from a certificate's SubjectPublicKeyInfo.
+/// The one signature scheme a peer handshake accepts.
+const HANDSHAKE_SCHEMES: [rustls::SignatureScheme; 1] = [rustls::SignatureScheme::ED25519];
+
+/// The handshake's `CertificateVerify` signature, checked by the Ed25519 rule: every
+/// verifier in this module checks a TLS 1.3 signature here and nowhere else.
+///
+/// The scheme must be Ed25519; the key is the certificate's, read by
+/// [`extract_ed25519_pubkey_from_cert`] (the same function the allowlist check reads it with)
+/// and so constructed as a [`VerifyingKey`]; and the signature over `message`, the bytes the
+/// TLS library hands a verifier, is checked by [`VerifyingKey::verify`].
+fn verify_handshake_signature(
+    message: &[u8],
+    cert: &CertificateDer<'_>,
+    dss: &rustls::DigitallySignedStruct,
+) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+    let bad = || rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature);
+    if !HANDSHAKE_SCHEMES.contains(&dss.scheme) {
+        return Err(bad());
+    }
+    let key = extract_ed25519_pubkey_from_cert(cert).ok_or_else(bad)?;
+    let signature = Signature::from_slice(dss.signature()).map_err(|_| bad())?;
+    key.verify(message, &signature).map_err(|_| bad())?;
+    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+}
+
+/// The Ed25519 public key a certificate's SubjectPublicKeyInfo carries, as a
+/// [`VerifyingKey`]: `None` if the certificate does not parse, is not Ed25519, or carries
+/// 32 bytes the Ed25519 rule refuses as a key.
+///
+/// This is where a peer's key enters from its certificate, so it is where the key is
+/// constructed; a caller that needs only the bytes takes [`VerifyingKey::as_bytes`].
 ///
 /// Parses the certificate and reads the key from the **SubjectPublicKeyInfo** —
-/// the exact field rustls verifies the TLS 1.3 `CertificateVerify` signature
-/// against. Returns `None` if the certificate does not parse or is not Ed25519.
+/// the exact field [`verify_handshake_signature`] checks the TLS 1.3
+/// `CertificateVerify` signature against, because it reads the key here too.
 ///
 /// # Why structural parsing, not a byte-scan
 ///
@@ -1009,15 +1025,15 @@ pub fn build_bootstrap_client_config(
 /// differential**: attacker-controlled octets in issuer/subject DN attributes
 /// *precede* the real SPKI in the certificate, so an attacker could plant
 /// `…OID…BITSTRING…<victim_pubkey>` in a DN field, sign the handshake with their
-/// **own** key (which rustls validates against the true SPKI), and have this
+/// **own** key (which the signature check reads from the true SPKI), and have this
 /// function match the *planted* victim key against the paired allowlist —
 /// impersonating any allowlisted DID without its private key. Gating the
-/// allowlist on the same SPKI rustls checks the signature against closes that gap.
+/// allowlist on the same SPKI the signature is checked against closes that gap.
 ///
 /// North star ([SECURITY-DESIGN-AUDIT-2026-07] C1): drop X.509 entirely and use
 /// TLS 1.3 raw public keys (RFC 7250) so "the cert *is* the identity key" is
 /// structural rather than parsed.
-pub fn extract_ed25519_pubkey_from_cert(cert_der: &CertificateDer<'_>) -> Option<[u8; 32]> {
+pub fn extract_ed25519_pubkey_from_cert(cert_der: &CertificateDer<'_>) -> Option<VerifyingKey> {
     use x509_parser::prelude::FromDer;
 
     let (_, cert) =
@@ -1033,7 +1049,7 @@ pub fn extract_ed25519_pubkey_from_cert(cert_der: &CertificateDer<'_>) -> Option
 
     // The Ed25519 subjectPublicKey is exactly 32 raw bytes; `try_into` enforces it.
     let key: [u8; 32] = spki.subject_public_key.data.as_ref().try_into().ok()?;
-    Some(key)
+    VerifyingKey::from_bytes(&key).ok()
 }
 
 /// The key events a peer offers in its certificate so this node can admit it
@@ -1165,10 +1181,6 @@ mod tests {
         });
     }
 
-    fn test_provider() -> Arc<rustls::crypto::CryptoProvider> {
-        Arc::new(rustls::crypto::ring::default_provider())
-    }
-
     #[test]
     fn test_device_cert_round_trip() {
         init_crypto();
@@ -1189,7 +1201,7 @@ mod tests {
         let cert = Ed25519DeviceCert::from_signing_key(&signing_key).unwrap();
 
         let extracted = extract_ed25519_pubkey_from_cert(&cert.cert_der).unwrap();
-        assert_eq!(extracted, cert.public_key_bytes);
+        assert_eq!(*extracted.as_bytes(), cert.public_key_bytes);
     }
 
     #[test]
@@ -1200,7 +1212,7 @@ mod tests {
 
         let mut allowed = HashSet::new();
         allowed.insert(cert.public_key_bytes);
-        let verifier = PairedDeviceVerifier::new(Arc::new(RwLock::new(allowed)), test_provider());
+        let verifier = PairedDeviceVerifier::new(Arc::new(RwLock::new(allowed)));
 
         verifier.check_cert(&cert.cert_der).unwrap();
     }
@@ -1213,7 +1225,6 @@ mod tests {
 
         let verifier = PairedDeviceVerifier::new(
             Arc::new(RwLock::new(HashSet::new())), // empty allowlist
-            test_provider(),
         );
 
         assert!(verifier.check_cert(&cert.cert_der).is_err());
@@ -1226,7 +1237,7 @@ mod tests {
         let cert = Ed25519DeviceCert::from_signing_key(&signing_key).unwrap();
 
         let allowed = Arc::new(RwLock::new(HashSet::new()));
-        let verifier = PairedDeviceVerifier::new(Arc::clone(&allowed), test_provider());
+        let verifier = PairedDeviceVerifier::new(Arc::clone(&allowed));
 
         // Add key → allowed
         allowed.write().unwrap().insert(cert.public_key_bytes);
@@ -1298,7 +1309,7 @@ mod tests {
         );
 
         // The fix: extraction returns the real SPKI key, never the planted one.
-        let extracted = extract_ed25519_pubkey_from_cert(&cert_der).unwrap();
+        let extracted = *extract_ed25519_pubkey_from_cert(&cert_der).unwrap().as_bytes();
         assert_eq!(extracted, attacker_key);
         assert_ne!(extracted, victim_key);
 
@@ -1307,7 +1318,7 @@ mod tests {
         let mut allowed = HashSet::new();
         allowed.insert(victim_key);
         let verifier =
-            PairedDeviceVerifier::new(Arc::new(RwLock::new(allowed)), test_provider());
+            PairedDeviceVerifier::new(Arc::new(RwLock::new(allowed)));
         assert!(
             verifier.check_cert(&cert_der).is_err(),
             "attacker cert with a planted victim key must not authenticate as the victim"
@@ -1397,7 +1408,7 @@ mod admission_extract_tests {
         assert_eq!(extract_admission_events(&cert.cert_der), events);
         // The identity the allowlist checks is unaffected by the passenger.
         assert_eq!(
-            extract_ed25519_pubkey_from_cert(&cert.cert_der),
+            extract_ed25519_pubkey_from_cert(&cert.cert_der).map(|k| *k.as_bytes()),
             Some(sk.verifying_key().to_bytes())
         );
     }
@@ -1444,10 +1455,6 @@ mod admission_verifier_tests {
     use super::*;
     use kotton_crypto::kel_verify::{build_mnemonic_rotation, build_user_inception};
 
-    fn provider() -> Arc<rustls::crypto::CryptoProvider> {
-        Arc::new(rustls::crypto::ring::default_provider())
-    }
-
     /// A blind node holding only the inception, and a device recovered from the phrase.
     fn scenario() -> (kotton_wire::kel::KelEvent, ed25519_dalek::SigningKey, Vec<kotton_wire::kel::KelEvent>) {
         let seed = [42u8; 32];
@@ -1473,7 +1480,6 @@ mod admission_verifier_tests {
         let v = PairedDeviceVerifier::new_with_tips(
             Arc::new(RwLock::new(HashSet::new())),
             tips(&[(&inception.aid.to_string(), &inception)]),
-            provider(),
         );
         let cert = Ed25519DeviceCert::from_signing_key_with_admission(&recovered, &offered)
             .expect("cert");
@@ -1486,7 +1492,6 @@ mod admission_verifier_tests {
         let sk = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
         let v = PairedDeviceVerifier::new(
             Arc::new(RwLock::new(HashSet::from([sk.verifying_key().to_bytes()]))),
-            provider(),
         );
         let cert = Ed25519DeviceCert::from_signing_key(&sk).expect("cert");
         assert!(v.check_cert(&cert.cert_der).is_ok());
@@ -1505,7 +1510,6 @@ mod admission_verifier_tests {
         let v = PairedDeviceVerifier::new_with_tips(
             Arc::new(RwLock::new(HashSet::new())),
             tips(&[(&inception.aid.to_string(), &inception)]),
-            provider(),
         );
         let cert = Ed25519DeviceCert::from_signing_key_with_admission(&attacker, &[their_rot])
             .expect("cert");
@@ -1523,7 +1527,6 @@ mod admission_verifier_tests {
         let v = PairedDeviceVerifier::new_with_tips(
             Arc::new(RwLock::new(HashSet::new())),
             tips(&[(&inception.aid.to_string(), &inception)]),
-            provider(),
         );
 
         let nothing = Ed25519DeviceCert::from_signing_key(&stranger).expect("cert");
@@ -1544,7 +1547,6 @@ mod admission_verifier_tests {
         let v = PairedDeviceVerifier::new_with_admission(
             Arc::new(RwLock::new(HashSet::new())),
             admission.clone(),
-            provider(),
         );
         (v, admission)
     }
@@ -1675,7 +1677,7 @@ mod admission_verifier_tests {
     #[test]
     fn a_node_with_no_tips_is_unchanged() {
         let (_, recovered, offered) = scenario();
-        let v = PairedDeviceVerifier::new(Arc::new(RwLock::new(HashSet::new())), provider());
+        let v = PairedDeviceVerifier::new(Arc::new(RwLock::new(HashSet::new())));
         let cert = Ed25519DeviceCert::from_signing_key_with_admission(&recovered, &offered)
             .expect("cert");
         assert!(v.check_cert(&cert.cert_der).is_err());
@@ -1719,12 +1721,12 @@ mod resumption_tests {
         }
 
         fn server_config(&self) -> rustls::ServerConfig {
-            let verifier = PairedDeviceVerifier::new(Arc::clone(&self.server_allows), provider());
+            let verifier = PairedDeviceVerifier::new(Arc::clone(&self.server_allows));
             build_peer_rustls_server_config(&self.server, verifier, provider()).unwrap()
         }
 
         fn client_config(&self) -> rustls::ClientConfig {
-            let verifier = PairedDeviceVerifier::new(Arc::clone(&self.client_allows), provider());
+            let verifier = PairedDeviceVerifier::new(Arc::clone(&self.client_allows));
             build_peer_rustls_client_config(&self.client, verifier, provider()).unwrap()
         }
     }
@@ -1744,7 +1746,7 @@ mod resumption_tests {
     }
 
     /// Move everything `from` has to send into `to`. False when there was nothing to send.
-    fn deliver<A, B>(
+    pub(super) fn deliver<A, B>(
         from: &mut ConnectionCommon<A>,
         to: &mut ConnectionCommon<B>,
     ) -> Result<bool, rustls::Error> {
@@ -1763,7 +1765,7 @@ mod resumption_tests {
     /// One connection, run until neither side has anything left to say, so that any ticket
     /// the server issues after the handshake reaches the client. The kind of handshake both
     /// sides agree they had, or the refusal.
-    fn connect(
+    pub(super) fn connect(
         client: &Arc<rustls::ClientConfig>,
         server: &Arc<rustls::ServerConfig>,
     ) -> Result<HandshakeKind, rustls::Error> {
@@ -1824,5 +1826,487 @@ mod resumption_tests {
         assert_eq!(connect(&client, &server).unwrap(), HandshakeKind::Full);
         pair.client_allows.write().unwrap().remove(&pair.server.public_key_bytes);
         assert!(connect(&client, &server).is_err());
+    }
+}
+
+/// The handshake holds the peer's key and its signature to the Ed25519 rule, in both
+/// directions and for both verifiers: a certificate under a key the rule refuses, and a
+/// `CertificateVerify` signature the rule refuses under an admitted key, end the handshake.
+///
+/// A test-only signer puts whatever 64 bytes a case needs into the handshake, under whatever
+/// key its certificate names, so each refusal is the verifier's and not the signer's. Each
+/// test first completes the same handshake with an honest signature, to show the harness is
+/// not what refuses.
+#[cfg(test)]
+mod rule_tests {
+    use super::resumption_tests::connect;
+    use super::*;
+    use kotton_crypto::ed25519::refused;
+
+    fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+        Arc::new(rustls::crypto::ring::default_provider())
+    }
+
+    /// What a test signer puts in the handshake for the message it is handed.
+    type Forge = Arc<dyn Fn(&[u8]) -> [u8; 64] + Send + Sync>;
+
+    /// A rustls signing key that signs by [`Forge`] and labels its signature with the scheme
+    /// it carries, whatever the peer offered.
+    #[derive(Clone)]
+    struct Forger(Forge, rustls::SignatureScheme);
+
+    impl Forger {
+        fn ed25519(forge: Forge) -> Self {
+            Self(forge, rustls::SignatureScheme::ED25519)
+        }
+    }
+
+    impl std::fmt::Debug for Forger {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Forger")
+        }
+    }
+
+    impl rustls::sign::SigningKey for Forger {
+        fn choose_scheme(&self, _offered: &[rustls::SignatureScheme]) -> Option<Box<dyn rustls::sign::Signer>> {
+            Some(Box::new(self.clone()))
+        }
+
+        fn algorithm(&self) -> rustls::SignatureAlgorithm {
+            rustls::SignatureAlgorithm::ED25519
+        }
+    }
+
+    impl rustls::sign::Signer for Forger {
+        fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
+            Ok((self.0)(message).to_vec())
+        }
+
+        fn scheme(&self) -> rustls::SignatureScheme {
+            self.1
+        }
+    }
+
+    /// An rcgen key that names `public` and signs the certificate with zeros: nothing here
+    /// checks a peer certificate's own signature, only the handshake's.
+    struct Named([u8; 32]);
+
+    impl rcgen::RemoteKeyPair for Named {
+        fn public_key(&self) -> &[u8] {
+            &self.0
+        }
+
+        fn sign(&self, _msg: &[u8]) -> Result<Vec<u8>, rcgen::Error> {
+            Ok(vec![0; 64])
+        }
+
+        fn algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+            &rcgen::PKCS_ED25519
+        }
+    }
+
+    /// A certificate under `public`, carrying `offer`, as a peer certificate is built.
+    fn cert_under(public: [u8; 32], offer: &CertOffer) -> CertificateDer<'static> {
+        let key = rcgen::KeyPair::from_remote(Box::new(Named(public))).unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["kotton-device".to_string()]).unwrap();
+        if let Some(claim) = &offer.claim {
+            params.custom_extensions.push(rcgen::CustomExtension::from_oid_content(
+                Ed25519DeviceCert::RECOVERY_CLAIM_OID,
+                der_octet_string(&serde_json::to_vec(claim).unwrap()),
+            ));
+        }
+        CertificateDer::from(params.self_signed(&key).unwrap().der().to_vec())
+    }
+
+    /// The certificate and signer of a peer presenting `public` and signing by `forge`.
+    fn forged(public: [u8; 32], forge: Forge) -> Arc<rustls::sign::CertifiedKey> {
+        Arc::new(rustls::sign::CertifiedKey::new(
+            vec![cert_under(public, &CertOffer::default())],
+            Arc::new(Forger::ed25519(forge)),
+        ))
+    }
+
+    /// A signer that signs honestly with `key`.
+    fn honestly(key: &ed25519_dalek::SigningKey) -> Forge {
+        use ed25519_dalek::Signer as _;
+        let key = key.clone();
+        Arc::new(move |m| key.sign(m).to_bytes())
+    }
+
+    /// A signature over `message` under [`refused::mixed_order_key`] that satisfies the
+    /// equation without the cofactor and whose `R` is of prime order: a signature check
+    /// alone accepts it, so only the key's construction refuses it.
+    ///
+    /// The key is `A + T`, the honest key of the seed `[42; 32]` plus a point of order eight.
+    /// A nonce is drawn until the challenge `k` is a multiple of eight, so `[k]T` is the
+    /// identity and `[S]B - [k](A + T) = R`.
+    fn under_mixed_order_key(message: &[u8]) -> [u8; 64] {
+        use curve25519_dalek::{edwards::EdwardsPoint, scalar::Scalar};
+        use sha2::{Digest as _, Sha512};
+        let a = ed25519_dalek::SigningKey::from_bytes(&[42; 32]).to_scalar();
+        let key = refused::mixed_order_key();
+        for nonce in 0u64.. {
+            let wide: [u8; 64] = Sha512::new().chain_update(nonce.to_le_bytes()).chain_update(message).finalize().into();
+            let r = Scalar::from_bytes_mod_order_wide(&wide);
+            let big_r = EdwardsPoint::mul_base(&r).compress();
+            let wide: [u8; 64] =
+                Sha512::new().chain_update(big_r.as_bytes()).chain_update(key).chain_update(message).finalize().into();
+            let k = Scalar::from_bytes_mod_order_wide(&wide);
+            if k.as_bytes()[0] & 7 != 0 {
+                continue;
+            }
+            let mut sig = [0u8; 64];
+            sig[..32].copy_from_slice(big_r.as_bytes());
+            sig[32..].copy_from_slice((r + k * a).as_bytes());
+            return sig;
+        }
+        unreachable!()
+    }
+
+    /// The signature a case puts under the refused key `public`: for the identity, the one a
+    /// check without the small-order clauses accepts over any message; for the mixed-order
+    /// key, [`under_mixed_order_key`]; for the others, the same bytes as the identity's,
+    /// since no signature is any of theirs.
+    fn under_refused(public: [u8; 32]) -> Forge {
+        if public == refused::mixed_order_key() {
+            Arc::new(under_mixed_order_key)
+        } else {
+            Arc::new(|_| refused::under_small_order_key_bytes())
+        }
+    }
+
+    /// Every key the rule refuses, each named with its clause.
+    fn refused_keys() -> Vec<(String, [u8; 32])> {
+        let small = [
+            "identity",
+            "order two",
+            "order four, x positive",
+            "order four, x negative",
+            "order eight, a",
+            "order eight, a negated",
+            "order eight, b",
+            "order eight, b negated",
+        ];
+        small
+            .iter()
+            .map(|n| format!("small order: {n}"))
+            .zip(refused::SMALL_ORDER_KEYS)
+            .chain(
+                ["identity, y = 1 with the sign bit", "identity, y = p + 1", "identity, y = p + 1 with the sign bit"]
+                    .map(String::from)
+                    .into_iter()
+                    .zip(refused::IDENTITY_OTHER_ENCODINGS),
+            )
+            .chain([
+                ("mixed order".to_string(), refused::mixed_order_key()),
+                ("not canonical".to_string(), refused::NON_CANONICAL_KEY),
+                ("not a point".to_string(), refused::NOT_A_POINT),
+            ])
+            .collect()
+    }
+
+    /// Every signature the rule refuses under an honest `key`, each named with its clause.
+    fn refused_signatures(key: &ed25519_dalek::SigningKey) -> Vec<(&'static str, Forge)> {
+        let (a, b) = (key.clone(), key.clone());
+        vec![
+            ("R of small order", Arc::new(move |m: &[u8]| refused::small_order_r(&a, m).to_bytes())),
+            ("S not reduced", Arc::new(move |m: &[u8]| refused::unreduced_s(&b, m).to_bytes())),
+        ]
+    }
+
+    /// Which verifier a case puts on the side that checks.
+    #[derive(Clone, Copy)]
+    enum Verifier {
+        Paired,
+        Bootstrap,
+    }
+
+    /// The verifier, admitting `admit` by allowlist where it keeps one.
+    fn server_verifier(v: Verifier, admit: [u8; 32]) -> Arc<dyn rustls::server::danger::ClientCertVerifier> {
+        match v {
+            Verifier::Paired => PairedDeviceVerifier::new(Arc::new(RwLock::new(HashSet::from([admit])))),
+            Verifier::Bootstrap => BootstrapCertVerifier::new(),
+        }
+    }
+
+    fn client_verifier(v: Verifier, admit: [u8; 32]) -> Arc<dyn rustls::client::danger::ServerCertVerifier> {
+        match v {
+            Verifier::Paired => PairedDeviceVerifier::new(Arc::new(RwLock::new(HashSet::from([admit])))),
+            Verifier::Bootstrap => BootstrapCertVerifier::new(),
+        }
+    }
+
+    fn honest_cert(key: &ed25519_dalek::SigningKey) -> Arc<rustls::sign::CertifiedKey> {
+        let cert = Ed25519DeviceCert::from_signing_key(key).unwrap();
+        Arc::new(rustls::sign::CertifiedKey::new(vec![cert.cert_der.clone()], Arc::new(Forger::ed25519(honestly(key)))))
+    }
+
+    fn server_config(
+        verifier: Arc<dyn rustls::server::danger::ClientCertVerifier>,
+        presents: Arc<rustls::sign::CertifiedKey>,
+    ) -> Arc<rustls::ServerConfig> {
+        let config = rustls::ServerConfig::builder_with_provider(provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(verifier)
+            .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(presents)));
+        Arc::new(config)
+    }
+
+    fn client_config(
+        verifier: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+        presents: Arc<rustls::sign::CertifiedKey>,
+    ) -> Arc<rustls::ClientConfig> {
+        let config = rustls::ClientConfig::builder_with_provider(provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(presents)));
+        Arc::new(config)
+    }
+
+    /// A handshake in which the server checks a client presenting `public` and signing by
+    /// `forge`; the server's verifier admits `public` where it keeps an allowlist.
+    fn server_checks(v: Verifier, public: [u8; 32], forge: Forge) -> Result<rustls::HandshakeKind, rustls::Error> {
+        let server_key = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
+        let server = server_config(server_verifier(v, public), honest_cert(&server_key));
+        let client = client_config(
+            client_verifier(v, server_key.verifying_key().to_bytes()),
+            forged(public, forge),
+        );
+        connect(&client, &server)
+    }
+
+    /// A handshake in which the client checks a server presenting `public` and signing by
+    /// `forge`; the client's verifier admits `public` where it keeps an allowlist.
+    fn client_checks(v: Verifier, public: [u8; 32], forge: Forge) -> Result<rustls::HandshakeKind, rustls::Error> {
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
+        let server = server_config(
+            server_verifier(v, client_key.verifying_key().to_bytes()),
+            forged(public, forge),
+        );
+        let client = client_config(client_verifier(v, public), honest_cert(&client_key));
+        connect(&client, &server)
+    }
+
+    type Handshake = fn(Verifier, [u8; 32], Forge) -> Result<rustls::HandshakeKind, rustls::Error>;
+
+    /// Each refused key, presented by the side `handshake` checks, ends the handshake; an
+    /// honest key and signature in the same place complete it.
+    fn refuses_every_refused_key(v: Verifier, handshake: Handshake) {
+        let honest = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        handshake(v, honest.verifying_key().to_bytes(), honestly(&honest)).expect("an honest peer is admitted");
+        let admitted: Vec<String> = refused_keys()
+            .into_iter()
+            .filter(|(_, public)| handshake(v, *public, under_refused(*public)).is_ok())
+            .map(|(name, _)| name)
+            .collect();
+        assert!(admitted.is_empty(), "the handshake admitted a key the rule refuses: {admitted:?}");
+    }
+
+    /// Each refused signature by an admitted key ends the handshake.
+    fn refuses_every_refused_signature(v: Verifier, handshake: Handshake) {
+        let honest = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let public = honest.verifying_key().to_bytes();
+        handshake(v, public, honestly(&honest)).expect("an honest peer is admitted");
+        let admitted: Vec<&str> = refused_signatures(&honest)
+            .into_iter()
+            .filter(|(_, forge)| handshake(v, public, Arc::clone(forge)).is_ok())
+            .map(|(name, _)| name)
+            .collect();
+        assert!(admitted.is_empty(), "the handshake accepted a signature the rule refuses: {admitted:?}");
+    }
+
+    /// The mixed-order case is the one a signature check alone would pass: its signature
+    /// satisfies the equation without the cofactor, and its `R` is not of small order.
+    #[test]
+    fn the_mixed_order_signature_satisfies_the_equation_and_only_the_key_is_refused() {
+        use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
+        use curve25519_dalek::scalar::Scalar;
+        use sha2::{Digest as _, Sha512};
+        let message = b"a handshake transcript";
+        let sig = under_mixed_order_key(message);
+        let key = refused::mixed_order_key();
+        let a = CompressedEdwardsY(key).decompress().unwrap();
+        let r = CompressedEdwardsY(sig[..32].try_into().unwrap()).decompress().unwrap();
+        let s = Option::<Scalar>::from(Scalar::from_canonical_bytes(sig[32..].try_into().unwrap())).expect("S is reduced");
+        let wide: [u8; 64] = Sha512::new().chain_update(&sig[..32]).chain_update(key).chain_update(message).finalize().into();
+        let k = Scalar::from_bytes_mod_order_wide(&wide);
+        assert_eq!(EdwardsPoint::mul_base(&s) - k * a, r);
+        assert!(!r.is_small_order() && !a.is_small_order());
+        assert_eq!(VerifyingKey::from_bytes(&key), Err(kotton_crypto::ed25519::Refused));
+    }
+
+    #[test]
+    fn a_paired_server_refuses_a_client_presenting_a_key_the_rule_refuses() {
+        refuses_every_refused_key(Verifier::Paired, server_checks);
+    }
+
+    #[test]
+    fn a_paired_client_refuses_a_server_presenting_a_key_the_rule_refuses() {
+        refuses_every_refused_key(Verifier::Paired, client_checks);
+    }
+
+    #[test]
+    fn a_bootstrap_server_refuses_a_client_presenting_a_key_the_rule_refuses() {
+        refuses_every_refused_key(Verifier::Bootstrap, server_checks);
+    }
+
+    #[test]
+    fn a_bootstrap_client_refuses_a_server_presenting_a_key_the_rule_refuses() {
+        refuses_every_refused_key(Verifier::Bootstrap, client_checks);
+    }
+
+    #[test]
+    fn a_paired_server_refuses_a_handshake_signature_the_rule_refuses_under_an_admitted_key() {
+        refuses_every_refused_signature(Verifier::Paired, server_checks);
+    }
+
+    #[test]
+    fn a_paired_client_refuses_a_handshake_signature_the_rule_refuses_under_an_admitted_key() {
+        refuses_every_refused_signature(Verifier::Paired, client_checks);
+    }
+
+    #[test]
+    fn a_bootstrap_server_refuses_a_handshake_signature_the_rule_refuses() {
+        refuses_every_refused_signature(Verifier::Bootstrap, server_checks);
+    }
+
+    #[test]
+    fn a_bootstrap_client_refuses_a_handshake_signature_the_rule_refuses() {
+        refuses_every_refused_signature(Verifier::Bootstrap, client_checks);
+    }
+
+    /// An honest Ed25519 signature by an admitted key, labelled with any other scheme, ends the
+    /// handshake in both directions for both verifiers: the TLS library hands a verifier the
+    /// scheme the peer named, and only Ed25519 is checked.
+    #[test]
+    fn a_handshake_signature_labelled_with_another_scheme_is_refused() {
+        let honest = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let public = honest.verifying_key().to_bytes();
+        let cert = || cert_under(public, &CertOffer::default());
+        let other = |scheme| Arc::new(rustls::sign::CertifiedKey::new(vec![cert()], Arc::new(Forger(honestly(&honest), scheme))));
+        let peer = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
+        let mut accepted = Vec::new();
+        for v in [Verifier::Paired, Verifier::Bootstrap] {
+            for scheme in [rustls::SignatureScheme::ED25519, rustls::SignatureScheme::ECDSA_NISTP256_SHA256, rustls::SignatureScheme::ED448] {
+                let as_client = connect(
+                    &client_config(client_verifier(v, peer.verifying_key().to_bytes()), other(scheme)),
+                    &server_config(server_verifier(v, public), honest_cert(&peer)),
+                );
+                let as_server = connect(
+                    &client_config(client_verifier(v, public), honest_cert(&peer)),
+                    &server_config(server_verifier(v, peer.verifying_key().to_bytes()), other(scheme)),
+                );
+                if scheme == rustls::SignatureScheme::ED25519 {
+                    as_client.expect("labelled Ed25519, the client is admitted");
+                    as_server.expect("labelled Ed25519, the server is admitted");
+                    continue;
+                }
+                if as_client.is_ok() {
+                    accepted.push(format!("{scheme:?} from a client"));
+                }
+                if as_server.is_ok() {
+                    accepted.push(format!("{scheme:?} from a server"));
+                }
+            }
+        }
+        assert!(accepted.is_empty(), "accepted under another scheme: {accepted:?}");
+    }
+
+    /// A certificate that is not Ed25519 completes no bootstrap handshake, from either side.
+    #[test]
+    fn a_bootstrap_verifier_refuses_a_certificate_that_is_not_ed25519() {
+        let (ecdsa_cert, ecdsa_key) = generate_self_signed_cert().unwrap();
+        let ed = ed25519_dalek::SigningKey::from_bytes(&[6; 32]);
+
+        let server = rustls::ServerConfig::builder_with_provider(provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(BootstrapCertVerifier::new())
+            .with_single_cert(vec![ecdsa_cert.clone()], ecdsa_key.clone_key())
+            .unwrap();
+        let client = client_config(BootstrapCertVerifier::new(), honest_cert(&ed));
+        assert!(connect(&Arc::new(client.as_ref().clone()), &Arc::new(server)).is_err());
+
+        let server = server_config(BootstrapCertVerifier::new(), honest_cert(&ed));
+        let client = rustls::ClientConfig::builder_with_provider(provider())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(BootstrapCertVerifier::new())
+            .with_client_auth_cert(vec![ecdsa_cert], ecdsa_key)
+            .unwrap();
+        assert!(connect(&Arc::new(client), &server).is_err());
+    }
+
+    /// A paired server hosting an identity whose recovery authorities `authorities` names,
+    /// facing a device with no allowlist entry whose certificate carries `claim`. The
+    /// handshake's outcome, and whether the server recorded an admission.
+    fn claim_at_the_handshake(
+        authorities: &[[u8; 32]],
+        claim: RecoveryClaim,
+    ) -> (Result<rustls::HandshakeKind, rustls::Error>, bool) {
+        let server_key = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
+        let device = ed25519_dalek::SigningKey::from_bytes(&[21; 32]);
+        let admission = Admission::default();
+        for a in authorities {
+            admission.authorities.write().unwrap().insert(*a, "did:example:hosted".to_string());
+        }
+        let verifier = PairedDeviceVerifier::new_with_admission(Arc::new(RwLock::new(HashSet::new())), admission.clone());
+        let server = server_config(verifier, honest_cert(&server_key));
+        let device_cert = Ed25519DeviceCert::from_signing_key_with_offer(&device, &CertOffer::claim(claim)).unwrap();
+        let client = client_config(
+            client_verifier(Verifier::Paired, server_key.verifying_key().to_bytes()),
+            Arc::new(rustls::sign::CertifiedKey::new(vec![device_cert.cert_der], Arc::new(Forger::ed25519(honestly(&device))))),
+        );
+        let outcome = connect(&client, &server);
+        (outcome, admission.admitted(&device.verifying_key().to_bytes()).is_some())
+    }
+
+    fn device_pub() -> [u8; 32] {
+        ed25519_dalek::SigningKey::from_bytes(&[21; 32]).verifying_key().to_bytes()
+    }
+
+    /// A recovery claim under a reserve key the rule refuses admits no device at the
+    /// handshake, though the node holds that key as an authority; an honest claim does.
+    #[test]
+    fn a_recovery_claim_under_a_reserve_key_the_rule_refuses_admits_no_device_at_the_handshake() {
+        let reserve = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
+        let (honest, recorded) = claim_at_the_handshake(
+            &[reserve.verifying_key().to_bytes()],
+            RecoveryClaim::sign(&reserve, &device_pub()),
+        );
+        assert!(honest.is_ok() && recorded, "an honest claim admits");
+
+        let message = RecoveryClaim::message(&device_pub());
+        let admitted: Vec<String> = refused_keys()
+            .into_iter()
+            .filter(|(_, public)| {
+                let claim = RecoveryClaim { reserve_pub: *public, sig: under_refused(*public)(&message).to_vec() };
+                let (outcome, recorded) = claim_at_the_handshake(&[*public], claim);
+                outcome.is_ok() || recorded
+            })
+            .map(|(name, _)| name)
+            .collect();
+        assert!(admitted.is_empty(), "a claim under a refused reserve key admitted a device: {admitted:?}");
+    }
+
+    /// A recovery claim whose signature the rule refuses admits no device at the handshake.
+    #[test]
+    fn a_recovery_claim_signature_the_rule_refuses_admits_no_device_at_the_handshake() {
+        let reserve = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
+        let message = RecoveryClaim::message(&device_pub());
+        let admitted: Vec<&str> = refused_signatures(&reserve)
+            .into_iter()
+            .filter(|(_, forge)| {
+                let claim = RecoveryClaim { reserve_pub: reserve.verifying_key().to_bytes(), sig: forge(&message).to_vec() };
+                let (outcome, recorded) = claim_at_the_handshake(&[reserve.verifying_key().to_bytes()], claim);
+                outcome.is_ok() || recorded
+            })
+            .map(|(name, _)| name)
+            .collect();
+        assert!(admitted.is_empty(), "a refused claim signature admitted a device: {admitted:?}");
     }
 }
