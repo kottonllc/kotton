@@ -1134,21 +1134,19 @@ pub async fn reproject_allowlist(
             }
         }
     }
-    // A row whose key does not decode, or is of small order, is not put on the allowlist.
-    // The rule's other clauses are held here when the allowlist's element is the type
-    // (#564, #567).
-    rebuilt.retain(a_key_someone_holds);
+    // A key the rule refuses is not kept in the rebuilt set: operator keys, stored
+    // rows and keys carried over from the live set are all held to it. The rule is
+    // the type's: bytes stay only if they become a `VerifyingKey`, so a row that
+    // does not decode, is not its point's canonical encoding, is the identity, or
+    // is outside the prime-order subgroup is left out. Own-device members' keys are
+    // added after it, below, as bytes; they are held to the rule when the
+    // allowlist's element is the key type (#578).
+    rebuilt.retain(|key| kotton_crypto::ed25519::VerifyingKey::from_bytes(key).is_ok());
     *paired_keys.write().unwrap() = rebuilt;
 
     for (uid, store) in users {
         project_membership_into_allowlist(store.as_ref(), db, paired_keys, uid).await;
     }
-}
-
-/// Whether `key` is an Ed25519 key a peer can hold the secret half of: a curve
-/// point, and not one of small order (the all-zero encoding is one).
-fn a_key_someone_holds(key: &[u8; 32]) -> bool {
-    ed25519_dalek::VerifyingKey::from_bytes(key).is_ok_and(|k| !k.is_weak())
 }
 
 /// Project a freshly-enrolled own-device node into the user's live mTLS allowlist
@@ -1641,13 +1639,18 @@ mod allowlist_rebuild {
         }
     }
 
-    /// **The allowlist a daemon rebuilds from its store holds no key nobody
-    /// holds.** A store can still carry an all-zero row: one written by the
-    /// placeholder pairing verb this crate no longer has, which an existing
-    /// database keeps, or one `peer_add` was handed. The rebuild admits the
-    /// real peer beside it and not the zero key.
+    /// **The allowlist a daemon rebuilds from its store holds only keys the
+    /// rule admits.** A store can carry a row whose bytes are not a key: an
+    /// all-zero row written by the placeholder pairing verb this crate no
+    /// longer has, which an existing database keeps, or bytes `peer_add` was
+    /// handed. One row per key the rule refuses sits beside one honest key, and
+    /// the live set starts holding every one of them, as a daemon that loaded
+    /// such rows before this rebuild would. The rebuild leaves the honest key
+    /// alone on the allowlist.
     #[tokio::test]
-    async fn the_rebuilt_allowlist_holds_no_all_zero_key() {
+    async fn the_rebuilt_allowlist_holds_only_keys_the_rule_admits() {
+        use kotton_crypto::ed25519::refused;
+
         let dir = tempfile::tempdir().unwrap();
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(dir.path().join("agent.db"))
@@ -1656,29 +1659,35 @@ mod allowlist_rebuild {
         sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
         let db = Arc::new(pool);
 
-        let real = SigningKey::from_bytes(&[11u8; 32]).verifying_key().to_bytes();
-        for (id, did, key) in [
-            ("laptop", "did:peer:laptop", real),
-            ("my-vps", "did:peer:my-vps", [0u8; 32]),
-        ] {
-            network_db::insert_paired_node(&db, id, "alice", did, &key, "[]", 0, None)
+        let honest = SigningKey::from_bytes(&[11u8; 32]).verifying_key().to_bytes();
+        let refused_keys: Vec<[u8; 32]> = refused::SMALL_ORDER_KEYS
+            .into_iter()
+            .chain(refused::IDENTITY_OTHER_ENCODINGS)
+            .chain([refused::mixed_order_key(), refused::NON_CANONICAL_KEY, refused::NOT_A_POINT])
+            .collect();
+        assert_eq!(refused_keys.len(), 14, "one row per refused key vector");
+
+        network_db::insert_paired_node(&db, "laptop", "alice", "did:peer:laptop", &honest, "[]", 0, None)
+            .await
+            .unwrap();
+        for (i, key) in refused_keys.iter().enumerate() {
+            let (id, did) = (format!("refused-{i}"), format!("did:peer:refused-{i}"));
+            network_db::insert_paired_node(&db, &id, "alice", &did, key, "[]", 0, None)
                 .await
                 .unwrap();
         }
+        assert_eq!(network_db::list_paired_nodes(&db, "alice").await.unwrap().len(), 15);
 
-        // The live set starts with the zero key in it, as a daemon that loaded
-        // such a row before this rebuild would hold it.
-        let paired_keys = Arc::new(RwLock::new(HashSet::from([[0u8; 32]])));
+        let paired_keys = Arc::new(RwLock::new(refused_keys.iter().copied().collect::<HashSet<_>>()));
         let users: Vec<(String, Arc<dyn MemberStore>)> =
             vec![("alice".to_string(), Arc::new(NoMembers))];
         reproject_allowlist(&users, &db, &paired_keys).await;
 
         let live = paired_keys.read().unwrap().clone();
-        assert!(live.contains(&real), "the real peer's row must still be admitted");
-        assert!(
-            !live.contains(&[0u8; 32]),
-            "the rebuilt allowlist admitted the all-zero key"
-        );
+        for (i, key) in refused_keys.iter().enumerate() {
+            assert!(!live.contains(key), "the rebuilt allowlist admitted refused key vector {i}");
+        }
+        assert_eq!(live, HashSet::from([honest]), "only the honest key is on the allowlist");
     }
 
     /// **A key revoked for one person stays in the live allowlist while
