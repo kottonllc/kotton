@@ -26,6 +26,15 @@
 //!    the handshake's `CertificateVerify` signature is checked under that key by the rule
 //!    ([`verify_handshake_signature`]), Ed25519 alone, for every verifier here. The TLS
 //!    library's own signature check is not called.
+//!
+//! 4. **Hold what of a certificate's form carries meaning, and say what is not held.** A peer
+//!    presents one certificate, and the extraction refuses bytes after it. The key's
+//!    SubjectPublicKeyInfo must be byte for byte the single encoding of an Ed25519 key (the
+//!    algorithm with no parameters, a BIT STRING with no unused bits, 32 bytes). Nothing else
+//!    of the certificate's form is held: a version-1 certificate, an unknown critical
+//!    extension, a length outside the key's encoding that is not minimal, its validity dates
+//!    and its own signature are not checked, because the certificate only carries the key,
+//!    and the key and the handshake's signature are what admit a peer.
 
 use kotton_crypto::ed25519::{Signature, VerifyingKey};
 use kotton_sys::net::TransportError;
@@ -423,6 +432,12 @@ impl Admission {
 // PairedDeviceVerifier
 // ---------------------------------------------------------------------------
 
+/// AID → the latest key event this node holds for that identity.
+///
+/// A **tip**, not a log: `validate` reads only the immediately preceding event, so a verifier
+/// kept current needs one event per identity and nothing before it (`RFC-0081`).
+pub type KnownTips = Arc<RwLock<std::collections::HashMap<String, kotton_wire::kel::KelEvent>>>;
+
 /// Allowlist-based certificate verifier for paired Kotton devices.
 ///
 /// Implements both `ClientCertVerifier` (used by the server side of mTLS) and
@@ -436,12 +451,6 @@ impl Admission {
 /// The presented key is admitted only once it has passed the Ed25519 rule as a key, and the
 /// handshake's signature is checked under it by the rule ([`verify_handshake_signature`]), so
 /// the verifier holds no crypto provider of its own.
-/// AID → the latest key event this node holds for that identity.
-///
-/// A **tip**, not a log: `validate` reads only the immediately preceding event, so a verifier
-/// kept current needs one event per identity and nothing before it (`RFC-0081`).
-pub type KnownTips = Arc<RwLock<std::collections::HashMap<String, kotton_wire::kel::KelEvent>>>;
-
 #[derive(Debug)]
 pub struct PairedDeviceVerifier {
     allowed_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
@@ -1008,8 +1017,15 @@ fn verify_handshake_signature(
 }
 
 /// The Ed25519 public key a certificate's SubjectPublicKeyInfo carries, as a
-/// [`VerifyingKey`]: `None` if the certificate does not parse, is not Ed25519, or carries
-/// 32 bytes the Ed25519 rule refuses as a key.
+/// [`VerifyingKey`]: `None` if the input is not exactly one certificate, if its
+/// SubjectPublicKeyInfo is not the one encoding an Ed25519 key has
+/// (`ED25519_SPKI_PREFIX` then the key's 32 bytes), or if those 32 bytes are refused by
+/// the Ed25519 rule as a key.
+///
+/// So a key has one spelling in a certificate, at the place it is read. The rest of the
+/// certificate's form (its version, its extensions, its validity, its own signature, and
+/// whether its other lengths are minimal) is not held here: the certificate is a carrier for
+/// the key, and the key and the handshake's signature are what is checked.
 ///
 /// This is where a peer's key enters from its certificate, so it is where the key is
 /// constructed; a caller that needs only the bytes takes [`VerifyingKey::as_bytes`].
@@ -1036,21 +1052,24 @@ fn verify_handshake_signature(
 pub fn extract_ed25519_pubkey_from_cert(cert_der: &CertificateDer<'_>) -> Option<VerifyingKey> {
     use x509_parser::prelude::FromDer;
 
-    let (_, cert) =
+    let (rest, cert) =
         x509_parser::certificate::X509Certificate::from_der(cert_der.as_ref()).ok()?;
-    let spki = cert.public_key();
-
-    // Reject anything that is not id-Ed25519 (OID 1.3.101.112). `as_bytes()`
-    // returns the OID's DER content octets, which for 1.3.101.112 are `2b 65 70`.
-    const ED25519_OID_OCTETS: [u8; 3] = [0x2b, 0x65, 0x70];
-    if spki.algorithm.algorithm.as_bytes() != ED25519_OID_OCTETS.as_slice() {
+    // One certificate, and nothing after it.
+    if !rest.is_empty() {
         return None;
     }
-
-    // The Ed25519 subjectPublicKey is exactly 32 raw bytes; `try_into` enforces it.
-    let key: [u8; 32] = spki.subject_public_key.data.as_ref().try_into().ok()?;
-    VerifyingKey::from_bytes(&key).ok()
+    // The SubjectPublicKeyInfo as it was sent, byte for byte the single encoding of an
+    // Ed25519 key: the algorithm id-Ed25519 with no parameters, then a BIT STRING of no
+    // unused bits holding exactly 32 bytes.
+    let key = cert.public_key().raw.strip_prefix(ED25519_SPKI_PREFIX.as_slice())?;
+    VerifyingKey::from_bytes(key.try_into().ok()?).ok()
 }
+
+/// The 12 bytes every Ed25519 SubjectPublicKeyInfo starts with, before the key's 32: a
+/// SEQUENCE of 42 bytes, holding a SEQUENCE of 5 (the OID 1.3.101.112, and no parameters),
+/// then a BIT STRING of 33 bytes whose first says no bits are unused.
+const ED25519_SPKI_PREFIX: [u8; 12] =
+    [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
 
 /// The key events a peer offers in its certificate so this node can admit it
 /// (`RFC-0081` gap 3), or an empty vec when it offers none.
@@ -1835,8 +1854,8 @@ mod resumption_tests {
 ///
 /// A test-only signer puts whatever 64 bytes a case needs into the handshake, under whatever
 /// key its certificate names, so each refusal is the verifier's and not the signer's. Each
-/// test first completes the same handshake with an honest signature, to show the harness is
-/// not what refuses.
+/// handshake test first completes the same handshake with an honest key and signature, to
+/// show the harness is not what refuses.
 #[cfg(test)]
 mod rule_tests {
     use super::resumption_tests::connect;
@@ -1963,10 +1982,17 @@ mod rule_tests {
         unreachable!()
     }
 
-    /// The signature a case puts under the refused key `public`: for the identity, the one a
-    /// check without the small-order clauses accepts over any message; for the mixed-order
-    /// key, [`under_mixed_order_key`]; for the others, the same bytes as the identity's,
-    /// since no signature is any of theirs.
+    /// The signature a case puts under the refused key `public`.
+    ///
+    /// - The identity, in each of its encodings: `R` the identity and `S` zero, which a check
+    ///   without the small-order clauses accepts over any message.
+    /// - The mixed-order key: [`under_mixed_order_key`], which a check without the subgroup
+    ///   clause on the key accepts.
+    /// - The other small-order keys: the same bytes. A check without the small-order clauses
+    ///   accepts them only for a message whose challenge sends the key to the identity, which
+    ///   depends on the transcript; this signer does not search for one.
+    /// - The non-canonical key and the non-point: the same bytes. No one holds a secret for
+    ///   either, so no signature is made under them.
     fn under_refused(public: [u8; 32]) -> Forge {
         if public == refused::mixed_order_key() {
             Arc::new(under_mixed_order_key)
@@ -1987,16 +2013,15 @@ mod rule_tests {
             "order eight, b",
             "order eight, b negated",
         ];
+        let identity = ["identity, y = 1 with the sign bit", "identity, y = p + 1", "identity, y = p + 1 with the sign bit"];
+        // A vector the leaf adds must be named here before it is presented, not dropped by zip.
+        assert_eq!(small.len(), refused::SMALL_ORDER_KEYS.len());
+        assert_eq!(identity.len(), refused::IDENTITY_OTHER_ENCODINGS.len());
         small
             .iter()
             .map(|n| format!("small order: {n}"))
             .zip(refused::SMALL_ORDER_KEYS)
-            .chain(
-                ["identity, y = 1 with the sign bit", "identity, y = p + 1", "identity, y = p + 1 with the sign bit"]
-                    .map(String::from)
-                    .into_iter()
-                    .zip(refused::IDENTITY_OTHER_ENCODINGS),
-            )
+            .chain(identity.map(String::from).into_iter().zip(refused::IDENTITY_OTHER_ENCODINGS))
             .chain([
                 ("mixed order".to_string(), refused::mixed_order_key()),
                 ("not canonical".to_string(), refused::NON_CANONICAL_KEY),
@@ -2220,6 +2245,12 @@ mod rule_tests {
     fn a_bootstrap_verifier_refuses_a_certificate_that_is_not_ed25519() {
         let (ecdsa_cert, ecdsa_key) = generate_self_signed_cert().unwrap();
         let ed = ed25519_dalek::SigningKey::from_bytes(&[6; 32]);
+        let other = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        connect(
+            &client_config(BootstrapCertVerifier::new(), honest_cert(&ed)),
+            &server_config(BootstrapCertVerifier::new(), honest_cert(&other)),
+        )
+        .expect("two Ed25519 certificates complete a bootstrap handshake");
 
         let server = rustls::ServerConfig::builder_with_provider(provider())
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -2297,6 +2328,11 @@ mod rule_tests {
     #[test]
     fn a_recovery_claim_signature_the_rule_refuses_admits_no_device_at_the_handshake() {
         let reserve = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
+        let (honest, recorded) = claim_at_the_handshake(
+            &[reserve.verifying_key().to_bytes()],
+            RecoveryClaim::sign(&reserve, &device_pub()),
+        );
+        assert!(honest.is_ok() && recorded, "an honest claim admits");
         let message = RecoveryClaim::message(&device_pub());
         let admitted: Vec<&str> = refused_signatures(&reserve)
             .into_iter()
@@ -2308,5 +2344,118 @@ mod rule_tests {
             .map(|(name, _)| name)
             .collect();
         assert!(admitted.is_empty(), "a refused claim signature admitted a device: {admitted:?}");
+    }
+
+    /// A DER element: `tag`, the shortest length, then `body`.
+    fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut v = vec![tag];
+        let n = body.len();
+        if n < 0x80 {
+            v.push(n as u8);
+        } else if n < 0x100 {
+            v.extend([0x81, n as u8]);
+        } else {
+            v.extend([0x82, (n >> 8) as u8, n as u8]);
+        }
+        v.extend(body);
+        v
+    }
+
+    /// One way a certificate can depart from the well-formed one.
+    #[derive(Clone, Copy, Default)]
+    struct Form {
+        trailing: bool,
+        spki_null: bool,
+        unused_bits: u8,
+        version_1: bool,
+        critical_extension: bool,
+        long_outer_length: bool,
+    }
+
+    /// A certificate under `key` in `form`, built by hand so each departure is the only one.
+    /// Its own signature is zeros: nothing here checks it.
+    fn certificate(key: &[u8; 32], form: Form) -> CertificateDer<'static> {
+        let oid = tlv(0x06, &[0x2b, 0x65, 0x70]);
+        let alg = tlv(0x30, &oid);
+        let spki_alg = if form.spki_null { tlv(0x30, &[oid.as_slice(), &[0x05, 0x00]].concat()) } else { alg.clone() };
+        let mut bits = vec![form.unused_bits];
+        bits.extend(key);
+        let spki = tlv(0x30, &[spki_alg, tlv(0x03, &bits)].concat());
+        let name = tlv(0x30, &[]);
+        let time = |t: &str| tlv(0x17, t.as_bytes());
+        let validity = tlv(0x30, &[time("200101000000Z"), time("400101000000Z")].concat());
+        let version = if form.version_1 { vec![] } else { tlv(0xa0, &tlv(0x02, &[2])) };
+        let mut tbs = [version, tlv(0x02, &[1]), alg.clone(), name.clone(), validity, name, spki].concat();
+        if form.critical_extension {
+            // 1.3.6.1.4.1.99999.1, marked critical.
+            let oid = tlv(0x06, &[0x2b, 6, 1, 4, 1, 0x86, 0x8d, 0x1f, 1]);
+            let ext = tlv(0x30, &[oid.as_slice(), &[0x01, 0x01, 0xff], &tlv(0x04, &[0x05, 0x00])].concat());
+            tbs.extend(tlv(0xa3, &tlv(0x30, &ext)));
+        }
+        let mut signature = vec![0u8];
+        signature.extend([0u8; 64]);
+        let body = [tlv(0x30, &tbs), alg, tlv(0x03, &signature)].concat();
+        let mut der = if form.long_outer_length {
+            // Three length bytes where two are enough: a length that is not minimal.
+            [vec![0x30, 0x83, 0, (body.len() >> 8) as u8, body.len() as u8], body].concat()
+        } else {
+            tlv(0x30, &body)
+        };
+        if form.trailing {
+            der.extend([0xde, 0xad]);
+        }
+        CertificateDer::from(der)
+    }
+
+    /// Each certificate form the TLS library's own parse refused, and the well-formed one,
+    /// under an honest key and an honest `CertificateVerify`, presented to both verifiers in
+    /// both directions. Whether the handshake completes is the row's last column, so a row
+    /// that changes fails the test.
+    ///
+    /// Held: one certificate and nothing after it, and the key's single encoding (no
+    /// parameters, no unused bits). Not held: the version, an unknown critical extension, and
+    /// the certificate's outer length written in more bytes than it needs, which the parse
+    /// reads to the end of the input and which leaves the key's encoding as it is.
+    #[test]
+    fn a_certificate_s_form_is_held_where_it_names_the_key_and_not_elsewhere() {
+        let d = Form::default();
+        let rows: [(&str, Form, bool); 7] = [
+            ("well formed", d, true),
+            ("bytes after the certificate", Form { trailing: true, ..d }, false),
+            ("key algorithm with NULL parameters", Form { spki_null: true, ..d }, false),
+            ("key BIT STRING with an unused bit", Form { unused_bits: 1, ..d }, false),
+            ("version 1", Form { version_1: true, ..d }, true),
+            ("an unknown critical extension", Form { critical_extension: true, ..d }, true),
+            ("an outer length that is not minimal", Form { long_outer_length: true, ..d }, true),
+        ];
+        let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let public = key.verifying_key().to_bytes();
+        let peer = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
+        let presents = |form| {
+            Arc::new(rustls::sign::CertifiedKey::new(vec![certificate(&public, form)], Arc::new(Forger::ed25519(honestly(&key)))))
+        };
+        let mut wrong = Vec::new();
+        for (name, form, completes) in rows {
+            for v in [Verifier::Paired, Verifier::Bootstrap] {
+                let from_client = connect(
+                    &client_config(client_verifier(v, peer.verifying_key().to_bytes()), presents(form)),
+                    &server_config(server_verifier(v, public), honest_cert(&peer)),
+                );
+                let from_server = connect(
+                    &client_config(client_verifier(v, public), honest_cert(&peer)),
+                    &server_config(server_verifier(v, peer.verifying_key().to_bytes()), presents(form)),
+                );
+                let side = match v {
+                    Verifier::Paired => "paired",
+                    Verifier::Bootstrap => "bootstrap",
+                };
+                for (from, outcome) in [("client", from_client), ("server", from_server)] {
+                    if outcome.is_ok() != completes {
+                        wrong.push(format!("{name}, {side}, from a {from}: completed {}", outcome.is_ok()));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "rows that do not hold: {wrong:?}");
     }
 }
