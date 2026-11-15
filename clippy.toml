@@ -5,9 +5,7 @@
 disallowed-methods = [
     # Every Ed25519 check made with ed25519-dalek is strict: it goes through
     # `kotton_ed25519::VerifyingKey::verify`, whose file is the one that calls `verify_strict`,
-    # the relay's workspace included. The one exemption is named in `cargo xtask ed25519-check`. The
-    # check of the handshake signature on a peer connection and the threshold provider's
-    # `aggregate` are not made with it and are #564's.
+    # the relay's workspace included. The one exemption is named in `cargo xtask ed25519-check`.
     { path = "ed25519_dalek::Verifier::verify", reason = "every Ed25519 check made with ed25519-dalek is strict: check through kotton_ed25519::VerifyingKey::verify" },
     { path = "ed25519_dalek::SigningKey::verify", reason = "every Ed25519 check made with ed25519-dalek is strict: check through kotton_ed25519::VerifyingKey::verify" },
 ]

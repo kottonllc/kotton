@@ -3,9 +3,8 @@
 //! is called in one file in the tree, the relay's workspace included: `kotton-ed25519`'s, whose
 //! `VerifyingKey::verify` every other check goes through.
 //!
-//! Not under this rule yet: the check of the handshake signature on a peer connection, which
-//! rustls makes with ring in `core/net`'s TLS verifiers, and the threshold-signing provider's
-//! `aggregate`, which `frost_ed25519` checks itself. Both are #564's.
+//! The handshake signature on a peer connection (`core/net`'s TLS verifiers) and the signature
+//! the threshold-signing provider's `aggregate` returns are checked through the same type.
 //!
 //! ## What holds it
 //!
@@ -127,23 +126,32 @@ const LOWERED: &[&str] = &[
 pub fn run(root: &Path) {
     let (count, found) = findings(root);
     if found.is_empty() {
-        println!(
-            "ed25519-check: OK: {count} source file(s); every check made with {LIBRARY} is strict: clippy.toml \
-             refuses the unstrict check, both clippy runs are --all-targets with -D warnings, nothing lowers that but one named exemption, no manifest turns on \
-             a feature that adds another check, and verify_strict is called in one file in the tree, the relay \
-             included ({SEAM}). The handshake's check and aggregate are #564's."
-        );
+        println!("{}", ok_line(count));
         return;
     }
     for f in &found {
         eprintln!("ed25519-check: {f}");
     }
-    eprintln!(
-        "\nEvery Ed25519 check made with {LIBRARY} is strict, and verify_strict is called in one file in the \
-         tree, the relay included: {SEAM}. Check through kotton_ed25519::VerifyingKey::verify. \
-         (The handshake's check and aggregate are #564's.)"
-    );
+    eprintln!("{}", failure_footer());
     std::process::exit(1);
+}
+
+/// The line printed when the tree holds the rule.
+fn ok_line(count: usize) -> String {
+    format!(
+        "ed25519-check: OK: {count} source file(s); every check made with {LIBRARY} is strict: clippy.toml \
+         refuses the unstrict check, both clippy runs are --all-targets with -D warnings, nothing lowers that but one named exemption, no manifest turns on \
+         a feature that adds another check, and verify_strict is called in one file in the tree, the relay \
+         included ({SEAM})."
+    )
+}
+
+/// The text printed after the findings when the tree breaks the rule.
+fn failure_footer() -> String {
+    format!(
+        "\nEvery Ed25519 check made with {LIBRARY} is strict, and verify_strict is called in one file in the \
+         tree, the relay included: {SEAM}. Check through kotton_ed25519::VerifyingKey::verify."
+    )
 }
 
 /// What the tree breaks of the rule, and how many source files it read.
@@ -622,6 +630,14 @@ mod tests {
     }
 
     const EXEMPT_SRC: &str = "#[cfg(test)]\nmod tests {\n    /// Why.\n    #[test]\n    #[allow(clippy::disallowed_methods)]\n    fn the_library_s_other_check_accepts_what_the_rule_refuses() {}\n}\n";
+
+    #[test]
+    fn the_printed_text_names_no_check_as_outside_the_rule() {
+        for text in [ok_line(1), failure_footer()] {
+            assert!(!text.contains("#564"), "{text}");
+            assert!(!text.contains("outside"), "{text}");
+        }
+    }
 
     #[test]
     fn the_config_names_both_methods_and_is_not_shadowed() {
