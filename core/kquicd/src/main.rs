@@ -172,7 +172,7 @@ async fn main() -> io::Result<()> {
     let provider = Arc::new(
         rustls::crypto::ring::default_provider(),
     );
-    let verifier = PairedDeviceVerifier::new(Arc::clone(&allowed_keys), Arc::clone(&provider));
+    let verifier = PairedDeviceVerifier::new(Arc::clone(&allowed_keys));
     let server_config = build_peer_server_config(
         &device_cert,
         verifier,
@@ -323,7 +323,7 @@ fn peer_pubkey_of(conn: &quinn::Connection) -> Option<String> {
         .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
         .ok()?;
     let leaf = certs.first()?;
-    Some(hex::encode(extract_ed25519_pubkey_from_cert(leaf)?))
+    Some(hex::encode(extract_ed25519_pubkey_from_cert(leaf)?.as_bytes()))
 }
 
 /// Accept all bidirectional streams on a single QUIC connection.

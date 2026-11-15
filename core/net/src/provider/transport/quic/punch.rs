@@ -186,7 +186,7 @@ async fn punch_inner(
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let device_cert = Ed25519DeviceCert::from_signing_key_with_offer(device_key, offer)
         .map_err(|e| PunchError::Tls(e.to_string()))?;
-    let verifier = PairedDeviceVerifier::new(Arc::clone(&paired), Arc::clone(&provider));
+    let verifier = PairedDeviceVerifier::new(Arc::clone(&paired));
     let verifier = Arc::new(verifier);
 
     let server_cfg = tls::build_peer_server_config(

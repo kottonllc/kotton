@@ -464,7 +464,7 @@ async fn try_direct_quic(
         .map_err(|e| e.to_string())?;
     let mut paired = HashSet::new();
     paired.insert(peer_pubkey);
-    let verifier = PairedDeviceVerifier::new(Arc::new(RwLock::new(paired)), Arc::clone(&provider));
+    let verifier = PairedDeviceVerifier::new(Arc::new(RwLock::new(paired)));
     let client_cfg = tls::build_peer_client_config(&device_cert, verifier, provider, config.keepalive())
         .map_err(|e| e.to_string())?;
 

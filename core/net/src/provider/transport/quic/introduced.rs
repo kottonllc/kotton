@@ -227,11 +227,8 @@ pub(super) fn introduced_transport() -> Arc<quinn::TransportConfig> {
 }
 
 /// A verifier that admits one key: the device the introduction named.
-pub(super) fn one_key(peer_key: [u8; 32], provider: &Arc<rustls::crypto::CryptoProvider>) -> Arc<PairedDeviceVerifier> {
-    PairedDeviceVerifier::new(
-        Arc::new(RwLock::new(HashSet::from([peer_key]))),
-        Arc::clone(provider),
-    )
+pub(super) fn one_key(peer_key: [u8; 32]) -> Arc<PairedDeviceVerifier> {
+    PairedDeviceVerifier::new(Arc::new(RwLock::new(HashSet::from([peer_key]))))
 }
 
 /// Open the listener an introduction asked for: on `bind`, hearing only `expect`,
@@ -247,7 +244,7 @@ pub fn listen_introduced(
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let cert = Ed25519DeviceCert::from_signing_key(device_key)?;
     let mut server =
-        tls::build_peer_server_config(&cert, one_key(peer_key, &provider), provider, None)?;
+        tls::build_peer_server_config(&cert, one_key(peer_key), provider, None)?;
     server.transport_config(introduced_transport());
 
     let std_socket = std::net::UdpSocket::bind(bind)
@@ -291,7 +288,7 @@ pub async fn dial_introduced(
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let cert = Ed25519DeviceCert::from_signing_key_with_offer(device_key, offer)?;
     let mut client =
-        tls::build_peer_client_config(&cert, one_key(peer_key, &provider), provider, None)?;
+        tls::build_peer_client_config(&cert, one_key(peer_key), provider, None)?;
     client.transport_config(introduced_transport());
 
     let socket = IntroducedSocket::new(socket, expect)
@@ -359,7 +356,7 @@ impl Listener for IntroducedListener {
             .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())
             .and_then(|certs| certs.into_iter().next())
             .and_then(|cert| tls::extract_ed25519_pubkey_from_cert(&cert))
-            .and_then(|pubkey| DidKeyMethod::from_public_key_bytes(&pubkey).ok())
+            .and_then(|pubkey| DidKeyMethod::from_public_key_bytes(pubkey.as_bytes()).ok())
             .map(|did| did.to_string())
             .ok_or_else(|| {
                 TransportError::ConnectionFailed("introduced peer presented no device key".into())

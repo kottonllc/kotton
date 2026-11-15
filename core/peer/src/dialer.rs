@@ -262,8 +262,7 @@ async fn open_channel(
                     .map_err(|e| anyhow::anyhow!("TURN TLS cert: {e}"))?;
             let mut paired = std::collections::HashSet::new();
             paired.insert(node.public_key);
-            let verifier =
-                PairedDeviceVerifier::new(Arc::new(RwLock::new(paired)), Arc::clone(&provider));
+            let verifier = PairedDeviceVerifier::new(Arc::new(RwLock::new(paired)));
             let client_cfg =
                 tls::build_peer_client_config(&device_cert, verifier, Arc::clone(&provider), config.keepalive())
                     .map_err(|e| anyhow::anyhow!("TURN TLS config: {e}"))?;
