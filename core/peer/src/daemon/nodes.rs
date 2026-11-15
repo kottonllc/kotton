@@ -1134,10 +1134,13 @@ pub async fn reproject_allowlist(
             }
         }
     }
-    // A key the rule refuses is not put on the allowlist. The rule is the type's:
-    // bytes stay only if they become a `VerifyingKey`, so a row that does not
-    // decode, is not its point's canonical encoding, is the identity, or is outside
-    // the prime-order subgroup is left out of the rebuilt set.
+    // A key the rule refuses is not kept in the rebuilt set: operator keys, stored
+    // rows and keys carried over from the live set are all held to it. The rule is
+    // the type's: bytes stay only if they become a `VerifyingKey`, so a row that
+    // does not decode, is not its point's canonical encoding, is the identity, or
+    // is outside the prime-order subgroup is left out. Own-device members' keys are
+    // added after it, below, as bytes; they are held to the rule when the
+    // allowlist's element is the key type (#578).
     rebuilt.retain(|key| kotton_crypto::ed25519::VerifyingKey::from_bytes(key).is_ok());
     *paired_keys.write().unwrap() = rebuilt;
 
