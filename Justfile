@@ -402,8 +402,8 @@ lint:
     # threshold provider's `aggregate` are #564's). The clippy runs above refuse the unstrict
     # check (`clippy.toml`, read by the workspace and the relay alike); this holds that file,
     # the one exemption it allows, that nothing else lowers the refusal or turns on a feature of
-    # the library that adds another check, and the seam: `kotton_crypto::ed25519::verify` in a
-    # crate that links kotton-crypto, `verify_strict` only in one that does not.
+    # the library that adds another check, and the seam: `verify_strict` is called in one file in
+    # the tree, the relay included, `kotton-ed25519`'s (`VerifyingKey::verify`).
     cargo xtask ed25519-check
     # Every file under tests/tests/suite/ is compiled into the one integration binary.
     cargo xtask suite-check

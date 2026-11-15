@@ -25,6 +25,8 @@ rand = { workspace = true }
 getrandom = { version = "0.2", default-features = false, features = ["custom"] }
 x25519-dalek = { workspace = true }
 ed25519-dalek = { workspace = true }
+# The verifying key and the one Ed25519 check (`verify`).
+kotton-ed25519 = { path = "../ed25519" }
 chacha20poly1305 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -34,5 +36,5 @@ workspace = true
 
 [dev-dependencies]
 workspace-hack = { path = "../../tools/workspace-hack" }
-# Test-only: the scalar arithmetic that builds the signatures a strict check refuses.
-curve25519-dalek = { workspace = true }
+# The keys and signatures the rule refuses.
+kotton-ed25519 = { path = "../ed25519", features = ["test-utils"] }

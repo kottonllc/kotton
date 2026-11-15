@@ -1,0 +1,31 @@
+[package]
+name = "kotton-ed25519"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "The Ed25519 verifying key: bytes become a key only by the rule, and the one check it offers is the strict one"
+
+[dependencies]
+# The library the type wraps. Built for every target `kotton-pair` is, the browser's
+# `wasm32-unknown-unknown` among them.
+ed25519-dalek = { workspace = true }
+# The library's own curve arithmetic, already beneath it: `from_bytes` tests the decoded
+# point for the identity with it.
+curve25519-dalek = { workspace = true }
+# `test-utils` only: the hash that builds the signatures the rule refuses (`refused`).
+sha2 = { workspace = true, optional = true }
+
+[dev-dependencies]
+workspace-hack = { path = "../../tools/workspace-hack" }
+sha2 = { workspace = true }
+
+[features]
+default = []
+# The keys and signatures the rule refuses, for the tests above this crate that hold a check to it.
+test-utils = ["dep:sha2"]
+
+[lints]
+workspace = true

@@ -145,13 +145,13 @@ pub fn verify_push_sig(
     check(verifying_key, message.as_bytes(), &signature)
 }
 
-/// The relay's one Ed25519 check, strict: a public key of small order, a signature whose `R`
-/// is of small order, and one whose `S` is not reduced are each refused. The relay is its own
-/// workspace and links no `kotton-crypto`, so it calls `verify_strict` here, where every
-/// signature it checks comes; the root `clippy.toml` refuses the unstrict check here as in the
-/// workspace.
+/// The relay's Ed25519 check, by the rule: the key's bytes must pass
+/// `kotton_ed25519::VerifyingKey::from_bytes`, and the signature its `verify`. A key or a
+/// signature the rule refuses is `BadSignature`.
 pub fn check(key: &VerifyingKey, message: &[u8], signature: &Signature) -> Result<(), AuthError> {
-    key.verify_strict(message, signature).map_err(|_| AuthError::BadSignature)
+    kotton_ed25519::VerifyingKey::from_bytes(key.as_bytes())
+        .and_then(|key| key.verify(message, signature))
+        .map_err(|_| AuthError::BadSignature)
 }
 
 /// A handle that proved itself: its fingerprint, the timestamp it signed, and the
@@ -282,6 +282,7 @@ fn hex_32(s: &str) -> Option<[u8; 32]> {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use kotton_ed25519::refused::{self, SMALL_ORDER_KEY};
     use rand::rngs::OsRng;
 
     fn make_key() -> (SigningKey, String) {
@@ -337,50 +338,14 @@ mod tests {
         assert!(matches!(result, Err(AuthError::BadSignature)));
     }
 
-    /// The encoding of the curve's identity point: a public key of small order.
-    const SMALL_ORDER_KEY: [u8; 32] = {
-        let mut k = [0u8; 32];
-        k[0] = 1;
-        k
-    };
-
-    /// A signature for [`SMALL_ORDER_KEY`]: `R` the identity point, `S` zero.
+    /// A signature for [`SMALL_ORDER_KEY`], base64url: `R` the identity point, `S` zero.
     fn under_small_order_key() -> String {
-        let mut sig = [0u8; 64];
-        sig[..32].copy_from_slice(&SMALL_ORDER_KEY);
-        URL_SAFE_NO_PAD.encode(sig)
+        URL_SAFE_NO_PAD.encode(refused::under_small_order_key_bytes())
     }
 
-    /// Two non-canonical signatures by `key` over `msg`, base64url: one whose `R` is the
-    /// identity point (with the `S` that completes the equation), and one whose `S` is not
-    /// reduced (the canonical `S` plus the group order).
+    /// The two signatures by `key` over `msg` the rule refuses, base64url.
     fn non_canonical(key: &SigningKey, msg: &[u8]) -> [String; 2] {
-        use curve25519_dalek::scalar::{clamp_integer, Scalar};
-        use ed25519_dalek::Signer as _;
-        use sha2::{Digest as _, Sha512};
-        let expanded: [u8; 64] = Sha512::digest(key.to_bytes()).into();
-        let mut lower = [0u8; 32];
-        lower.copy_from_slice(&expanded[..32]);
-        let a = Scalar::from_bytes_mod_order(clamp_integer(lower));
-        let k: [u8; 64] = Sha512::new()
-            .chain_update(SMALL_ORDER_KEY)
-            .chain_update(key.verifying_key().as_bytes())
-            .chain_update(msg)
-            .finalize()
-            .into();
-        let mut small_r = [0u8; 64];
-        small_r[..32].copy_from_slice(&SMALL_ORDER_KEY);
-        small_r[32..].copy_from_slice((Scalar::from_bytes_mod_order_wide(&k) * a).as_bytes());
-
-        let mut unreduced = key.sign(msg).to_bytes();
-        let order_minus_one = (Scalar::ZERO - Scalar::ONE).to_bytes();
-        let mut carry = 1u16;
-        for i in 0..32 {
-            let sum = unreduced[32 + i] as u16 + order_minus_one[i] as u16 + carry;
-            unreduced[32 + i] = sum as u8;
-            carry = sum >> 8;
-        }
-        [URL_SAFE_NO_PAD.encode(small_r), URL_SAFE_NO_PAD.encode(unreduced)]
+        refused::non_canonical(key, msg).map(|sig| URL_SAFE_NO_PAD.encode(sig.to_bytes()))
     }
 
     fn did_of(key: &[u8; 32]) -> String {

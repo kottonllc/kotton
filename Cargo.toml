@@ -16,6 +16,9 @@ members = [
     # mechanism — nobody's authority; no opinion about who is asking
     "core/common",
     "core/sys",
+    # `ed25519`: the verifying key and the one Ed25519 check, beneath `pair` so the ceremony,
+    # everything above it and the relay hold one rule.
+    "core/ed25519",
     "core/pair",
     # `handshake`: the one handshake every connection begins with, over keys
     # handed in. No socket, no clock, no principal.

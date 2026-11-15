@@ -206,18 +206,9 @@ mod tests {
         assert!(matches!(verify(&def), Err(SchemaSignatureError::NotBase64(_))));
     }
 
-    /// A publisher whose key is the identity point, a small-order point no secret stands
-    /// behind, and a forged signature with `R` the identity and `S` zero. Plain `verify`
-    /// accepts it over any message, the signed message for the definition's digest among
-    /// them: it checks `[S]B = R + [k]A`, and with `S = 0`, `R` the identity and `A` the
-    /// identity both sides are the identity whatever `k` is. The strict check refuses a
-    /// small-order key, so the forgery is refused.
-    ///
-    /// The tree's one exemption from the workspace's refusal of the unstrict check, named in
-    /// `cargo xtask ed25519-check`: this test holds the difference between the two checks, so
-    /// it makes the other one.
+    /// A publisher whose key is the identity point, with `R` the identity and `S` zero: the
+    /// rule refuses the key, so the definition is refused.
     #[test]
-    #[allow(clippy::disallowed_methods)]
     fn a_small_order_publisher_key_with_a_forged_signature_is_refused() {
         let mut identity = [0u8; 32];
         identity[0] = 1;
@@ -230,10 +221,6 @@ mod tests {
             vec![SchemaField::required("url", FieldType::String)],
         );
         def.signature = Some(STANDARD.encode(forged));
-        // What the forgery passes: the check this module used to make.
-        use ed25519_dalek::Verifier as _;
-        key.verify(&message(&def.digest().unwrap()), &Signature::from_bytes(&forged))
-            .expect("plain verify accepts the forgery, which is why it is not the check");
         assert_eq!(verify(&def), Err(SchemaSignatureError::Invalid));
     }
 

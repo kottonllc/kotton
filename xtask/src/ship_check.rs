@@ -58,6 +58,8 @@ pub(crate) const SYSTEM_CRATES: &[&str] = &[
     // The version every binary reports, derived once from the tags.
     "kotton-version",
     "kotton-sys",
+    // The verifying key and the one Ed25519 check.
+    "kotton-ed25519",
     "kotton-pair",
     // The one handshake every connection begins with.
     "kotton-handshake",

@@ -28,6 +28,8 @@ serde_json = "1.0"
 
 # Cryptography
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+# The verifying key and the one Ed25519 check (`auth::check`).
+kotton-ed25519 = { path = "../../core/ed25519" }
 base64 = "0.21"
 bs58 = "0.5"
 rand = "0.8"
@@ -56,9 +58,8 @@ anyhow = "1"
 thiserror = "2.0"
 
 [dev-dependencies]
-# The scalar arithmetic that builds the signatures a strict check refuses, for the tests
-# that hold the relay's check strict.
-curve25519-dalek = "4.1"
+# The keys and signatures the rule refuses, for the tests that hold the relay's check to it.
+kotton-ed25519 = { path = "../../core/ed25519", features = ["test-utils"] }
 # WebSocket client for the relay circuit integration test.
 tokio-tungstenite = "0.21"
 
