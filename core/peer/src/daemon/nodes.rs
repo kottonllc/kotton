@@ -1134,7 +1134,9 @@ pub async fn reproject_allowlist(
             }
         }
     }
-    // A key the rule refuses is not put on the allowlist.
+    // A row whose key does not decode, or is of small order, is not put on the allowlist.
+    // The rule's other clauses are held here when the allowlist's element is the type
+    // (#564, #567).
     rebuilt.retain(a_key_someone_holds);
     *paired_keys.write().unwrap() = rebuilt;
 

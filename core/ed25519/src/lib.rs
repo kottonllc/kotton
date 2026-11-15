@@ -2,10 +2,11 @@
 //! The Ed25519 verifying key, and the one Ed25519 check in the tree.
 //!
 //! [`VerifyingKey::from_bytes`] is the rule for a key: a key is the canonical encoding of a point
-//! of the prime-order subgroup other than the identity (kottonllc/kotton#565). 32 bytes that do
-//! not decode, are not their point's canonical encoding, decode to the identity, or decode to a
-//! point outside that subgroup are [`Refused`]. So a held [`VerifyingKey`] is one that passed,
-//! one key has one encoding, and a set of them keyed by bytes is a set of keys.
+//! of the prime-order subgroup other than the identity (kotton-protocol states this rule for
+//! every Ed25519 key and signature; kottonllc/kotton#565 placed the crate). 32 bytes that do
+//! not decode, are not their point's canonical encoding, decode to the identity, or decode to
+//! a point outside that subgroup are [`Refused`]. So a held [`VerifyingKey`] is one that
+//! passed, one key has one encoding, and a set of them keyed by bytes is a set of keys.
 //!
 //! [`VerifyingKey::verify`] is the rule for a signature: `S` reduced, `R` canonical and not of
 //! small order, and the equation without the cofactor. It is the library's strict check, and
@@ -286,8 +287,12 @@ mod tests {
         assert!(CompressedEdwardsY(NOT_A_POINT).decompress().is_none());
     }
 
-    /// Each clause of the key rule, by a case it alone refuses. A case is named by the
-    /// clause; removing the clause from `from_bytes` fails that case.
+    /// Each clause of the key rule, by a case that refuses it. The identity and subgroup
+    /// clauses each have a case that fails when that clause is removed from `from_bytes`. The
+    /// re-encoding clause has none of its own, because each non-canonical encoding that decodes
+    /// is the identity or outside the subgroup (`from_bytes_refuses_every_non_canonical_encoding`
+    /// shows it); its cases fail when it is removed together with the identity clause, or with
+    /// the subgroup clause weakened.
     #[test]
     fn from_bytes_refuses_each_clause() {
         let names = [
