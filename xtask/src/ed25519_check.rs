@@ -3,9 +3,8 @@
 //! is called in one file in the tree, the relay's workspace included: `kotton-ed25519`'s, whose
 //! `VerifyingKey::verify` every other check goes through.
 //!
-//! Not under this rule yet: the check of the handshake signature on a peer connection, which
-//! rustls makes with ring in `core/net`'s TLS verifiers, and the threshold-signing provider's
-//! `aggregate`, which `frost_ed25519` checks itself. Both are #564's.
+//! The handshake signature on a peer connection (`core/net`'s TLS verifiers) and the signature
+//! the threshold-signing provider's `aggregate` returns are checked through the same type.
 //!
 //! ## What holds it
 //!

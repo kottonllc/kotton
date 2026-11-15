@@ -24,6 +24,7 @@ use frost_ed25519::{round1, round2, Identifier, SigningPackage};
 use std::collections::BTreeMap;
 
 use crate::did::DidKeyMethod;
+use crate::ed25519::{Signature, VerifyingKey};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,9 @@ pub enum FrostError {
     Deserialise(String),
     #[error("invalid participant index {0}")]
     InvalidIndex(u16),
+    /// A group key, or an aggregated signature under it, that the Ed25519 rule refuses.
+    #[error("FROST: {0}")]
+    Refused(#[from] crate::ed25519::Refused),
 }
 
 pub type FrostResult<T> = Result<T, FrostError>;
@@ -69,6 +73,17 @@ fn deserialise<T: serde::de::DeserializeOwned>(hex: &str) -> FrostResult<T> {
     serde_json::from_slice(&bytes).map_err(|e| FrostError::Deserialise(e.to_string()))
 }
 
+/// The group's verifying key as a key that passed the Ed25519 rule: its 32 bytes constructed as
+/// [`VerifyingKey`]. Every group key this module reads or returns comes through here.
+fn group_key(key: &frost::VerifyingKey) -> FrostResult<VerifyingKey> {
+    let bytes: [u8; 32] = key
+        .serialize()
+        .map_err(|e| FrostError::Serialise(format!("serialize verifying key: {e}")))?[..]
+        .try_into()
+        .map_err(|_| FrostError::Serialise("verifying key must be 32 bytes".into()))?;
+    Ok(VerifyingKey::from_bytes(&bytes)?)
+}
+
 // ── Key generation (trusted dealer) ──────────────────────────────────────────
 
 /// Generate a t-of-n FROST key using the trusted-dealer path.
@@ -92,12 +107,7 @@ pub fn generate_key_shares(
         rng,
     )?;
 
-    let vk_bytes: [u8; 32] = pubkey_package
-        .verifying_key()
-        .serialize()
-        .map_err(|e| FrostError::Serialise(format!("serialize verifying key: {e}")))?[..]
-        .try_into()
-        .map_err(|_| FrostError::Serialise("verifying key must be 32 bytes".into()))?;
+    let vk_bytes = *group_key(pubkey_package.verifying_key())?.as_bytes();
 
     let org_did = DidKeyMethod::from_public_key_bytes(&vk_bytes)
         .map_err(|e| FrostError::Serialise(format!("did derivation: {e}")))?
@@ -163,12 +173,7 @@ pub fn split_existing_identity(
         &mut rng,
     )?;
 
-    let vk_bytes: [u8; 32] = pubkey_package
-        .verifying_key()
-        .serialize()
-        .map_err(|e| FrostError::Serialise(format!("serialize verifying key: {e}")))?[..]
-        .try_into()
-        .map_err(|_| FrostError::Serialise("verifying key must be 32 bytes".into()))?;
+    let vk_bytes = *group_key(pubkey_package.verifying_key())?.as_bytes();
     let did = DidKeyMethod::from_public_key_bytes(&vk_bytes)
         .map_err(|e| FrostError::Serialise(format!("did derivation: {e}")))?
         .to_string();
@@ -200,15 +205,12 @@ pub fn validate_key_package(key_package_hex: &str) -> FrostResult<String> {
 /// from these bytes and compare it to the expected root DID. The enrollment
 /// accept gate uses this to bind the share to the root cryptographically rather
 /// than trusting the issuer's certificate alone.
-pub fn key_package_verifying_key(key_package_hex: &str) -> FrostResult<[u8; 32]> {
+///
+/// The group key is constructed as [`VerifyingKey`], so it is a key that passed the Ed25519 rule;
+/// a package whose group key the rule refuses yields [`FrostError::Refused`].
+pub fn key_package_verifying_key(key_package_hex: &str) -> FrostResult<VerifyingKey> {
     let kp: KeyPackage = deserialise(key_package_hex)?;
-    let bytes: [u8; 32] = kp
-        .verifying_key()
-        .serialize()
-        .map_err(|e| FrostError::Serialise(format!("serialize verifying key: {e}")))?[..]
-        .try_into()
-        .map_err(|_| FrostError::Serialise("verifying key must be 32 bytes".into()))?;
-    Ok(bytes)
+    group_key(kp.verifying_key())
 }
 
 // ── Signing — round 1 (commit) ────────────────────────────────────────────────
@@ -272,6 +274,12 @@ pub fn signing_sign(
 ///
 /// `shares` is `&[(participant_id_hex, signature_share_hex)]`.
 /// Returns raw 64-byte Ed25519 signature bytes.
+///
+/// A threshold signature is an Ed25519 signature, and a side that assembles one checks it by the
+/// Ed25519 rule before it gives it to anyone. So the group key is constructed as
+/// [`VerifyingKey`], and the signature is returned only if that key's
+/// [`verify`](VerifyingKey::verify) accepts it over the signing package's message; otherwise
+/// this is [`FrostError::Refused`].
 pub fn aggregate(
     signing_package_hex: &str,
     pubkey_package_hex: &str,
@@ -287,11 +295,21 @@ pub fn aggregate(
         map.insert(id, share);
     }
 
+    let key = group_key(pubkey.verifying_key())?;
     let sig = frost::aggregate(&pkg, &map, &pubkey)?;
-    Ok(sig
+    let bytes: [u8; 64] = sig
         .serialize()
-        .map_err(|e| FrostError::Serialise(format!("serialize signature: {e}")))?
-        .to_vec())
+        .map_err(|e| FrostError::Serialise(format!("serialize signature: {e}")))?[..]
+        .try_into()
+        .map_err(|_| FrostError::Serialise("signature must be 64 bytes".into()))?;
+    released(&key, pkg.message(), bytes)
+}
+
+/// `signature` as bytes to give out, if `key`'s [`verify`](VerifyingKey::verify) accepts it over
+/// `message`. [`aggregate`] returns only through here.
+fn released(key: &VerifyingKey, message: &[u8], signature: [u8; 64]) -> FrostResult<Vec<u8>> {
+    key.verify(message, &Signature::from_bytes(&signature))?;
+    Ok(signature.to_vec())
 }
 
 // ── Distributed key generation (DKG, Phase B) ─────────────────────────────────
@@ -361,12 +379,7 @@ pub fn dkg_part3(
     }
     let (key_package, pubkey_package) = dkg::part3(&round2_secret, &r1, &r2)?;
 
-    let vk_bytes: [u8; 32] = pubkey_package
-        .verifying_key()
-        .serialize()
-        .map_err(|e| FrostError::Serialise(format!("serialize verifying key: {e}")))?[..]
-        .try_into()
-        .map_err(|_| FrostError::Serialise("verifying key must be 32 bytes".into()))?;
+    let vk_bytes = *group_key(pubkey_package.verifying_key())?.as_bytes();
     let org_did = DidKeyMethod::from_public_key_bytes(&vk_bytes)
         .map_err(|e| FrostError::Serialise(format!("did derivation: {e}")))?
         .to_string();
@@ -425,15 +438,196 @@ mod tests {
         Ok((sig, pubkey_hex))
     }
 
-    /// Verify an aggregated 64-byte signature against a serialised group key.
+    /// Verify an aggregated 64-byte signature against a serialised group key, by the Ed25519
+    /// rule: the group key constructed as [`VerifyingKey`] and the signature checked by its
+    /// `verify`.
     fn verify_group_sig(sig_bytes: &[u8], pubkey_hex: &str, message: &[u8]) {
         let pubkey: PublicKeyPackage = deserialise(pubkey_hex).unwrap();
+        let key = group_key(pubkey.verifying_key()).expect("the group key passes the rule");
         let arr: [u8; 64] = sig_bytes.try_into().expect("64-byte signature");
-        let sig = frost::Signature::deserialize(&arr).expect("valid signature bytes");
-        pubkey
-            .verifying_key()
-            .verify(message, &sig)
-            .expect("threshold signature verifies against the group key");
+        key.verify(message, &Signature::from_bytes(&arr))
+            .expect("threshold signature verifies against the group key by the rule");
+    }
+
+    /// Every key vector the rule refuses, by name: the eight small-order encodings, the
+    /// identity's three other encodings, the mixed-order key, the non-canonical key and the
+    /// non-point.
+    fn refused_keys() -> Vec<(String, [u8; 32])> {
+        use crate::ed25519::refused::*;
+        let small = [
+            "identity",
+            "order two",
+            "order four, x positive",
+            "order four, x negative",
+            "order eight, a",
+            "order eight, a negated",
+            "order eight, b",
+            "order eight, b negated",
+        ];
+        let identity = ["identity, y = 1 with the sign bit", "identity, y = p + 1", "identity, y = p + 1 with the sign bit"];
+        let keys: Vec<(String, [u8; 32])> = small
+            .iter()
+            .map(|n| format!("small order: {n}"))
+            .zip(SMALL_ORDER_KEYS)
+            .chain(identity.iter().map(|n| n.to_string()).zip(IDENTITY_OTHER_ENCODINGS))
+            .chain([
+                ("mixed order".to_string(), mixed_order_key()),
+                ("not canonical".to_string(), NON_CANONICAL_KEY),
+                ("not a point".to_string(), NOT_A_POINT),
+            ])
+            .collect();
+        assert_eq!(keys.len(), SMALL_ORDER_KEYS.len() + IDENTITY_OTHER_ENCODINGS.len() + 3);
+        keys
+    }
+
+    /// `serialised` (a hex blob of this module's) with its `verifying_key` field set to `key`.
+    fn with_group_key(serialised: &str, key: &[u8; 32]) -> String {
+        let mut value: serde_json::Value = deserialise(serialised).unwrap();
+        let field = value.get_mut("verifying_key").expect("the package names its group key");
+        assert!(field.is_string(), "the group key is serialised as hex");
+        *field = serde_json::Value::String(hex::encode(key));
+        serialise(&value).unwrap()
+    }
+
+    /// The pieces of one 2-of-2 ceremony up to aggregation, by the trusted dealer:
+    /// `(signing_package_hex, pubkey_package_hex, shares, key_package_hex of participant 1)`.
+    fn ceremony(message: &[u8]) -> (String, String, Vec<(String, String)>, String) {
+        let (shares, pubkey_hex, _did) = generate_key_shares(2, 2).unwrap();
+        let mut commitments = Vec::new();
+        let mut nonces = Vec::new();
+        for (_idx, kp_hex) in &shares {
+            let (n, c, id) = signing_commit(kp_hex).unwrap();
+            commitments.push((id, c));
+            nonces.push(n);
+        }
+        let pkg_hex = create_signing_package(message, &commitments).unwrap();
+        let sig_shares = shares
+            .iter()
+            .zip(&nonces)
+            .zip(&commitments)
+            .map(|(((_idx, kp_hex), n), (id, _))| (id.clone(), signing_sign(kp_hex, n, &pkg_hex).unwrap()))
+            .collect();
+        (pkg_hex, pubkey_hex, sig_shares, shares[0].1.clone())
+    }
+
+    /// `signature` with the group order added to its `S`: the same point equation, `S` not
+    /// reduced.
+    fn with_order_added_to_s(signature: &[u8]) -> [u8; 64] {
+        let mut sig: [u8; 64] = signature.try_into().unwrap();
+        let order_minus_one = (curve25519_dalek::Scalar::ZERO - curve25519_dalek::Scalar::ONE).to_bytes();
+        let mut carry = 1u16;
+        for i in 0..32 {
+            let sum = sig[32 + i] as u16 + order_minus_one[i] as u16 + carry;
+            sig[32 + i] = sum as u8;
+            carry = sum >> 8;
+        }
+        assert_eq!(carry, 0, "S plus the order fits in 256 bits");
+        sig
+    }
+
+    /// The group key a ceremony's public key package names, by the rule.
+    fn ceremony_key(pubkey_hex: &str) -> VerifyingKey {
+        let pubkey: PublicKeyPackage = deserialise(pubkey_hex).unwrap();
+        group_key(pubkey.verifying_key()).unwrap()
+    }
+
+    /// Where the group key enters `aggregate`: the public key package. A package naming any
+    /// refused key yields no signature from shares that aggregate under the honest one.
+    #[test]
+    fn aggregate_refuses_a_public_key_package_whose_group_key_the_rule_refuses() {
+        let message = b"a quorum signs";
+        let (pkg_hex, pubkey_hex, shares, _kp) = ceremony(message);
+        let honest = *ceremony_key(&pubkey_hex).as_bytes();
+        let sig = aggregate(&pkg_hex, &with_group_key(&pubkey_hex, &honest), &shares)
+            .expect("the package with its own group key written back aggregates");
+        verify_group_sig(&sig, &pubkey_hex, message);
+
+        let accepted: Vec<String> = refused_keys()
+            .into_iter()
+            .filter(|(_, key)| aggregate(&pkg_hex, &with_group_key(&pubkey_hex, key), &shares).is_ok())
+            .map(|(name, _)| name)
+            .collect();
+        assert!(accepted.is_empty(), "aggregate accepted a group key the rule refuses: {accepted:?}");
+    }
+
+    /// Where the group key enters from a received share: the key package. A package naming any
+    /// refused key yields no key.
+    #[test]
+    fn a_key_package_whose_group_key_the_rule_refuses_yields_no_key() {
+        let (_pkg, pubkey_hex, _shares, kp_hex) = ceremony(b"unused");
+        let honest = ceremony_key(&pubkey_hex);
+        assert_eq!(key_package_verifying_key(&with_group_key(&kp_hex, honest.as_bytes())).unwrap(), honest);
+        assert_eq!(key_package_verifying_key(&kp_hex).unwrap(), honest);
+
+        let accepted: Vec<String> = refused_keys()
+            .into_iter()
+            .filter(|(_, key)| key_package_verifying_key(&with_group_key(&kp_hex, key)).is_ok())
+            .map(|(name, _)| name)
+            .collect();
+        assert!(accepted.is_empty(), "a key package yielded a group key the rule refuses: {accepted:?}");
+    }
+
+    /// The signature `aggregate` returns, from a real ceremony, with the group order added to
+    /// its `S`: `released` gives out the real one and refuses the variant.
+    #[test]
+    fn released_refuses_a_real_aggregate_with_the_group_order_added_to_s() {
+        let message = b"a quorum signs";
+        let (pkg_hex, pubkey_hex, shares, _kp) = ceremony(message);
+        let key = ceremony_key(&pubkey_hex);
+        let sig: [u8; 64] = aggregate(&pkg_hex, &pubkey_hex, &shares).unwrap().try_into().unwrap();
+        assert_eq!(released(&key, message, sig).unwrap(), sig.to_vec());
+        assert!(matches!(released(&key, message, with_order_added_to_s(&sig)), Err(FrostError::Refused(_))));
+    }
+
+    /// A signature under the group key whose `R` is the identity, with the `S` that completes
+    /// the equation. The group key is a split of a known seed, so the test can make it;
+    /// `released` refuses it.
+    #[test]
+    fn released_refuses_a_signature_under_the_group_key_whose_r_is_of_small_order() {
+        let seed = [11u8; 32];
+        let (_shares, pubkey_hex, _did) = split_existing_identity(&seed, 2, 2).unwrap();
+        let key = ceremony_key(&pubkey_hex);
+        let signer = ed25519_dalek::SigningKey::from_bytes(&seed);
+        assert_eq!(key.as_bytes(), signer.verifying_key().as_bytes());
+
+        let message = b"a quorum signs";
+        let sig = crate::ed25519::refused::small_order_r(&signer, message);
+        assert!(matches!(released(&key, message, sig.to_bytes()), Err(FrostError::Refused(_))));
+    }
+
+    /// Why no test shows `aggregate` refusing a signature its library accepted: the library
+    /// decodes `S` only below the group order and `R` only as a point of the prime-order
+    /// subgroup other than the identity, and checks the equation without the cofactor. So the
+    /// rule's signature vectors under the group key do not decode as the library's signature at
+    /// all, and what does decode and check is what the rule accepts.
+    #[test]
+    fn the_threshold_library_does_not_decode_a_signature_the_rule_refuses() {
+        use crate::ed25519::refused::*;
+        let seed = [11u8; 32];
+        let signer = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let message = b"a quorum signs";
+        let (pkg_hex, pubkey_hex, shares, _kp) = ceremony(message);
+        let real = aggregate(&pkg_hex, &pubkey_hex, &shares).unwrap();
+
+        let mut cases = vec![
+            ("S not reduced, a real aggregate".to_string(), with_order_added_to_s(&real)),
+            ("R the identity".to_string(), small_order_r(&signer, message).to_bytes()),
+            ("S not reduced".to_string(), unreduced_s(&signer, message).to_bytes()),
+        ];
+        cases.extend(
+            IDENTITY_OTHER_ENCODINGS
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (format!("R another encoding of the identity, {i}"), with_r(&signer, message, *r).to_bytes())),
+        );
+        let real: [u8; 64] = real.try_into().unwrap();
+        assert!(frost::Signature::deserialize(&real).is_ok(), "the library decodes the real aggregate");
+        let decoded: Vec<String> = cases
+            .into_iter()
+            .filter(|(_, sig)| frost::Signature::deserialize(sig).is_ok())
+            .map(|(name, _)| name)
+            .collect();
+        assert!(decoded.is_empty(), "the library decoded a signature the rule refuses: {decoded:?}");
     }
 
     #[test]
@@ -454,14 +648,8 @@ mod tests {
         let (sig_bytes, pubkey_hex) = sign_with(2, 3, 2, message).unwrap();
         assert_eq!(sig_bytes.len(), 64, "Ed25519 signature is 64 bytes");
 
-        // Independently verify the aggregated signature against the group key.
-        let pubkey: PublicKeyPackage = deserialise(&pubkey_hex).unwrap();
-        let arr: [u8; 64] = sig_bytes.as_slice().try_into().unwrap();
-        let sig = frost::Signature::deserialize(&arr).expect("valid signature bytes");
-        pubkey
-            .verifying_key()
-            .verify(message, &sig)
-            .expect("aggregated threshold signature verifies against the group key");
+        // Independently verify the aggregated signature against the group key, by the rule.
+        verify_group_sig(&sig_bytes, &pubkey_hex, message);
     }
 
     #[test]
