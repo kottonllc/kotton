@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `ed25519-check`: every Ed25519 check made with `ed25519-dalek` is strict, and in a crate that
-//! links `kotton-crypto` goes through one seam.
+//! `ed25519-check`: every Ed25519 check made with `ed25519-dalek` is strict, and `verify_strict`
+//! is called in one file in the tree, the relay's workspace included: `kotton-ed25519`'s, whose
+//! `VerifyingKey::verify` every other check goes through.
 //!
 //! Not under this rule yet: the check of the handshake signature on a peer connection, which
 //! rustls makes with ring in `core/net`'s TLS verifiers, and the threshold-signing provider's
@@ -31,10 +32,9 @@
 //!     `CLIPPY_CONF_DIR`;
 //!   - no manifest turns on a feature of the library that adds a check other than the two
 //!     methods `clippy.toml` names, or loosens the strict one ([`FEATURES`]);
-//!   - the seam: in a crate that depends on `kotton-crypto` a check is
-//!     `kotton_crypto::ed25519::verify`, so `verify_strict` is called in [`SEAM`] and, outside
-//!     it, only in a crate that does not link `kotton-crypto` (`kotton-pair`, below it, and the
-//!     relay).
+//!   - the seam: `verify_strict` is called in [`SEAM`] and in no other file under the code
+//!     roots, the relay's included; every other check is `kotton_ed25519::VerifyingKey::verify`
+//!     or reaches it.
 //!
 //! ## What it reads
 //!
@@ -67,8 +67,9 @@
 //!   `workspace-hack-check` holds the resolved feature set to `tools/workspace-hack`'s
 //!   manifest, which this reads).
 //!
-//! What holds the rule at its cause, so that no spelling matters, is #564's: a verifying-key
-//! type that offers only the strict check.
+//! What holds the rule at its cause is `kotton_ed25519::VerifyingKey`, which offers only the
+//! strict check. While a crate other than `kotton-ed25519` depends on the library, the library's
+//! other check is reachable from it, and this check and the lint are what refuse it (#564).
 
 use std::path::Path;
 
@@ -96,14 +97,15 @@ const FEATURES: &[(&str, &str)] = &[
     ("legacy_compatibility", "has every check, verify_strict included, accept an S that is not reduced"),
 ];
 
-/// The one function every crate that depends on `kotton-crypto` calls for an Ed25519 check.
-const SEAM: &str = "core/crypto/src/provider/ed25519.rs";
+/// The one file that calls `verify_strict`: `kotton-ed25519`, beneath `kotton-pair`, which
+/// every crate in the tree and the relay reach.
+const SEAM: &str = "core/ed25519/src/lib.rs";
 
 /// The one place the lint is allowed: (file, the test it is allowed on). The test holds the
 /// difference between the strict check and the other one, so it makes the other one.
 const EXEMPTION: (&str, &str) = (
-    "core/crypto/src/schema_signature.rs",
-    "fn a_small_order_publisher_key_with_a_forged_signature_is_refused",
+    "core/ed25519/src/lib.rs",
+    "fn the_library_s_other_check_accepts_what_the_rule_refuses",
 );
 
 /// This check's own source, whose tests spell what it refuses.
@@ -128,8 +130,8 @@ pub fn run(root: &Path) {
         println!(
             "ed25519-check: OK: {count} source file(s); every check made with {LIBRARY} is strict: clippy.toml \
              refuses the unstrict check, both clippy runs are --all-targets with -D warnings, nothing lowers that but one named exemption, no manifest turns on \
-             a feature that adds another check, and verify_strict is called only in the seam and in crates \
-             that do not link kotton-crypto. The handshake's check and aggregate are #564's."
+             a feature that adds another check, and verify_strict is called in one file in the tree, the relay \
+             included ({SEAM}). The handshake's check and aggregate are #564's."
         );
         return;
     }
@@ -137,9 +139,9 @@ pub fn run(root: &Path) {
         eprintln!("ed25519-check: {f}");
     }
     eprintln!(
-        "\nEvery Ed25519 check made with {LIBRARY} is strict: \
-         kotton_crypto::ed25519::verify ({SEAM}) in a crate that depends on kotton-crypto, verify_strict \
-         in one that does not. (The handshake's check and aggregate are #564's.)"
+        "\nEvery Ed25519 check made with {LIBRARY} is strict, and verify_strict is called in one file in the \
+         tree, the relay included: {SEAM}. Check through kotton_ed25519::VerifyingKey::verify. \
+         (The handshake's check and aggregate are #564's.)"
     );
     std::process::exit(1);
 }
@@ -203,7 +205,7 @@ fn findings(root: &Path) -> (usize, Vec<String>) {
     found.extend(lint_run_findings(&others));
     let root_manifest: Vec<(String, String)> = others.iter().filter(|(f, _)| f == "Cargo.toml").cloned().collect();
     found.extend(feature_findings(manifests.iter().chain(&root_manifest)));
-    found.extend(seam_findings(&sources, &crates_linking_crypto(&manifests)));
+    found.extend(seam_findings(&sources));
     (sources.len(), found)
 }
 
@@ -491,14 +493,15 @@ fn feature_findings<'a>(manifests: impl Iterator<Item = &'a (String, String)>) -
     out
 }
 
-/// `verify_strict` is called in [`SEAM`], and elsewhere only in a crate that does not link
-/// `kotton-crypto`. `crypto_crates` holds the directories of the crates that do, and
-/// `kotton-crypto`'s own.
-fn seam_findings(sources: &[(String, String)], crypto_crates: &[String]) -> Vec<String> {
+/// `verify_strict` is called in [`SEAM`] and in no other file. Comment lines are skipped, and
+/// so is this check's own source, whose tests spell what it refuses.
+fn seam_findings(sources: &[(String, String)]) -> Vec<String> {
     let mut out = Vec::new();
     let mut seam_calls = 0;
     for (file, src) in sources {
-        let linked = crypto_crates.iter().any(|dir| file.starts_with(&format!("{dir}/")));
+        if file == THIS {
+            continue;
+        }
         for (i, text) in src.lines().enumerate() {
             if text.trim_start().starts_with("//") || !text.contains("verify_strict") {
                 continue;
@@ -507,35 +510,16 @@ fn seam_findings(sources: &[(String, String)], crypto_crates: &[String]) -> Vec<
                 seam_calls += 1;
                 continue;
             }
-            if linked {
-                out.push(format!(
-                    "{file}:{}: calls verify_strict in a crate that links kotton-crypto; call kotton_crypto::ed25519::verify",
-                    i + 1
-                ));
-            }
+            out.push(format!(
+                "{file}:{}: calls verify_strict outside {SEAM}; check through kotton_ed25519::VerifyingKey::verify",
+                i + 1
+            ));
         }
     }
     if seam_calls == 0 {
         out.push(format!("{SEAM}: the seam calls no verify_strict"));
     }
     out
-}
-
-/// The directories (relative, `/`-separated) of `kotton-crypto` and every crate whose manifest
-/// names it.
-fn crates_linking_crypto(manifests: &[(String, String)]) -> Vec<String> {
-    manifests
-        .iter()
-        .filter(|(_, text)| manifest_links_crypto(text))
-        .map(|(file, _)| file.strip_suffix("Cargo.toml").unwrap_or(file).trim_end_matches('/').to_string())
-        .collect()
-}
-
-/// Whether a manifest is `kotton-crypto`'s or names it as a dependency of any kind. A manifest
-/// that does not parse is `feature_findings`' finding.
-fn manifest_links_crypto(text: &str) -> bool {
-    Manifest::read(text)
-        .is_ok_and(|m| m.package.as_deref() == Some("kotton-crypto") || m.deps.iter().any(|d| d.package == "kotton-crypto"))
 }
 
 /// Whether a file, by its relative path, is a crate's or the workspace's manifest.
@@ -562,10 +546,9 @@ struct Dep {
     table: String,
 }
 
-/// What this check reads of a parsed `Cargo.toml`: its package's name, its dependencies in
+/// What this check reads of a parsed `Cargo.toml`: its dependencies in
 /// every dependency table, the values of its `[features]`, and its lint levels.
 struct Manifest {
-    package: Option<String>,
     deps: Vec<Dep>,
     /// (the feature, a value it turns on).
     feature_values: Vec<(String, String)>,
@@ -587,7 +570,6 @@ impl Manifest {
             v.and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
         };
         let mut m = Manifest {
-            package: t.get("package").and_then(|p| p.get("name")).and_then(Value::as_str).map(str::to_string),
             deps: Vec::new(),
             feature_values: Vec::new(),
             lints: Vec::new(),
@@ -639,7 +621,7 @@ mod tests {
         vec![(file.to_string(), src.to_string())]
     }
 
-    const EXEMPT_SRC: &str = "#[cfg(test)]\nmod tests {\n    /// Why.\n    #[test]\n    #[allow(clippy::disallowed_methods)]\n    fn a_small_order_publisher_key_with_a_forged_signature_is_refused() {}\n}\n";
+    const EXEMPT_SRC: &str = "#[cfg(test)]\nmod tests {\n    /// Why.\n    #[test]\n    #[allow(clippy::disallowed_methods)]\n    fn the_library_s_other_check_accepts_what_the_rule_refuses() {}\n}\n";
 
     #[test]
     fn the_config_names_both_methods_and_is_not_shadowed() {
@@ -656,7 +638,7 @@ mod tests {
         assert!(allowance_findings(&one(EXEMPTION.0, EXEMPT_SRC), &[], &[]).is_empty());
 
         // The same allow anywhere else, or on another test, is a finding.
-        let elsewhere = EXEMPT_SRC.replace("fn a_small_order", "fn another_small_order");
+        let elsewhere = EXEMPT_SRC.replace("fn the_library_s_other_check", "fn another_check");
         assert_eq!(allowance_findings(&one(EXEMPTION.0, &elsewhere), &[], &[]).len(), 2);
         let mut two = one(EXEMPTION.0, EXEMPT_SRC);
         two.push(("core/msg/src/x.rs".into(), "#![allow(clippy::disallowed_methods)]\n".into()));
@@ -680,24 +662,33 @@ mod tests {
     }
 
     #[test]
-    fn verify_strict_outside_the_seam_in_a_crate_linking_crypto_is_a_finding() {
-        let crypto = vec!["core/crypto".to_string(), "core/msg".to_string()];
+    fn verify_strict_outside_the_seam_is_a_finding() {
         let seam = (SEAM.to_string(), "pub fn verify() { key.verify_strict(m, s) }\n".to_string());
-        let pair = ("core/pair/src/browser.rs".to_string(), "vk.verify_strict(msg, &sig)\n".to_string());
-        let relay = ("infra/relay/src/auth.rs".to_string(), "key.verify_strict(m, s)\n".to_string());
         let comment = ("core/msg/src/a.rs".to_string(), "// verify_strict, in prose\n".to_string());
-        assert!(seam_findings(&[seam.clone(), pair, relay, comment], &crypto).is_empty());
+        let this = (THIS.to_string(), "let s = \"key.verify_strict(m, s)\";\n".to_string());
+        assert!(seam_findings(&[seam.clone(), comment, this]).is_empty());
 
-        let in_msg = ("core/msg/src/envelope.rs".to_string(), "fn f() {\n    key.verify_strict(m, s)\n}\n".to_string());
-        let found = seam_findings(&[seam.clone(), in_msg], &crypto);
-        assert_eq!(found.len(), 1);
-        assert!(found[0].starts_with("core/msg/src/envelope.rs:2:"), "{found:?}");
-
-        let in_crypto = ("core/crypto/src/warm_key.rs".to_string(), "key.verify_strict(m, s)\n".to_string());
-        assert_eq!(seam_findings(&[seam, in_crypto], &crypto).len(), 1);
+        // Anywhere else: a crate that links kotton-crypto, one beneath it, and the relay.
+        for file in ["core/msg/src/envelope.rs", "core/crypto/src/provider/ed25519.rs", "core/pair/src/browser.rs", "infra/relay/src/auth.rs"] {
+            let other = (file.to_string(), "fn f() {\n    key.verify_strict(m, s)\n}\n".to_string());
+            let found = seam_findings(&[seam.clone(), other]);
+            assert_eq!(found.len(), 1, "{file}: {found:?}");
+            assert!(found[0].starts_with(&format!("{file}:2:")), "{found:?}");
+        }
 
         // A seam that no longer calls verify_strict is a finding.
-        assert_eq!(seam_findings(&[(SEAM.to_string(), "pub fn verify() {}\n".to_string())], &crypto).len(), 1);
+        assert_eq!(seam_findings(&[(SEAM.to_string(), "pub fn verify() {}\n".to_string())]).len(), 1);
+    }
+
+    /// The whole check, over a tree: a second file that calls `verify_strict`, in the
+    /// workspace or in the relay, fails it.
+    #[test]
+    fn a_second_file_calling_verify_strict_fails_the_check() {
+        for file in ["core/pair/src/browser.rs", "infra/relay/src/auth.rs"] {
+            let found = findings_with(file, "pub fn check() { key.verify_strict(m, s) }\n");
+            assert_eq!(found.len(), 1, "{file}: {found:#?}");
+            assert!(found[0].starts_with(&format!("{file}:1: calls verify_strict outside {SEAM}")), "{found:#?}");
+        }
     }
 
     #[test]
@@ -787,25 +778,10 @@ mod tests {
         assert_eq!(with("[dependencies]\ned25519-dalek = { version = \"2.2.0\", default-features = false, features = [\"alloc\", \"default\", \"fast\", \"rand_core\", \"std\", \"zeroize\"] }\n"), 0);
     }
 
-    #[test]
-    fn a_manifest_links_crypto_by_name_or_by_dependency() {
-        assert!(manifest_links_crypto("[package]\nname = \"kotton-crypto\"\n"));
-        assert!(manifest_links_crypto("[dependencies]\nkotton-crypto = { path = \"../crypto\" }\n"));
-        assert!(manifest_links_crypto("[dev-dependencies]\nkotton-crypto = { path = \"../crypto\", features = [\"test-utils\"] }\n"));
-        assert!(!manifest_links_crypto("[dependencies]\nkotton-pair = { path = \"../pair\" }\n# kotton-crypto = {}\n"));
-        // In table form, renamed, and in a target's table.
-        assert!(manifest_links_crypto("[dependencies.kotton-crypto]\npath = \"../crypto\"\n"));
-        assert!(manifest_links_crypto("[dependencies]\ncrypto = { package = \"kotton-crypto\", path = \"../crypto\" }\n"));
-        assert!(manifest_links_crypto("[dev-dependencies.crypto]\npackage = \"kotton-crypto\"\npath = \"../crypto\"\n"));
-        assert!(manifest_links_crypto("[target.'cfg(unix)'.dependencies]\nkotton-crypto = { path = \"../crypto\" }\n"));
-        // A feature that names it is not a dependency, and another package's name is not it.
-        assert!(!manifest_links_crypto("[package]\nname = \"kotton-msg\"\n[features]\nx = [\"kotton-crypto\"]\n"));
-    }
-
     const GOOD_CONFIG: &str = "disallowed-methods = [\n  { path = \"ed25519_dalek::Verifier::verify\", reason = \"r\" },\n  { path = \"ed25519_dalek::SigningKey::verify\", reason = \"r\" },\n]\n";
     const GOOD_JUSTFILE: &str = "lint:\n    # cargo clippy, in prose\n    cargo clippy --all-targets -- -D warnings\n    cargo clippy --manifest-path infra/relay/Cargo.toml --target-dir {{relay_target}} --all-targets -- -D warnings\n";
 
-    /// A tree that holds, at `dir`: `clippy.toml`, the seam, the exemption, a root manifest
+    /// A tree that holds, at `dir`: `clippy.toml`, the seam with the exemption in it, a root manifest
     /// and a Justfile, each as the tree has it in the part this check reads.
     fn a_tree(dir: &Path) {
         let write = |path: &str, text: &str| {
@@ -814,9 +790,8 @@ mod tests {
             std::fs::write(path, text).unwrap();
         };
         write(CLIPPY_TOML, GOOD_CONFIG);
-        write(SEAM, "pub fn verify() { key.verify_strict(m, s) }\n");
-        write(EXEMPTION.0, EXEMPT_SRC);
-        write("core/crypto/Cargo.toml", "[package]\nname = \"kotton-crypto\"\n");
+        write(SEAM, &format!("pub fn verify() {{ key.verify_strict(m, s) }}\n{EXEMPT_SRC}"));
+        write("core/ed25519/Cargo.toml", "[package]\nname = \"kotton-ed25519\"\n");
         write("Cargo.toml", "[workspace.dependencies]\ned25519-dalek = { version = \"2.1\", features = [\"rand_core\"] }\n");
         write("Justfile", GOOD_JUSTFILE);
     }
@@ -835,7 +810,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         a_tree(dir.path());
         let (count, found) = findings(dir.path());
-        assert_eq!(count, 2);
+        assert_eq!(count, 1);
         assert!(found.is_empty(), "{found:#?}");
     }
 

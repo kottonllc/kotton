@@ -8,6 +8,8 @@ authors.workspace = true
 [dependencies]
 kotton-common = { path = "../common" }
 kotton-pair = { path = "../pair" }
+# The verifying key and the one Ed25519 check, re-exported from `ed25519`.
+kotton-ed25519 = { path = "../ed25519" }
 kotton-sys = { path = "../sys" }
 tracing = { workspace = true }
 kotton-wire = { path = "../wire" }
@@ -41,11 +43,13 @@ zxcvbn = "3"
 
 [dev-dependencies]
 workspace-hack = { path = "../../tools/workspace-hack" }
+# This crate's own tests read the refused keys and signatures through `ed25519::refused`.
+kotton-ed25519 = { path = "../ed25519", features = ["test-utils"] }
 tokio = { version = "1.41", features = ["full"] }
 
 [features]
 default = []
-test-utils = []
+test-utils = ["kotton-ed25519/test-utils"]
 
 [lints]
 workspace = true

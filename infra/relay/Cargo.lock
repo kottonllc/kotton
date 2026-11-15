@@ -1069,6 +1069,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kotton-ed25519"
+version = "0.1.0"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "sha2",
+]
+
+[[package]]
 name = "kotton-pair"
 version = "0.1.0"
 dependencies = [
@@ -1077,6 +1086,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
  "hkdf",
+ "kotton-ed25519",
  "rand",
  "ring",
  "serde",
@@ -1096,11 +1106,11 @@ dependencies = [
  "base64 0.21.7",
  "bs58",
  "clap",
- "curve25519-dalek",
  "dashmap",
  "ed25519-dalek",
  "futures-util",
  "hmac",
+ "kotton-ed25519",
  "kotton-wire",
  "libc",
  "rand",

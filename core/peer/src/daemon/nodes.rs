@@ -1134,10 +1134,9 @@ pub async fn reproject_allowlist(
             }
         }
     }
-    // A row is evidence of a pairing only if its key is one somebody holds the
-    // secret half of. A stored row can name a key nobody holds, and the TLS
-    // stack accepts a signature under a small-order key that anyone can make,
-    // so on the allowlist such a key would admit whoever tried, not nobody.
+    // A row whose key does not decode, or is of small order, is not put on the allowlist.
+    // The rule's other clauses are held here when the allowlist's element is the type
+    // (#564, #567).
     rebuilt.retain(a_key_someone_holds);
     *paired_keys.write().unwrap() = rebuilt;
 

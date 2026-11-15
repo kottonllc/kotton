@@ -66,6 +66,7 @@ pub const RUST_TREES: &[&str] = &[
     "core/device/src",
     "core/device/tests",
     "core/diag/src",
+    "core/ed25519/src",
     "core/fs/src",
     "core/grant/src",
     "core/handshake/src",

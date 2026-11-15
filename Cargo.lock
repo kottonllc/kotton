@@ -3060,6 +3060,7 @@ dependencies = [
  "hex",
  "hkdf",
  "kotton-common",
+ "kotton-ed25519",
  "kotton-pair",
  "kotton-schemas",
  "kotton-sys",
@@ -3141,6 +3142,16 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "workspace-hack",
+]
+
+[[package]]
+name = "kotton-ed25519"
+version = "0.1.0"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "sha2 0.10.9",
  "workspace-hack",
 ]
 
@@ -3431,10 +3442,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
- "curve25519-dalek",
  "ed25519-dalek",
  "getrandom 0.2.17",
  "hkdf",
+ "kotton-ed25519",
  "rand 0.8.8",
  "ring 0.17.14",
  "serde",
@@ -8369,6 +8380,7 @@ dependencies = [
  "itoa",
  "kotton-crypto",
  "kotton-device",
+ "kotton-ed25519",
  "kotton-ipc",
  "kotton-peer",
  "kotton-secret",
