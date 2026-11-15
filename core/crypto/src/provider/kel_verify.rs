@@ -2133,7 +2133,7 @@ mod tests {
                 refused_for_the_set.push(format!("inception: {name}"));
             }
             for kind in [EventKind::RotationMnemonic, EventKind::RotationGuardian] {
-                // Commits `{pk(4)}` and carries `{key}`; the set is not in what the signature covers.
+                // Commits `{pk(4)}` and carries `{key}`.
                 let mut rot = a_rotation_naming(&tip, kind, pk(9), &[pk(4)], &reserve);
                 rot.recovery_set = vec![key];
                 assert_ne!(recovery_root(&rot.recovery_set), rot.recovery_commitment);
@@ -2145,19 +2145,20 @@ mod tests {
         assert!(refused_for_the_set.is_empty(), "refused for a set that is not its authorities: {refused_for_the_set:?}");
     }
 
-    /// `validate` refuses an event whose predecessor's identity key the rule refuses, even where
-    /// the event is signed under that key by the equation as written: an interaction that
-    /// carries the predecessor's key state forward.
+    /// `validate` refuses a cooperative rotation onto an honest key after a predecessor whose
+    /// identity key the rule refuses. The rotation is signed under the predecessor's key by
+    /// the equation as written wherever such a signature exists, and the key it installs
+    /// passes, so the predecessor's key is the only thing that refuses it.
     #[test]
-    fn an_event_after_a_predecessor_whose_identity_key_is_no_key_is_invalid() {
+    fn a_rotation_onto_an_honest_key_after_a_predecessor_whose_identity_key_is_no_key_is_invalid() {
         let accepted = accepted_by(|key| {
             let prev = an_inception_naming(*key, &[], empty_recovery_root(), None);
             let mut e = KelEvent {
                 aid: prev.aid.clone(),
                 seq: 1,
                 prev_event_digest: Some(digest(&prev)),
-                kind: EventKind::Interaction,
-                key_state: prev.key_state.clone(),
+                kind: EventKind::RotationCooperative,
+                key_state: KeyState { group_key: pk(9), threshold: 1, participants: 1 },
                 recovery_commitment: prev.recovery_commitment,
                 recovery_set: Vec::new(),
                 authorization: Authorization::Quorum { sig: vec![0u8; 64] },
