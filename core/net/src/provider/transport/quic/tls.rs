@@ -24,7 +24,7 @@
 //!    peer's certificate carries is constructed as a [`VerifyingKey`] where it is read
 //!    ([`extract_ed25519_pubkey_from_cert`]), so a key the rule refuses admits nothing; and
 //!    the handshake's `CertificateVerify` signature is checked under that key by the rule
-//!    ([`verify_handshake_signature`]), Ed25519 alone, for every verifier here. The TLS
+//!    (`verify_handshake_signature`), Ed25519 alone, for every verifier here. The TLS
 //!    library's own signature check is not called.
 //!
 //! 4. **Hold what of a certificate's form carries meaning, and say what is not held.** A peer
@@ -449,7 +449,7 @@ pub type KnownTips = Arc<RwLock<std::collections::HashMap<String, kotton_wire::k
 /// handshake with no daemon restart needed.
 ///
 /// The presented key is admitted only once it has passed the Ed25519 rule as a key, and the
-/// handshake's signature is checked under it by the rule ([`verify_handshake_signature`]), so
+/// handshake's signature is checked under it by the rule (`verify_handshake_signature`), so
 /// the verifier holds no crypto provider of its own.
 #[derive(Debug)]
 pub struct PairedDeviceVerifier {
@@ -831,7 +831,7 @@ pub fn build_peer_rustls_client_config(
 ///
 /// It does hold the handshake to the Ed25519 rule, as [`PairedDeviceVerifier`] does: the
 /// signature must be Ed25519, under a key that passes the rule, and check by the rule
-/// ([`verify_handshake_signature`]). A certificate that is not Ed25519 is refused.
+/// (`verify_handshake_signature`). A certificate that is not Ed25519 is refused.
 #[derive(Debug)]
 pub struct BootstrapCertVerifier(());
 
@@ -1031,7 +1031,7 @@ fn verify_handshake_signature(
 /// constructed; a caller that needs only the bytes takes [`VerifyingKey::as_bytes`].
 ///
 /// Parses the certificate and reads the key from the **SubjectPublicKeyInfo** —
-/// the exact field [`verify_handshake_signature`] checks the TLS 1.3
+/// the exact field `verify_handshake_signature` checks the TLS 1.3
 /// `CertificateVerify` signature against, because it reads the key here too.
 ///
 /// # Why structural parsing, not a byte-scan
@@ -2407,7 +2407,7 @@ mod rule_tests {
         CertificateDer::from(der)
     }
 
-    /// Each certificate form the TLS library's own parse refused, and the well-formed one,
+    /// Forms the TLS library's own parse refused, and the well-formed one,
     /// under an honest key and an honest `CertificateVerify`, presented to both verifiers in
     /// both directions. Whether the handshake completes is the row's last column, so a row
     /// that changes fails the test.
