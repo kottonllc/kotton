@@ -32,3 +32,5 @@ winresource = { workspace = true }
 
 [dev-dependencies]
 workspace-hack = { path = "../../tools/workspace-hack" }
+# The keys the rule refuses, which the allowlist's tests hold the fetch to.
+kotton-ed25519 = { path = "../ed25519", features = ["test-utils"] }

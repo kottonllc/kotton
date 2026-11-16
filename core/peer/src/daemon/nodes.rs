@@ -1031,13 +1031,13 @@ pub async fn project_membership_into_allowlist(
     // repair below. The filter belongs on the allowlist insert, which is the one
     // thing it is about.
     for m in members {
-        // The member's key enters the allowlist as a key or not at all: bytes the
-        // Ed25519 rule refuses are not put on it.
-        if m.in_paired_key_allowlist() {
-            if let Ok(key) = VerifyingKey::from_bytes(&m.public_key) {
-                if paired_keys.write().unwrap().insert(key) {
-                    added += 1;
-                }
+        // A member is recorded here as a key or not at all: for bytes the Ed25519
+        // rule refuses, nothing is written below — no allowlist entry, no
+        // `paired_nodes` row, no drive.
+        let key = VerifyingKey::from_bytes(&m.public_key).ok();
+        if let Some(key) = key.filter(|_| m.in_paired_key_allowlist()) {
+            if paired_keys.write().unwrap().insert(key) {
+                added += 1;
             }
         }
         // Ensure a paired_nodes cache row exists without clobbering learned
@@ -1065,7 +1065,7 @@ pub async fn project_membership_into_allowlist(
                 Err(e) => tracing::warn!(did = %m.did, error = %e, "could not un-cache a contact"),
             }
         }
-        if m.is_own_device() && !existing_dids.contains(&m.did) {
+        if key.is_some() && m.is_own_device() && !existing_dids.contains(&m.did) {
             if let Err(e) = network_db::insert_paired_node(
                 db,
                 &m.did,
@@ -1087,7 +1087,7 @@ pub async fn project_membership_into_allowlist(
         // reaches before the person tells it where the vault is — comes to know
         // the drive, through the one writer (`super::drives`). Idempotent, so
         // a row this device already holds for the vault is recorded as well.
-        if m.is_own_device() && m.posture == Some(Posture::BlindStorage) {
+        if key.is_some() && m.is_own_device() && m.posture == Some(Posture::BlindStorage) {
             if let Err(e) = super::drives::record(db, user_id, &m.public_key).await {
                 tracing::warn!(did = %m.did, error = %e, "a vault in the membership set was not recorded as a drive");
             }
@@ -1682,7 +1682,8 @@ mod allowlist_rebuild {
         }
     }
 
-    /// An own-device member under `public_key`, named `did`.
+    /// An own-device member under `public_key`, named `did`, admitted blind: a vault, which
+    /// the projection also records as a drive.
     fn own_device(did: &str, public_key: [u8; 32]) -> Member {
         Member {
             did: did.to_string(),
@@ -1690,7 +1691,7 @@ mod allowlist_rebuild {
             role: Role::OwnDevice,
             admitted_by: Ceremony::DeviceEnroll,
             added_at: "2026-11-16T00:00:00Z".to_string(),
-            posture: Some(Posture::Full),
+            posture: Some(Posture::BlindStorage),
             label: None,
             reach: None,
         }
@@ -1703,8 +1704,9 @@ mod allowlist_rebuild {
     /// or bytes `peer_add` was handed. A membership set can carry such a member
     /// too. One row per key the rule refuses sits beside one honest row, and the
     /// rebuild runs twice: with no members, and with one own-device member per
-    /// refused key beside one honest member. Each time only the honest keys are
-    /// on the allowlist.
+    /// refused key beside one honest member, each a vault. Each time only the
+    /// honest keys are on the allowlist, and nothing is recorded for a member the
+    /// rule refuses: no `paired_nodes` row and no drive.
     #[tokio::test]
     async fn the_rebuilt_allowlist_holds_only_keys_the_rule_admits() {
         use kotton_crypto::ed25519::refused;
@@ -1726,11 +1728,11 @@ mod allowlist_rebuild {
         assert_eq!(members.list_members().await.unwrap().len(), 15);
 
         let key = |b: &[u8; 32]| VerifyingKey::from_bytes(b).expect("an honest key");
-        let runs: [(Arc<dyn MemberStore>, HashSet<VerifyingKey>); 2] = [
-            (Arc::new(NoMembers), HashSet::from([key(&honest_row)])),
-            (Arc::new(members), HashSet::from([key(&honest_row), key(&honest_member)])),
+        let runs: [(Arc<dyn MemberStore>, HashSet<VerifyingKey>, bool); 2] = [
+            (Arc::new(NoMembers), HashSet::from([key(&honest_row)]), false),
+            (Arc::new(members), HashSet::from([key(&honest_row), key(&honest_member)]), true),
         ];
-        for (store, honest) in runs {
+        for (store, honest, with_members) in runs {
             let dir = tempfile::tempdir().unwrap();
             let options = sqlx::sqlite::SqliteConnectOptions::new()
                 .filename(dir.path().join("agent.db"))
@@ -1762,6 +1764,27 @@ mod allowlist_rebuild {
                 );
             }
             assert_eq!(live, honest, "only the honest keys are on the allowlist");
+
+            let drives_under = |key: [u8; 32]| {
+                let db = Arc::clone(&db);
+                async move {
+                    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM drives WHERE vault_key = ?")
+                        .bind(key.as_slice())
+                        .fetch_one(db.as_ref())
+                        .await
+                        .unwrap()
+                }
+            };
+            for (i, key) in refused_keys.iter().enumerate() {
+                let did = format!("did:peer:refused-member-{i}");
+                assert!(
+                    network_db::get_paired_node(&db, "alice", &did).await.unwrap().is_none(),
+                    "a row was written for refused member {i}"
+                );
+                assert_eq!(drives_under(*key).await, 0, "a drive was recorded for refused key vector {i}");
+            }
+            let honest_drives = drives_under(honest_member).await;
+            assert_eq!(honest_drives, i64::from(with_members), "the honest vault member's drive");
         }
     }
 

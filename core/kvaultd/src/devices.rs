@@ -117,11 +117,13 @@ pub async fn accept(
         return Err("it is not signed under the tenant's identity".to_string());
     }
 
-    // 2. The DID is the key's.
+    // 2. The DID is the key's, and for an admit a key the Ed25519 rule admits:
+    // bytes it refuses name no key, and are refused as a DID that names none.
     let named = Did::parse(&change.device_did)
         .ok()
         .and_then(|d| DidKeyMethod::to_public_key(&d).ok())
-        .map(|k| k.to_bytes());
+        .map(|k| k.to_bytes())
+        .filter(|b| change.act != TenantDeviceAct::Admit || VerifyingKey::from_bytes(b).is_ok());
     if named != Some(change.public_key) {
         return Err("the device's DID does not name its key".to_string());
     }
@@ -170,8 +172,8 @@ async fn apply_ending(
     let taken = matches!(outcome, Ok(Ok(())));
     tx.end(end.unwrap_or(if taken { "COMMIT" } else { "ROLLBACK" })).await?;
     let outcome = outcome?;
-    // The key enters the allowlist as a key or not at all: bytes the Ed25519 rule
-    // refuses are not put on it.
+    // The key enters the allowlist as a key. `accept` refuses an admit of bytes
+    // the Ed25519 rule refuses at condition 2, before this is reached.
     if outcome.is_ok() && change.act == TenantDeviceAct::Admit {
         if let Ok(key) = VerifyingKey::from_bytes(&change.public_key) {
             paired_keys.write().unwrap().insert(key);
@@ -475,6 +477,49 @@ mod tests {
         assert!(why.contains("the device's DID does not name its key"), "{why}");
         assert!(!paired(&db, "alice", &key).await);
         assert!(!keys.read().unwrap().contains(&VerifyingKey::from_bytes(&key).unwrap()));
+    }
+
+    /// **Condition 2 holds the key to the Ed25519 rule**: an admit the identity
+    /// signed, of each key vector the rule refuses under a DID naming those bytes,
+    /// is refused with the refusal a DID that names another key gets, byte for byte
+    /// in the reply, and writes no row.
+    #[tokio::test]
+    async fn an_admit_of_a_key_the_rule_refuses_is_refused_as_a_did_that_names_no_key() {
+        use kotton_crypto::ed25519::refused;
+        let base = tempfile::tempdir().unwrap();
+        let identity = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        a_tenant_at(base.path(), &identity);
+        let db = a_vault_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+
+        let (key, _) = a_device(2);
+        let (_, another_did) = a_device(4);
+        let misnamed = TenantDeviceChange { act: TenantDeviceAct::Admit, device_did: another_did, public_key: key, said_at_ms: 1 };
+        let existing = accept(base.path(), &db, &keys, "alice", &misnamed, &signed(&identity, &misnamed)).await.unwrap_err();
+        let existing_reply = serde_json::to_vec(&super::refused(&existing)).unwrap();
+
+        let vectors: Vec<[u8; 32]> = refused::SMALL_ORDER_KEYS
+            .into_iter()
+            .chain(refused::IDENTITY_OTHER_ENCODINGS)
+            .chain([refused::mixed_order_key(), refused::NON_CANONICAL_KEY, refused::NOT_A_POINT])
+            .collect();
+        assert_eq!(vectors.len(), 14, "one admit per refused key vector");
+        for (i, bytes) in vectors.into_iter().enumerate() {
+            let mut multicodec = vec![0xed, 0x01];
+            multicodec.extend_from_slice(&bytes);
+            let did = format!("did:key:z{}", bs58::encode(multicodec).into_string());
+            let change = TenantDeviceChange { act: TenantDeviceAct::Admit, device_did: did, public_key: bytes, said_at_ms: 2 + i as u64 };
+            let why = accept(base.path(), &db, &keys, "alice", &change, &signed(&identity, &change)).await.unwrap_err();
+            assert_eq!(serde_json::to_vec(&super::refused(&why)).unwrap(), existing_reply, "refused key vector {i}: {why}");
+            assert!(!paired(&db, "alice", &bytes).await, "a row was written for refused key vector {i}");
+            let changes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenant_device_changes WHERE public_key = ?")
+                .bind(bytes.as_slice())
+                .fetch_one(db.as_ref())
+                .await
+                .unwrap();
+            assert_eq!(changes, 0, "a change was taken for refused key vector {i}");
+        }
+        assert!(keys.read().unwrap().is_empty());
     }
 
     /// **The operator's half of condition 4, through the whole acceptance**:

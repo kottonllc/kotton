@@ -218,7 +218,7 @@ async fn main() -> io::Result<()> {
                 ticker.tick().await;
                 match refresh_allowed_keys(&token2, &endpoint2, &user_id2).await {
                     Ok(new_keys) => {
-                        *keys.write().unwrap() = new_keys;
+                        replace_live(&keys, new_keys);
                         tracing::debug!("kquicd: allowlist refreshed");
                     }
                     Err(e) => {
@@ -490,24 +490,28 @@ async fn fetch_allowed_keys(
         })
         .await?
     {
-        UserResponse::AuthorizedClients { pubkey_hexes, .. } => {
-            let mut set = HashSet::with_capacity(pubkey_hexes.len());
-            for hex_str in pubkey_hexes {
-                let bytes = hex::decode(&hex_str)
-                    .map_err(|e| io::Error::other(format!("bad pubkey hex: {e}")))?;
-                let arr: [u8; 32] = bytes
-                    .try_into()
-                    .map_err(|_| io::Error::other("pubkey must be 32 bytes"))?;
-                let key = VerifyingKey::from_bytes(&arr)
-                    .map_err(|e| io::Error::other(format!("pubkey is not an Ed25519 key: {e}")))?;
-                set.insert(key);
-            }
-            Ok(set)
-        }
+        UserResponse::AuthorizedClients { pubkey_hexes, .. } => Ok(keys_of(&pubkey_hexes)),
         other => Err(io::Error::other(format!(
             "GetAuthorizedClients unexpected: {other:?}"
         ))),
     }
+}
+
+/// The keys among `pubkey_hexes`, each a paired client's stored key in hex. An entry that is
+/// not a key (not hex, not 32 bytes, or bytes the Ed25519 rule refuses) is left out, and the
+/// rest stand: the store is read entry by entry, as the daemon's own rebuild reads it.
+fn keys_of(pubkey_hexes: &[String]) -> HashSet<VerifyingKey> {
+    pubkey_hexes
+        .iter()
+        .filter_map(|h| hex::decode(h).ok())
+        .filter_map(|b| <[u8; 32]>::try_from(b).ok())
+        .filter_map(|b| VerifyingKey::from_bytes(&b).ok())
+        .collect()
+}
+
+/// Replace the live allowlist with `fresh`, whole: a key the store no longer pairs leaves it.
+fn replace_live(live: &RwLock<HashSet<VerifyingKey>>, fresh: HashSet<VerifyingKey>) {
+    *live.write().unwrap() = fresh;
 }
 
 /// Open a fresh IPC connection and re-fetch the allowed-key set.
@@ -543,5 +547,44 @@ fn build_ipc_endpoint() -> io::Result<IpcEndpoint> {
         let _ = &name;
         let path = kotton_common::kuserd_socket_from_env().map_err(|e| io::Error::other(e.to_string()))?;
         Ok(IpcEndpoint::UnixSocket(path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kotton_ed25519::refused;
+
+    fn hex_of(seed: u8) -> String {
+        hex::encode(ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes())
+    }
+
+    fn key_of(seed: u8) -> VerifyingKey {
+        VerifyingKey::from_bytes(&ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes()).unwrap()
+    }
+
+    /// Every key vector the rule refuses, beside one honest key, gives the honest key alone:
+    /// the refused entries are left out and the honest one stands.
+    #[test]
+    fn the_refused_vectors_beside_an_honest_key_give_the_honest_key_alone() {
+        let refused_keys: Vec<[u8; 32]> = refused::SMALL_ORDER_KEYS
+            .into_iter()
+            .chain(refused::IDENTITY_OTHER_ENCODINGS)
+            .chain([refused::mixed_order_key(), refused::NON_CANONICAL_KEY, refused::NOT_A_POINT])
+            .collect();
+        assert_eq!(refused_keys.len(), 14, "one entry per refused key vector");
+        let mut hexes: Vec<String> = refused_keys.iter().map(hex::encode).collect();
+        hexes.insert(7, hex_of(3));
+        assert_eq!(keys_of(&hexes), HashSet::from([key_of(3)]));
+    }
+
+    /// A refresh over a store holding a refused entry still replaces the live set: the key the
+    /// store no longer pairs leaves, and the one it now pairs is admitted.
+    #[test]
+    fn a_refresh_replaces_the_live_set() {
+        let live = RwLock::new(HashSet::from([key_of(1)]));
+        let fresh = keys_of(&[hex::encode(refused::NOT_A_POINT), hex_of(2)]);
+        replace_live(&live, fresh);
+        assert_eq!(*live.read().unwrap(), HashSet::from([key_of(2)]));
     }
 }
