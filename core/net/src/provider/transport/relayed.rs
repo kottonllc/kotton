@@ -1025,11 +1025,8 @@ mod tests {
         let (door_key, claimant, authority) = (key(9), key(2), key(11));
         assert_ne!(pub_of(&claimant)[31] & 0x80, 0, "the claimant's key has its sign bit set");
         let admission = Admission::default();
-        admission
-            .authorities
-            .write()
-            .unwrap()
-            .insert(pub_of(&authority), "did:kotton:held".into());
+        let held = kotton_crypto::kel_verify::build_inception(&key(10), &[pub_of(&authority)]);
+        admission.learn_chain(std::slice::from_ref(&held));
 
         for (offered, admitted) in [(authority.clone(), true), (key(12), false)] {
             let (s_io, c_io) = tokio::io::duplex(64 * 1024);
@@ -1046,7 +1043,7 @@ mod tests {
                 assert_eq!(
                     conn.peer(),
                     &Peer::Claim {
-                        aid: "did:kotton:held".into()
+                        aid: held.aid.to_string()
                     }
                 );
                 assert_eq!(conn.peer_did(), None, "a claimant has no name");
@@ -1056,6 +1053,41 @@ mod tests {
             admission.admitted.read().unwrap().is_empty(),
             "a circuit's claim writes nothing to the shared table"
         );
+    }
+
+    /// For each kind of event, a hosted chain in which that one event carries a set that does
+    /// not make its commitment admits no claim by the key it carries beyond that commitment:
+    /// the circuit is closed on as any refusal is, and nothing is written to the admission's
+    /// shared table. A claim by the phrase the chain commits is admitted.
+    #[tokio::test]
+    async fn a_claim_by_a_key_no_event_commits_is_closed_on_as_any_refusal_is() {
+        use kotton_crypto::kel_verify::committed_set;
+        let seed = [42u8; 32];
+        let honest = crate::provider::transport::quic::tls::a_hosted_chain_of_every_kind(&seed);
+        let (door_key, claimant, outside) = (key(9), key(2), key(33));
+        let phrase = SigningKey::from_bytes(&kotton_crypto::kdf::derive_kel_recovery_key(&seed, 0));
+        for at in 0..honest.len() {
+            let mut chain = honest.clone();
+            let mut carried = committed_set(&chain[at]).unwrap_or_default().to_vec();
+            carried.push(pub_of(&outside));
+            chain[at].recovery_set = carried;
+            let kind = chain[at].kind;
+            let admission = Admission::default();
+            admission.learn_chain(&chain);
+            for (offered, admitted) in [(outside.clone(), false), (phrase.clone(), true)] {
+                let (s_io, c_io) = tokio::io::duplex(64 * 1024);
+                let door = door_admitting(&door_key, &[], admission.clone());
+                let server =
+                    tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place()).await });
+                let dialled =
+                    RelayedConnection::connect(c_io, &claimant, &pub_of(&door_key), &claiming(offered))
+                        .await;
+                let accepted = server.await.unwrap();
+                assert_eq!(dialled.is_ok(), admitted, "{kind:?}");
+                assert_eq!(accepted.is_ok(), admitted, "{kind:?}");
+            }
+            assert!(admission.admitted.read().unwrap().is_empty(), "{kind:?}: nothing is written");
+        }
     }
 
     /// A recovered device offers, inside the channel, the rotation that names its key, and

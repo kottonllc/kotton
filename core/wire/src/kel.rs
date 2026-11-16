@@ -177,8 +177,12 @@ pub struct KelEvent {
     /// by a cooperative rotation; set fresh by a recovery rotation; grown by a
     /// `RotationAddRecovery`.
     pub recovery_commitment: [u8; 32],
-    /// The recovery authorities `recovery_commitment` commits to, present only on a
-    /// `RotationAddRecovery`.
+    /// The recovery authorities `recovery_commitment` commits to, carried by an
+    /// `Inception`, a `RotationAddRecovery` and a recovery rotation
+    /// (`RotationMnemonic`, `RotationGuardian`); a cooperative rotation and an
+    /// interaction carry none. A carried set is read only through
+    /// `kotton_crypto::kel_verify::committed_set`, which returns it only where it is
+    /// not empty and makes `recovery_commitment`.
     ///
     /// Carried in the clear because a verifier cannot check "this set grew" from two
     /// roots — a Merkle root proves membership, never containment. These are public

@@ -299,7 +299,7 @@ fn scan(src: &str) -> Scan {
 /// and line number still holds. A string or char literal that is exactly `/` is kept, so
 /// `trim_end_matches("/")` reads like `trim_end_matches('/')`; any other char literal is
 /// blanked so a `'{'` does not unbalance a brace count.
-fn blank(src: &str) -> String {
+pub(crate) fn blank(src: &str) -> String {
     let s = src.as_bytes();
     let mut o = s.to_vec();
     let mut i = 0;
@@ -440,7 +440,7 @@ fn normalisations(b: &[u8]) -> Vec<usize> {
 }
 
 /// Every function with a body: (name, body-open offset, one past body-close).
-fn functions(b: &[u8]) -> Vec<(String, usize, usize)> {
+pub(crate) fn functions(b: &[u8]) -> Vec<(String, usize, usize)> {
     let mut out = Vec::new();
     let mut i = 0;
     while let Some(p) = find(b, b"fn", i) {

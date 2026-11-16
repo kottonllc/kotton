@@ -347,15 +347,11 @@ async fn the_relay_sees_a_version_two_fresh_values_lengths_and_ciphertext() {
     let (claimant, authority) = (random_key(), random_key());
     let seed = [7u8; 32];
     let rung = |i| kel_recovery_pubkey(&kotton_crypto::kdf::derive_kel_recovery_key(&seed, i));
-    let tip = build_inception(&random_key(), &[rung(0)]);
-    let rotation = build_mnemonic_rotation(&tip, &seed, 0, &recovered, 0, &[rung(0)]);
+    let committed = [rung(0), pub_of(&authority)];
+    let tip = build_inception(&random_key(), &committed);
+    let rotation = build_mnemonic_rotation(&tip, &seed, 0, &recovered, 0, &committed);
     let admission = Admission::default();
-    admission.tips.write().unwrap().insert(tip.aid.to_string(), tip.clone());
-    admission
-        .authorities
-        .write()
-        .unwrap()
-        .insert(pub_of(&authority), tip.aid.to_string());
+    admission.learn_chain(std::slice::from_ref(&tip));
     let (label, door, served) =
         hold_door(&relay_url, &b, admitting(&[pub_of(&a)], admission.clone())).await;
 

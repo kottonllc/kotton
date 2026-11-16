@@ -398,6 +398,10 @@ lint:
     # No code under core/ spells `device add --`, outside tests and comments: the words come from
     # device_add_word, a total map over Posture. A text check; its doc says what it misses.
     cargo xtask device-add-check
+    # An event's carried recovery set is its authorities only where it makes the event's
+    # commitment; kotton_crypto::kel_verify::committed_set is that rule, and outside tests nothing
+    # else reads the field. A text check; its doc says what it misses.
+    cargo xtask recovery-set-check
     # Every Ed25519 check made with ed25519-dalek is strict (the handshake's check and the
     # threshold provider's `aggregate` are #564's). The clippy runs above refuse the unstrict
     # check (`clippy.toml`, read by the workspace and the relay alike); this holds that file,

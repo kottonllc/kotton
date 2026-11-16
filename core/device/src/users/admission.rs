@@ -119,9 +119,11 @@ impl Chains {
 ///
 /// **A blind node's copy of an identity's chain has to track the identity's.**
 /// It is the only thing the node can check a recovery claim against
-/// (`Admission::learn_chain` reads every event's `recovery_set`), so a chain
-/// that stops at the moment of enrolment can only admit the authorities that
-/// existed then.
+/// (`Admission::learn_chain` indexes each set an inception, an add-recovery or a
+/// recovery rotation carries, read through `kel_verify::committed_set`, which
+/// returns a set only where it makes its event's commitment), so a chain that
+/// stops at the moment of enrolment can only admit the authorities that existed
+/// then.
 ///
 /// That is not a corner case; it is the order the host guides (`docs/use/run-a-vault.md`,
 /// then `docs/use/recover-and-start-over.md`) tell a person to work in: admit a node,
@@ -135,8 +137,11 @@ impl Chains {
 ///
 /// **Nothing is taken on the peer's word.** Only events past the stored tip are
 /// considered, and the result is replayed from the beginning: each event must be
-/// authorized by the key state its predecessor established. A peer cannot insert
-/// an authority the identity did not sign for — which is why the same helper is
+/// authorized by the key state its predecessor established. And what the index
+/// learns of an event is the set `kel_verify::committed_set` returns for it, the
+/// set that makes the commitment the event's signature covers, never a set it
+/// merely carries. A peer cannot insert an authority the identity did not sign
+/// for — which is why the same helper is
 /// safe for `persist_admitted`, where the offering device is not yet paired at
 /// all, and narrower here, where it already is.
 pub fn adopt_chain_extension(
