@@ -36,3 +36,7 @@ infra/vault/** text eol=lf
 infra/relay/*.service text eol=lf
 infra/relay/*.env text eol=lf
 *.sh text eol=lf
+
+# The did:key spellings: rebuilt from the codec and compared byte for byte
+# (core/crypto/src/provider/did/key_method.rs), and read by the relay's tests.
+core/wire/src/did/did-key-spellings.txt -text
