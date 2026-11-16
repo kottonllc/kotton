@@ -97,7 +97,7 @@ mod tests {
 
         let did = kotton_wire::did::Did::parse(&runtime.operational_did()).expect("a DID");
         assert_eq!(
-            kotton_crypto::DidKeyMethod::to_public_key(&did).expect("did:key").to_bytes(),
+            *kotton_crypto::DidKeyMethod::to_public_key(&did).expect("did:key").as_bytes(),
             runtime.device_signing_pubkey_bytes()
         );
         assert_ne!(

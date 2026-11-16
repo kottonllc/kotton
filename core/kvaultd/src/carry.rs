@@ -46,7 +46,7 @@
 //! answer it by guessing (the record's 2026-09-26 heading).
 
 use crate::doors::decode32;
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::SigningKey;
 use kotton_crypto::did::DidKeyMethod;
 use kotton_device::DeviceRuntime;
 use kotton_peer::rendezvous::{self, DeliveryAttempt};
@@ -393,13 +393,13 @@ fn attempts_at(doors: &[HeldDoor], now: u64) -> Vec<DeliveryAttempt> {
         let (Some(seed), Some(admit)) = (decode32(&door.seed), decode32(&door.admit)) else {
             continue;
         };
-        let Ok(target) = VerifyingKey::from_bytes(&admit) else {
+        let Ok(target) = kotton_crypto::ed25519::VerifyingKey::from_bytes(&admit) else {
             continue;
         };
         let auth_key = SigningKey::from_bytes(&seed);
         out.push(DeliveryAttempt {
             epoch: e,
-            auth_did: DidKeyMethod::from_public_key(&auth_key.verifying_key()).to_string(),
+            auth_did: DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&auth_key)).to_string(),
             auth_key,
             target: DidKeyMethod::from_public_key(&target).to_string(),
             target_pub: admit,

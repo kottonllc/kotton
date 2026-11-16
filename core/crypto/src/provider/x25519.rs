@@ -24,16 +24,26 @@
 //!
 //! The channel key is never sent to the hosting node in plaintext.
 //!
-//! ## DID ↔ X25519 key conversion
+//! ## The two forms of a key
 //!
-//! Kotton DIDs are `did:key:` over Ed25519 public keys.  X25519 keys are
-//! derived from Ed25519 keys via the Birkhoff point conversion (Elligator2):
-//! Ed25519 verifying key (Edwards point) → Montgomery (X25519) point.
-//! Ed25519 signing key seed → clamped X25519 scalar via SLIP-10-consistent
-//! hashing. This is the tree's one conversion between the two forms.
+//! Kotton DIDs are `did:key:` over Ed25519 public keys, and a side's static X25519 key is the
+//! Montgomery form of its Ed25519 key, as the protocol's handshake says.
+//!
+//! - [`ed25519_pub_to_x25519`] takes a key that passed the Ed25519 rule
+//!   ([`VerifyingKey`], `kotton_crypto::ed25519`) and returns the Montgomery `u` of its point,
+//!   `(1 + y) / (1 - y)`. Only a key that passed is converted, by the type: a caller that holds
+//!   bytes constructs the key first and refuses what the rule refuses, so a value that is no key
+//!   is never used as one. Among keys that pass, one form is shared by a key and its
+//!   negative and by no other value.
+//! - [`ed25519_priv_to_x25519`] reads the signing key's seed and nothing else: SHA-512 of it,
+//!   the first 32 bytes clamped (RFC 7748 section 5), as libsodium's
+//!   `crypto_sign_ed25519_sk_to_curve25519` does.
+//!
+//! This is the tree's one conversion between the two forms.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ed25519_dalek::SigningKey;
+use kotton_ed25519::VerifyingKey;
 use hkdf::Hkdf;
 use rand::RngCore;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
@@ -42,19 +52,19 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 // ── Key conversion (Ed25519 ↔ X25519) ─────────────────────────────────────────
 
-/// Convert an Ed25519 verifying-key byte array (32 bytes, compressed Edwards
-/// point) to an X25519 public key (Montgomery form).
-///
-/// Used to derive the recipient's X25519 public key from their `did:key:`
-/// (which encodes an Ed25519 verifying key).
-pub fn ed25519_pub_to_x25519(ed_pub: &[u8; 32]) -> Result<X25519PublicKey> {
+/// The Montgomery form of `ed_pub`, a key that passed the Ed25519 rule: its X25519 public key.
+pub fn ed25519_pub_to_x25519(ed_pub: &VerifyingKey) -> X25519PublicKey {
     use curve25519_dalek::edwards::CompressedEdwardsY;
-    let compressed = CompressedEdwardsY(*ed_pub);
-    let edwards = compressed
+    let edwards = CompressedEdwardsY(*ed_pub.as_bytes())
         .decompress()
-        .context("invalid Ed25519 public key: cannot decompress Edwards point")?;
-    let montgomery = edwards.to_montgomery();
-    Ok(X25519PublicKey::from(montgomery.to_bytes()))
+        .expect("a key that passed the Ed25519 rule decodes to its point");
+    X25519PublicKey::from(edwards.to_montgomery().to_bytes())
+}
+
+/// `bytes` as a key by the Ed25519 rule, for a caller that converts it: what the rule refuses
+/// is no key, and is not converted.
+fn key(bytes: &[u8; 32], whose: &str) -> Result<VerifyingKey> {
+    VerifyingKey::from_bytes(bytes).map_err(|e| anyhow::anyhow!("{whose} is not an Ed25519 key: {e}"))
 }
 
 /// Convert an Ed25519 signing key to an X25519 static secret.
@@ -130,7 +140,7 @@ pub fn dm_encrypt(
     plaintext: &[u8],
     recipient_ed_pub: &[u8; 32],
 ) -> Result<(Vec<u8>, [u8; 12], [u8; 32])> {
-    let recipient_x25519 = ed25519_pub_to_x25519(recipient_ed_pub)?;
+    let recipient_x25519 = ed25519_pub_to_x25519(&key(recipient_ed_pub, "the recipient's key")?);
 
     // Generate ephemeral keypair
     let eph_priv = StaticSecret::random_from_rng(rand::thread_rng());
@@ -183,7 +193,7 @@ pub fn retired_keys_seal(
     keys: &[SigningKey],
     holder_ed_pub: &[u8; 32],
 ) -> Result<(Vec<u8>, [u8; 12], [u8; 32])> {
-    let holder_x25519 = ed25519_pub_to_x25519(holder_ed_pub)?;
+    let holder_x25519 = ed25519_pub_to_x25519(&key(holder_ed_pub, "the holder's key")?);
     let eph_priv = StaticSecret::random_from_rng(rand::thread_rng());
     let eph_pub = X25519PublicKey::from(&eph_priv);
     let dh = eph_priv.diffie_hellman(&holder_x25519);
@@ -258,7 +268,7 @@ pub fn channel_key_wrap(
     channel_key: &[u8; 32],
     recipient_ed_pub: &[u8; 32],
 ) -> Result<(Vec<u8>, [u8; 12], [u8; 32])> {
-    let recipient_x25519 = ed25519_pub_to_x25519(recipient_ed_pub)?;
+    let recipient_x25519 = ed25519_pub_to_x25519(&key(recipient_ed_pub, "the recipient's key")?);
     let eph_priv = StaticSecret::random_from_rng(rand::thread_rng());
     let eph_pub = X25519PublicKey::from(&eph_priv);
     let dh = eph_priv.diffie_hellman(&recipient_x25519);
@@ -352,5 +362,26 @@ mod tests {
         // Not by a retired key itself, and not as a message: the label differs.
         assert!(retired_keys_open(&ct, &nonce, &eph, &retired[0]).is_err());
         assert!(dm_decrypt(&ct, &nonce, &eph, &holder).is_err());
+    }
+
+    /// Nothing is sealed to a key the rule refuses: a message, a grant of a channel key and the
+    /// retired keys each refuse every vector, and convert nothing.
+    #[test]
+    fn nothing_is_sealed_to_a_key_the_rule_refuses() {
+        let retired = [random_signing_key()];
+        for (name, bytes) in crate::ed25519::refused_keys() {
+            assert!(dm_encrypt(b"m", &bytes).is_err(), "a message sealed to {name}");
+            assert!(channel_key_wrap(&channel_key_generate(), &bytes).is_err(), "a channel key sealed to {name}");
+            assert!(retired_keys_seal(&retired, &bytes).is_err(), "retired keys sealed to {name}");
+        }
+    }
+
+    /// The Montgomery form of a key is its point's `u = (1 + y) / (1 - y)`, and the secret
+    /// conversion of its signing key makes the same public key.
+    #[test]
+    fn the_two_conversions_agree() {
+        let signing = random_signing_key();
+        let public = ed25519_pub_to_x25519(&crate::ed25519::verifying_key(&signing));
+        assert_eq!(public.as_bytes(), X25519PublicKey::from(&ed25519_priv_to_x25519(&signing)).as_bytes());
     }
 }

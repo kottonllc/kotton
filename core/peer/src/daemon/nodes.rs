@@ -1015,12 +1015,19 @@ pub async fn project_membership_into_allowlist(
             return 0;
         }
     };
-    let existing_dids: HashSet<String> = network_db::list_paired_nodes(db, user_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|n| n.device_did.to_string())
-        .collect();
+    let existing = network_db::list_paired_nodes(db, user_id).await.unwrap_or_default();
+    // A contact cached as a device is found by the DID it was cached under: the
+    // repair below removes the row an earlier build wrote for the member, by
+    // the name it wrote it under, and no row of the person's own that happens
+    // to hold the same bytes.
+    let existing_dids: HashSet<String> = existing.iter().map(|n| n.device_did.to_string()).collect();
+    // An own device is already recorded when a row of the person's holds its
+    // key: a row is its bytes', and the DID beside them is never read as the
+    // key's name (kottonllc/kotton#597). A row under another spelling of the
+    // member's `did:key` (a drive's node handed at a join under its key's
+    // `did:key`, beside a member an earlier build wrote under another) is the
+    // member's row, and no second row is written for the same key.
+    let mut existing_keys: HashSet<[u8; 32]> = existing.iter().map(|n| n.public_key).collect();
     let now = chrono::Utc::now().timestamp();
     let mut added = 0usize;
     // Every member, not only the ones the allowlist admits.
@@ -1065,7 +1072,7 @@ pub async fn project_membership_into_allowlist(
                 Err(e) => tracing::warn!(did = %m.did, error = %e, "could not un-cache a contact"),
             }
         }
-        if key.is_some() && m.is_own_device() && !existing_dids.contains(&m.did) {
+        if key.is_some() && m.is_own_device() && existing_keys.insert(m.public_key) {
             if let Err(e) = network_db::insert_paired_node(
                 db,
                 &m.did,
@@ -1697,6 +1704,39 @@ mod allowlist_rebuild {
         }
     }
 
+    /// **A row and a member stand by their bytes** (kottonllc/kotton#597): a
+    /// `paired_nodes` row and an own-device member whose bytes are a key, each
+    /// stored under another spelling of the key's `did:key`, are admitted as
+    /// before: the rebuilt allowlist holds both keys and the row's key is paired
+    /// to its person.
+    #[tokio::test]
+    async fn a_row_and_a_member_under_another_spelling_are_admitted_by_their_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        let db = Arc::new(pool);
+
+        let row = *kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[21u8; 32])).as_bytes();
+        let member = *kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[22u8; 32])).as_bytes();
+        let row_did = kotton_crypto::DidKeyMethod::spelled_otherwise(&row).to_string();
+        network_db::insert_paired_node(&db, "laptop", "alice", &row_did, &row, "[]", 0, None).await.unwrap();
+        let members = Members::default();
+        let m = own_device(&kotton_crypto::DidKeyMethod::spelled_otherwise(&member).to_string(), member);
+        members.write_member(&m).await.unwrap();
+
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let users: Vec<(String, Arc<dyn MemberStore>)> = vec![("alice".to_string(), Arc::new(members))];
+        reproject_allowlist(&users, &db, &paired_keys).await;
+        let live = paired_keys.read().unwrap().clone();
+        let key = |b: &[u8; 32]| VerifyingKey::from_bytes(b).unwrap();
+        assert!(live.contains(&key(&row)), "the row under another spelling is not admitted");
+        assert!(live.contains(&key(&member)), "the member under another spelling is not admitted");
+        assert!(network_db::is_pubkey_paired_to_user(&db, &row, "alice").await.unwrap());
+    }
+
     /// **The allowlist a daemon rebuilds from its store holds only keys the
     /// rule admits**, from every source it is built from. A store can carry a
     /// row whose bytes are not a key: an all-zero row written by the placeholder
@@ -1722,8 +1762,10 @@ mod allowlist_rebuild {
 
         let members = Members::default();
         members.write_member(&own_device("did:peer:honest-member", honest_member)).await.unwrap();
+        // As an earlier build wrote them: `write_member` refuses a member under such bytes.
         for (i, key) in refused_keys.iter().enumerate() {
-            members.write_member(&own_device(&format!("did:peer:refused-member-{i}"), *key)).await.unwrap();
+            let m = own_device(&format!("did:peer:refused-member-{i}"), *key);
+            members.member_write(&m.vfs_path(), &serde_json::to_vec(&m).unwrap()).await.unwrap();
         }
         assert_eq!(members.list_members().await.unwrap().len(), 15);
 
@@ -1819,6 +1861,38 @@ mod allowlist_rebuild {
         let said = node_revoke(&NoMembers, &db, "bob".into(), did.clone(), &paired_keys).await.unwrap();
         assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
         assert!(!paired_keys.read().unwrap().contains(&admitted), "a key no row pairs is still admitted");
+    }
+
+    /// **A row an earlier build stored under bytes the rule refuses is removed by
+    /// the verb that revokes any node**, named by its DID as stored and matched
+    /// by what is stored, not through the decode: for every key vector the rule
+    /// refuses, the row goes, the honest row beside it stays, and the allowlist
+    /// is untouched.
+    #[tokio::test]
+    async fn a_row_under_bytes_the_rule_refuses_is_revoked_by_what_is_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        let db = Arc::new(pool);
+
+        let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[12u8; 32]));
+        let honest_did = kotton_crypto::DidKeyMethod::from_public_key(&honest).to_string();
+        network_db::insert_paired_node(&db, "laptop", "alice", &honest_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([honest])));
+
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
+            network_db::insert_paired_node(&db, "old", "alice", &did, &bytes, "[]", 0, None).await.unwrap();
+            let said = node_revoke(&NoMembers, &db, "alice".into(), did.clone(), &paired_keys).await.unwrap();
+            assert!(matches!(said, UserResponse::NodeRevoked), "{name}: {said:?}");
+            let left: Vec<String> =
+                network_db::list_paired_nodes(&db, "alice").await.unwrap().iter().map(|n| n.device_did.to_string()).collect();
+            assert_eq!(left, vec![honest_did.clone()], "{name}: the row was not removed, or the honest one went with it");
+            assert_eq!(*paired_keys.read().unwrap(), HashSet::from([honest]), "{name}: the allowlist changed");
+        }
     }
 }
 

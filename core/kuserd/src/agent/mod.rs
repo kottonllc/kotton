@@ -2122,7 +2122,7 @@ async fn serve_peer_request(
     let peer_pubkey_bytes: Option<[u8; 32]> = Did::parse(peer_did)
         .ok()
         .and_then(|d| DidKeyMethod::to_public_key(&d).ok())
-        .map(|vk| vk.to_bytes());
+        .map(|vk| *vk.as_bytes());
 
     // A gateway device is paired so the relay carries it and the handshake
     // admits it; its *posture* is what keeps pairing from being reach. It

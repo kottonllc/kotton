@@ -218,17 +218,8 @@ impl MessageHost for DaemonMessageHost<'_> {
             .users
             .get(user_id)
             .ok_or_else(|| NotKept::Failed(format!("'{user_id}' is not available on this node")))?;
-        let member = store
-            .read_member(contact_did)
-            .await
-            .map_err(|e| NotKept::Failed(format!("could not read the card for {contact_did}: {e}")))?;
-        let kept = judge_on_card(member.as_ref(), &note, contact_did, kotton_peer::rendezvous::unix_now())?;
-        if let Some(mut member) = member.filter(|_| kept == Kept::Replaced) {
-            member.reach = Some(note);
-            store
-                .write_member(&member)
-                .await
-                .map_err(|e| NotKept::Failed(format!("could not keep the reach note: {e}")))?;
+        let kept = keep_note_on_card(store.as_ref(), contact_did, note, kotton_peer::rendezvous::unix_now()).await?;
+        if kept == Kept::Replaced {
             tracing::debug!(user_id, contact = %contact_did, "a contact's reach note was replaced");
         }
         Ok(kept)
@@ -269,23 +260,15 @@ impl MessageHost for DaemonMessageHost<'_> {
             .users
             .get(user_id)
             .ok_or_else(|| NotKept::Failed(format!("'{user_id}' is not available on this node")))?;
-        let mut member = store
-            .read_member(contact_did)
-            .await
-            .map_err(|e| NotKept::Failed(format!("could not read the card for {contact_did}: {e}")))?
-            .filter(|m| matches!(m.role, kotton_schemas::membership::Role::Contact))
-            .ok_or_else(|| NotKept::Refused(format!("{contact_did} is not a contact")))?;
-        kotton_identity::kel_store::save_contact_chain(self.runtime.base_dir(), user_id, contact_did, log)
-            .map_err(|e| NotKept::Failed(format!("could not keep {contact_did}'s key log: {e}")))?;
-        if member.public_key == key {
-            return Ok(());
+        let base = self.runtime.base_dir();
+        let changed = adopt_key_on_card(store.as_ref(), contact_did, key, || {
+            kotton_identity::kel_store::save_contact_chain(base, user_id, contact_did, log)
+                .map_err(|e| NotKept::Failed(format!("could not keep {contact_did}'s key log: {e}")))
+        })
+        .await?;
+        if changed {
+            self.runtime.contacts_changed().notify_one();
         }
-        member.public_key = key;
-        store
-            .write_member(&member)
-            .await
-            .map_err(|e| NotKept::Failed(format!("could not keep {contact_did}'s new key: {e}")))?;
-        self.runtime.contacts_changed().notify_one();
         Ok(())
     }
 
@@ -619,6 +602,62 @@ async fn deliver_here(
 /// tried again rather than settled until the next reach note version.
 /// Under the key the card holds, never one the note or the envelope brought
 /// with it: that key is what pairing authenticated.
+/// Keep `note` on `contact_did`'s card where the card says it replaces the one
+/// held: the card is read, judged and written back. A card the membership
+/// writer refuses (one an earlier build stored under bytes that are no Ed25519
+/// key) is not written, and the refusal says why; the card is left as it was.
+async fn keep_note_on_card<S: Membership + ?Sized>(
+    store: &S,
+    contact_did: &str,
+    note: kotton_crypto::reach_note::ReachNote,
+    now: u64,
+) -> Result<kotton_crypto::reach_note::Kept, kotton_msg::daemon::messages::NotKept> {
+    use kotton_crypto::reach_note::Kept;
+    use kotton_msg::daemon::messages::NotKept;
+    let member = store
+        .read_member(contact_did)
+        .await
+        .map_err(|e| NotKept::Failed(format!("could not read the card for {contact_did}: {e}")))?;
+    let kept = judge_on_card(member.as_ref(), &note, contact_did, now)?;
+    if let Some(mut member) = member.filter(|_| kept == Kept::Replaced) {
+        member.reach = Some(note);
+        store
+            .write_member(&member)
+            .await
+            .map_err(|e| NotKept::Failed(format!("could not keep the reach note: {e}")))?;
+    }
+    Ok(kept)
+}
+
+/// Put `key` on `contact_did`'s card, after `save_log` keeps the key log that
+/// accounts for it (the log first, then the card). Whether the card changed. A
+/// key the membership writer refuses (bytes that are no Ed25519 key) is not
+/// written, and the refusal says why; the card keeps the key it held.
+async fn adopt_key_on_card<S: Membership + ?Sized>(
+    store: &S,
+    contact_did: &str,
+    key: [u8; 32],
+    save_log: impl FnOnce() -> Result<(), kotton_msg::daemon::messages::NotKept>,
+) -> Result<bool, kotton_msg::daemon::messages::NotKept> {
+    use kotton_msg::daemon::messages::NotKept;
+    let mut member = store
+        .read_member(contact_did)
+        .await
+        .map_err(|e| NotKept::Failed(format!("could not read the card for {contact_did}: {e}")))?
+        .filter(|m| matches!(m.role, kotton_schemas::membership::Role::Contact))
+        .ok_or_else(|| NotKept::Refused(format!("{contact_did} is not a contact")))?;
+    save_log()?;
+    if member.public_key == key {
+        return Ok(false);
+    }
+    member.public_key = key;
+    store
+        .write_member(&member)
+        .await
+        .map_err(|e| NotKept::Failed(format!("could not keep {contact_did}'s new key: {e}")))?;
+    Ok(true)
+}
+
 fn judge_on_card(
     member: Option<&kotton_schemas::membership::Member>,
     note: &kotton_crypto::reach_note::ReachNote,
@@ -671,7 +710,8 @@ pub(crate) fn contact_relays(
 
 #[cfg(test)]
 mod tests {
-    use super::{contact_paths_from, contact_relays, judge_on_card, Way};
+    use super::{adopt_key_on_card, contact_paths_from, contact_relays, judge_on_card, keep_note_on_card, Way};
+    use kotton_peer::membership::{MemberStore, Membership as _};
     use kotton_crypto::reach_note::{self, RelayRef};
     use kotton_schemas::membership::Member;
 
@@ -721,6 +761,86 @@ mod tests {
             vec!["http://relay.bob.first", "http://relay.shared", "http://relay.bob.second"]
         );
         assert_eq!(contact_relays(card(stored_card()).reach.as_ref(), "", NOW), Vec::<String>::new(), "no relay anywhere: no path");
+    }
+
+    /// A member store that keeps what it is told.
+    #[derive(Default)]
+    struct Cards(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+    #[async_trait::async_trait]
+    impl MemberStore for Cards {
+        async fn member_write(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.0.lock().unwrap().insert(path.to_string(), data.to_vec());
+            Ok(())
+        }
+        async fn member_read(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+            self.0.lock().unwrap().get(path).cloned().ok_or_else(|| anyhow::anyhow!("no card at {path}"))
+        }
+        async fn member_delete(&self, path: &str) -> anyhow::Result<()> {
+            self.0.lock().unwrap().remove(path);
+            Ok(())
+        }
+        async fn member_list(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            Ok(self.0.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect())
+        }
+    }
+
+    /// Bob's card under `key`, written as stored, past the membership writer, as an earlier
+    /// build could have written it.
+    async fn bob_under(cards: &Cards, key: [u8; 32]) -> Member {
+        let mut stored = stored_card();
+        stored["public_key"] = serde_json::json!(key.to_vec());
+        let bob = card(stored);
+        cards.member_write(&bob.vfs_path(), &serde_json::to_vec(&bob).unwrap()).await.unwrap();
+        bob
+    }
+
+    /// **A reach note on a card that names no key is not kept, and the card is left as it
+    /// was** (`keep_reach_note`). For every key vector the rule refuses, Bob's card stored
+    /// under those bytes: a note in his name is refused at its signature, before anything is
+    /// written. Under his key, the same note is kept on his card.
+    #[tokio::test]
+    async fn a_reach_note_is_kept_only_on_a_card_that_names_a_key() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let note = reach_note::next(None, "did:key:z6MkBob", &[], &[], &key, NOW).unwrap();
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let cards = Cards::default();
+            let bob = bob_under(&cards, bytes).await;
+            assert!(keep_note_on_card(&cards, "did:key:z6MkBob", note.clone(), NOW).await.is_err(), "{name}");
+            assert_eq!(cards.read_member("did:key:z6MkBob").await.unwrap(), Some(bob), "{name}: the card changed");
+        }
+        let cards = Cards::default();
+        bob_under(&cards, key.verifying_key().to_bytes()).await;
+        keep_note_on_card(&cards, "did:key:z6MkBob", note.clone(), NOW).await.unwrap();
+        assert_eq!(cards.read_member("did:key:z6MkBob").await.unwrap().unwrap().reach, Some(note));
+    }
+
+    /// **A contact's new key that is no key is not put on their card** (`adopt_contact_key`).
+    /// For every key vector the rule refuses, adopting it is refused by the membership writer,
+    /// which says why, and the card keeps the key it held; the log is kept first, as before. An
+    /// honest new key is adopted.
+    #[tokio::test]
+    async fn a_contacts_new_key_is_adopted_only_where_it_is_a_key() {
+        let old = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes();
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let cards = Cards::default();
+            let bob = bob_under(&cards, old).await;
+            let mut logged = false;
+            let refused = adopt_key_on_card(&cards, "did:key:z6MkBob", bytes, || {
+                logged = true;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+            assert!(refused.reason().contains("not an Ed25519 key"), "{name}: {}", refused.reason());
+            assert!(logged, "{name}: the log was not kept first");
+            assert_eq!(cards.read_member("did:key:z6MkBob").await.unwrap(), Some(bob), "{name}: the card changed");
+        }
+        let cards = Cards::default();
+        bob_under(&cards, old).await;
+        let new = ed25519_dalek::SigningKey::from_bytes(&[10u8; 32]).verifying_key().to_bytes();
+        assert!(adopt_key_on_card(&cards, "did:key:z6MkBob", new, || Ok(())).await.unwrap());
+        assert_eq!(cards.read_member("did:key:z6MkBob").await.unwrap().unwrap().public_key, new);
     }
 
     fn with_note(relays: &[&str]) -> serde_json::Value {

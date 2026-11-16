@@ -3085,7 +3085,7 @@ mod relayed_tests {
         assert!(j.data_keys.is_none() && j.frost_share.is_none(), "blind: no keys crossed");
         assert_eq!(j.recovery_bundle.as_deref(), Some("sealed-recovery-copy"));
         assert_eq!(
-            kotton_crypto::DidKeyMethod::to_public_key(&e.node.device_did).unwrap().to_bytes(),
+            *kotton_crypto::DidKeyMethod::to_public_key(&e.node.device_did).unwrap().as_bytes(),
             e.node.public_key,
             "the DID is the proven key's"
         );

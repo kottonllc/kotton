@@ -35,7 +35,7 @@ mod b3_tests {
     fn member(did: &str, posture: Option<Posture>) -> Member {
         Member {
             did: did.to_string(),
-            public_key: [0u8; 32],
+            public_key: ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]).verifying_key().to_bytes(),
             role: Role::OwnDevice,
             admitted_by: Ceremony::DeviceEnroll,
             added_at: "2026-07-23T00:00:00Z".to_string(),

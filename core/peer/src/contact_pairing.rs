@@ -618,7 +618,7 @@ mod tests {
         let (alice, ka) = identity("alice");
         let mut r = sign_identity(b"t", &alice, &ka).unwrap();
         r.public_key = refused::SMALL_ORDER_KEY;
-        r.aid = DidKeyMethod::from_public_key_bytes(&r.public_key).unwrap().to_string();
+        r.aid = DidKeyMethod::spelled_over(&r.public_key).to_string();
         r.sig = refused::under_small_order_key_bytes().to_vec();
         let refused = verify_identity(b"t", &r).unwrap_err().to_string();
         assert!(refused.contains("not signed by the key it presents"), "{refused}");

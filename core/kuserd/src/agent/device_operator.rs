@@ -76,7 +76,7 @@ pub(crate) fn own_key(store: &UserStore) -> anyhow::Result<SigningKey> {
 
 /// The key's `did:key`.
 pub(crate) fn did_of(key: &SigningKey) -> String {
-    kotton_crypto::DidKeyMethod::from_public_key(&key.verifying_key()).to_string()
+    kotton_crypto::DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(key)).to_string()
 }
 
 /// Where this machine's `kdeviced` listens: the runtime's, when it was told one,

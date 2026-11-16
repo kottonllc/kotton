@@ -17,6 +17,11 @@
 //! does not say which clause refused. [`Signature`] is the library's, which parses 64 bytes and
 //! checks nothing of its own.
 //!
+//! Above this crate, the type is what a `did:key` names: `kotton_crypto::did` makes one only of
+//! a key that passed and decodes one only to such a key, so 32 bytes that do not pass are named
+//! by no `did:key` the tree makes or reads. And it is the only key converted to its Montgomery
+//! form for an exchange (`kotton_crypto::x25519`), which this crate does not do.
+//!
 //! This crate is beneath `kotton-pair`, so the pairing ceremony, `kotton-crypto` and every
 //! crate above it, and the relay reach the same type. It builds for every target `kotton-pair`
 //! does, `wasm32-unknown-unknown` among them.

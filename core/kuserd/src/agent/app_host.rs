@@ -762,7 +762,7 @@ mod tests {
         store
             .write_member(&Member {
                 did: VAULT.to_string(),
-                public_key: [3u8; 32],
+                public_key: ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]).verifying_key().to_bytes(),
                 role: Role::OwnDevice,
                 admitted_by: Ceremony::DeviceEnroll,
                 added_at: "2026-09-23T00:00:00Z".to_string(),

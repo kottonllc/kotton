@@ -533,7 +533,7 @@ mod tests {
             .try_into()
             .expect("ed25519 verifying key is 32 bytes");
         let did = DidKeyMethod::from_public_key_bytes(&pub_array)
-            .expect("from_public_key_bytes is infallible for 32-byte input");
+            .expect("a key made from a seed passes the Ed25519 rule");
         eprintln!("did:key      : {}", did);
 
         // Layer C1: seed32 → CEK (HKDF-SHA256)

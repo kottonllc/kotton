@@ -164,7 +164,7 @@ pub async fn hold(
                 message: "a door's admitted key is not 32 bytes".to_string(),
             };
         }
-        let did = DidKeyMethod::from_public_key(&SigningKey::from_bytes(&seed).verifying_key());
+        let did = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&seed)));
         rows.push((d.epoch, did.to_string(), d.seed, d.admit));
     }
     let err = |e: sqlx::Error| UserResponse::Error {
@@ -328,7 +328,7 @@ pub async fn refresh(runtime: &Arc<DeviceRuntime>, db: &Arc<SqlitePool>) {
             continue;
         };
         let signing_key = SigningKey::from_bytes(&seed);
-        let did = DidKeyMethod::from_public_key(&signing_key.verifying_key());
+        let did = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&signing_key));
         let user_id: String = r.get("user_id");
         let handle_did = did.to_string();
         doors.push(DmDoor {

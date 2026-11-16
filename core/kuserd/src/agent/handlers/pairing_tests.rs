@@ -189,7 +189,7 @@ mod enrollment_tests {
 
     #[test]
     fn own_device_member_maps_a_paired_node() {
-        let pubkey = [9u8; 32];
+        let pubkey = SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes();
         let did = DidKeyMethod::from_public_key_bytes(&pubkey).unwrap();
         let node = PairedNode {
             id: "laptop".to_string(),

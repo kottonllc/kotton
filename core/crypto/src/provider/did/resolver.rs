@@ -184,7 +184,7 @@ mod tests {
 
     fn make_did_key() -> Did {
         let key = SigningKey::generate(&mut OsRng);
-        DidKeyMethod::from_public_key(&key.verifying_key())
+        DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&key))
     }
 
     // -- DidKeyResolver -------------------------------------------------------
@@ -213,7 +213,7 @@ mod tests {
     #[tokio::test]
     async fn round_trip_key_matches_generated_keypair() {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let verifying_key = signing_key.verifying_key();
+        let verifying_key = crate::ed25519::verifying_key(&signing_key);
         let expected_bytes = verifying_key.as_bytes();
 
         let did = DidKeyMethod::from_public_key(&verifying_key);

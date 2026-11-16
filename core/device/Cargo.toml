@@ -48,7 +48,6 @@ kotton-secret = { path = "../secret" }
 # know this crate exists, so the impl lives on this side.
 kotton-identity = { path = "../identity" }
 kotton-common = { path = "../common" }
-bs58 = "0.5"
 blake3 = "1"
 rand = "0.8"
 kotton-wire = { path = "../wire" }

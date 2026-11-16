@@ -239,7 +239,7 @@ async fn a_gateway_minted_session_is_floored_out_of_device_add() {
     // rather than on the gateway's word.
     let client_key = SigningKey::generate(&mut OsRng);
     let pubkey = client_key.verifying_key().to_bytes();
-    let did = kotton_crypto::did::DidKeyMethod::from_public_key(&client_key.verifying_key())
+    let did = kotton_crypto::did::DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&client_key))
         .to_string();
     env.client
         .peer_add(

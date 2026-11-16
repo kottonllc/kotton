@@ -70,7 +70,15 @@ pub trait Membership: MemberStore {
 
     /// Write (insert or replace) a membership record — the source of truth the
     /// computed views are projected from.
+    ///
+    /// The member's key is put to the Ed25519 rule first, and a member whose
+    /// bytes it refuses is not written: every member this writes names a key,
+    /// so a member under such bytes is one an earlier build wrote. Such a member
+    /// is left in the set and read as no key (the projection writes nothing for
+    /// it), and is removed by [`Self::remove_member`], by its DID as stored.
     async fn write_member(&self, member: &Member) -> Result<()> {
+        kotton_crypto::ed25519::VerifyingKey::from_bytes(&member.public_key)
+            .map_err(|e| anyhow::anyhow!("member {}: its key is not an Ed25519 key: {e}", member.did))?;
         let json = serde_json::to_vec(member).context("serialize member record")?;
         self.member_write(&member.vfs_path(), &json)
             .await
@@ -304,7 +312,7 @@ mod tests {
     fn member(did: &str, role: Role, posture: Option<Posture>) -> Member {
         Member {
             did: did.to_string(),
-            public_key: [7u8; 32],
+            public_key: *kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])).as_bytes(),
             role,
             admitted_by: Ceremony::DeviceEnroll,
             added_at: "2026-06-26T00:00:00Z".to_string(),
@@ -361,6 +369,29 @@ mod tests {
         let store = store(&temp);
         store.member_write(OWN_REACH_NOTE_PATH, b"not a note").await.unwrap();
         assert!(store.read_own_reach_note().await.is_err());
+    }
+
+    /// **A member under bytes the Ed25519 rule refuses is not written**, for every
+    /// key vector: the set holds what it held. One an earlier build wrote is read
+    /// back as it was, and removed by its DID as stored.
+    #[tokio::test]
+    async fn a_member_under_bytes_the_rule_refuses_is_not_written_and_one_stored_is_removed() {
+        let temp = TempDir::new().unwrap();
+        let store = store(&temp);
+        let own = member("did:key:zNode2", Role::OwnDevice, Some(Posture::Full));
+        store.write_member(&own).await.unwrap();
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let mut m = member("did:key:zEarlier", Role::OwnDevice, Some(Posture::Full));
+            m.public_key = bytes;
+            let why = store.write_member(&m).await.unwrap_err().to_string();
+            assert!(why.contains("not an Ed25519 key"), "{name}: {why}");
+            assert_eq!(store.list_members().await.unwrap(), vec![own.clone()], "{name}");
+
+            store.member_write(&m.vfs_path(), &serde_json::to_vec(&m).unwrap()).await.unwrap();
+            assert_eq!(store.read_member("did:key:zEarlier").await.unwrap(), Some(m.clone()), "{name}");
+            store.remove_member("did:key:zEarlier").await.unwrap();
+            assert_eq!(store.list_members().await.unwrap(), vec![own.clone()], "{name}");
+        }
     }
 
     #[tokio::test]

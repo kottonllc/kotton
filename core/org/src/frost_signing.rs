@@ -503,7 +503,7 @@ mod tests {
     fn verify_under_group(did: &str, sig: &[u8], message: &[u8]) {
         let vk = DidKeyMethod::to_public_key(&did.parse().unwrap()).unwrap();
         let arr: [u8; 64] = sig.try_into().expect("64-byte signature");
-        kotton_crypto::ed25519::verify(&vk, message, &Signature::from_bytes(&arr))
+        vk.verify(message, &Signature::from_bytes(&arr))
             .expect("threshold signature verifies under the group key");
     }
 

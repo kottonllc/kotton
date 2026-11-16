@@ -68,7 +68,7 @@ pub fn verify(
     let key = DidKeyMethod::to_public_key(&did).map_err(|e| AppSignatureError::PublisherKey(e.to_string()))?;
     // A publisher's key is checked as a schema's signature is, by the strict check: the key
     // and `R` must each be a point of full order, and the signature must check against both.
-    kotton_crypto::ed25519::verify(&key, &message, &signature).map_err(|_| AppSignatureError::Invalid)
+    key.verify(&message, &signature).map_err(|_| AppSignatureError::Invalid)
 }
 
 /// The publisher `key` is, as a manifest's `[publisher] did` names it.
@@ -188,17 +188,18 @@ mod tests {
         assert!(matches!(verify("did:key:zbad", &sig, MANIFEST, CODE), Err(AppSignatureError::PublisherKey(_))));
     }
 
-    /// The identity point as a publisher's key, and a forged signature with `R` the identity
-    /// and `S` zero: the strict check refuses it, as a schema's does.
+    /// A publisher's `did:key` over each key vector the Ed25519 rule refuses (the identity
+    /// point among them), with a forged signature with `R` the identity and `S` zero: the
+    /// decode refuses the DID as naming no key, and nothing is checked under it.
     #[test]
-    fn a_small_order_publisher_key_is_refused() {
-        let mut identity = [0u8; 32];
-        identity[0] = 1;
-        let did = Publisher::from_ed25519_public_key(&identity);
+    fn a_publisher_did_that_names_no_key_is_refused() {
         let mut forged = [0u8; 64];
         forged[0] = 1;
         let sig = STANDARD.encode(forged);
-        assert!(matches!(verify(did.as_str(), &sig, MANIFEST, CODE), Err(AppSignatureError::Invalid)));
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let did = Publisher::from_ed25519_public_key(&bytes);
+            assert!(matches!(verify(did.as_str(), &sig, MANIFEST, CODE), Err(AppSignatureError::PublisherKey(_))), "{name}");
+        }
     }
 
     // ── The known answer (`vectors/app-v1.txt`) ──────────────────────────────

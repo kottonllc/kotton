@@ -11,10 +11,16 @@
 //! (`system::handle_sys_request`), so removing a row ends that key's standing
 //! on a connection it already holds.
 //!
-//! **The last is never removed.** [`remove`] is one statement whose guard is in
+//! **The last is never removed.** The operator a device always keeps is a row
+//! that names a key: one somebody can sign for. A row under a string that is
+//! not the `did:key` of an Ed25519 key is no operator and does not stand in for
+//! one (kottonllc/kotton#597); nothing is admitted under it at login, and
+//! [`remove`] removes it by the DID as stored. [`remove`] reads the set once
+//! and then removes exactly the rows it read in one statement whose guard is in
 //! its own `WHERE`, so two operators stepping each other down at once cannot
-//! both succeed and leave the device with nobody: a device always has one, and
-//! handing it on is add-then-step-down.
+//! both succeed and leave the device with nobody, and a key given to a person
+//! while they are being stepped down is not taken with them: a device always
+//! has one, and handing it on is add-then-step-down.
 //!
 //! **First run.** When the set is empty, the first caller to prove a key is
 //! enrolled ([`bootstrap`]) — trust on first use, DEC-0017 — in one statement
@@ -73,10 +79,12 @@ pub enum Refusal {
     SharedKey { did: String, person: String },
     /// Nothing in the set is that key or that person's.
     NotAnOperator(String),
-    /// It would leave the device with no operator.
-    Last(String),
     /// No key of `person`'s own has been kept here yet.
     NoKeyKept(String),
+    /// It would leave the device with no operator row that names a key.
+    LastKey(String),
+    /// The key kept for `person` names no Ed25519 key, so nobody can sign for it.
+    KeptNamesNoKey { person: String, did: String },
 }
 
 impl std::fmt::Display for Refusal {
@@ -91,13 +99,19 @@ impl std::fmt::Display for Refusal {
                 "{did} is already {person}'s key — each operator holds their own, and a key is never shared"
             ),
             Refusal::NotAnOperator(who) => write!(f, "{who} is not one of this device's operators"),
-            Refusal::Last(who) => write!(
-                f,
-                "{who} is this device's last operator, and the last is never removed — add another operator first"
-            ),
             Refusal::NoKeyKept(p) => write!(
                 f,
                 "{p} holds no key of their own on this device yet — their Kotton makes one the next time they unlock here"
+            ),
+            Refusal::LastKey(who) => write!(
+                f,
+                "{who} holds this device's last operator key that names an Ed25519 key, and the last is never removed — \
+                 a row that names no key is no operator anyone can sign as, so it does not stand in for one; add another operator first"
+            ),
+            Refusal::KeptNamesNoKey { person, did } => write!(
+                f,
+                "the key kept for {person}, {did}, is not the did:key of an Ed25519 key, so nobody can sign for it and \
+                 it is not made an operator — remove it by that DID as stored"
             ),
         }
     }
@@ -186,35 +200,95 @@ pub async fn add(
     Ok(Ok(()))
 }
 
-/// Step down `who` — one key, or a person, which takes every key of theirs.
-/// Refused when nothing matches, or when it would leave no operator. The guard
-/// is in the one `DELETE`'s own `WHERE`, so it holds against a concurrent
-/// removal: whichever runs second finds itself the last. Returns the keys it
-/// removed.
+/// Whether `did` is the `did:key` of an Ed25519 key: a row under it is one
+/// somebody can sign for. A row under any other string, bytes the rule refuses
+/// or another spelling of a key's `did:key`, is no operator anyone can sign as
+/// (kottonllc/kotton#597), as migration 0004 says of the rows it leaves behind.
+pub fn names_a_key(did: &str) -> bool {
+    did.parse::<kotton_wire::did::Did>()
+        .ok()
+        .is_some_and(|d| kotton_crypto::DidKeyMethod::to_public_key(&d).is_ok())
+}
+
+/// Step down `who` — one key, or a person, which takes every key of theirs —
+/// and remove a kept key stored under `who` as a DID. Refused when nothing
+/// matches, or when it would leave no operator row that names a key: a row
+/// nobody can sign for is not an operator and does not stand in for one.
+/// Returns the keys it removed. A kept key is matched by its DID as stored,
+/// never by person, and its removal leaves no device without an operator.
 pub async fn remove(pool: &SqlitePool, who: &str) -> io::Result<Result<Vec<String>, Refusal>> {
-    let matching: Vec<String> = sqlx::query("SELECT did FROM operators WHERE did = ?1 OR person = ?1")
-        .bind(who)
+    remove_with(pool, who, || async {}).await
+}
+
+/// [`remove`], with `between` run after the set is read and before the one
+/// `DELETE`. A test runs another writer there, to hold that what is removed is
+/// what was read, and that the guard is the `DELETE`'s own.
+///
+/// **One read, one statement.** The set is read once: the rows `who` names,
+/// and the other rows that name a key. Whether a DID names a key is a fact of
+/// the string alone, so it is decided from that read. The `DELETE` then names
+/// exactly the DIDs read, never `who` again, so a row written after the read
+/// (a key the same person is given meanwhile) is not removed by it. Where the
+/// rows read include one that names a key, the guard is in the same
+/// statement's `WHERE`: another row that names a key, of those read, must
+/// still be there as it runs. So of two removals at once, whichever runs
+/// second finds itself the last, and a row added meanwhile is never counted
+/// on before it was read. There is no second guard.
+async fn remove_with<F: std::future::Future<Output = ()>>(
+    pool: &SqlitePool,
+    who: &str,
+    between: impl FnOnce() -> F,
+) -> io::Result<Result<Vec<String>, Refusal>> {
+    let rows: Vec<(String, Option<String>)> = sqlx::query("SELECT did, person FROM operators")
         .fetch_all(pool)
         .await
         .map_err(db_err("remove"))?
         .into_iter()
-        .map(|r| r.get::<String, _>("did"))
+        .map(|r| (r.get::<String, _>("did"), r.get::<Option<String>, _>("person")))
         .collect();
-    if matching.is_empty() {
+    let (matching, others): (Vec<_>, Vec<_>) =
+        rows.into_iter().partition(|(did, person)| did == who || person.as_deref() == Some(who));
+    let matching: Vec<String> = matching.into_iter().map(|(did, _)| did).collect();
+    let others: Vec<String> = others.into_iter().map(|(did, _)| did).filter(|d| names_a_key(d)).collect();
+    let kept = sqlx::query("SELECT 1 FROM operator_keys_kept WHERE did = ?")
+        .bind(who)
+        .fetch_optional(pool)
+        .await
+        .map_err(db_err("remove"))?
+        .is_some();
+    if matching.is_empty() && !kept {
         return Ok(Err(Refusal::NotAnOperator(who.to_string())));
     }
-    let done = sqlx::query(
-        "DELETE FROM operators WHERE (did = ?1 OR person = ?1) \
-         AND EXISTS (SELECT 1 FROM operators WHERE did <> ?1 AND COALESCE(person, '') <> ?1)",
-    )
-    .bind(who)
-    .execute(pool)
-    .await
-    .map_err(db_err("remove"))?;
-    if done.rows_affected() == 0 {
-        return Ok(Err(Refusal::Last(who.to_string())));
+    between().await;
+    if !matching.is_empty() {
+        let removes_a_key = matching.iter().any(|d| names_a_key(d));
+        let marks = |from: usize, n: usize| (from..from + n).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "DELETE FROM operators WHERE did IN ({}) AND (?1 = 0 OR EXISTS (SELECT 1 FROM operators WHERE did IN ({})))",
+            marks(2, matching.len()),
+            marks(2 + matching.len(), others.len()),
+        );
+        let mut q = sqlx::query(&sql).bind(removes_a_key);
+        for d in matching.iter().chain(&others) {
+            q = q.bind(d);
+        }
+        let done = q.execute(pool).await.map_err(db_err("remove"))?;
+        if removes_a_key && done.rows_affected() == 0 {
+            return Ok(Err(Refusal::LastKey(who.to_string())));
+        }
     }
-    Ok(Ok(matching))
+    let mut removed = matching;
+    if kept {
+        sqlx::query("DELETE FROM operator_keys_kept WHERE did = ?")
+            .bind(who)
+            .execute(pool)
+            .await
+            .map_err(db_err("remove"))?;
+        if !removed.iter().any(|d| d == who) {
+            removed.push(who.to_string());
+        }
+    }
+    Ok(Ok(removed))
 }
 
 /// What keeping a person's own key came to ([`keep_own_key`]).
@@ -302,6 +376,11 @@ pub async fn take_kept_key(
     let Some(did) = kept_key(pool, person).await? else {
         return Ok(Err(Refusal::NoKeyKept(person.to_string())));
     };
+    // Every writer of a row that holds a key constructs the key first: a kept
+    // row that names none is not moved into the operators.
+    if !names_a_key(&did) {
+        return Ok(Err(Refusal::KeptNamesNoKey { person: person.to_string(), did }));
+    }
     if let Err(refused) = add(pool, &did, person, added_by, accounts).await? {
         return Ok(Err(refused));
     }
@@ -442,4 +521,88 @@ pub async fn set_device_name(pool: &SqlitePool, name: &str) -> io::Result<()> {
         .await
         .map_err(|e| io::Error::other(format!("set_device_name failed: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `did:key` of the key made from `seed`.
+    fn did_of(seed: u8) -> String {
+        let key = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[seed; 32]));
+        kotton_crypto::DidKeyMethod::from_public_key(&key).to_string()
+    }
+
+    async fn a_device_db() -> (tempfile::TempDir, SqlitePool) {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = open(&dir.path().join("system").join("device.db")).await.unwrap();
+        (dir, pool)
+    }
+
+    /// The operator rows that name a key.
+    async fn keyed(pool: &SqlitePool) -> Vec<String> {
+        list(pool).await.unwrap().into_iter().map(|o| o.did).filter(|d| names_a_key(d)).collect()
+    }
+
+    /// **What is removed is what was read.** Ben holds one row that names no key, and Ana is
+    /// an operator under hers. While Ben is being stepped down, between the read and the
+    /// `DELETE`, Ana makes Ben an operator under his own key. The removal takes the row it
+    /// read and not the one written after it: Ben's key is still an operator's afterwards.
+    #[tokio::test]
+    async fn a_key_given_while_a_person_is_stepped_down_is_not_taken_with_them() {
+        let (_dir, pool) = a_device_db().await;
+        let (ana, ben, ben_key) = (did_of(1), "ben".to_string(), did_of(2));
+        let accounts = vec![ana.clone(), ben.clone()];
+        assert!(bootstrap(&pool, &ana, Some(&ana)).await.unwrap());
+        let no_key = kotton_crypto::DidKeyMethod::spelled_over(&kotton_crypto::ed25519::refused::NOT_A_POINT).to_string();
+        sqlx::query("INSERT INTO operators (did, person, added_at, added_by) VALUES (?, ?, 0, 'an earlier build')")
+            .bind(&no_key)
+            .bind(&ben)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let removed = remove_with(&pool, &ben, || async {
+            add(&pool, &ben_key, &ben, &ana, &accounts).await.unwrap().unwrap();
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(removed, vec![no_key.clone()], "the removal took a row it did not read");
+        assert!(is_operator(&pool, &ben_key).await.unwrap(), "Ben's key, given during the removal, was taken");
+        assert!(!is_operator(&pool, &no_key).await.unwrap(), "the row that was read stayed");
+    }
+
+    /// **Two removals and an add at once never leave the set without a row that names a
+    /// key.** Ana and Ben each step the other's key down while Cai is added, many times.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_removals_and_an_add_at_once_leave_a_row_that_names_a_key() {
+        for round in 0..40 {
+            let (_dir, pool) = a_device_db().await;
+            let (ana, ben, cai) = (did_of(1), did_of(2), did_of(3));
+            let accounts = vec![ana.clone(), ben.clone(), cai.clone()];
+            assert!(bootstrap(&pool, &ana, Some(&ana)).await.unwrap());
+            add(&pool, &ben, &ben, &ana, &accounts).await.unwrap().unwrap();
+            let no_key = kotton_crypto::DidKeyMethod::spelled_over(&kotton_crypto::ed25519::refused::SMALL_ORDER_KEY).to_string();
+            sqlx::query("INSERT INTO operators (did, person, added_at, added_by) VALUES (?, NULL, 0, 'an earlier build')")
+                .bind(&no_key)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let (a, b, c) = tokio::join!(remove(&pool, &ana), remove(&pool, &ben), add(&pool, &cai, &cai, &ana, &accounts));
+            let (a, b) = (a.unwrap(), b.unwrap());
+            // `add` begins a deferred transaction, which can meet the lock at once and say so
+            // (`database is locked`); the person says it again. The set is what is held here.
+            let added = match c {
+                Ok(c) => c.is_ok(),
+                Err(e) => {
+                    assert!(e.to_string().contains("database is locked"), "round {round}: {e}");
+                    false
+                }
+            };
+            let left = keyed(&pool).await;
+            assert!(!left.is_empty(), "round {round}: no row that names a key is left ({a:?}, {b:?}, added: {added})");
+            assert!(a.is_err() || b.is_err() || left.contains(&cai), "round {round}: both removals succeeded with nobody else to stand");
+        }
+    }
 }

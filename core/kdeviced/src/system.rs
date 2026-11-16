@@ -864,7 +864,7 @@ async fn handle_sys_request(
 
             // 6. Verify the Ed25519 signature, strictly, over the login message and
             // nothing else: a signature over the bare challenge is refused here.
-            if kotton_crypto::ed25519::verify(&verifying_key, &message, &ed_sig).is_err() {
+            if verifying_key.verify(&message, &ed_sig).is_err() {
                 return Ok(DeviceResponse::AuthFailed {
                     reason: "signature verification failed".into(),
                 });
@@ -1211,7 +1211,7 @@ mod tests {
 
     fn person() -> Person {
         let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-        let did = DidKeyMethod::from_public_key(&key.verifying_key()).to_string();
+        let did = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&key)).to_string();
         Person { key, did }
     }
 
@@ -1461,6 +1461,134 @@ mod tests {
                 (ben.did.as_str(), ben.did.as_str(), false),
             ]
         );
+    }
+
+    /// **An operator row an earlier build stored under a DID that names no key
+    /// is removed by `sudoers remove`**, matched by the DID as stored and not
+    /// through the decode, for every key vector the rule refuses; and `sudoers
+    /// add` refuses to write one.
+    #[tokio::test]
+    async fn an_operator_row_that_names_no_key_is_removed_as_stored_and_none_is_added() {
+        let ana = person();
+        let device = device_with(&[&ana]).await;
+        let at_ana = first_operator(&device, &ana).await;
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let did = DidKeyMethod::spelled_over(&bytes).to_string();
+            let added = refused(
+                device.say(&at_ana, DeviceRequest::SudoersAdd { did: did.clone(), person: ana.did.clone() }).await,
+            );
+            assert!(added.contains("is not a key"), "{name}: {added}");
+            assert!(!operators_db::is_operator(&device.db, &did).await.unwrap(), "{name}: sudoers add wrote it");
+
+            sqlx::query("INSERT INTO operators (did, person, added_at, added_by) VALUES (?, NULL, 0, 'an earlier build')")
+                .bind(&did)
+                .execute(&device.db)
+                .await
+                .unwrap();
+            assert!(matches!(
+                device.say(&at_ana, DeviceRequest::SudoersRemove { did: did.clone() }).await,
+                DeviceResponse::SudoersModified
+            ), "{name}");
+            let left: Vec<String> = operators_db::list(&device.db).await.unwrap().into_iter().map(|o| o.did).collect();
+            assert_eq!(left, vec![ana.did.clone()], "{name}");
+        }
+    }
+
+    /// Every string that names no key, by name: a `did:key` over each key vector the rule
+    /// refuses, and another spelling of an honest key's `did:key`.
+    fn strings_that_name_no_key() -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = kotton_crypto::ed25519::refused_keys()
+            .into_iter()
+            .map(|(name, bytes)| (name, DidKeyMethod::spelled_over(&bytes).to_string()))
+            .collect();
+        let honest = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[33; 32]));
+        out.push(("another spelling".to_string(), DidKeyMethod::spelled_otherwise(honest.as_bytes()).to_string()));
+        out
+    }
+
+    /// **The operator a device keeps is a row that names a key.** Beside each row that names
+    /// no key, `sudoers remove` of the one operator whose key is a key is refused, by name; that
+    /// operator stays, and the row that names no key is removed by its DID as stored.
+    #[tokio::test]
+    async fn the_last_operator_that_names_a_key_is_never_removed() {
+        for (name, did) in strings_that_name_no_key() {
+            let ana = person();
+            let device = device_with(&[&ana]).await;
+            let at_ana = first_operator(&device, &ana).await;
+            sqlx::query("INSERT INTO operators (did, person, added_at, added_by) VALUES (?, NULL, 0, 'an earlier build')")
+                .bind(&did)
+                .execute(&device.db)
+                .await
+                .unwrap();
+            let last = refused(device.say(&at_ana, DeviceRequest::SudoersRemove { did: ana.did.clone() }).await);
+            assert!(last.contains("last operator key that names an Ed25519 key"), "{name}: {last}");
+            assert!(operators_db::is_operator(&device.db, &ana.did).await.unwrap(), "{name}: the last operator went");
+            assert!(matches!(
+                device.say(&at_ana, DeviceRequest::SudoersRemove { did: did.clone() }).await,
+                DeviceResponse::SudoersModified
+            ), "{name}");
+            let left: Vec<String> = operators_db::list(&device.db).await.unwrap().into_iter().map(|o| o.did).collect();
+            assert_eq!(left, vec![ana.did.clone()], "{name}");
+        }
+    }
+
+    /// **A kept key that names no key is not made an operator, and `sudoers remove` removes it
+    /// by its DID as stored.** For each string that names no key, kept as Ben's: an operator's
+    /// `OperatorAdd` of Ben is refused and says why, Ben is no operator, and `sudoers remove` of
+    /// the DID as stored removes the kept row, after which nothing is kept for Ben.
+    #[tokio::test]
+    async fn a_kept_key_that_names_no_key_is_refused_and_removed_as_stored() {
+        for (name, did) in strings_that_name_no_key() {
+            let (ana, ben) = (person(), person());
+            let device = device_with(&[&ana, &ben]).await;
+            let at_ana = first_operator(&device, &ana).await;
+            sqlx::query("INSERT INTO operator_keys_kept (did, person, kept_at) VALUES (?, ?, 0)")
+                .bind(&did)
+                .bind(&ben.did)
+                .execute(&device.db)
+                .await
+                .unwrap();
+            let why = refused(device.say(&at_ana, DeviceRequest::OperatorAdd { person: ben.did.clone() }).await);
+            assert!(why.contains("is not the did:key of an Ed25519 key"), "{name}: {why}");
+            assert!(!operators_db::is_operator(&device.db, &did).await.unwrap(), "{name}: the kept row was made an operator");
+            assert!(!operators_db::is_operator_person(&device.db, &ben.did).await.unwrap(), "{name}: Ben was made an operator");
+            assert!(matches!(
+                device.say(&at_ana, DeviceRequest::SudoersRemove { did: did.clone() }).await,
+                DeviceResponse::SudoersModified
+            ), "{name}");
+            assert_eq!(operators_db::kept_key(&device.db, &ben.did).await.unwrap(), None, "{name}: the kept row stayed");
+            let left: Vec<String> = operators_db::list(&device.db).await.unwrap().into_iter().map(|o| o.did).collect();
+            assert_eq!(left, vec![ana.did.clone()], "{name}");
+        }
+    }
+
+    /// **Nothing is admitted under an operator row stored under another spelling of a key's
+    /// `did:key`.** The key's own holder, signing the login message as that row names it, is
+    /// refused at the decode and enrolled as nothing; `sudoers remove` removes the row as stored.
+    #[tokio::test]
+    async fn an_operator_row_under_another_spelling_admits_nobody_and_is_removed_as_stored() {
+        let ana = person();
+        let device = device_with(&[&ana]).await;
+        let at_ana = first_operator(&device, &ana).await;
+        let ben_key = ed25519_dalek::SigningKey::from_bytes(&[44; 32]);
+        let otherwise = DidKeyMethod::spelled_otherwise(kotton_crypto::ed25519::verifying_key(&ben_key).as_bytes()).to_string();
+        sqlx::query("INSERT INTO operators (did, person, added_at, added_by) VALUES (?, NULL, 0, 'an earlier build')")
+            .bind(&otherwise)
+            .execute(&device.db)
+            .await
+            .unwrap();
+        let ben = Person { key: ben_key, did: otherwise.clone() };
+        let (_conn, answer) = device.connect(&ben).await;
+        assert!(
+            matches!(&answer, DeviceResponse::AuthFailed { reason } if reason.starts_with("cannot extract key from DID")),
+            "{answer:?}"
+        );
+        assert!(matches!(
+            device.say(&at_ana, DeviceRequest::SudoersRemove { did: otherwise.clone() }).await,
+            DeviceResponse::SudoersModified
+        ));
+        let left: Vec<String> = operators_db::list(&device.db).await.unwrap().into_iter().map(|o| o.did).collect();
+        assert_eq!(left, vec![ana.did.clone()]);
     }
 
     /// Stepping a person down takes every key of theirs — here the machine's
@@ -1815,30 +1943,32 @@ mod tests {
         assert!(operators.is_empty(), "a bare signature enrolled a key: {operators:?}");
     }
 
-    /// **A login under a key of small order is refused**: the login check is strict, so a
-    /// key of small order authenticates nobody, and nothing is enrolled.
+    /// **A login under a DID that names no key is refused**: the decode holds the Ed25519
+    /// rule, so for every key vector it refuses, a DID spelled over those bytes authenticates
+    /// nobody, nothing is checked under it, and nothing is enrolled.
     #[tokio::test]
-    async fn a_login_under_a_small_order_key_is_refused() {
+    async fn a_login_under_a_did_that_names_no_key_is_refused() {
         use kotton_crypto::ed25519::refused;
-        let small = ed25519_dalek::VerifyingKey::from_bytes(&refused::SMALL_ORDER_KEY).unwrap();
-        let who = Person {
-            key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
-            did: DidKeyMethod::from_public_key(&small).to_string(),
-        };
-        let device = device_with(&[&who]).await;
-        let conn: Conn = Arc::new(Mutex::new(None));
-        let DeviceResponse::ChallengeIssued { nonce } = device.say(&conn, DeviceRequest::Challenge).await else {
-            panic!("no challenge");
-        };
-        let signature = refused::under_small_order_key_bytes().to_vec();
-        let answer = authenticate_with(&device, &conn, &who, nonce, signature).await;
-        let refused = matches!(
-            &answer,
-            DeviceResponse::AuthFailed { reason } if reason == "signature verification failed"
-        );
-        assert!(refused, "{answer:?}");
-        let operators = operators_db::list(&device.db).await.unwrap();
-        assert!(operators.is_empty(), "a key of small order enrolled: {operators:?}");
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let who = Person {
+                key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+                did: DidKeyMethod::spelled_over(&bytes).to_string(),
+            };
+            let device = device_with(&[&who]).await;
+            let conn: Conn = Arc::new(Mutex::new(None));
+            let DeviceResponse::ChallengeIssued { nonce } = device.say(&conn, DeviceRequest::Challenge).await else {
+                panic!("no challenge");
+            };
+            let signature = refused::under_small_order_key_bytes().to_vec();
+            let answer = authenticate_with(&device, &conn, &who, nonce, signature).await;
+            let refused = matches!(
+                &answer,
+                DeviceResponse::AuthFailed { reason } if reason.starts_with("cannot extract key from DID")
+            );
+            assert!(refused, "{name}: {answer:?}");
+            let operators = operators_db::list(&device.db).await.unwrap();
+            assert!(operators.is_empty(), "{name}: a DID that names no key enrolled: {operators:?}");
+        }
     }
 
     /// **A non-canonical login signature is refused**: the person's own key, over the

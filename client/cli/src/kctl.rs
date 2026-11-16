@@ -360,8 +360,7 @@ async fn authenticate(dev: &mut DeviceClient, recover: bool) -> io::Result<Strin
         operator_signing_key()?
     };
 
-    let verifying_key = signing_key.verifying_key();
-    let did = DidKeyMethod::from_public_key(&verifying_key).to_string();
+    let did = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&signing_key)).to_string();
 
     // Request a challenge, decode it, and sign the login message it makes
     // (`kotton_wire::sys_ipc::login_message`: the tag, a zero byte, the challenge); a

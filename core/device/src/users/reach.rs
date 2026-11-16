@@ -627,7 +627,7 @@ mod tests {
         let store = Synced::default();
         store.write_member(&member(&desktop, "desktop", Some(Posture::Full))).await.unwrap();
         let mut vault = member(&desktop, "vault", Some(Posture::BlindStorage));
-        vault.public_key = [4u8; 32];
+        vault.public_key = SigningKey::from_bytes(&[4u8; 32]).verifying_key().to_bytes();
         store.write_member(&vault).await.unwrap();
         let now = 1_900_000_000u64;
 

@@ -359,8 +359,7 @@ impl Listener for IntroducedListener {
             .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())
             .and_then(|certs| certs.into_iter().next())
             .and_then(|cert| tls::extract_ed25519_pubkey_from_cert(&cert))
-            .and_then(|pubkey| DidKeyMethod::from_public_key_bytes(pubkey.as_bytes()).ok())
-            .map(|did| did.to_string())
+            .map(|pubkey| DidKeyMethod::from_public_key(&pubkey).to_string())
             .ok_or_else(|| {
                 TransportError::ConnectionFailed("introduced peer presented no device key".into())
             })?;

@@ -82,14 +82,23 @@ pub fn signed_change(
 ) -> Option<(TenantDeviceChange, Vec<u8>)> {
     use ed25519_dalek::Signer as _;
     let identity = identity_key(runtime, user_id)?;
-    let change = TenantDeviceChange {
-        act,
-        device_did: device.device_did.to_string(),
-        public_key: device.public_key,
-        said_at_ms: u64::try_from(kotton_common::time::now_millis()).unwrap_or(0),
-    };
+    let change = change_for(device, act, u64::try_from(kotton_common::time::now_millis()).unwrap_or(0));
     let signature = identity.sign(&change.signed_bytes(user_id)).to_bytes().to_vec();
     Some((change, signature))
+}
+
+/// The change a drive is told of `device`. Its key is named by the `did:key` the
+/// derivation makes of the row's bytes, never by the DID stored beside them,
+/// which may be another spelling (kottonllc/kotton#597): a row stands by its
+/// bytes, so a device under such a row is admitted at its person's drive as
+/// any other is. Where the bytes are no key the row's DID is told as stored,
+/// so a withdrawal is matched to what the drive stored for it; an admit under
+/// them is refused at the drive, which says why.
+pub fn change_for(device: &PairedNode, act: TenantDeviceAct, said_at_ms: u64) -> TenantDeviceChange {
+    let device_did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&device.public_key)
+        .map(|did| did.to_string())
+        .unwrap_or_else(|_| device.device_did.to_string());
+    TenantDeviceChange { act, device_did, public_key: device.public_key, said_at_ms }
 }
 
 /// The nodes `user_id`'s drives are reached through, other than `device`
