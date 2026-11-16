@@ -489,6 +489,7 @@ mod tests {
 
         accept(base.path(), &db, &keys, "alice", &change, &signed(&identity, &change)).await.unwrap();
         assert!(paired(&db, "alice", &key).await);
+        assert!(keys.read().unwrap().contains(&VerifyingKey::from_bytes(&key).unwrap()), "an admit taken did not admit the key");
     }
 
     /// Through the whole acceptance: a tenant whose key log rotates onto a key of small
