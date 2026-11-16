@@ -374,8 +374,12 @@ pub enum Admitted {
 pub struct Admission {
     /// AID → the latest key event this node holds for that identity.
     pub tips: KnownTips,
-    /// Committed recovery public key → the AID whose chain committed it.
-    pub authorities: Arc<RwLock<std::collections::HashMap<[u8; 32], String>>>,
+    /// Recovery public key → the AID whose chain committed it: each member of each set
+    /// `kel_verify::committed_set` returns for an event of a hosted chain, and no other
+    /// value. A set is carried by an inception, an add-recovery and a recovery rotation;
+    /// `committed_set` is what reads one. Written by [`Self::learn_chain`] and
+    /// [`Self::forget`] alone, and read through [`Self::authority`].
+    authorities: Arc<RwLock<std::collections::HashMap<[u8; 32], String>>>,
     /// Device TLS key → how it was admitted, pending persistence.
     pub admitted: Arc<RwLock<std::collections::HashMap<[u8; 32], Admitted>>>,
 }
@@ -383,6 +387,11 @@ pub struct Admission {
 impl Admission {
     /// Learn (or re-learn) a hosted identity's chain: its tip, and every recovery
     /// authority any of its events committed.
+    ///
+    /// An event's authorities are what `kel_verify::committed_set` returns for it: the set
+    /// an inception, an add-recovery or a recovery rotation carries, where that set makes
+    /// the event's commitment. A set that does not make it teaches the index nothing, and
+    /// a member that is no Ed25519 key is not indexed.
     ///
     /// Indexes the whole chain, not just the tip, on purpose. A phrase added by a
     /// `RotationAddRecovery` appears in that event's set and in no later one, and a
@@ -392,8 +401,8 @@ impl Admission {
         let aid = tip.aid.to_string();
         {
             let mut authorities = self.authorities.write().unwrap();
-            for e in chain {
-                for member in &e.recovery_set {
+            for set in chain.iter().filter_map(kotton_crypto::kel_verify::committed_set) {
+                for member in set.iter().filter(|m| VerifyingKey::from_bytes(m).is_ok()) {
                     authorities.insert(*member, aid.clone());
                 }
             }
@@ -417,6 +426,12 @@ impl Admission {
         });
     }
 
+    /// The hosted identity whose chain committed `reserve_pub` as a recovery authority, if
+    /// any: what both doors read a recovery claim against.
+    pub fn authority(&self, reserve_pub: &[u8; 32]) -> Option<String> {
+        self.authorities.read().unwrap().get(reserve_pub).cloned()
+    }
+
     /// Take the pending admission for `device_pub`, if the verifier granted one.
     pub fn take_admitted(&self, device_pub: &[u8; 32]) -> Option<Admitted> {
         self.admitted.write().unwrap().remove(device_pub)
@@ -426,6 +441,62 @@ impl Admission {
     pub fn admitted(&self, device_pub: &[u8; 32]) -> Option<Admitted> {
         self.admitted.read().unwrap().get(device_pub).cloned()
     }
+}
+
+/// Test fixture: an honest hosted chain holding every kind of event, from the phrase `seed`.
+///
+/// The inception commits `{K_rec[0]}`; an add-recovery grows it to `{K_rec[0], a}`; a
+/// cooperative rotation and an interaction carry that forward; a mnemonic rotation reveals
+/// `K_rec[0]` and commits `{K_rec[1]}`; and a guardian rotation reveals `K_rec[1]` and commits
+/// `{g}`. `a` and `g` are keys of seeds 61 and 62.
+#[cfg(test)]
+pub(crate) fn a_hosted_chain_of_every_kind(seed: &[u8; 32]) -> Vec<kotton_wire::kel::KelEvent> {
+    use ed25519_dalek::{Signer, SigningKey};
+    use kotton_crypto::kel_verify as kel;
+    use kotton_wire::kel::{Authorization, ContestWindow, EventKind, KelEvent, KeyState};
+    let key = |n: u8| SigningKey::from_bytes(&[n; 32]);
+    let rung = |i| SigningKey::from_bytes(&kotton_crypto::kdf::derive_kel_recovery_key(seed, i));
+    let state = |k: &SigningKey| KeyState { group_key: k.verifying_key().to_bytes(), threshold: 1, participants: 1 };
+    let signed = |mut e: KelEvent, by: &SigningKey| {
+        let sig = by.sign(e.canonical().as_bytes()).to_bytes().to_vec();
+        e.authorization = match e.authorization {
+            Authorization::Guardian { revealed_group_key, proof, .. } => Authorization::Guardian { revealed_group_key, proof, sig },
+            _ => Authorization::Quorum { sig },
+        };
+        e
+    };
+    let next = |prev: &KelEvent, kind, k: &SigningKey| KelEvent {
+        aid: prev.aid.clone(),
+        seq: prev.seq + 1,
+        prev_event_digest: Some(kel::digest(prev)),
+        kind,
+        key_state: state(k),
+        recovery_commitment: prev.recovery_commitment,
+        recovery_set: Vec::new(),
+        authorization: Authorization::Quorum { sig: vec![0u8; 64] },
+        contest_window: None,
+    };
+    let start = SigningKey::from_bytes(&kotton_crypto::kdf::derive_identity_key(seed));
+    let (first, second, third) = (key(63), key(64), key(65));
+    let r0 = rung(0).verifying_key().to_bytes();
+    let inception = kel::build_user_inception(seed);
+    let grown = [r0, key(61).verifying_key().to_bytes()];
+    let add = kel::build_add_recovery(&inception, &grown, &start);
+    let cooperative = signed(next(&add, EventKind::RotationCooperative, &first), &start);
+    let interaction = signed(next(&cooperative, EventKind::Interaction, &first), &first);
+    let mnemonic = kel::build_mnemonic_rotation(&interaction, seed, 0, &second, 0, &grown);
+    let g = key(62).verifying_key().to_bytes();
+    let mut guardian = next(&mnemonic, EventKind::RotationGuardian, &third);
+    guardian.recovery_commitment = kel::recovery_root(&[g]);
+    guardian.recovery_set = vec![g];
+    guardian.contest_window = Some(ContestWindow { min_seconds: 0 });
+    guardian.authorization = Authorization::Guardian {
+        revealed_group_key: rung(1).verifying_key().to_bytes(),
+        proof: Vec::new(),
+        sig: Vec::new(),
+    };
+    let guardian = signed(guardian, &rung(1));
+    vec![inception, add, cooperative, interaction, mnemonic, guardian]
 }
 
 // ---------------------------------------------------------------------------
@@ -588,14 +659,7 @@ impl PairedDeviceVerifier {
     ) -> Result<(), rustls::Error> {
         let refuse = || rustls::Error::General(Self::REFUSED.into());
         let claim = extract_recovery_claim(cert).ok_or_else(refuse)?;
-        let aid = self
-            .admission
-            .authorities
-            .read()
-            .unwrap()
-            .get(&claim.reserve_pub)
-            .cloned()
-            .ok_or_else(refuse)?;
+        let aid = self.admission.authority(&claim.reserve_pub).ok_or_else(refuse)?;
         if !claim.verifies_for(pubkey.as_bytes()) {
             return Err(refuse());
         }
@@ -1642,6 +1706,103 @@ mod admission_verifier_tests {
             v.check_cert(&claim_for(&other_seed, &neighbour).cert_der).is_ok(),
             "the identity not forgotten is still admitted"
         );
+    }
+
+    /// The honest chain the tests below change one event of resolves, and every member of
+    /// every set it commits is indexed.
+    #[test]
+    fn the_hosted_chain_of_every_kind_is_honest() {
+        let chain = a_hosted_chain_of_every_kind(&[42u8; 32]);
+        let kinds: Vec<_> = chain.iter().map(|e| e.kind).collect();
+        use kotton_wire::kel::EventKind::*;
+        assert_eq!(kinds, [Inception, RotationAddRecovery, RotationCooperative, Interaction, RotationMnemonic, RotationGuardian]);
+        kotton_crypto::kel_verify::resolve_current_key(&chain, &kotton_crypto::kel_verify::LocalArbiter, false)
+            .expect("the fixture is an honest chain");
+        let admission = Admission::default();
+        admission.learn_chain(&chain);
+        let aid = chain[0].aid.to_string();
+        for e in &chain {
+            for m in kotton_crypto::kel_verify::committed_set(e).unwrap_or_default() {
+                assert_eq!(admission.authority(m), Some(aid.clone()));
+            }
+        }
+    }
+
+    /// For each kind of event, a chain in which that one event carries a set that does not
+    /// make its commitment (the set it commits and one key more, or that key alone where it
+    /// commits none of its own) teaches the index none of that set's members but those
+    /// another event commits, and every member of every other event's set. A claim under
+    /// the key no event commits is refused as a stranger is, and nothing is recorded.
+    #[test]
+    fn a_carried_set_that_does_not_make_its_commitment_teaches_the_index_nothing() {
+        use kotton_crypto::kel_verify::committed_set;
+        let seed = [42u8; 32];
+        let honest = a_hosted_chain_of_every_kind(&seed);
+        let outside = ed25519_dalek::SigningKey::from_bytes(&[33u8; 32]);
+        let x = outside.verifying_key().to_bytes();
+        let stranger = ed25519_dalek::SigningKey::from_bytes(&[13u8; 32]);
+        let device = ed25519_dalek::SigningKey::from_bytes(&[21u8; 32]);
+        let phrase = ed25519_dalek::SigningKey::from_bytes(&kotton_crypto::kdf::derive_kel_recovery_key(&seed, 0));
+        let everyone: std::collections::BTreeSet<[u8; 32]> = honest
+            .iter()
+            .flat_map(|e| committed_set(e).unwrap_or_default().to_vec())
+            .chain([x])
+            .collect();
+        for at in 0..honest.len() {
+            let mut chain = honest.clone();
+            let mut carried = committed_set(&chain[at]).unwrap_or_default().to_vec();
+            carried.push(x);
+            chain[at].recovery_set = carried;
+            assert_eq!(committed_set(&chain[at]), None);
+            let kind = chain[at].kind;
+            let taught: std::collections::BTreeSet<[u8; 32]> = chain
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != at)
+                .flat_map(|(_, e)| committed_set(e).unwrap_or_default().to_vec())
+                .collect();
+            assert!(!taught.contains(&x));
+
+            let (v, admission) = hosting(&chain);
+            for m in &everyone {
+                assert_eq!(
+                    admission.authority(m).is_some(),
+                    taught.contains(m),
+                    "{kind:?}: the index holds {m:?} where the other events' sets {}",
+                    if taught.contains(m) { "hold it" } else { "do not" }
+                );
+            }
+
+            let refused = v
+                .check_cert(&Ed25519DeviceCert::from_signing_key(&stranger).expect("cert").cert_der)
+                .unwrap_err()
+                .to_string();
+            let claim = RecoveryClaim::sign(&outside, &device.verifying_key().to_bytes());
+            let cert = Ed25519DeviceCert::from_signing_key_with_offer(&device, &CertOffer::claim(claim)).expect("cert");
+            assert_eq!(v.check_cert(&cert.cert_der).unwrap_err().to_string(), refused, "{kind:?}: refused as a stranger is");
+            assert!(admission.admitted.read().unwrap().is_empty(), "{kind:?}: nothing is recorded");
+
+            // The phrase the chain commits still admits on its claim.
+            let claim = RecoveryClaim::sign(&phrase, &device.verifying_key().to_bytes());
+            let cert = Ed25519DeviceCert::from_signing_key_with_offer(&device, &CertOffer::claim(claim)).expect("cert");
+            assert!(v.check_cert(&cert.cert_der).is_ok(), "{kind:?}: the committed phrase admits");
+        }
+    }
+
+    /// A member that is no Ed25519 key is not indexed, though its set makes its commitment.
+    #[test]
+    fn a_committed_member_that_is_no_key_is_not_indexed() {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let honest = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]).verifying_key().to_bytes();
+        for refused in [kotton_crypto::ed25519::refused::SMALL_ORDER_KEY, kotton_crypto::ed25519::refused::NOT_A_POINT] {
+            let mut inception = kotton_crypto::kel_verify::build_inception(&sk, &[honest]);
+            inception.recovery_commitment = kotton_crypto::kel_verify::recovery_root(&[honest, refused]);
+            inception.recovery_set = vec![honest, refused];
+            let admission = Admission::default();
+            admission.learn_chain(&[inception]);
+            assert!(admission.authority(&honest).is_some());
+            assert_eq!(admission.authority(&refused), None);
+        }
     }
 
     /// A claim is bound to the TLS key it was signed over: replayed from another

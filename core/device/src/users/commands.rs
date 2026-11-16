@@ -757,6 +757,24 @@ pub async fn add_recovery_phrase(
         .last()
         .ok_or_else(|| anyhow!("user '{user_id}' has no KEL (legacy did:key account)"))?;
 
+    // Grow, never replace, and grow from the set the tip committed: the one
+    // `committed_set` returns for it. The prior set is carried on the event that
+    // committed it, which is why a set travels in the clear — containment is not a
+    // property a Merkle root can prove. A tip that commits a set and carries none
+    // that makes it has nothing to grow from, so nothing is appended or sealed.
+    let mut set = match kotton_crypto::kel_verify::committed_set(prev) {
+        Some(committed) => committed.to_vec(),
+        None if prev.recovery_commitment == kotton_crypto::kel_verify::empty_recovery_root() => {
+            Vec::new()
+        }
+        None => {
+            return Err(anyhow!(
+                "this identity's log does not carry the recovery set its tip commits, so an \
+                 authority cannot be added to it"
+            ))
+        }
+    };
+
     let mnemonic = Bip39MnemonicProvider
         .generate()
         .map_err(|e| anyhow!("Failed to generate mnemonic: {}", e))?;
@@ -765,10 +783,6 @@ pub async fn add_recovery_phrase(
         &kotton_crypto::kdf::derive_kel_recovery_key(&seed32, 0),
     );
 
-    // Grow, never replace. The prior set is carried on the event that committed it,
-    // which is why `recovery_set` travels in the clear — containment is not a
-    // property a Merkle root can prove.
-    let mut set = prev.recovery_set.clone();
     // Not a user-facing refusal: the phrase was generated three lines up, so a
     // collision here means the RNG repeated itself. It is kept as the assertion it
     // actually is, because the failure it catches is one a person could not see —
@@ -997,7 +1011,8 @@ pub async fn rotate_identity_to_key(
     let reserve = kotton_crypto::kel_verify::kel_recovery_pubkey(
         &kotton_crypto::kdf::derive_kel_recovery_key(&seed32, recovery_index),
     );
-    let holds_authority = kotton_crypto::kel_verify::recovery_proof(&prev.recovery_set, &reserve)
+    let holds_authority = kotton_crypto::kel_verify::committed_set(prev)
+        .and_then(|set| kotton_crypto::kel_verify::recovery_proof(set, &reserve))
         .is_some_and(|proof| {
             kotton_crypto::kel_verify::verify_recovery_inclusion(
                 &prev.recovery_commitment,
@@ -1425,6 +1440,101 @@ mod tests {
             kotton_crypto::kel_verify::validate(&tip_before, tip),
             kotton_crypto::kel_verify::Verdict::Valid
         );
+    }
+
+    /// The bytes of `alice`'s stored log and of her recovery copy.
+    fn stored(base: &Path) -> (Vec<u8>, Vec<u8>) {
+        let kel = base.join("users").join("alice").join("identity").join("kel.json");
+        let copy = kotton_identity::provisioning::recovery_bundle_path(base, "alice");
+        (std::fs::read(kel).unwrap(), std::fs::read(copy).unwrap())
+    }
+
+    /// An identity whose stored tip carries a set that does not make the tip's commitment
+    /// has no set to grow from: adding a phrase is refused, and the stored log and the
+    /// recovery copy are byte for byte as they were.
+    #[tokio::test]
+    async fn adding_a_phrase_on_a_tip_whose_set_does_not_make_its_commitment_changes_nothing() {
+        let temp = TempDir::new().unwrap();
+        let rt = make_runtime(&temp).await;
+        create_user(&rt, "alice", TEST_PASSPHRASE).await.unwrap();
+        add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice").await.expect("first phrase");
+        let honest = kotton_identity::kel_store::load_chain(rt.base_dir(), "alice").unwrap();
+        let committed = kotton_crypto::kel_verify::committed_set(honest.last().unwrap()).unwrap().to_vec();
+        let x = ed25519_dalek::SigningKey::from_bytes(&[33u8; 32]).verifying_key().to_bytes();
+
+        for carried in [vec![x], vec![committed[0], x]] {
+            let mut chain = honest.clone();
+            chain.last_mut().unwrap().recovery_set = carried.clone();
+            kotton_identity::kel_store::save_chain(rt.base_dir(), "alice", &chain).unwrap();
+            let before = stored(rt.base_dir());
+            let refused = add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice").await;
+            assert!(refused.is_err(), "carrying {carried:?}: a phrase was added");
+            assert!(
+                refused.unwrap_err().to_string().contains("does not carry the recovery set its tip commits"),
+                "the refusal says why"
+            );
+            assert!(stored(rt.base_dir()) == before, "carrying {carried:?}: the log or the copy changed");
+        }
+    }
+
+    /// A tip that commits a set and carries none (a cooperative rotation) has no set to grow
+    /// from either: adding a phrase is refused, and nothing is written. A chain adopted with
+    /// such a rotation carrying a set that does not make its commitment teaches the index none
+    /// of it, and adding a phrase after it is refused the same way.
+    #[tokio::test]
+    async fn adding_a_phrase_on_a_tip_that_carries_no_set_it_commits_changes_nothing() {
+        use kotton_wire::kel::{Authorization, EventKind, KelEvent};
+        let temp = TempDir::new().unwrap();
+        let rt = make_runtime(&temp).await;
+        create_user(&rt, "alice", TEST_PASSPHRASE).await.unwrap();
+        add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice").await.expect("first phrase");
+        let chain = kotton_identity::kel_store::load_chain(rt.base_dir(), "alice").unwrap();
+        let tip = chain.last().unwrap().clone();
+        let committed = kotton_crypto::kel_verify::committed_set(&tip).unwrap().to_vec();
+        let sk = kotton_identity::identity_signing_key_for("alice", rt.secrets()).expect("the operational key");
+        let x = ed25519_dalek::SigningKey::from_bytes(&[33u8; 32]).verifying_key().to_bytes();
+        let cooperative = |carried: Vec<[u8; 32]>| {
+            let mut e = KelEvent {
+                aid: tip.aid.clone(),
+                seq: tip.seq + 1,
+                prev_event_digest: Some(kotton_crypto::kel_verify::digest(&tip)),
+                kind: EventKind::RotationCooperative,
+                key_state: tip.key_state.clone(),
+                recovery_commitment: tip.recovery_commitment,
+                recovery_set: carried,
+                authorization: Authorization::Quorum { sig: vec![0u8; 64] },
+                contest_window: None,
+            };
+            use ed25519_dalek::Signer;
+            e.authorization = Authorization::Quorum { sig: sk.sign(e.canonical().as_bytes()).to_bytes().to_vec() };
+            e
+        };
+
+        // Adopted from a peer, past the stored tip: the chain replays and is kept.
+        let admission = kotton_net::transport::quic::tls::Admission::default();
+        crate::users::admission::Chains::new(rt.base_dir().clone(), admission.clone())
+            .adopt("alice", &[cooperative(vec![x])])
+            .expect("the extended chain replays");
+        assert_eq!(admission.authority(&x), None, "the carried set taught the index nothing");
+        for m in &committed {
+            assert!(admission.authority(m).is_some(), "the committed set is still indexed");
+        }
+        // And the stored chain, read again at the next start, teaches it none either.
+        let restarted = kotton_net::transport::quic::tls::Admission::default();
+        crate::users::admission::reproject(rt.base_dir(), &["alice".to_string()], &restarted);
+        assert_eq!(restarted.authority(&x), None, "the stored chain taught the index nothing");
+        assert!(restarted.authority(&committed[0]).is_some());
+        let before = stored(rt.base_dir());
+        assert!(add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice").await.is_err());
+        assert!(stored(rt.base_dir()) == before, "the log or the copy changed");
+
+        // An honest cooperative rotation: it carries no set.
+        let mut honest = chain.clone();
+        honest.push(cooperative(Vec::new()));
+        kotton_identity::kel_store::save_chain(rt.base_dir(), "alice", &honest).unwrap();
+        let before = stored(rt.base_dir());
+        assert!(add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice").await.is_err());
+        assert!(stored(rt.base_dir()) == before, "the log or the copy changed");
     }
 
     /// **No door reaches a created identity without a credential.**

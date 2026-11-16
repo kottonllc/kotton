@@ -156,6 +156,19 @@ pub fn recovery_root(pubkeys: &[[u8; 32]]) -> [u8; 32] {
     level[0]
 }
 
+/// The set `event` carries, where that set is not empty and [`recovery_root`] of it is the
+/// event's commitment; otherwise nothing.
+///
+/// This is the one reader of [`KelEvent::recovery_set`]: what an event committed is read from
+/// its commitment, which its digest covers, and a carried set is that commitment's members only
+/// where it makes it. The root is of the set, so a set carried in another order or
+/// with a member repeated is returned as carried. Outside tests nothing else reads the field;
+/// `cargo xtask recovery-set-check` holds that.
+pub fn committed_set(event: &KelEvent) -> Option<&[[u8; 32]]> {
+    let set = event.recovery_set.as_slice();
+    (!set.is_empty() && recovery_root(set) == event.recovery_commitment).then_some(set)
+}
+
 /// The sibling path proving `pubkey` is in the set, or `None` if it is not.
 pub fn recovery_proof(pubkeys: &[[u8; 32]], pubkey: &[u8; 32]) -> Option<Vec<[u8; 32]>> {
     let mut leaves: Vec<[u8; 32]> = pubkeys.iter().map(leaf_hash).collect();
@@ -400,11 +413,13 @@ pub fn build_mnemonic_rotation(
 //
 // The identity key is `key_state.group_key`, on every event kind: the inception's own, the
 // one a rotation installs, and the one an interaction or an add-recovery carries forward.
-// An authority is a member of the set an event carries where that set makes the event's
-// commitment, which the digest covers; and a revealed authority, when a recovery rotation
-// shows it. A set that does not make its event's commitment is not that event's authorities
-// and is read as before: add-recovery refuses it, and validation of the other kinds does not
-// read it.
+// An authority is a member of the set [`committed_set`] returns for an event: the set it
+// carries where that set makes the event's commitment, which the digest covers; and a revealed
+// authority, when a recovery rotation shows it. A set that does not make its event's commitment
+// is not that event's authorities and nothing reads it: add-recovery refuses it, validation of
+// the other kinds passes over it, and every reader outside validation (the index of
+// authorities, `tip_commits_recovery_key`, and the commands that build on a tip's set) reads
+// through `committed_set` and finds nothing there.
 //
 // The log as built names no device value apart from its identity key: the device a log
 // admits is the one that holds that key (`admits_device`), so no value here is dropped as
@@ -418,10 +433,10 @@ fn identity_key(bytes: &[u8; 32]) -> Result<VerifyingKey, String> {
 /// Every authority `event` carries passes as a key, or why the event is invalid. The carried
 /// set is the event's authorities where it makes the event's commitment.
 fn authorities_pass(event: &KelEvent) -> Result<(), String> {
-    if event.recovery_set.is_empty() || recovery_root(&event.recovery_set) != event.recovery_commitment {
+    let Some(set) = committed_set(event) else {
         return Ok(());
-    }
-    if event.recovery_set.iter().all(|m| VerifyingKey::from_bytes(m).is_ok()) {
+    };
+    if set.iter().all(|m| VerifyingKey::from_bytes(m).is_ok()) {
         Ok(())
     } else {
         Err("a recovery authority the event carries is no Ed25519 key".to_string())
@@ -536,13 +551,15 @@ fn check(prev: &KelEvent, prev_key: &VerifyingKey, event: &KelEvent) -> Result<(
             if event.contest_window.is_some() {
                 return Err("add-recovery carries no contest window".into());
             }
-            if event.recovery_set.is_empty() {
-                return Err("add-recovery must carry the set it installs".into());
-            }
-            if recovery_root(&event.recovery_set) != event.recovery_commitment {
-                return Err("add-recovery: commitment does not match the carried set".into());
-            }
-            // Growth, checked directly against the predecessor's own set.
+            let Some(new_set) = committed_set(event) else {
+                return Err(
+                    "add-recovery must carry the set it installs, and that set must make its \
+                     commitment"
+                        .into(),
+                );
+            };
+            // Growth, checked directly against the set the predecessor committed: the one
+            // `committed_set` returns for it, never the set it merely carries.
             //
             // The first attempt tried to recover the prior set by searching subsets
             // of the new one for a matching root. That was wrong twice: `windows`
@@ -552,15 +569,15 @@ fn check(prev: &KelEvent, prev_key: &VerifyingKey, event: &KelEvent) -> Result<(
             // commitment now carries the set it committed, so the predecessor's set
             // is simply available.
             if prev.recovery_commitment != empty_recovery_root() {
-                if prev.recovery_set.is_empty() {
+                let Some(prior) = committed_set(prev) else {
                     return Err(
-                        "add-recovery: predecessor commits a non-empty set but did not \
-                         carry it, so growth cannot be checked"
+                        "add-recovery: predecessor commits a non-empty set but does not \
+                         carry the set that makes it, so growth cannot be checked"
                             .into(),
                     );
-                }
-                let new_members: std::collections::BTreeSet<_> = event.recovery_set.iter().collect();
-                if !prev.recovery_set.iter().all(|m| new_members.contains(m)) {
+                };
+                let new_members: std::collections::BTreeSet<_> = new_set.iter().collect();
+                if !prior.iter().all(|m| new_members.contains(m)) {
                     return Err(
                         "add-recovery may only grow the set — every prior authority must \
                          still be present"
@@ -757,15 +774,16 @@ pub fn tip_commits_recovery_key(chain: &[KelEvent], reserve_pubkey: &[u8; 32]) -
     let Some(tip) = chain.last() else {
         return false;
     };
-    // `recovery_set` is carried in the clear only on the events that *set* it —
+    // A set is carried in the clear only on the events that *set* a commitment —
     // inception, `RotationAddRecovery`, and the recovery rotations, which install a
-    // fresh one-member set. `RotationCooperative` is the exception: it carries the
-    // commitment forward unchanged and puts no set in the clear. So an absent set is
-    // not an empty one, and the last event carrying one is always the set that
-    // matches the tip's commitment — every kind that changes the commitment also
-    // publishes what it changed it to.
+    // fresh one-member set. `RotationCooperative` and `Interaction` carry the
+    // commitment forward unchanged and put no set in the clear. So an absent set is
+    // not an empty one, and the answer is read from the last event for which
+    // `committed_set` returns a set: the last set that makes its event's commitment.
+    // A set an event carries that does not make its commitment is passed over, so the
+    // chain answers as it would without it.
     //
-    // Reading only `tip.recovery_set`, as this did while it was inline in
+    // Reading only the tip's set, as this did while it was inline in
     // `login_with_recovery_key`, meant an identity that set up recovery and then
     // rotated its key normally could not be recovered by its own phrase — the
     // commitment still named it and nothing could see that.
@@ -774,12 +792,7 @@ pub fn tip_commits_recovery_key(chain: &[KelEvent], reserve_pubkey: &[u8; 32]) -
     //
     // `verify_recovery_inclusion` refuses the empty root on its own, so a chain that
     // never committed any authority still answers `false` rather than matching.
-    let Some(set) = chain
-        .iter()
-        .rev()
-        .map(|e| &e.recovery_set)
-        .find(|s| !s.is_empty())
-    else {
+    let Some(set) = chain.iter().rev().find_map(committed_set) else {
         return false;
     };
     recovery_proof(set, reserve_pubkey).is_some_and(|proof| {
@@ -2191,5 +2204,163 @@ mod tests {
             contact_key_from_log(&held, key, &held[0].aid.0, &held).is_ok()
         });
         assert!(accepted.is_empty(), "a held log taught: {accepted:?}");
+    }
+
+    // ── A carried set is read through `committed_set` ───────────────────────────
+
+    /// Every kind of event, in the order a log may hold them.
+    const KINDS: [EventKind; 6] = [
+        EventKind::Inception,
+        EventKind::RotationAddRecovery,
+        EventKind::RotationMnemonic,
+        EventKind::RotationGuardian,
+        EventKind::RotationCooperative,
+        EventKind::Interaction,
+    ];
+
+    /// An event of `kind` whose commitment is the root of `committed`, carrying `carried`.
+    /// A kind that sets a commitment sets it to `committed`; a cooperative rotation and an
+    /// interaction carry forward an inception's commitment to `committed`.
+    fn carrying(kind: EventKind, committed: &[[u8; 32]], carried: &[[u8; 32]]) -> KelEvent {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let mut e = match kind {
+            EventKind::Inception => build_inception(&sk, committed),
+            EventKind::RotationAddRecovery => build_add_recovery(&build_fresh_inception(&sk), committed, &sk),
+            EventKind::RotationMnemonic | EventKind::RotationGuardian => {
+                let reserve = SigningKey::from_bytes(&[5u8; 32]);
+                let prev = build_inception(&sk, &[reserve.verifying_key().to_bytes()]);
+                let mut rot = a_rotation_naming(&prev, kind, pk(9), committed, &reserve);
+                // `a_rotation_naming` carries the commitment forward for an empty set; a
+                // recovery that commits none commits the empty root.
+                rot.recovery_commitment = recovery_root(committed);
+                rot
+            }
+            _ => a_rotation_naming(&build_inception(&sk, committed), kind, sk.verifying_key().to_bytes(), &[], &sk),
+        };
+        assert_eq!(e.recovery_commitment, recovery_root(committed), "{kind:?} commits the set it is given");
+        e.recovery_set = carried.to_vec();
+        e
+    }
+
+    /// For every kind of event, the carried set is returned where it makes the event's
+    /// commitment, in any order and with a member repeated; and nothing is returned for an
+    /// empty set, a set with a member added, left out or replaced, or an event that commits
+    /// no authority.
+    #[test]
+    fn committed_set_returns_the_carried_set_only_where_it_makes_the_commitment() {
+        let (c, d, x) = (pk(1), pk(2), pk(3));
+        for kind in KINDS {
+            for carried in [vec![c, d], vec![d, c], vec![c, d, c]] {
+                let e = carrying(kind, &[c, d], &carried);
+                assert_eq!(committed_set(&e), Some(&carried[..]), "{kind:?} carrying {carried:?}");
+            }
+            for carried in [vec![], vec![c, d, x], vec![c], vec![c, x], vec![x, d]] {
+                let e = carrying(kind, &[c, d], &carried);
+                assert_eq!(committed_set(&e), None, "{kind:?} committing {{c, d}} and carrying {carried:?}");
+            }
+            for carried in [vec![], vec![x], vec![c, x]] {
+                let e = carrying(kind, &[c], &carried);
+                assert_eq!(committed_set(&e), None, "{kind:?} committing {{c}} and carrying {carried:?}");
+            }
+            assert_eq!(committed_set(&carrying(kind, &[], &[])), None, "{kind:?} committing no authority");
+        }
+    }
+
+    /// Each kind of event that carries a set, as an honest predecessor whose identity key is
+    /// `sk`, with the events before it: (name, history, predecessor).
+    fn predecessors_carrying_a_set(sk: &SigningKey) -> Vec<(&'static str, Vec<KelEvent>, KelEvent)> {
+        let inc = build_inception(sk, &[pk(1), pk(2)]);
+        let fresh = build_fresh_inception(sk);
+        let add = build_add_recovery(&fresh, &[pk(1), pk(2)], sk);
+        let user = build_user_inception(&seed32());
+        let start = SigningKey::from_bytes(&crate::kdf::derive_identity_key(&seed32()));
+        let user_add = build_add_recovery(&user, &[rung(0), pk(4)], &start);
+        let mnemonic = build_mnemonic_rotation(&user_add, &seed32(), 0, sk, 0, &[rung(0), pk(4)]);
+        let reserve = SigningKey::from_bytes(&[5u8; 32]);
+        let guarded = build_inception(&start, &[reserve.verifying_key().to_bytes()]);
+        let guardian = a_rotation_naming(&guarded, EventKind::RotationGuardian, sk.verifying_key().to_bytes(), &[pk(1), pk(2)], &reserve);
+        vec![
+            ("an inception", vec![], inc),
+            ("an add-recovery", vec![fresh], add),
+            ("a mnemonic rotation", vec![user, user_add], mnemonic),
+            ("a guardian rotation", vec![guarded], guardian),
+        ]
+    }
+
+    /// An add-recovery grows from the set that makes its predecessor's commitment: over each
+    /// kind of predecessor that carries a set, it is valid where its set holds every member of
+    /// that set, and invalid where the predecessor's carried set does not make the
+    /// predecessor's commitment, whatever the new set holds. A log holding such a predecessor
+    /// and the add-recovery after it does not resolve.
+    #[test]
+    fn an_add_recovery_grows_from_the_set_that_makes_its_predecessors_commitment() {
+        let sk = SigningKey::from_bytes(&[11u8; 32]);
+        let (x, y) = (pk(3), pk(6));
+        for (name, history, prev) in predecessors_carrying_a_set(&sk) {
+            let committed = committed_set(&prev).expect("an honest predecessor carries the set it commits").to_vec();
+            let resolves = |prev: &KelEvent, add: &KelEvent| {
+                let mut chain = history.clone();
+                chain.extend([prev.clone(), add.clone()]);
+                resolve_current_key(&chain, &LocalArbiter, false).is_ok()
+            };
+            let grown: Vec<[u8; 32]> = committed.iter().rev().copied().chain([y]).collect();
+            let add = build_add_recovery(&prev, &grown, &sk);
+            assert_eq!(validate(&prev, &add), Verdict::Valid, "{name}: growth from its committed set");
+            assert!(resolves(&prev, &add), "{name}: the honest log resolves");
+
+            let with_x: Vec<[u8; 32]> = committed.iter().copied().chain([x]).collect();
+            for carried in [vec![x], with_x.clone(), vec![]] {
+                let mut copy = prev.clone();
+                copy.recovery_set = carried.clone();
+                let with_y: Vec<[u8; 32]> = carried.iter().copied().chain([y]).collect();
+                let everything: Vec<[u8; 32]> = with_x.iter().copied().chain([y]).collect();
+                for new_set in [grown.clone(), vec![x, y], everything, with_y] {
+                    let add = build_add_recovery(&copy, &new_set, &sk);
+                    assert!(
+                        is_invalid(&validate(&copy, &add)),
+                        "{name} carrying {carried:?}: an add-recovery installing {new_set:?} is valid"
+                    );
+                    assert!(!resolves(&copy, &add), "{name} carrying {carried:?}: the log resolves");
+                }
+            }
+        }
+    }
+
+    /// The answer for a chain whose last set-carrying event is followed by an event carrying a
+    /// set that does not make its commitment is, for every key, the answer for the same chain
+    /// without that carried set.
+    #[test]
+    fn a_carried_set_that_does_not_make_its_commitment_does_not_answer_for_the_tip() {
+        let seed = seed32();
+        let inc = build_user_inception(&seed);
+        let start = SigningKey::from_bytes(&crate::kdf::derive_identity_key(&seed));
+        let (c, x) = (rung(0), pk(3));
+        let followers = [
+            a_rotation_naming(&inc, EventKind::RotationCooperative, pk(12), &[], &start),
+            a_rotation_naming(&inc, EventKind::Interaction, inc.key_state.group_key, &[], &start),
+            build_mnemonic_rotation(&inc, &seed, 0, &SigningKey::from_bytes(&[12u8; 32]), 0, &[c]),
+        ];
+        for honest in followers {
+            let kind = honest.kind;
+            let without: Vec<KelEvent> = vec![inc.clone(), KelEvent { recovery_set: Vec::new(), ..honest.clone() }];
+            for carried in [vec![x], vec![c, x], vec![x, rung(1)]] {
+                let mut follower = honest.clone();
+                follower.recovery_set = carried.clone();
+                assert_eq!(committed_set(&follower), None);
+                let chain = vec![inc.clone(), follower];
+                for key in [c, x, rung(1), pk(4)] {
+                    assert_eq!(
+                        tip_commits_recovery_key(&chain, &key),
+                        tip_commits_recovery_key(&without, &key),
+                        "{kind:?} carrying {carried:?}, asked for {key:?}"
+                    );
+                }
+            }
+        }
+        // The phrase stays an authority across a cooperative rotation that carries such a set.
+        let mut follower = a_rotation_naming(&inc, EventKind::RotationCooperative, pk(12), &[], &start);
+        follower.recovery_set = vec![x];
+        assert!(tip_commits_recovery_key(&[inc.clone(), follower.clone()], &c));
+        assert!(!tip_commits_recovery_key(&[inc, follower], &x));
     }
 }
