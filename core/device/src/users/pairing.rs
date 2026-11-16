@@ -1635,10 +1635,23 @@ pub async fn handle_device_invite(
 /// hands them to a `Full` joiner only); this says what they are. A record that
 /// does not read is a join that hands no drive, and is logged, never a failed
 /// join.
+///
+/// A drive whose vault key the Ed25519 rule refuses names no key: only an
+/// earlier build can have recorded one (`record_handed_drives` and the
+/// projection each construct the key first). It is not handed, and the rest
+/// are: the joiner refuses a handout that carries one, and a drive nothing can
+/// be checked under reaches nothing.
 pub async fn drives_to_hand(db: &Arc<SqlitePool>, user_id: &str) -> Vec<kotton_wire::peer::DriveHandout> {
     match kotton_peer::daemon::drives::list(db, user_id).await {
         Ok(drives) => drives
             .into_iter()
+            .filter(|d| {
+                let names_a_key = VerifyingKey::from_bytes(&d.vault_key).is_ok();
+                if !names_a_key {
+                    tracing::warn!(user_id, node = %d.node.device_did, "a drive recorded under bytes that are no Ed25519 key is not handed at the join");
+                }
+                names_a_key
+            })
             .map(|d| kotton_wire::peer::DriveHandout { vault_key: d.vault_key, tenancy: d.tenancy, node: d.node })
             .collect(),
         Err(e) => {
@@ -1673,14 +1686,15 @@ pub fn check_handed_drives(
 ) -> Result<(), String> {
     for drive in drives {
         let node = &drive.node;
-        let named = kotton_crypto::DidKeyMethod::to_public_key(&node.device_did).map(|k| k.to_bytes()).ok();
+        // The decode holds the Ed25519 rule: a DID over bytes it refuses names no key.
+        let named = kotton_crypto::DidKeyMethod::to_public_key(&node.device_did).ok();
         let why = if drive.tenancy != user_id {
             Some(format!("it is kept under '{}', and this device joins as '{user_id}'", drive.tenancy))
         } else if node.public_key != drive.vault_key {
             Some("the node it is reached through is not the vault's key".to_string())
-        } else if VerifyingKey::from_bytes(&node.public_key).is_err() {
-            Some("its node's key is not an Ed25519 key".to_string())
-        } else if named != Some(node.public_key) {
+        } else if named.is_none() {
+            Some("its node's DID names bytes that are not an Ed25519 key".to_string())
+        } else if named.as_ref().map(|k| k.as_bytes()) != Some(&node.public_key) {
             Some("its node's DID does not name its key".to_string())
         } else if node.device_did == issuer.device_did || node.public_key == issuer.public_key {
             Some(format!("its node is the device this one joins ('{}')", issuer.id))
@@ -1798,7 +1812,7 @@ pub async fn record_handed_drives(
 
 #[cfg(test)]
 mod handed_drive_tests {
-    use super::{check_handed_drives, check_handed_rows, record_handed_drives};
+    use super::{check_handed_drives, check_handed_rows, drives_to_hand, record_handed_drives};
     use kotton_peer::daemon::db as network_db;
     use kotton_store::runtime::user::UserStore;
     use kotton_wire::ipc::UserResponse;
@@ -1808,11 +1822,11 @@ mod handed_drive_tests {
     use std::sync::{Arc, RwLock};
 
     fn a_node(id: &str, seed: u8) -> PairedNode {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key();
+        let key = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[seed; 32]));
         PairedNode {
             id: id.into(),
             device_did: kotton_crypto::DidKeyMethod::from_public_key(&key),
-            public_key: key.to_bytes(),
+            public_key: *key.as_bytes(),
             paired_at: 0,
             addresses: vec![],
             relay_url: None,
@@ -1955,9 +1969,7 @@ mod handed_drive_tests {
     /// A drive at a vault under `key`, its DID naming those bytes as did:key does.
     fn a_drive_under(key: [u8; 32]) -> DriveHandout {
         let mut node = a_node("vault", 2);
-        let mut multicodec = vec![0xed, 0x01];
-        multicodec.extend_from_slice(&key);
-        node.device_did = kotton_wire::did::Did::new("key", format!("z{}", bs58::encode(multicodec).into_string()));
+        node.device_did = kotton_crypto::DidKeyMethod::spelled_over(&key);
         node.public_key = key;
         DriveHandout { vault_key: key, tenancy: "alice".into(), node }
     }
@@ -1974,6 +1986,33 @@ mod handed_drive_tests {
         }
         out.sort();
         out
+    }
+
+    /// **The issuer hands no drive recorded under bytes the rule refuses, and
+    /// hands the rest**: one drive per key vector the rule refuses, recorded as
+    /// an earlier build could have recorded it, sits beside an honest drive;
+    /// the handout is the honest drive alone, and the joiner's check takes it.
+    #[tokio::test]
+    async fn the_handout_at_a_join_skips_a_drive_that_names_no_key() {
+        let (_dir, db) = machine_db().await;
+        let honest = a_drive("vault", 3, "alice");
+        network_db::insert_paired_node(&db, "vault", "alice", &honest.node.device_did.to_string(), &honest.vault_key, "[]", 0, Some("blind-storage"))
+            .await
+            .unwrap();
+        kotton_peer::daemon::drives::record(&db, "alice", &honest.vault_key).await.unwrap();
+        for (i, key) in refused_keys().into_iter().enumerate() {
+            let did = kotton_crypto::DidKeyMethod::spelled_over(&key).to_string();
+            network_db::insert_paired_node(&db, &format!("old-{i}"), "alice", &did, &key, "[]", 0, Some("blind-storage"))
+                .await
+                .unwrap();
+            kotton_peer::daemon::drives::record(&db, "alice", &key).await.unwrap();
+        }
+        assert_eq!(kotton_peer::daemon::drives::list(&db, "alice").await.unwrap().len(), 15, "every drive is recorded");
+
+        let handed = drives_to_hand(&db, "alice").await;
+        let keys: Vec<[u8; 32]> = handed.iter().map(|d| d.vault_key).collect();
+        assert_eq!(keys, vec![honest.vault_key], "the handout carried a drive that names no key, or dropped the honest one");
+        check_handed_drives("alice", &a_node("laptop", 1), &handed).unwrap();
     }
 
     /// **A handed drive under a key the rule refuses is refused by the check**,
@@ -2362,14 +2401,14 @@ mod admit_tests {
     /// What an admit's ceremony hands back for a vault: its node, blind, and
     /// no share.
     fn an_enrolled_vault() -> kotton_peer::pairing::EnrolledNode {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]).verifying_key();
+        let key = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[5; 32]));
         kotton_peer::pairing::EnrolledNode {
             issuer_share: None,
             pubkey_package: None,
             node: kotton_wire::peer::PairedNode {
                 id: "vault".into(),
                 device_did: kotton_crypto::DidKeyMethod::from_public_key(&key),
-                public_key: key.to_bytes(),
+                public_key: *key.as_bytes(),
                 paired_at: 0,
                 addresses: vec![],
                 relay_url: Some("http://relay.test:7700".into()),

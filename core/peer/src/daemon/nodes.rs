@@ -1722,8 +1722,10 @@ mod allowlist_rebuild {
 
         let members = Members::default();
         members.write_member(&own_device("did:peer:honest-member", honest_member)).await.unwrap();
+        // As an earlier build wrote them: `write_member` refuses a member under such bytes.
         for (i, key) in refused_keys.iter().enumerate() {
-            members.write_member(&own_device(&format!("did:peer:refused-member-{i}"), *key)).await.unwrap();
+            let m = own_device(&format!("did:peer:refused-member-{i}"), *key);
+            members.member_write(&m.vfs_path(), &serde_json::to_vec(&m).unwrap()).await.unwrap();
         }
         assert_eq!(members.list_members().await.unwrap().len(), 15);
 
@@ -1819,6 +1821,38 @@ mod allowlist_rebuild {
         let said = node_revoke(&NoMembers, &db, "bob".into(), did.clone(), &paired_keys).await.unwrap();
         assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
         assert!(!paired_keys.read().unwrap().contains(&admitted), "a key no row pairs is still admitted");
+    }
+
+    /// **A row an earlier build stored under bytes the rule refuses is removed by
+    /// the verb that revokes any node**, named by its DID as stored and matched
+    /// by what is stored, not through the decode: for every key vector the rule
+    /// refuses, the row goes, the honest row beside it stays, and the allowlist
+    /// is untouched.
+    #[tokio::test]
+    async fn a_row_under_bytes_the_rule_refuses_is_revoked_by_what_is_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        let db = Arc::new(pool);
+
+        let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[12u8; 32]));
+        let honest_did = kotton_crypto::DidKeyMethod::from_public_key(&honest).to_string();
+        network_db::insert_paired_node(&db, "laptop", "alice", &honest_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([honest])));
+
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
+            network_db::insert_paired_node(&db, "old", "alice", &did, &bytes, "[]", 0, None).await.unwrap();
+            let said = node_revoke(&NoMembers, &db, "alice".into(), did.clone(), &paired_keys).await.unwrap();
+            assert!(matches!(said, UserResponse::NodeRevoked), "{name}: {said:?}");
+            let left: Vec<String> =
+                network_db::list_paired_nodes(&db, "alice").await.unwrap().iter().map(|n| n.device_did.to_string()).collect();
+            assert_eq!(left, vec![honest_did.clone()], "{name}: the row was not removed, or the honest one went with it");
+            assert_eq!(*paired_keys.read().unwrap(), HashSet::from([honest]), "{name}: the allowlist changed");
+        }
     }
 }
 

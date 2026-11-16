@@ -248,7 +248,7 @@ async fn org_grant_issue_signature_verifies() {
         .expect("decode signature");
     let sig = ed25519_dalek::Signature::from_slice(&sig_bytes).expect("valid sig bytes");
 
-    kotton_crypto::ed25519::verify(&vk, canonical.as_bytes(), &sig)
+    vk.verify(canonical.as_bytes(), &sig)
         .expect("signature must verify against the org's public key");
 }
 
@@ -544,7 +544,7 @@ async fn org_grant_removed_member_cannot_import() {
 
 // ── helper: decode Ed25519 public key from a did:key DID ──────────────────────
 
-fn public_key_from_did(did: &str) -> ed25519_dalek::VerifyingKey {
+fn public_key_from_did(did: &str) -> kotton_crypto::ed25519::VerifyingKey {
     use kotton_wire::did::Did;
     use kotton_crypto::DidKeyMethod;
     let parsed = Did::parse(did).expect("valid DID");

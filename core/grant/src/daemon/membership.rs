@@ -246,7 +246,7 @@ mod tests {
     }
 
     fn did(k: &ed25519_dalek::SigningKey) -> String {
-        DidKeyMethod::from_public_key(&k.verifying_key()).to_string()
+        DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(k)).to_string()
     }
 
     /// An envelope from `issuer` to `subject` carrying `grants`, signed by `issuer`.

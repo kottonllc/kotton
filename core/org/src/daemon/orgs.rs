@@ -58,7 +58,7 @@ pub async fn org_new(
 
     // Generate org keypair.
     let org_sk = ed25519_dalek::SigningKey::generate(&mut OsRng);
-    let org_did = DidKeyMethod::from_public_key(&org_sk.verifying_key());
+    let org_did = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&org_sk));
     let org_did_str = org_did.to_string();
 
     // Persist private key in keychain (hex-encoded).
@@ -188,7 +188,7 @@ pub async fn org_grant_issue(
         }
     };
 
-    let issuer_did = DidKeyMethod::from_public_key(&org_sk.verifying_key());
+    let issuer_did = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&org_sk));
     let now = now_secs();
     let expires_at = ttl_secs.map(|ttl| now + ttl);
 

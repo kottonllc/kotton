@@ -365,11 +365,8 @@ pub(crate) async fn mint_principal_session(
                 );
                 return Ok(UserResponse::NotAllowed);
             }
-            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(pubkey.as_bytes()) else {
-                return Ok(UserResponse::NotAllowed);
-            };
             Principal::RemoteClient {
-                did: kotton_crypto::did::DidKeyMethod::from_public_key(&vk).to_string(),
+                did: kotton_crypto::did::DidKeyMethod::from_public_key(&pubkey).to_string(),
             }
         }
     };

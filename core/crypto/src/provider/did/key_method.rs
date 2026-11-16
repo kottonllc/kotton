@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-use ed25519_dalek::VerifyingKey;
+use kotton_ed25519::VerifyingKey;
 use kotton_wire::did::{Did, DidDocument, DidError, Result, VerificationMethod};
 use multibase::Base;
 
@@ -7,20 +7,25 @@ use multibase::Base;
 ///
 /// The did:key method generates a DID from a public key using multibase/multicodec encoding.
 /// Format: `did:key:<multibase-encoded-public-key>`
+///
+/// The key is one that passed the Ed25519 rule ([`VerifyingKey::from_bytes`]): the derivation
+/// takes such a key or constructs it, and the decode returns one or refuses. A `did:key` this
+/// type makes or reads names a key or names nothing.
 pub struct DidKeyMethod;
 
 impl DidKeyMethod {
     /// Ed25519 multicodec prefix (0xed01)
     const ED25519_MULTICODEC: &'static [u8] = &[0xed, 0x01];
 
-    /// Create a DID from an Ed25519 public key
+    /// The `did:key` of a key that passed the rule.
     ///
     /// # Example
     /// ```
     /// use kotton_crypto::did::DidKeyMethod;
-    /// use ed25519_dalek::VerifyingKey;
+    /// use kotton_crypto::ed25519::VerifyingKey;
     ///
-    /// let public_key = VerifyingKey::from_bytes(&[0u8; 32])?;
+    /// let signing_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    /// let public_key = VerifyingKey::from_bytes(signing_key.verifying_key().as_bytes())?;
     /// let did = DidKeyMethod::from_public_key(&public_key);
     /// println!("{}", did); // did:key:z6Mk...
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -32,23 +37,22 @@ impl DidKeyMethod {
         Did::new("key", multibase)
     }
 
-    /// Create a DID from Ed25519 public key bytes
-    ///
-    /// # Arguments
-    /// * `public_key_bytes` - 32-byte Ed25519 public key
-    ///
-    /// # Returns
-    /// did:key identifier
+    /// The `did:key` of 32 bytes, if they pass the rule as a key.
     ///
     /// # Errors
-    /// Returns DidError if key bytes are invalid
+    /// [`DidError::InvalidKey`] where the rule refuses the bytes. It does not say which clause.
     pub fn from_public_key_bytes(public_key_bytes: &[u8; 32]) -> Result<Did> {
-        let verifying_key = VerifyingKey::from_bytes(public_key_bytes)
-            .map_err(|e| DidError::InvalidKey(format!("Invalid Ed25519 key: {}", e)))?;
-        Ok(Self::from_public_key(&verifying_key))
+        let key = VerifyingKey::from_bytes(public_key_bytes)
+            .map_err(|e| DidError::InvalidKey(format!("not an Ed25519 key: {e}")))?;
+        Ok(Self::from_public_key(&key))
     }
 
-    /// Extract Ed25519 public key from a did:key identifier
+    /// The key a `did:key` names, if it names one: an Ed25519 key that passed the rule.
+    ///
+    /// # Errors
+    /// [`DidError::UnsupportedMethod`] for a method other than `key`,
+    /// [`DidError::InvalidMultibase`] where the identifier does not decode, and
+    /// [`DidError::InvalidKey`] where it is not 32 bytes of Ed25519 key or the rule refuses them.
     pub fn to_public_key(did: &Did) -> Result<VerifyingKey> {
         if did.method() != "key" {
             return Err(DidError::UnsupportedMethod(did.method().to_string()));
@@ -79,7 +83,16 @@ impl DidKeyMethod {
         })?;
 
         VerifyingKey::from_bytes(&key_array)
-            .map_err(|e| DidError::InvalidKey(format!("Invalid Ed25519 key: {}", e)))
+            .map_err(|e| DidError::InvalidKey(format!("not an Ed25519 key: {e}")))
+    }
+
+    /// A `did:key` spelled over any 32 bytes, with nothing put to the rule: the string an
+    /// earlier build, or a peer, could have written under bytes that are no key. For the tests
+    /// that hold a reader to reading such a string as no key and a removal to matching it as
+    /// stored; it is not a way to name a key.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn spelled_over(bytes: &[u8; 32]) -> Did {
+        Did::new("key", multibase::encode(Base::Base58Btc, Self::encode_multicodec(bytes)))
     }
 
     /// Generate a full DID document from a did:key DID
@@ -117,10 +130,49 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
 
+    /// The rule's key of `signing_key`.
+    fn key_of(signing_key: &SigningKey) -> VerifyingKey {
+        VerifyingKey::from_bytes(signing_key.verifying_key().as_bytes()).expect("a key made from a seed passes")
+    }
+
+    /// The derivation refuses every vector the rule refuses: no `did:key` is made of bytes that
+    /// are no key.
+    #[test]
+    fn the_derivation_refuses_every_refused_key() {
+        let made: Vec<String> = crate::ed25519::refused_keys()
+            .into_iter()
+            .filter(|(_, bytes)| DidKeyMethod::from_public_key_bytes(bytes).is_ok())
+            .map(|(name, _)| name)
+            .collect();
+        assert!(made.is_empty(), "a did:key was made of bytes the rule refuses: {made:?}");
+    }
+
+    /// The decode refuses every vector the rule refuses, and says it is no key.
+    #[test]
+    fn the_decode_refuses_every_refused_key() {
+        for (name, bytes) in crate::ed25519::refused_keys() {
+            match DidKeyMethod::to_public_key(&DidKeyMethod::spelled_over(&bytes)) {
+                Err(DidError::InvalidKey(_)) => {}
+                other => panic!("{name}: the decode gave {other:?}"),
+            }
+        }
+    }
+
+    /// The bytes form and the key form make one string for one key, and the decode gives the
+    /// key back.
+    #[test]
+    fn one_key_has_one_did() {
+        let key = key_of(&SigningKey::from_bytes(&[7u8; 32]));
+        let did = DidKeyMethod::from_public_key(&key);
+        assert_eq!(DidKeyMethod::from_public_key_bytes(key.as_bytes()).unwrap(), did);
+        assert_eq!(DidKeyMethod::spelled_over(key.as_bytes()), did);
+        assert_eq!(DidKeyMethod::to_public_key(&did).unwrap(), key);
+    }
+
     #[test]
     fn test_did_key_from_public_key() {
         let signing_key = SigningKey::from_bytes(&[1u8; 32]);
-        let public_key = signing_key.verifying_key();
+        let public_key = key_of(&signing_key);
 
         let did = DidKeyMethod::from_public_key(&public_key);
 
@@ -131,7 +183,7 @@ mod tests {
     #[test]
     fn test_did_key_round_trip() {
         let signing_key = SigningKey::from_bytes(&[1u8; 32]);
-        let original_key = signing_key.verifying_key();
+        let original_key = key_of(&signing_key);
 
         let did = DidKeyMethod::from_public_key(&original_key);
         let recovered_key = DidKeyMethod::to_public_key(&did).unwrap();
@@ -142,7 +194,7 @@ mod tests {
     #[test]
     fn test_did_key_to_document() {
         let signing_key = SigningKey::from_bytes(&[1u8; 32]);
-        let public_key = signing_key.verifying_key();
+        let public_key = key_of(&signing_key);
 
         let did = DidKeyMethod::from_public_key(&public_key);
         let doc = DidKeyMethod::to_document(&did).unwrap();
@@ -178,7 +230,7 @@ mod tests {
             157, 097, 177, 157, 239, 253, 090, 096, 186, 132, 074, 244, 146, 236, 044, 196, 068,
             073, 197, 105, 123, 050, 105, 025, 112, 059, 172, 003, 028, 174, 127, 096,
         ]);
-        let public_key = signing_key.verifying_key();
+        let public_key = key_of(&signing_key);
 
         let did = DidKeyMethod::from_public_key(&public_key);
         let did_string = did.to_string();

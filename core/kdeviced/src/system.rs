@@ -864,7 +864,7 @@ async fn handle_sys_request(
 
             // 6. Verify the Ed25519 signature, strictly, over the login message and
             // nothing else: a signature over the bare challenge is refused here.
-            if kotton_crypto::ed25519::verify(&verifying_key, &message, &ed_sig).is_err() {
+            if verifying_key.verify(&message, &ed_sig).is_err() {
                 return Ok(DeviceResponse::AuthFailed {
                     reason: "signature verification failed".into(),
                 });
@@ -1211,7 +1211,7 @@ mod tests {
 
     fn person() -> Person {
         let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-        let did = DidKeyMethod::from_public_key(&key.verifying_key()).to_string();
+        let did = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&key)).to_string();
         Person { key, did }
     }
 
@@ -1461,6 +1461,37 @@ mod tests {
                 (ben.did.as_str(), ben.did.as_str(), false),
             ]
         );
+    }
+
+    /// **An operator row an earlier build stored under a DID that names no key
+    /// is removed by `sudoers remove`**, matched by the DID as stored and not
+    /// through the decode, for every key vector the rule refuses; and `sudoers
+    /// add` refuses to write one.
+    #[tokio::test]
+    async fn an_operator_row_that_names_no_key_is_removed_as_stored_and_none_is_added() {
+        let ana = person();
+        let device = device_with(&[&ana]).await;
+        let at_ana = first_operator(&device, &ana).await;
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let did = DidKeyMethod::spelled_over(&bytes).to_string();
+            let added = refused(
+                device.say(&at_ana, DeviceRequest::SudoersAdd { did: did.clone(), person: ana.did.clone() }).await,
+            );
+            assert!(added.contains("is not a key"), "{name}: {added}");
+            assert!(!operators_db::is_operator(&device.db, &did).await.unwrap(), "{name}: sudoers add wrote it");
+
+            sqlx::query("INSERT INTO operators (did, person, added_at, added_by) VALUES (?, NULL, 0, 'an earlier build')")
+                .bind(&did)
+                .execute(&device.db)
+                .await
+                .unwrap();
+            assert!(matches!(
+                device.say(&at_ana, DeviceRequest::SudoersRemove { did: did.clone() }).await,
+                DeviceResponse::SudoersModified
+            ), "{name}");
+            let left: Vec<String> = operators_db::list(&device.db).await.unwrap().into_iter().map(|o| o.did).collect();
+            assert_eq!(left, vec![ana.did.clone()], "{name}");
+        }
     }
 
     /// Stepping a person down takes every key of theirs — here the machine's
@@ -1815,30 +1846,32 @@ mod tests {
         assert!(operators.is_empty(), "a bare signature enrolled a key: {operators:?}");
     }
 
-    /// **A login under a key of small order is refused**: the login check is strict, so a
-    /// key of small order authenticates nobody, and nothing is enrolled.
+    /// **A login under a DID that names no key is refused**: the decode holds the Ed25519
+    /// rule, so for every key vector it refuses, a DID spelled over those bytes authenticates
+    /// nobody, nothing is checked under it, and nothing is enrolled.
     #[tokio::test]
-    async fn a_login_under_a_small_order_key_is_refused() {
+    async fn a_login_under_a_did_that_names_no_key_is_refused() {
         use kotton_crypto::ed25519::refused;
-        let small = ed25519_dalek::VerifyingKey::from_bytes(&refused::SMALL_ORDER_KEY).unwrap();
-        let who = Person {
-            key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
-            did: DidKeyMethod::from_public_key(&small).to_string(),
-        };
-        let device = device_with(&[&who]).await;
-        let conn: Conn = Arc::new(Mutex::new(None));
-        let DeviceResponse::ChallengeIssued { nonce } = device.say(&conn, DeviceRequest::Challenge).await else {
-            panic!("no challenge");
-        };
-        let signature = refused::under_small_order_key_bytes().to_vec();
-        let answer = authenticate_with(&device, &conn, &who, nonce, signature).await;
-        let refused = matches!(
-            &answer,
-            DeviceResponse::AuthFailed { reason } if reason == "signature verification failed"
-        );
-        assert!(refused, "{answer:?}");
-        let operators = operators_db::list(&device.db).await.unwrap();
-        assert!(operators.is_empty(), "a key of small order enrolled: {operators:?}");
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let who = Person {
+                key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+                did: DidKeyMethod::spelled_over(&bytes).to_string(),
+            };
+            let device = device_with(&[&who]).await;
+            let conn: Conn = Arc::new(Mutex::new(None));
+            let DeviceResponse::ChallengeIssued { nonce } = device.say(&conn, DeviceRequest::Challenge).await else {
+                panic!("no challenge");
+            };
+            let signature = refused::under_small_order_key_bytes().to_vec();
+            let answer = authenticate_with(&device, &conn, &who, nonce, signature).await;
+            let refused = matches!(
+                &answer,
+                DeviceResponse::AuthFailed { reason } if reason.starts_with("cannot extract key from DID")
+            );
+            assert!(refused, "{name}: {answer:?}");
+            let operators = operators_db::list(&device.db).await.unwrap();
+            assert!(operators.is_empty(), "{name}: a DID that names no key enrolled: {operators:?}");
+        }
     }
 
     /// **A non-canonical login signature is refused**: the person's own key, over the

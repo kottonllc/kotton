@@ -305,7 +305,7 @@ pub async fn peer_standing_in(
     let peer_pubkey: Option<[u8; 32]> = kotton_wire::did::Did::parse(peer_did)
         .ok()
         .and_then(|d| kotton_crypto::did::DidKeyMethod::to_public_key(&d).ok())
-        .map(|vk| vk.to_bytes());
+        .map(|vk| *vk.as_bytes());
     let Some(pk) = peer_pubkey else {
         return Ok(PeerStanding::Stranger);
     };

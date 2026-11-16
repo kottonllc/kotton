@@ -17,8 +17,7 @@ fn mont(key: &SigningKey) -> StaticSecret {
 }
 
 fn mont_pub(key: &SigningKey) -> PublicKey {
-    kotton_crypto::x25519::ed25519_pub_to_x25519(&key.verifying_key().to_bytes())
-        .expect("an Ed25519 key is a curve point")
+    kotton_crypto::x25519::ed25519_pub_to_x25519(&kotton_crypto::ed25519::verifying_key(key))
 }
 
 fn hex(bytes: &[u8]) -> String {

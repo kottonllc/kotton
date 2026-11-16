@@ -870,7 +870,7 @@ mod tests {
     fn split_existing_identity_preserves_did_and_threshold_signs() {
         let seed = [11u8; 32];
         let ed_did = crate::did::DidKeyMethod::from_public_key(
-            &ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key(),
+            &crate::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&seed)),
         )
         .to_string();
 

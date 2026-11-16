@@ -379,7 +379,7 @@ mod tests {
         async fn admit(&self, did: &str, key: u8) {
             let member = Member {
                 did: did.to_string(),
-                public_key: [key; 32],
+                public_key: card_key(key),
                 role: Role::Contact,
                 admitted_by: Ceremony::Pairing,
                 added_at: "2026-10-09T00:00:00Z".to_string(),
@@ -412,8 +412,14 @@ mod tests {
         }
     }
 
+    /// The key of the card admitted under `key`: one made from a seed, as every
+    /// member's is.
+    fn card_key(key: u8) -> [u8; 32] {
+        ed25519_dalek::SigningKey::from_bytes(&[key; 32]).verifying_key().to_bytes()
+    }
+
     fn door(did: &str, key: u8) -> Door {
-        (did.to_string(), [key; 32])
+        (did.to_string(), card_key(key))
     }
 
     fn sorted(doors: &Doors) -> Vec<Door> {
@@ -423,7 +429,7 @@ mod tests {
     }
 
     fn co_member(did: &str, key: u8, channel: &str) -> CoMember {
-        CoMember { did: did.to_string(), key: [key; 32], reach: None, channel_did: channel.to_string() }
+        CoMember { did: did.to_string(), key: card_key(key), reach: None, channel_did: channel.to_string() }
     }
 
     /// Alice's rebuild, reported a pass at a time: whether it read everything,

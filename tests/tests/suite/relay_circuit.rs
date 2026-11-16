@@ -44,9 +44,7 @@ fn did_of(pubkey: &[u8; 32]) -> String {
 }
 
 fn montgomery(k: &SigningKey) -> [u8; 32] {
-    kotton_crypto::x25519::ed25519_pub_to_x25519(&pub_of(k))
-        .unwrap()
-        .to_bytes()
+    kotton_crypto::x25519::ed25519_pub_to_x25519(&kotton_crypto::ed25519::verifying_key(k)).to_bytes()
 }
 
 /// A recovery authority held by the test, as `recover` holds one: the circuit is handed this,

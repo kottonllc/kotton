@@ -262,14 +262,19 @@ pub(crate) fn vault_rows(
     operated: &[Operated],
     relays: &[OperatedRelay],
 ) -> Vec<RunnerVault> {
-    let operated: Vec<(String, &Operated)> = operated
-        .iter()
-        .filter_map(|o| {
-            kotton_crypto::DidKeyMethod::from_public_key_bytes(&o.vault)
-                .ok()
-                .map(|d| (d.to_string(), o))
-        })
-        .collect();
+    // A credential whose vault key the Ed25519 rule refuses names no key: only
+    // an earlier build can have kept one. It is listed below, saying so and
+    // how to remove it, and matched to no row and no connection.
+    let (operated, keyless): (Vec<(String, &Operated)>, Vec<&Operated>) = operated.iter().fold(
+        (Vec::new(), Vec::new()),
+        |(mut named, mut keyless), o| {
+            match kotton_crypto::DidKeyMethod::from_public_key_bytes(&o.vault) {
+                Ok(d) => named.push((d.to_string(), o)),
+                Err(_) => keyless.push(o),
+            }
+            (named, keyless)
+        },
+    );
     let mine = |handle: &str| operated.iter().find(|(did, _)| did == handle).map(|(_, o)| *o);
     let relay_named = |key: Option<[u8; 32]>| {
         let key = key?;
@@ -317,7 +322,31 @@ pub(crate) fn vault_rows(
             told_at: o.told_at,
         });
     }
+    for o in keyless {
+        rows.push(RunnerVault {
+            label: Some(o.name.clone()),
+            through: o.relay.as_deref().map(relay_name).filter(|n| !n.is_empty()),
+            holds: keyless_vault_words(&o.name),
+            held_bytes: None,
+            bought_bytes: None,
+            answering: false,
+            yours: true,
+            vault_name: Some(o.name.clone()),
+            relay_name: relay_named(o.relay_key),
+            stands_at: o.relay.clone(),
+            told_at: o.told_at,
+        });
+    }
     rows
+}
+
+/// What a kept vault credential whose key names no Ed25519 key holds, in one
+/// sentence: that it names none, so nothing is reached or checked under it, and
+/// the verb that removes it.
+pub(crate) fn keyless_vault_words(name: &str) -> String {
+    format!(
+        "nothing: the key kept for it is not an Ed25519 key, so nothing is reached or checked under it; `vault forget {name}` removes it"
+    )
 }
 
 /// Whether a peer on the same network can reach this device directly.
@@ -552,6 +581,33 @@ mod tests {
         assert_eq!(rows[0].told_at, Some(1_790_000_000));
         let untold = vault_rows(&[], &[], &[], &|_| false, &[vault(13, "new", None)], &[]);
         assert_eq!((untold[0].stands_at.as_deref(), untold[0].told_at), (None, None));
+    }
+
+    /// **A kept vault credential whose key the Ed25519 rule refuses is listed,
+    /// saying so and how to remove it**, for every key vector the rule refuses,
+    /// beside an honest one that reads as before: it is the person's own, it
+    /// answers nothing, and no enrolled row or connection is matched to it.
+    #[test]
+    fn a_kept_vault_whose_key_names_no_key_is_listed_and_says_how_to_remove_it() {
+        let honest = || Operated {
+            vault: ed25519_dalek::SigningKey::from_bytes(&[10; 32]).verifying_key().to_bytes(),
+            name: "kotton".to_owned(),
+            relay: None,
+            relay_key: None,
+            told_at: None,
+        };
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let keyless = Operated { vault: bytes, name: "attic".to_owned(), relay: None, relay_key: None, told_at: None };
+            let spelled = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
+            let enrolled = [Target { handle: spelled.clone(), label: Some("attic".into()) }];
+            let rows = vault_rows(&enrolled, &[], &[], &|_| true, &[honest(), keyless], &[]);
+            assert_eq!(rows.len(), 3, "{name}: the enrolled row, the honest vault and the keyless one");
+            assert!(!rows[0].yours, "{name}: the enrolled row was matched to a credential that names no key");
+            let row = rows.iter().find(|r| r.holds == keyless_vault_words("attic")).unwrap_or_else(|| panic!("{name}: not listed: {rows:?}"));
+            assert!(row.yours && row.vault_name.as_deref() == Some("attic") && !row.answering, "{name}: {row:?}");
+            assert!(row.holds.contains("not an Ed25519 key") && row.holds.contains("`vault forget attic`"), "{}", row.holds);
+            assert!(rows.iter().any(|r| r.vault_name.as_deref() == Some("kotton") && r.holds == "nothing of yours"));
+        }
     }
 
     /// **No relay named is no row**, which is not the same fact as a row that

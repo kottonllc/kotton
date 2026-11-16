@@ -216,7 +216,7 @@ async fn an_operator_adds_and_removes_a_person_through_the_occupant_host_under_t
         .expect("austin's private objects open")
         .expect("austin's own operator key is kept in his store");
     let seed: [u8; 32] = seed.as_slice().try_into().expect("a 32-byte seed");
-    let kept = kotton_crypto::DidKeyMethod::from_public_key(&ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key())
+    let kept = kotton_crypto::DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&seed)))
         .to_string();
     assert_eq!(kept, austins_key, "the key kdeviced keeps for Austin is the one in his sealed store");
     let acts = kdeviced::db::operators_db::acts(&db).await.unwrap();

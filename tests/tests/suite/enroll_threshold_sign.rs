@@ -585,11 +585,11 @@ async fn file_written_on_one_device_syncs_to_a_joined_device() {
     );
     assert_eq!(hex::encode(node_n.public_key), pubkey_n_hex);
     assert_eq!(
-        kotton_crypto::DidKeyMethod::to_public_key(
+        *kotton_crypto::DidKeyMethod::to_public_key(
             &kotton_wire::did::Did::parse(&did_n_dev).expect("a did:key")
         )
         .expect("decodes")
-        .to_bytes(),
+        .as_bytes(),
         node_n.public_key,
         "the DID is the operational key's, not a label"
     );

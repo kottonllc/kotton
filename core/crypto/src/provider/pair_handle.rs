@@ -62,6 +62,7 @@ use x25519_dalek::PublicKey as X25519PublicKey;
 
 use super::did::DidKeyMethod;
 use super::x25519::{ed25519_priv_to_x25519, ed25519_pub_to_x25519};
+use kotton_ed25519::VerifyingKey;
 
 /// Domain separator. Changing it rotates every handle in the system at once,
 /// which is the intended way to retire a broken scheme.
@@ -289,8 +290,8 @@ fn contact_knock(
     router: &[u8; 32],
 ) -> Result<[u8; CONTACT_KNOCK_LEN]> {
     let own_x = ed25519_priv_to_x25519(own_identity);
-    let peer_x: X25519PublicKey = ed25519_pub_to_x25519(peer_ed_pub)
-        .context("contact knock: contact key is not a curve point")?;
+    let peer = VerifyingKey::from_bytes(peer_ed_pub).context("contact knock: the contact's key is not an Ed25519 key")?;
+    let peer_x: X25519PublicKey = ed25519_pub_to_x25519(&peer);
     let shared = own_x.diffie_hellman(&peer_x);
 
     let mut info = Vec::with_capacity(CONTACT_KNOCK_INFO.len() + 16 + 8 + 32 + 32);
@@ -315,8 +316,8 @@ fn door_name(
     day: u64,
 ) -> Result<String> {
     let own_x = ed25519_priv_to_x25519(own_signing_key);
-    let peer_x: X25519PublicKey =
-        ed25519_pub_to_x25519(peer_ed_pub).context("door name: peer key is not a curve point")?;
+    let peer = VerifyingKey::from_bytes(peer_ed_pub).context("door name: the peer's key is not an Ed25519 key")?;
+    let peer_x: X25519PublicKey = ed25519_pub_to_x25519(&peer);
     let shared = own_x.diffie_hellman(&peer_x);
 
     let mut info = Vec::with_capacity(DOOR_NAME_INFO.len() + 8 + 32 + 32);
@@ -343,8 +344,8 @@ fn derive(
     domain_info: &[u8],
 ) -> Result<(Did, SigningKey)> {
     let own_x = ed25519_priv_to_x25519(own_signing_key);
-    let peer_x: X25519PublicKey =
-        ed25519_pub_to_x25519(peer_ed_pub).context("pair handle: peer key is not a curve point")?;
+    let peer = VerifyingKey::from_bytes(peer_ed_pub).context("pair handle: the peer's key is not an Ed25519 key")?;
+    let peer_x: X25519PublicKey = ed25519_pub_to_x25519(&peer);
     let shared = own_x.diffie_hellman(&peer_x);
 
     let mut info = Vec::with_capacity(domain_info.len() + 8 + 32);
@@ -358,7 +359,7 @@ fn derive(
         .map_err(|_| anyhow::anyhow!("pair handle: HKDF expand failed"))?;
 
     let signing_key = SigningKey::from_bytes(&seed);
-    let did = DidKeyMethod::from_public_key(&signing_key.verifying_key());
+    let did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&signing_key));
     Ok((did, signing_key))
 }
 
@@ -389,7 +390,7 @@ mod tests {
 
         // Exactly what the relay does: recover the key from the DID it was handed.
         let recovered = DidKeyMethod::to_public_key(&h.did).expect("handle is a did:key");
-        assert!(crate::ed25519::verify(&recovered, b"addr=203.0.113.9:7700", &signature).is_ok());
+        assert!(recovered.verify(b"addr=203.0.113.9:7700", &signature).is_ok());
     }
 
     /// The door's name: what A announces on a router today is what B expects, and
@@ -519,6 +520,24 @@ mod tests {
         );
     }
 
+    /// No handle, mailbox, door name or knock is made with a peer's key the rule refuses: each
+    /// refuses every vector, and nothing is converted.
+    #[test]
+    fn nothing_is_derived_from_a_key_the_rule_refuses() {
+        let (a, _) = pair();
+        let router = [3u8; 32];
+        for (name, bytes) in crate::ed25519::refused_keys() {
+            assert!(publish_handle(&a, &bytes, 42).is_err(), "a handle with {name}");
+            assert!(lookup_handle(&a, &bytes, 42).is_err(), "a lookup with {name}");
+            assert!(dm_inbox_handle(&a, &bytes, 42).is_err(), "a mailbox with {name}");
+            assert!(dm_inbox_target(&a, &bytes, 42).is_err(), "a mailbox target with {name}");
+            assert!(door_announce_name(&a, &bytes, &router, 7).is_err(), "a door name with {name}");
+            assert!(door_expect_name(&a, &bytes, &router, 7).is_err(), "an expected door name with {name}");
+            assert!(contact_knock_to_open(&a, &bytes, &[1; 16], 42, &router).is_err(), "a knock to open with {name}");
+            assert!(contact_knock_to_dial(&a, &bytes, &[1; 16], 42, &router).is_err(), "a knock to dial with {name}");
+        }
+    }
+
     /// A handle must carry neither party's identity.
     #[test]
     fn a_handle_reveals_neither_identity() {
@@ -526,8 +545,8 @@ mod tests {
         let (a_pub, b_pub) = (a.verifying_key().to_bytes(), b.verifying_key().to_bytes());
 
         let h = publish_handle(&a, &b_pub, 42).unwrap().did.to_string();
-        assert_ne!(h, DidKeyMethod::from_public_key(&a.verifying_key()).to_string());
-        assert_ne!(h, DidKeyMethod::from_public_key(&b.verifying_key()).to_string());
+        assert_ne!(h, DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&a)).to_string());
+        assert_ne!(h, DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&b)).to_string());
         assert!(!h.contains(&hex::encode(a_pub)));
         assert!(!h.contains(&hex::encode(b_pub)));
     }
@@ -632,7 +651,7 @@ mod tests {
 
         let signature = h.signing_key.sign(b"poll");
         let recovered = DidKeyMethod::to_public_key(&h.did).expect("address is a did:key");
-        assert!(crate::ed25519::verify(&recovered, b"poll", &signature).is_ok());
+        assert!(recovered.verify(b"poll", &signature).is_ok());
     }
 
     /// A lookup spans the boundary, so a device a few minutes out still connects.

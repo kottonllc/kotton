@@ -175,7 +175,7 @@ pub async fn handle(control: &ControlContext, from: &Peer, request: VaultPeerReq
     let peer_pubkey: Option<[u8; 32]> = Did::parse(peer_did)
         .ok()
         .and_then(|d| DidKeyMethod::to_public_key(&d).ok())
-        .map(|vk| vk.to_bytes());
+        .map(|vk| *vk.as_bytes());
 
     // Who is asking, to this pool. A vault grants no guest session, so a
     // stranger is refused here and there is no second door.

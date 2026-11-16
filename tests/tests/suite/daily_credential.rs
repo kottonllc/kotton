@@ -269,7 +269,7 @@ async fn a_cold_daemon_says_it_cannot_read_the_contacts_rather_than_that_there_a
         .expect("the user is resident")
         .write_member(&Member {
             did: contact_did.to_string(),
-            public_key: [9u8; 32],
+            public_key: ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes(),
             role: Role::Contact,
             admitted_by: Ceremony::Pairing,
             added_at: "2026-09-09T00:00:00Z".to_string(),

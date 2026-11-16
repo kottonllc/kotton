@@ -156,7 +156,7 @@ pub fn dm_door(
 ) -> Result<DmDoorKeys> {
     let handle = dm_inbox_handle(own_identity, contact_ed_pub, epoch)?;
     let their = dm_inbox_target(own_identity, contact_ed_pub, epoch)?;
-    let admit = kotton_crypto::did::DidKeyMethod::to_public_key(&their)?.to_bytes();
+    let admit = *kotton_crypto::did::DidKeyMethod::to_public_key(&their)?.as_bytes();
     Ok(DmDoorKeys { handle, admit })
 }
 
@@ -180,7 +180,7 @@ pub fn dm_delivery_attempts(
     for e in epochs {
         let own = dm_inbox_handle(own_identity, contact_ed_pub, e)?;
         let target = dm_inbox_target(own_identity, contact_ed_pub, e)?;
-        let target_pub = kotton_crypto::did::DidKeyMethod::to_public_key(&target)?.to_bytes();
+        let target_pub = *kotton_crypto::did::DidKeyMethod::to_public_key(&target)?.as_bytes();
         attempts.push(DeliveryAttempt {
             epoch: e,
             auth_did: own.did.to_string(),

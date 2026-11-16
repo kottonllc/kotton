@@ -561,7 +561,7 @@ impl DeviceRuntime {
     /// certificate on connect. This is what `GetNodeIdentity` answers, what
     /// the pairing ceremony records, and what a person writes down.
     pub fn operational_did(&self) -> String {
-        kotton_crypto::DidKeyMethod::from_public_key(&self.device_signing_key.verifying_key())
+        kotton_crypto::DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&self.device_signing_key))
             .to_string()
     }
 

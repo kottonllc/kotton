@@ -293,8 +293,9 @@ where
         offer: &CircuitOffer,
     ) -> Result<Self, TransportError> {
         let own_static = kotton_crypto::x25519::ed25519_priv_to_x25519(own);
-        let responder_static = kotton_crypto::x25519::ed25519_pub_to_x25519(responder)
+        let responder = kotton_crypto::ed25519::VerifyingKey::from_bytes(responder)
             .map_err(|e| TransportError::ConfigError(format!("the door's key: {e}")))?;
+        let responder_static = kotton_crypto::x25519::ed25519_pub_to_x25519(&responder);
         let (initiator, opening) =
             Initiator::open(&own_static, &responder_static, None, None).map_err(|_| closed())?;
         send(&mut stream, &opening).await?;
@@ -326,7 +327,7 @@ where
         }
         Ok(Self {
             inner: Mutex::new(Carried { stream, channel }),
-            peer: Peer::Key(did_of(responder)?),
+            peer: Peer::Key(DidKeyMethod::from_public_key(&responder).to_string()),
         })
     }
 
@@ -380,8 +381,9 @@ where
                     AskReply::Claim(claim) => {
                         // The tag first: one who does not hold the key it names learns nothing
                         // from how long the door took to look it up.
-                        let tagged = kotton_crypto::x25519::ed25519_pub_to_x25519(claim.key())
+                        let tagged = kotton_crypto::ed25519::VerifyingKey::from_bytes(claim.key())
                             .ok()
+                            .map(|authority| kotton_crypto::x25519::ed25519_pub_to_x25519(&authority))
                             .and_then(|authority| asked.expected_claim_tag(&authority, claim.key()))
                             .is_some_and(|expected| claim.tag_matches(&expected));
                         if tagged {
@@ -923,7 +925,7 @@ mod tests {
     async fn open_and_stall(io: &mut tokio::io::DuplexStream, door_key: &SigningKey, dialer_key: &SigningKey) {
         let (_, opening) = Initiator::open(
             &kotton_crypto::x25519::ed25519_priv_to_x25519(dialer_key),
-            &kotton_crypto::x25519::ed25519_pub_to_x25519(&pub_of(door_key)).unwrap(),
+            &kotton_crypto::x25519::ed25519_pub_to_x25519(&kotton_crypto::ed25519::verifying_key(door_key)),
             None,
             None,
         )
@@ -1000,7 +1002,7 @@ mod tests {
         let server = tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place()).await });
         let (_, opening) = Initiator::open(
             &kotton_crypto::x25519::ed25519_priv_to_x25519(&dialer_key),
-            &kotton_crypto::x25519::ed25519_pub_to_x25519(&pub_of(&key(8))).unwrap(),
+            &kotton_crypto::x25519::ed25519_pub_to_x25519(&kotton_crypto::ed25519::verifying_key(&key(8))),
             None,
             None,
         )
@@ -1285,7 +1287,7 @@ mod tests {
         };
         let (_, opening) = Initiator::open(
             &kotton_crypto::x25519::ed25519_priv_to_x25519(&dialer_key),
-            &kotton_crypto::x25519::ed25519_pub_to_x25519(&pub_of(&door_key)).unwrap(),
+            &kotton_crypto::x25519::ed25519_pub_to_x25519(&kotton_crypto::ed25519::verifying_key(&door_key)),
             None,
             None,
         )

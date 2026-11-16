@@ -30,8 +30,7 @@ fn now_secs() -> i64 {
 /// Generate an Ed25519 signing key and derive its `did:key:…` string.
 fn gen_org_key() -> (SigningKey, String) {
     let sk = SigningKey::generate(&mut OsRng);
-    let vk = sk.verifying_key();
-    let did = DidKeyMethod::from_public_key(&vk);
+    let did = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&sk));
     (sk, did.to_string())
 }
 

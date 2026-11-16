@@ -253,7 +253,7 @@ async fn frost_signing_round_trip_2_of_2() {
         .expect("decode base64 signature");
     let sig = ed25519_dalek::Signature::from_slice(&sig_bytes).expect("parse signature");
     let canonical = envelope.canonical_json().expect("canonical_json");
-    kotton_crypto::ed25519::verify(&vk, canonical.as_bytes(), &sig)
+    vk.verify(canonical.as_bytes(), &sig)
         .expect("FROST signature must verify against the org group key");
 }
 

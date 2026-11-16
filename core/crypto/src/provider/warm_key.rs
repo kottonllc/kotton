@@ -114,7 +114,8 @@ pub fn verify_warm_key_delegation(
         .try_into()
         .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
     let signature = Signature::from_bytes(&sig_arr);
-    crate::ed25519::verify(&root_key, delegation.signing_message().as_bytes(), &signature)
+    root_key
+        .verify(delegation.signing_message().as_bytes(), &signature)
         .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
 
     Ok(())
@@ -139,7 +140,7 @@ pub fn issue_warm_key_delegation(
     expires_at: i64,
 ) -> anyhow::Result<WarmKeyDelegation> {
     let warm_did = DidKeyMethod::from_public_key_bytes(warm_pubkey)?;
-    let root_did = DidKeyMethod::from_public_key(&root_key.verifying_key());
+    let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(root_key));
 
     let mut delegation = WarmKeyDelegation {
         warm_did,
@@ -192,11 +193,8 @@ pub fn verify_enrollment_cert(
         .try_into()
         .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
     let signature = Signature::from_bytes(&sig_arr);
-    crate::ed25519::verify(
-        &root_key,
-        enrollment_cert_message(share_hex, warm_pubkey).as_bytes(),
-        &signature,
-    )
+    root_key
+        .verify(enrollment_cert_message(share_hex, warm_pubkey).as_bytes(), &signature)
     .map_err(|_| WarmKeyDenied::BadQuorumSignature)?;
     Ok(())
 }
@@ -224,7 +222,7 @@ mod tests {
         let root = key(1);
         let warm = key(2);
         let d = make_delegation(&root, &warm, 9_999_999_999);
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
         assert_eq!(verify_warm_key_delegation(&d, &root_did, 1_000), Ok(()));
     }
 
@@ -234,7 +232,7 @@ mod tests {
         let warm = key(2);
         let d = make_delegation(&root, &warm, 9_999_999_999);
         // Verify against a different root identity.
-        let other_root_did = DidKeyMethod::from_public_key(&key(42).verifying_key());
+        let other_root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&key(42)));
         assert_eq!(
             verify_warm_key_delegation(&d, &other_root_did, 1_000),
             Err(WarmKeyDenied::WrongRoot)
@@ -246,7 +244,7 @@ mod tests {
         let root = key(1);
         let warm = key(2);
         let d = make_delegation(&root, &warm, 500); // expired in the past
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
         assert_eq!(
             verify_warm_key_delegation(&d, &root_did, 1_000), // now > expires_at
             Err(WarmKeyDenied::Expired)
@@ -259,7 +257,7 @@ mod tests {
         let warm = key(2);
         let mut d = make_delegation(&root, &warm, 9_999_999_999);
         d.quorum_signature = URL_SAFE_NO_PAD.encode([0u8; 64]);
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
         assert_eq!(
             verify_warm_key_delegation(&d, &root_did, 1_000),
             Err(WarmKeyDenied::BadQuorumSignature)
@@ -276,7 +274,7 @@ mod tests {
         let mut d = make_delegation(&root, &warm, 9_999_999_999);
         let forged = impostor.sign(d.signing_message().as_bytes());
         d.quorum_signature = URL_SAFE_NO_PAD.encode(forged.to_bytes());
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
         assert_eq!(
             verify_warm_key_delegation(&d, &root_did, 1_000),
             Err(WarmKeyDenied::BadQuorumSignature)
@@ -293,28 +291,44 @@ mod tests {
         // Re-sign so the signature itself is valid over the (now inconsistent) message.
         let sig = root.sign(d.signing_message().as_bytes());
         d.quorum_signature = URL_SAFE_NO_PAD.encode(sig.to_bytes());
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
         assert_eq!(
             verify_warm_key_delegation(&d, &root_did, 1_000),
             Err(WarmKeyDenied::InconsistentWarmKey)
         );
     }
 
-    /// A delegation under a root key of small order is refused.
+    /// A delegation under a root DID that names no key is refused at the decode, for every
+    /// vector the rule refuses: nothing is checked under it.
     #[test]
-    fn a_delegation_under_a_small_order_root_key_is_refused() {
+    fn a_delegation_under_a_root_did_that_names_no_key_is_refused() {
         use crate::ed25519::refused;
-        let small = ed25519_dalek::VerifyingKey::from_bytes(&refused::SMALL_ORDER_KEY).unwrap();
-        let root_did = DidKeyMethod::from_public_key(&small);
         let warm = key(2);
-        let d = WarmKeyDelegation {
-            warm_did: DidKeyMethod::from_public_key(&warm.verifying_key()),
-            warm_pubkey: warm.verifying_key().to_bytes(),
-            expires_at: 9_999_999_999,
-            root_did: root_did.clone(),
-            quorum_signature: URL_SAFE_NO_PAD.encode(refused::under_small_order_key_bytes()),
-        };
-        assert_eq!(verify_warm_key_delegation(&d, &root_did, 1_000), Err(WarmKeyDenied::BadQuorumSignature));
+        for (name, bytes) in crate::ed25519::refused_keys() {
+            let root_did = DidKeyMethod::spelled_over(&bytes);
+            let d = WarmKeyDelegation {
+                warm_did: DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&warm)),
+                warm_pubkey: warm.verifying_key().to_bytes(),
+                expires_at: 9_999_999_999,
+                root_did: root_did.clone(),
+                quorum_signature: URL_SAFE_NO_PAD.encode(refused::under_small_order_key_bytes()),
+            };
+            assert_eq!(verify_warm_key_delegation(&d, &root_did, 1_000), Err(WarmKeyDenied::BadRootDid), "{name}");
+        }
+    }
+
+    /// A delegation that carries a warm key the rule refuses is refused, and none is issued.
+    #[test]
+    fn a_delegation_to_a_warm_key_the_rule_refuses_is_refused() {
+        let root = key(1);
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
+        let mut d = make_delegation(&root, &key(2), 9_999_999_999);
+        for (name, bytes) in crate::ed25519::refused_keys() {
+            assert!(issue_warm_key_delegation(&root, &bytes, 9_999_999_999).is_err(), "issued to {name}");
+            d.warm_pubkey = bytes;
+            d.warm_did = DidKeyMethod::spelled_over(&bytes);
+            assert_eq!(verify_warm_key_delegation(&d, &root_did, 1_000), Err(WarmKeyDenied::InconsistentWarmKey), "{name}");
+        }
     }
 
     /// A non-canonical signature by the root key over the delegation is refused.
@@ -322,29 +336,31 @@ mod tests {
     fn a_delegation_with_a_non_canonical_signature_is_refused() {
         let root = key(1);
         let mut d = make_delegation(&root, &key(2), 9_999_999_999);
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
         for sig in crate::ed25519::refused::non_canonical(&root, d.signing_message().as_bytes()) {
             d.quorum_signature = URL_SAFE_NO_PAD.encode(sig.to_bytes());
             assert_eq!(verify_warm_key_delegation(&d, &root_did, 1_000), Err(WarmKeyDenied::BadQuorumSignature));
         }
     }
 
-    /// An enrollment certificate under a root key of small order is refused.
+    /// An enrollment certificate under a root DID that names no key is refused at the decode,
+    /// for every vector the rule refuses.
     #[test]
-    fn an_enrollment_cert_under_a_small_order_root_key_is_refused() {
+    fn an_enrollment_cert_under_a_root_did_that_names_no_key_is_refused() {
         use crate::ed25519::refused;
-        let small = ed25519_dalek::VerifyingKey::from_bytes(&refused::SMALL_ORDER_KEY).unwrap();
-        let root_did = DidKeyMethod::from_public_key(&small);
         let warm_pub = key(2).verifying_key().to_bytes();
         let cert = URL_SAFE_NO_PAD.encode(refused::under_small_order_key_bytes());
-        assert_eq!(verify_enrollment_cert(&cert, &root_did, "ab12", &warm_pub), Err(WarmKeyDenied::BadQuorumSignature));
+        for (name, bytes) in crate::ed25519::refused_keys() {
+            let root_did = DidKeyMethod::spelled_over(&bytes);
+            assert_eq!(verify_enrollment_cert(&cert, &root_did, "ab12", &warm_pub), Err(WarmKeyDenied::BadRootDid), "{name}");
+        }
     }
 
     /// A non-canonical signature by the root key over the enrollment certificate is refused.
     #[test]
     fn an_enrollment_cert_with_a_non_canonical_signature_is_refused() {
         let root = key(1);
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
         let warm_pub = key(2).verifying_key().to_bytes();
         assert_eq!(verify_enrollment_cert(&sign_enrollment_cert(&root, "ab12", &warm_pub), &root_did, "ab12", &warm_pub), Ok(()));
         let message = enrollment_cert_message("ab12", &warm_pub);
@@ -359,7 +375,7 @@ mod tests {
         let root = key(1);
         let warm = key(2);
         let d = make_delegation(&root, &warm, 1_000);
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
         // now == expires_at is still valid (reject only when now > expires_at).
         assert_eq!(verify_warm_key_delegation(&d, &root_did, 1_000), Ok(()));
     }
@@ -371,8 +387,8 @@ mod tests {
         let warm_pub = warm.verifying_key().to_bytes();
         let d = issue_warm_key_delegation(&root, &warm_pub, 9_999_999_999).unwrap();
 
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
-        let warm_did = DidKeyMethod::from_public_key(&warm.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
+        let warm_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&warm));
         // Issuance sets the fields it should.
         assert_eq!(d.root_did, root_did);
         assert_eq!(d.warm_did, warm_did);
@@ -387,7 +403,7 @@ mod tests {
         let root = key(1);
         let warm = key(2);
         let d = issue_warm_key_delegation(&root, &warm.verifying_key().to_bytes(), 9_999_999_999).unwrap();
-        let other_root = DidKeyMethod::from_public_key(&key(9).verifying_key());
+        let other_root = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&key(9)));
         assert_eq!(
             verify_warm_key_delegation(&d, &other_root, 1_000),
             Err(WarmKeyDenied::WrongRoot)
@@ -397,7 +413,7 @@ mod tests {
     #[test]
     fn enrollment_cert_round_trips() {
         let root = key(1);
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
         let warm_pub = key(2).verifying_key().to_bytes();
         let cert = sign_enrollment_cert(&root, "share-hex", &warm_pub);
         assert!(verify_enrollment_cert(&cert, &root_did, "share-hex", &warm_pub).is_ok());
@@ -406,7 +422,7 @@ mod tests {
     #[test]
     fn enrollment_cert_rejects_wrong_share_or_warm_key() {
         let root = key(1);
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&root));
         let warm_pub = key(2).verifying_key().to_bytes();
         let cert = sign_enrollment_cert(&root, "share-hex", &warm_pub);
         // A different share under the same warm key must not verify.
@@ -421,7 +437,7 @@ mod tests {
         let root = key(1);
         let warm_pub = key(2).verifying_key().to_bytes();
         let cert = sign_enrollment_cert(&root, "share-hex", &warm_pub);
-        let other_root = DidKeyMethod::from_public_key(&key(9).verifying_key());
+        let other_root = DidKeyMethod::from_public_key(&crate::ed25519::verifying_key(&key(9)));
         assert!(verify_enrollment_cert(&cert, &other_root, "share-hex", &warm_pub).is_err());
     }
 }

@@ -326,7 +326,7 @@ mod tests {
         let warm = key(2);
         let delegation = delegation_from(&key(1), &warm);
         let warm_pub = warm.verifying_key().to_bytes();
-        let other_root = DidKeyMethod::from_public_key(&key(9).verifying_key());
+        let other_root = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&key(9)));
         // Fails at step 1 (delegation root binding), before share/cert checks.
         assert!(verify_received_frost_share(
             &delegation,
@@ -343,7 +343,7 @@ mod tests {
     fn rejects_delegation_for_a_different_device() {
         let root = key(1);
         let warm = key(2);
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&root));
         let delegation = delegation_from(&root, &warm); // issued for key(2)
         let some_other_device = key(5).verifying_key().to_bytes();
         // Fails at step 2 (this-device binding), before share/cert checks.
@@ -365,7 +365,7 @@ mod tests {
     fn rejects_expired_delegation() {
         let root = key(1);
         let warm = key(2);
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&root));
         let expired =
             issue_warm_key_delegation(&root, &warm.verifying_key().to_bytes(), 500).unwrap();
         let warm_pub = warm.verifying_key().to_bytes();
@@ -387,7 +387,7 @@ mod tests {
     fn rejects_malformed_share() {
         let root = key(1);
         let warm = key(2);
-        let root_did = DidKeyMethod::from_public_key(&root.verifying_key());
+        let root_did = DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&root));
         let delegation = delegation_from(&root, &warm);
         let warm_pub = warm.verifying_key().to_bytes();
         let bad = FrostSharePayload("not-a-key-package".to_string());
@@ -411,7 +411,7 @@ mod tests {
 
         // The split preserves the issuer's existing identity DID.
         let issuer_did =
-            DidKeyMethod::from_public_key(&SigningKey::from_bytes(&issuer_seed).verifying_key());
+            DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&issuer_seed)));
         assert_eq!(issued.root_did, issuer_did, "DID preserved across the split");
 
         match &issued.payload {

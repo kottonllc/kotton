@@ -19,12 +19,39 @@ pub use kotton_ed25519::{Refused, Signature, VerifyingKey};
 #[cfg(any(test, feature = "test-utils"))]
 pub use kotton_ed25519::refused;
 
+/// Every vector [`refused`] names as a key, each with its name: the eight encodings of small
+/// order, the identity's other encodings, the mixed-order key, the non-canonical encoding and
+/// the bytes that are no point. A test that holds a site to the rule runs it over all of them.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn refused_keys() -> Vec<(String, [u8; 32])> {
+    let mut keys: Vec<(String, [u8; 32])> =
+        refused::SMALL_ORDER_KEYS.iter().enumerate().map(|(i, k)| (format!("small order {i}"), *k)).collect();
+    keys.extend(
+        refused::IDENTITY_OTHER_ENCODINGS.iter().enumerate().map(|(i, k)| (format!("the identity, encoding {}", i + 2), *k)),
+    );
+    keys.push(("mixed order".to_string(), refused::mixed_order_key()));
+    keys.push(("not canonical".to_string(), refused::NON_CANONICAL_KEY));
+    keys.push(("not a point".to_string(), refused::NOT_A_POINT));
+    keys
+}
+
 /// Verify `signature` over `message` under `key` by the rule: the key's bytes must pass
 /// [`VerifyingKey::from_bytes`], and the signature [`VerifyingKey::verify`].
 pub fn verify(key: &ed25519_dalek::VerifyingKey, message: &[u8], signature: &Signature) -> Result<(), SignatureError> {
     VerifyingKey::from_bytes(key.as_bytes())
         .and_then(|key| key.verify(message, signature))
         .map_err(|_| SignatureError::new())
+}
+
+/// The rule's key of `key`. A key made from a seed is a multiple of the base point by a scalar
+/// that is not zero modulo the group's order, so it passes the rule (nothing an honest side
+/// makes is refused); a refusal here is a defect in the library, and panics rather than name a
+/// key that is no key.
+///
+/// It stands where the library's signing key is still held; kottonllc/kotton#565 gives the
+/// signing key a type whose own `verifying_key` returns the rule's key.
+pub fn verifying_key(key: &SigningKey) -> VerifyingKey {
+    VerifyingKey::from_bytes(key.verifying_key().as_bytes()).expect("a key made from a seed passes the Ed25519 rule")
 }
 
 /// Ed25519 keypair generator
@@ -187,6 +214,25 @@ impl Verifier for Ed25519Verifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule's key of a signing key is the library's key's bytes, put to the rule.
+    /// The list is every key vector the rule's crate names, and the rule refuses each.
+    #[test]
+    fn refused_keys_are_refused() {
+        let keys = refused_keys();
+        assert_eq!(keys.len(), refused::SMALL_ORDER_KEYS.len() + refused::IDENTITY_OTHER_ENCODINGS.len() + 3);
+        for (name, bytes) in keys {
+            assert!(VerifyingKey::from_bytes(&bytes).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn verifying_key_is_the_signing_keys_key() {
+        for seed in [[0u8; 32], [1; 32], [42; 32], [255; 32]] {
+            let key = SigningKey::from_bytes(&seed);
+            assert_eq!(verifying_key(&key).as_bytes(), key.verifying_key().as_bytes());
+        }
+    }
 
     #[test]
     fn test_ed25519_sign_verify() {

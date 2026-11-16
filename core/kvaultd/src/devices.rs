@@ -17,7 +17,11 @@
 //! 1. its signature verifies under the identity's current key, replayed from the
 //!    key log this vault keeps for the tenant — so a device the vault admits,
 //!    but which does not hold the identity, introduces nobody;
-//! 2. its `device_did` names its `public_key`;
+//! 2. its `device_did` names its `public_key`. The decode holds the Ed25519 rule
+//!    (`kotton_crypto::did`), so an admit's key is one the rule admits. A
+//!    withdrawal whose DID names no key is of a row an earlier build stored
+//!    under bytes the rule refuses: it is matched by what is stored, the
+//!    tenant's row under that DID and those bytes, and not through the decode;
 //! 3. an admit is later than every change taken for that key (`said_at_ms`,
 //!    kept in `tenant_device_changes`), so an admit replayed after a
 //!    withdrawal does not put a revoked device back; a withdrawal is always
@@ -117,19 +121,25 @@ pub async fn accept(
         return Err("it is not signed under the tenant's identity".to_string());
     }
 
-    // 2. The DID is the key's, and for an admit a key the Ed25519 rule admits:
-    // bytes it refuses name no key, and are refused as a DID that names none.
-    // The key is constructed here, once, and handed to `apply`.
-    let named = Did::parse(&change.device_did).ok().and_then(|d| DidKeyMethod::to_public_key(&d).ok()).map(|k| k.to_bytes());
+    // 2. The DID is the key's. The decode holds the Ed25519 rule, so the key it
+    // gives is constructed, once, and handed to `apply`; bytes the rule refuses
+    // name no key, and an admit under them is refused as a DID that names none.
+    // A withdrawal whose DID names no key is matched as stored (`Stored`).
+    let named = Did::parse(&change.device_did).ok().and_then(|d| DidKeyMethod::to_public_key(&d).ok());
     let taken = match (change.act, named) {
-        (TenantDeviceAct::Admit, Some(b)) if b == change.public_key => VerifyingKey::from_bytes(&b).ok().map(|key| Taken::Admit {
+        (TenantDeviceAct::Admit, Some(key)) if key.as_bytes() == &change.public_key => Some(Taken::Admit {
             key,
             device_did: &change.device_did,
             said_at_ms: change.said_at_ms,
         }),
-        (TenantDeviceAct::Withdraw, Some(b)) if b == change.public_key => {
-            Some(Taken::Withdraw { public_key: b, said_at_ms: change.said_at_ms })
+        (TenantDeviceAct::Withdraw, Some(key)) if key.as_bytes() == &change.public_key => {
+            Some(Taken::Withdraw { public_key: change.public_key, said_at_ms: change.said_at_ms, stored: None })
         }
+        (TenantDeviceAct::Withdraw, None) => Some(Taken::Withdraw {
+            public_key: change.public_key,
+            said_at_ms: change.said_at_ms,
+            stored: Some(&change.device_did),
+        }),
         _ => None,
     };
     let Some(taken) = taken else {
@@ -148,11 +158,14 @@ pub async fn accept(
 /// allowlist entry are both that key, and an admit without its key cannot be
 /// written. A withdraw carries the stored bytes, which the Ed25519 rule does not
 /// hold, so that it can remove a row whatever they are; it never enters the
-/// allowlist.
+/// allowlist. `stored` is `None` where the DID named those bytes as a key, and
+/// the DID as stored where it names no key: then only the tenant's row under
+/// that DID and those bytes is removed, and no change is recorded under bytes
+/// that are no key.
 #[derive(Clone, Copy)]
 enum Taken<'a> {
     Admit { key: VerifyingKey, device_did: &'a str, said_at_ms: u64 },
-    Withdraw { public_key: [u8; 32], said_at_ms: u64 },
+    Withdraw { public_key: [u8; 32], said_at_ms: u64, stored: Option<&'a str> },
 }
 
 impl Taken<'_> {
@@ -221,6 +234,23 @@ async fn apply_in(
 ) -> io::Result<Result<(), String>> {
     let said_at = i64::try_from(taken.said_at_ms()).map_err(io::Error::other)?;
     let key = taken.public_key().as_slice();
+    // A row an earlier build stored under bytes that name no key, removed by
+    // what is stored. Nothing is recorded under those bytes: no admit can be
+    // taken under them for a record to order.
+    if let Taken::Withdraw { stored: Some(device_did), .. } = taken {
+        let removed = sqlx::query("DELETE FROM paired_nodes WHERE user_id = ? AND public_key = ? AND device_did = ?")
+            .bind(user_id)
+            .bind(key)
+            .bind(device_did)
+            .execute(&mut *conn)
+            .await
+            .map_err(io::Error::other)?
+            .rows_affected();
+        if removed == 0 {
+            return Ok(Err("the device's DID names no key, and no row of the tenant's is stored under it".to_string()));
+        }
+        return Ok(Ok(()));
+    }
     let last: Option<i64> =
         sqlx::query("SELECT said_at FROM tenant_device_changes WHERE user_id = ? AND public_key = ?")
             .bind(user_id)
@@ -333,7 +363,7 @@ mod tests {
                 device_did: &change.device_did,
                 said_at_ms: change.said_at_ms,
             },
-            TenantDeviceAct::Withdraw => Taken::Withdraw { public_key: change.public_key, said_at_ms: change.said_at_ms },
+            TenantDeviceAct::Withdraw => Taken::Withdraw { public_key: change.public_key, said_at_ms: change.said_at_ms, stored: None },
         };
         let before = keys.read().unwrap().clone();
         let outcome = apply(db, keys, user, taken).await;
@@ -443,8 +473,8 @@ mod tests {
     }
 
     fn a_device(seed: u8) -> ([u8; 32], String) {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key();
-        (key.to_bytes(), DidKeyMethod::from_public_key(&key).to_string())
+        let key = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[seed; 32]));
+        (*key.as_bytes(), DidKeyMethod::from_public_key(&key).to_string())
     }
 
     /// Through the whole acceptance: an admit under the identity, for a key
@@ -579,9 +609,7 @@ mod tests {
             .collect();
         assert_eq!(vectors.len(), 14, "one admit per refused key vector");
         for (i, bytes) in vectors.into_iter().enumerate() {
-            let mut multicodec = vec![0xed, 0x01];
-            multicodec.extend_from_slice(&bytes);
-            let did = format!("did:key:z{}", bs58::encode(multicodec).into_string());
+            let did = DidKeyMethod::spelled_over(&bytes).to_string();
             let change = TenantDeviceChange { act: TenantDeviceAct::Admit, device_did: did, public_key: bytes, said_at_ms: 2 + i as u64 };
             let why = accept(base.path(), &db, &keys, "alice", &change, &signed(&identity, &change)).await.unwrap_err();
             assert_eq!(serde_json::to_vec(&super::refused(&why)).unwrap(), existing_reply, "refused key vector {i}: {why}");
@@ -594,6 +622,83 @@ mod tests {
             assert_eq!(changes, 0, "a change was taken for refused key vector {i}");
         }
         assert!(keys.read().unwrap().is_empty());
+    }
+
+    /// A tenant whose membership set this vault cannot read, as a vault's is:
+    /// its tenant set is its rows, and nothing else.
+    struct Sealed;
+
+    #[async_trait::async_trait]
+    impl kotton_peer::membership::MemberStore for Sealed {
+        async fn member_write(&self, _: &str, _: &[u8]) -> anyhow::Result<()> {
+            anyhow::bail!("sealed")
+        }
+        async fn member_read(&self, _: &str) -> anyhow::Result<Vec<u8>> {
+            anyhow::bail!("sealed")
+        }
+        async fn member_delete(&self, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("sealed")
+        }
+        async fn member_list(&self, _: &str) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// **The vault's tenant set reads a row an earlier build stored under bytes
+    /// the rule refuses as no key, and a withdrawal removes it by what is
+    /// stored.** One row per key vector the rule refuses sits beside an honest
+    /// device the identity admitted. The allowlist rebuilt from the tenant's
+    /// rows holds the honest key alone. A withdrawal the identity signed, under
+    /// a DID that names no key and is not the one stored with those bytes,
+    /// removes nothing; under the DID as stored it removes that row and no
+    /// other, and records no change under bytes that are no key. The rebuilt
+    /// allowlist is the honest key throughout.
+    #[tokio::test]
+    async fn a_row_under_bytes_the_rule_refuses_is_read_as_no_key_and_withdrawn_as_stored() {
+        let base = tempfile::tempdir().unwrap();
+        let identity = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        a_tenant_at(base.path(), &identity);
+        let db = a_vault_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        let (honest, honest_did) = a_device(2);
+        let admit = TenantDeviceChange { act: TenantDeviceAct::Admit, device_did: honest_did, public_key: honest, said_at_ms: 1 };
+        accept(base.path(), &db, &keys, "alice", &admit, &signed(&identity, &admit)).await.unwrap();
+        let honest_key = VerifyingKey::from_bytes(&honest).unwrap();
+
+        let refused = kotton_crypto::ed25519::refused_keys();
+        for (i, (_, bytes)) in refused.iter().enumerate() {
+            let did = DidKeyMethod::spelled_over(bytes).to_string();
+            kotton_peer::daemon::db::insert_paired_node(&db, &format!("old-{i}"), "alice", &did, bytes, "[]", 0, Some("full"))
+                .await
+                .unwrap();
+        }
+        let tenants: Vec<(String, Arc<dyn kotton_peer::membership::MemberStore>)> = vec![("alice".into(), Arc::new(Sealed))];
+        kotton_peer::daemon::nodes::reproject_allowlist(&tenants, &db, &keys).await;
+        assert_eq!(*keys.read().unwrap(), HashSet::from([honest_key]), "the tenant set admitted a row that names no key");
+
+        for (i, (name, bytes)) in refused.iter().enumerate() {
+            let did = DidKeyMethod::spelled_over(bytes).to_string();
+            let elsewhere = format!("did:key:zNotStored{i}");
+            let misnamed = TenantDeviceChange { act: TenantDeviceAct::Withdraw, device_did: elsewhere, public_key: *bytes, said_at_ms: 10 + i as u64 };
+            let why = accept(base.path(), &db, &keys, "alice", &misnamed, &signed(&identity, &misnamed)).await.unwrap_err();
+            assert!(why.contains("names no key, and no row of the tenant's is stored under it"), "{name}: {why}");
+            assert!(paired(&db, "alice", bytes).await, "{name}: a withdrawal not as stored removed the row");
+
+            let withdraw = TenantDeviceChange { act: TenantDeviceAct::Withdraw, device_did: did, public_key: *bytes, said_at_ms: 10 + i as u64 };
+            accept(base.path(), &db, &keys, "alice", &withdraw, &signed(&identity, &withdraw))
+                .await
+                .unwrap_or_else(|why| panic!("{name}: the withdrawal as stored was refused: {why}"));
+            assert!(!paired(&db, "alice", bytes).await, "{name}: the row stayed");
+            assert!(paired(&db, "alice", &honest).await, "{name}: the honest row went with it");
+            let changes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenant_device_changes WHERE public_key = ?")
+                .bind(bytes.as_slice())
+                .fetch_one(db.as_ref())
+                .await
+                .unwrap();
+            assert_eq!(changes, 0, "{name}: a change was recorded under bytes that are no key");
+            kotton_peer::daemon::nodes::reproject_allowlist(&tenants, &db, &keys).await;
+            assert_eq!(*keys.read().unwrap(), HashSet::from([honest_key]), "{name}");
+        }
     }
 
     /// **The operator's half of condition 4, through the whole acceptance**:

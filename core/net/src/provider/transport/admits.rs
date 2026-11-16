@@ -67,11 +67,12 @@ pub trait Admits: Send + Sync {
     fn by_claim(&self, authority: &[u8; 32]) -> Option<String>;
 }
 
-/// The Montgomery form of an Ed25519 key, or `None` where it is no point.
+/// The Montgomery form of an Ed25519 key, or `None` where the rule refuses the bytes as a key:
+/// a value that is no key is not converted, and is not one of two keys that share a form.
 fn montgomery(ed: &[u8; 32]) -> Option<[u8; 32]> {
-    kotton_crypto::x25519::ed25519_pub_to_x25519(ed)
+    kotton_crypto::ed25519::VerifyingKey::from_bytes(ed)
         .ok()
-        .map(|m| m.to_bytes())
+        .map(|key| kotton_crypto::x25519::ed25519_pub_to_x25519(&key).to_bytes())
 }
 
 /// The one key of `keys`, each beside its Montgomery form, whose form is `initiator`; none
@@ -231,6 +232,22 @@ mod tests {
         assert_eq!(montgomery(&k), montgomery(&negated));
         let held = HeldKeys::only(Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&k).unwrap(), VerifyingKey::from_bytes(&negated).unwrap()]))));
         assert_eq!(held.by_key(&montgomery(&k).unwrap()), None);
+    }
+
+    /// **The door converts no value that is no key.** For every key vector the rule refuses,
+    /// `montgomery` reads `None`, and a key offered under those bytes (as an event's key
+    /// state offers one) is not the key whose form an initiator holds, even where the bytes
+    /// decode to a point whose form that is.
+    #[test]
+    fn a_value_the_rule_refuses_has_no_montgomery_form_at_the_door() {
+        use curve25519_dalek::edwards::CompressedEdwardsY;
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            assert_eq!(montgomery(&bytes), None, "{name}");
+            if let Some(point) = CompressedEdwardsY(bytes).decompress() {
+                let form = point.to_montgomery().to_bytes();
+                assert_eq!(one_of([(&bytes, montgomery(&bytes))], &form), None, "{name}");
+            }
+        }
     }
 
     /// Events that are not events, and a claim by an authority no held identity committed,

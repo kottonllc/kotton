@@ -47,7 +47,7 @@ pub fn owner_did_for(
     secrets: &dyn kotton_sys::secret::SecretsStore,
 ) -> Option<String> {
     let sk = identity_signing_key_for(user_id, secrets)?;
-    Some(kotton_crypto::DidKeyMethod::from_public_key(&sk.verifying_key()).to_string())
+    Some(kotton_crypto::DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&sk)).to_string())
 }
 
 /// The user's identity signing key from the keychain — the key [`owner_did_for`] names.
