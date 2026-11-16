@@ -1697,6 +1697,39 @@ mod allowlist_rebuild {
         }
     }
 
+    /// **A row and a member stand by their bytes** (kottonllc/kotton#597): a
+    /// `paired_nodes` row and an own-device member whose bytes are a key, each
+    /// stored under another spelling of the key's `did:key`, are admitted as
+    /// before: the rebuilt allowlist holds both keys and the row's key is paired
+    /// to its person.
+    #[tokio::test]
+    async fn a_row_and_a_member_under_another_spelling_are_admitted_by_their_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        let db = Arc::new(pool);
+
+        let row = *kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[21u8; 32])).as_bytes();
+        let member = *kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[22u8; 32])).as_bytes();
+        let row_did = kotton_crypto::DidKeyMethod::spelled_otherwise(&row).to_string();
+        network_db::insert_paired_node(&db, "laptop", "alice", &row_did, &row, "[]", 0, None).await.unwrap();
+        let members = Members::default();
+        let m = own_device(&kotton_crypto::DidKeyMethod::spelled_otherwise(&member).to_string(), member);
+        members.write_member(&m).await.unwrap();
+
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let users: Vec<(String, Arc<dyn MemberStore>)> = vec![("alice".to_string(), Arc::new(members))];
+        reproject_allowlist(&users, &db, &paired_keys).await;
+        let live = paired_keys.read().unwrap().clone();
+        let key = |b: &[u8; 32]| VerifyingKey::from_bytes(b).unwrap();
+        assert!(live.contains(&key(&row)), "the row under another spelling is not admitted");
+        assert!(live.contains(&key(&member)), "the member under another spelling is not admitted");
+        assert!(network_db::is_pubkey_paired_to_user(&db, &row, "alice").await.unwrap());
+    }
+
     /// **The allowlist a daemon rebuilds from its store holds only keys the
     /// rule admits**, from every source it is built from. A store can carry a
     /// row whose bytes are not a key: an all-zero row written by the placeholder

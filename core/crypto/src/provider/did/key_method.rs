@@ -52,7 +52,8 @@ impl DidKeyMethod {
     /// # Errors
     /// [`DidError::UnsupportedMethod`] for a method other than `key`,
     /// [`DidError::InvalidMultibase`] where the identifier does not decode, and
-    /// [`DidError::InvalidKey`] where it is not 32 bytes of Ed25519 key or the rule refuses them.
+    /// [`DidError::InvalidKey`] where it is not 32 bytes of Ed25519 key, the rule refuses them,
+    /// or the DID is not the one string [`Self::from_public_key`] makes of that key.
     pub fn to_public_key(did: &Did) -> Result<VerifyingKey> {
         if did.method() != "key" {
             return Err(DidError::UnsupportedMethod(did.method().to_string()));
@@ -82,8 +83,17 @@ impl DidKeyMethod {
             DidError::InvalidKey("Failed to convert key bytes to array".to_string())
         })?;
 
-        VerifyingKey::from_bytes(&key_array)
-            .map_err(|e| DidError::InvalidKey(format!("not an Ed25519 key: {e}")))
+        let key = VerifyingKey::from_bytes(&key_array)
+            .map_err(|e| DidError::InvalidKey(format!("not an Ed25519 key: {e}")))?;
+        // One key has one `did:key`: the string the derivation makes of it, compared as
+        // stored. The codec reads other spellings of the same bytes; none of them names it.
+        if Self::from_public_key(&key) != *did {
+            return Err(DidError::InvalidKey(
+                "not the did:key of its key: a key's did:key is did:key:z and the base58btc of 0xed 0x01 and the key"
+                    .to_string(),
+            ));
+        }
+        Ok(key)
     }
 
     /// A `did:key` spelled over any 32 bytes, with nothing put to the rule: the string an
@@ -95,8 +105,19 @@ impl DidKeyMethod {
         Did::new("key", multibase::encode(Base::Base58Btc, Self::encode_multicodec(bytes)))
     }
 
-    /// Generate a full DID document from a did:key DID
+    /// The same bytes as [`Self::spelled_over`] under another base the codec reads (base58
+    /// Flickr, `Z`, whose alphabet keeps the string a single path component):
+    /// a string an earlier build or a peer could have written beside a key, which names no key
+    /// however good the bytes. For the tests that hold a table to what the row is read by.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn spelled_otherwise(bytes: &[u8; 32]) -> Did {
+        Did::new("key", multibase::encode(Base::Base58Flickr, Self::encode_multicodec(bytes)))
+    }
+
+    /// The DID document of a `did:key` that names a key: it goes through [`Self::to_public_key`],
+    /// and a DID that names none has no document.
     pub fn to_document(did: &Did) -> Result<DidDocument> {
+        Self::to_public_key(did)?;
         let did_string = did.to_string();
         let verification_method_id = format!("{}#{}", did_string, did.identifier());
 
@@ -242,4 +263,89 @@ mod tests {
         let recovered = DidKeyMethod::to_public_key(&did).unwrap();
         assert_eq!(public_key.as_bytes(), recovered.as_bytes());
     }
+
+    /// The committed spellings of one key's `did:key` (`kotton_wire`'s `did/did-key-spellings.txt`),
+    /// which the relay's decode is held to as well.
+    const SPELLINGS: &str = include_str!("../../../../wire/src/did/did-key-spellings.txt");
+
+    /// The key the spellings are of: one made from a seed.
+    fn spelled_key() -> VerifyingKey {
+        key_of(&SigningKey::from_bytes(&[1u8; 32]))
+    }
+
+    /// What the spellings file says: the key's `did:key` under every base the codec offers, the
+    /// one `did:key` first. A base whose encoder cannot write these bytes as text is named and
+    /// left out: the identity base, which writes the bytes as they are, and `0xed` is no
+    /// UTF-8 text.
+    fn spellings() -> String {
+        let bytes = DidKeyMethod::encode_multicodec(spelled_key().as_bytes());
+        let mut bases: Vec<Base> = Vec::new();
+        for code in (0..=0x10ffffu32).filter_map(char::from_u32) {
+            if let Ok(base) = Base::from_code(code) {
+                if !bases.contains(&base) {
+                    bases.push(base);
+                }
+            }
+        }
+        bases.sort_by_key(|b| (*b != Base::Base58Btc, b.code()));
+        let mut out = String::from(
+            "# One Ed25519 key's did:key, spelled under every base the multibase codec offers.\n\
+             # The first line is the key's did:key; no other line names a key.\n\
+             # Rebuilt and checked by kotton-crypto (did::key_method::tests); read by the relay's tests.\n",
+        );
+        for base in bases {
+            if base == Base::Identity {
+                assert!(std::str::from_utf8(&bytes).is_err(), "the identity base writes these bytes as text");
+                continue;
+            }
+            out.push_str(&format!("{base:?} did:key:{}\n", multibase::encode(base, &bytes)));
+        }
+        out
+    }
+
+    /// The spellings, as `(base, did)`, the one `did:key` first.
+    fn spelled() -> Vec<(String, String)> {
+        SPELLINGS
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .map(|l| {
+                let (base, did) = l.split_once(' ').expect("a base and a did per line");
+                (base.to_string(), did.to_string())
+            })
+            .collect()
+    }
+
+    /// **The committed spellings are the codec's**: rebuilt from it, they match the file, so a
+    /// base the codec gains is a red test until the file says so.
+    #[test]
+    fn the_spellings_file_is_every_base_the_codec_offers() {
+        if let Ok(path) = std::env::var("KOTTON_WRITE_DID_KEY_SPELLINGS") {
+            std::fs::write(path, spellings()).expect("write the spellings");
+        }
+        assert_eq!(SPELLINGS, spellings(), "the spellings file is not the codec's: run this test with KOTTON_WRITE_DID_KEY_SPELLINGS=<path to the file> to rebuild it");
+        assert_eq!(spelled()[0].1, DidKeyMethod::from_public_key(&spelled_key()).to_string());
+        assert!(spelled().len() > 20, "{} spellings", spelled().len());
+    }
+
+    /// **One key has one `did:key`**: of every spelling of one key, the decode reads the
+    /// derivation's string as that key and refuses every other, a document is made for that
+    /// string alone, and `Publisher::new` takes the same one string and no other.
+    #[test]
+    fn exactly_one_spelling_of_a_key_decodes() {
+        let key = spelled_key();
+        for (i, (base, did)) in spelled().into_iter().enumerate() {
+            let decoded = Did::parse(&did).ok().and_then(|d| DidKeyMethod::to_public_key(&d).ok());
+            let published = kotton_schemas::Publisher::new(did.clone()).is_ok();
+            let documented = Did::parse(&did).ok().is_some_and(|d| DidKeyMethod::to_document(&d).is_ok());
+            assert_eq!(documented, i == 0, "{base}: a document was made for {did}");
+            if i == 0 {
+                assert_eq!(decoded, Some(key), "{base}: the did:key did not decode to its key");
+                assert!(published, "{base}: Publisher::new refused the did:key");
+            } else {
+                assert_eq!(decoded, None, "{base}: {did} decoded");
+                assert!(!published, "{base}: Publisher::new took {did}");
+            }
+        }
+    }
 }
+

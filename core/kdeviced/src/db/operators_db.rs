@@ -11,10 +11,14 @@
 //! (`system::handle_sys_request`), so removing a row ends that key's standing
 //! on a connection it already holds.
 //!
-//! **The last is never removed.** [`remove`] is one statement whose guard is in
-//! its own `WHERE`, so two operators stepping each other down at once cannot
-//! both succeed and leave the device with nobody: a device always has one, and
-//! handing it on is add-then-step-down.
+//! **The last is never removed.** The operator a device always keeps is a row
+//! that names a key: one somebody can sign for. A row under a string that is
+//! not the `did:key` of an Ed25519 key is no operator and does not stand in for
+//! one (kottonllc/kotton#597); nothing is admitted under it at login, and
+//! [`remove`] removes it by the DID as stored. [`remove`] is one statement
+//! whose guard is in its own `WHERE`, so two operators stepping each other down
+//! at once cannot both succeed and leave the device with nobody: a device
+//! always has one, and handing it on is add-then-step-down.
 //!
 //! **First run.** When the set is empty, the first caller to prove a key is
 //! enrolled ([`bootstrap`]) — trust on first use, DEC-0017 — in one statement
@@ -73,10 +77,12 @@ pub enum Refusal {
     SharedKey { did: String, person: String },
     /// Nothing in the set is that key or that person's.
     NotAnOperator(String),
-    /// It would leave the device with no operator.
-    Last(String),
     /// No key of `person`'s own has been kept here yet.
     NoKeyKept(String),
+    /// It would leave the device with no operator row that names a key.
+    LastKey(String),
+    /// The key kept for `person` names no Ed25519 key, so nobody can sign for it.
+    KeptNamesNoKey { person: String, did: String },
 }
 
 impl std::fmt::Display for Refusal {
@@ -91,13 +97,19 @@ impl std::fmt::Display for Refusal {
                 "{did} is already {person}'s key — each operator holds their own, and a key is never shared"
             ),
             Refusal::NotAnOperator(who) => write!(f, "{who} is not one of this device's operators"),
-            Refusal::Last(who) => write!(
-                f,
-                "{who} is this device's last operator, and the last is never removed — add another operator first"
-            ),
             Refusal::NoKeyKept(p) => write!(
                 f,
                 "{p} holds no key of their own on this device yet — their Kotton makes one the next time they unlock here"
+            ),
+            Refusal::LastKey(who) => write!(
+                f,
+                "{who} holds this device's last operator key that names an Ed25519 key, and the last is never removed — \
+                 a row that names no key is no operator anyone can sign as, so it does not stand in for one; add another operator first"
+            ),
+            Refusal::KeptNamesNoKey { person, did } => write!(
+                f,
+                "the key kept for {person}, {did}, is not the did:key of an Ed25519 key, so nobody can sign for it and \
+                 it is not made an operator — remove it by that DID as stored"
             ),
         }
     }
@@ -186,11 +198,25 @@ pub async fn add(
     Ok(Ok(()))
 }
 
-/// Step down `who` — one key, or a person, which takes every key of theirs.
-/// Refused when nothing matches, or when it would leave no operator. The guard
-/// is in the one `DELETE`'s own `WHERE`, so it holds against a concurrent
-/// removal: whichever runs second finds itself the last. Returns the keys it
-/// removed.
+/// Whether `did` is the `did:key` of an Ed25519 key: a row under it is one
+/// somebody can sign for. A row under any other string, bytes the rule refuses
+/// or another spelling of a key's `did:key`, is no operator anyone can sign as
+/// (kottonllc/kotton#597), as migration 0004 says of the rows it leaves behind.
+pub fn names_a_key(did: &str) -> bool {
+    did.parse::<kotton_wire::did::Did>()
+        .ok()
+        .is_some_and(|d| kotton_crypto::DidKeyMethod::to_public_key(&d).is_ok())
+}
+
+/// Step down `who` — one key, or a person, which takes every key of theirs —
+/// and remove a kept key stored under `who` as a DID. Refused when nothing
+/// matches, or when it would leave no operator row that names a key: a row
+/// nobody can sign for is not an operator and does not stand in for one. The
+/// guard is in the one `DELETE`'s own `WHERE`, so it holds against a
+/// concurrent removal: whichever runs second finds itself the last. Whether a
+/// DID names a key is a fact of the string alone, read before the `DELETE`.
+/// Returns the keys it removed. A kept key is matched by its DID as stored,
+/// never by person, and its removal leaves no device without an operator.
 pub async fn remove(pool: &SqlitePool, who: &str) -> io::Result<Result<Vec<String>, Refusal>> {
     let matching: Vec<String> = sqlx::query("SELECT did FROM operators WHERE did = ?1 OR person = ?1")
         .bind(who)
@@ -200,21 +226,65 @@ pub async fn remove(pool: &SqlitePool, who: &str) -> io::Result<Result<Vec<Strin
         .into_iter()
         .map(|r| r.get::<String, _>("did"))
         .collect();
-    if matching.is_empty() {
+    let kept = sqlx::query("SELECT 1 FROM operator_keys_kept WHERE did = ?")
+        .bind(who)
+        .fetch_optional(pool)
+        .await
+        .map_err(db_err("remove"))?
+        .is_some();
+    if matching.is_empty() && !kept {
         return Ok(Err(Refusal::NotAnOperator(who.to_string())));
     }
-    let done = sqlx::query(
-        "DELETE FROM operators WHERE (did = ?1 OR person = ?1) \
-         AND EXISTS (SELECT 1 FROM operators WHERE did <> ?1 AND COALESCE(person, '') <> ?1)",
-    )
-    .bind(who)
-    .execute(pool)
-    .await
-    .map_err(db_err("remove"))?;
-    if done.rows_affected() == 0 {
-        return Ok(Err(Refusal::Last(who.to_string())));
+    if !matching.is_empty() {
+        let removes_a_key = matching.iter().any(|d| names_a_key(d));
+        let done = if removes_a_key {
+            // The rows that name a key, other than the ones being removed.
+            let others: Vec<String> = sqlx::query("SELECT did FROM operators WHERE did <> ?1 AND COALESCE(person, '') <> ?1")
+                .bind(who)
+                .fetch_all(pool)
+                .await
+                .map_err(db_err("remove"))?
+                .into_iter()
+                .map(|r| r.get::<String, _>("did"))
+                .filter(|d| names_a_key(d))
+                .collect();
+            if others.is_empty() {
+                return Ok(Err(Refusal::LastKey(who.to_string())));
+            }
+            let marks = (2..others.len() + 2).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
+            let sql = format!(
+                "DELETE FROM operators WHERE (did = ?1 OR person = ?1) \
+                 AND EXISTS (SELECT 1 FROM operators WHERE did <> ?1 AND COALESCE(person, '') <> ?1 AND did IN ({marks}))"
+            );
+            let mut q = sqlx::query(&sql).bind(who);
+            for d in &others {
+                q = q.bind(d);
+            }
+            q.execute(pool).await.map_err(db_err("remove"))?
+        } else {
+            // Rows nobody can sign for: removing them leaves every operator.
+            sqlx::query("DELETE FROM operators WHERE did = ?1 OR person = ?1")
+                .bind(who)
+                .execute(pool)
+                .await
+                .map_err(db_err("remove"))?
+        };
+        if done.rows_affected() == 0 {
+            return Ok(Err(Refusal::LastKey(who.to_string())));
+        }
     }
-    Ok(Ok(matching))
+    let mut removed = matching;
+    if kept {
+        sqlx::query("DELETE FROM operator_keys_kept WHERE did = ?")
+            .bind(who)
+            .execute(pool)
+            .await
+            .map_err(db_err("remove"))?;
+        if !removed.iter().any(|d| d == who) {
+            removed.push(who.to_string());
+        }
+    }
+    Ok(Ok(removed))
 }
 
 /// What keeping a person's own key came to ([`keep_own_key`]).
@@ -302,6 +372,11 @@ pub async fn take_kept_key(
     let Some(did) = kept_key(pool, person).await? else {
         return Ok(Err(Refusal::NoKeyKept(person.to_string())));
     };
+    // Every writer of a row that holds a key constructs the key first: a kept
+    // row that names none is not moved into the operators.
+    if !names_a_key(&did) {
+        return Ok(Err(Refusal::KeptNamesNoKey { person: person.to_string(), did }));
+    }
     if let Err(refused) = add(pool, &did, person, added_by, accounts).await? {
         return Ok(Err(refused));
     }

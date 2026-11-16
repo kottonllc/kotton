@@ -1494,6 +1494,103 @@ mod tests {
         }
     }
 
+    /// Every string that names no key, by name: a `did:key` over each key vector the rule
+    /// refuses, and another spelling of an honest key's `did:key`.
+    fn strings_that_name_no_key() -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = kotton_crypto::ed25519::refused_keys()
+            .into_iter()
+            .map(|(name, bytes)| (name, DidKeyMethod::spelled_over(&bytes).to_string()))
+            .collect();
+        let honest = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[33; 32]));
+        out.push(("another spelling".to_string(), DidKeyMethod::spelled_otherwise(honest.as_bytes()).to_string()));
+        out
+    }
+
+    /// **The operator a device keeps is a row that names a key.** Beside each row that names
+    /// no key, `sudoers remove` of the one operator whose key is a key is refused, by name; that
+    /// operator stays, and the row that names no key is removed by its DID as stored.
+    #[tokio::test]
+    async fn the_last_operator_that_names_a_key_is_never_removed() {
+        for (name, did) in strings_that_name_no_key() {
+            let ana = person();
+            let device = device_with(&[&ana]).await;
+            let at_ana = first_operator(&device, &ana).await;
+            sqlx::query("INSERT INTO operators (did, person, added_at, added_by) VALUES (?, NULL, 0, 'an earlier build')")
+                .bind(&did)
+                .execute(&device.db)
+                .await
+                .unwrap();
+            let last = refused(device.say(&at_ana, DeviceRequest::SudoersRemove { did: ana.did.clone() }).await);
+            assert!(last.contains("last operator key that names an Ed25519 key"), "{name}: {last}");
+            assert!(operators_db::is_operator(&device.db, &ana.did).await.unwrap(), "{name}: the last operator went");
+            assert!(matches!(
+                device.say(&at_ana, DeviceRequest::SudoersRemove { did: did.clone() }).await,
+                DeviceResponse::SudoersModified
+            ), "{name}");
+            let left: Vec<String> = operators_db::list(&device.db).await.unwrap().into_iter().map(|o| o.did).collect();
+            assert_eq!(left, vec![ana.did.clone()], "{name}");
+        }
+    }
+
+    /// **A kept key that names no key is not made an operator, and `sudoers remove` removes it
+    /// by its DID as stored.** For each string that names no key, kept as Ben's: an operator's
+    /// `OperatorAdd` of Ben is refused and says why, Ben is no operator, and `sudoers remove` of
+    /// the DID as stored removes the kept row, after which nothing is kept for Ben.
+    #[tokio::test]
+    async fn a_kept_key_that_names_no_key_is_refused_and_removed_as_stored() {
+        for (name, did) in strings_that_name_no_key() {
+            let (ana, ben) = (person(), person());
+            let device = device_with(&[&ana, &ben]).await;
+            let at_ana = first_operator(&device, &ana).await;
+            sqlx::query("INSERT INTO operator_keys_kept (did, person, kept_at) VALUES (?, ?, 0)")
+                .bind(&did)
+                .bind(&ben.did)
+                .execute(&device.db)
+                .await
+                .unwrap();
+            let why = refused(device.say(&at_ana, DeviceRequest::OperatorAdd { person: ben.did.clone() }).await);
+            assert!(why.contains("is not the did:key of an Ed25519 key"), "{name}: {why}");
+            assert!(!operators_db::is_operator(&device.db, &did).await.unwrap(), "{name}: the kept row was made an operator");
+            assert!(!operators_db::is_operator_person(&device.db, &ben.did).await.unwrap(), "{name}: Ben was made an operator");
+            assert!(matches!(
+                device.say(&at_ana, DeviceRequest::SudoersRemove { did: did.clone() }).await,
+                DeviceResponse::SudoersModified
+            ), "{name}");
+            assert_eq!(operators_db::kept_key(&device.db, &ben.did).await.unwrap(), None, "{name}: the kept row stayed");
+            let left: Vec<String> = operators_db::list(&device.db).await.unwrap().into_iter().map(|o| o.did).collect();
+            assert_eq!(left, vec![ana.did.clone()], "{name}");
+        }
+    }
+
+    /// **Nothing is admitted under an operator row stored under another spelling of a key's
+    /// `did:key`.** The key's own holder, signing the login message as that row names it, is
+    /// refused at the decode and enrolled as nothing; `sudoers remove` removes the row as stored.
+    #[tokio::test]
+    async fn an_operator_row_under_another_spelling_admits_nobody_and_is_removed_as_stored() {
+        let ana = person();
+        let device = device_with(&[&ana]).await;
+        let at_ana = first_operator(&device, &ana).await;
+        let ben_key = ed25519_dalek::SigningKey::from_bytes(&[44; 32]);
+        let otherwise = DidKeyMethod::spelled_otherwise(kotton_crypto::ed25519::verifying_key(&ben_key).as_bytes()).to_string();
+        sqlx::query("INSERT INTO operators (did, person, added_at, added_by) VALUES (?, NULL, 0, 'an earlier build')")
+            .bind(&otherwise)
+            .execute(&device.db)
+            .await
+            .unwrap();
+        let ben = Person { key: ben_key, did: otherwise.clone() };
+        let (_conn, answer) = device.connect(&ben).await;
+        assert!(
+            matches!(&answer, DeviceResponse::AuthFailed { reason } if reason.starts_with("cannot extract key from DID")),
+            "{answer:?}"
+        );
+        assert!(matches!(
+            device.say(&at_ana, DeviceRequest::SudoersRemove { did: otherwise.clone() }).await,
+            DeviceResponse::SudoersModified
+        ));
+        let left: Vec<String> = operators_db::list(&device.db).await.unwrap().into_iter().map(|o| o.did).collect();
+        assert_eq!(left, vec![ana.did.clone()]);
+    }
+
     /// Stepping a person down takes every key of theirs — here the machine's
     /// first-run key bound to Ana, and her identity's own — and is refused
     /// when those keys are all the device has.

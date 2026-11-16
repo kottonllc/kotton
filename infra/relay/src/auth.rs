@@ -285,6 +285,29 @@ mod tests {
     use kotton_ed25519::refused::{self, SMALL_ORDER_KEY};
     use rand::rngs::OsRng;
 
+    /// One key's `did:key` under every base the multibase codec offers, the one `did:key`
+    /// first. The file is kotton-wire's; kotton-crypto rebuilds it from the codec and holds its
+    /// own decode and `Publisher::new` to it.
+    const SPELLINGS: &str = include_str!("../../../core/wire/src/did/did-key-spellings.txt");
+
+    /// **The relay reads one spelling of a key**: of every spelling of one key, its decode
+    /// reads the first, the key's `did:key`, and refuses every other.
+    #[test]
+    fn exactly_one_spelling_of_a_key_decodes() {
+        let spelled: Vec<(&str, &str)> = SPELLINGS
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .map(|l| l.split_once(' ').expect("a base and a did per line"))
+            .collect();
+        assert!(spelled.len() > 20, "{} spellings", spelled.len());
+        let key = ed25519_key_from_did(spelled[0].1).expect("the key's did:key decodes");
+        let expected = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
+        assert_eq!(key.as_bytes(), expected.as_bytes(), "the first spelling is the key's");
+        for (base, did) in &spelled[1..] {
+            assert!(ed25519_key_from_did(did).is_err(), "{base}: {did} decoded");
+        }
+    }
+
     fn make_key() -> (SigningKey, String) {
         let sk = SigningKey::generate(&mut OsRng);
         let vk = sk.verifying_key();

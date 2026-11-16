@@ -1652,7 +1652,16 @@ pub async fn drives_to_hand(db: &Arc<SqlitePool>, user_id: &str) -> Vec<kotton_w
                 }
                 names_a_key
             })
-            .map(|d| kotton_wire::peer::DriveHandout { vault_key: d.vault_key, tenancy: d.tenancy, node: d.node })
+            .map(|d| {
+                // The node is named by the `did:key` of its key, never by the
+                // DID stored beside the bytes, which may be another spelling
+                // (kottonllc/kotton#597): the joiner holds a node to its key.
+                let mut node = d.node;
+                if let Ok(did) = kotton_crypto::DidKeyMethod::from_public_key_bytes(&d.vault_key) {
+                    node.device_did = did;
+                }
+                kotton_wire::peer::DriveHandout { vault_key: d.vault_key, tenancy: d.tenancy, node }
+            })
             .collect(),
         Err(e) => {
             tracing::warn!(user_id, error = %e, "the drive record does not read; the join hands no drive");
@@ -2013,6 +2022,31 @@ mod handed_drive_tests {
         let keys: Vec<[u8; 32]> = handed.iter().map(|d| d.vault_key).collect();
         assert_eq!(keys, vec![honest.vault_key], "the handout carried a drive that names no key, or dropped the honest one");
         check_handed_drives("alice", &a_node("laptop", 1), &handed).unwrap();
+    }
+
+    /// **A join succeeds from a drive whose row is stored under another spelling
+    /// of its key's `did:key`** (kottonllc/kotton#597): the row stands by its
+    /// bytes, the handout names its node by the key's `did:key`, the joiner's
+    /// check takes it, and the joiner records it.
+    #[tokio::test]
+    async fn a_join_succeeds_from_a_drive_stored_under_another_spelling() {
+        let (_dir, db) = machine_db().await;
+        let vault = a_drive("vault", 3, "alice");
+        let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(&vault.vault_key).to_string();
+        network_db::insert_paired_node(&db, "vault", "alice", &otherwise, &vault.vault_key, "[]", 0, Some("blind-storage"))
+            .await
+            .unwrap();
+        kotton_peer::daemon::drives::record(&db, "alice", &vault.vault_key).await.unwrap();
+
+        let handed = drives_to_hand(&db, "alice").await;
+        assert_eq!(handed.len(), 1, "the drive was not handed");
+        assert_eq!(handed[0].node.device_did, vault.node.device_did, "the node is not named by its key's did:key");
+        check_handed_drives("alice", &a_node("laptop", 1), &handed).unwrap();
+
+        let (_joiner_dir, joiner) = machine_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        record_handed_drives(&joiner, &keys, "alice", &handed).await.unwrap();
+        assert_eq!(kotton_peer::daemon::drives::list(&joiner, "alice").await.unwrap().len(), 1, "the joiner recorded no drive");
     }
 
     /// **A handed drive under a key the rule refuses is refused by the check**,
