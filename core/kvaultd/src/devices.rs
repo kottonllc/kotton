@@ -119,17 +119,19 @@ pub async fn accept(
 
     // 2. The DID is the key's, and for an admit a key the Ed25519 rule admits:
     // bytes it refuses name no key, and are refused as a DID that names none.
-    let named = Did::parse(&change.device_did)
-        .ok()
-        .and_then(|d| DidKeyMethod::to_public_key(&d).ok())
-        .map(|k| k.to_bytes())
-        .filter(|b| change.act != TenantDeviceAct::Admit || VerifyingKey::from_bytes(b).is_ok());
+    // The key is constructed here, once, and handed to `apply`.
+    let named = Did::parse(&change.device_did).ok().and_then(|d| DidKeyMethod::to_public_key(&d).ok()).map(|k| k.to_bytes());
+    let admitted = match (change.act, named) {
+        (TenantDeviceAct::Admit, Some(b)) => VerifyingKey::from_bytes(&b).ok(),
+        _ => None,
+    };
+    let named = named.filter(|_| change.act != TenantDeviceAct::Admit || admitted.is_some());
     if named != Some(change.public_key) {
         return Err("the device's DID does not name its key".to_string());
     }
 
     // 3 and 4, and the write.
-    match apply(db, paired_keys, user_id, change).await {
+    match apply(db, paired_keys, user_id, change, admitted).await {
         Ok(taken) => taken,
         Err(e) => Err(e.to_string()),
     }
@@ -139,6 +141,10 @@ pub async fn accept(
 /// transaction: the read of the last change and the write that follows it are
 /// one step, so two changes to one key cannot both read the same "last".
 /// `Ok(Err(_))` is a refusal; `Err(_)` a database that did not answer.
+///
+/// `admitted` is the key `accept` constructed for an admit, which enters the
+/// allowlist once the change is taken; a withdrawal is given `None`, since it
+/// must remove a row whatever its stored bytes are.
 ///
 /// **A withdrawal always wins.** An admit is taken only when it is later than
 /// every change taken for the key; a withdrawal is taken whenever it comes —
@@ -153,8 +159,9 @@ async fn apply(
     paired_keys: &Arc<std::sync::RwLock<std::collections::HashSet<VerifyingKey>>>,
     user_id: &str,
     change: &TenantDeviceChange,
+    admitted: Option<VerifyingKey>,
 ) -> io::Result<Result<(), String>> {
-    apply_ending(db, paired_keys, user_id, change, None).await
+    apply_ending(db, paired_keys, user_id, change, admitted, None).await
 }
 
 /// [`apply`], with the statement that ends the transaction given: `None` is
@@ -165,6 +172,7 @@ async fn apply_ending(
     paired_keys: &Arc<std::sync::RwLock<std::collections::HashSet<VerifyingKey>>>,
     user_id: &str,
     change: &TenantDeviceChange,
+    admitted: Option<VerifyingKey>,
     end: Option<&str>,
 ) -> io::Result<Result<(), String>> {
     let mut tx = Immediate::begin(db).await?;
@@ -172,12 +180,9 @@ async fn apply_ending(
     let taken = matches!(outcome, Ok(Ok(())));
     tx.end(end.unwrap_or(if taken { "COMMIT" } else { "ROLLBACK" })).await?;
     let outcome = outcome?;
-    // The key enters the allowlist as a key. `accept` refuses an admit of bytes
-    // the Ed25519 rule refuses at condition 2, before this is reached.
-    if outcome.is_ok() && change.act == TenantDeviceAct::Admit {
-        if let Ok(key) = VerifyingKey::from_bytes(&change.public_key) {
-            paired_keys.write().unwrap().insert(key);
-        }
+    // The key enters the allowlist as the key `accept` constructed at condition 2.
+    if let (true, Some(key)) = (outcome.is_ok(), admitted) {
+        paired_keys.write().unwrap().insert(key);
     }
     Ok(outcome)
 }
@@ -286,6 +291,17 @@ mod tests {
         TenantDeviceChange { act, device_did: format!("did:key:z{}", key[0]), public_key: key, said_at_ms: said_at }
     }
 
+    /// `apply` as `accept` calls it: an admit carries the key `accept` constructed.
+    async fn apply_change(
+        db: &Arc<SqlitePool>,
+        keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
+        user: &str,
+        change: &TenantDeviceChange,
+    ) -> io::Result<Result<(), String>> {
+        let admitted = (change.act == TenantDeviceAct::Admit).then(|| VerifyingKey::from_bytes(&change.public_key).ok()).flatten();
+        apply(db, keys, user, change, admitted).await
+    }
+
     async fn paired(db: &Arc<SqlitePool>, user: &str, key: &[u8; 32]) -> bool {
         kotton_peer::daemon::db::is_pubkey_paired_to_user(db, key, user).await.unwrap()
     }
@@ -297,10 +313,10 @@ mod tests {
         let db = a_vault_db().await;
         let keys = Arc::new(RwLock::new(HashSet::new()));
         let (key, _) = a_device(3);
-        apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 10)).await.unwrap().unwrap();
+        apply_change(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 10)).await.unwrap().unwrap();
         assert!(paired(&db, "alice", &key).await);
         assert!(keys.read().unwrap().contains(&VerifyingKey::from_bytes(&key).unwrap()));
-        apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Withdraw, key, 11)).await.unwrap().unwrap();
+        apply_change(&db, &keys, "alice", &a_change(TenantDeviceAct::Withdraw, key, 11)).await.unwrap().unwrap();
         assert!(!paired(&db, "alice", &key).await);
     }
 
@@ -312,12 +328,12 @@ mod tests {
         let keys = Arc::new(RwLock::new(HashSet::new()));
         let key = [4u8; 32];
         let admit = a_change(TenantDeviceAct::Admit, key, 10);
-        apply(&db, &keys, "alice", &admit).await.unwrap().unwrap();
-        apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Withdraw, key, 20)).await.unwrap().unwrap();
-        let replayed = apply(&db, &keys, "alice", &admit).await.unwrap();
+        apply_change(&db, &keys, "alice", &admit).await.unwrap().unwrap();
+        apply_change(&db, &keys, "alice", &a_change(TenantDeviceAct::Withdraw, key, 20)).await.unwrap().unwrap();
+        let replayed = apply_change(&db, &keys, "alice", &admit).await.unwrap();
         assert!(replayed.is_err(), "the replayed admit was taken");
         assert!(!paired(&db, "alice", &key).await, "the withdrawn device is back");
-        let same_time = apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 20)).await.unwrap();
+        let same_time = apply_change(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 20)).await.unwrap();
         assert!(same_time.is_err(), "an admit at the same time as the last change was taken");
     }
 
@@ -329,15 +345,15 @@ mod tests {
         let db = a_vault_db().await;
         let keys = Arc::new(RwLock::new(HashSet::new()));
         for (key, withdrawn_at) in [([6u8; 32], 50u64), ([7u8; 32], 40u64)] {
-            apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 50)).await.unwrap().unwrap();
-            apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Withdraw, key, withdrawn_at))
+            apply_change(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 50)).await.unwrap().unwrap();
+            apply_change(&db, &keys, "alice", &a_change(TenantDeviceAct::Withdraw, key, withdrawn_at))
                 .await
                 .unwrap()
                 .unwrap_or_else(|why| panic!("a withdrawal at {withdrawn_at} after an admit at 50 was refused: {why}"));
             assert!(!paired(&db, "alice", &key).await, "the withdrawn device is still paired");
-            let again = apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 50)).await.unwrap();
+            let again = apply_change(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 50)).await.unwrap();
             assert!(again.is_err(), "an admit at 50 followed the withdrawal");
-            apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 51)).await.unwrap().unwrap();
+            apply_change(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 51)).await.unwrap().unwrap();
             assert!(paired(&db, "alice", &key).await, "a later admit is taken");
         }
     }
@@ -352,7 +368,7 @@ mod tests {
         kotton_peer::daemon::db::insert_paired_node(&db, "bobs-laptop", "bob", "did:key:zBob", &key, "[]", 0, Some("full"))
             .await
             .unwrap();
-        let taken = apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 1)).await.unwrap();
+        let taken = apply_change(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 1)).await.unwrap();
         assert!(taken.is_err(), "bob's key was admitted for alice");
         assert!(!paired(&db, "alice", &key).await);
         assert!(paired(&db, "bob", &key).await, "bob's row was disturbed");
@@ -598,13 +614,13 @@ mod tests {
         let (db, busy) = a_file_pool(dir.path()).await;
         let keys = Arc::new(RwLock::new(HashSet::new()));
         let key = [8u8; 32];
-        let failed = apply_ending(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 1), Some("COMMIT TO NOWHERE")).await;
+        let failed = apply_ending(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 1), VerifyingKey::from_bytes(&key).ok(), Some("COMMIT TO NOWHERE")).await;
         assert!(failed.is_err(), "an end that failed was reported taken: {failed:?}");
         assert!(!paired(&db, "alice", &key).await, "a change whose end failed was kept");
 
         the_pool_writes(dir.path(), &db, busy, 1).await;
         let other = [9u8; 32];
-        tokio::time::timeout(busy, apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, other, 2)))
+        tokio::time::timeout(busy, apply_change(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, other, 2)))
             .await
             .expect("the next change waited out the busy timeout")
             .unwrap()
