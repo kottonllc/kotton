@@ -121,7 +121,7 @@ async fn hold_door(
 
 fn admitting(keys: &[[u8; 32]], admission: Admission) -> HeldKeys {
     HeldKeys::new(
-        Arc::new(RwLock::new(keys.iter().copied().collect::<HashSet<_>>())),
+        Arc::new(RwLock::new(keys.iter().map(|k| kotton_crypto::ed25519::VerifyingKey::from_bytes(k).unwrap()).collect::<HashSet<_>>())),
         admission,
     )
 }

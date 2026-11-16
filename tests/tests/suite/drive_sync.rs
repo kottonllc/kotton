@@ -377,7 +377,12 @@ async fn a_join_the_joiner_refuses_leaves_no_row_on_the_issuer_and_no_admission_
     let (_, b_key_hex) = client_b.get_node_identity().await.expect("B's identity");
     let b_key: [u8; 32] = hex::decode(&b_key_hex).unwrap().try_into().unwrap();
     b.daemon
-        .insert_paired_node(USER, &drive.did, [7u8; 32], "127.0.0.1:9".parse().unwrap())
+        .insert_paired_node(
+            USER,
+            &drive.did,
+            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes(),
+            "127.0.0.1:9".parse().unwrap(),
+        )
         .await
         .expect("B pairs the drive's DID under another key");
 

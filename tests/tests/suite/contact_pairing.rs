@@ -549,7 +549,7 @@ async fn a_contact_learns_a_rotated_key_from_the_persons_own_key_log() {
         let paired = b.runtime.paired_keys();
         let paired = paired.read().unwrap();
         assert!(
-            !paired.contains(&new_pub) && !paired.contains(&old_key.verifying_key().to_bytes()),
+            !paired.iter().any(|k| k.as_bytes() == &new_pub || k.as_bytes() == &old_key.verifying_key().to_bytes()),
             "a contact's key, new or retired, is not in the device allowlist"
         );
     }

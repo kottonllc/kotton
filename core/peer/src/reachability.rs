@@ -44,6 +44,7 @@ use kotton_sys::net::{Address, Listener, Transport};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
+use kotton_crypto::ed25519::VerifyingKey;
 use std::time::Duration;
 
 /// Re-push interval for the presence registrar. The relay TTL defaults to 60s, so
@@ -159,7 +160,7 @@ pub struct Reachability {
     /// may connect, and who this device announces itself to. The daemon seeds it
     /// from its own records and keeps it current
     /// ([`paired_keys`](Self::paired_keys)).
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
 
     /// The per-pair mailboxes this node answers for its users' contacts.
     ///
@@ -318,7 +319,7 @@ impl Reachability {
         Arc::clone(&self.dm_doors)
     }
 
-    pub fn paired_keys(&self) -> Arc<RwLock<HashSet<[u8; 32]>>> {
+    pub fn paired_keys(&self) -> Arc<RwLock<HashSet<VerifyingKey>>> {
         Arc::clone(&self.paired_keys)
     }
 
@@ -376,7 +377,7 @@ impl Reachability {
     /// alone (`kotton_crypto::door_announce_name`). A pair whose key is not a curve
     /// point is skipped rather than announced under something guessable.
     pub fn door_names(&self, router: &[u8; 32], day: u64) -> Vec<String> {
-        let peers: Vec<[u8; 32]> = self.paired_keys.read().unwrap().iter().copied().collect();
+        let peers: Vec<[u8; 32]> = self.paired_keys.read().unwrap().iter().map(|k| *k.as_bytes()).collect();
         peers
             .iter()
             .filter_map(|peer| {
@@ -562,7 +563,7 @@ impl Reachability {
             // The identities this device should currently be dialable under, at
             // each relay it holds.
             let relays: Vec<(String, Option<RelayId>)> = std::iter::once(relay_url).chain(forwarding).collect();
-            let peers: Vec<[u8; 32]> = self.paired_keys.read().unwrap().iter().copied().collect();
+            let peers: Vec<[u8; 32]> = self.paired_keys.read().unwrap().iter().map(|k| *k.as_bytes()).collect();
             let mut desired: Vec<Wanted> = Vec::with_capacity(2 * peers.len() * relays.len());
             for (relay, relay_key) in &relays {
                 for peer in &peers {
@@ -637,8 +638,8 @@ impl Reachability {
                         door = %fingerprint,
                         "reserving a pair door"
                     );
-                    let mut admit = HashSet::new();
-                    admit.insert(*admit_key);
+                    // Bytes the Ed25519 rule refuses are no key, and the door admits nothing.
+                    let admit: HashSet<_> = VerifyingKey::from_bytes(admit_key).into_iter().collect();
                     desired.push(Wanted {
                         slot: format!("{relay} {fingerprint}"),
                         relay: relay.clone(),
@@ -730,7 +731,7 @@ struct Wanted {
     /// The key a served circuit's handshake answers under.
     cert_key: SigningKey,
     /// Whose keys the door admits there.
-    admit: Arc<RwLock<HashSet<[u8; 32]>>>,
+    admit: Arc<RwLock<HashSet<VerifyingKey>>>,
     admission: Admission,
     handler: PeerHandler,
 }
@@ -748,7 +749,7 @@ async fn hold_reservation(
     fingerprint: String,
     reservation_key: SigningKey,
     device_key: SigningKey,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     admission: Admission,
     handler: PeerHandler,
     live: Arc<RwLock<HashSet<String>>>,
@@ -850,7 +851,7 @@ async fn run_presence_registrar(
     relay_url: String,
     relay: Option<RelayId>,
     signing_key: SigningKey,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     reflexive: SocketAddr,
     keys: crate::relay_keys::RelayKeyring,
 ) {
@@ -862,13 +863,13 @@ async fn run_presence_registrar(
     // over or the paired set changes: a `RendezvousClient` owns an HTTP
     // connection pool, and rebuilding one per cycle would drop the relay's
     // keep-alive on every push.
-    let mut covers: Option<(u64, HashSet<[u8; 32]>, Option<String>)> = None;
+    let mut covers: Option<(u64, HashSet<VerifyingKey>, Option<String>)> = None;
     let mut clients: Vec<RendezvousClient> = Vec::new();
 
     loop {
         let now = rendezvous::unix_now();
         let epoch = kotton_crypto::epoch_at(now);
-        let peers: HashSet<[u8; 32]> = paired_keys.read().unwrap().clone();
+        let peers: HashSet<VerifyingKey> = paired_keys.read().unwrap().clone();
         // The key this device presents here, compared by its text so a
         // rotation rebuilds the clients that carry it.
         let admit = relay.and_then(|r| keys.present_at(&r));
@@ -883,7 +884,7 @@ async fn run_presence_registrar(
         if stale {
             clients = peers
                 .iter()
-                .filter_map(|peer| match rendezvous::publish_to(&signing_key, peer, now) {
+                .filter_map(|peer| match rendezvous::publish_to(&signing_key, peer.as_bytes(), now) {
                     Ok(handle) => Some(
                         RendezvousClient::new(
                             relay_url.clone(),
@@ -997,9 +998,8 @@ mod tests {
     #[tokio::test]
     async fn the_allowlist_is_shared_not_copied() {
         let device = reachability(NatNetworkConfig::default());
-        let peer = SigningKey::generate(&mut rand::rngs::OsRng)
-            .verifying_key()
-            .to_bytes();
+        let peer = VerifyingKey::from_bytes(&SigningKey::generate(&mut rand::rngs::OsRng).verifying_key().to_bytes())
+            .unwrap();
 
         device.paired_keys().write().unwrap().insert(peer);
 

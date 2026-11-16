@@ -14,6 +14,7 @@ use anyhow::Result;
 use kotton_peer::PeerHandler;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
+use kotton_crypto::ed25519::VerifyingKey;
 
 impl DeviceRuntime {
     /// Bind the QUIC peer-listener on `port` and start the accept loop.
@@ -99,7 +100,7 @@ impl DeviceRuntime {
     /// The same set the TLS handshake admits from and the presence registrar
     /// announces to — see
     /// [`Reachability::paired_keys`](kotton_peer::Reachability::paired_keys).
-    pub fn paired_keys(&self) -> Arc<RwLock<HashSet<[u8; 32]>>> {
+    pub fn paired_keys(&self) -> Arc<RwLock<HashSet<VerifyingKey>>> {
         self.reachability.paired_keys()
     }
 

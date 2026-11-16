@@ -90,7 +90,7 @@ async fn a_relayed_circuit_connects_under_pair_handles() {
     let a_client = RelayClient::new(&url, handle.did.to_string(), handle.signing_key);
     let door = Door::new(
         std::slice::from_ref(&a),
-        Arc::new(HeldKeys::only(Arc::new(RwLock::new(HashSet::from([b_pub]))))),
+        Arc::new(HeldKeys::only(Arc::new(RwLock::new(HashSet::from([kotton_crypto::ed25519::VerifyingKey::from_bytes(&b_pub).unwrap()]))))),
     )
     .unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);

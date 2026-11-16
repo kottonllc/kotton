@@ -799,7 +799,7 @@ mod tests {
         let base = tempfile::tempdir().expect("a base directory");
         let admission = kotton_net::transport::quic::tls::Admission::default();
         let chains = Chains::new(base.path().to_path_buf(), admission.clone());
-        let paired = Arc::new(std::sync::RwLock::new(std::collections::HashSet::from([claimant])));
+        let paired = Arc::new(std::sync::RwLock::new(std::collections::HashSet::from([kotton_crypto::ed25519::VerifyingKey::from_bytes(&claimant).unwrap()])));
         let from = Peer::Claim { aid: "did:kel:sams".into() };
 
         let standing = peer_standing_in(&chains, &db, &paired, &from, Some("sam")).await.expect("a standing");

@@ -21,6 +21,7 @@ use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, RwLock};
+use kotton_crypto::ed25519::VerifyingKey;
 use uuid::Uuid;
 
 /// `device_config` key holding this machine's human name.
@@ -337,7 +338,7 @@ pub(crate) async fn web_shell_status(device_db: &Arc<SqlitePool>) -> io::Result<
 pub(crate) async fn mint_principal_session(
     sessions: &sessions::SessionMap,
     principal_sessions: &Arc<RwLock<HashMap<String, kotton_wire::ipc::Principal>>>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: String,
     evidence: kotton_wire::ipc::PrincipalEvidence,
 ) -> io::Result<UserResponse> {
@@ -353,6 +354,7 @@ pub(crate) async fn mint_principal_session(
             let Some(pubkey) = hex::decode(&pubkey_hex)
                 .ok()
                 .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                .and_then(|b| VerifyingKey::from_bytes(&b).ok())
             else {
                 return Ok(UserResponse::NotAllowed);
             };
@@ -363,7 +365,7 @@ pub(crate) async fn mint_principal_session(
                 );
                 return Ok(UserResponse::NotAllowed);
             }
-            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&pubkey) else {
+            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(pubkey.as_bytes()) else {
                 return Ok(UserResponse::NotAllowed);
             };
             Principal::RemoteClient {

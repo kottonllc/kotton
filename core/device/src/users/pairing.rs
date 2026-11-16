@@ -113,6 +113,7 @@ use sqlx::SqlitePool;
 use std::collections::HashSet;
 use std::io;
 use std::sync::{Arc, RwLock};
+use kotton_crypto::ed25519::VerifyingKey;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use kotton_common::time::now_secs;
@@ -132,7 +133,7 @@ pub async fn finalize_joined_node(
     users: &dyn crate::users::residency::Residency,
     db: &Arc<SqlitePool>,
     sessions: &sessions::SessionMap,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: &str,
     warm_key: &SigningKey,
     joined: kotton_peer::pairing::JoinedNode,
@@ -165,6 +166,10 @@ pub async fn finalize_joined_node(
             ),
         });
     }
+    // The admitting device's key enters the allowlist below; bytes the Ed25519
+    // rule refuses are refused here, before anything is written.
+    let key = VerifyingKey::from_bytes(&joined.peer.public_key)
+        .map_err(|e| io::Error::other(format!("the admitting device's key is not an Ed25519 key: {e}")))?;
     // Provision BEFORE writing anything: this validates that `user_id` is either
     // free or already this same identity (a name colliding with a *different*
     // local identity is rejected), and creates the user directory. Doing it first
@@ -271,7 +276,7 @@ pub async fn finalize_joined_node(
     if let Some(relay) = node.relay_url.as_deref() {
         network_db::update_paired_node_relay(db, user_id, &node.device_did.to_string(), Some(relay)).await?;
     }
-    paired_keys.write().unwrap().insert(node.public_key);
+    paired_keys.write().unwrap().insert(key);
 
     // The person's drives, as the admitting device handed them: recorded here
     // through the one writer of the record (`record_handed_drives`), so this
@@ -409,7 +414,7 @@ pub async fn handle_device_add(
     users: Arc<dyn crate::users::residency::Residency>,
     db: Arc<SqlitePool>,
     device_db: Arc<SqlitePool>,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     pending: PendingConfirms,
     user_id: String,
     as_name: Option<String>,
@@ -589,7 +594,7 @@ pub async fn handle_gateway_enroll(
     users: Arc<dyn crate::users::residency::Residency>,
     db: Arc<SqlitePool>,
     device_db: Arc<SqlitePool>,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     pending: PendingConfirms,
     user_id: String,
     code: String,
@@ -715,7 +720,7 @@ pub async fn handle_device_join(
     db: Arc<SqlitePool>,
     device_db: Arc<SqlitePool>,
     sessions: sessions::SessionMap,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     pending: PendingConfirms,
     user_id: String,
     code: String,
@@ -1053,7 +1058,7 @@ pub async fn handle_device_admit(
     users: Arc<dyn crate::users::residency::Residency>,
     db: Arc<SqlitePool>,
     device_db: Arc<SqlitePool>,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     pending: PendingConfirms,
     user_id: String,
     code: String,
@@ -1292,7 +1297,7 @@ async fn keep_the_admitted(
     secrets: &dyn kotton_sys::secret::SecretsStore,
     member_store: &dyn kotton_peer::membership::MemberStore,
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: &str,
     posture: Posture,
     enrolled: kotton_peer::pairing::EnrolledNode,
@@ -1502,7 +1507,7 @@ pub async fn handle_device_invite(
     db: Arc<SqlitePool>,
     device_db: Arc<SqlitePool>,
     sessions: sessions::SessionMap,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     pending: PendingConfirms,
     user_id: String,
     ttl_seconds: u64,
@@ -1645,7 +1650,8 @@ pub async fn drives_to_hand(db: &Arc<SqlitePool>, user_id: &str) -> Vec<kotton_w
 
 /// Whether this device can record every drive `issuer` handed it at the join,
 /// as the name `user_id` it joins under: each drive's tenancy is that name, its
-/// node's key is the vault's key and its DID names that key, and its node is
+/// node's key is the vault's key, a key the Ed25519 rule admits, and its DID
+/// names that key, and its node is
 /// not the issuer's — neither the issuer's key nor the issuer's DID, which is
 /// the key of the row the join writes for the issuer, so a drive under it
 /// would be written over that row. `Err` says which drive and why. The rows
@@ -1672,6 +1678,8 @@ pub fn check_handed_drives(
             Some(format!("it is kept under '{}', and this device joins as '{user_id}'", drive.tenancy))
         } else if node.public_key != drive.vault_key {
             Some("the node it is reached through is not the vault's key".to_string())
+        } else if VerifyingKey::from_bytes(&node.public_key).is_err() {
+            Some("its node's key is not an Ed25519 key".to_string())
         } else if named != Some(node.public_key) {
             Some("its node's DID does not name its key".to_string())
         } else if node.device_did == issuer.device_did || node.public_key == issuer.public_key {
@@ -1757,12 +1765,14 @@ pub async fn check_handed_rows(
 /// device that has nothing to sync.
 pub async fn record_handed_drives(
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: &str,
     drives: &[kotton_wire::peer::DriveHandout],
 ) -> io::Result<()> {
     for drive in drives {
         let node = &drive.node;
+        let key = VerifyingKey::from_bytes(&node.public_key)
+            .map_err(|e| io::Error::other(format!("a handed drive's key is not an Ed25519 key: {e}")))?;
         let did = node.device_did.to_string();
         let addresses = serde_json::to_string(&node.addresses).map_err(json_err)?;
         network_db::insert_paired_node(
@@ -1780,7 +1790,7 @@ pub async fn record_handed_drives(
             network_db::update_paired_node_relay(db, user_id, &did, Some(relay)).await?;
         }
         kotton_peer::daemon::drives::record(db, user_id, &drive.vault_key).await?;
-        paired_keys.write().unwrap().insert(node.public_key);
+        paired_keys.write().unwrap().insert(key);
         tracing::info!(user_id, drive = %node.id, "recorded a drive handed at the join");
     }
     Ok(())
@@ -1891,8 +1901,13 @@ mod handed_drive_tests {
     /// `laptop`, on `db`, and say what it answered.
     async fn join_handing(db: &Arc<SqlitePool>, drives: Vec<DriveHandout>) -> UserResponse {
         let temp = tempfile::tempdir().unwrap();
+        join_handing_at(temp.path(), db, drives).await
+    }
+
+    /// [`join_handing`], with the joining device's state under `base`.
+    async fn join_handing_at(base: &std::path::Path, db: &Arc<SqlitePool>, drives: Vec<DriveHandout>) -> UserResponse {
         let runtime = crate::runtime::DeviceRuntime::new_with_secrets(
-            temp.path().to_path_buf(),
+            base.to_path_buf(),
             crate::config::RuntimeConfig::default(),
             Arc::new(kotton_secret::MemorySecrets::new()),
         )
@@ -1923,6 +1938,76 @@ mod handed_drive_tests {
         )
         .await
         .unwrap()
+    }
+
+    /// Every key vector the rule refuses.
+    fn refused_keys() -> Vec<[u8; 32]> {
+        use kotton_crypto::ed25519::refused;
+        let keys: Vec<[u8; 32]> = refused::SMALL_ORDER_KEYS
+            .into_iter()
+            .chain(refused::IDENTITY_OTHER_ENCODINGS)
+            .chain([refused::mixed_order_key(), refused::NON_CANONICAL_KEY, refused::NOT_A_POINT])
+            .collect();
+        assert_eq!(keys.len(), 14, "one per refused key vector");
+        keys
+    }
+
+    /// A drive at a vault under `key`, its DID naming those bytes as did:key does.
+    fn a_drive_under(key: [u8; 32]) -> DriveHandout {
+        let mut node = a_node("vault", 2);
+        let mut multicodec = vec![0xed, 0x01];
+        multicodec.extend_from_slice(&key);
+        node.device_did = kotton_wire::did::Did::new("key", format!("z{}", bs58::encode(multicodec).into_string()));
+        node.public_key = key;
+        DriveHandout { vault_key: key, tenancy: "alice".into(), node }
+    }
+
+    /// Every file under `dir`, so a test can see that nothing was written there.
+    fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(files_under(&path));
+            }
+            out.push(path);
+        }
+        out.sort();
+        out
+    }
+
+    /// **A handed drive under a key the rule refuses is refused by the check**,
+    /// for each refused vector, its DID naming those bytes.
+    #[test]
+    fn a_handed_drive_under_a_key_the_rule_refuses_is_refused() {
+        let issuer = a_node("laptop", 1);
+        for (i, key) in refused_keys().into_iter().enumerate() {
+            let why = check_handed_drives("alice", &issuer, &[a_drive_under(key)]).unwrap_err();
+            assert!(why.contains("not an Ed25519 key"), "refused key vector {i}: {why}");
+        }
+    }
+
+    /// **A join handed such a drive writes nothing**: it is refused before the
+    /// user is provisioned or any row is written, so the joining device holds no
+    /// user directory and its database no row and no drive. The same join with
+    /// the honest drive alone provisions the user, so the first is no accident
+    /// of where the user would be written.
+    #[tokio::test]
+    async fn a_join_handed_a_drive_under_a_key_the_rule_refuses_writes_nothing() {
+        let (_dir, db) = machine_db().await;
+        let temp = tempfile::tempdir().unwrap();
+        let named_alice = |dir: &std::path::Path| files_under(dir).iter().any(|p| p.to_string_lossy().contains("alice"));
+        for key in refused_keys() {
+            let why = refusal(join_handing_at(temp.path(), &db, vec![a_drive("other", 3, "alice"), a_drive_under(key)]).await);
+            assert!(why.contains("not an Ed25519 key") && why.contains("This device was not joined"), "{why}");
+        }
+        assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty(), "a refused join wrote a row");
+        assert_eq!(drive_records(&db).await, 0, "a refused join recorded a drive");
+        assert!(!named_alice(temp.path()), "a refused join provisioned the user");
+
+        let answer = join_handing_at(temp.path(), &db, vec![a_drive("other", 3, "alice")]).await;
+        assert!(!matches!(answer, UserResponse::PairFailed { .. }), "the honest join was refused: {answer:?}");
+        assert!(named_alice(temp.path()), "the honest join provisioned no user where this test looks");
     }
 
     fn refusal(answer: UserResponse) -> String {
@@ -2304,10 +2389,10 @@ mod admit_tests {
 
     async fn recorded(
         db: &std::sync::Arc<sqlx::SqlitePool>,
-        paired_keys: &std::sync::Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+        paired_keys: &std::sync::Arc<std::sync::RwLock<std::collections::HashSet<kotton_crypto::ed25519::VerifyingKey>>>,
         members: &Members,
     ) -> Recorded {
-        let key = an_enrolled_vault().node.public_key;
+        let key = kotton_crypto::ed25519::VerifyingKey::from_bytes(&an_enrolled_vault().node.public_key).unwrap();
         Recorded {
             row: kotton_peer::daemon::db::paired_node_named(db, "alice", "vault").await.unwrap().is_some(),
             drives: sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap(),

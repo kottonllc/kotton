@@ -444,7 +444,7 @@ pub type KnownTips = Arc<RwLock<std::collections::HashMap<String, kotton_wire::k
 /// `ServerCertVerifier` (used by the client side). Both sides of a peer connection
 /// verify that the remote device's Ed25519 public key is in the shared allowlist.
 ///
-/// The allowlist is a live `Arc<RwLock<HashSet<[u8; 32]>>>`. Revoking a device is
+/// The allowlist is a live `Arc<RwLock<HashSet<VerifyingKey>>>`. Revoking a device is
 /// instant: remove its key, and the next connection attempt is rejected at the TLS
 /// handshake with no daemon restart needed.
 ///
@@ -453,7 +453,7 @@ pub type KnownTips = Arc<RwLock<std::collections::HashMap<String, kotton_wire::k
 /// the verifier holds no crypto provider of its own.
 #[derive(Debug)]
 pub struct PairedDeviceVerifier {
-    allowed_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    allowed_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     /// Empty for every peer that is not a replica of somebody's identity — a verifier with no
     /// tips and no authorities behaves exactly as it did before admission-by-proof existed.
     admission: Admission,
@@ -465,13 +465,13 @@ impl PairedDeviceVerifier {
     /// Admits on the allowlist alone. A node that holds a user's identity tip should use
     /// [`Self::new_with_tips`] so a recovered device can be admitted on proof of control of
     /// the root rather than on a key the node was told about in advance.
-    pub fn new(allowed_keys: Arc<RwLock<HashSet<[u8; 32]>>>) -> Arc<Self> {
+    pub fn new(allowed_keys: Arc<RwLock<HashSet<VerifyingKey>>>) -> Arc<Self> {
         Self::new_with_tips(allowed_keys, Default::default())
     }
 
     /// As [`Self::new`], plus the identity tips this node holds (`RFC-0081` gap 3).
     pub fn new_with_tips(
-        allowed_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+        allowed_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
         known_tips: KnownTips,
     ) -> Arc<Self> {
         Self::new_with_admission(
@@ -487,7 +487,7 @@ impl PairedDeviceVerifier {
     /// not told about: identity tips, committed recovery authorities, and the map the
     /// handshake writes its verdicts into for the handler to persist.
     pub fn new_with_admission(
-        allowed_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+        allowed_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
         admission: Admission,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -504,7 +504,7 @@ impl PairedDeviceVerifier {
                 "Certificate carries no Ed25519 public key that passes the rule".into(),
             )
         })?;
-        if self.allowed_keys.read().unwrap().contains(pubkey.as_bytes()) {
+        if self.allowed_keys.read().unwrap().contains(&pubkey) {
             return Ok(());
         }
         self.admit_by_proof(cert, &pubkey)
@@ -1230,7 +1230,7 @@ mod tests {
         let cert = Ed25519DeviceCert::from_signing_key(&signing_key).unwrap();
 
         let mut allowed = HashSet::new();
-        allowed.insert(cert.public_key_bytes);
+        allowed.insert(VerifyingKey::from_bytes(&cert.public_key_bytes).unwrap());
         let verifier = PairedDeviceVerifier::new(Arc::new(RwLock::new(allowed)));
 
         verifier.check_cert(&cert.cert_der).unwrap();
@@ -1259,11 +1259,11 @@ mod tests {
         let verifier = PairedDeviceVerifier::new(Arc::clone(&allowed));
 
         // Add key → allowed
-        allowed.write().unwrap().insert(cert.public_key_bytes);
+        allowed.write().unwrap().insert(VerifyingKey::from_bytes(&cert.public_key_bytes).unwrap());
         verifier.check_cert(&cert.cert_der).unwrap();
 
         // Remove key → rejected immediately (no restart)
-        allowed.write().unwrap().remove(&cert.public_key_bytes);
+        allowed.write().unwrap().remove(&VerifyingKey::from_bytes(&cert.public_key_bytes).unwrap());
         assert!(verifier.check_cert(&cert.cert_der).is_err());
     }
 
@@ -1298,8 +1298,12 @@ mod tests {
         use rcgen::{CertificateParams, DnType, DnValue, KeyPair, PKCS_ED25519};
 
         // Victim key to impersonate. Bytes < 0x80 so the decoy is valid UTF-8 and
-        // can ride inside a DN attribute value.
-        let victim_key: [u8; 32] = std::array::from_fn(|i| 0x41 + i as u8);
+        // can ride inside a DN attribute value, and a key the rule admits, so it can
+        // be on the allowlist: the first byte is the one chosen to make it one.
+        let victim_key: [u8; 32] = (0x20u8..0x80)
+            .map(|first| std::array::from_fn(|i| if i == 0 { first } else { 0x41 + i as u8 }))
+            .find(|k| VerifyingKey::from_bytes(k).is_ok())
+            .expect("a printable key the rule admits");
 
         // The attacker's decoy: the exact SPKI byte pattern the old scanner keyed
         // on — Ed25519 OID (06 03 2b 65 70) + BIT STRING header (03 21 00) + the
@@ -1335,7 +1339,7 @@ mod tests {
         // End-to-end: with only the victim allowlisted, the crafted cert is
         // rejected — no impersonation.
         let mut allowed = HashSet::new();
-        allowed.insert(victim_key);
+        allowed.insert(VerifyingKey::from_bytes(&victim_key).unwrap());
         let verifier =
             PairedDeviceVerifier::new(Arc::new(RwLock::new(allowed)));
         assert!(
@@ -1510,7 +1514,7 @@ mod admission_verifier_tests {
     fn an_allowlisted_device_is_admitted_with_no_events() {
         let sk = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
         let v = PairedDeviceVerifier::new(
-            Arc::new(RwLock::new(HashSet::from([sk.verifying_key().to_bytes()]))),
+            Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&sk.verifying_key().to_bytes()).unwrap()]))),
         );
         let cert = Ed25519DeviceCert::from_signing_key(&sk).expect("cert");
         assert!(v.check_cert(&cert.cert_der).is_ok());
@@ -1723,8 +1727,8 @@ mod resumption_tests {
     struct Pair {
         server: Ed25519DeviceCert,
         client: Ed25519DeviceCert,
-        server_allows: Arc<RwLock<HashSet<[u8; 32]>>>,
-        client_allows: Arc<RwLock<HashSet<[u8; 32]>>>,
+        server_allows: Arc<RwLock<HashSet<VerifyingKey>>>,
+        client_allows: Arc<RwLock<HashSet<VerifyingKey>>>,
     }
 
     impl Pair {
@@ -1734,8 +1738,8 @@ mod resumption_tests {
                 Ed25519DeviceCert::from_signing_key(&key).unwrap()
             };
             let (server, client) = (cert(3u8), cert(4u8));
-            let server_allows = Arc::new(RwLock::new(HashSet::from([client.public_key_bytes])));
-            let client_allows = Arc::new(RwLock::new(HashSet::from([server.public_key_bytes])));
+            let server_allows = Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&client.public_key_bytes).unwrap()])));
+            let client_allows = Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&server.public_key_bytes).unwrap()])));
             Self { server, client, server_allows, client_allows }
         }
 
@@ -1807,7 +1811,7 @@ mod resumption_tests {
         let client = Arc::new(keeping_tickets(pair.client_config()));
 
         assert_eq!(connect(&client, &server).unwrap(), HandshakeKind::Full);
-        pair.server_allows.write().unwrap().remove(&pair.client.public_key_bytes);
+        pair.server_allows.write().unwrap().remove(&VerifyingKey::from_bytes(&pair.client.public_key_bytes).unwrap());
         assert_eq!(connect(&client, &server).unwrap(), HandshakeKind::Resumed);
     }
 
@@ -1830,7 +1834,7 @@ mod resumption_tests {
         let client = Arc::new(keeping_tickets(pair.client_config()));
 
         assert_eq!(connect(&client, &server).unwrap(), HandshakeKind::Full);
-        pair.server_allows.write().unwrap().remove(&pair.client.public_key_bytes);
+        pair.server_allows.write().unwrap().remove(&VerifyingKey::from_bytes(&pair.client.public_key_bytes).unwrap());
         assert!(connect(&client, &server).is_err());
     }
 
@@ -1843,7 +1847,7 @@ mod resumption_tests {
         let client = Arc::new(pair.client_config());
 
         assert_eq!(connect(&client, &server).unwrap(), HandshakeKind::Full);
-        pair.client_allows.write().unwrap().remove(&pair.server.public_key_bytes);
+        pair.client_allows.write().unwrap().remove(&VerifyingKey::from_bytes(&pair.server.public_key_bytes).unwrap());
         assert!(connect(&client, &server).is_err());
     }
 }
@@ -2046,17 +2050,23 @@ mod rule_tests {
         Bootstrap,
     }
 
+    /// The allowlist that admits `admit`, where the rule makes it a key: the allowlist holds keys
+    /// alone, so bytes the rule refuses are on none.
+    fn admitting(admit: [u8; 32]) -> Arc<RwLock<HashSet<VerifyingKey>>> {
+        Arc::new(RwLock::new(VerifyingKey::from_bytes(&admit).into_iter().collect()))
+    }
+
     /// The verifier, admitting `admit` by allowlist where it keeps one.
     fn server_verifier(v: Verifier, admit: [u8; 32]) -> Arc<dyn rustls::server::danger::ClientCertVerifier> {
         match v {
-            Verifier::Paired => PairedDeviceVerifier::new(Arc::new(RwLock::new(HashSet::from([admit])))),
+            Verifier::Paired => PairedDeviceVerifier::new(admitting(admit)),
             Verifier::Bootstrap => BootstrapCertVerifier::new(),
         }
     }
 
     fn client_verifier(v: Verifier, admit: [u8; 32]) -> Arc<dyn rustls::client::danger::ServerCertVerifier> {
         match v {
-            Verifier::Paired => PairedDeviceVerifier::new(Arc::new(RwLock::new(HashSet::from([admit])))),
+            Verifier::Paired => PairedDeviceVerifier::new(admitting(admit)),
             Verifier::Bootstrap => BootstrapCertVerifier::new(),
         }
     }

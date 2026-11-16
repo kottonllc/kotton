@@ -21,6 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
+use kotton_crypto::ed25519::VerifyingKey;
 
 use super::quic::tls::{Admission, Admitted};
 
@@ -101,7 +102,7 @@ type Forms = HashMap<[u8; 32], Option<[u8; 32]>>;
 /// holds the one key the pair derives for the initiator this hour, and an empty admission.
 #[derive(Clone, Debug)]
 pub struct HeldKeys {
-    keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     /// Each held key's Montgomery form, made once per key rather than at every connection.
     /// Entries for keys no longer held are let go the next time a key is added.
     forms: Arc<Mutex<Forms>>,
@@ -109,7 +110,7 @@ pub struct HeldKeys {
 }
 
 impl HeldKeys {
-    pub fn new(keys: Arc<RwLock<HashSet<[u8; 32]>>>, admission: Admission) -> Self {
+    pub fn new(keys: Arc<RwLock<HashSet<VerifyingKey>>>, admission: Admission) -> Self {
         Self {
             keys,
             forms: Arc::default(),
@@ -118,7 +119,7 @@ impl HeldKeys {
     }
 
     /// The set alone, and no admission by events or claim.
-    pub fn only(keys: Arc<RwLock<HashSet<[u8; 32]>>>) -> Self {
+    pub fn only(keys: Arc<RwLock<HashSet<VerifyingKey>>>) -> Self {
         Self::new(keys, Admission::default())
     }
 }
@@ -128,12 +129,13 @@ impl Admits for HeldKeys {
         let keys = self.keys.read().unwrap();
         let mut forms = self.forms.lock().unwrap();
         for key in keys.iter() {
-            forms.entry(*key).or_insert_with(|| montgomery(key));
+            forms.entry(*key.as_bytes()).or_insert_with(|| montgomery(key.as_bytes()));
         }
         if forms.len() > keys.len() {
-            forms.retain(|k, _| keys.contains(k));
+            let held: HashSet<&[u8; 32]> = keys.iter().map(VerifyingKey::as_bytes).collect();
+            forms.retain(|k, _| held.contains(k));
         }
-        one_of(keys.iter().map(|k| (k, forms.get(k).copied().flatten())), initiator)
+        one_of(keys.iter().map(|k| (k.as_bytes(), forms.get(k.as_bytes()).copied().flatten())), initiator)
     }
 
     fn by_events(&self, initiator: &[u8; 32], events: &[Vec<u8>]) -> Option<[u8; 32]> {
@@ -189,11 +191,16 @@ mod tests {
         SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes()
     }
 
+    /// `key(n)` as the key the allowlist holds.
+    fn on_list(n: u8) -> VerifyingKey {
+        VerifyingKey::from_bytes(&key(n)).unwrap()
+    }
+
     /// The responder names the initiator by the key it holds whose Montgomery form the
     /// handshake delivered, and by no other.
     #[test]
     fn a_held_key_is_found_by_its_montgomery_form() {
-        let held = HeldKeys::only(Arc::new(RwLock::new(HashSet::from([key(1), key(2)]))));
+        let held = HeldKeys::only(Arc::new(RwLock::new(HashSet::from([on_list(1), on_list(2)]))));
         assert_eq!(held.by_key(&montgomery(&key(2)).unwrap()), Some(key(2)));
         assert_eq!(held.by_key(&montgomery(&key(3)).unwrap()), None);
     }
@@ -202,14 +209,14 @@ mod tests {
     /// and one removed is found no longer.
     #[test]
     fn the_kept_forms_follow_the_live_set() {
-        let set = Arc::new(RwLock::new(HashSet::from([key(1)])));
+        let set = Arc::new(RwLock::new(HashSet::from([on_list(1)])));
         let held = HeldKeys::only(Arc::clone(&set));
         assert_eq!(held.by_key(&montgomery(&key(1)).unwrap()), Some(key(1)));
-        set.write().unwrap().insert(key(2));
+        set.write().unwrap().insert(on_list(2));
         assert_eq!(held.by_key(&montgomery(&key(2)).unwrap()), Some(key(2)));
-        set.write().unwrap().remove(&key(1));
+        set.write().unwrap().remove(&on_list(1));
         assert_eq!(held.by_key(&montgomery(&key(1)).unwrap()), None);
-        set.write().unwrap().insert(key(3));
+        set.write().unwrap().insert(on_list(3));
         assert_eq!(held.by_key(&montgomery(&key(3)).unwrap()), Some(key(3)));
         assert_eq!(held.forms.lock().unwrap().len(), 2, "the removed key's form is let go");
     }
@@ -222,7 +229,7 @@ mod tests {
         let k = key(1);
         let negated = (-CompressedEdwardsY(k).decompress().unwrap()).compress().to_bytes();
         assert_eq!(montgomery(&k), montgomery(&negated));
-        let held = HeldKeys::only(Arc::new(RwLock::new(HashSet::from([k, negated]))));
+        let held = HeldKeys::only(Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&k).unwrap(), VerifyingKey::from_bytes(&negated).unwrap()]))));
         assert_eq!(held.by_key(&montgomery(&k).unwrap()), None);
     }
 

@@ -37,27 +37,26 @@
 //! `OperatorRevoke`), which no key on the peer transport can name.
 
 use crate::peer::PeerContext;
+use kotton_crypto::ed25519::VerifyingKey;
 use std::io;
 
-/// Read a public key as the door takes it: 64 hex characters naming a point
-/// on the curve — the `key=` line of the credential file.
-pub fn parse_key(key: &str) -> io::Result<[u8; 32]> {
+/// Read a public key as the door takes it: 64 hex characters naming a key the
+/// Ed25519 rule admits — the `key=` line of the credential file.
+pub fn parse_key(key: &str) -> io::Result<VerifyingKey> {
     let bytes: [u8; 32] = hex::decode(key.trim())
         .ok()
         .and_then(|b| b.try_into().ok())
         .ok_or_else(|| io::Error::other("an operator key is 64 hex characters — the key= line"))?;
-    ed25519_dalek::VerifyingKey::from_bytes(&bytes)
-        .map_err(|_| io::Error::other("that is not an ed25519 public key"))?;
-    Ok(bytes)
+    VerifyingKey::from_bytes(&bytes).map_err(|_| io::Error::other("that is not an ed25519 public key"))
 }
 
 /// Add `key` to this vault's operator credentials: the row, then the
 /// allowlist. Every other operator's key stays enrolled.
 pub async fn admit(ctx: &PeerContext, key: &str) -> io::Result<()> {
     let key = parse_key(key)?;
-    let new = kotton_peer::daemon::db::enrol_operator_key(&ctx.db, &key).await?;
+    let new = kotton_peer::daemon::db::enrol_operator_key(&ctx.db, key.as_bytes()).await?;
     ctx.runtime.paired_keys().write().unwrap().insert(key);
-    tracing::info!(key = %hex::encode(key), new, "an operator credential is enrolled");
+    tracing::info!(key = %hex::encode(key.as_bytes()), new, "an operator credential is enrolled");
     Ok(())
 }
 
@@ -70,7 +69,7 @@ pub const LAST_OPERATOR: &str = "that is this vault's last operator, and a vault
 /// a typo cannot read as a revocation, and so is naming the last.
 pub async fn revoke(ctx: &PeerContext, key: &str) -> io::Result<()> {
     use kotton_peer::daemon::db::Revoked;
-    let key = parse_key(key)?;
+    let key = *parse_key(key)?.as_bytes();
     match kotton_peer::daemon::db::revoke_operator_key(&ctx.db, &key).await? {
         Revoked::Gone => {}
         Revoked::NotEnrolled => return Err(io::Error::other("that key is not one of this vault's operators")),
@@ -84,7 +83,7 @@ pub async fn revoke(ctx: &PeerContext, key: &str) -> io::Result<()> {
 /// Revoke every operator credential but `keep`, which must be enrolled.
 /// Returns how many were revoked.
 pub async fn revoke_all_but(ctx: &PeerContext, keep: &str) -> io::Result<usize> {
-    let keep = parse_key(keep)?;
+    let keep = *parse_key(keep)?.as_bytes();
     let Some(revoked) = kotton_peer::daemon::db::revoke_operator_keys_but(&ctx.db, &keep).await? else {
         return Err(io::Error::other(
             "the key to keep is not one of this vault's operators, so nothing is revoked: \
@@ -109,15 +108,16 @@ async fn unadmit(ctx: &PeerContext, keys: &[[u8; 32]]) {
 /// reads as no row, as it always has, and the key leaves.
 async fn unadmit_from(
     db: &std::sync::Arc<sqlx::SqlitePool>,
-    paired_keys: &std::sync::RwLock<std::collections::HashSet<[u8; 32]>>,
+    paired_keys: &std::sync::RwLock<std::collections::HashSet<VerifyingKey>>,
     keys: &[[u8; 32]],
 ) {
     for key in keys {
         let paired = kotton_peer::daemon::db::paired_users_for_pubkey(db, key)
             .await
             .is_ok_and(|pools| !pools.is_empty());
-        if !paired {
-            paired_keys.write().unwrap().remove(key);
+        // Bytes the Ed25519 rule refuses are no key, so they were never on the allowlist.
+        if let (false, Ok(key)) = (paired, VerifyingKey::from_bytes(key)) {
+            paired_keys.write().unwrap().remove(&key);
         }
     }
 }
@@ -125,6 +125,7 @@ async fn unadmit_from(
 #[cfg(test)]
 mod tests {
     use super::unadmit_from;
+    use kotton_crypto::ed25519::VerifyingKey;
     use std::collections::HashSet;
     use std::sync::{Arc, RwLock};
 
@@ -136,24 +137,26 @@ mod tests {
     async fn an_unadmitted_key_stays_while_any_person_pairs_it() {
         let db = Arc::new(sqlx::SqlitePool::connect("sqlite::memory:").await.expect("db"));
         kotton_device::db::MIGRATOR.run(db.as_ref()).await.expect("migrations");
-        let (shared, alone) = ([7u8; 32], [9u8; 32]);
+        let public = |seed: u8| ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
+        let (shared, alone) = (public(7), public(9));
         for user in ["pat", "sam"] {
             kotton_peer::daemon::db::insert_paired_node(&db, "laptop", user, "did:key:zShared", &shared, "[]", 0, Some("full"))
                 .await
                 .expect("paired");
         }
-        let allow = RwLock::new(HashSet::from([shared, alone]));
+        let key = |b: &[u8; 32]| VerifyingKey::from_bytes(b).expect("a key");
+        let allow = RwLock::new(HashSet::from([key(&shared), key(&alone)]));
 
         unadmit_from(&db, &allow, &[shared, alone]).await;
-        assert!(allow.read().unwrap().contains(&shared), "a key two people pair left the allowlist");
-        assert!(!allow.read().unwrap().contains(&alone), "a key no one pairs stayed");
+        assert!(allow.read().unwrap().contains(&key(&shared)), "a key two people pair left the allowlist");
+        assert!(!allow.read().unwrap().contains(&key(&alone)), "a key no one pairs stayed");
 
         sqlx::query("DELETE FROM paired_nodes WHERE user_id = 'pat'").execute(db.as_ref()).await.unwrap();
         unadmit_from(&db, &allow, &[shared]).await;
-        assert!(allow.read().unwrap().contains(&shared), "sam's row no longer admitted his key once pat's went");
+        assert!(allow.read().unwrap().contains(&key(&shared)), "sam's row no longer admitted his key once pat's went");
 
         sqlx::query("DELETE FROM paired_nodes WHERE user_id = 'sam'").execute(db.as_ref()).await.unwrap();
         unadmit_from(&db, &allow, &[shared]).await;
-        assert!(!allow.read().unwrap().contains(&shared), "a key stayed after its last row went");
+        assert!(!allow.read().unwrap().contains(&key(&shared)), "a key stayed after its last row went");
     }
 }

@@ -47,7 +47,7 @@ fn random_signing_key() -> SigningKey {
 
 fn make_verifier(peer_pubkey: [u8; 32]) -> Arc<PairedDeviceVerifier> {
     let mut set = HashSet::new();
-    set.insert(peer_pubkey);
+    set.insert(kotton_crypto::ed25519::VerifyingKey::from_bytes(&peer_pubkey).unwrap());
     PairedDeviceVerifier::new(Arc::new(RwLock::new(set)))
 }
 

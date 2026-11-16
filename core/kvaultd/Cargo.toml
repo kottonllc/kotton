@@ -77,6 +77,8 @@ workspace-hack = { path = "../../tools/workspace-hack" }
 tempfile = "3.8"
 # A sealed write is checked against its content hash; a test must declare one.
 blake3 = { workspace = true }
+# A did:key naming bytes the Ed25519 rule refuses, which the library's encoder will not make.
+bs58 = "0.5"
 
 [lints]
 workspace = true

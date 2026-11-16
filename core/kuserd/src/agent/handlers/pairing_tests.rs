@@ -22,6 +22,7 @@ use kotton_device::users::DeviceUsers as _;
 const TEST_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";
 
 use ed25519_dalek::SigningKey;
+use kotton_crypto::ed25519::VerifyingKey;
 use kotton_common::crypto::kdf_labels;
 use kotton_peer::daemon::db as network_db;
 use kotton_peer::membership::Membership as _;
@@ -302,7 +303,7 @@ mod enrollment_tests {
                 .unwrap();
         }
 
-        let paired_keys = Arc::new(RwLock::new(HashSet::<[u8; 32]>::new()));
+        let paired_keys = Arc::new(RwLock::new(HashSet::<VerifyingKey>::new()));
         let resolved: Vec<(
             String,
             std::sync::Arc<dyn kotton_peer::membership::MemberStore>,
@@ -320,11 +321,11 @@ mod enrollment_tests {
 
         let live = paired_keys.read().unwrap().clone();
         assert!(
-            live.contains(&alices_peer),
+            live.contains(&VerifyingKey::from_bytes(&alices_peer).unwrap()),
             "the loaded user's peer must be admitted"
         );
         assert!(
-            !live.contains(&bobs_peer),
+            !live.contains(&VerifyingKey::from_bytes(&bobs_peer).unwrap()),
             "a peer paired only with a user who is not loaded must not be admitted — \
              this is the whole point of the per-user contribution"
         );
@@ -370,7 +371,7 @@ mod enrollment_tests {
         record_own_device_member(users.get("alice").unwrap().as_ref(), &node, Posture::Full)
             .await
             .unwrap();
-        let paired_keys = Arc::new(RwLock::new(HashSet::<[u8; 32]>::new()));
+        let paired_keys = Arc::new(RwLock::new(HashSet::<VerifyingKey>::new()));
 
         let added = project_membership_into_allowlist(
             users.get("alice").unwrap().as_ref(),
@@ -384,7 +385,7 @@ mod enrollment_tests {
             "the member's key is newly added to the live allowlist"
         );
         assert!(
-            paired_keys.read().unwrap().contains(&pubkey),
+            paired_keys.read().unwrap().contains(&VerifyingKey::from_bytes(&pubkey).unwrap()),
             "key projected into the live allowlist"
         );
         assert!(
@@ -477,7 +478,7 @@ mod enrollment_tests {
             .await
             .unwrap());
 
-        let paired_keys = Arc::new(RwLock::new(HashSet::<[u8; 32]>::new()));
+        let paired_keys = Arc::new(RwLock::new(HashSet::<VerifyingKey>::new()));
         project_membership_into_allowlist(
             users.get("alice").unwrap().as_ref(),
             &db,
@@ -487,7 +488,7 @@ mod enrollment_tests {
         .await;
 
         assert!(
-            !paired_keys.read().unwrap().contains(&bob_key),
+            !paired_keys.read().unwrap().contains(&VerifyingKey::from_bytes(&bob_key).unwrap()),
             "a contact must not be in the device allowlist: it gates peer mTLS, and their \
              messages arrive through their own per-pair door instead"
         );
@@ -551,7 +552,7 @@ mod enrollment_tests {
         record_own_device_member(users.get("alice").unwrap().as_ref(), &node, Posture::Full)
             .await
             .unwrap();
-        let paired_keys = Arc::new(RwLock::new(HashSet::from([pubkey])));
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&pubkey).unwrap()])));
 
         // Sanity: the member is present before revoke.
         let members_before = users.get("alice").unwrap().list_members().await.unwrap();
@@ -577,7 +578,7 @@ mod enrollment_tests {
             .await
             .unwrap()
             .is_empty());
-        assert!(!paired_keys.read().unwrap().contains(&pubkey));
+        assert!(!paired_keys.read().unwrap().contains(&VerifyingKey::from_bytes(&pubkey).unwrap()));
         assert!(network_db::paired_node_named(&db, "alice", "vps")
             .await
             .unwrap()

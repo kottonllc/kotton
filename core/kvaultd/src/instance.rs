@@ -467,7 +467,7 @@ async fn create_with(
     let db = kotton_device::db::open_machine_db(&db_path)
         .await
         .map_err(|e| io::Error::other(format!("failed to open machine db: {e}")))?;
-    let enrolled = kotton_peer::daemon::db::enrol_operator_key(&db, &operator).await;
+    let enrolled = kotton_peer::daemon::db::enrol_operator_key(&db, operator.as_bytes()).await;
     db.close().await;
     enrolled?;
     // Which provider holds the key, recorded once, for every start to compare.
@@ -476,7 +476,7 @@ async fn create_with(
     }
     tracing::info!(
         adopted = existing,
-        operator = %hex::encode(operator),
+        operator = %hex::encode(operator.as_bytes()),
         "a vault is created for its operator's key"
     );
     // 8. The line.

@@ -657,7 +657,7 @@ mod tests {
         let refused = recover(&rt, &NobodyResident, &pool, "alice", NOT_THEIRS, NEW_PASSPHRASE, &line_of(key(9), ADDR)).await;
         assert!(refused.expect_err("words that prove nothing").to_string().contains("not an authority"));
         assert!(rows(&pool).await.is_empty(), "the node the line added was left");
-        assert!(!rt.paired_keys().read().unwrap().contains(&key(9)), "the line's key was left on the allowlist");
+        assert!(!rt.paired_keys().read().unwrap().contains(&kotton_crypto::ed25519::VerifyingKey::from_bytes(&key(9)).unwrap()), "the line's key was left on the allowlist");
 
         kotton_peer::daemon::nodes::peer_add(
             &pool,
