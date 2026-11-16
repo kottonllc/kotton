@@ -178,7 +178,7 @@ impl Admits for HeldKeys {
     }
 
     fn by_claim(&self, authority: &[u8; 32]) -> Option<String> {
-        self.admission.authorities.read().unwrap().get(authority).cloned()
+        self.admission.authority(authority)
     }
 }
 
