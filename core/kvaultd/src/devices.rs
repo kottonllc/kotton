@@ -808,6 +808,45 @@ mod tests {
         assert!(keys.read().unwrap().contains(&VerifyingKey::from_bytes(&key).unwrap()));
     }
 
+    /// **A withdrawal told from a row whose bytes are no key removes it** (6B): for every key
+    /// vector the rule refuses, the change a device tells its drive of such a row
+    /// (`drive_devices::change_for`) carries the row's DID as stored, and the drive removes
+    /// the tenant's row under it, matched as stored, and records no change under the bytes.
+    #[tokio::test]
+    async fn a_withdrawal_told_from_a_row_under_bytes_that_are_no_key_removes_it() {
+        let base = tempfile::tempdir().unwrap();
+        let identity = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        a_tenant_at(base.path(), &identity);
+        let db = a_vault_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        for (i, (name, bytes)) in kotton_crypto::ed25519::refused_keys().into_iter().enumerate() {
+            let did = DidKeyMethod::spelled_over(&bytes);
+            kotton_peer::daemon::db::insert_paired_node(&db, &format!("old-{i}"), "alice", &did.to_string(), &bytes, "[]", 0, Some("full"))
+                .await
+                .unwrap();
+            let row = kotton_wire::peer::PairedNode {
+                id: format!("old-{i}"),
+                device_did: did,
+                public_key: bytes,
+                paired_at: 0,
+                addresses: Vec::new(),
+                relay_url: None,
+                posture: None,
+            };
+            let change = kotton_device::users::drive_devices::change_for(&row, TenantDeviceAct::Withdraw, 10 + i as u64);
+            accept(base.path(), &db, &keys, "alice", &change, &signed(&identity, &change))
+                .await
+                .unwrap_or_else(|why| panic!("{name}: the withdrawal was refused: {why}"));
+            assert!(!paired(&db, "alice", &bytes).await, "{name}: the row stayed");
+            let changes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenant_device_changes WHERE public_key = ?")
+                .bind(bytes.as_slice())
+                .fetch_one(db.as_ref())
+                .await
+                .unwrap();
+            assert_eq!(changes, 0, "{name}: a change was recorded under bytes that are no key");
+        }
+    }
+
     /// **A tenant's row stands by its bytes** (kottonllc/kotton#597): a row
     /// whose bytes are a key, stored under another spelling of its `did:key`,
     /// is admitted as before: the rebuilt allowlist holds its key, and the key

@@ -2049,6 +2049,65 @@ mod handed_drive_tests {
         assert_eq!(kotton_peer::daemon::drives::list(&joiner, "alice").await.unwrap().len(), 1, "the joiner recorded no drive");
     }
 
+    /// A member store that keeps what it is told.
+    #[derive(Default)]
+    struct Cards(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+    #[async_trait::async_trait]
+    impl kotton_peer::membership::MemberStore for Cards {
+        async fn member_write(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.0.lock().unwrap().insert(path.to_string(), data.to_vec());
+            Ok(())
+        }
+        async fn member_read(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+            self.0.lock().unwrap().get(path).cloned().ok_or_else(|| anyhow::anyhow!("no member at {path}"))
+        }
+        async fn member_delete(&self, path: &str) -> anyhow::Result<()> {
+            self.0.lock().unwrap().remove(path);
+            Ok(())
+        }
+        async fn member_list(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            Ok(self.0.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect())
+        }
+    }
+
+    /// **A joined device ends with one row per vault** when the issuer's row, and the
+    /// member the issuer wrote for the vault, are under another spelling of its key's
+    /// `did:key`: the joiner records the handed node under the key's `did:key`, and the
+    /// membership projection, which reads an own device by its key's bytes, writes no
+    /// second row for the same key under the member's spelling.
+    #[tokio::test]
+    async fn a_joined_device_ends_with_one_row_per_vault() {
+        use kotton_peer::membership::Membership as _;
+        let (_dir, db) = machine_db().await;
+        let vault = a_drive("vault", 3, "alice");
+        let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(&vault.vault_key).to_string();
+        network_db::insert_paired_node(&db, "vault", "alice", &otherwise, &vault.vault_key, "[]", 0, Some("blind-storage"))
+            .await
+            .unwrap();
+        kotton_peer::daemon::drives::record(&db, "alice", &vault.vault_key).await.unwrap();
+        let handed = drives_to_hand(&db, "alice").await;
+
+        let (_joiner_dir, joiner) = machine_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        record_handed_drives(&joiner, &keys, "alice", &handed).await.unwrap();
+        let members = Cards::default();
+        let mut node = vault.node.clone();
+        node.device_did = kotton_wire::did::Did::parse(&otherwise).unwrap();
+        let member = kotton_peer::daemon::nodes::own_device_member(&node, kotton_schemas::membership::Posture::BlindStorage, "2026-11-16T00:00:00Z");
+        members.write_member(&member).await.unwrap();
+        kotton_peer::daemon::nodes::project_membership_into_allowlist(&members, &joiner, &keys, "alice").await;
+
+        let rows: Vec<String> = network_db::list_paired_nodes(&joiner, "alice")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.public_key == vault.vault_key)
+            .map(|n| n.device_did.to_string())
+            .collect();
+        assert_eq!(rows, vec![vault.node.device_did.to_string()], "the joiner holds the vault under more than one row");
+    }
+
     /// **A handed drive under a key the rule refuses is refused by the check**,
     /// for each refused vector, its DID naming those bytes.
     #[test]

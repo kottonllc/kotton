@@ -1015,12 +1015,19 @@ pub async fn project_membership_into_allowlist(
             return 0;
         }
     };
-    let existing_dids: HashSet<String> = network_db::list_paired_nodes(db, user_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|n| n.device_did.to_string())
-        .collect();
+    let existing = network_db::list_paired_nodes(db, user_id).await.unwrap_or_default();
+    // A contact cached as a device is found by the DID it was cached under: the
+    // repair below removes the row an earlier build wrote for the member, by
+    // the name it wrote it under, and no row of the person's own that happens
+    // to hold the same bytes.
+    let existing_dids: HashSet<String> = existing.iter().map(|n| n.device_did.to_string()).collect();
+    // An own device is already recorded when a row of the person's holds its
+    // key: a row is its bytes', and the DID beside them is never read as the
+    // key's name (kottonllc/kotton#597). A row under another spelling of the
+    // member's `did:key` (a drive's node handed at a join under its key's
+    // `did:key`, beside a member an earlier build wrote under another) is the
+    // member's row, and no second row is written for the same key.
+    let mut existing_keys: HashSet<[u8; 32]> = existing.iter().map(|n| n.public_key).collect();
     let now = chrono::Utc::now().timestamp();
     let mut added = 0usize;
     // Every member, not only the ones the allowlist admits.
@@ -1065,7 +1072,7 @@ pub async fn project_membership_into_allowlist(
                 Err(e) => tracing::warn!(did = %m.did, error = %e, "could not un-cache a contact"),
             }
         }
-        if key.is_some() && m.is_own_device() && !existing_dids.contains(&m.did) {
+        if key.is_some() && m.is_own_device() && existing_keys.insert(m.public_key) {
             if let Err(e) = network_db::insert_paired_node(
                 db,
                 &m.did,
