@@ -30,6 +30,12 @@
 //! Where the key's bytes are stored beside it, the row stands by its bytes if they pass, and
 //! the string beside them is never passed on as the key's name.
 //!
+//! A listing tells the person of each such row (kottonllc/kotton#605): its answer carries,
+//! beside the rows, a `kotton_wire::note::RowNote` for each, with the name a command takes
+//! and which of the two it is, and `kotton_wire::note::sentence` says it with the removal
+//! verb the surface registers. The node listing, `kctl sudoers list`, `drive list`, the
+//! network readout's kept credentials and the admitting side of a join each say it.
+//!
 //! [`DidError::InvalidKey`]: kotton_wire::did::DidError::InvalidKey
 //! [`DidKeyResolver`]: resolver::DidKeyResolver
 pub mod key_method;

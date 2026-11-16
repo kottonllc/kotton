@@ -480,9 +480,15 @@ pub enum UserResponse {
     NodePaired {
         node: PairedNode,
     },
-    /// List of paired nodes.
+    /// List of paired nodes, the same to a local asker and a remote one.
     NodeList {
         nodes: Vec<PairedNode>,
+        /// A note for each row of `nodes` that names no key, or that stands by
+        /// its key's bytes under a DID that is not the key's `did:key`
+        /// ([`crate::note`]), made from that row and nothing else. Left off the
+        /// wire when there is none; an older reader ignores it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<crate::note::RowNote>,
     },
     /// Answer to [`crate::UserRequest::NodeRelay`]: the relay this node reserves
     /// at, `None` when it has none.
@@ -601,6 +607,12 @@ pub enum UserResponse {
     /// verb is about, each as its descriptor.
     Drives {
         drives: Vec<crate::ipc::DriveDescriptor>,
+        /// `drive list` only: a note for each vault of the person's whose key
+        /// is no key, named as its node is ([`crate::note`]); the drives kept
+        /// there are reached through nothing. Left off the wire when there is
+        /// none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<crate::note::RowNote>,
     },
     /// Answer to `DriveMove` (kotton #314): the drive where it now lives, as its
     /// descriptor, and what the move refused. Its own answer, as `SyncComplete`
@@ -696,6 +708,12 @@ pub enum UserResponse {
         /// that has a relay already.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         relay_offer: Option<String>,
+        /// The admitting side only: each drive of the person's this ceremony
+        /// did not hand the joiner, because it is recorded under bytes that are
+        /// no Ed25519 key, as a note on the node it is reached through
+        /// ([`crate::note`]). Left off the wire when every drive was handed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        not_handed: Vec<crate::note::RowNote>,
     },
 
     // -- RFC-0040 streamed pairing ceremony -----------------------------------
@@ -1661,7 +1679,7 @@ mod secret_debug_tests {
             relay_url: None,
             posture: None,
         };
-        hides(&UserResponse::PairingComplete { node, session_token: Some(t()), relay_offer: None }, &[token]);
+        hides(&UserResponse::PairingComplete { node, session_token: Some(t()), relay_offer: None, not_handed: vec![] }, &[token]);
     }
 
     /// The seed `GetDeviceCert` returns prints `<redacted>`, and crosses as the
@@ -1690,10 +1708,13 @@ mod drive_answer_tests {
     /// as every daemon before kotton #274 wrote it, decodes (kotton #313).
     #[test]
     fn a_drives_answer_carries_no_refused_count_and_decodes_without_one() {
-        let wire = serde_json::to_string(&UserResponse::Drives { drives: vec![] }).unwrap();
+        let wire = serde_json::to_string(&UserResponse::Drives { drives: vec![], notes: vec![] }).unwrap();
         assert_eq!(wire, r#"{"Drives":{"drives":[]}}"#);
         let recorded: UserResponse = serde_json::from_str(r#"{"Drives":{"drives":[]}}"#).unwrap();
-        assert!(matches!(recorded, UserResponse::Drives { ref drives } if drives.is_empty()), "{recorded:?}");
+        assert!(
+            matches!(recorded, UserResponse::Drives { ref drives, ref notes } if drives.is_empty() && notes.is_empty()),
+            "{recorded:?}"
+        );
     }
 
     /// **A move's answer says how many keys it refused, or it is not a move's
@@ -1707,5 +1728,56 @@ mod drive_answer_tests {
         let back: UserResponse = serde_json::from_str(&wire).unwrap();
         assert!(matches!(back, UserResponse::DriveMoved { keys_refused: 2, .. }), "{back:?}");
         assert!(serde_json::from_str::<UserResponse>(r#"{"DriveMoved":{"drives":[]}}"#).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod note_answer_tests {
+    use super::UserResponse;
+    use crate::did::Did;
+    use crate::note::RowNote;
+    use crate::peer::PairedNode;
+
+    fn node() -> PairedNode {
+        PairedNode {
+            id: "laptop".into(),
+            device_did: Did::new("key", "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"),
+            public_key: [1u8; 32],
+            paired_at: 1_700_000_000,
+            addresses: vec!["192.0.2.7:7701".parse().unwrap()],
+            relay_url: Some("http://relay.test:7700".into()),
+            posture: Some("full".into()),
+        }
+    }
+
+    /// **`PairedNode` encodes as it did** (kottonllc/kotton#597, 8B and 22A): a
+    /// node a join hands between devices carries no field a readout added,
+    /// byte for byte. The notes are the answer's, beside the rows.
+    #[test]
+    fn a_paired_node_encodes_as_it_did() {
+        let ones = vec!["1"; 32].join(",");
+        assert_eq!(
+            serde_json::to_string(&node()).unwrap(),
+            format!(
+                r#"{{"id":"laptop","device_did":"did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK","public_key":[{ones}],"paired_at":1700000000,"addresses":["192.0.2.7:7701"],"relay_url":"http://relay.test:7700","posture":"full"}}"#
+            )
+        );
+    }
+
+    /// **The notes ride beside the rows, and only when there are some**: an
+    /// answer with none is written as before, and one written before the field
+    /// existed reads as having none.
+    #[test]
+    fn a_listing_carries_its_notes_beside_the_rows_and_none_is_off_the_wire() {
+        let bare = UserResponse::NodeList { nodes: vec![node()], notes: vec![] };
+        let wire = serde_json::to_value(&bare).unwrap();
+        assert!(wire["NodeList"].get("notes").is_none(), "{wire}");
+        let noted = UserResponse::NodeList { nodes: vec![node()], notes: vec![RowNote::names_no_key("laptop")] };
+        let wire = serde_json::to_value(&noted).unwrap();
+        assert_eq!(wire["NodeList"]["notes"], serde_json::json!([{ "name": "laptop", "is": "names_no_key" }]));
+        let earlier: UserResponse =
+            serde_json::from_value(serde_json::json!({ "NodeList": { "nodes": [] } })).unwrap();
+        assert!(matches!(earlier, UserResponse::NodeList { ref notes, .. } if notes.is_empty()), "{earlier:?}");
     }
 }

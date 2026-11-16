@@ -3593,6 +3593,10 @@ mod session_read_tests;
 mod kept_schema_tests;
 
 #[cfg(test)]
+#[path = "node_notes_tests.rs"]
+mod node_notes_tests;
+
+#[cfg(test)]
 #[path = "write_wake_tests.rs"]
 mod write_wake_tests;
 

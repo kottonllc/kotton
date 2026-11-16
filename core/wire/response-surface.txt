@@ -127,6 +127,8 @@ DriveMoved
     keys_refused: u32
 Drives
     drives: Vec<crate::ipc::DriveDescriptor>
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<crate::note::RowNote>
 Error
     message: String
 EventList
@@ -237,6 +239,8 @@ NodeIdentity
     signing_pubkey_hex: String
 NodeList
     nodes: Vec<PairedNode>
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<crate::note::RowNote>
 NodePaired
     node: PairedNode
 NodeRelayResult
@@ -329,6 +333,8 @@ PairingComplete
     session_token: Option<crate::ipc::SecretText>
     #[serde(default, skip_serializing_if = "Option::is_none")]
     relay_offer: Option<String>
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    not_handed: Vec<crate::note::RowNote>
 Pins
     pins: crate::ipc::PinReadout
 PrincipalSession

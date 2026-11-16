@@ -5908,6 +5908,7 @@ mod host_call_tests {
                 address: "http://droplet.austin.dev:7700".into(),
                 standing: vec!["droplet".into()],
                 here: false,
+                no_key: None,
             }])
         }
         async fn join_admit(&self, invite: String) -> Result<(), String> {

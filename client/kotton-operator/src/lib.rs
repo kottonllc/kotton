@@ -179,10 +179,12 @@ impl Device<'_> {
         }
     }
 
-    /// This device's operators: each key, and the person it answers for.
-    pub async fn sudoers(&mut self) -> io::Result<Vec<DeviceOperator>> {
+    /// This device's operators: each key, and the person it answers for; and
+    /// beside them a note for each operator row or kept key whose DID names no
+    /// key ([`kotton_wire::note`]).
+    pub async fn sudoers(&mut self) -> io::Result<kotton_wire::note::Listed<DeviceOperator>> {
         match self.client.send(DeviceRequest::SudoersList).await? {
-            DeviceResponse::SudoersList { operators } => Ok(operators),
+            DeviceResponse::SudoersList { operators, notes } => Ok(kotton_wire::note::Listed { rows: operators, notes }),
             other => Err(unexpected(other)),
         }
     }

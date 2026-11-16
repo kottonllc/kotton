@@ -229,9 +229,9 @@ impl KottonClient {
 /// The drive's verbs (RFC 0003): a person's drives, on one vault or many.
 /// Each answers the drives it is about, as their descriptors.
 impl KottonClient {
-    async fn drives(&mut self, request: UserRequest) -> io::Result<Vec<kotton_wire::ipc::DriveDescriptor>> {
+    async fn drives(&mut self, request: UserRequest) -> io::Result<kotton_wire::note::Listed<kotton_wire::ipc::DriveDescriptor>> {
         match self.client.send(&request).await? {
-            UserResponse::Drives { drives } => Ok(drives),
+            UserResponse::Drives { drives, notes } => Ok(kotton_wire::note::Listed { rows: drives, notes }),
             UserResponse::Error { message } => Err(io::Error::other(message)),
             got => Err(crate::protocol::unexpected(got)),
         }
@@ -239,18 +239,20 @@ impl KottonClient {
 
     /// `drive create <name> [--on <vault>]`: the drive made.
     pub async fn drive_create(&mut self, user_id: &str, name: &str, on: Option<&str>) -> io::Result<Vec<kotton_wire::ipc::DriveDescriptor>> {
-        self.drives(UserRequest::DriveCreate { user_id: user_id.into(), name: name.into(), on: on.map(Into::into) })
-            .await
+        Ok(self.drives(UserRequest::DriveCreate { user_id: user_id.into(), name: name.into(), on: on.map(Into::into) })
+            .await?
+            .rows)
     }
 
-    /// `drive list`: every drive the person has.
-    pub async fn drive_list(&mut self, user_id: &str) -> io::Result<Vec<kotton_wire::ipc::DriveDescriptor>> {
+    /// `drive list`: every drive the person has, and a note for each vault of
+    /// theirs whose key is no key.
+    pub async fn drive_list(&mut self, user_id: &str) -> io::Result<kotton_wire::note::Listed<kotton_wire::ipc::DriveDescriptor>> {
         self.drives(UserRequest::DriveList { user_id: user_id.into() }).await
     }
 
     /// `drive show <name>`: the drives called `name`.
     pub async fn drive_show(&mut self, user_id: &str, name: &str) -> io::Result<Vec<kotton_wire::ipc::DriveDescriptor>> {
-        self.drives(UserRequest::DriveShow { user_id: user_id.into(), name: name.into() }).await
+        Ok(self.drives(UserRequest::DriveShow { user_id: user_id.into(), name: name.into() }).await?.rows)
     }
 
     /// `drive move <name> --to <vault> [--from <vault>]`: the drive where it

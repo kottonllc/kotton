@@ -721,6 +721,12 @@ pub struct RunnerOperatedRelay {
     pub standing: Vec<String>,
     /// Whether this device reserves here — its own relay proved this key.
     pub here: bool,
+    /// For a credential whose kept key is present and names no Ed25519 key,
+    /// the sentence that says so and the verb that removes it
+    /// ([`crate::note::sentence`]); such a card carries no `key`, nothing
+    /// `standing` and is not `here`. `None`, and off the wire, for every other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_key: Option<String>,
 }
 
 /// This machine's operators, mirroring `interface operators` in `world occupant`

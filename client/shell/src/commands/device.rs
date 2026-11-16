@@ -75,6 +75,26 @@ fn known_verb(word: &str) -> bool {
     KNOWN_VERBS.contains(&word)
 }
 
+/// What the admitting side says of each drive the join did not hand: the device
+/// it joined, and the note's sentence for the node the drive is reached through.
+pub(crate) fn not_handed_lines(joined: &str, not_handed: &[kotton_wire::note::RowNote]) -> Vec<String> {
+    not_handed
+        .iter()
+        .map(|n| format!("{joined} was not handed the drive reached through `{}`: {}", n.name, kotton_wire::note::sentence(n, DEVICE_REVOKE)))
+        .collect()
+}
+
+/// The verb that removes a paired node by the name a note gives it: the one
+/// `device list`, `peer list`, `drive list` and the admitting side of a join name
+/// in a note's sentence (kottonllc/kotton#605).
+pub(crate) const DEVICE_REVOKE: &str = "device revoke";
+
+/// One line for each note a listing carried beside its rows, as
+/// [`kotton_wire::note::sentence`] says it with [`DEVICE_REVOKE`].
+pub(crate) fn notes_said(notes: &[kotton_wire::note::RowNote]) -> Vec<Out> {
+    notes.iter().map(|n| Out::Note(kotton_wire::note::sentence(n, DEVICE_REVOKE))).collect()
+}
+
 /// The usage refusal, exit 2: what `device` prints for a word it does not have: the
 /// grammar ([`device_grammar`]), each alternative after this door's prefix, the verb word,
 /// and an aside that `reset` is the CLI's.
@@ -365,6 +385,7 @@ impl DeviceCommand {
             columns: vec!["device".into(), "did".into(), "paired".into()],
             rows,
         }];
+        shapes.extend(notes_said(&nodes.notes));
         // The browsers admitted with `device add --browser`, beside the devices:
         // a browser is paired like a device (DEC-0053), so what acts as you is
         // one list read in one place, and the revoke below takes either.
@@ -663,7 +684,7 @@ pub(crate) async fn run_ceremony_to(
             }
             UserResponse::PairAwaitingPeer => ui::body("waiting for the other device to confirm…"),
             UserResponse::PairTransferring => ui::body("setting things up…"),
-            UserResponse::PairingComplete { node, relay_offer, .. } => {
+            UserResponse::PairingComplete { node, relay_offer, not_handed, .. } => {
                 ui::blank();
                 match role {
                     Role::Issuer | Role::Box => {
@@ -687,6 +708,9 @@ pub(crate) async fn run_ceremony_to(
                         ui::body("run `sync` to pull your data when you want it.");
                     }
                     Role::Browser => ui::greet("the phone is in —", &node.id),
+                }
+                for line in not_handed_lines(&node.id, &not_handed) {
+                    ui::body(&line);
                 }
                 let mut taken = None;
                 if let Some(line) = relay_offer {
@@ -1033,6 +1057,45 @@ mod tests {
     use super::{parse_add, Add};
     use crate::commands::{Command, ExitCode};
     use kotton_schemas::membership::Posture;
+
+    /// **A note's sentence on `device list`, `peer list`, `drive list` and a join's
+    /// admitting side names a verb this shell registers, with the note's name**
+    /// (kottonllc/kotton#605), for every key vector the Ed25519 rule refuses: the noun is
+    /// a registered command and the verb is one `device` answers.
+    #[test]
+    fn a_notes_sentence_names_the_revoke_this_shell_registers() {
+        let registry = crate::executor::ShellExecutor::new().registry();
+        let (noun, verb) = super::DEVICE_REVOKE.split_once(' ').unwrap();
+        assert!(registry.has_command(noun), "`{noun}` is not registered");
+        assert!(super::known_verb(verb), "`{noun}` does not answer `{verb}`");
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
+            for row in ["old", did.as_str()] {
+                let note = kotton_wire::note::RowNote::names_no_key(row);
+                let typed = format!("{} {row}", super::DEVICE_REVOKE);
+                let said: Vec<String> = super::notes_said(std::slice::from_ref(&note))
+                    .into_iter()
+                    .map(|o| match o {
+                        crate::out::Out::Note(t) => t,
+                        other => panic!("{name}: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(said.len(), 1, "{name}");
+                assert!(said[0].contains("names no Ed25519 key") && said[0].contains(&typed), "{name}: {said:?}");
+                let lines = super::not_handed_lines("laptop", std::slice::from_ref(&note));
+                assert!(lines[0].contains("laptop was not handed the drive") && lines[0].contains(&typed), "{name}: {lines:?}");
+            }
+        }
+        let stands = kotton_wire::note::RowNote {
+            name: "phone".into(),
+            is: kotton_wire::note::NoteKind::StandsByBytes { did_key: "did:key:z6MkA".into(), stored: "did:key:mB".into() },
+        };
+        let said = super::notes_said(&[stands]);
+        assert!(
+            matches!(&said[..], [crate::out::Out::Note(t)] if !t.contains(super::DEVICE_REVOKE) && t.contains("did:key:mB")),
+            "{said:?}"
+        );
+    }
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()

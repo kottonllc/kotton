@@ -3305,6 +3305,73 @@ mod tests {
         assert!(held(&store).unwrap().is_empty());
     }
 
+    /// **A kept vault credential and a kept relay credential whose key names no Ed25519 key are
+    /// each listed in the network readout with the sentence and the verb that removes it, and
+    /// that verb, run, removes them** (kottonllc/kotton#605), for every key vector the rule
+    /// refuses. The relay's card carries no key, nothing standing and is not here; after the
+    /// two forgets the readout lists neither.
+    #[tokio::test]
+    async fn a_kept_credential_that_names_no_key_is_listed_and_its_forget_removes_it() {
+        use super::super::network_readout::{operated_relay_rows, vault_rows, Operated, RELAY_FORGET, VAULT_FORGET};
+        let nobody = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let readout = |store: &UserStore| {
+            let (mut relays, mut vaults) = (Vec::new(), Vec::new());
+            for c in held(store).unwrap() {
+                match c.operates {
+                    Operates::Relay { url, key, .. } => relays.push((c.name, key, url)),
+                    Operates::Vault { vault, .. } => {
+                        vaults.push(Operated { vault, name: c.name, relay: None, relay_key: None, told_at: None })
+                    }
+                }
+            }
+            let told = |_: &[u8; 32]| Vec::new();
+            let at = relays.first().and_then(|(_, k, _): &(String, Option<[u8; 32]>, String)| *k);
+            let cards = operated_relay_rows(&relays, &vaults, &told, at.map(|k| ("PC", k)));
+            (cards, vault_rows(&[], &[], &[], &|_| true, &vaults, &[]))
+        };
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let temp = tempfile::tempdir().unwrap();
+            let store = std::sync::Arc::new(a_store(&temp));
+            let runtime = a_runtime(&temp).await;
+            let users = UserRegistry::new();
+            users.insert("lee".to_string(), store.clone());
+            let attic = OperatorCredential { operates: Operates::Vault { vault: bytes, addr: Some(nobody) }, ..a_vault("attic") };
+            let gate = a_relay("gate", &format!("http://{nobody}"), bytes);
+            keep_credentials(&store, &[attic, gate]).unwrap();
+
+            let (cards, rows) = readout(&store);
+            assert_eq!(cards.len(), 1, "{name}");
+            let card = &cards[0];
+            assert_eq!((card.key.as_deref(), card.standing.len(), card.here), (None, 0, false), "{name}: {card:?}");
+            let said = card.no_key.as_deref().unwrap_or_else(|| panic!("{name}: the card says nothing"));
+            assert!(said.contains("names no Ed25519 key") && said.contains(&format!("`{RELAY_FORGET} gate`")), "{name}: {said}");
+            assert_eq!(rows.len(), 1, "{name}");
+            assert!(rows[0].holds.contains(&format!("`{VAULT_FORGET} attic`")), "{name}: {}", rows[0].holds);
+
+            for (service, word, verb) in [(OperatedService::Vault, "attic", VAULT_FORGET), (OperatedService::Relay, "gate", RELAY_FORGET)] {
+                assert_eq!(verb.split_once(' '), Some((service.word(), "forget")), "{name}");
+                match tokio::time::timeout(WITHIN * 2, forget(&runtime, &users, "lee", service, word)).await.expect("bounded") {
+                    UserResponse::OperatorForgotten { name: n, .. } => assert_eq!(n, word, "{name}"),
+                    other => panic!("{name}: {word} was not forgotten: {other:?}"),
+                }
+            }
+            let (cards, rows) = readout(&store);
+            assert!(cards.is_empty() && rows.is_empty(), "{name}: {cards:?} {rows:?}");
+        }
+    }
+
+    /// **A kept relay credential that showed no key reads as it did**: no sentence.
+    #[test]
+    fn a_kept_relay_that_showed_no_key_carries_no_sentence() {
+        let relays = vec![("old".to_owned(), None, "http://192.0.2.1:7700".to_owned())];
+        let cards = super::super::network_readout::operated_relay_rows(&relays, &[], &|_| Vec::new(), None);
+        assert_eq!(cards[0].no_key, None);
+        assert_eq!(cards[0].key, None);
+    }
+
     /// **What a relay's answer says of the key** (decision 0006). A rule, or
     /// a request it read and refused, is given only to an operator: the key
     /// stands. *Not an operator of this relay*, the 403 its door refuses a key

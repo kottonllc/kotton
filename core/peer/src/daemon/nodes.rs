@@ -377,9 +377,14 @@ pub async fn pair_node_ephemeral(
 // Node list / revoke
 // ---------------------------------------------------------------------------
 
+/// Every node `user_id` has paired, and beside them a note for each row that
+/// names no key or stands by its bytes under another spelling
+/// ([`network_db::notes_of`]). The same answer to a local asker and a remote
+/// one: each note says only what its row in the answer already does.
 pub async fn node_list(db: &Arc<SqlitePool>, user_id: String) -> io::Result<UserResponse> {
     let nodes = network_db::list_paired_nodes(db, &user_id).await?;
-    Ok(UserResponse::NodeList { nodes })
+    let notes = network_db::notes_of(&nodes);
+    Ok(UserResponse::NodeList { nodes, notes })
 }
 
 pub async fn node_revoke(
@@ -1893,6 +1898,119 @@ mod allowlist_rebuild {
             assert_eq!(left, vec![honest_did.clone()], "{name}: the row was not removed, or the honest one went with it");
             assert_eq!(*paired_keys.read().unwrap(), HashSet::from([honest]), "{name}: the allowlist changed");
         }
+    }
+
+    async fn agent_db(dir: &tempfile::TempDir) -> Arc<SqlitePool> {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        Arc::new(pool)
+    }
+
+    fn listed(said: UserResponse) -> (Vec<PairedNode>, Vec<kotton_wire::note::RowNote>) {
+        match said {
+            UserResponse::NodeList { nodes, notes } => (nodes, notes),
+            other => panic!("the listing answered {other:?}"),
+        }
+    }
+
+    /// **The node listing notes a row under bytes the rule refuses, by the
+    /// name `device revoke` takes, and the revoke by that name removes it**
+    /// (kottonllc/kotton#605), for every key vector the rule refuses. The
+    /// honest row beside it carries no note, and after the revoke the listing
+    /// carries none.
+    #[tokio::test]
+    async fn the_node_listing_notes_a_row_that_names_no_key_and_its_revoke_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[12u8; 32]));
+        let honest_did = kotton_crypto::DidKeyMethod::from_public_key(&honest).to_string();
+        network_db::insert_paired_node(&db, "laptop", "alice", &honest_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([honest])));
+
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
+            network_db::insert_paired_node(&db, "old", "alice", &did, &bytes, "[]", 0, None).await.unwrap();
+            let (nodes, notes) = listed(node_list(&db, "alice".into()).await.unwrap());
+            assert_eq!(nodes.len(), 2, "{name}: the row is listed as any other");
+            assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key("old")], "{name}");
+
+            let said = node_revoke(&NoMembers, &db, "alice".into(), notes[0].name.clone(), &paired_keys).await.unwrap();
+            assert!(matches!(said, UserResponse::NodeRevoked), "{name}: {said:?}");
+            let (nodes, notes) = listed(node_list(&db, "alice".into()).await.unwrap());
+            assert_eq!(nodes.iter().map(|n| n.device_did.to_string()).collect::<Vec<_>>(), vec![honest_did.clone()], "{name}");
+            assert!(notes.is_empty(), "{name}: {notes:?}");
+        }
+    }
+
+    /// **A note's name is one `device revoke` takes to its row**: the label
+    /// where the resolver takes the label to this row, the DID as stored
+    /// where the label is two rows' or is another row's DID. Every note's
+    /// name resolves, through [`network_db::paired_node_named`], to the row it
+    /// notes.
+    #[tokio::test]
+    async fn every_notes_name_resolves_to_its_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let refused = kotton_crypto::ed25519::refused_keys();
+        let row = |i: usize| (refused[i].1, kotton_crypto::DidKeyMethod::spelled_over(&refused[i].1).to_string());
+        let (one, one_did) = row(0);
+        let (two, two_did) = row(1);
+        let (three, three_did) = row(2);
+        let (four, four_did) = row(3);
+        // A label only this row carries.
+        network_db::insert_paired_node(&db, "attic", "alice", &one_did, &one, "[]", 0, None).await.unwrap();
+        // A label two rows carry.
+        network_db::insert_paired_node(&db, "twin", "alice", &two_did, &two, "[]", 0, None).await.unwrap();
+        network_db::insert_paired_node(&db, "twin", "alice", &three_did, &three, "[]", 0, None).await.unwrap();
+        // A label that is another row's DID.
+        network_db::insert_paired_node(&db, &one_did, "alice", &four_did, &four, "[]", 0, None).await.unwrap();
+
+        let (nodes, notes) = listed(node_list(&db, "alice".into()).await.unwrap());
+        assert_eq!(notes.len(), 4, "{notes:?}");
+        let name_of = |did: &str| notes.iter().zip(nodes.iter()).find(|(_, n)| n.device_did.to_string() == did).map(|(note, _)| note.name.clone()).unwrap();
+        assert_eq!(name_of(&one_did), "attic");
+        assert_eq!(name_of(&two_did), two_did);
+        assert_eq!(name_of(&three_did), three_did);
+        assert_eq!(name_of(&four_did), four_did, "a label that is another row's DID finds that row");
+        for (note, node) in notes.iter().zip(&nodes) {
+            let found = network_db::paired_node_named(&db, "alice", &note.name).await.unwrap().expect("the name finds a row");
+            assert_eq!(found.device_did.to_string(), node.device_did.to_string(), "{} finds another row", note.name);
+        }
+    }
+
+    /// **A row whose bytes pass under a `did:key` spelled another way is
+    /// noted with its key's `did:key` and the DID as stored, and is admitted
+    /// after the listing as before it** (5B, 18B).
+    #[tokio::test]
+    async fn a_row_under_another_spelling_is_noted_as_standing_by_its_bytes_and_still_admitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let spellings = include_str!("../../../wire/src/did/did-key-spellings.txt");
+        let mut lines = spellings.lines().filter(|l| !l.starts_with('#')).map(|l| l.split_once(' ').unwrap().1);
+        let did_key = lines.next().unwrap().to_string();
+        let other = lines.next().unwrap().to_string();
+        let key = kotton_crypto::DidKeyMethod::to_public_key(&did_key.parse().unwrap()).unwrap();
+        network_db::insert_paired_node(&db, "phone", "alice", &other, key.as_bytes(), "[]", 0, None).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let none: Vec<(String, Arc<dyn crate::membership::MemberStore>)> = vec![("alice".into(), Arc::new(NoMembers))];
+
+        reproject_allowlist(&none, &db, &paired_keys).await;
+        assert!(paired_keys.read().unwrap().contains(&key), "the row is not admitted before the listing");
+        let (_, notes) = listed(node_list(&db, "alice".into()).await.unwrap());
+        assert_eq!(
+            notes,
+            vec![kotton_wire::note::RowNote {
+                name: "phone".into(),
+                is: kotton_wire::note::NoteKind::StandsByBytes { did_key: did_key.clone(), stored: other.clone() },
+            }]
+        );
+        let said = kotton_wire::note::sentence(&notes[0], "device revoke");
+        assert!(!said.contains("device revoke"), "{said}");
+        reproject_allowlist(&none, &db, &paired_keys).await;
+        assert!(paired_keys.read().unwrap().contains(&key), "the row is not admitted after the listing");
     }
 }
 

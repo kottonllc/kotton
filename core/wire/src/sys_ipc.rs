@@ -357,7 +357,14 @@ pub enum DeviceResponse {
     SessionList { sessions: Vec<UserSessionInfo> },
 
     /// This device's operators, oldest first.
-    SudoersList { operators: Vec<DeviceOperator> },
+    SudoersList {
+        operators: Vec<DeviceOperator>,
+        /// A note for each `operators` row, and each kept key, whose DID names
+        /// no Ed25519 key, by the DID as stored ([`crate::note`]). Left off the
+        /// wire when there is none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<crate::note::RowNote>,
+    },
 
     /// A sudoers mutation completed successfully.
     SudoersModified,

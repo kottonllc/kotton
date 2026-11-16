@@ -210,12 +210,17 @@ async fn run(line: Line<'_>, state: &mut ShellState) -> Result<CommandOutput> {
             if as_json {
                 return json(&drives);
             }
+            let noted = super::device::notes_said(&drives.notes);
             if drives.is_empty() {
-                return Ok(CommandOutput::shapes(vec![Out::Note(
+                let mut shapes = vec![Out::Note(
                     "you keep no drive yet — your things live on a drive; `vault invite --me` makes one".into(),
-                )]));
+                )];
+                shapes.extend(noted);
+                return Ok(CommandOutput::shapes(shapes));
             }
-            Ok(CommandOutput::shapes(vec![table(&drives)]))
+            let mut shapes = vec![table(&drives)];
+            shapes.extend(noted);
+            Ok(CommandOutput::shapes(shapes))
         }
         Line::Show { name, json: as_json } => {
             let drives = client.lock().await.drive_show(&user_id, name).await.map_err(|e| said("show", e))?;

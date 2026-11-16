@@ -121,7 +121,7 @@ impl Peer<'_> {
     }
 
     /// Every paired device. See [`KottonClient::list_nodes`].
-    pub async fn nodes(&mut self) -> io::Result<Vec<PairedNode>> {
+    pub async fn nodes(&mut self) -> io::Result<kotton_wire::note::Listed<PairedNode>> {
         let u = self.user_id.clone();
         self.client.list_nodes(&u).await
     }
@@ -225,12 +225,14 @@ impl KottonClient {
     }
 
     /// List all paired nodes for `user_id`.
-    pub async fn list_nodes(&mut self, user_id: &str) -> io::Result<Vec<PairedNode>> {
+    /// The notes beside them are returned with them
+    /// ([`kotton_wire::note::Listed`]).
+    pub async fn list_nodes(&mut self, user_id: &str) -> io::Result<kotton_wire::note::Listed<PairedNode>> {
         let request = UserRequest::NodeList {
             user_id: user_id.to_string(),
         };
         match self.client.send(&request).await? {
-            UserResponse::NodeList { nodes } => Ok(nodes),
+            UserResponse::NodeList { nodes, notes } => Ok(kotton_wire::note::Listed { rows: nodes, notes }),
             UserResponse::Error { message } => Err(io::Error::other(message)),
             got => Err(crate::protocol::unexpected(got)),
         }
@@ -544,7 +546,7 @@ impl KottonClient {
     /// a caller that holds this client shared while a ceremony's stream is
     /// open — the line a vault's enrolment ends on, which says whether the
     /// vault keeps a drive (kotton #124). As [`Self::drive_list`] otherwise.
-    pub async fn drive_list_beside(&self, user_id: &str) -> io::Result<Vec<kotton_wire::ipc::DriveDescriptor>> {
+    pub async fn drive_list_beside(&self, user_id: &str) -> io::Result<kotton_wire::note::Listed<kotton_wire::ipc::DriveDescriptor>> {
         let token = self
             .session_token
             .as_deref()
@@ -553,7 +555,7 @@ impl KottonClient {
         let mut raw = self.fresh_connection().await?;
         authenticate_raw(&mut raw, &token).await?;
         match raw.send(&UserRequest::DriveList { user_id: user_id.to_string() }).await? {
-            UserResponse::Drives { drives } => Ok(drives),
+            UserResponse::Drives { drives, notes } => Ok(kotton_wire::note::Listed { rows: drives, notes }),
             UserResponse::Error { message } => Err(io::Error::other(message)),
             got => Err(crate::protocol::unexpected(got)),
         }

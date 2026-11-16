@@ -935,7 +935,7 @@ async fn create_holding(
         made_here(db, user_id, &made).await?;
     }
     tracing::info!(user_id, vault = %vault.node.id, "made a drive");
-    Ok(UserResponse::Drives { drives: vec![describe(&made, &sizes, &pins_now(runtime, records, store, db, user_id).await?)] })
+    Ok(UserResponse::Drives { drives: vec![describe(&made, &sizes, &pins_now(runtime, records, store, db, user_id).await?)], notes: Vec::new() })
 }
 
 /// What [`make_first`] did at an enrolment.
@@ -1036,7 +1036,8 @@ async fn made_here(db: &Arc<SqlitePool>, user_id: &str, made: &Drive) -> io::Res
 }
 
 /// `drive list`: every drive, after asking each vault what it keeps, and
-/// every unfinished move's tree, marked so.
+/// every unfinished move's tree, marked so; and beside them a note for each
+/// vault of the person's whose key is no key ([`vaults_noted`]).
 pub async fn list(
     runtime: &DeviceRuntime,
     store: &UserStore,
@@ -1049,7 +1050,30 @@ pub async fn list(
     let pins = pins_now(runtime, records, store, db, user_id).await?;
     let mut drives: Vec<DriveDescriptor> = record::kept(db, user_id).await?.iter().map(|d| describe(d, &sizes, &pins)).collect();
     drives.extend(unfinished_described(db, user_id, &seen).await?);
-    Ok(UserResponse::Drives { drives })
+    let notes = vaults_noted(db, user_id).await?;
+    Ok(UserResponse::Drives { drives, notes })
+}
+
+/// One note for each vault of `user_id`'s whose key the Ed25519 rule refuses,
+/// named as its node is ([`kotton_peer::daemon::db::name_of`]): a drive kept
+/// there is reached through nothing, and `device revoke` of that name removes
+/// the node and every record under its key together. One per vault, not per
+/// drive, since `drive list` reads made drives and such a vault may show none;
+/// none for a row under another spelling, which works and whose DID this
+/// listing never shows (kottonllc/kotton#597, 19A).
+pub async fn vaults_noted(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<kotton_wire::note::RowNote>> {
+    let rows = kotton_peer::daemon::db::list_paired_nodes(db, user_id).await?;
+    let mut notes: Vec<kotton_wire::note::RowNote> = Vec::new();
+    for vault in record::list(db, user_id).await? {
+        if kotton_crypto::ed25519::VerifyingKey::from_bytes(&vault.vault_key).is_ok() {
+            continue;
+        }
+        let name = kotton_peer::daemon::db::name_of(&rows, &vault.node);
+        if !notes.iter().any(|n| n.name == name) {
+            notes.push(kotton_wire::note::RowNote::names_no_key(name));
+        }
+    }
+    Ok(notes)
 }
 
 /// `drive show <name>`: the drives called `name`, one per vault it is kept on.
@@ -1074,7 +1098,7 @@ pub async fn show(
     if drives.is_empty() {
         return refused(format!("drive show: you have no drive called '{name}'"));
     }
-    Ok(UserResponse::Drives { drives })
+    Ok(UserResponse::Drives { drives, notes: Vec::new() })
 }
 
 /// One vault a move reads from or writes to: a made drive's tree there, and

@@ -313,6 +313,48 @@ pub async fn paired_node_named(
     }
 }
 
+/// The name [`paired_node_named`] takes to `row` among `rows`, the person's
+/// rows: its label where that resolver would take the label to this row and no
+/// other, and its DID as stored otherwise. The resolver reads a name as a DID
+/// first, so a label that is a row's DID finds that row and is no name for
+/// another; and a label two rows carry finds neither. One rule, the
+/// resolver's, read over rows already in hand (kottonllc/kotton#597, 20A).
+pub fn name_of(rows: &[PairedNode], row: &PairedNode) -> String {
+    let label = row.id.as_str();
+    let a_did = rows.iter().any(|r| r.device_did.to_string() == label);
+    let carried = rows.iter().filter(|r| r.id == label).count();
+    if !a_did && carried == 1 {
+        label.to_string()
+    } else {
+        row.device_did.to_string()
+    }
+}
+
+/// The note the node listing carries for `row`, one of `rows` (the person's),
+/// or `None` for a row whose DID is its key's `did:key`
+/// ([`kotton_wire::note`]): a row whose bytes the Ed25519 rule refuses names no
+/// key; a row whose bytes pass under a `did:key` that is not theirs stands by
+/// them (5B). A DID of another method beside a key is not read here. Made
+/// from the row and nothing else.
+pub fn note_of(rows: &[PairedNode], row: &PairedNode) -> Option<kotton_wire::note::RowNote> {
+    use kotton_wire::note::{NoteKind, RowNote};
+    match kotton_crypto::DidKeyMethod::from_public_key_bytes(&row.public_key) {
+        Err(_) => Some(RowNote::names_no_key(name_of(rows, row))),
+        Ok(did_key) if row.device_did.method() == "key" && did_key.to_string() != row.device_did.to_string() => {
+            Some(RowNote {
+                name: name_of(rows, row),
+                is: NoteKind::StandsByBytes { did_key: did_key.to_string(), stored: row.device_did.to_string() },
+            })
+        }
+        Ok(_) => None,
+    }
+}
+
+/// [`note_of`] for every row of `rows`, in their order.
+pub fn notes_of(rows: &[PairedNode]) -> Vec<kotton_wire::note::RowNote> {
+    rows.iter().filter_map(|r| note_of(rows, r)).collect()
+}
+
 /// Delete `user_id`'s row for the node `device_did`, and a drive reached
 /// through it ([`super::drives`]) that no other row of theirs still carries
 /// the key of: a drive with no node to reach it through is not one this device

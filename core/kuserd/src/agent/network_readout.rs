@@ -220,6 +220,21 @@ pub(crate) fn operated_relay_rows(
     relays
         .iter()
         .map(|(name, key, address)| {
+            // A kept key the Ed25519 rule refuses names no key: only an earlier
+            // build can have kept one. The card says so and how to remove it,
+            // and carries no key, since a surface matches by the key and bytes
+            // that are no key are not handed on as one; nothing stands at it
+            // and this device does not reserve there (kottonllc/kotton#597, 17A).
+            if key.is_some_and(|k| kotton_crypto::ed25519::VerifyingKey::from_bytes(&k).is_err()) {
+                return kotton_wire::runner::RunnerOperatedRelay {
+                    name: name.clone(),
+                    key: None,
+                    address: address.clone(),
+                    standing: Vec::new(),
+                    here: false,
+                    no_key: Some(keyless_relay_words(name)),
+                };
+            }
             let mut standing: Vec<String> = match key {
                 Some(k) => vaults.iter().filter(|v| told(&v.vault).contains(k)).map(|v| v.name.clone()).collect(),
                 None => Vec::new(),
@@ -234,6 +249,7 @@ pub(crate) fn operated_relay_rows(
                 address: address.clone(),
                 standing,
                 here,
+                no_key: None,
             }
         })
         .collect()
@@ -283,9 +299,13 @@ pub(crate) fn vault_rows(
     let mut rows: Vec<RunnerVault> = enrolled
         .iter()
         .map(|t| {
+            // A row is matched by its key's `did:key`, never by the DID
+            // stored beside its bytes, which may be another spelling (5B).
             let learned = nodes
                 .iter()
-                .find(|n| n.device_did.to_string() == t.handle)
+                .find(|n| {
+                    kotton_crypto::DidKeyMethod::from_public_key_bytes(&n.public_key).is_ok_and(|d| d.to_string() == t.handle)
+                })
                 .and_then(|n| n.relay_url.as_deref());
             RunnerVault {
                 label: t.label.clone(),
@@ -340,13 +360,24 @@ pub(crate) fn vault_rows(
     rows
 }
 
+/// The shell's verbs that remove a kept credential by its name: what the
+/// readout's sentences name, as the shell registers them (`vault forget`,
+/// `relay forget`). The occupant has no registry to hand a verb from.
+pub(crate) const VAULT_FORGET: &str = "vault forget";
+/// See [`VAULT_FORGET`].
+pub(crate) const RELAY_FORGET: &str = "relay forget";
+
 /// What a kept vault credential whose key names no Ed25519 key holds, in one
-/// sentence: that it names none, so nothing is reached or checked under it, and
-/// the verb that removes it.
+/// sentence ([`kotton_wire::note::sentence`]): that it names none, so nothing
+/// is reached or checked under it, and the verb that removes it.
 pub(crate) fn keyless_vault_words(name: &str) -> String {
-    format!(
-        "nothing: the key kept for it is not an Ed25519 key, so nothing is reached or checked under it; `vault forget {name}` removes it"
-    )
+    format!("nothing: {}", kotton_wire::note::sentence(&kotton_wire::note::RowNote::names_no_key(name), VAULT_FORGET))
+}
+
+/// What a kept relay credential whose key is present and names no Ed25519 key
+/// says on its card, in the same sentence with the relay's verb.
+pub(crate) fn keyless_relay_words(name: &str) -> String {
+    kotton_wire::note::sentence(&kotton_wire::note::RowNote::names_no_key(name), RELAY_FORGET)
 }
 
 /// Whether a peer on the same network can reach this device directly.
@@ -364,16 +395,20 @@ mod tests {
     use super::*;
     use kotton_wire::runner::{RunnerRootMember, RunnerRootTarget};
 
-    /// The DID the fixtures below use for the vault, as a `did:key` string.
-    const VAULT: &str = "did:key:z6MkVaultDroplet";
+    /// The DID the fixtures below use for the vault: a key's `did:key`, the
+    /// first line of `kotton-wire`'s `did/did-key-spellings.txt`.
+    const VAULT: &str = "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX";
     /// And for the person's other device.
-    const PHONE: &str = "did:key:z6MkPhone";
+    const PHONE: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
 
+    /// A row under `did`, holding the key it names: a row's key is read from
+    /// its bytes, and the readout matches a row by its key's `did:key`.
     fn node(did: &str, relay: Option<&str>) -> PairedNode {
+        let device_did = kotton_wire::did::Did::parse(did).expect("a did:key parses");
         PairedNode {
             id: "a-label".to_owned(),
-            device_did: kotton_wire::did::Did::parse(did).expect("a did:key parses"),
-            public_key: [0u8; 32],
+            public_key: *kotton_crypto::DidKeyMethod::to_public_key(&device_did).expect("a key's did:key").as_bytes(),
+            device_did,
             paired_at: 1_755_648_000,
             addresses: Vec::new(),
             relay_url: relay.map(str::to_owned),
@@ -545,7 +580,10 @@ mod tests {
     /// carries the address it was told and the date.
     #[test]
     fn a_relays_card_lists_who_stands_at_it_by_key_and_a_vault_says_where_it_stands() {
-        let (gate, attic) = ([1u8; 32], [2u8; 32]);
+        // Keys made from a seed: a relay's kept key the Ed25519 rule refuses is
+        // a card that names no key (`a_kept_credential_that_names_no_key_*`).
+        let seeded = |n: u8| ed25519_dalek::SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes();
+        let (gate, attic) = (seeded(1), seeded(2));
         let vault = |n: u8, name: &str, at: Option<[u8; 32]>| Operated {
             vault: ed25519_dalek::SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes(),
             name: name.to_owned(),
@@ -605,9 +643,24 @@ mod tests {
             assert!(!rows[0].yours, "{name}: the enrolled row was matched to a credential that names no key");
             let row = rows.iter().find(|r| r.holds == keyless_vault_words("attic")).unwrap_or_else(|| panic!("{name}: not listed: {rows:?}"));
             assert!(row.yours && row.vault_name.as_deref() == Some("attic") && !row.answering, "{name}: {row:?}");
-            assert!(row.holds.contains("not an Ed25519 key") && row.holds.contains("`vault forget attic`"), "{}", row.holds);
+            assert!(row.holds.contains("names no Ed25519 key") && row.holds.contains("`vault forget attic`"), "{}", row.holds);
             assert!(rows.iter().any(|r| r.vault_name.as_deref() == Some("kotton") && r.holds == "nothing of yours"));
         }
+    }
+
+    /// **An enrolled vault is matched to its paired row by the row's key's `did:key`**, not by
+    /// the DID stored beside the bytes: a row stored under another spelling of the vault's
+    /// `did:key` still gives the row the relay it reserves at (kottonllc/kotton#605, 5B).
+    #[test]
+    fn a_row_is_matched_to_its_vault_by_its_keys_did_key() {
+        let relay_url = "http://droplet.austin.dev:7700";
+        let spellings = include_str!("../../../wire/src/did/did-key-spellings.txt");
+        let other = spellings.lines().filter(|l| !l.starts_with('#')).nth(1).unwrap().split_once(' ').unwrap().1;
+        let mut row = node(VAULT, Some(relay_url));
+        row.device_did = kotton_wire::did::Did::parse(other).unwrap();
+        let enrolled = vec![Target::new(VAULT, Some("Vault".to_owned()))];
+        let rows = vault_rows(&enrolled, &[row], &[], &|_| true, &[], &[]);
+        assert_eq!(rows[0].through.as_deref(), Some("droplet.austin.dev:7700"), "{rows:?}");
     }
 
     /// **No relay named is no row**, which is not the same fact as a row that

@@ -194,7 +194,9 @@ pub(crate) async fn read(
         Standing::Kept => Ok(None),
         Standing::Operator { mut client, own } => {
             match tokio::time::timeout(WITHIN, send(&mut client, DeviceRequest::SudoersList)).await {
-                Ok(Ok(DeviceResponse::SudoersList { operators })) => Ok(Some((own, operators))),
+                // The occupant names people, never keys, and lists none: a note
+                // on a key's row is `kctl sudoers list`'s to print.
+                Ok(Ok(DeviceResponse::SudoersList { operators, .. })) => Ok(Some((own, operators))),
                 Ok(Ok(other)) => Err(unread("SudoersList", other)),
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err("this machine's kdeviced did not answer".to_owned()),

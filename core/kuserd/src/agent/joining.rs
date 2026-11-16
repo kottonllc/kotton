@@ -585,6 +585,7 @@ mod tests {
                     node: node.clone(),
                     session_token: None,
                     relay_offer: None,
+                    not_handed: Vec::new(),
                 },
                 RELAY
             ),
@@ -602,6 +603,7 @@ mod tests {
                     node,
                     session_token: None,
                     relay_offer: Some(format!("kotton-instance:relay:{}@http://{RELAY}", "ab".repeat(32))),
+                    not_handed: Vec::new(),
                 },
                 RELAY
             ),
