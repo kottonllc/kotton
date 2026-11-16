@@ -4,7 +4,11 @@
 //! `VerifyingKey::verify` every other check goes through.
 //!
 //! The handshake signature on a peer connection (`core/net`'s TLS verifiers) and the signature
-//! the threshold-signing provider's `aggregate` returns are checked through the same type.
+//! the threshold-signing provider's `aggregate` returns are checked through the same type. The
+//! threshold library (`frost-ed25519`, over `frost-core`) is a dependency of `kotton-crypto`
+//! alone, whose provider (`core/crypto/src/provider/frost.rs`) hands every group key and
+//! signature to that type, and the library's own signature checks are refused like the
+//! unstrict one.
 //!
 //! ## What holds it
 //!
@@ -12,14 +16,16 @@
 //!
 //! - **The workspace's `clippy.toml`** refuses `ed25519_dalek::Verifier::verify` and the
 //!   inherent `ed25519_dalek::SigningKey::verify`: the two ways to make the unstrict check with
-//!   the library's features the tree turns on. Clippy resolves the call, so a trait brought in
+//!   the library's features the tree turns on. It refuses the threshold library's own checks of
+//!   a group signature too ([`THRESHOLD_REFUSED`]), in `kotton-crypto` as everywhere: its
+//!   provider checks through the rule's type. Clippy resolves the call, so a trait brought in
 //!   under any name, a generic bound or a fully qualified call is refused as surely as
 //!   `key.verify(..)`. `just lint` runs clippy over the workspace and over the relay's own
 //!   workspace, `--all-targets`, so tests are held too, and with `-D warnings`, so a refusal
 //!   fails the gate.
 //! - **This check** holds what clippy cannot hold of itself:
-//!   - the file is there and names both methods in its top-level `disallowed-methods`, and no
-//!     other `clippy.toml` or `.clippy.toml` (at the root or below it) shadows it;
+//!   - the file is there and names every refused method in its top-level `disallowed-methods`,
+//!     and no other `clippy.toml` or `.clippy.toml` (at the root or below it) shadows it;
 //!   - the two lint runs are there: in the `Justfile` and `just/`, a `cargo clippy` run over
 //!     the workspace and one with `--manifest-path infra/relay/Cargo.toml`, each
 //!     `--all-targets` with `-D warnings` after `--`;
@@ -31,6 +37,10 @@
 //!     `CLIPPY_CONF_DIR`;
 //!   - no manifest turns on a feature of the library that adds a check other than the two
 //!     methods `clippy.toml` names, or loosens the strict one ([`FEATURES`]);
+//!   - no manifest but [`THRESHOLD_HOME`] lists the threshold library ([`THRESHOLD`]), in any
+//!     dependency table, renamed or not; the root manifest's `[workspace.dependencies]` entry
+//!     declares its version and is not a dependency. So no crate but `kotton-crypto` can name
+//!     the library, and its signatures reach the rest of the tree only through the provider;
 //!   - the seam: `verify_strict` is called in [`SEAM`] and in no other file under the code
 //!     roots, the relay's included; every other check is `kotton_ed25519::VerifyingKey::verify`
 //!     or reaches it.
@@ -86,6 +96,25 @@ const REFUSED: &[&str] = &["ed25519_dalek::Verifier::verify", "ed25519_dalek::Si
 /// The library, by its package name.
 const LIBRARY: &str = "ed25519-dalek";
 
+/// The threshold-signing library, by its package names: the Ed25519 ciphersuite and the core
+/// it is built on, either of which reaches the library's own checks.
+const THRESHOLD: &[&str] = &["frost-ed25519", "frost-core"];
+
+/// The one manifest that lists [`THRESHOLD`]: `kotton-crypto`'s, whose provider hands every
+/// group key and signature to the Ed25519 rule.
+const THRESHOLD_HOME: &str = "core/crypto/Cargo.toml";
+
+/// The threshold library's own checks of a group signature, read from `frost-core` 2.2.0's
+/// source: a key's `verify`, the batch verifier's two, and the ciphersuite's
+/// `verify_signature`, which the others call. `frost-ed25519`'s names for these types are
+/// aliases, so clippy resolves a call through them to these paths.
+const THRESHOLD_REFUSED: &[&str] = &[
+    "frost_core::VerifyingKey::verify",
+    "frost_core::batch::Verifier::verify",
+    "frost_core::batch::Item::verify_single",
+    "frost_core::Ciphersuite::verify_signature",
+];
+
 /// The library's features that no manifest turns on, read from `ed25519-dalek` 2.2.0's source:
 /// each adds a way to check a signature other than the two methods in [`REFUSED`], or
 /// loosens the strict check itself.
@@ -140,7 +169,8 @@ pub fn run(root: &Path) {
 fn ok_line(count: usize) -> String {
     format!(
         "ed25519-check: OK: {count} source file(s); every check made with {LIBRARY} is strict: clippy.toml \
-         refuses the unstrict check, both clippy runs are --all-targets with -D warnings, nothing lowers that but one named exemption, no manifest turns on \
+         refuses the unstrict check and the threshold library's own checks, {THRESHOLD_HOME} alone lists \
+         the threshold library, both clippy runs are --all-targets with -D warnings, nothing lowers that but one named exemption, no manifest turns on \
          a feature that adds another check, and verify_strict is called in one file in the tree, the relay \
          included ({SEAM})."
     )
@@ -150,7 +180,8 @@ fn ok_line(count: usize) -> String {
 fn failure_footer() -> String {
     format!(
         "\nEvery Ed25519 check made with {LIBRARY} is strict, and verify_strict is called in one file in the \
-         tree, the relay included: {SEAM}. Check through kotton_ed25519::VerifyingKey::verify."
+         tree, the relay included: {SEAM}. Check through kotton_ed25519::VerifyingKey::verify. The threshold \
+         library is a dependency of {THRESHOLD_HOME} alone, whose provider checks its signatures the same way."
     )
 }
 
@@ -213,6 +244,7 @@ fn findings(root: &Path) -> (usize, Vec<String>) {
     found.extend(lint_run_findings(&others));
     let root_manifest: Vec<(String, String)> = others.iter().filter(|(f, _)| f == "Cargo.toml").cloned().collect();
     found.extend(feature_findings(manifests.iter().chain(&root_manifest)));
+    found.extend(threshold_findings(manifests.iter().chain(&root_manifest)));
     found.extend(seam_findings(&sources));
     (sources.len(), found)
 }
@@ -241,7 +273,7 @@ fn config_findings(config: Option<&str>, shadows: &[String]) -> Vec<String> {
                     .flatten()
                     .filter_map(|v| v.as_str().or_else(|| v.get("path").and_then(Value::as_str)))
                     .collect();
-                for m in REFUSED {
+                for m in REFUSED.iter().chain(THRESHOLD_REFUSED) {
                     if !named.contains(m) {
                         out.push(format!("{CLIPPY_TOML} does not refuse `{m}` (disallowed-methods)"));
                     }
@@ -501,6 +533,31 @@ fn feature_findings<'a>(manifests: impl Iterator<Item = &'a (String, String)>) -
     out
 }
 
+/// No manifest but [`THRESHOLD_HOME`] lists a package in [`THRESHOLD`], in any dependency table,
+/// inline or table form, renamed or not. The root manifest's `[workspace.dependencies]` entry
+/// declares the version a member inherits and is not a dependency, so it is not a finding. A
+/// manifest that does not parse is `feature_findings`' finding.
+fn threshold_findings<'a>(manifests: impl Iterator<Item = &'a (String, String)>) -> Vec<String> {
+    let mut out = Vec::new();
+    for (file, text) in manifests {
+        if file == THRESHOLD_HOME {
+            continue;
+        }
+        let Ok(m) = Manifest::read(text) else { continue };
+        for d in m.deps.iter().filter(|d| THRESHOLD.contains(&d.package.as_str())) {
+            if file == "Cargo.toml" && d.table == "workspace.dependencies" {
+                continue;
+            }
+            out.push(format!(
+                "{file}: [{}] {} lists {}: the threshold library is a dependency of {THRESHOLD_HOME} alone; \
+                 use its provider, kotton_crypto::frost",
+                d.table, d.key, d.package
+            ));
+        }
+    }
+    out
+}
+
 /// `verify_strict` is called in [`SEAM`] and in no other file. Comment lines are skipped, and
 /// so is this check's own source, whose tests spell what it refuses.
 fn seam_findings(sources: &[(String, String)]) -> Vec<String> {
@@ -641,10 +698,10 @@ mod tests {
 
     #[test]
     fn the_config_names_both_methods_and_is_not_shadowed() {
-        let good = "disallowed-methods = [\n  { path = \"ed25519_dalek::Verifier::verify\", reason = \"r\" },\n  { path = \"ed25519_dalek::SigningKey::verify\", reason = \"r\" },\n]\n";
+        let good = GOOD_CONFIG;
         assert!(config_findings(Some(good), &[]).is_empty());
-        let one_only = "disallowed-methods = [\n  { path = \"ed25519_dalek::Verifier::verify\", reason = \"r\" },\n  # { path = \"ed25519_dalek::SigningKey::verify\" },\n]\n";
-        assert_eq!(config_findings(Some(one_only), &[]).len(), 1);
+        let one_only = GOOD_CONFIG.replace("  { path = \"ed25519_dalek::SigningKey::verify\"", "  # { path = \"ed25519_dalek::SigningKey::verify\"");
+        assert_eq!(config_findings(Some(&one_only), &[]).len(), 1);
         assert_eq!(config_findings(None, &[]).len(), 1);
         assert_eq!(config_findings(Some(good), &["infra/relay/clippy.toml".into()]).len(), 1);
     }
@@ -794,7 +851,7 @@ mod tests {
         assert_eq!(with("[dependencies]\ned25519-dalek = { version = \"2.2.0\", default-features = false, features = [\"alloc\", \"default\", \"fast\", \"rand_core\", \"std\", \"zeroize\"] }\n"), 0);
     }
 
-    const GOOD_CONFIG: &str = "disallowed-methods = [\n  { path = \"ed25519_dalek::Verifier::verify\", reason = \"r\" },\n  { path = \"ed25519_dalek::SigningKey::verify\", reason = \"r\" },\n]\n";
+    const GOOD_CONFIG: &str = "disallowed-methods = [\n  { path = \"ed25519_dalek::Verifier::verify\", reason = \"r\" },\n  { path = \"ed25519_dalek::SigningKey::verify\", reason = \"r\" },\n  { path = \"frost_core::VerifyingKey::verify\", reason = \"r\" },\n  { path = \"frost_core::batch::Verifier::verify\", reason = \"r\" },\n  { path = \"frost_core::batch::Item::verify_single\", reason = \"r\" },\n  { path = \"frost_core::Ciphersuite::verify_signature\", reason = \"r\" },\n]\n";
     const GOOD_JUSTFILE: &str = "lint:\n    # cargo clippy, in prose\n    cargo clippy --all-targets -- -D warnings\n    cargo clippy --manifest-path infra/relay/Cargo.toml --target-dir {{relay_target}} --all-targets -- -D warnings\n";
 
     /// A tree that holds, at `dir`: `clippy.toml`, the seam with the exemption in it, a root manifest
@@ -852,10 +909,11 @@ mod tests {
         assert!(config_findings(Some(GOOD_CONFIG), &[]).is_empty());
         // Named under another key, or under a table's key of the same name, is not refusing.
         let other_key = GOOD_CONFIG.replace("disallowed-methods", "disallowed-types");
-        assert_eq!(config_findings(Some(&other_key), &[]).len(), 2);
+        let every = REFUSED.len() + THRESHOLD_REFUSED.len();
+        assert_eq!(config_findings(Some(&other_key), &[]).len(), every);
         let in_a_table = format!("[elsewhere]\n{GOOD_CONFIG}");
-        assert_eq!(config_findings(Some(&in_a_table), &[]).len(), 2);
-        let split = "disallowed-methods = [\n  { path = \"ed25519_dalek::Verifier::verify\", reason = \"r\" },\n]\nmsrv = \"1.80\" # ed25519_dalek::SigningKey::verify\ndisallowed-types = [\"ed25519_dalek::SigningKey::verify\"]\n";
+        assert_eq!(config_findings(Some(&in_a_table), &[]).len(), every);
+        let split = "disallowed-methods = [\n  { path = \"ed25519_dalek::Verifier::verify\", reason = \"r\" },\n  { path = \"frost_core::VerifyingKey::verify\", reason = \"r\" },\n  { path = \"frost_core::batch::Verifier::verify\", reason = \"r\" },\n  { path = \"frost_core::batch::Item::verify_single\", reason = \"r\" },\n  { path = \"frost_core::Ciphersuite::verify_signature\", reason = \"r\" },\n]\nmsrv = \"1.80\" # ed25519_dalek::SigningKey::verify\ndisallowed-types = [\"ed25519_dalek::SigningKey::verify\"]\n";
         assert_eq!(config_findings(Some(split), &[]).len(), 1);
     }
 
@@ -987,6 +1045,52 @@ mod tests {
                 "{path}: {found:#?}"
             );
         }
+    }
+
+    /// Each of the threshold library's own checks, gone from `clippy.toml`, is a finding.
+    #[test]
+    fn the_config_refuses_the_threshold_librarys_checks() {
+        assert_eq!(THRESHOLD_REFUSED.len(), 4);
+        for m in THRESHOLD_REFUSED {
+            let line = format!("  {{ path = \"{m}\", reason = \"r\" }},\n");
+            assert!(GOOD_CONFIG.contains(&line), "{m}");
+            let without = GOOD_CONFIG.replace(&line, "");
+            let found = config_findings(Some(&without), &[]);
+            assert_eq!(found, [format!("{CLIPPY_TOML} does not refuse `{m}` (disallowed-methods)")], "{m}");
+        }
+    }
+
+    /// A manifest other than kotton-crypto's that lists the threshold library fails the whole
+    /// check, in any dependency table, inline or table form, renamed or not; kotton-crypto's,
+    /// and the root's `[workspace.dependencies]` entry, do not.
+    #[test]
+    fn a_manifest_other_than_kotton_cryptos_listing_the_threshold_library_is_a_finding() {
+        let member = |deps: &str| format!("[package]\nname = \"kotton-org\"\n\n{deps}");
+        for package in THRESHOLD {
+            for deps in [
+                format!("[dependencies]\n{package} = {{ workspace = true }}\n"),
+                format!("[dev-dependencies]\n{package} = \"2.2\"\n"),
+                format!("[build-dependencies]\n{package} = \"2.2\"\n"),
+                format!("[target.'cfg(unix)'.dependencies]\n{package} = {{ workspace = true }}\n"),
+                format!("[dependencies.{package}]\nworkspace = true\n"),
+                format!("[dependencies]\nthreshold = {{ package = \"{package}\", version = \"2.2\", optional = true }}\n"),
+            ] {
+                for file in ["core/org/Cargo.toml", "core/kuserd/Cargo.toml", "infra/relay/Cargo.toml"] {
+                    let found = findings_with(file, &member(&deps));
+                    assert_eq!(found.len(), 1, "{file}: {deps}: {found:#?}");
+                    assert!(found[0].starts_with(&format!("{file}: [")), "{found:#?}");
+                    assert!(found[0].contains(&format!("lists {package}")), "{found:#?}");
+                }
+                assert!(findings_with(THRESHOLD_HOME, &member(&deps)).is_empty(), "{deps}");
+            }
+            // The root's version declaration is not a dependency; a dependency of the root is.
+            let declared = format!("[workspace.dependencies]\ned25519-dalek = {{ version = \"2.1\", features = [\"rand_core\"] }}\n{package} = {{ version = \"2.2\", features = [\"serde\"] }}\n");
+            assert!(findings_with("Cargo.toml", &declared).is_empty(), "{package}");
+            let depended = format!("{declared}[dependencies]\n{package} = {{ workspace = true }}\n");
+            assert_eq!(findings_with("Cargo.toml", &depended).len(), 1, "{package}");
+        }
+        // Another package is not a finding.
+        assert!(findings_with("core/org/Cargo.toml", &member("[dependencies]\nfrost = \"1\"\n")).is_empty());
     }
 
     /// The tree as it is: every hold above holds.

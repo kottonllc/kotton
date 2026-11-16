@@ -1,6 +1,6 @@
 # Read by `cargo clippy` for every crate in this tree, the relay's workspace included: clippy
 # looks for this file from a crate's directory upwards, and no other is kept
-# (`cargo xtask ed25519-check` holds that, and that both entries below are here).
+# (`cargo xtask ed25519-check` holds that, and that every entry below is here).
 
 disallowed-methods = [
     # Every Ed25519 check made with ed25519-dalek is strict: it goes through
@@ -8,4 +8,12 @@ disallowed-methods = [
     # the relay's workspace included. The one exemption is named in `cargo xtask ed25519-check`.
     { path = "ed25519_dalek::Verifier::verify", reason = "every Ed25519 check made with ed25519-dalek is strict: check through kotton_ed25519::VerifyingKey::verify" },
     { path = "ed25519_dalek::SigningKey::verify", reason = "every Ed25519 check made with ed25519-dalek is strict: check through kotton_ed25519::VerifyingKey::verify" },
+    # The threshold library's own checks of a group signature. It is a dependency of
+    # kotton-crypto alone, whose provider (`core/crypto/src/provider/frost.rs`) hands every group
+    # key and signature to the same rule; `frost_ed25519`'s names for these types are aliases of
+    # these, so a call through either is refused, in kotton-crypto as everywhere.
+    { path = "frost_core::VerifyingKey::verify", reason = "a threshold signature is checked by the Ed25519 rule: check through kotton_ed25519::VerifyingKey::verify" },
+    { path = "frost_core::batch::Verifier::verify", reason = "a threshold signature is checked by the Ed25519 rule: check through kotton_ed25519::VerifyingKey::verify" },
+    { path = "frost_core::batch::Item::verify_single", reason = "a threshold signature is checked by the Ed25519 rule: check through kotton_ed25519::VerifyingKey::verify" },
+    { path = "frost_core::Ciphersuite::verify_signature", reason = "a threshold signature is checked by the Ed25519 rule: check through kotton_ed25519::VerifyingKey::verify" },
 ]

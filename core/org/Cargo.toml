@@ -20,7 +20,6 @@ tokio = { workspace = true }
 quinn = "0.11"
 serde = { workspace = true }
 serde_json = { workspace = true }
-frost-ed25519 = { workspace = true }
 hex = "0.4"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 uuid = { version = "1.6", features = ["v4"] }
