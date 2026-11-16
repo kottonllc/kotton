@@ -305,6 +305,7 @@ pub(crate) mod redial_tests {
     use super::*;
     use kotton_net::transport::quic::tls::{self, Ed25519DeviceCert, PairedDeviceVerifier};
     use std::collections::HashSet;
+    use kotton_crypto::ed25519::VerifyingKey;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
@@ -316,7 +317,7 @@ pub(crate) mod redial_tests {
 
     fn allowing(key: &ed25519_dalek::SigningKey) -> Arc<PairedDeviceVerifier> {
         let mut keys = HashSet::new();
-        keys.insert(key.verifying_key().to_bytes());
+        keys.insert(VerifyingKey::from_bytes(&key.verifying_key().to_bytes()).unwrap());
         PairedDeviceVerifier::new(Arc::new(RwLock::new(keys)))
     }
 
@@ -328,7 +329,7 @@ pub(crate) mod redial_tests {
         idle: Duration,
     ) -> std::net::SocketAddr {
         let mut keys = HashSet::new();
-        keys.insert(client.verifying_key().to_bytes());
+        keys.insert(VerifyingKey::from_bytes(&client.verifying_key().to_bytes()).unwrap());
         echo_peer_admitting(server, Arc::new(RwLock::new(keys)), idle)
     }
 
@@ -336,7 +337,7 @@ pub(crate) mod redial_tests {
     /// the live allowlist a real peer keeps, so a test can unpair a device.
     fn echo_peer_admitting(
         server: &ed25519_dalek::SigningKey,
-        allowed: Arc<RwLock<HashSet<[u8; 32]>>>,
+        allowed: Arc<RwLock<HashSet<VerifyingKey>>>,
         idle: Duration,
     ) -> std::net::SocketAddr {
         let cert = Ed25519DeviceCert::from_signing_key(server).unwrap();
@@ -472,7 +473,7 @@ pub(crate) mod redial_tests {
     async fn a_device_unpaired_since_the_first_dial_is_refused_on_the_redial() {
         let (server, client) = keys();
         let mut keys = HashSet::new();
-        keys.insert(client.verifying_key().to_bytes());
+        keys.insert(VerifyingKey::from_bytes(&client.verifying_key().to_bytes()).unwrap());
         let allowed = Arc::new(RwLock::new(keys));
         let addr = echo_peer_admitting(&server, Arc::clone(&allowed), IDLE);
         let dials = Arc::new(AtomicUsize::new(0));

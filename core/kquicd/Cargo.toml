@@ -10,6 +10,8 @@ kotton-sys = { path = "../sys" }
 kotton-wire = { path = "../wire" }
 kotton-ipc = { path = "../ipc" }
 kotton-net = { path = "../net" }
+# The allowlist's element: a key that passed the Ed25519 rule.
+kotton-ed25519 = { path = "../ed25519" }
 kotton-common = { path = "../common" }
 
 ed25519-dalek = { workspace = true }

@@ -28,6 +28,7 @@ use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
+use kotton_ed25519::VerifyingKey;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Requested scope for the kquicd administrative IPC connection.
@@ -133,7 +134,7 @@ async fn main() -> io::Result<()> {
 
     // ── Authorized-client allowlist ──────────────────────────────────────────
     let initial_keys = fetch_allowed_keys(&mut admin, &user_id).await?;
-    let allowed_keys: Arc<RwLock<HashSet<[u8; 32]>>> =
+    let allowed_keys: Arc<RwLock<HashSet<VerifyingKey>>> =
         Arc::new(RwLock::new(initial_keys));
 
     // ── QUIC gateway config ──────────────────────────────────────────────────
@@ -478,11 +479,11 @@ async fn write_response_frame(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Fetch the raw Ed25519 public-key bytes for all paired clients of `user_id`.
+/// Fetch the Ed25519 public keys of all paired clients of `user_id`.
 async fn fetch_allowed_keys(
     client: &mut IpcClient<UserRequest, UserResponse>,
     user_id: &str,
-) -> io::Result<HashSet<[u8; 32]>> {
+) -> io::Result<HashSet<VerifyingKey>> {
     match client
         .send(&UserRequest::GetAuthorizedClients {
             user_id: user_id.to_string(),
@@ -497,7 +498,9 @@ async fn fetch_allowed_keys(
                 let arr: [u8; 32] = bytes
                     .try_into()
                     .map_err(|_| io::Error::other("pubkey must be 32 bytes"))?;
-                set.insert(arr);
+                let key = VerifyingKey::from_bytes(&arr)
+                    .map_err(|e| io::Error::other(format!("pubkey is not an Ed25519 key: {e}")))?;
+                set.insert(key);
             }
             Ok(set)
         }
@@ -512,7 +515,7 @@ async fn refresh_allowed_keys(
     token: &str,
     ipc_endpoint: &IpcEndpoint,
     user_id: &str,
-) -> io::Result<HashSet<[u8; 32]>> {
+) -> io::Result<HashSet<VerifyingKey>> {
     let mut client: IpcClient<UserRequest, UserResponse> =
         IpcClient::connect_to_own_user(ipc_endpoint.clone()).await?;
     client

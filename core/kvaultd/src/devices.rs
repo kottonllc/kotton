@@ -43,6 +43,7 @@
 use kotton_record::immediate::Immediate;
 use crate::peer::PeerContext;
 use kotton_crypto::ed25519::Signature;
+use kotton_crypto::ed25519::VerifyingKey;
 use kotton_crypto::did::DidKeyMethod;
 use kotton_crypto::kel_verify::{resolve_current_key, LocalArbiter};
 use kotton_wire::did::Did;
@@ -98,7 +99,7 @@ pub async fn change(ctx: &PeerContext, user_id: &str, change: TenantDeviceChange
 pub async fn accept(
     base: &std::path::Path,
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<std::sync::RwLock<std::collections::HashSet<VerifyingKey>>>,
     user_id: &str,
     change: &TenantDeviceChange,
     signature: &[u8],
@@ -147,7 +148,7 @@ pub async fn accept(
 /// toward refusing.
 async fn apply(
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<std::sync::RwLock<std::collections::HashSet<VerifyingKey>>>,
     user_id: &str,
     change: &TenantDeviceChange,
 ) -> io::Result<Result<(), String>> {
@@ -159,7 +160,7 @@ async fn apply(
 /// fails, to hold that a failed end returns no locked connection to the pool.
 async fn apply_ending(
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<std::sync::RwLock<std::collections::HashSet<VerifyingKey>>>,
     user_id: &str,
     change: &TenantDeviceChange,
     end: Option<&str>,
@@ -169,8 +170,12 @@ async fn apply_ending(
     let taken = matches!(outcome, Ok(Ok(())));
     tx.end(end.unwrap_or(if taken { "COMMIT" } else { "ROLLBACK" })).await?;
     let outcome = outcome?;
+    // The key enters the allowlist as a key or not at all: bytes the Ed25519 rule
+    // refuses are not put on it.
     if outcome.is_ok() && change.act == TenantDeviceAct::Admit {
-        paired_keys.write().unwrap().insert(change.public_key);
+        if let Ok(key) = VerifyingKey::from_bytes(&change.public_key) {
+            paired_keys.write().unwrap().insert(key);
+        }
     }
     Ok(outcome)
 }
@@ -289,10 +294,10 @@ mod tests {
     async fn an_admitted_key_is_paired_to_the_tenant_and_a_withdrawn_one_is_not() {
         let db = a_vault_db().await;
         let keys = Arc::new(RwLock::new(HashSet::new()));
-        let key = [3u8; 32];
+        let (key, _) = a_device(3);
         apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 10)).await.unwrap().unwrap();
         assert!(paired(&db, "alice", &key).await);
-        assert!(keys.read().unwrap().contains(&key));
+        assert!(keys.read().unwrap().contains(&VerifyingKey::from_bytes(&key).unwrap()));
         apply(&db, &keys, "alice", &a_change(TenantDeviceAct::Withdraw, key, 11)).await.unwrap().unwrap();
         assert!(!paired(&db, "alice", &key).await);
     }
@@ -451,7 +456,7 @@ mod tests {
             .unwrap_err();
         assert!(why.contains("does not resolve to a key"), "{why}");
         assert!(!paired(&db, "alice", &key).await);
-        assert!(!keys.read().unwrap().contains(&key));
+        assert!(!keys.read().unwrap().contains(&VerifyingKey::from_bytes(&key).unwrap()));
     }
 
     /// **Condition 2, through the whole acceptance**: an admit the identity
@@ -469,7 +474,7 @@ mod tests {
         let why = accept(base.path(), &db, &keys, "alice", &change, &signed(&identity, &change)).await.unwrap_err();
         assert!(why.contains("the device's DID does not name its key"), "{why}");
         assert!(!paired(&db, "alice", &key).await);
-        assert!(!keys.read().unwrap().contains(&key));
+        assert!(!keys.read().unwrap().contains(&VerifyingKey::from_bytes(&key).unwrap()));
     }
 
     /// **The operator's half of condition 4, through the whole acceptance**:

@@ -407,6 +407,10 @@ lint:
     # no manifest but kotton-crypto's lists the threshold library, and that `clippy.toml` refuses
     # the library's own signature checks.
     cargo xtask ed25519-check
+    # The allowlist's element is the key type (`kotton_ed25519::VerifyingKey`), so no insert of
+    # raw bytes compiles: each holder of the live set declares it so, and no live set of byte
+    # arrays is declared anywhere. The compiler holds every insert to that declaration.
+    cargo xtask allowlist-check
     # Every file under tests/tests/suite/ is compiled into the one integration binary.
     cargo xtask suite-check
     # GitHub Actions runs the release workflow on a pushed tag, and the lint, sign-off and

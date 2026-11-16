@@ -113,6 +113,7 @@ use sqlx::SqlitePool;
 use std::collections::HashSet;
 use std::io;
 use std::sync::{Arc, RwLock};
+use kotton_crypto::ed25519::VerifyingKey;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use kotton_common::time::now_secs;
@@ -132,7 +133,7 @@ pub async fn finalize_joined_node(
     users: &dyn crate::users::residency::Residency,
     db: &Arc<SqlitePool>,
     sessions: &sessions::SessionMap,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: &str,
     warm_key: &SigningKey,
     joined: kotton_peer::pairing::JoinedNode,
@@ -253,6 +254,8 @@ pub async fn finalize_joined_node(
     // the whole of what it keeps about the issuer, and that is by design.
     let keyless = joined.data_keys.is_none();
     let node = joined.peer;
+    let key = VerifyingKey::from_bytes(&node.public_key)
+        .map_err(|e| io::Error::other(format!("the admitting device's key is not an Ed25519 key: {e}")))?;
     let now = now_secs();
     let addresses_json = serde_json::to_string(&node.addresses).map_err(json_err)?;
     network_db::insert_paired_node(
@@ -271,7 +274,7 @@ pub async fn finalize_joined_node(
     if let Some(relay) = node.relay_url.as_deref() {
         network_db::update_paired_node_relay(db, user_id, &node.device_did.to_string(), Some(relay)).await?;
     }
-    paired_keys.write().unwrap().insert(node.public_key);
+    paired_keys.write().unwrap().insert(key);
 
     // The person's drives, as the admitting device handed them: recorded here
     // through the one writer of the record (`record_handed_drives`), so this
@@ -409,7 +412,7 @@ pub async fn handle_device_add(
     users: Arc<dyn crate::users::residency::Residency>,
     db: Arc<SqlitePool>,
     device_db: Arc<SqlitePool>,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     pending: PendingConfirms,
     user_id: String,
     as_name: Option<String>,
@@ -589,7 +592,7 @@ pub async fn handle_gateway_enroll(
     users: Arc<dyn crate::users::residency::Residency>,
     db: Arc<SqlitePool>,
     device_db: Arc<SqlitePool>,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     pending: PendingConfirms,
     user_id: String,
     code: String,
@@ -715,7 +718,7 @@ pub async fn handle_device_join(
     db: Arc<SqlitePool>,
     device_db: Arc<SqlitePool>,
     sessions: sessions::SessionMap,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     pending: PendingConfirms,
     user_id: String,
     code: String,
@@ -1053,7 +1056,7 @@ pub async fn handle_device_admit(
     users: Arc<dyn crate::users::residency::Residency>,
     db: Arc<SqlitePool>,
     device_db: Arc<SqlitePool>,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     pending: PendingConfirms,
     user_id: String,
     code: String,
@@ -1292,7 +1295,7 @@ async fn keep_the_admitted(
     secrets: &dyn kotton_sys::secret::SecretsStore,
     member_store: &dyn kotton_peer::membership::MemberStore,
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: &str,
     posture: Posture,
     enrolled: kotton_peer::pairing::EnrolledNode,
@@ -1502,7 +1505,7 @@ pub async fn handle_device_invite(
     db: Arc<SqlitePool>,
     device_db: Arc<SqlitePool>,
     sessions: sessions::SessionMap,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     pending: PendingConfirms,
     user_id: String,
     ttl_seconds: u64,
@@ -1757,12 +1760,14 @@ pub async fn check_handed_rows(
 /// device that has nothing to sync.
 pub async fn record_handed_drives(
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: &str,
     drives: &[kotton_wire::peer::DriveHandout],
 ) -> io::Result<()> {
     for drive in drives {
         let node = &drive.node;
+        let key = VerifyingKey::from_bytes(&node.public_key)
+            .map_err(|e| io::Error::other(format!("a handed drive's key is not an Ed25519 key: {e}")))?;
         let did = node.device_did.to_string();
         let addresses = serde_json::to_string(&node.addresses).map_err(json_err)?;
         network_db::insert_paired_node(
@@ -1780,7 +1785,7 @@ pub async fn record_handed_drives(
             network_db::update_paired_node_relay(db, user_id, &did, Some(relay)).await?;
         }
         kotton_peer::daemon::drives::record(db, user_id, &drive.vault_key).await?;
-        paired_keys.write().unwrap().insert(node.public_key);
+        paired_keys.write().unwrap().insert(key);
         tracing::info!(user_id, drive = %node.id, "recorded a drive handed at the join");
     }
     Ok(())
@@ -2304,10 +2309,10 @@ mod admit_tests {
 
     async fn recorded(
         db: &std::sync::Arc<sqlx::SqlitePool>,
-        paired_keys: &std::sync::Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+        paired_keys: &std::sync::Arc<std::sync::RwLock<std::collections::HashSet<kotton_crypto::ed25519::VerifyingKey>>>,
         members: &Members,
     ) -> Recorded {
-        let key = an_enrolled_vault().node.public_key;
+        let key = kotton_crypto::ed25519::VerifyingKey::from_bytes(&an_enrolled_vault().node.public_key).unwrap();
         Recorded {
             row: kotton_peer::daemon::db::paired_node_named(db, "alice", "vault").await.unwrap().is_some(),
             drives: sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap(),

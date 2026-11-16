@@ -12,6 +12,8 @@ kotton-store = { path = "../store" }
 kotton-record = { path = "../record" }
 # `PeerLinks` names a peer client and a paired node; both are below `sync`.
 kotton-peer = { path = "../peer" }
+# The allowlist's element: a key that passed the Ed25519 rule.
+kotton-ed25519 = { path = "../ed25519" }
 kotton-wire = { path = "../wire" }
 kotton-device = { path = "../device" }
 kotton-common = { path = "../common" }

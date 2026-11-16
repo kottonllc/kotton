@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use kotton_crypto::ed25519::VerifyingKey;
 use std::time::Instant;
 use tokio::task::JoinHandle;
 
@@ -235,7 +236,7 @@ pub(super) struct AgentContext {
     pub(super) sessions: sessions::SessionMap,
     pub(super) gateway_tokens: Arc<RwLock<HashSet<String>>>,
     pub(super) principal_sessions: Arc<RwLock<HashMap<String, kotton_wire::ipc::Principal>>>,
-    pub(super) paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    pub(super) paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     pub(super) sync_engine: Arc<kotton_sync::engine::SyncEngine>,
     pub(super) live_instances:
         Arc<tokio::sync::Mutex<HashMap<String, kotton_app::daemon::apps::LongLivedInstance>>>,
@@ -351,7 +352,7 @@ pub struct DeviceDaemon {
     /// Seeded from `paired_nodes` at startup; updated in-place when a node is
     /// inserted (`insert_paired_node`) or revoked (`NodeRevoke`).  Passed to the
     /// QUIC transport so the TLS handshake can check the peer's certificate.
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     /// Parked SAS confirmations for the streamed pairing ceremony.
     ///
     /// Maps a ceremony token → the oneshot a `PairConfirmCode` request fires with
@@ -1878,6 +1879,8 @@ impl DeviceDaemon {
         addr: std::net::SocketAddr,
     ) -> io::Result<()> {
         use std::time::{SystemTime, UNIX_EPOCH};
+        let key = VerifyingKey::from_bytes(&pubkey)
+            .map_err(|e| io::Error::other(format!("the peer's key is not an Ed25519 key: {e}")))?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1896,7 +1899,7 @@ impl DeviceDaemon {
         )
         .await?;
         // Update the live TLS allowlist so the peer can connect immediately.
-        self.paired_keys.write().unwrap().insert(pubkey);
+        self.paired_keys.write().unwrap().insert(key);
         // A new node may be a vault that should hold this user's doors;
         // the same wake the contact registry listens for.
         self.runtime.contacts_changed().notify_one();

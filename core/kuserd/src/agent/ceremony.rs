@@ -70,7 +70,7 @@ pub struct Ceremonies {
     /// So a guest that calls `infer` while a ceremony is running gets the same
     /// answer it would from any other frame.
     pub infer_proxy: Arc<crate::infer_proxy::InferProxy>,
-    pub paired_keys: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+    pub paired_keys: Arc<std::sync::RwLock<std::collections::HashSet<kotton_crypto::ed25519::VerifyingKey>>>,
     pub pending_confirms: kotton_peer::daemon::nodes::PendingConfirms,
     pub live_instances: Arc<Mutex<HashMap<String, kotton_app::daemon::apps::LongLivedInstance>>>,
     pub events: Arc<kotton_diag::service::EventBus>,
@@ -126,7 +126,7 @@ impl Ceremonies {
         db: Arc<SqlitePool>,
         record_stores: RecordStores,
         infer_proxy: Arc<crate::infer_proxy::InferProxy>,
-        paired_keys: Arc<std::sync::RwLock<std::collections::HashSet<[u8; 32]>>>,
+        paired_keys: Arc<std::sync::RwLock<std::collections::HashSet<kotton_crypto::ed25519::VerifyingKey>>>,
         pending_confirms: kotton_peer::daemon::nodes::PendingConfirms,
         live_instances: Arc<Mutex<HashMap<String, kotton_app::daemon::apps::LongLivedInstance>>>,
         events: Arc<kotton_diag::service::EventBus>,

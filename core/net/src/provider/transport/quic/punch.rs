@@ -23,6 +23,7 @@ use std::{
     time::Duration,
 };
 
+use kotton_crypto::ed25519::VerifyingKey;
 use quinn::Endpoint;
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -179,8 +180,8 @@ async fn punch_inner(
 ) -> Result<quinn::Connection, PunchInnerError> {
     // ── 1. Build mTLS configs ────────────────────────────────────────────────
     let paired = {
-        let mut set = HashSet::new();
-        set.insert(peer_pubkey);
+        // Bytes the Ed25519 rule refuses are no key, and admit nothing.
+        let set: HashSet<_> = VerifyingKey::from_bytes(&peer_pubkey).into_iter().collect();
         Arc::new(RwLock::new(set))
     };
     let provider = Arc::new(rustls::crypto::ring::default_provider());

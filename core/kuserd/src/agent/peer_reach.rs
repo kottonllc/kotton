@@ -52,20 +52,21 @@ use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use kotton_crypto::ed25519::VerifyingKey;
 
 /// Who a peer is to a person: the paired-node rows, the live allowlist a
 /// proof-admitted peer is written into, and the identity chains
 /// ([`Chains`]) — never the keychain.
 pub(super) struct Standing {
     db: Arc<SqlitePool>,
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     chains: Chains,
 }
 
 impl Standing {
     pub(super) fn new(
         db: Arc<SqlitePool>,
-        paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+        paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
         chains: Chains,
     ) -> Self {
         Self { db, paired_keys, chains }

@@ -10,6 +10,7 @@
 
 use crate::DeviceRuntime;
 use kotton_crypto::kel_verify::{resolve_current_key, LocalArbiter};
+use kotton_crypto::ed25519::VerifyingKey;
 use kotton_identity::kel_store;
 use kotton_net::transport::quic::tls::{Admission, Admitted};
 use kotton_net::transport::Peer;
@@ -158,7 +159,7 @@ pub fn adopt_chain_extension(
 pub async fn persist_admitted(
     runtime: &DeviceRuntime,
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     peer_did: &str,
     peer_pubkey: [u8; 32],
     aid: &str,
@@ -172,12 +173,14 @@ pub async fn persist_admitted(
 async fn persist_admitted_in(
     chains: &Chains,
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     peer_did: &str,
     peer_pubkey: [u8; 32],
     aid: &str,
     events: &[KelEvent],
 ) -> io::Result<String> {
+    let key = VerifyingKey::from_bytes(&peer_pubkey)
+        .map_err(|e| io::Error::other(format!("the admitted device's key is not an Ed25519 key: {e}")))?;
     let user_id = user_for_aid(&chains.base, aid).ok_or_else(|| {
         io::Error::other(format!("admitted identity {aid} is hosted under no local user"))
     })?;
@@ -201,7 +204,7 @@ async fn persist_admitted_in(
         )
         .await?;
     }
-    paired_keys.write().unwrap().insert(peer_pubkey);
+    paired_keys.write().unwrap().insert(key);
     chains.admission.take_admitted(&peer_pubkey);
     tracing::info!(user_id = %user_id, peer = %peer_did, "admitted a recovered device on proof");
     Ok(user_id)
@@ -268,7 +271,7 @@ pub const NOT_PAIRED_WITH: &str = "is not paired with user";
 pub async fn peer_standing(
     runtime: &DeviceRuntime,
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     peer: &Peer,
     user_id: Option<&str>,
 ) -> io::Result<PeerStanding> {
@@ -280,7 +283,7 @@ pub async fn peer_standing(
 pub async fn peer_standing_in(
     chains: &Chains,
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     peer: &Peer,
     user_id: Option<&str>,
 ) -> io::Result<PeerStanding> {

@@ -26,6 +26,7 @@ use crate::pair_channel::SasConfirmer;
 use crate::relay_keys::{FirstContact, Presented, RefusedAtTheRelay, Tier};
 use crate::pairing::JoinNotKept;
 use kotton_crypto::x25519::ed25519_priv_to_x25519;
+use kotton_crypto::ed25519::VerifyingKey;
 use kotton_schemas::membership::{Ceremony, Member, Posture, Role};
 use kotton_schemas::{CapabilityGrant, CapabilityKind};
 use kotton_common::crypto::kdf_labels;
@@ -71,7 +72,7 @@ pub fn json_err(e: serde_json::Error) -> io::Error {
 /// that let a local session record any key as a drive went with #80.
 pub async fn peer_add(
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: String,
     label: String,
     peer_did: String,
@@ -88,6 +89,8 @@ pub async fn peer_add(
     }
     let mut pubkey = [0u8; 32];
     pubkey.copy_from_slice(&pubkey_bytes);
+    let key = VerifyingKey::from_bytes(&pubkey)
+        .map_err(|e| io::Error::other(format!("peer_pubkey_hex is not an Ed25519 key: {e}")))?;
 
     let now = now_secs();
     // The label is what the person reads and names the node by; the row is
@@ -113,7 +116,7 @@ pub async fn peer_add(
     .await?;
 
     // Update live mTLS allowlist.
-    paired_keys.write().unwrap().insert(pubkey);
+    paired_keys.write().unwrap().insert(key);
 
     // The row as it now stands: a posture an earlier pairing projected is kept
     // (`insert_paired_node`).
@@ -141,7 +144,7 @@ pub async fn peer_add(
 /// may be another row's too.
 pub async fn take_back_added(
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: &str,
     device_did: &str,
 ) -> io::Result<()> {
@@ -150,9 +153,17 @@ pub async fn take_back_added(
     };
     network_db::delete_paired_node(db, user_id, device_did).await?;
     if !still_paired(db, &node.public_key).await? {
-        paired_keys.write().unwrap().remove(&node.public_key);
+        unadmit(paired_keys, &node.public_key);
     }
     Ok(())
+}
+
+/// Take `key` off the live allowlist. Bytes the Ed25519 rule refuses are no key, so they
+/// were never on it.
+fn unadmit(paired_keys: &RwLock<HashSet<VerifyingKey>>, key: &[u8; 32]) {
+    if let Ok(key) = VerifyingKey::from_bytes(key) {
+        paired_keys.write().unwrap().remove(&key);
+    }
 }
 
 /// Whether any row on this machine, any person's, still pairs `key`: the live
@@ -376,7 +387,7 @@ pub async fn node_revoke(
     db: &Arc<SqlitePool>,
     user_id: String,
     node_id: String,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
 ) -> io::Result<UserResponse> {
     // Fetch the node *before* deleting so we have its DID (to drop the membership
     // record and to name the row) and public key (to drop the live TLS
@@ -409,7 +420,7 @@ pub async fn node_revoke(
     // The key leaves the live allowlist unless a row still pairs it: another
     // person's here, who may pair the same node (two tenants of one vault).
     if !still_paired(db, &node.public_key).await? {
-        paired_keys.write().unwrap().remove(&node.public_key);
+        unadmit(paired_keys, &node.public_key);
     }
     Ok(UserResponse::NodeRevoked)
 }
@@ -994,7 +1005,7 @@ pub async fn record_own_device_member(
 pub async fn project_membership_into_allowlist(
     member_store: &dyn crate::membership::MemberStore,
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: &str,
 ) -> usize {
     let members = match member_store.list_members().await {
@@ -1020,8 +1031,14 @@ pub async fn project_membership_into_allowlist(
     // repair below. The filter belongs on the allowlist insert, which is the one
     // thing it is about.
     for m in members {
-        if m.in_paired_key_allowlist() && paired_keys.write().unwrap().insert(m.public_key) {
-            added += 1;
+        // The member's key enters the allowlist as a key or not at all: bytes the
+        // Ed25519 rule refuses are not put on it.
+        if m.in_paired_key_allowlist() {
+            if let Ok(key) = VerifyingKey::from_bytes(&m.public_key) {
+                if paired_keys.write().unwrap().insert(key) {
+                    added += 1;
+                }
+            }
         }
         // Ensure a paired_nodes cache row exists without clobbering learned
         // addresses (keyed by the person and the DID; address-less until reachability
@@ -1105,19 +1122,27 @@ pub async fn reproject_allowlist(
     // needs the set, and `peer` must not learn how residency is tracked.
     users: &[(String, std::sync::Arc<dyn crate::membership::MemberStore>)],
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
 ) {
     let user_ids: Vec<String> = users.iter().map(|(id, _)| id.clone()).collect();
 
     // Built aside and swapped in, so the live set is never transiently empty —
     // a handshake landing mid-rebuild must not be refused for a peer that both
     // the old and the new allowlist admit.
-    let mut rebuilt: HashSet<[u8; 32]> = HashSet::new();
+    //
+    // A key the rule refuses is not put on the allowlist. The set's element is the
+    // key type, so nothing enters it but through `VerifyingKey::from_bytes`: the
+    // operator keys and the stored rows read below, the keys carried over from the
+    // live set (keys already), and the own-device members' keys the membership
+    // projection adds after the swap. Bytes that do not decode, are not their
+    // point's canonical encoding, are the identity, or are outside the prime-order
+    // subgroup are left out.
+    let mut rebuilt: HashSet<VerifyingKey> = HashSet::new();
     // The vault's operator credential, which is no user's row and is admitted at
     // the handshake all the same; what it may say once admitted is its standing
     // (`PeerStanding::Operator`). Empty on a device.
     match network_db::operator_keys(db).await {
-        Ok(keys) => rebuilt.extend(keys),
+        Ok(keys) => rebuilt.extend(keys.iter().filter_map(|k| VerifyingKey::from_bytes(k).ok())),
         Err(e) => {
             tracing::warn!(error = %e, "operator_key unreadable; keeping the live keys");
             rebuilt.extend(paired_keys.read().unwrap().iter().copied());
@@ -1125,7 +1150,7 @@ pub async fn reproject_allowlist(
     }
     for uid in &user_ids {
         match network_db::list_paired_nodes(db, uid).await {
-            Ok(nodes) => rebuilt.extend(nodes.into_iter().map(|n| n.public_key)),
+            Ok(nodes) => rebuilt.extend(nodes.iter().filter_map(|n| VerifyingKey::from_bytes(&n.public_key).ok())),
             Err(e) => {
                 // Losing one user's rows would silently unadmit their peers, so
                 // keep whatever is live for them rather than narrowing on error.
@@ -1134,14 +1159,6 @@ pub async fn reproject_allowlist(
             }
         }
     }
-    // A key the rule refuses is not kept in the rebuilt set: operator keys, stored
-    // rows and keys carried over from the live set are all held to it. The rule is
-    // the type's: bytes stay only if they become a `VerifyingKey`, so a row that
-    // does not decode, is not its point's canonical encoding, is the identity, or
-    // is outside the prime-order subgroup is left out. Own-device members' keys are
-    // added after it, below, as bytes; they are held to the rule when the
-    // allowlist's element is the key type (#578).
-    rebuilt.retain(|key| kotton_crypto::ed25519::VerifyingKey::from_bytes(key).is_ok());
     *paired_keys.write().unwrap() = rebuilt;
 
     for (uid, store) in users {
@@ -1163,7 +1180,7 @@ pub async fn reproject_allowlist(
 pub async fn wire_own_device_allowlist(
     member_store: &dyn crate::membership::MemberStore,
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: &str,
     _node: &PairedNode,
 ) {
@@ -1479,11 +1496,15 @@ pub async fn finalize_enrolled_node(
     secrets: &dyn SecretsStore,
     member_store: &dyn crate::membership::MemberStore,
     db: &Arc<SqlitePool>,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: &str,
     posture: Posture,
     enrolled: crate::pairing::EnrolledNode,
 ) -> io::Result<PairedNode> {
+    // The node's key enters the allowlist below; bytes the Ed25519 rule refuses are
+    // refused here, before anything is recorded.
+    let key = VerifyingKey::from_bytes(&enrolled.node.public_key)
+        .map_err(|e| io::Error::other(format!("the enrolled node's key is not an Ed25519 key: {e}")))?;
     // Full/Cosigner: persist the issuer's retained 2-of-2 share + group key. Blind
     // retains nothing.
     if let Some((issuer_share, _root_did)) = &enrolled.issuer_share {
@@ -1525,7 +1546,7 @@ pub async fn finalize_enrolled_node(
     if posture == Posture::BlindStorage {
         super::drives::record(db, user_id, &node.public_key).await?;
     }
-    paired_keys.write().unwrap().insert(node.public_key);
+    paired_keys.write().unwrap().insert(key);
 
     // The issuer's VFS CEK is correct at startup, so membership is written under
     // the right key with no reload (unlike the joiner).
@@ -1639,55 +1660,109 @@ mod allowlist_rebuild {
         }
     }
 
+    /// A member store that keeps what it is told.
+    #[derive(Default)]
+    struct Members(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+    #[async_trait::async_trait]
+    impl MemberStore for Members {
+        async fn member_write(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.0.lock().unwrap().insert(path.to_string(), data.to_vec());
+            Ok(())
+        }
+        async fn member_read(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+            self.0.lock().unwrap().get(path).cloned().ok_or_else(|| anyhow::anyhow!("no member at {path}"))
+        }
+        async fn member_delete(&self, path: &str) -> anyhow::Result<()> {
+            self.0.lock().unwrap().remove(path);
+            Ok(())
+        }
+        async fn member_list(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            Ok(self.0.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect())
+        }
+    }
+
+    /// An own-device member under `public_key`, named `did`.
+    fn own_device(did: &str, public_key: [u8; 32]) -> Member {
+        Member {
+            did: did.to_string(),
+            public_key,
+            role: Role::OwnDevice,
+            admitted_by: Ceremony::DeviceEnroll,
+            added_at: "2026-11-16T00:00:00Z".to_string(),
+            posture: Some(Posture::Full),
+            label: None,
+            reach: None,
+        }
+    }
+
     /// **The allowlist a daemon rebuilds from its store holds only keys the
-    /// rule admits.** A store can carry a row whose bytes are not a key: an
-    /// all-zero row written by the placeholder pairing verb this crate no
-    /// longer has, which an existing database keeps, or bytes `peer_add` was
-    /// handed. One row per key the rule refuses sits beside one honest key, and
-    /// the live set starts holding every one of them, as a daemon that loaded
-    /// such rows before this rebuild would. The rebuild leaves the honest key
-    /// alone on the allowlist.
+    /// rule admits**, from every source it is built from. A store can carry a
+    /// row whose bytes are not a key: an all-zero row written by the placeholder
+    /// pairing verb this crate no longer has, which an existing database keeps,
+    /// or bytes `peer_add` was handed. A membership set can carry such a member
+    /// too. One row per key the rule refuses sits beside one honest row, and the
+    /// rebuild runs twice: with no members, and with one own-device member per
+    /// refused key beside one honest member. Each time only the honest keys are
+    /// on the allowlist.
     #[tokio::test]
     async fn the_rebuilt_allowlist_holds_only_keys_the_rule_admits() {
         use kotton_crypto::ed25519::refused;
 
-        let dir = tempfile::tempdir().unwrap();
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(dir.path().join("agent.db"))
-            .create_if_missing(true);
-        let pool = SqlitePool::connect_with(options).await.unwrap();
-        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
-        let db = Arc::new(pool);
-
-        let honest = SigningKey::from_bytes(&[11u8; 32]).verifying_key().to_bytes();
+        let honest_row = SigningKey::from_bytes(&[11u8; 32]).verifying_key().to_bytes();
+        let honest_member = SigningKey::from_bytes(&[13u8; 32]).verifying_key().to_bytes();
         let refused_keys: Vec<[u8; 32]> = refused::SMALL_ORDER_KEYS
             .into_iter()
             .chain(refused::IDENTITY_OTHER_ENCODINGS)
             .chain([refused::mixed_order_key(), refused::NON_CANONICAL_KEY, refused::NOT_A_POINT])
             .collect();
-        assert_eq!(refused_keys.len(), 14, "one row per refused key vector");
+        assert_eq!(refused_keys.len(), 14, "one row and one member per refused key vector");
 
-        network_db::insert_paired_node(&db, "laptop", "alice", "did:peer:laptop", &honest, "[]", 0, None)
-            .await
-            .unwrap();
+        let members = Members::default();
+        members.write_member(&own_device("did:peer:honest-member", honest_member)).await.unwrap();
         for (i, key) in refused_keys.iter().enumerate() {
-            let (id, did) = (format!("refused-{i}"), format!("did:peer:refused-{i}"));
-            network_db::insert_paired_node(&db, &id, "alice", &did, key, "[]", 0, None)
+            members.write_member(&own_device(&format!("did:peer:refused-member-{i}"), *key)).await.unwrap();
+        }
+        assert_eq!(members.list_members().await.unwrap().len(), 15);
+
+        let key = |b: &[u8; 32]| VerifyingKey::from_bytes(b).expect("an honest key");
+        let runs: [(Arc<dyn MemberStore>, HashSet<VerifyingKey>); 2] = [
+            (Arc::new(NoMembers), HashSet::from([key(&honest_row)])),
+            (Arc::new(members), HashSet::from([key(&honest_row), key(&honest_member)])),
+        ];
+        for (store, honest) in runs {
+            let dir = tempfile::tempdir().unwrap();
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(dir.path().join("agent.db"))
+                .create_if_missing(true);
+            let pool = SqlitePool::connect_with(options).await.unwrap();
+            sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+            let db = Arc::new(pool);
+
+            network_db::insert_paired_node(&db, "laptop", "alice", "did:peer:laptop", &honest_row, "[]", 0, None)
                 .await
                 .unwrap();
-        }
-        assert_eq!(network_db::list_paired_nodes(&db, "alice").await.unwrap().len(), 15);
+            for (i, key) in refused_keys.iter().enumerate() {
+                let (id, did) = (format!("refused-{i}"), format!("did:peer:refused-{i}"));
+                network_db::insert_paired_node(&db, &id, "alice", &did, key, "[]", 0, None)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(network_db::list_paired_nodes(&db, "alice").await.unwrap().len(), 15);
 
-        let paired_keys = Arc::new(RwLock::new(refused_keys.iter().copied().collect::<HashSet<_>>()));
-        let users: Vec<(String, Arc<dyn MemberStore>)> =
-            vec![("alice".to_string(), Arc::new(NoMembers))];
-        reproject_allowlist(&users, &db, &paired_keys).await;
+            let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+            let users: Vec<(String, Arc<dyn MemberStore>)> = vec![("alice".to_string(), store)];
+            reproject_allowlist(&users, &db, &paired_keys).await;
 
-        let live = paired_keys.read().unwrap().clone();
-        for (i, key) in refused_keys.iter().enumerate() {
-            assert!(!live.contains(key), "the rebuilt allowlist admitted refused key vector {i}");
+            let live = paired_keys.read().unwrap().clone();
+            for (i, key) in refused_keys.iter().enumerate() {
+                assert!(
+                    !live.iter().any(|k| k.as_bytes() == key),
+                    "the rebuilt allowlist admitted refused key vector {i}"
+                );
+            }
+            assert_eq!(live, honest, "only the honest keys are on the allowlist");
         }
-        assert_eq!(live, HashSet::from([honest]), "only the honest key is on the allowlist");
     }
 
     /// **A key revoked for one person stays in the live allowlist while
@@ -1710,16 +1785,17 @@ mod allowlist_rebuild {
         for user in ["alice", "bob"] {
             network_db::insert_paired_node(&db, "household", user, &did, &key, "[]", 0, None).await.unwrap();
         }
-        let paired_keys = Arc::new(RwLock::new(HashSet::from([key])));
+        let admitted = VerifyingKey::from_bytes(&key).unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([admitted])));
 
         let said = node_revoke(&NoMembers, &db, "alice".into(), "household".into(), &paired_keys).await.unwrap();
         assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
         assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty());
-        assert!(paired_keys.read().unwrap().contains(&key), "alice's revoke shut bob's door at the handshake");
+        assert!(paired_keys.read().unwrap().contains(&admitted), "alice's revoke shut bob's door at the handshake");
 
         let said = node_revoke(&NoMembers, &db, "bob".into(), did.clone(), &paired_keys).await.unwrap();
         assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
-        assert!(!paired_keys.read().unwrap().contains(&key), "a key no row pairs is still admitted");
+        assert!(!paired_keys.read().unwrap().contains(&admitted), "a key no row pairs is still admitted");
     }
 }
 

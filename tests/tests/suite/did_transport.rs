@@ -118,8 +118,8 @@ async fn quic_mtls_bidirectional_data() {
     let pub_a = key_a.verifying_key().to_bytes();
     let pub_b = key_b.verifying_key().to_bytes();
 
-    let allowlist_a = Arc::new(RwLock::new(HashSet::from([pub_b])));
-    let allowlist_b = Arc::new(RwLock::new(HashSet::from([pub_a])));
+    let allowlist_a = Arc::new(RwLock::new(HashSet::from([kotton_crypto::ed25519::VerifyingKey::from_bytes(&pub_b).unwrap()])));
+    let allowlist_b = Arc::new(RwLock::new(HashSet::from([kotton_crypto::ed25519::VerifyingKey::from_bytes(&pub_a).unwrap()])));
 
     let transport_a = QuicTransport::new_peer(&key_a, allowlist_a).unwrap();
     let transport_b = QuicTransport::new_peer(&key_b, allowlist_b).unwrap();
@@ -173,10 +173,10 @@ async fn quic_mtls_rejects_unpaired_device() {
     let pub_b = key_b.verifying_key().to_bytes();
 
     // A allows only B; C is unknown to A.
-    let allowlist_a = Arc::new(RwLock::new(HashSet::from([pub_b])));
+    let allowlist_a = Arc::new(RwLock::new(HashSet::from([kotton_crypto::ed25519::VerifyingKey::from_bytes(&pub_b).unwrap()])));
     // C trusts A so C's TLS verifier accepts A's server cert — only A's
     // verifier of C's client cert matters for the rejection.
-    let allowlist_c = Arc::new(RwLock::new(HashSet::from([pub_a])));
+    let allowlist_c = Arc::new(RwLock::new(HashSet::from([kotton_crypto::ed25519::VerifyingKey::from_bytes(&pub_a).unwrap()])));
 
     let transport_a = QuicTransport::new_peer(&key_a, allowlist_a).unwrap();
     let transport_c = QuicTransport::new_peer(&key_c, allowlist_c).unwrap();
@@ -206,8 +206,8 @@ async fn quic_mtls_revocation_live() {
     let pub_a = key_a.verifying_key().to_bytes();
     let pub_b = key_b.verifying_key().to_bytes();
 
-    let allowlist_a = Arc::new(RwLock::new(HashSet::from([pub_b])));
-    let allowlist_b = Arc::new(RwLock::new(HashSet::from([pub_a])));
+    let allowlist_a = Arc::new(RwLock::new(HashSet::from([kotton_crypto::ed25519::VerifyingKey::from_bytes(&pub_b).unwrap()])));
+    let allowlist_b = Arc::new(RwLock::new(HashSet::from([kotton_crypto::ed25519::VerifyingKey::from_bytes(&pub_a).unwrap()])));
 
     // Keep a clone of allowlist_a to modify after transport creation.
     let transport_a = QuicTransport::new_peer(&key_a, Arc::clone(&allowlist_a)).unwrap();
@@ -229,7 +229,7 @@ async fn quic_mtls_revocation_live() {
     );
 
     // Revoke B — write to the shared allowlist without restarting any process.
-    allowlist_a.write().unwrap().remove(&pub_b);
+    allowlist_a.write().unwrap().remove(&kotton_crypto::ed25519::VerifyingKey::from_bytes(&pub_b).unwrap());
 
     // Post-revocation: B's next connection must be rejected.
     let result = transport_b.connect(&server_addr).await;

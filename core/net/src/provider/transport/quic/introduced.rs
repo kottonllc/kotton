@@ -28,6 +28,7 @@
 
 use super::tls::{self, CertOffer, Ed25519DeviceCert, PairedDeviceVerifier};
 use kotton_crypto::DidKeyMethod;
+use kotton_crypto::ed25519::VerifyingKey;
 use kotton_sys::net::{
     Address, Connection, Listener, TransportError, TransportResult,
 };
@@ -226,9 +227,11 @@ pub(super) fn introduced_transport() -> Arc<quinn::TransportConfig> {
     Arc::new(transport)
 }
 
-/// A verifier that admits one key: the device the introduction named.
+/// A verifier that admits one key: the device the introduction named. Bytes the Ed25519 rule
+/// refuses are no key, and admit nothing.
 pub(super) fn one_key(peer_key: [u8; 32]) -> Arc<PairedDeviceVerifier> {
-    PairedDeviceVerifier::new(Arc::new(RwLock::new(HashSet::from([peer_key]))))
+    let keys: HashSet<_> = VerifyingKey::from_bytes(&peer_key).into_iter().collect();
+    PairedDeviceVerifier::new(Arc::new(RwLock::new(keys)))
 }
 
 /// Open the listener an introduction asked for: on `bind`, hearing only `expect`,

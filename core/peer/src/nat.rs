@@ -62,6 +62,7 @@ use kotton_net::{
     },
     TurnAllocation, TurnClient,
 };
+use kotton_crypto::ed25519::VerifyingKey;
 use kotton_diag::{Event, EventBus, EventCategory, EventLevel};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -462,8 +463,8 @@ async fn try_direct_quic(
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let device_cert = Ed25519DeviceCert::from_signing_key_with_offer(device_signing_key, offer)
         .map_err(|e| e.to_string())?;
-    let mut paired = HashSet::new();
-    paired.insert(peer_pubkey);
+    // Bytes the Ed25519 rule refuses are no key, and admit nothing.
+    let paired: HashSet<_> = VerifyingKey::from_bytes(&peer_pubkey).into_iter().collect();
     let verifier = PairedDeviceVerifier::new(Arc::new(RwLock::new(paired)));
     let client_cfg = tls::build_peer_client_config(&device_cert, verifier, provider, config.keepalive())
         .map_err(|e| e.to_string())?;

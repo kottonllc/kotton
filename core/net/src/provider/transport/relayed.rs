@@ -874,6 +874,7 @@ mod tests {
     use crate::provider::transport::quic::tls::{Admission, Admitted};
     use std::collections::HashSet;
     use std::sync::RwLock;
+    use kotton_crypto::ed25519::VerifyingKey;
 
     fn key(n: u8) -> SigningKey {
         SigningKey::from_bytes(&[n; 32])
@@ -885,7 +886,9 @@ mod tests {
 
     fn door_admitting(own: &SigningKey, admitted: &[[u8; 32]], admission: Admission) -> Door {
         let held = HeldKeys::new(
-            Arc::new(RwLock::new(admitted.iter().copied().collect::<HashSet<_>>())),
+            Arc::new(RwLock::new(
+                admitted.iter().map(|k| VerifyingKey::from_bytes(k).unwrap()).collect::<HashSet<_>>(),
+            )),
             admission,
         );
         Door::new(std::slice::from_ref(own), Arc::new(held)).unwrap()

@@ -38,6 +38,7 @@ use kotton_sys::net::{
 use quinn::{ClientConfig, Endpoint, ServerConfig};
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
+use kotton_crypto::ed25519::VerifyingKey;
 
 /// QUIC transport with mandatory TLS 1.3.
 pub struct QuicTransport {
@@ -80,12 +81,12 @@ impl QuicTransport {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let paired = Arc::new(RwLock::new(HashSet::from([remote_pubkey_bytes])));
+    /// let paired = Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&remote_pubkey_bytes)?])));
     /// let transport = QuicTransport::new_peer(&device_signing_key, paired)?;
     /// ```
     pub fn new_peer(
         device_key: &ed25519_dalek::SigningKey,
-        paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+        paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     ) -> Result<Self, TransportError> {
         Self::new_peer_with_admission(device_key, paired_keys, tls::Admission::default())
     }
@@ -94,7 +95,7 @@ impl QuicTransport {
     /// admit a device on proof rather than on a key it was told about (`RFC-0081`).
     pub fn new_peer_with_admission(
         device_key: &ed25519_dalek::SigningKey,
-        paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+        paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
         admission: tls::Admission,
     ) -> Result<Self, TransportError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -521,8 +522,8 @@ mod tests {
         let client_pubkey = key_client.verifying_key().to_bytes();
 
         // Server knows client; client knows server
-        let server_allowlist = Arc::new(RwLock::new(HashSet::from([client_pubkey])));
-        let client_allowlist = Arc::new(RwLock::new(HashSet::from([server_pubkey])));
+        let server_allowlist = Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&client_pubkey).unwrap()])));
+        let client_allowlist = Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&server_pubkey).unwrap()])));
 
         let server_transport = QuicTransport::new_peer(&key_server, server_allowlist).unwrap();
         let client_transport = QuicTransport::new_peer(&key_client, client_allowlist).unwrap();
@@ -594,9 +595,9 @@ mod tests {
         let key_server = SigningKey::generate(&mut OsRng);
         let key_client = SigningKey::generate(&mut OsRng);
         let server_allowlist =
-            Arc::new(RwLock::new(HashSet::from([key_client.verifying_key().to_bytes()])));
+            Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&key_client.verifying_key().to_bytes()).unwrap()])));
         let client_allowlist =
-            Arc::new(RwLock::new(HashSet::from([key_server.verifying_key().to_bytes()])));
+            Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&key_server.verifying_key().to_bytes()).unwrap()])));
 
         let server_transport = QuicTransport::new_peer(&key_server, server_allowlist).unwrap();
         let client_transport = QuicTransport::new_peer(&key_client, client_allowlist).unwrap();
@@ -639,7 +640,7 @@ mod tests {
         // Server allowlist is empty — it does not know the connecting client
         let server_allowlist = Arc::new(RwLock::new(HashSet::new()));
         // Client knows the server (server cert will pass client-side check)
-        let client_allowlist = Arc::new(RwLock::new(HashSet::from([server_pubkey])));
+        let client_allowlist = Arc::new(RwLock::new(HashSet::from([VerifyingKey::from_bytes(&server_pubkey).unwrap()])));
 
         let server_transport = QuicTransport::new_peer(&key_server, server_allowlist).unwrap();
         let client_transport = QuicTransport::new_peer(&key_unknown, client_allowlist).unwrap();
@@ -724,18 +725,18 @@ mod tests {
     struct Paired {
         dialler: QuicTransport,
         addr: Address,
-        listener_allows: Arc<RwLock<HashSet<[u8; 32]>>>,
-        dialler_allows: Arc<RwLock<HashSet<[u8; 32]>>>,
-        listener_key: [u8; 32],
-        dialler_key: [u8; 32],
+        listener_allows: Arc<RwLock<HashSet<VerifyingKey>>>,
+        dialler_allows: Arc<RwLock<HashSet<VerifyingKey>>>,
+        listener_key: VerifyingKey,
+        dialler_key: VerifyingKey,
     }
 
     async fn paired() -> Paired {
         init_crypto();
         let listener_sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
         let dialler_sk = ed25519_dalek::SigningKey::from_bytes(&[6u8; 32]);
-        let listener_key = listener_sk.verifying_key().to_bytes();
-        let dialler_key = dialler_sk.verifying_key().to_bytes();
+        let listener_key = VerifyingKey::from_bytes(&listener_sk.verifying_key().to_bytes()).unwrap();
+        let dialler_key = VerifyingKey::from_bytes(&dialler_sk.verifying_key().to_bytes()).unwrap();
         let listener_allows = Arc::new(RwLock::new(HashSet::from([dialler_key])));
         let dialler_allows = Arc::new(RwLock::new(HashSet::from([listener_key])));
         let listening = QuicTransport::new_peer(&listener_sk, Arc::clone(&listener_allows)).unwrap();

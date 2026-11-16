@@ -112,6 +112,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
+use kotton_ed25519::VerifyingKey;
 use std::time::Instant;
 use tokio::sync::{watch, Notify, Semaphore};
 use tokio::time::{Duration, interval};
@@ -266,7 +267,7 @@ pub struct SyncEngine {
     /// Live mTLS allowlist — reprojected from membership after each sync pass, so a
     /// member admitted on another of the user's nodes (pulled in by the pass) is
     /// admitted here without a restart (RFC-0024 computed view).
-    paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     /// When each user's mount was last maintained (monotonic, for the due test).
     last_maintenance: Arc<Mutex<HashMap<String, Instant>>>,
     /// The same event in wall-clock seconds, for reporting it to a human.
@@ -293,7 +294,7 @@ impl SyncEngine {
         db: Arc<SqlitePool>,
         runtime: Arc<DeviceRuntime>,
         resources: Arc<dyn crate::SyncHost>,
-        paired_keys: Arc<RwLock<HashSet<[u8; 32]>>>,
+        paired_keys: Arc<RwLock<HashSet<VerifyingKey>>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             db,
@@ -1030,7 +1031,7 @@ async fn sync_drive_with_outcome(
     db: &Arc<SqlitePool>,
     runtime: &Arc<DeviceRuntime>,
     resources: &dyn crate::SyncHost,
-    paired_keys: &Arc<RwLock<HashSet<[u8; 32]>>>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
     user_id: &str,
     target: &DriveTarget,
 ) -> Result<SyncOutcome, String> {

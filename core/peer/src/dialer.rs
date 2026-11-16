@@ -19,6 +19,7 @@
 //! the database. This receives an already-resolved node.
 
 use crate::nat::{nat_connect, NatConfig, NatResult};
+use kotton_crypto::ed25519::VerifyingKey;
 use kotton_wire::peer::PairedNode;
 use kotton_wire::ipc::SealedVerb;
 use kotton_wire::{UserRequest, UserResponse};
@@ -260,8 +261,9 @@ async fn open_channel(
             let device_cert =
                 Ed25519DeviceCert::from_signing_key_with_offer(&rt.signing_key, &rt.offer)
                     .map_err(|e| anyhow::anyhow!("TURN TLS cert: {e}"))?;
-            let mut paired = std::collections::HashSet::new();
-            paired.insert(node.public_key);
+            // Bytes the Ed25519 rule refuses are no key, and admit nothing.
+            let paired: std::collections::HashSet<_> =
+                VerifyingKey::from_bytes(&node.public_key).into_iter().collect();
             let verifier = PairedDeviceVerifier::new(Arc::new(RwLock::new(paired)));
             let client_cfg =
                 tls::build_peer_client_config(&device_cert, verifier, Arc::clone(&provider), config.keepalive())
@@ -553,7 +555,7 @@ mod tests {
         let far_door = kotton_net::transport::Door::new(
             &[key(1)],
             Arc::new(kotton_net::transport::HeldKeys::only(Arc::new(RwLock::new(
-                HashSet::from([key(2).verifying_key().to_bytes()]),
+                HashSet::from([VerifyingKey::from_bytes(&key(2).verifying_key().to_bytes()).unwrap()]),
             )))),
         )
         .unwrap();
