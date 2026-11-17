@@ -286,11 +286,34 @@ impl OperatorCredential {
     }
 }
 
-/// A credential's name, as a person typed it: no line break, no `/` and no
-/// `=` in it, and no space, so it is one line of the form and one word.
+/// A credential's name, as a kept credential is read: no line break, no `/`
+/// and no `=` in it, and no space, so it is one line of the form and one word
+/// of it. A name minted from now on is held to [`check_minted_name`] as well;
+/// a kept credential is read by this rule alone, so one minted under an older
+/// rule is held, listed and forgotten by its name as before
+/// (kottonllc/kotton#597, 24B).
 pub fn check_name(name: &str) -> Result<()> {
     if name.is_empty() || name.chars().any(|c| c.is_control() || c == '/' || c == '=' || c.is_whitespace()) {
         bail!("'{name}' is not a name for a vault or a relay — one word, no `/` or `=`");
+    }
+    Ok(())
+}
+
+/// A name a key is minted under: [`check_name`]'s, and one word of a typed line
+/// as well (kottonllc/kotton#597, 24B). Its ASCII is in the set a note's
+/// command is printed with ([`kotton_wire::note::plain_word_char`]), less `/`
+/// and `=`, which are the form's own syntax, and it does not start with `-`. A
+/// character outside ASCII is admitted, so a name in any script is minted as
+/// typed; that a command is printed only with an ASCII name is the concession
+/// [`kotton_wire::note::one_plain_word`] states.
+pub fn check_minted_name(name: &str) -> Result<()> {
+    check_name(name)?;
+    if name.starts_with('-') || name.chars().any(|c| c.is_ascii() && !kotton_wire::note::plain_word_char(c)) {
+        bail!(
+            "'{}' is not a name for a new vault or relay — its ASCII is letters, digits and `.` `_` `:` `-` `+`, \
+             not starting with `-`; a letter of any other script is kept as typed",
+            kotton_wire::note::shown(name)
+        );
     }
     Ok(())
 }
@@ -302,7 +325,7 @@ pub fn check_name(name: &str) -> Result<()> {
 /// read as a credential yet; [`complete`] makes it one. A vault's mint takes
 /// no rule: the rule is the relay's.
 pub fn minted_text(service: OperatedService, name: &str, key: &SigningKey, rule: Option<AdmissionRule>) -> Result<String> {
-    check_name(name)?;
+    check_minted_name(name)?;
     let mut out = format!(
         "{MAGIC}\nname={name}\noperator={}\nkey={}\n{OPERATES}={}\n",
         hex::encode(key.to_bytes()),
@@ -687,6 +710,48 @@ mod tests {
         }
         for name in ["", "a/b", "a=b", "two words", "line\nbreak"] {
             assert!(minted_text(OperatedService::Vault, name, &key, None).is_err(), "{name:?}");
+        }
+    }
+
+    /// **A name minted from now on holds no ASCII outside the gate's set and does not start
+    /// with `-`; `/` and `=` stay refused and a character outside ASCII stays admitted. A
+    /// kept credential is read by the rule as it was** (kottonllc/kotton#618, 24B): one
+    /// under a name the mint now refuses still reads, under that name.
+    #[test]
+    fn a_minted_name_is_one_word_of_a_line_and_a_kept_one_reads_as_it_did() {
+        let key = SigningKey::from_bytes(&[3u8; 32]);
+        for name in ["kotton", "attic-2", "my_box.local", "a:b", "v+1", "\u{5c4b}\u{6839}\u{88cf}", "caf\u{e9}", "\u{0434}\u{043e}\u{043c}"] {
+            assert!(minted_text(OperatedService::Vault, name, &key, None).is_ok(), "{name:?}");
+            assert!(minted_text(OperatedService::Relay, name, &key, None).is_ok(), "{name:?}");
+        }
+        let refused = [
+            "it's", "say\"x", "a`b", "a;b", "a|b", "a&b", "$HOME", "a*b", "a\\b", "a>b", "a<b", "a(b)", "a#b", "a!b", "a?b",
+            "a@b", "a%b", "a^b", "a~b", "a[b]", "a{b}", "a,b", "-attic", "--browser", "a/b", "a=b",
+        ];
+        for name in refused {
+            for service in [OperatedService::Vault, OperatedService::Relay] {
+                let said = minted_text(service, name, &key, None).unwrap_err().to_string();
+                assert!(said.contains("is not a name for"), "{name:?}: {said}");
+            }
+        }
+        // Every ASCII character the gate refuses is refused at the mint, and every one it
+        // admits but `/` and `=` is minted, after a letter.
+        for c in (0u8..=127).map(char::from) {
+            let name = format!("a{c}");
+            let gate = kotton_wire::note::plain_word_char(c) && c != '/' && c != '=';
+            assert_eq!(minted_text(OperatedService::Vault, &name, &key, None).is_ok(), gate, "{name:?}");
+        }
+        // A kept credential is read by `check_name` alone: under a name the mint refuses,
+        // it still reads, under that name.
+        for name in ["it's", "-attic", "a;b", "$HOME"] {
+            assert!(check_minted_name(name).is_err() && check_name(name).is_ok(), "{name:?}");
+            let kept = OperatorCredential {
+                name: name.to_string(),
+                key: key.clone(),
+                operates: Operates::Vault { vault: [2u8; 32], addr: Some("203.0.113.9:7710".parse().unwrap()) },
+            };
+            let read = OperatorCredential::parse(&kept.to_text()).unwrap_or_else(|e| panic!("{name:?}: {e:#}"));
+            assert_eq!(read.name, name);
         }
     }
 

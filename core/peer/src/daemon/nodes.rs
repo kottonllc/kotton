@@ -2604,13 +2604,14 @@ mod allowlist_rebuild {
 
         // A DID as stored whose identifier is not one plain word, under a label
         // that is not one either: the note is carried, under the DID as stored,
-        // and its sentence names no command.
+        // and its sentence names its verb and composes no command (23A).
         let odd = "did:key:RD/T4NHD S5UEFOU51W*VRLU7R";
         network_db::insert_paired_node(&db, "my phone", "person-odd", odd, &bytes, "[]", 0, None).await.unwrap();
         let (_, notes) = listed(node_list(&db, "person-odd".into(), None).await.unwrap());
         assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key(odd)]);
         let said = kotton_wire::note::sentence(&notes[0], "device revoke");
-        assert!(said.contains("names no Ed25519 key") && !said.contains("device revoke"), "{said}");
+        assert!(said.contains("names no Ed25519 key") && said.contains("`device revoke` is the verb that removes it, by this name"), "{said}");
+        assert!(!said.contains("device revoke "), "{said}");
     }
 
     /// **The second kind's name is one word too**: a row under another spelling

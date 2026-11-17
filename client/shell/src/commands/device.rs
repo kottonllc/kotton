@@ -80,7 +80,13 @@ fn known_verb(word: &str) -> bool {
 pub(crate) fn not_handed_lines(joined: &str, not_handed: &[kotton_wire::note::RowNote]) -> Vec<String> {
     not_handed
         .iter()
-        .map(|n| format!("{joined} was not handed the drive reached through `{}`: {}", n.name, kotton_wire::note::sentence(n, DEVICE_REVOKE)))
+        .map(|n| {
+            format!(
+                "{joined} was not handed the drive reached through `{}`: {}",
+                kotton_wire::note::shown(&n.name),
+                kotton_wire::note::sentence(n, DEVICE_REVOKE)
+            )
+        })
         .collect()
 }
 
@@ -92,8 +98,34 @@ pub(crate) const DEVICE_REVOKE: &str = "device revoke";
 
 /// One line for each note a listing carried beside its rows, as
 /// [`kotton_wire::note::sentence`] says it with [`DEVICE_REVOKE`].
+///
+/// A note's sentence gives a command to type only with a name that is one plain
+/// word ([`kotton_wire::note::one_plain_word`]), and that set is ASCII, as a
+/// stated concession (kottonllc/kotton#597, 25A). What is conceded: a command
+/// is printed only with a name in ASCII; nothing is refused for it, and a name
+/// in any script is stored, listed, shown with each character it holds
+/// ([`kotton_wire::note::shown`]) and taken by `device revoke` whole. What it
+/// costs: a device named in another script is given its DID as stored to copy,
+/// and a row with no plain name is told `device revoke` and the name it takes,
+/// with no line to copy. Why: a printed command is held to reach its row typed
+/// as printed, the stores compare a name byte for byte, and no normal form is
+/// applied to a name stored or typed. The seam is the one predicate, widened
+/// after a normal form is applied where a name is stored and where it is
+/// compared, with this shell's read-back test over the wider set
+/// (`a_notes_name_is_one_word_the_shell_takes_to_its_row`).
 pub(crate) fn notes_said(notes: &[kotton_wire::note::RowNote]) -> Vec<Out> {
     notes.iter().map(|n| Out::Note(kotton_wire::note::sentence(n, DEVICE_REVOKE))).collect()
+}
+
+/// `device list`'s table of the machines on this identity: each label shown
+/// with every character it holds ([`kotton_wire::note::shown`]), a shortened
+/// DID, and when it was paired.
+fn device_table(nodes: &[kotton_wire::peer::PairedNode]) -> Out {
+    let rows: Vec<Vec<String>> = nodes
+        .iter()
+        .map(|n| vec![kotton_wire::note::shown(&n.id), short_did(&n.device_did.to_string()), human_since(n.paired_at)])
+        .collect();
+    Out::Table { columns: vec!["device".into(), "did".into(), "paired".into()], rows }
 }
 
 /// The usage refusal, exit 2: what `device` prints for a word it does not have: the
@@ -372,20 +404,7 @@ impl DeviceCommand {
             .list_nodes(&user_id)
             .await
             .map_err(|e| anyhow::anyhow!("device list: {e}"))?;
-        let rows: Vec<Vec<String>> = nodes
-            .iter()
-            .map(|n| {
-                vec![
-                    n.id.clone(),
-                    short_did(&n.device_did.to_string()),
-                    human_since(n.paired_at),
-                ]
-            })
-            .collect();
-        let mut shapes = vec![Out::Table {
-            columns: vec!["device".into(), "did".into(), "paired".into()],
-            rows,
-        }];
+        let mut shapes = vec![device_table(&nodes)];
         shapes.extend(notes_said(&nodes.notes));
         // The browsers admitted with `device add --browser`, beside the devices:
         // a browser is paired like a device (DEC-0053), so what acts as you is
@@ -1149,6 +1168,7 @@ mod tests {
     fn names_taken(said: &str, stored: &str) -> Vec<String> {
         let Some((_, takes)) = said.split_once(", and a command that names it takes ") else { return Vec::new() };
         let takes = takes.strip_suffix(", not the key's").unwrap_or_else(|| panic!("{said}"));
+        let takes = takes.strip_suffix(", as recorded").unwrap_or(takes);
         match takes.strip_suffix(" or that recorded name") {
             _ if takes == "that recorded name" => vec![stored.to_owned()],
             Some(named) => vec![named.trim_matches('`').to_owned(), stored.to_owned()],
@@ -1160,9 +1180,11 @@ mod tests {
     /// 20A): each command a note's sentence gives to type, on `device list`, `peer list`,
     /// `drive list` and a join's admitting side, reads back through this shell's parser and
     /// `revoke`'s own reading as one command handing the revoke the note's name; and each
-    /// name the second kind's sentence says a command takes reads back the same. A name that
-    /// is not one plain word is given no command. That the name resolves to its row is held
-    /// in `kotton-peer` (`a_notes_name_is_one_word_the_shell_takes_to_its_row`).
+    /// name the second kind's sentence says a command takes reads back the same where it is
+    /// one plain word. A name that is not one plain word is given no command: the first kind
+    /// is told `device revoke` and that it takes the name (23A), and the second kind is told
+    /// the name, shown, and that a command takes it as recorded. That the name resolves to
+    /// its row is held in `kotton-peer` (`a_notes_name_is_one_word_the_shell_takes_to_its_row`).
     #[test]
     fn a_notes_name_is_one_word_the_shell_takes_to_its_row() {
         use kotton_wire::note::{NoteKind, RowNote};
@@ -1182,7 +1204,10 @@ mod tests {
             for line in &lines {
                 match command_in(line) {
                     Some(typed) => assert_eq!(read_as_typed(&typed), super::Revoke::Node(Some(name.to_owned())), "{line}"),
-                    None => assert!(!words.contains(&name), "a word was given no command: {line}"),
+                    None => {
+                        assert!(!words.contains(&name), "a word was given no command: {line}");
+                        assert!(line.contains("`device revoke` is the verb that removes it, by this name"), "{line}");
+                    }
                 }
             }
 
@@ -1197,12 +1222,73 @@ mod tests {
                 };
                 assert!(!said.contains(super::DEVICE_REVOKE), "{said}");
                 let taken = names_taken(&said, stored);
-                for taken in &taken {
+                for taken in taken.iter().filter(|t| kotton_wire::note::one_plain_word(t)) {
                     let typed = format!("{} {taken}", super::DEVICE_REVOKE);
                     assert_eq!(read_as_typed(&typed), super::Revoke::Node(Some(taken.clone())), "{said}");
                 }
-                assert_eq!(taken.contains(&name.to_owned()), words.contains(&name), "{said}");
+                assert!(taken.contains(&kotton_wire::note::shown(name)), "the name is not one a command takes: {said}");
+                let all_words = taken.iter().all(|t| kotton_wire::note::one_plain_word(t));
+                assert_eq!(said.contains(", as recorded,"), !all_words, "{said}");
             }
+        }
+    }
+
+    /// **A row with no plain name is told `device revoke` and given no command, on
+    /// `device list`, `peer list`, `drive list` and a join's admitting side**
+    /// (kottonllc/kotton#618, 23A): a name in another script, one with a quote, and one
+    /// that starts with `-`. The verb is in the sentence, and no command with the name is.
+    #[test]
+    fn a_row_with_no_plain_name_is_told_device_revoke_and_given_no_command() {
+        for name in ["\u{5c4b}\u{6839}\u{88cf}", "it's", "-attic"] {
+            let note = kotton_wire::note::RowNote::names_no_key(name);
+            let mut lines: Vec<String> = super::notes_said(std::slice::from_ref(&note))
+                .into_iter()
+                .map(|o| match o {
+                    crate::out::Out::Note(t) => t,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            lines.extend(super::not_handed_lines("laptop", std::slice::from_ref(&note)));
+            assert_eq!(lines.len(), 2);
+            for line in &lines {
+                assert!(line.contains("`device revoke` is the verb that removes it, by this name"), "{line}");
+                assert!(line.contains(&format!("`{name}`")), "{line}");
+                assert!(!line.contains("device revoke "), "a command was composed: {line}");
+                assert_eq!(command_in(line), None, "{line}");
+            }
+        }
+    }
+
+    /// **A label in `device list` and `peer list` is shown with each character it holds**
+    /// (kottonllc/kotton#618): a control, invisible or bidirectional character by its
+    /// escape, and a letter of another script, a quote and a space as they are. So is the
+    /// name a join's admitting side names a node by.
+    #[test]
+    fn a_label_is_shown_with_each_character_it_holds() {
+        let node = |label: &str| kotton_wire::peer::PairedNode {
+            id: label.into(),
+            device_did: kotton_wire::did::Did::parse("did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX").unwrap(),
+            public_key: [0xab; 32],
+            paired_at: 0,
+            addresses: vec![],
+            relay_url: None,
+            posture: None,
+        };
+        for (label, said) in [
+            ("bell\u{7}", "bell\\u{7}"),
+            ("esc\u{1b}[2K", "esc\\u{1b}[2K"),
+            ("\u{202e}enohp", "\\u{202e}enohp"),
+            ("ph\u{200b}one", "ph\\u{200b}one"),
+            ("two\nlines", "two\\nlines"),
+            ("\u{5c4b}\u{6839}\u{88cf}", "\u{5c4b}\u{6839}\u{88cf}"),
+            ("sam's phone", "sam's phone"),
+        ] {
+            let crate::out::Out::Table { rows, .. } = super::device_table(&[node(label)]) else { panic!("a table") };
+            assert_eq!(rows[0][0], said, "device list: {label:?}");
+            let crate::out::Out::Table { rows, .. } = crate::commands::peer::list_table(&[node(label)]) else { panic!("a table") };
+            assert_eq!(rows[0][0], said, "peer list: {label:?}");
+            let lines = super::not_handed_lines("laptop", &[kotton_wire::note::RowNote::names_no_key(label)]);
+            assert!(lines[0].starts_with(&format!("laptop was not handed the drive reached through `{said}`: ")), "{lines:?}");
         }
     }
 
