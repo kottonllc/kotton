@@ -292,9 +292,13 @@ pub(crate) fn vault_rows(
         },
     );
     let mine = |handle: &str| operated.iter().find(|(did, _)| did == handle).map(|(_, o)| *o);
+    // A vault's relay is matched to a kept relay credential by the key's
+    // `did:key`, as a row is matched to its vault: a key the Ed25519 rule
+    // refuses has none, so it names no relay on any row (#605).
+    let did_of = |key: Option<[u8; 32]>| key.and_then(|k| kotton_crypto::DidKeyMethod::from_public_key_bytes(&k).ok()).map(|d| d.to_string());
     let relay_named = |key: Option<[u8; 32]>| {
-        let key = key?;
-        relays.iter().find(|r| r.key == Some(key)).map(|r| r.name.clone())
+        let did = did_of(key)?;
+        relays.iter().find(|r| did_of(r.key).as_deref() == Some(did.as_str())).map(|r| r.name.clone())
     };
     let mut rows: Vec<RunnerVault> = enrolled
         .iter()
@@ -505,6 +509,9 @@ mod tests {
     /// by the relay's key and never its URL.
     #[test]
     fn a_vault_the_person_operates_is_listed_as_theirs_and_names_their_relay_by_its_key() {
+        // Relay keys made from a seed: bytes the Ed25519 rule refuses name no
+        // relay on any row (`a_vaults_row_names_its_relay_by_the_relay_keys_did_key`).
+        let seeded = |n: u8| ed25519_dalek::SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes();
         let own = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]).verifying_key().to_bytes();
         let other = ed25519_dalek::SigningKey::from_bytes(&[6u8; 32]).verifying_key().to_bytes();
         let did = |k: &[u8; 32]| kotton_crypto::DidKeyMethod::from_public_key_bytes(k).unwrap().to_string();
@@ -521,12 +528,12 @@ mod tests {
                 vault: own,
                 name: "kotton".to_owned(),
                 relay: Some("http://droplet.example.org:7700".to_owned()),
-                relay_key: Some([1u8; 32]),
+                relay_key: Some(seeded(1)),
                 told_at: Some(1_790_000_000),
             }],
             &[OperatedRelay {
                 name: "gate".to_owned(),
-                key: Some([1u8; 32]),
+                key: Some(seeded(1)),
             }],
         );
         let yours: Vec<(Option<&str>, bool)> = rows.iter().map(|r| (r.label.as_deref(), r.yours)).collect();
@@ -552,12 +559,12 @@ mod tests {
                 vault: third,
                 name: "attic".to_owned(),
                 relay: Some("http://attic.example.org:7700".to_owned()),
-                relay_key: Some([2u8; 32]),
+                relay_key: Some(seeded(2)),
                 told_at: None,
             }],
             &[OperatedRelay {
                 name: "gate".to_owned(),
-                key: Some([1u8; 32]),
+                key: Some(seeded(1)),
             }],
         );
         assert_eq!(rows.len(), 3, "{rows:?}");
@@ -661,6 +668,42 @@ mod tests {
         let enrolled = vec![Target::new(VAULT, Some("Vault".to_owned()))];
         let rows = vault_rows(&enrolled, &[row], &[], &|_| true, &[], &[]);
         assert_eq!(rows[0].through.as_deref(), Some("droplet.austin.dev:7700"), "{rows:?}");
+    }
+
+    /// **A vault's row names a relay this person keeps only by the relay key's
+    /// `did:key`**, as a row is matched to its vault: for every key vector the
+    /// Ed25519 rule refuses, a kept relay credential under those bytes is named
+    /// on no vault's row though the vault was told those same bytes, and a
+    /// relay whose key is made from a seed is named on the row of the vault
+    /// told it, enrolled or not (kottonllc/kotton#605).
+    #[test]
+    fn a_vaults_row_names_its_relay_by_the_relay_keys_did_key() {
+        let seeded = |n: u8| ed25519_dalek::SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes();
+        let did = |k: &[u8; 32]| kotton_crypto::DidKeyMethod::from_public_key_bytes(k).unwrap().to_string();
+        let vault = |n: u8, name: &str, at: [u8; 32]| Operated {
+            vault: seeded(n),
+            name: name.to_owned(),
+            relay: Some("http://203.0.113.9:7700".to_owned()),
+            relay_key: Some(at),
+            told_at: Some(1_790_000_000),
+        };
+        let enrolled = [Target::new(did(&seeded(10)), Some("droplet".to_owned()))];
+        let named = |at: [u8; 32]| {
+            let rows = vault_rows(
+                &enrolled,
+                &[],
+                &[],
+                &|_| false,
+                &[vault(10, "kotton", at), vault(11, "attic", at)],
+                &[OperatedRelay { name: "gate".to_owned(), key: Some(at) }],
+            );
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            rows.into_iter().map(|r| r.relay_name).collect::<Vec<_>>()
+        };
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            assert_eq!(named(bytes), vec![None, None], "{name}: a relay key the rule refuses was named on a vault's row");
+        }
+        assert_eq!(named(seeded(1)), vec![Some("gate".to_owned()), Some("gate".to_owned())]);
     }
 
     /// **No relay named is no row**, which is not the same fact as a row that
