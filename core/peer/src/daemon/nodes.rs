@@ -181,7 +181,7 @@ pub async fn peer_readdress(
 /// pairs it. What the daemon's `Recover` runs when the words are refused, for
 /// the node it added for the line (`kotton_device::users::recover`).
 ///
-/// Unlike [`node_revoke`] it touches no membership record: a node added by
+/// Unlike a revoke ([`revoke_named`]) it touches no membership record: a node added by
 /// address was never a member, and the person's set may not be open here.
 /// The node is named by its DID, the row's key: the label it was added under
 /// may be another row's too.
@@ -422,53 +422,242 @@ pub async fn pair_node_ephemeral(
 
 /// Every node `user_id` has paired, and beside them a note for each row that
 /// names no key or stands by its bytes under another spelling
-/// ([`network_db::notes_of`]). The same answer to a local asker and a remote
-/// one: each note says only what its row in the answer already does.
-pub async fn node_list(db: &Arc<SqlitePool>, user_id: String) -> io::Result<UserResponse> {
+/// ([`network_db::notes_of`]).
+///
+/// `members` is the person's set, handed in only for an answer given at the
+/// machine: kottonllc/kotton#610 has such a note "carried only in an answer to
+/// the person whose set it is, on their own device".
+/// With it, the answer also carries a note for each DID as stored that
+/// own-device members of the set carry whose bytes are no key and that no row
+/// stands for ([`member_notes`]): the one thing such a member is reached by is
+/// `device revoke`, which resolves it for a local asker only ([`node_named`]). Without
+/// it, as for every remote asker, each note says only what its row in the
+/// answer already does. A set that cannot be read adds no note, and the rows are
+/// listed as ever.
+pub async fn node_list(
+    db: &Arc<SqlitePool>,
+    user_id: String,
+    members: Option<&dyn crate::membership::MemberStore>,
+) -> io::Result<UserResponse> {
     let nodes = network_db::list_paired_nodes(db, &user_id).await?;
-    let notes = network_db::notes_of(&nodes);
+    let mut notes = network_db::notes_of(&nodes);
+    if let Some(store) = members {
+        match store.list_found().await {
+            Ok(found) => notes.extend(member_notes(&nodes, &found)),
+            Err(e) => tracing::debug!(user_id, error = %e, "membership not readable; no member is noted"),
+        }
+    }
     Ok(UserResponse::NodeList { nodes, notes })
 }
 
-pub async fn node_revoke(
-    member_store: &dyn crate::membership::MemberStore,
-    db: &Arc<SqlitePool>,
-    user_id: String,
-    node_id: String,
-    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
-) -> io::Result<UserResponse> {
-    // Fetch the node *before* deleting so we have its DID (to drop the membership
-    // record and to name the row) and public key (to drop the live TLS
-    // allowlist entry). `node_id` is what the person typed: the node's DID, or
-    // a label one row of theirs carries (`network_db::paired_node_named`).
-    let node = match network_db::paired_node_named(db, &user_id, &node_id).await? {
-        Some(n) => n,
-        None => {
-            return Ok(UserResponse::Error {
-                message: format!("node '{}' not found for user '{}'", node_id, user_id),
-            })
-        }
-    };
+/// The own-device members of `found`, the set's own listing, that no row of
+/// `rows`, the person's, holds the key of: a row is its bytes' and stands for
+/// the member that holds them (kottonllc/kotton#597, 5B), so these are the
+/// members no row stands for. Contacts and relays are never among them.
+pub fn members_with_no_row(rows: &[PairedNode], found: Vec<crate::membership::Found>) -> Vec<crate::membership::Found> {
+    found
+        .into_iter()
+        .filter(|f| f.member.is_own_device())
+        .filter(|f| !rows.iter().any(|r| r.public_key == f.member.public_key))
+        .collect()
+}
 
-    // Remove the membership record (the source of truth) so every computed
-    // view closes — "revoke once, closed everywhere". Best-effort: the live
-    // allowlist removal below is what actually blocks connections today, so a
-    // membership-cleanup failure is logged, not fatal.
+/// A note for each DID as stored that own-device members of `found` carry whose
+/// bytes the Ed25519 rule refuses and that no row of `rows` stands for
+/// ([`members_with_no_row`]), named by that DID: the name `device revoke` takes
+/// to them ([`node_named`]). The name is noted once however many members carry
+/// it, since the one revoke by it removes every one of them
+/// (kottonllc/kotton#597, 35A). A member whose DID as stored a row also
+/// carries, as its DID or its label, is not noted: the resolver takes that name
+/// to the row first, so a command printed with it would reach the row and not
+/// the member (20A; 36A).
+pub fn member_notes(rows: &[PairedNode], found: &[crate::membership::Found]) -> Vec<kotton_wire::note::RowNote> {
+    let mut named: Vec<String> = Vec::new();
+    for f in members_with_no_row(rows, found.to_vec())
+        .into_iter()
+        .filter(|f| VerifyingKey::from_bytes(&f.member.public_key).is_err())
+        .filter(|f| !rows.iter().any(|r| r.id == f.member.did || r.device_did.to_string() == f.member.did))
     {
-        if let Err(e) = member_store.remove_member(&node.device_did.to_string()).await {
-            tracing::warn!(
-                user_id = %user_id,
-                node_id = %node_id,
-                "revoked node but failed to remove its membership record: {e}"
-            );
+        if !named.contains(&f.member.did) {
+            named.push(f.member.did);
         }
     }
+    named.into_iter().map(kotton_wire::note::RowNote::names_no_key).collect()
+}
 
-    network_db::delete_paired_node(db, &user_id, &node.device_did.to_string()).await?;
-    // The key leaves the live allowlist unless a row still pairs it: another
-    // person's here, who may pair the same node (two tenants of one vault).
-    if !still_paired(db, &node.public_key).await? {
-        unadmit(paired_keys, &node.public_key);
+/// What a name a person typed may reach ([`node_named`]).
+pub enum Reach<'a> {
+    /// The person's `paired_nodes` rows, and nothing else: what a remote asker
+    /// reaches with `device revoke`.
+    Rows,
+    /// The rows, and where no row carries the name, an own-device member of this
+    /// set that no row stands for ([`members_with_no_row`]), by its DID as stored.
+    RowsAndMembers(&'a dyn crate::membership::MemberStore),
+    /// The person's rows that the drive record names, one per node
+    /// ([`super::drives::nodes`]), and nothing else: what a verb whose noun is a
+    /// drive reaches, `remote add` and `sync` (kottonllc/kotton#597, 37A). A
+    /// device is not in reach, so a drive is named by its label whatever a
+    /// device carries.
+    Drives,
+}
+
+/// Who asked for a revoke, for what it may reach ([`Asked::reach`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asked {
+    /// At the machine, on the person's own device (`ConnTrustOrigin::Local`):
+    /// a row, or an own-device member of their set with no row.
+    Locally,
+    /// By anyone else: a row of the person's and that row's members, as before
+    /// (kottonllc/kotton#610).
+    Remotely,
+}
+
+impl Asked {
+    /// What a revoke so asked may reach, over `members`, the person's set: the
+    /// one place an asker becomes a [`Reach`]. `device revoke` resolves through
+    /// it ([`node_named`]) and removes what it resolved ([`revoke_named`]), in
+    /// `kotton_device::users::drive_devices::revoke`, the one body a revoke runs.
+    pub fn reach(self, members: &dyn crate::membership::MemberStore) -> Reach<'_> {
+        match self {
+            Asked::Locally => Reach::RowsAndMembers(members),
+            Asked::Remotely => Reach::Rows,
+        }
+    }
+}
+
+/// What [`node_named`] resolved a name to.
+#[derive(Debug, Clone)]
+pub enum Named {
+    /// One of the person's rows.
+    Row(PairedNode),
+    /// The own-device members of the person's set that carry the name as their
+    /// DID as stored and that no row stands for, as the set's own listing
+    /// returned them. Never empty.
+    Members(Vec<crate::membership::Found>),
+}
+
+/// **The one resolver of a node a person names** (kottonllc/kotton#610). A
+/// name is taken whole and compared by equality with what is stored, and held
+/// to no rule of characters: the rule a sentence prints a command by
+/// ([`kotton_wire::note::one_plain_word`]) bounds what is printed, never what is
+/// taken (kottonllc/kotton#597, 26A).
+///
+/// In order: a row of the person's under the name as its DID as stored, then a
+/// row carrying it as its label, refused where two rows carry it
+/// ([`network_db::paired_node_named`]); then, with [`Reach::RowsAndMembers`] and
+/// only where no row carries the name, an own-device member of the person's set
+/// under it as its DID as stored that no row stands for, found in the set's own
+/// listing ([`crate::membership::Membership::list_found`]). With
+/// [`Reach::Drives`], the same order over the rows the drive record names only:
+/// one by its DID as stored, then one by its label, refused where two of those
+/// rows carry it; it never reaches a member. A contact or a relay is never
+/// resolved, and the name is never joined into a store path. `Ok(None)` when it
+/// names nothing in reach; `Err` for a label two rows in reach carry, or a set
+/// or a drive record that could not be read.
+///
+/// Conceded (kottonllc/kotton#597, 36A): a member under bytes that are no key is
+/// neither reached nor noted ([`member_notes`]) while a row of the person's
+/// carries its DID as stored as a DID or a label, and is both once no row does.
+/// The seam is the member arm, one branch here: a form of the request that says
+/// the member is meant, taken at the machine only, would reach it by its listing
+/// key with no change to a store, a row or a note.
+pub async fn node_named(
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    name: &str,
+    reach: Reach<'_>,
+) -> io::Result<Option<Named>> {
+    if let Reach::Drives = reach {
+        return Ok(drive_node_named(db, user_id, name).await?.map(Named::Row));
+    }
+    if let Some(row) = network_db::paired_node_named(db, user_id, name).await? {
+        return Ok(Some(Named::Row(row)));
+    }
+    let Reach::RowsAndMembers(store) = reach else {
+        return Ok(None);
+    };
+    let found = store
+        .list_found()
+        .await
+        .map_err(|e| io::Error::other(format!("could not read your membership set to look for '{name}': {e:#}")))?;
+    let rows = network_db::list_paired_nodes(db, user_id).await?;
+    let named: Vec<_> = members_with_no_row(&rows, found).into_iter().filter(|f| f.member.did == name).collect();
+    Ok((!named.is_empty()).then_some(Named::Members(named)))
+}
+
+/// [`node_named`] over [`Reach::Drives`]: the row among the drive record's that
+/// `name` names, by its DID as stored, then by its label where one of those rows
+/// carries it.
+async fn drive_node_named(db: &Arc<SqlitePool>, user_id: &str, name: &str) -> io::Result<Option<PairedNode>> {
+    let rows = super::drives::nodes(db, user_id)
+        .await
+        .map_err(|e| io::Error::other(format!("failed to list your drives: {e}")))?;
+    if let Some(row) = rows.iter().find(|r| r.device_did.to_string() == name) {
+        return Ok(Some(row.clone()));
+    }
+    let mut labelled: Vec<PairedNode> = rows.into_iter().filter(|r| r.id == name).collect();
+    match labelled.len() {
+        0 | 1 => Ok(labelled.pop()),
+        n => {
+            let mut dids: Vec<String> = labelled.iter().map(|r| r.device_did.to_string()).collect();
+            dids.sort();
+            Err(io::Error::other(format!(
+                "'{name}' is the label of {n} of your drives ({}); name the one you mean by its DID",
+                dids.join(", ")
+            )))
+        }
+    }
+}
+
+/// Revoke what [`node_named`] resolved, and its key on the live allowlist
+/// unless a row still pairs it: another person's here, who may pair the same
+/// node (two tenants of one vault).
+///
+/// - **A row:** the row goes, and with it every own-device member of the set that
+///   holds the row's key, by its bytes: a row is its bytes', and the DID beside
+///   them is not read as the member's name (kottonllc/kotton#597, 5B). The
+///   members go first, as the source of truth ("revoke once, closed
+///   everywhere"), best-effort: the row and the live allowlist entry are what
+///   block a connection here today, so a set that cannot be read or written is
+///   logged, not fatal.
+/// - **Members with no row:** each is removed from the set by the key the set's
+///   own listing gave for it, and a failure is the answer.
+pub async fn revoke_named(
+    member_store: &dyn crate::membership::MemberStore,
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    named: &Named,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
+) -> io::Result<UserResponse> {
+    let keys: Vec<[u8; 32]> = match named {
+        Named::Row(node) => {
+            match member_store.list_found().await {
+                Ok(found) => {
+                    let holding = found
+                        .iter()
+                        .filter(|f| f.member.is_own_device() && f.member.public_key == node.public_key);
+                    for f in holding {
+                        if let Err(e) = member_store.remove_found(f).await {
+                            tracing::warn!(user_id, member = %f.member.did, "revoked node but failed to remove its membership record: {e:#}");
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(user_id, node = %node.device_did, "revoked node but could not read the membership set to remove its member: {e:#}"),
+            }
+            network_db::delete_paired_node(db, user_id, &node.device_did.to_string()).await?;
+            vec![node.public_key]
+        }
+        Named::Members(found) => {
+            for f in found {
+                member_store.remove_found(f).await.map_err(|e| io::Error::other(format!("{e:#}")))?;
+            }
+            found.iter().map(|f| f.member.public_key).collect()
+        }
+    };
+    for key in keys {
+        if !still_paired(db, &key).await? {
+            unadmit(paired_keys, &key);
+        }
     }
     Ok(UserResponse::NodeRevoked)
 }
@@ -1051,8 +1240,8 @@ pub async fn record_own_device_member(
 /// **own-device** member's key to the live allowlist and ensures a `paired_nodes`
 /// cache row exists for it (so it is dialable; an address-less row is filled later
 /// by presence/connect). It **never removes a key** — revocation is an explicit
-/// act ([`node_revoke`](node_revoke) drops the member and the key together), and a
-/// reproject-*with-removal* against a not-yet-synced (incomplete) membership set
+/// act (`device revoke`, whose [`revoke_named`] drops the member and the key
+/// together), and a reproject-*with-removal* against a not-yet-synced (incomplete) membership set
 /// would wrongly drop legitimately-paired keys (the "revoke-wins /
 /// completeness" hazard).
 ///
@@ -1897,7 +2086,7 @@ mod allowlist_rebuild {
     /// **A key revoked for one person stays in the live allowlist while
     /// another person's row still pairs it, and leaves with the last row**
     /// (kotton #99). Rows are each person's, so two tenants of one vault on a
-    /// shared device each pair its key; `node_revoke` for one of them must
+    /// shared device each pair its key; a revoke for one of them must
     /// not shut the other's door at the handshake.
     #[tokio::test]
     async fn a_revoked_key_leaves_the_allowlist_with_its_last_row() {
@@ -1917,12 +2106,12 @@ mod allowlist_rebuild {
         let admitted = VerifyingKey::from_bytes(&key).unwrap();
         let paired_keys = Arc::new(RwLock::new(HashSet::from([admitted])));
 
-        let said = node_revoke(&NoMembers, &db, "alice".into(), "household".into(), &paired_keys).await.unwrap();
+        let said = revoke(&NoMembers, &db, "alice", "household", &paired_keys, Asked::Locally).await;
         assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
         assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty());
         assert!(paired_keys.read().unwrap().contains(&admitted), "alice's revoke shut bob's door at the handshake");
 
-        let said = node_revoke(&NoMembers, &db, "bob".into(), did.clone(), &paired_keys).await.unwrap();
+        let said = revoke(&NoMembers, &db, "bob", &did, &paired_keys, Asked::Locally).await;
         assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
         assert!(!paired_keys.read().unwrap().contains(&admitted), "a key no row pairs is still admitted");
     }
@@ -1950,7 +2139,7 @@ mod allowlist_rebuild {
         for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
             let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
             network_db::insert_paired_node(&db, "old", "alice", &did, &bytes, "[]", 0, None).await.unwrap();
-            let said = node_revoke(&NoMembers, &db, "alice".into(), did.clone(), &paired_keys).await.unwrap();
+            let said = revoke(&NoMembers, &db, "alice", &did, &paired_keys, Asked::Locally).await;
             assert!(matches!(said, UserResponse::NodeRevoked), "{name}: {said:?}");
             let left: Vec<String> =
                 network_db::list_paired_nodes(&db, "alice").await.unwrap().iter().map(|n| n.device_did.to_string()).collect();
@@ -1966,6 +2155,348 @@ mod allowlist_rebuild {
         let pool = SqlitePool::connect_with(options).await.unwrap();
         sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
         Arc::new(pool)
+    }
+
+    /// `device revoke` as its one body runs it here, with no drive to tell
+    /// (`kotton_device::users::drive_devices::revoke`): the name resolved within
+    /// what `asked` reaches, then what it resolved revoked.
+    async fn revoke(
+        store: &dyn MemberStore,
+        db: &Arc<SqlitePool>,
+        user: &str,
+        name: &str,
+        keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
+        asked: Asked,
+    ) -> UserResponse {
+        match node_named(db, user, name, asked.reach(store)).await.unwrap() {
+            Some(named) => revoke_named(store, db, user, &named, keys).await.unwrap(),
+            None => UserResponse::Error { message: format!("node '{name}' not found for user '{user}'") },
+        }
+    }
+
+    /// A member as an earlier build could have written it, past `write_member`'s rule.
+    async fn stored(members: &Members, m: &Member) {
+        members.member_write(&m.vfs_path(), &serde_json::to_vec(m).unwrap()).await.unwrap();
+    }
+
+    fn dids(members: &[Member]) -> Vec<String> {
+        let mut dids: Vec<String> = members.iter().map(|m| m.did.clone()).collect();
+        dids.sort();
+        dids
+    }
+
+    /// **`device revoke` of a row removes the member that holds the row's key**
+    /// (kottonllc/kotton#610; kottonllc/kotton#597, 5B): the row stands under its
+    /// key's `did:key` and the own-device member under another spelling of it, and
+    /// both go. A member under another key, and a contact under the row's key, stay.
+    #[tokio::test]
+    async fn a_rows_revoke_removes_the_member_that_holds_the_rows_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let key = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[31u8; 32]));
+        let other = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[32u8; 32]));
+        let did = kotton_crypto::DidKeyMethod::from_public_key(&key).to_string();
+        network_db::insert_paired_node(&db, "laptop", "alice", &did, key.as_bytes(), "[]", 0, None).await.unwrap();
+        let members = Members::default();
+        let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string();
+        members.write_member(&own_device(&spelled, *key.as_bytes())).await.unwrap();
+        let stays = own_device(&kotton_crypto::DidKeyMethod::from_public_key(&other).to_string(), *other.as_bytes());
+        members.write_member(&stays).await.unwrap();
+        let mut contact = own_device("did:kel:Ecarol", *key.as_bytes());
+        contact.role = Role::Contact;
+        members.write_member(&contact).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([key])));
+
+        let said = revoke(&members, &db, "alice", "laptop", &paired_keys, Asked::Remotely).await;
+        assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
+        assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty(), "the row stayed");
+        let mut want = vec![stays.did.clone(), contact.did.clone()];
+        want.sort();
+        assert_eq!(dids(&members.list_members().await.unwrap()), want, "the member under the row's key stayed");
+        assert!(paired_keys.read().unwrap().is_empty(), "the key stayed on the allowlist");
+    }
+
+    /// **A member of the set with no row is resolved by its DID as stored and
+    /// removed from the set** (kottonllc/kotton#610), for every key vector the
+    /// Ed25519 rule refuses: the listing at the machine notes it by that DID, the
+    /// note's sentence names `device revoke` with it, and the revoke by the note's
+    /// name, asked locally, removes it. Asked remotely, the same name is not found
+    /// and the member stays; the listing without the set notes it not at all.
+    #[tokio::test]
+    async fn a_member_with_no_row_is_noted_and_removed_for_a_local_asker_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[33u8; 32]));
+        let honest_did = kotton_crypto::DidKeyMethod::from_public_key(&honest).to_string();
+        network_db::insert_paired_node(&db, "laptop", "alice", &honest_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+        let members = Members::default();
+        let kept = own_device(&honest_did, *honest.as_bytes());
+        members.write_member(&kept).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([honest])));
+
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
+            stored(&members, &own_device(&did, bytes)).await;
+
+            let (_, remote) = listed(node_list(&db, "alice".into(), None).await.unwrap());
+            assert!(remote.is_empty(), "{name}: a member was noted without the set: {remote:?}");
+            let said = revoke(&members, &db, "alice", &did, &paired_keys, Asked::Remotely).await;
+            assert!(matches!(&said, UserResponse::Error { message } if message.contains("not found")), "{name}: {said:?}");
+            assert_eq!(members.list_members().await.unwrap().len(), 2, "{name}: a remote asker removed a member with no row");
+
+            let (nodes, notes) = listed(node_list(&db, "alice".into(), Some(&members)).await.unwrap());
+            assert_eq!(nodes.len(), 1, "{name}");
+            assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key(did.clone())], "{name}");
+            assert!(
+                kotton_wire::note::sentence(&notes[0], "device revoke").contains(&format!("`device revoke {did}`")),
+                "{name}: the sentence names no revoke"
+            );
+            let said = revoke(&members, &db, "alice", &notes[0].name, &paired_keys, Asked::Locally).await;
+            assert!(matches!(said, UserResponse::NodeRevoked), "{name}: {said:?}");
+            assert_eq!(members.list_members().await.unwrap(), vec![kept.clone()], "{name}: the member stayed, or another went");
+            let (nodes, notes) = listed(node_list(&db, "alice".into(), Some(&members)).await.unwrap());
+            assert_eq!((nodes.len(), notes.len()), (1, 0), "{name}: {notes:?}");
+            assert_eq!(*paired_keys.read().unwrap(), HashSet::from([honest]), "{name}: the allowlist changed");
+        }
+    }
+
+    /// **A member with no row whose bytes pass is resolved too, and its key leaves
+    /// the live allowlist**, where the projection put it without a row; it carries
+    /// no note, since it names a key.
+    #[tokio::test]
+    async fn a_member_with_no_row_whose_bytes_pass_is_removed_and_unadmitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let key = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[34u8; 32]));
+        let did = kotton_crypto::DidKeyMethod::from_public_key(&key).to_string();
+        let members = Members::default();
+        members.write_member(&own_device(&did, *key.as_bytes())).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([key])));
+
+        let (_, notes) = listed(node_list(&db, "alice".into(), Some(&members)).await.unwrap());
+        assert!(notes.is_empty(), "{notes:?}");
+        let said = revoke(&members, &db, "alice", &did, &paired_keys, Asked::Locally).await;
+        assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
+        assert!(members.list_members().await.unwrap().is_empty());
+        assert!(paired_keys.read().unwrap().is_empty(), "the key stayed on the allowlist");
+    }
+
+    /// **A contact or a relay is never resolved** (kottonllc/kotton#610), whatever
+    /// its bytes: asked locally by its DID as stored, it is not found, it stays in
+    /// the set, and the listing notes neither.
+    #[tokio::test]
+    async fn a_contact_or_a_relay_is_never_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let members = Members::default();
+        let (_, refused) = kotton_crypto::ed25519::refused_keys().remove(0);
+        for (role, did) in [(Role::Contact, "did:kel:Ecarol"), (Role::Relay, "did:key:zRelay")] {
+            let mut m = own_device(did, refused);
+            m.role = role;
+            stored(&members, &m).await;
+        }
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        for did in ["did:kel:Ecarol", "did:key:zRelay"] {
+            let said = revoke(&members, &db, "alice", did, &paired_keys, Asked::Locally).await;
+            assert!(matches!(&said, UserResponse::Error { message } if message.contains("not found")), "{did}: {said:?}");
+        }
+        assert_eq!(members.list_members().await.unwrap().len(), 2, "a contact or a relay was removed");
+        let (_, notes) = listed(node_list(&db, "alice".into(), Some(&members)).await.unwrap());
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// **A member is removed by the key the set's own listing gave for it, and
+    /// the typed name is joined into no store path** (kottonllc/kotton#610): an
+    /// object listed under one key that holds a member under another DID is
+    /// resolved by the DID it holds and removed at the key it was listed under;
+    /// the path that DID would make holds an honest member, which stays.
+    #[tokio::test]
+    async fn a_member_is_removed_at_the_key_it_was_listed_under() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let members = Members::default();
+        let (_, refused) = kotton_crypto::ed25519::refused_keys().remove(0);
+        let earlier = own_device("did:key:zEarlier", refused);
+        members
+            .member_write("/network/members/did:key:zListedElsewhere", &serde_json::to_vec(&earlier).unwrap())
+            .await
+            .unwrap();
+        let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[35u8; 32]));
+        let at_its_path = own_device("did:key:zHonest", *honest.as_bytes());
+        members.member_write(&kotton_schemas::membership::member_path("did:key:zEarlier"), &serde_json::to_vec(&at_its_path).unwrap()).await.unwrap();
+
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let said = revoke(&members, &db, "alice", "did:key:zEarlier", &paired_keys, Asked::Locally).await;
+        assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
+        assert_eq!(members.list_members().await.unwrap(), vec![at_its_path], "the wrong object was removed");
+    }
+
+    /// **The one resolver takes a label and a DID as stored whole, by equality,
+    /// and holds neither to a rule of characters** (kottonllc/kotton#597, 26A): a
+    /// row whose label and whose DID as stored are neither one plain word is
+    /// resolved by each and removed.
+    #[tokio::test]
+    async fn a_row_with_no_plain_name_is_resolved_by_each_name_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let key = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[36u8; 32]));
+        let (label, did) = ("my phone; it's \"old\"", "did:key:z an earlier spelling");
+        assert!(!kotton_wire::note::one_plain_word(label) && !kotton_wire::note::one_plain_word(did));
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([key])));
+        for name in [label, did] {
+            network_db::insert_paired_node(&db, label, "alice", did, key.as_bytes(), "[]", 0, None).await.unwrap();
+            match node_named(&db, "alice", name, Reach::Rows).await.unwrap() {
+                Some(Named::Row(row)) => assert_eq!(row.device_did.to_string(), did, "{name}"),
+                other => panic!("{name:?} resolved to {other:?}"),
+            }
+            let said = revoke(&NoMembers, &db, "alice", name, &paired_keys, Asked::Remotely).await;
+            assert!(matches!(said, UserResponse::NodeRevoked), "{name:?}: {said:?}");
+            assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty(), "{name:?}");
+        }
+    }
+
+    /// **A member whose DID as stored a row carries as its name is not noted**:
+    /// `device revoke` given that name takes it to the row, so a sentence naming
+    /// it would remove the row and not the member (20A).
+    #[tokio::test]
+    async fn a_member_whose_did_a_row_carries_is_not_noted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let (_, refused) = kotton_crypto::ed25519::refused_keys().remove(0);
+        let did = kotton_crypto::DidKeyMethod::spelled_over(&refused).to_string();
+        let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[37u8; 32]));
+        let honest_did = kotton_crypto::DidKeyMethod::from_public_key(&honest).to_string();
+        network_db::insert_paired_node(&db, &did, "alice", &honest_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+        let members = Members::default();
+        stored(&members, &own_device(&did, refused)).await;
+        let (_, notes) = listed(node_list(&db, "alice".into(), Some(&members)).await.unwrap());
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// **One name removes every member with no row under it, and the listing says
+    /// the name once** (kottonllc/kotton#597, 35A): two own-device members carry one
+    /// DID as stored under two listing keys, each under bytes the rule refuses. The
+    /// listing at the machine notes that DID once; the local revoke by it removes
+    /// both; the listing then notes nothing; an honest member beside them stays.
+    #[tokio::test]
+    async fn several_members_under_one_did_are_noted_once_and_all_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let members = Members::default();
+        let refused = kotton_crypto::ed25519::refused_keys();
+        let did = "did:peer:twice-stored";
+        for (i, (_, bytes)) in refused.iter().take(2).enumerate() {
+            let m = own_device(did, *bytes);
+            members.member_write(&format!("/network/members/listed-{i}"), &serde_json::to_vec(&m).unwrap()).await.unwrap();
+        }
+        let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[38u8; 32]));
+        let stays = own_device(&kotton_crypto::DidKeyMethod::from_public_key(&honest).to_string(), *honest.as_bytes());
+        members.write_member(&stays).await.unwrap();
+        assert_eq!(members.list_members().await.unwrap().len(), 3);
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([honest])));
+
+        let (_, notes) = listed(node_list(&db, "alice".into(), Some(&members)).await.unwrap());
+        assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key(did)], "the name is not noted once");
+        let said = revoke(&members, &db, "alice", &notes[0].name, &paired_keys, Asked::Locally).await;
+        assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
+        assert_eq!(members.list_members().await.unwrap(), vec![stays], "a member under the name stayed, or the honest one went");
+        let (_, notes) = listed(node_list(&db, "alice".into(), Some(&members)).await.unwrap());
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(*paired_keys.read().unwrap(), HashSet::from([honest]), "the allowlist changed");
+    }
+
+    /// **A row's revoke removes the members that hold its key and leaves a second
+    /// row of the person's under that key** (kottonllc/kotton#597, 34A's removal): two
+    /// rows under one key, by its `did:key` and by another spelling of it, and an
+    /// own-device member holding the key. Revoking the first removes it and the
+    /// member; the second row stays, and the key stays on the allowlist while it
+    /// pairs it. Revoking the second removes it and takes the key off.
+    #[tokio::test]
+    async fn a_rows_revoke_removes_its_members_and_leaves_a_second_row_under_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let key = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[39u8; 32]));
+        let did = kotton_crypto::DidKeyMethod::from_public_key(&key).to_string();
+        let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string();
+        network_db::insert_paired_node(&db, "laptop", "alice", &did, key.as_bytes(), "[]", 0, None).await.unwrap();
+        network_db::insert_paired_node(&db, "laptop-before", "alice", &spelled, key.as_bytes(), "[]", 0, None).await.unwrap();
+        let members = Members::default();
+        members.write_member(&own_device(&did, *key.as_bytes())).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([key])));
+
+        let said = revoke(&members, &db, "alice", "laptop", &paired_keys, Asked::Locally).await;
+        assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
+        assert!(members.list_members().await.unwrap().is_empty(), "the member that holds the key stayed");
+        let left: Vec<String> = network_db::list_paired_nodes(&db, "alice").await.unwrap().iter().map(|n| n.device_did.to_string()).collect();
+        assert_eq!(left, vec![spelled.clone()], "the second row went, or the first stayed");
+        assert!(paired_keys.read().unwrap().contains(&key), "the key left the allowlist while a row pairs it");
+
+        let said = revoke(&members, &db, "alice", "laptop-before", &paired_keys, Asked::Locally).await;
+        assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
+        assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty(), "the second row stayed");
+        assert!(paired_keys.read().unwrap().is_empty(), "the key stayed on the allowlist with no row");
+    }
+
+    /// **A member whose DID as stored a row carries is reached once that row is
+    /// gone** (kottonllc/kotton#597, 36A), for a row that carries it as its DID as
+    /// stored beside a key from a seed, and for one that carries it as its label:
+    /// the listing at the machine notes nothing; `device revoke` of that name
+    /// removes the row and leaves the member; the next listing notes the member by
+    /// that DID; the local revoke by the note's name removes it.
+    #[tokio::test]
+    async fn a_member_whose_did_a_row_carries_is_reached_once_the_row_is_gone() {
+        let (_, refused) = kotton_crypto::ed25519::refused_keys().remove(0);
+        let name = "did:peer:carried-by-a-row";
+        let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[40u8; 32]));
+        let honest_did = kotton_crypto::DidKeyMethod::from_public_key(&honest).to_string();
+        for (label, row_did) in [("laptop", name), (name, honest_did.as_str())] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = agent_db(&dir).await;
+            network_db::insert_paired_node(&db, label, "alice", row_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+            let members = Members::default();
+            let member = own_device(name, refused);
+            stored(&members, &member).await;
+            let paired_keys = Arc::new(RwLock::new(HashSet::from([honest])));
+
+            let (nodes, notes) = listed(node_list(&db, "alice".into(), Some(&members)).await.unwrap());
+            assert_eq!(nodes.len(), 1, "{label}");
+            assert!(notes.is_empty(), "{label}: {notes:?}");
+            let said = revoke(&members, &db, "alice", name, &paired_keys, Asked::Locally).await;
+            assert!(matches!(said, UserResponse::NodeRevoked), "{label}: {said:?}");
+            assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty(), "{label}: the row stayed");
+            assert_eq!(members.list_members().await.unwrap(), vec![member.clone()], "{label}: the member went with the row");
+
+            let (_, notes) = listed(node_list(&db, "alice".into(), Some(&members)).await.unwrap());
+            assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key(name)], "{label}");
+            let said = revoke(&members, &db, "alice", &notes[0].name, &paired_keys, Asked::Locally).await;
+            assert!(matches!(said, UserResponse::NodeRevoked), "{label}: {said:?}");
+            assert!(members.list_members().await.unwrap().is_empty(), "{label}: the member stayed");
+        }
+    }
+
+    /// **"No row" is read by bytes** (kottonllc/kotton#597, 5B): a row under its
+    /// key's `did:key`, and an own-device member holding the same key under another
+    /// spelling of it. `device revoke` of the member's DID, asked at the machine, is
+    /// not found, and the row and the member stay: the row stands for the member,
+    /// and is reached by its own names.
+    #[tokio::test]
+    async fn a_members_did_whose_key_a_row_holds_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let key = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[41u8; 32]));
+        let did = kotton_crypto::DidKeyMethod::from_public_key(&key).to_string();
+        let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string();
+        network_db::insert_paired_node(&db, "laptop", "alice", &did, key.as_bytes(), "[]", 0, None).await.unwrap();
+        let members = Members::default();
+        let member = own_device(&spelled, *key.as_bytes());
+        members.write_member(&member).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::from([key])));
+
+        let said = revoke(&members, &db, "alice", &spelled, &paired_keys, Asked::Locally).await;
+        assert!(matches!(&said, UserResponse::Error { message } if message.contains("not found")), "{said:?}");
+        assert_eq!(network_db::list_paired_nodes(&db, "alice").await.unwrap().len(), 1, "the row went");
+        assert_eq!(members.list_members().await.unwrap(), vec![member], "the member went");
+        assert!(paired_keys.read().unwrap().contains(&key), "the key left the allowlist");
     }
 
     fn listed(said: UserResponse) -> (Vec<PairedNode>, Vec<kotton_wire::note::RowNote>) {
@@ -1992,13 +2523,13 @@ mod allowlist_rebuild {
         for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
             let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
             network_db::insert_paired_node(&db, "old", "alice", &did, &bytes, "[]", 0, None).await.unwrap();
-            let (nodes, notes) = listed(node_list(&db, "alice".into()).await.unwrap());
+            let (nodes, notes) = listed(node_list(&db, "alice".into(), None).await.unwrap());
             assert_eq!(nodes.len(), 2, "{name}: the row is listed as any other");
             assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key("old")], "{name}");
 
-            let said = node_revoke(&NoMembers, &db, "alice".into(), notes[0].name.clone(), &paired_keys).await.unwrap();
+            let said = revoke(&NoMembers, &db, "alice", &notes[0].name, &paired_keys, Asked::Locally).await;
             assert!(matches!(said, UserResponse::NodeRevoked), "{name}: {said:?}");
-            let (nodes, notes) = listed(node_list(&db, "alice".into()).await.unwrap());
+            let (nodes, notes) = listed(node_list(&db, "alice".into(), None).await.unwrap());
             assert_eq!(nodes.iter().map(|n| n.device_did.to_string()).collect::<Vec<_>>(), vec![honest_did.clone()], "{name}");
             assert!(notes.is_empty(), "{name}: {notes:?}");
         }
@@ -2027,7 +2558,7 @@ mod allowlist_rebuild {
         // A label that is another row's DID.
         network_db::insert_paired_node(&db, &one_did, "alice", &four_did, &four, "[]", 0, None).await.unwrap();
 
-        let (nodes, notes) = listed(node_list(&db, "alice".into()).await.unwrap());
+        let (nodes, notes) = listed(node_list(&db, "alice".into(), None).await.unwrap());
         assert_eq!(notes.len(), 4, "{notes:?}");
         let name_of = |did: &str| notes.iter().zip(nodes.iter()).find(|(_, n)| n.device_did.to_string() == did).map(|(note, _)| note.name.clone()).unwrap();
         assert_eq!(name_of(&one_did), "attic");
@@ -2060,7 +2591,7 @@ mod allowlist_rebuild {
         for (i, label) in LABELS_NOT_ONE_WORD.iter().copied().chain(["attic"]).enumerate() {
             let user = format!("person-{i}");
             network_db::insert_paired_node(&db, label, &user, &did, &bytes, "[]", 0, None).await.unwrap();
-            let (nodes, notes) = listed(node_list(&db, user.clone()).await.unwrap());
+            let (nodes, notes) = listed(node_list(&db, user.clone(), None).await.unwrap());
             assert_eq!((nodes.len(), notes.len()), (1, 1), "{label:?}");
             let name = &notes[0].name;
             let want = if label == "attic" { label } else { did.as_str() };
@@ -2076,7 +2607,7 @@ mod allowlist_rebuild {
         // and its sentence names no command.
         let odd = "did:key:RD/T4NHD S5UEFOU51W*VRLU7R";
         network_db::insert_paired_node(&db, "my phone", "person-odd", odd, &bytes, "[]", 0, None).await.unwrap();
-        let (_, notes) = listed(node_list(&db, "person-odd".into()).await.unwrap());
+        let (_, notes) = listed(node_list(&db, "person-odd".into(), None).await.unwrap());
         assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key(odd)]);
         let said = kotton_wire::note::sentence(&notes[0], "device revoke");
         assert!(said.contains("names no Ed25519 key") && !said.contains("device revoke"), "{said}");
@@ -2098,7 +2629,7 @@ mod allowlist_rebuild {
         for (i, label) in LABELS_NOT_ONE_WORD.iter().enumerate() {
             let user = format!("person-{i}");
             network_db::insert_paired_node(&db, label, &user, &other, key.as_bytes(), "[]", 0, None).await.unwrap();
-            let (_, notes) = listed(node_list(&db, user.clone()).await.unwrap());
+            let (_, notes) = listed(node_list(&db, user.clone(), None).await.unwrap());
             assert_eq!(
                 notes,
                 vec![kotton_wire::note::RowNote {
@@ -2132,7 +2663,7 @@ mod allowlist_rebuild {
 
         reproject_allowlist(&none, &db, &paired_keys).await;
         assert!(paired_keys.read().unwrap().contains(&key), "the row is not admitted before the listing");
-        let (_, notes) = listed(node_list(&db, "alice".into()).await.unwrap());
+        let (_, notes) = listed(node_list(&db, "alice".into(), None).await.unwrap());
         assert_eq!(
             notes,
             vec![kotton_wire::note::RowNote {

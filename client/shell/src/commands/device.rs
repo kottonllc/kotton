@@ -84,9 +84,10 @@ pub(crate) fn not_handed_lines(joined: &str, not_handed: &[kotton_wire::note::Ro
         .collect()
 }
 
-/// The verb that removes a paired node by the name a note gives it: the one
-/// `device list`, `peer list`, `drive list` and the admitting side of a join name
-/// in a note's sentence (kottonllc/kotton#605).
+/// The verb that removes a paired node, or a member of the person's set with no
+/// row, by the name a note gives it: the one `device list`, `peer list`, `drive
+/// list` and the admitting side of a join name in a note's sentence
+/// (kottonllc/kotton#605, kottonllc/kotton#610).
 pub(crate) const DEVICE_REVOKE: &str = "device revoke";
 
 /// One line for each note a listing carried beside its rows, as
@@ -414,7 +415,9 @@ impl DeviceCommand {
     }
 
     /// `device revoke <id>` — remove a device from the identity (drops it from the
-    /// mTLS allowlist on the next handshake).
+    /// mTLS allowlist on the next handshake). `<id>` is a row's label or DID as
+    /// stored, or the DID as stored of a member of the set with no row, taken
+    /// whole, through the daemon's one resolver (`kotton_peer::daemon::nodes::node_named`).
     ///
     /// `device revoke --browser <name>` revokes an admitted browser instead: its
     /// next visit needs a human again, and a channel it holds open now is ended

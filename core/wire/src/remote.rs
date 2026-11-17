@@ -34,13 +34,20 @@ pub enum RemoteBackend {
     Ipfs {
         gateway: String,
     },
-    /// A paired Kotton peer — connected on-demand via the NAT traversal stack.
+    /// A drive of the person's, reached through its node — connected on-demand
+    /// via the NAT traversal stack.
     ///
-    /// `peer_did` must match the `device_did` of a node in the paired-nodes DB.
-    /// Connections are established at `remote add` time and not persisted across
-    /// daemon restarts (the daemon re-connects on the next `remote add` invocation).
+    /// In a `remote add` request, `peer_did` names the node one of the person's
+    /// drives is reached through: its label or its DID as stored, each whole, as
+    /// the one resolver over the rows the drive record names takes it
+    /// (`kotton_peer::daemon::nodes::node_named`, kottonllc/kotton#597, 37A). The
+    /// remote is kept under that node's DID as stored, which is what a kept
+    /// configuration carries. Connections are established at `remote add` time
+    /// and not persisted across daemon restarts (the daemon re-connects on the
+    /// next `remote add` invocation).
     Kotton {
-        /// DID of the target peer device (must be in the paired-nodes table).
+        /// The drive's node: in a request, its label or its DID as stored; as
+        /// kept, its DID as stored.
         peer_did: String,
         /// Human-readable label for display purposes.
         label: String,

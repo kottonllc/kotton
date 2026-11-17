@@ -210,7 +210,8 @@ async fn dispatch(ctx: &ControlContext, request: VaultRequest) -> io::Result<Han
             kotton_peer::daemon::nodes::confirm_code(&ctx.pending_confirms, token.expose().to_owned(), matches).await?,
         )),
         VaultRequest::NodeList { user_id } => Ok(HandlerOutput::Single(
-            kotton_peer::daemon::nodes::node_list(&peer.db, user_id).await?,
+            // A vault holds no person's set: the rows only.
+            kotton_peer::daemon::nodes::node_list(&peer.db, user_id, None).await?,
         )),
         VaultRequest::VaultCapacity { user_id } => {
             Ok(HandlerOutput::Single(capacity(peer, &user_id).await))

@@ -24,6 +24,12 @@
 //!   list that node, and the note names it as the node listing does (`drive
 //!   list`'s, and the admitting side's of a join).
 //!
+//! One note is about something no listing shows: an own-device member of the
+//! person's set whose bytes are no key and that no row stands for, noted by the
+//! node listing by its DID as stored (kottonllc/kotton#610). It is carried only
+//! in the answer given to the person whose set it is, on their own device, and
+//! `device revoke` resolves it there and nowhere else.
+//!
 //! A note's name is one the verb its sentence names takes to the row, typed as
 //! the sentence gives it (20A): it is put in a command only when it is
 //! [`one_plain_word`].
@@ -48,7 +54,8 @@ pub struct RowNote {
 #[serde(rename_all = "snake_case")]
 pub enum NoteKind {
     /// The row names no Ed25519 key: nothing is reached or checked under it,
-    /// and the surface's removal verb removes it by `name`.
+    /// and the surface's removal verb removes it by `name`. Said of a member of
+    /// the set with no row as well, named by its DID as stored.
     NamesNoKey,
     /// The row stands by its key's bytes, which pass, and is reached and
     /// checked under that key as before; the DID stored beside them is not the

@@ -92,3 +92,67 @@ async fn the_shells_revoke_is_an_error_for_a_device_not_paired_and_for_a_revoke_
     assert!(partial.contains("still admits it: vault ("), "{partial}");
     assert!(partial.contains("will not reach it"), "{partial}");
 }
+
+/// **The occupant reaches rows only** (kottonllc/kotton#597, 33A): an own-device
+/// member of alice's set with no row, under each key vector the Ed25519 rule
+/// refuses, is not found by `DaemonOccupantHost::revoke_device` given its DID as
+/// stored, and stays in the set; the occupant's roster lists the rows and nothing
+/// for it.
+#[tokio::test]
+async fn the_occupants_revoke_does_not_reach_a_member_with_no_row() {
+    use kotton_peer::membership::{MemberStore as _, Membership as _};
+    use kotton_schemas::membership::Posture;
+    let temp = tempfile::tempdir().unwrap();
+    let daemon = alice_at(temp.path()).await;
+    let ctx = daemon.agent_context();
+    let host = occupant_host::occupant_host(
+        &ctx.runtime,
+        &ctx.users,
+        &ctx.sessions,
+        &ctx.base,
+        &ctx.db,
+        &ctx.record_stores,
+        &ctx.ceremonies,
+        &ctx.user_dbs,
+        &ctx.event_log_tasks,
+        &ctx.device_db,
+        &ctx.connected_peers,
+        &ctx.surface_proxy,
+        ctx.browser_admissions(),
+    );
+    paired(&ctx.db, "laptop", 6, Posture::Full).await;
+    let rows: Vec<String> = kotton_peer::daemon::db::list_paired_nodes(&ctx.db, "alice")
+        .await
+        .unwrap()
+        .iter()
+        .map(|n| n.device_did.to_string())
+        .collect();
+    let set = daemon.users().get("alice").expect("alice is loaded");
+
+    for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+        let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
+        let member = kotton_schemas::membership::Member {
+            did: did.clone(),
+            public_key: bytes,
+            role: kotton_schemas::membership::Role::OwnDevice,
+            admitted_by: kotton_schemas::membership::Ceremony::DeviceEnroll,
+            added_at: "2026-11-17T00:00:00Z".to_string(),
+            posture: Some(Posture::Full),
+            label: Some("old".to_string()),
+            reach: None,
+        };
+        // As an earlier build wrote it: `write_member` refuses such bytes.
+        set.member_write(&member.vfs_path(), &serde_json::to_vec(&member).unwrap()).await.unwrap();
+
+        let refused = host.revoke_device(&did).await.expect_err("the occupant revoked a member with no row");
+        assert!(refused.contains("not found"), "{name}: {refused}");
+        assert_eq!(set.list_members().await.unwrap(), vec![member.clone()], "{name}: the occupant removed the member");
+        let listed: Vec<String> = host.list_devices().await.unwrap().into_iter().map(|d| d.did).collect();
+        assert_eq!(listed, rows, "{name}: the occupant's roster is not the rows");
+
+        // The next vector's member is written at the same path; this one goes first.
+        for f in set.list_found().await.unwrap().iter().filter(|f| f.member.did == did) {
+            set.remove_found(f).await.unwrap();
+        }
+    }
+}

@@ -1406,7 +1406,15 @@ async fn answer_request(
             .await
         }
         UserRequest::NodeList { user_id } => {
-            kotton_peer::daemon::nodes::node_list(db, user_id).await
+            // The person's set is read for the listing at the machine only: a
+            // member with no row is noted to them on their own device, and to no
+            // remote asker (`node_list`).
+            let resident = users.get(&user_id);
+            let members = resident
+                .as_ref()
+                .filter(|_| conn_origin(&conn_session) == kotton_wire::ConnTrustOrigin::Local)
+                .map(|rt| rt.as_ref() as &dyn kotton_peer::membership::MemberStore);
+            kotton_peer::daemon::nodes::node_list(db, user_id, members).await
         }
         UserRequest::NodeRelay { .. } => Ok(UserResponse::NodeRelayResult {
             relay_url: Some(runtime.reachability().nat().relay_url).filter(|u| !u.is_empty()),
@@ -1465,8 +1473,14 @@ async fn answer_request(
                 });
             };
             // Withdrawn from the person's drives first, then here
-            // (`drive_devices::revoke`), on the runtime's own allowlist.
-            kotton_device::users::drive_devices::revoke(runtime, user_rt.as_ref(), db, user_id, node_id).await
+            // (`drive_devices::revoke`), on the runtime's own allowlist. A member
+            // of the set with no row is in reach of a local asker only.
+            let asked = if conn_origin(&conn_session) == kotton_wire::ConnTrustOrigin::Local {
+                kotton_peer::daemon::nodes::Asked::Locally
+            } else {
+                kotton_peer::daemon::nodes::Asked::Remotely
+            };
+            kotton_device::users::drive_devices::revoke(runtime, user_rt.as_ref(), db, user_id, node_id, asked).await
         }
         UserRequest::PeerAdd {
             user_id,
