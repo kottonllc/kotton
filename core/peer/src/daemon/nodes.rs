@@ -60,7 +60,10 @@ pub fn json_err(e: serde_json::Error) -> io::Error {
 /// enabling the demo recipe and the `two_node_transfer` integration test to
 /// set up pairing without the full QUIC ceremony.
 ///
-/// `peer_pubkey_hex` must be 64 lowercase hex characters (32 bytes raw Ed25519).
+/// `peer_pubkey_hex` must be 64 lowercase hex characters (32 bytes raw Ed25519),
+/// and `peer_did` the `did:key` of that key, as
+/// [`kotton_crypto::DidKeyMethod::from_public_key`] makes it; any other string,
+/// another spelling of the key's `did:key` included, is refused.
 /// The key is inserted into both the `paired_nodes` DB table and the live
 /// `paired_keys` mTLS allowlist, so the peer can connect immediately.
 ///
@@ -99,9 +102,17 @@ pub async fn peer_add(
     let id = label.clone();
     let addresses_json = serde_json::to_string(&[peer_addr]).map_err(json_err)?;
 
-    // Parse DID for the PairedNode response.
-    let device_did_parsed = Did::parse(&peer_did)
-        .map_err(|e| io::Error::other(format!("invalid peer_did '{}': {e}", peer_did)))?;
+    // The DID stored is the key's own: the derivation's string for the bytes
+    // stored beside it, or nothing is stored. A row is its bytes'
+    // (kottonllc/kotton#597, 5B), and the DID beside them is what the person's
+    // other surfaces name the row by, so it names the key the row holds.
+    let device_did_parsed = kotton_crypto::DidKeyMethod::from_public_key(&key);
+    if peer_did != device_did_parsed.to_string() {
+        return Err(io::Error::other(format!(
+            "peer_did '{peer_did}' is not the did:key of peer_pubkey_hex; that key's is \
+             '{device_did_parsed}', and nothing was added"
+        )));
+    }
 
     super::db::insert_paired_node(
         db,
@@ -485,6 +496,33 @@ pub async fn refresh_observed_peer_address(
     }
 }
 
+/// The person's `paired_nodes` rows a threshold round dials: each row whose key
+/// is the key of a member that holds a share (`Full` or `Cosigner`).
+///
+/// **A co-signer is chosen by its key.** A `paired_nodes` row is its bytes',
+/// and the DID stored beside them is never read as the key's name
+/// (kottonllc/kotton#597, 5B): a row under another spelling of a member's
+/// `did:key` is that member's row, and a row whose stored DID is a member's
+/// beside a different key is not. This is how the membership projection reads
+/// an own device ([`project_membership_into_allowlist`]).
+///
+/// A member whose bytes the Ed25519 rule refuses chooses no row: nothing is
+/// dialled for a signature under bytes that are no key. A key held by more than
+/// one row is dialled once, through the first row the store lists, so no share
+/// is asked for twice in one round.
+#[cfg(any(test, feature = "test-support"))]
+fn cosigner_nodes(members: &[Member], rows: Vec<PairedNode>) -> Vec<PairedNode> {
+    let mut keys: HashSet<[u8; 32]> = members
+        .iter()
+        // Any share-holding member can co-sign: `Full` and `Cosigner` both
+        // hold a FROST share. Only `BlindStorage` is excluded.
+        .filter(|m| matches!(m.posture, Some(Posture::Full | Posture::Cosigner)))
+        .filter(|m| VerifyingKey::from_bytes(&m.public_key).is_ok())
+        .map(|m| m.public_key)
+        .collect();
+    rows.into_iter().filter(|n| keys.remove(&n.public_key)).collect()
+}
+
 /// Coordinate a threshold signature over `message` across this node's own
 /// network. This node contributes its own FROST share locally and co-signs with
 /// every **Full** own-device member reached over the authenticated peer channel
@@ -493,9 +531,10 @@ pub async fn refresh_observed_peer_address(
 /// the group (identity) DID.
 ///
 /// Co-signers are resolved from the membership set (the source of truth):
-/// a paired node is included iff it holds a share — a `Full` or `Cosigner`
-/// membership record — which is precisely what excludes a `BlindStorage` (no
-/// share) from the quorum.
+/// a paired node is included iff its key is the key of a member that holds a
+/// share — a `Full` or `Cosigner` membership record — which is precisely what
+/// excludes a `BlindStorage` (no share) from the quorum. The match is by the
+/// key's bytes ([`cosigner_nodes`]).
 ///
 /// **Compiled only under `test-support`: this is the test-only round.** No request on
 /// any door of a daemon's build asks the person's group key to sign bytes the caller
@@ -545,13 +584,6 @@ pub async fn threshold_sign(
         .list_members()
         .await
         .map_err(|e| anyhow::anyhow!("cannot choose who signs with this node: {e:#}"))?;
-    let full_dids: HashSet<String> = members
-        .into_iter()
-        // Any share-holding member can co-sign: `Full` and `Cosigner` both
-        // hold a FROST share. Only `BlindStorage` is excluded.
-        .filter(|m| matches!(m.posture, Some(Posture::Full | Posture::Cosigner)))
-        .map(|m| m.did)
-        .collect();
 
     // This node's own share + the group public-key package (both persisted at
     // enrollment). Absence means this node is not enrolled in the threshold.
@@ -566,12 +598,7 @@ pub async fn threshold_sign(
         Err(e) => anyhow::bail!("keychain read failed: {e}"),
     };
 
-    let mut cosigner_nodes: Vec<PairedNode> = Vec::new();
-    for node in network_db::list_paired_nodes(db, &user_id).await? {
-        if full_dids.contains(&node.device_did.to_string()) {
-            cosigner_nodes.push(node);
-        }
-    }
+    let cosigner_nodes = cosigner_nodes(&members, network_db::list_paired_nodes(db, &user_id).await?);
 
     // Open a peer client per co-signer and build a request/response FrostSigner
     // over it. The session id correlates this co-signer's two rounds.
@@ -2163,5 +2190,157 @@ mod streaming_confirmer {
         drop(rx);
         let finished = tokio::time::timeout(Duration::from_secs(10), ceremony).await.expect("ran").unwrap();
         assert_eq!(finished, Some("recorded"), "a ceremony past its yes was dropped part-way");
+    }
+}
+
+/// Who a threshold round dials, and what `peer add` stores beside a key
+/// (kottonllc/kotton#609): a co-signer is chosen by its key's bytes, and the DID
+/// a row is added under is the derivation's string for those bytes.
+#[cfg(test)]
+mod chosen_by_key {
+    use super::*;
+    use kotton_crypto::DidKeyMethod;
+
+    fn key(seed: u8) -> VerifyingKey {
+        kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[seed; 32]))
+    }
+
+    fn member(did: &Did, public_key: [u8; 32], posture: Posture) -> Member {
+        Member {
+            did: did.to_string(),
+            public_key,
+            role: Role::OwnDevice,
+            admitted_by: Ceremony::DeviceEnroll,
+            added_at: "2026-11-17T00:00:00Z".to_string(),
+            posture: Some(posture),
+            label: None,
+            reach: None,
+        }
+    }
+
+    fn row(id: &str, did: Did, public_key: [u8; 32]) -> PairedNode {
+        PairedNode {
+            id: id.to_string(),
+            device_did: did,
+            public_key,
+            paired_at: 0,
+            addresses: Vec::new(),
+            relay_url: None,
+            posture: None,
+        }
+    }
+
+    fn ids(nodes: &[PairedNode]) -> Vec<&str> {
+        nodes.iter().map(|n| n.id.as_str()).collect()
+    }
+
+    /// **A row stored under another spelling of a member's key is that member's
+    /// co-signer.** The member is named by its key's `did:key`; the row holds
+    /// the same key's bytes beside another spelling of it. A `Cosigner` member
+    /// is chosen the same way; a `BlindStorage` member holds no share and is not.
+    #[test]
+    fn a_row_under_another_spelling_of_a_members_key_is_chosen() {
+        let (full, cosigner, blind) = (key(31), key(32), key(33));
+        let members = vec![
+            member(&DidKeyMethod::from_public_key(&full), *full.as_bytes(), Posture::Full),
+            member(&DidKeyMethod::from_public_key(&cosigner), *cosigner.as_bytes(), Posture::Cosigner),
+            member(&DidKeyMethod::from_public_key(&blind), *blind.as_bytes(), Posture::BlindStorage),
+        ];
+        let rows = vec![
+            row("laptop", DidKeyMethod::spelled_otherwise(full.as_bytes()), *full.as_bytes()),
+            row("phone", DidKeyMethod::spelled_otherwise(cosigner.as_bytes()), *cosigner.as_bytes()),
+            row("vault", DidKeyMethod::from_public_key(&blind), *blind.as_bytes()),
+        ];
+        assert_eq!(ids(&cosigner_nodes(&members, rows)), vec!["laptop", "phone"]);
+    }
+
+    /// **A row whose stored DID names a member, beside a different key, is not
+    /// chosen.** The DID beside a row's bytes is not read as a key's name, so
+    /// the member's own DID on a row holding another key dials no one.
+    #[test]
+    fn a_row_under_a_members_did_beside_another_key_is_not_chosen() {
+        let (signer, other) = (key(34), key(35));
+        let signer_did = DidKeyMethod::from_public_key(&signer);
+        let members = vec![member(&signer_did, *signer.as_bytes(), Posture::Full)];
+        let rows = vec![row("not-the-signer", signer_did, *other.as_bytes())];
+        assert!(cosigner_nodes(&members, rows).is_empty());
+    }
+
+    /// **A member under bytes the Ed25519 rule refuses chooses no row**, for
+    /// every vector in `kotton_ed25519::refused`, even a row stored under the
+    /// same bytes and the same string: nothing is dialled for a signature under
+    /// bytes that are no key.
+    #[test]
+    fn a_member_under_bytes_the_rule_refuses_chooses_no_row() {
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let did = DidKeyMethod::spelled_over(&bytes);
+            let members = vec![member(&did, bytes, Posture::Full)];
+            let rows = vec![row("old", did, bytes)];
+            assert!(cosigner_nodes(&members, rows).is_empty(), "{name}: a row was chosen");
+        }
+    }
+
+    /// **A key held by two rows is dialled once**, through the first row the
+    /// store lists: one co-signer is one share in the round.
+    #[test]
+    fn a_key_held_by_two_rows_is_dialled_once() {
+        let signer = key(36);
+        let members = vec![member(&DidKeyMethod::from_public_key(&signer), *signer.as_bytes(), Posture::Full)];
+        let rows = vec![
+            row("first", DidKeyMethod::from_public_key(&signer), *signer.as_bytes()),
+            row("second", DidKeyMethod::spelled_otherwise(signer.as_bytes()), *signer.as_bytes()),
+        ];
+        assert_eq!(ids(&cosigner_nodes(&members, rows)), vec!["first"]);
+    }
+
+    async fn agent_db(dir: &tempfile::TempDir) -> Arc<SqlitePool> {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        Arc::new(pool)
+    }
+
+    /// **`peer add` stores the derivation's string for the key it stores.**
+    #[tokio::test]
+    async fn peer_add_stores_the_did_key_of_the_key_it_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let added = key(37);
+        let did = DidKeyMethod::from_public_key(&added).to_string();
+
+        let said = peer_add(&db, &paired_keys, "alice".into(), "laptop".into(), did.clone(), hex::encode(added.as_bytes()), "127.0.0.1:7".parse().unwrap())
+            .await
+            .expect("the key's own did:key is added");
+        let UserResponse::NodePaired { node } = said else { panic!("{said:?}") };
+        assert_eq!(node.device_did.to_string(), did);
+        let rows = network_db::list_paired_nodes(&db, "alice").await.unwrap();
+        assert_eq!(rows.iter().map(|n| (n.device_did.to_string(), n.public_key)).collect::<Vec<_>>(), vec![(did, *added.as_bytes())]);
+        assert!(paired_keys.read().unwrap().contains(&added));
+    }
+
+    /// **`peer add` refuses a DID that is not the derivation's string for the
+    /// key beside it**: another spelling of that key's `did:key`, another key's
+    /// `did:key`, and a DID of another method. Nothing is stored and nothing is
+    /// admitted.
+    #[tokio::test]
+    async fn peer_add_refuses_a_did_that_is_not_its_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let added = key(38);
+        let refused = [
+            ("another spelling", DidKeyMethod::spelled_otherwise(added.as_bytes()).to_string()),
+            ("another key's did:key", DidKeyMethod::from_public_key(&key(39)).to_string()),
+            ("another method", "did:web:example.com".to_string()),
+        ];
+        for (name, did) in refused {
+            let said = peer_add(&db, &paired_keys, "alice".into(), "laptop".into(), did, hex::encode(added.as_bytes()), "127.0.0.1:7".parse().unwrap()).await;
+            assert!(said.is_err(), "{name}: added: {said:?}");
+            assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty(), "{name}: a row was stored");
+            assert!(paired_keys.read().unwrap().is_empty(), "{name}: the key was admitted");
+        }
     }
 }
