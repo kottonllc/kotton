@@ -238,13 +238,14 @@ fn flag_u64(args: &[String], flag: &str) -> Option<u64> {
 }
 
 /// `peer list`'s table, as a pure function of the paired nodes so its columns are
-/// testable without a daemon.
+/// testable without a daemon. Each label is as stored: the renderer prints it with
+/// every character shown, and `--json` carries it as stored (kottonllc/kotton#597, 39A).
 pub(crate) fn list_table(nodes: &[PairedNode]) -> Out {
     let rows: Vec<Vec<String>> = nodes
         .iter()
         .map(|n| {
             vec![
-                kotton_wire::note::shown(&n.id),
+                n.id.clone(),
                 n.device_did.to_string(),
                 format_addresses(n),
                 n.relay_url.clone().unwrap_or_else(|| "—".to_string()),

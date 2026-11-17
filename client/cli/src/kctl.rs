@@ -584,7 +584,7 @@ mod tests {
             };
             let lines = super::sudoers_list_lines(&listed);
             let said = lines.iter().find(|l| l.contains("names no Ed25519 key")).unwrap_or_else(|| panic!("{lines:?}"));
-            assert!(said.contains(&format!("`{}` is the verb that removes it, by this name", super::SUDOERS_REMOVE)), "{said}");
+            assert!(said.contains(&format!("`{}` is the verb that removes it, by this name, as recorded", super::SUDOERS_REMOVE)), "{said}");
             assert!(said.contains(&format!("`{did}`")), "{said}");
             assert!(!said.contains(&format!("{} ", super::SUDOERS_REMOVE)), "a command was composed: {said}");
         }

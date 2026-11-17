@@ -82,8 +82,8 @@ pub(crate) fn not_handed_lines(joined: &str, not_handed: &[kotton_wire::note::Ro
         .iter()
         .map(|n| {
             format!(
-                "{joined} was not handed the drive reached through `{}`: {}",
-                kotton_wire::note::shown(&n.name),
+                "{joined} was not handed the drive reached through {}: {}",
+                kotton_wire::note::quoted(&n.name),
                 kotton_wire::note::sentence(n, DEVICE_REVOKE)
             )
         })
@@ -106,26 +106,49 @@ pub(crate) const DEVICE_REVOKE: &str = "device revoke";
 /// in any script is stored, listed, shown with each character it holds
 /// ([`kotton_wire::note::shown`]) and taken by `device revoke` whole. What it
 /// costs: a device named in another script is given its DID as stored to copy,
-/// and a row with no plain name is told `device revoke` and the name it takes,
-/// with no line to copy. Why: a printed command is held to reach its row typed
-/// as printed, the stores compare a name byte for byte, and no normal form is
-/// applied to a name stored or typed. The seam is the one predicate, widened
-/// after a normal form is applied where a name is stored and where it is
-/// compared, with this shell's read-back test over the wider set
-/// (`a_notes_name_is_one_word_the_shell_takes_to_its_row`).
+/// and a row with no plain name is told `device revoke` and that it removes the
+/// row by this name, as recorded, with no line to copy. Why: a printed command
+/// is held to reach its row typed as printed, and the stores compare a name byte
+/// for byte. A name a vault or a relay is minted under is in NFC; a label and a
+/// DID as stored are in no normal form, and no normal form is applied where a
+/// typed name is compared. The seam is the one predicate, widened after a normal
+/// form is applied where a name is stored and where it is compared, with this
+/// shell's read-back test over the wider set
+/// (`a_notes_name_is_one_word_the_shell_takes_to_its_row`); the first step is
+/// done for a minted name. The same is said for a person in
+/// `docs/cli/reference.md`, under `--json`.
 pub(crate) fn notes_said(notes: &[kotton_wire::note::RowNote]) -> Vec<Out> {
     notes.iter().map(|n| Out::Note(kotton_wire::note::sentence(n, DEVICE_REVOKE))).collect()
 }
 
-/// `device list`'s table of the machines on this identity: each label shown
-/// with every character it holds ([`kotton_wire::note::shown`]), a shortened
-/// DID, and when it was paired.
+/// `device list`'s table of the machines on this identity: each label as
+/// stored, a shortened DID, and when it was paired. The renderer prints each
+/// cell with every character it holds shown, and `--json` carries the label as
+/// stored (kottonllc/kotton#597, 39A).
 fn device_table(nodes: &[kotton_wire::peer::PairedNode]) -> Out {
     let rows: Vec<Vec<String>> = nodes
         .iter()
-        .map(|n| vec![kotton_wire::note::shown(&n.id), short_did(&n.device_did.to_string()), human_since(n.paired_at)])
+        .map(|n| vec![n.id.clone(), short_did(&n.device_did.to_string()), human_since(n.paired_at)])
         .collect();
     Out::Table { columns: vec!["device".into(), "did".into(), "paired".into()], rows }
+}
+
+/// `device list`'s second table, of the browsers admitted with `device add
+/// --browser`, as a pure function of them as [`device_table`] is of the nodes:
+/// each name as stored, printed by the renderer (39A). None when there are none.
+fn browser_table(browsers: &[kotton_wire::ipc::types::BrowserDevice]) -> Option<Out> {
+    if browsers.is_empty() {
+        return None;
+    }
+    Some(Out::Table {
+        columns: vec!["browser".into(), "admitted".into(), "last seen".into()],
+        rows: browsers
+            .iter()
+            .map(|b| {
+                vec![b.name.clone(), human_since(b.created_at), b.last_used_at.map(human_since).unwrap_or_else(|| "—".into())]
+            })
+            .collect(),
+    })
 }
 
 /// The usage refusal, exit 2: what `device` prints for a word it does not have: the
@@ -413,23 +436,7 @@ impl DeviceCommand {
             .list_browsers(&user_id)
             .await
             .map_err(|e| anyhow::anyhow!("device list: {e}"))?;
-        if !browsers.is_empty() {
-            shapes.push(Out::Table {
-                columns: vec!["browser".into(), "admitted".into(), "last seen".into()],
-                rows: browsers
-                    .iter()
-                    .map(|b| {
-                        vec![
-                            b.name.clone(),
-                            human_since(b.created_at),
-                            b.last_used_at
-                                .map(human_since)
-                                .unwrap_or_else(|| "—".into()),
-                        ]
-                    })
-                    .collect(),
-            });
-        }
+        shapes.extend(browser_table(&browsers));
         Ok(CommandOutput::shapes(shapes))
     }
 
@@ -1206,7 +1213,7 @@ mod tests {
                     Some(typed) => assert_eq!(read_as_typed(&typed), super::Revoke::Node(Some(name.to_owned())), "{line}"),
                     None => {
                         assert!(!words.contains(&name), "a word was given no command: {line}");
-                        assert!(line.contains("`device revoke` is the verb that removes it, by this name"), "{line}");
+                        assert!(line.contains("`device revoke` is the verb that removes it, by this name, as recorded"), "{line}");
                     }
                 }
             }
@@ -1226,7 +1233,8 @@ mod tests {
                     let typed = format!("{} {taken}", super::DEVICE_REVOKE);
                     assert_eq!(read_as_typed(&typed), super::Revoke::Node(Some(taken.clone())), "{said}");
                 }
-                assert!(taken.contains(&kotton_wire::note::shown(name)), "the name is not one a command takes: {said}");
+                let printed = kotton_wire::note::quoted(name).trim_matches('`').to_owned();
+                assert!(taken.contains(&printed), "the name is not one a command takes: {said}");
                 let all_words = taken.iter().all(|t| kotton_wire::note::one_plain_word(t));
                 assert_eq!(said.contains(", as recorded,"), !all_words, "{said}");
             }
@@ -1235,11 +1243,24 @@ mod tests {
 
     /// **A row with no plain name is told `device revoke` and given no command, on
     /// `device list`, `peer list`, `drive list` and a join's admitting side**
-    /// (kottonllc/kotton#618, 23A): a name in another script, one with a quote, and one
-    /// that starts with `-`. The verb is in the sentence, and no command with the name is.
+    /// (kottonllc/kotton#618, 23A, 43A): a name in another script, one with a quote, one
+    /// that starts with `-`, and names that hold a backtick, a space and the verb's own
+    /// words. The verb is in the sentence, the name is printed between its backticks with
+    /// none of its own, and no command is read from either line.
     #[test]
     fn a_row_with_no_plain_name_is_told_device_revoke_and_given_no_command() {
-        for name in ["\u{5c4b}\u{6839}\u{88cf}", "it's", "-attic"] {
+        let names = [
+            "\u{5c4b}\u{6839}\u{88cf}",
+            "it's",
+            "-attic",
+            "a`b",
+            "`",
+            "a` b",
+            "x` removes it; `device revoke y",
+            "x`; `device revoke x` removes it",
+            "x `device revoke y` removes it",
+        ];
+        let lines_of = |name: &str| {
             let note = kotton_wire::note::RowNote::names_no_key(name);
             let mut lines: Vec<String> = super::notes_said(std::slice::from_ref(&note))
                 .into_iter()
@@ -1249,22 +1270,51 @@ mod tests {
                 })
                 .collect();
             lines.extend(super::not_handed_lines("laptop", std::slice::from_ref(&note)));
+            lines
+        };
+        let ticks: Vec<usize> = lines_of("it's").iter().map(|l| l.matches('`').count()).collect();
+        for name in names {
+            let lines = lines_of(name);
             assert_eq!(lines.len(), 2);
-            for line in &lines {
-                assert!(line.contains("`device revoke` is the verb that removes it, by this name"), "{line}");
-                assert!(line.contains(&format!("`{name}`")), "{line}");
-                assert!(!line.contains("device revoke "), "a command was composed: {line}");
+            for (line, ticks) in lines.iter().zip(&ticks) {
+                assert!(line.contains("`device revoke` is the verb that removes it, by this name, as recorded"), "{line}");
+                assert!(line.contains(&kotton_wire::note::quoted(name)), "{line}");
+                assert_eq!(line.matches('`').count(), *ticks, "a backtick of the name was printed as one: {line}");
                 assert_eq!(command_in(line), None, "{line}");
             }
         }
     }
 
-    /// **A label in `device list` and `peer list` is shown with each character it holds**
-    /// (kottonllc/kotton#618): a control, invisible or bidirectional character by its
-    /// escape, and a letter of another script, a quote and a space as they are. So is the
-    /// name a join's admitting side names a node by.
+    /// Labels that hold a character of each class `shown` prints by its escape
+    /// (kottonllc/kotton#597, 42A), each beside the print the renderer gives it: a
+    /// control, a format, a private-use and an unassigned character, a separator other
+    /// than the space, a default-ignorable letter, U+2800, `\`, a mark with nothing
+    /// before it, and a backtick, a letter of another script and a quote, which are
+    /// printed as they are.
+    const LABELS: [(&str, &str); 13] = [
+        ("bell\u{7}", "bell\\u{7}"),
+        ("two\nlines", "two\\nlines"),
+        ("\u{202e}enohp", "\\u{202e}enohp"),
+        ("ph\u{200d}one", "ph\\u{200d}one"),
+        ("ph\u{e000}one", "ph\\u{e000}one"),
+        ("ph\u{378}one", "ph\\u{378}one"),
+        ("ph\u{2029}one", "ph\\u{2029}one"),
+        ("ph\u{115f}one", "ph\\u{115f}one"),
+        ("ph\u{2800}one", "ph\\u{2800}one"),
+        ("\u{301}phone", "\\u{301}phone"),
+        ("a\\b", "a\\\\b"),
+        ("a`b", "a`b"),
+        ("\u{5c4b}\u{6839}'s", "\u{5c4b}\u{6839}'s"),
+    ];
+
+    /// **Every cell that carries a label is printed by `shown`, and `--json` carries it as
+    /// stored** (kottonllc/kotton#618, kottonllc/kotton#597, 39A): `device list`'s two
+    /// tables and `peer list`'s, built from rows under [`LABELS`] and rendered by the
+    /// renderer, hold none of the characters `shown` escapes and each label's print; the
+    /// same shapes serialized as `--json` writes them and parsed back hold each label as
+    /// stored. The join's line prints the name between backticks (43A).
     #[test]
-    fn a_label_is_shown_with_each_character_it_holds() {
+    fn every_cell_that_carries_a_label_is_printed_by_shown() {
         let node = |label: &str| kotton_wire::peer::PairedNode {
             id: label.into(),
             device_did: kotton_wire::did::Did::parse("did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX").unwrap(),
@@ -1274,21 +1324,46 @@ mod tests {
             relay_url: None,
             posture: None,
         };
-        for (label, said) in [
-            ("bell\u{7}", "bell\\u{7}"),
-            ("esc\u{1b}[2K", "esc\\u{1b}[2K"),
-            ("\u{202e}enohp", "\\u{202e}enohp"),
-            ("ph\u{200b}one", "ph\\u{200b}one"),
-            ("two\nlines", "two\\nlines"),
-            ("\u{5c4b}\u{6839}\u{88cf}", "\u{5c4b}\u{6839}\u{88cf}"),
-            ("sam's phone", "sam's phone"),
-        ] {
-            let crate::out::Out::Table { rows, .. } = super::device_table(&[node(label)]) else { panic!("a table") };
-            assert_eq!(rows[0][0], said, "device list: {label:?}");
-            let crate::out::Out::Table { rows, .. } = crate::commands::peer::list_table(&[node(label)]) else { panic!("a table") };
-            assert_eq!(rows[0][0], said, "peer list: {label:?}");
+        let browser = |label: &str| kotton_wire::ipc::types::BrowserDevice { name: label.into(), created_at: 0, last_used_at: None };
+        let nodes: Vec<_> = LABELS.iter().map(|(l, _)| node(l)).collect();
+        let browsers: Vec<_> = LABELS.iter().map(|(l, _)| browser(l)).collect();
+        let mut device_list = vec![super::device_table(&nodes)];
+        device_list.extend(super::browser_table(&browsers));
+        assert_eq!(device_list.len(), 2, "both tables of `device list`");
+        let peer_list = vec![crate::commands::peer::list_table(&nodes)];
+
+        for shapes in [&device_list, &peer_list] {
+            let text: String = shapes.iter().map(crate::out::render_shape).collect::<Vec<_>>().join("\n");
+            let json: serde_json::Value = serde_json::from_str(&serde_json::to_string(shapes).unwrap()).unwrap();
+            for (i, shape) in shapes.iter().enumerate() {
+                let crate::out::Out::Table { rows, .. } = shape else { panic!("a table: {shape:?}") };
+                for (row, (label, said)) in rows.iter().zip(LABELS) {
+                    assert_eq!(row[0], label, "a command put a print in the cell: {said}");
+                    assert_eq!(kotton_wire::note::shown(&row[0]), said, "{label:?}");
+                    assert!(text.lines().any(|l| l.trim_start().starts_with(said)), "{said} is not printed: {text}");
+                }
+                let read: Vec<String> = json[i]["table"]["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r[0].as_str().unwrap().to_owned())
+                    .collect();
+                assert_eq!(read, LABELS.map(|(l, _)| l.to_owned()), "`--json` does not carry the label as stored");
+            }
+            for (label, said) in LABELS {
+                if label != said {
+                    // A line break is the renderer's own between rows; a label's is held by its
+                    // print beginning a row, above.
+                    for c in label.chars().filter(|c| !said.contains(*c) && *c != '\n') {
+                        assert!(!text.contains(c), "{c:?} was printed as it is: {text}");
+                    }
+                }
+            }
+        }
+        for (label, _) in LABELS {
             let lines = super::not_handed_lines("laptop", &[kotton_wire::note::RowNote::names_no_key(label)]);
-            assert!(lines[0].starts_with(&format!("laptop was not handed the drive reached through `{said}`: ")), "{lines:?}");
+            let quoted = kotton_wire::note::quoted(label);
+            assert!(lines[0].starts_with(&format!("laptop was not handed the drive reached through {quoted}: ")), "{lines:?}");
         }
     }
 

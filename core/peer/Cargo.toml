@@ -60,6 +60,9 @@ bytes = "1.5"
 tracing = "0.1"
 # Whole-object content hash for chunked sealed writes (RFC-0048).
 blake3 = "1"
+# A name a vault or a relay is minted under is in NFC (kottonllc/kotton#597, 41A).
+# Already in the lock, through `kotton-crypto`'s `bip39`.
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 # Test-only: the signatures a strict check refuses, for the tests that hold each check.

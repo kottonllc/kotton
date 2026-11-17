@@ -2610,7 +2610,7 @@ mod allowlist_rebuild {
         let (_, notes) = listed(node_list(&db, "person-odd".into(), None).await.unwrap());
         assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key(odd)]);
         let said = kotton_wire::note::sentence(&notes[0], "device revoke");
-        assert!(said.contains("names no Ed25519 key") && said.contains("`device revoke` is the verb that removes it, by this name"), "{said}");
+        assert!(said.contains("names no Ed25519 key") && said.contains("`device revoke` is the verb that removes it, by this name, as recorded"), "{said}");
         assert!(!said.contains("device revoke "), "{said}");
     }
 

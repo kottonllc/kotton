@@ -14,6 +14,11 @@
 //!
 //! The enum is **closed** on purpose: a command whose output "doesn't fit" ten
 //! shapes triggers a design conversation, not a new `println!`.
+//!
+//! A table's cell and a record's value are the strings a command made, a name as
+//! stored among them: no command prints a cell itself. The renderer prints each by
+//! [`kotton_wire::note::shown`], each character it holds shown, before it fits and
+//! styles it, and `--json` carries the cell as stored (kottonllc/kotton#597, 39A).
 
 use crate::ui;
 use colored::Colorize;
@@ -86,12 +91,16 @@ pub fn render_shape(out: &Out) -> String {
                 .iter()
                 .map(|(k, v)| {
                     let label = format!("{k:width$}");
-                    format!("{}{}  {v}", ui::ROW_MARGIN, label.dimmed())
+                    format!("{}{}  {}", ui::ROW_MARGIN, label.dimmed(), kotton_wire::note::shown(v))
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
         }
-        Out::Table { columns, rows } => render_table(columns, rows),
+        Out::Table { columns, rows } => {
+            let rows: Vec<Vec<String>> =
+                rows.iter().map(|row| row.iter().map(|cell| kotton_wire::note::shown(cell)).collect()).collect();
+            render_table(columns, &rows)
+        }
         Out::Note(text) => ui::wrap(text)
             .into_iter()
             .map(|line| format!("{}{}", ui::MARGIN, line.bold()))
@@ -218,7 +227,8 @@ pub fn render(outs: &[Out], actor: Option<&str>) {
 
 /// Render the shapes as a JSON array to stdout (the `--json` path). The human
 /// output never serves two masters: the same `Out` a person sees is what a script
-/// parses. Falls back to `render` if serialization somehow fails.
+/// parses, each cell and value as the command made it, a name as stored (39A).
+/// Falls back to `render` if serialization somehow fails.
 pub fn render_json(outs: &[Out]) {
     match serde_json::to_string_pretty(outs) {
         Ok(json) => println!("{json}"),
@@ -321,6 +331,28 @@ mod tests {
                 "line overflows terminal: {line:?}"
             );
         }
+    }
+
+    /// **A table's cell and a record's value are printed with each character shown**
+    /// (kottonllc/kotton#597, 39A): a control, format or bidirectional character by its
+    /// escape; a value that holds a backtick or a command to type is printed as it is;
+    /// a cell cut to fit still ends with `…`.
+    #[test]
+    fn a_cell_and_a_value_are_printed_with_each_character_shown() {
+        for (raw, said) in [("bell\u{7}", "bell\\u{7}"), ("\u{202e}enohp", "\\u{202e}enohp"), ("ph\u{200d}one", "ph\\u{200d}one")] {
+            let record = render_shape(&Out::Record(vec![("name".into(), raw.into())]));
+            assert!(record.ends_with(&format!("  {said}")) && !record.contains(raw), "{record:?}");
+            let table = render_shape(&Out::Table { columns: vec!["name".into()], rows: vec![vec![raw.into()]] });
+            assert!(table.ends_with(said) && !table.contains(raw), "{table:?}");
+        }
+        for as_is in ["`device revoke attic` removes it", "kotton --json issuer list", "sam's phone"] {
+            assert!(render_shape(&Out::Record(vec![("try".into(), as_is.into())])).ends_with(&format!("  {as_is}")));
+            assert!(render_shape(&Out::Table { columns: vec!["try".into()], rows: vec![vec![as_is.into()]] }).ends_with(as_is));
+        }
+        let long = format!("a\u{7}{}", "b".repeat(400));
+        let table = render_shape(&Out::Table { columns: vec!["name".into()], rows: vec![vec![long.clone()]] });
+        let row = table.lines().last().unwrap();
+        assert!(row.contains("a\\u{7}b") && row.ends_with('…') && !row.contains('\u{7}'), "{row:?}");
     }
 
     #[test]

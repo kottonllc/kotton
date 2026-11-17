@@ -3365,9 +3365,10 @@ mod tests {
 
     /// **A kept credential whose name is not one plain word is told the verb that removes it,
     /// by that name, and given no command; it is still held, and that verb given the name
-    /// whole forgets it** (kottonllc/kotton#618, 23A and 24B): a name in another script,
-    /// one with a quote, and one that starts with `-`. The mint now refuses the last two,
-    /// and a kept credential is read by the rule as it was, so each is held as before.
+    /// whole forgets it** (kottonllc/kotton#618, 23A, 24B, 40A, 41A, 44A): a name in another
+    /// script, one with a quote, one that starts with `-`, one that holds a format character
+    /// and one in decomposed form. The mint now refuses all but the first, and a kept
+    /// credential is read by the rule as it was, so each is held as before.
     #[tokio::test]
     async fn a_kept_credential_with_no_plain_name_is_told_its_verb_and_forgotten_by_that_name() {
         use super::super::network_readout::{keyless_relay_words, keyless_vault_words, RELAY_FORGET, VAULT_FORGET};
@@ -3377,15 +3378,22 @@ mod tests {
         };
         let (_, bytes) = kotton_crypto::ed25519::refused_keys().into_iter().next().unwrap();
         let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
-        for (name, minted) in [("\u{5c4b}\u{6839}\u{88cf}", true), ("it's", false), ("-attic", false)] {
+        for (name, minted) in [
+            ("\u{5c4b}\u{6839}\u{88cf}", true),
+            ("it's", false),
+            ("-attic", false),
+            ("ph\u{200d}one", false),
+            ("cafe\u{301}", false),
+        ] {
             assert_eq!(
                 kotton_peer::operator::minted_text(OperatedService::Vault, name, &key, None).is_ok(),
                 minted,
                 "{name}: the mint's rule"
             );
             for (verb, said) in [(VAULT_FORGET, keyless_vault_words(name)), (RELAY_FORGET, keyless_relay_words(name))] {
-                assert!(said.contains(&format!("`{verb}` is the verb that removes it, by this name")), "{said}");
-                assert!(said.contains(&format!("`{name}` names no Ed25519 key")), "{said}");
+                assert!(said.contains(&format!("`{verb}` is the verb that removes it, by this name, as recorded")), "{said}");
+                let quoted = kotton_wire::note::quoted(name);
+                assert!(said.contains(&format!("{quoted} names no Ed25519 key")), "{said}");
                 assert!(!said.contains(&format!("{verb} ")), "a command was composed: {said}");
             }
 

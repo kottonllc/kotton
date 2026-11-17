@@ -130,6 +130,38 @@ pub fn is_combining_mark(c: char) -> bool {
     )
 }
 
+/// Whether `c` is printed as it is where a name is printed as data, by its class in Unicode's
+/// tables (kottonllc/kotton#597, 42A); `first` is whether nothing comes before it in the name.
+/// Every character this does not hold is printed by its escape (`kotton_wire::note::shown`).
+///
+/// It is a set of what is printed as it is, not a list of what is not:
+///
+/// - its general category is a letter, a mark, a number, a punctuation mark or a symbol, or it
+///   is the space (U+0020). So a control, format, private-use or unassigned character, and a
+///   separator other than the space, is not printed as it is;
+/// - it is not default-ignorable, which holds the joiners, the variation selectors and the
+///   Hangul fillers;
+/// - it is not `\`, which begins an escape, and not U+2800, a symbol that draws nothing;
+/// - it is not a mark with nothing before it to sit on (`first`).
+///
+/// An unassigned character is escaped, so a name's print does not change silently when the
+/// tables grow. The same set bounds a name a vault or a relay is minted under from now on,
+/// which `shown` must print unchanged (40A). *The seam:* Unicode's identifier rules name the
+/// places a joiner belongs in a word, and admitting it there is a change to this one predicate,
+/// read by `shown` and the mint alike. [`is_hostile_char`], [`renders_blank`] and
+/// [`is_combining_mark`] are not read here; `petname`'s rule is kottonllc/kotton#498's.
+pub fn is_printed_as_is(c: char, first: bool) -> bool {
+    use icu_properties::props::{DefaultIgnorableCodePoint, GeneralCategory, GeneralCategoryGroup as G};
+    use icu_properties::{CodePointMapData, CodePointSetData};
+    let class = CodePointMapData::<GeneralCategory>::new().get(c);
+    let drawn = c == ' '
+        || [G::Letter, G::Mark, G::Number, G::Punctuation, G::Symbol].iter().any(|g| g.contains(class));
+    drawn
+        && !CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
+        && !matches!(c, '\\' | '\u{2800}')
+        && !(first && G::Mark.contains(class))
+}
+
 /// `name` as names are compared for sameness: spaces around it trimmed, each run of
 /// whitespace (and of characters that [`renders_blank`]) one space, and the case folded.
 /// `kotton` is reserved by it, and two keys whose names compare the same by it are said to

@@ -21,6 +21,9 @@ bs58 = "0.5"
 blake3 = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
+# Unicode's general category and default-ignorable property, for what a name is printed as
+# (`petname::is_printed_as_is`, kottonllc/kotton#597, 42A). Already in both locks.
+icu_properties = "2.2"
 ts-rs = { version = "10", features = ["serde-compat"], optional = true }
 
 [lints]
