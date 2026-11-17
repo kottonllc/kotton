@@ -75,7 +75,8 @@ pub trait Membership: MemberStore {
     /// bytes it refuses is not written: every member this writes names a key,
     /// so a member under such bytes is one an earlier build wrote. Such a member
     /// is left in the set and read as no key (the projection writes nothing for
-    /// it), and is removed by [`Self::remove_member`], by its DID as stored.
+    /// it), and is removed by [`Self::remove_found`], found in the set's own
+    /// listing by its DID as stored.
     async fn write_member(&self, member: &Member) -> Result<()> {
         kotton_crypto::ed25519::VerifyingKey::from_bytes(&member.public_key)
             .map_err(|e| anyhow::anyhow!("member {}: its key is not an Ed25519 key: {e}", member.did))?;
@@ -117,6 +118,18 @@ pub trait Membership: MemberStore {
     /// or foreign file empty the whole set. A listing that cannot be taken at all
     /// is the other thing, and every caller already has an arm for it.
     async fn list_members(&self) -> Result<Vec<Member>> {
+        Ok(self.list_found().await?.into_iter().map(|f| f.member).collect())
+    }
+
+    /// [`Self::list_members`], each member beside the key the set's own listing
+    /// gave for its object: the one thing [`Self::remove_found`] removes by.
+    ///
+    /// A member is found by what the listing returns and never by a path made
+    /// from a name. A member's object is kept under its DID, but nothing holds the
+    /// DID an object carries to the key it is listed under, and a name a person
+    /// typed is compared with what is stored, never joined into a store path
+    /// (kottonllc/kotton#610).
+    async fn list_found(&self) -> Result<Vec<Found>> {
         let keys = self
             .member_list(MEMBERS_PREFIX)
             .await
@@ -128,7 +141,7 @@ pub trait Membership: MemberStore {
             }
             match self.member_read(&key).await {
                 Ok(bytes) => match serde_json::from_slice::<Member>(&bytes) {
-                    Ok(member) => members.push(member),
+                    Ok(member) => members.push(Found { key, member }),
                     // The key and the kind of failure, never serde's text:
                     // for a field of the wrong type it quotes the value, and
                     // the value is a decrypted card's.
@@ -253,13 +266,25 @@ pub trait Membership: MemberStore {
             .context("write this person's reach note")
     }
 
-    /// Remove a membership record (revocation). Deleting the object closes every
-    /// computed view that referenced this member on the next projection.
-    async fn remove_member(&self, did: &str) -> Result<()> {
-        self.member_delete(&member_path(did))
+    /// Remove a member the set's own listing returned (revocation), by the key
+    /// the listing gave for its object ([`Self::list_found`]). Deleting the
+    /// object closes every computed view that referenced this member on the next
+    /// projection.
+    async fn remove_found(&self, found: &Found) -> Result<()> {
+        self.member_delete(&found.key)
             .await
-            .with_context(|| format!("remove member {did}"))
+            .with_context(|| format!("remove member {}", found.member.did))
     }
+}
+
+/// A member as the set's own listing returned it: the member, and the key its
+/// object was listed under ([`Membership::list_found`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    /// The key the listing gave for the member's object.
+    pub key: String,
+    /// The member the object holds.
+    pub member: Member,
 }
 
 #[async_trait::async_trait]
@@ -308,6 +333,14 @@ mod tests {
     use kotton_schemas::membership::{Ceremony, Member, Posture, Role};
     use kotton_store::runtime::{user::UserStore, UserKeys};
     use tempfile::TempDir;
+
+    /// Remove the members under `did` as stored, found in the set's own listing,
+    /// as a revoke does.
+    async fn remove(store: &UserStore, did: &str) {
+        for found in store.list_found().await.unwrap().into_iter().filter(|f| f.member.did == did) {
+            store.remove_found(&found).await.unwrap();
+        }
+    }
 
     fn member(did: &str, role: Role, posture: Option<Posture>) -> Member {
         Member {
@@ -389,7 +422,7 @@ mod tests {
 
             store.member_write(&m.vfs_path(), &serde_json::to_vec(&m).unwrap()).await.unwrap();
             assert_eq!(store.read_member("did:key:zEarlier").await.unwrap(), Some(m.clone()), "{name}");
-            store.remove_member("did:key:zEarlier").await.unwrap();
+            remove(&store, "did:key:zEarlier").await;
             assert_eq!(store.list_members().await.unwrap(), vec![own.clone()], "{name}");
         }
     }
@@ -426,7 +459,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.list_members().await.unwrap().len(), 2);
 
-        store.remove_member("did:key:zA").await.unwrap();
+        remove(&store, "did:key:zA").await;
         let remaining = store.list_members().await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].did, "did:key:zB");
@@ -492,7 +525,7 @@ mod tests {
             ]
         );
 
-        store.remove_member("did:key:zVaultA").await.unwrap();
+        remove(&store, "did:key:zVaultA").await;
         assert_eq!(
             store.list_vaults().await.unwrap(),
             vec![("did:key:zVaultB".to_string(), Some("home-vps".to_string()))],

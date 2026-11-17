@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! File operations, remote storage management, and sync IPC handlers.
 
-use kotton_peer::daemon::db as network_db;
 use kotton_wire::ipc::SyncDirection;
 use kotton_wire::remote::{RemoteBackend, RemoteConfig};
 use kotton_diag::service::{Event, EventCategory, EventLevel, EventScope};
@@ -1004,12 +1003,19 @@ async fn remote_add_kotton(
     peer_did: String,
     label: String,
 ) -> io::Result<UserResponse> {
-    // 1. Resolve peer_did → the node one of the person's drives is reached
-    //    through. A peer remote is a drive and nothing else: a device
-    //    replicates to its person's drives, and no device is another's
-    //    target, so a paired node the drive record does not name — another of
-    //    the person's own devices — is refused here, the one place a peer
-    //    remote is opened from a request.
+    // 1. Resolve the name → the node one of the person's drives is reached
+    //    through. The name goes through the one resolver a node a person names
+    //    goes through (`nodes::node_named`, kottonllc/kotton#610), over the
+    //    person's rows: a DID as stored or a label, whole, by equality. A peer
+    //    remote is a drive and nothing else: a device replicates to its person's
+    //    drives, and no device is another's target, so a paired node the drive
+    //    record does not name — another of the person's own devices — is
+    //    refused here, the one place a peer remote is opened from a request.
+    let row = match kotton_peer::daemon::nodes::node_named(db, &user_id, &peer_did, kotton_peer::daemon::nodes::Reach::Rows).await {
+        Ok(Some(kotton_peer::daemon::nodes::Named::Row(row))) => Some(row),
+        Ok(_) => None,
+        Err(e) => return Ok(UserResponse::Error { message: e.to_string() }),
+    };
     let drives = match kotton_peer::daemon::drives::nodes(db, &user_id).await {
         Ok(n) => n,
         Err(e) => {
@@ -1018,31 +1024,29 @@ async fn remote_add_kotton(
             });
         }
     };
-    let node = match drives
-        .into_iter()
-        .find(|n| n.device_did.to_string() == peer_did)
-    {
+    // The resolved row is a drive's node where the drive record names that row.
+    let node = row.as_ref().and_then(|row| drives.into_iter().find(|n| n.device_did == row.device_did));
+    let node = match node {
         Some(n) => n,
         None => {
-            let paired = network_db::list_paired_nodes(db, &user_id)
-                .await
-                .map(|nodes| nodes.iter().any(|n| n.device_did.to_string() == peer_did))
-                .unwrap_or(false);
             return Ok(UserResponse::Error {
-                message: if paired {
+                message: if row.is_some() {
                     format!(
                         "'{peer_did}' is not one of your drives: a device is not a sync target — \
                          devices sync to their drives, never to each other"
                     )
                 } else {
                     format!(
-                        "no paired node with DID '{peer_did}' — pair this device first with \
+                        "no paired node named '{peer_did}' — pair this device first with \
                          `kotton pair`"
                     )
                 },
             });
         }
     };
+    // The remote is kept under the node's DID as stored, the row's own name in
+    // the store, whichever of its names was given.
+    let peer_did = node.device_did.to_string();
 
     // 2. NAT traversal → KottonPeerObjectStorage.
     let user_store = host.user_store(&user_id);
@@ -1184,8 +1188,8 @@ pub async fn sync_mount(
     //
     // The name is looked for among the drives first, by label or DID: a label
     // keys no row, so a device and a drive may both carry it, and `sync` names
-    // the drive. A name no drive carries is resolved among every row
-    // (`paired_node_named`), so a device is refused by name below.
+    // the drive. A name no drive carries is resolved among every row through the
+    // one resolver (`nodes::node_named`), so a device is refused by name below.
     if !store.list_remotes().contains(&remote) {
         let drive = kotton_peer::daemon::drives::nodes(db, &user_id)
             .await?
@@ -1194,7 +1198,10 @@ pub async fn sync_mount(
             .collect::<Vec<_>>();
         let node = match <[_; 1]>::try_from(drive) {
             Ok([node]) => Some(node),
-            Err(_) => network_db::paired_node_named(db, &user_id, &remote).await?,
+            Err(_) => match kotton_peer::daemon::nodes::node_named(db, &user_id, &remote, kotton_peer::daemon::nodes::Reach::Rows).await? {
+                Some(kotton_peer::daemon::nodes::Named::Row(row)) => Some(row),
+                _ => None,
+            },
         };
         if let Some(node) = node {
             let did = node.device_did.to_string();
@@ -1267,6 +1274,106 @@ mod tests {
         fn user_store(&self, _: &str) -> Option<Arc<kotton_store::runtime::user::UserStore>> {
             unreachable!("the host was asked for a store")
         }
+    }
+
+    /// A host that records the node a remote is opened to and opens none.
+    #[derive(Default)]
+    struct Dials(std::sync::Mutex<Vec<kotton_wire::peer::PairedNode>>);
+
+    impl StoreHost for Dials {
+        fn events(&self) -> &Arc<kotton_diag::service::EventBus> {
+            unreachable!("the host was asked for its events")
+        }
+        fn mount_domain(&self, _: &str, _: &str) -> io::Result<Option<String>> {
+            unreachable!("the host was asked for a mount's domain")
+        }
+        fn pin_mount_domain(&self, _: &str, _: &str, _: &str) -> io::Result<()> {
+            unreachable!("the host was asked to pin a domain")
+        }
+        fn cek_domain_id(&self, _: &str, _: Option<&kotton_store::runtime::user::UserStore>) -> Option<String> {
+            unreachable!("the host was asked for a key domain")
+        }
+        fn user_store(&self, _: &str) -> Option<Arc<kotton_store::runtime::user::UserStore>> {
+            None
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FileHost for Dials {
+        fn set_remote_credentials(&self, _: &str, _: &str, _: &str) -> io::Result<()> {
+            unreachable!("the host was asked to keep credentials")
+        }
+        fn forget_remote_credentials(&self, _: &str, _: &str) {
+            unreachable!("the host was asked to forget credentials")
+        }
+        async fn sync_mount(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<kotton_wire::ipc::SyncDirection>,
+        ) -> anyhow::Result<kotton_wire::remote::SyncResult> {
+            unreachable!("the host was asked to sync")
+        }
+        async fn open_peer_storage(
+            &self,
+            node: kotton_wire::peer::PairedNode,
+            _: &str,
+            _: Option<&kotton_store::runtime::user::UserStore>,
+        ) -> anyhow::Result<Arc<dyn kotton_sys::store::SyncableStore>> {
+            self.0.lock().unwrap().push(node);
+            anyhow::bail!("not dialled in a test")
+        }
+    }
+
+    /// **`remote add` resolves its name through the one resolver**
+    /// (kottonllc/kotton#610; kottonllc/kotton#597, 29A): a drive's node is named by its
+    /// label or its DID as stored, each whole, and is the node the remote is opened to; a
+    /// label two rows carry is refused with the resolver's words and opens nothing; a row
+    /// of the person's that is no drive is refused as a device.
+    #[tokio::test]
+    async fn remote_add_resolves_its_name_through_the_one_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("agent.db")).create_if_missing(true);
+        let db = Arc::new(SqlitePool::connect_with(options).await.unwrap());
+        crate::db::MIGRATOR.run(db.as_ref()).await.unwrap();
+        let key = |seed: u8| kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[seed; 32]));
+        let (vault, laptop, phone) = (key(51), key(52), key(53));
+        let did = |k: &kotton_crypto::ed25519::VerifyingKey| kotton_crypto::DidKeyMethod::from_public_key(k).to_string();
+        let insert = |id: &'static str, k: kotton_crypto::ed25519::VerifyingKey| {
+            let db = Arc::clone(&db);
+            async move {
+                kotton_peer::daemon::db::insert_paired_node(&db, id, "alice", &did(&k), k.as_bytes(), "[]", 0, None).await.unwrap()
+            }
+        };
+        insert("home vault", vault).await;
+        insert("twin", laptop).await;
+        insert("twin", phone).await;
+        kotton_peer::daemon::drives::record(&db, "alice", vault.as_bytes()).await.unwrap();
+        let add = |name: String| {
+            let db = Arc::clone(&db);
+            async move {
+                let host = Dials::default();
+                let backend = RemoteBackend::Kotton { peer_did: name, label: "vault".into() };
+                let said = remote_add(&db, &host, "alice".into(), "vault".into(), backend, None).await.unwrap();
+                let dialled = host.0.lock().unwrap().iter().map(|n| n.device_did.to_string()).collect::<Vec<_>>();
+                match said {
+                    UserResponse::Error { message } => (message, dialled),
+                    other => panic!("{other:?}"),
+                }
+            }
+        };
+        for name in ["home vault".to_string(), did(&vault)] {
+            let (said, dialled) = add(name.clone()).await;
+            assert_eq!(dialled, vec![did(&vault)], "{name}: {said}");
+            assert!(said.starts_with("peer connection failed"), "{name}: {said}");
+        }
+        let (said, dialled) = add("twin".into()).await;
+        assert!(said.contains("is the label of 2 of your nodes"), "{said}");
+        assert!(dialled.is_empty());
+        let (said, dialled) = add(did(&laptop)).await;
+        assert!(said.contains("is not one of your drives"), "{said}");
+        assert!(dialled.is_empty());
     }
 
     /// A `ListSealed` prefix that is not canonical is refused where it

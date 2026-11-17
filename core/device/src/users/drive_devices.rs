@@ -101,6 +101,21 @@ pub fn change_for(device: &PairedNode, act: TenantDeviceAct, said_at_ms: u64) ->
     TenantDeviceChange { act, device_did, public_key: device.public_key, said_at_ms }
 }
 
+/// A member of the person's set as the node a drive is told of: its DID as
+/// stored and its stored bytes, under its label or its DID. `None` when the DID
+/// as stored does not read as a DID.
+fn member_as_node(member: &kotton_schemas::membership::Member) -> Option<PairedNode> {
+    Some(PairedNode {
+        id: member.label.clone().unwrap_or_else(|| member.did.clone()),
+        device_did: kotton_wire::did::Did::parse(&member.did).ok()?,
+        public_key: member.public_key,
+        paired_at: 0,
+        addresses: Vec::new(),
+        relay_url: None,
+        posture: member.posture.map(|p| p.as_str().to_string()),
+    })
+}
+
 /// The nodes `user_id`'s drives are reached through, other than `device`
 /// itself, as the drive record names them.
 async fn drives_of(db: &Arc<SqlitePool>, user_id: &str, device: &PairedNode) -> std::io::Result<Vec<PairedNode>> {
@@ -165,6 +180,13 @@ async fn tell(
 /// here. The one body both the `NodeRevoke` request and the shell's surface
 /// run, so neither can mean less than the other.
 ///
+/// **What it names is the one resolver's** (`kotton_peer::daemon::nodes::node_named`):
+/// a row of the person's, or, asked [`Asked::Locally`] only, an own-device member
+/// of their set that no row stands for, by its DID as stored. A member with no
+/// row is withdrawn at the person's drives as a row is, from the member's stored
+/// bytes and DID ([`change_for`]); a drive matches a withdrawal under bytes that
+/// are no key as stored and records nothing (`kvaultd::devices`).
+///
 /// **Never success while a drive still admits the device.** On a device that
 /// does not hold the identity, with drives to tell, nothing is revoked and the
 /// answer says which device can do it. When some drive does not take the
@@ -174,25 +196,53 @@ async fn tell(
 /// row is gone here, so a second run finds no such device — and that nothing
 /// retries yet. Telling those drives again is a later queue's; the person is
 /// told now.
+///
+/// [`Asked::Locally`]: kotton_peer::daemon::nodes::Asked::Locally
 pub async fn revoke(
     runtime: &DeviceRuntime,
     member_store: &dyn kotton_peer::membership::MemberStore,
     db: &Arc<SqlitePool>,
     user_id: String,
     node_id: String,
+    asked: kotton_peer::daemon::nodes::Asked,
 ) -> std::io::Result<UserResponse> {
-    // Read before the row goes: the withdrawal names the device's key.
-    // `node_id` is what the person named: the node's DID, or a label one row
-    // of theirs carries. A label two rows carry is refused here, before the
-    // drives are asked anything, rather than read as whichever row came first.
-    let node = kotton_peer::daemon::db::paired_node_named(db, &user_id, &node_id).await?;
-    let mut missed: Vec<(String, String)> = Vec::new();
-    let is_drive = match node.as_ref() {
-        Some(node) => kotton_peer::daemon::drives::is_drive(db, &user_id, node).await?,
-        None => false,
+    use kotton_peer::daemon::nodes::{node_named, revoke_named, Asked, Named, Reach};
+    // Read before anything goes: the withdrawal names the device's key.
+    // `node_id` is what the person named. A label two rows carry is refused
+    // here, before the drives are asked anything, rather than read as whichever
+    // row came first.
+    let reach = match asked {
+        Asked::Locally => Reach::RowsAndMembers(member_store),
+        Asked::Remotely => Reach::Rows,
     };
-    if let Some(node) = node.as_ref().filter(|_| !is_drive) {
-        let drives = drives_of(db, &user_id, node).await?;
+    let Some(named) = node_named(db, &user_id, &node_id, reach).await? else {
+        return Ok(UserResponse::Error {
+            message: format!("node '{}' not found for user '{}'", node_id, user_id),
+        });
+    };
+    // What the drives are told of: the row, or each member as a node of its
+    // stored bytes and DID. A member whose DID as stored does not read as a DID
+    // can be told to no drive, and is said to be missed at each.
+    let mut devices: Vec<PairedNode> = Vec::new();
+    let mut untold: Vec<String> = Vec::new();
+    match &named {
+        Named::Row(node) => {
+            if !kotton_peer::daemon::drives::is_drive(db, &user_id, node).await? {
+                devices.push(node.clone());
+            }
+        }
+        Named::Members(found) => {
+            for f in found {
+                match member_as_node(&f.member) {
+                    Some(node) => devices.push(node),
+                    None => untold.push(f.member.did.clone()),
+                }
+            }
+        }
+    }
+    let mut missed: Vec<(String, String)> = Vec::new();
+    for device in &devices {
+        let drives = drives_of(db, &user_id, device).await?;
         if !drives.is_empty() && identity_key(runtime, &user_id).is_none() {
             let names: Vec<String> = drives.iter().map(|d| d.id.clone()).collect();
             return Ok(UserResponse::Error {
@@ -205,12 +255,18 @@ pub async fn revoke(
                 ),
             });
         }
-        missed = withdraw(runtime, db, &user_id, node).await.missed;
     }
-    // The row is named by its DID from here, so the revoke takes the row the
-    // drives were just told of.
-    let named = node.as_ref().map_or_else(|| node_id.clone(), |n| n.device_did.to_string());
-    let revoked = kotton_peer::daemon::nodes::node_revoke(member_store, db, user_id, named, &runtime.paired_keys()).await?;
+    for device in &devices {
+        missed.extend(withdraw(runtime, db, &user_id, device).await.missed);
+    }
+    if !untold.is_empty() {
+        for drive in kotton_peer::daemon::drives::nodes(db, &user_id).await? {
+            missed.push((drive.id, "the member's DID as stored is not a DID, so it was not told".to_string()));
+        }
+    }
+    // What was resolved is what is revoked: the row the drives were just told
+    // of, or the members the set's own listing returned.
+    let revoked = revoke_named(member_store, db, &user_id, &named, &runtime.paired_keys()).await?;
     if !matches!(revoked, UserResponse::NodeRevoked) || missed.is_empty() {
         return Ok(revoked);
     }

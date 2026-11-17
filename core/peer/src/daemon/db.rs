@@ -14,7 +14,8 @@
 //! elsewhere (the name a device announced at a join, a drive's label handed at
 //! one), so a write under it reaches no other row, and two of one person's
 //! rows may carry it. What names a row is [`get_paired_node`]; a verb a person
-//! names a node in resolves the name through [`paired_node_named`], which
+//! names a node in resolves the name through the one resolver,
+//! `super::nodes::node_named`, whose rows are [`paired_node_named`]'s, which
 //! refuses a label two rows carry rather than pick one.
 //!
 //! **A transaction here that reads and then writes begins as the writer**
@@ -339,8 +340,10 @@ pub async fn paired_node_for_key(
     row.as_ref().map(node_of).transpose()
 }
 
-/// The node `name` names among `user_id`'s rows, for a verb a person names a
-/// node in: its DID, or the label it is shown under when one row carries it.
+/// The row `name` names among `user_id`'s rows: its DID as stored, or the label
+/// it is shown under when one row carries it, each taken whole and by equality.
+/// This is the rows half of the one resolver a verb a person names a node in
+/// goes through, `super::nodes::node_named` (kottonllc/kotton#610).
 /// A label is a name, not a key (`migrations/0027_paired_nodes_per_person.sql`),
 /// so two of the person's rows may carry one; such a label is refused with the
 /// DIDs that tell them apart, never resolved to whichever row came first.

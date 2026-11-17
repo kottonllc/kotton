@@ -1031,12 +1031,16 @@ pub enum UserRequest {
     VaultCapacity {
         user_id: String,
     },
-    /// Revoke a paired node, removing it from the allowlist.
+    /// Revoke a paired node, removing it from the allowlist, with every
+    /// own-device member of the person's set that holds its key.
     NodeRevoke {
         user_id: String,
         /// The node's DID, or the label it is shown under while one of the
         /// person's nodes carries it: a label keys no row, so one that two
-        /// carry is refused and the DID names the one meant.
+        /// carry is refused and the DID names the one meant. Asked at the
+        /// machine, and only there, a name no row carries may also be the DID as
+        /// stored of an own-device member of the set that no row stands for
+        /// (kottonllc/kotton#610). Taken whole, by equality.
         node_id: String,
     },
 

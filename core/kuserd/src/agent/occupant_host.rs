@@ -379,7 +379,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         let user_id = self.the_only_user().map_err(|e| format!("{e:?}"))?;
         // The same call the `NodeList` IPC arm makes, so the surface and the CLI
         // cannot disagree about what is paired.
-        let nodes = match kotton_peer::daemon::nodes::node_list(self.db, user_id.clone())
+        let nodes = match kotton_peer::daemon::nodes::node_list(self.db, user_id.clone(), None)
             .await
             .map_err(|e| format!("reading the device roster: {e}"))?
         {
@@ -1193,7 +1193,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
             .get(&user_id)
             .ok_or_else(|| format!("user runtime '{user_id}' is not loaded"))?;
 
-        // The same call the `NodeRevoke` IPC arm makes, with the same arguments,
+        // The same call the `NodeRevoke` IPC arm makes, as a remote asker's,
         // so the surface and the CLI cannot drift about what revoking means: the
         // membership record goes and the live TLS allowlist entry goes with it.
         // The membership record goes, the live TLS allowlist entry with it, and
@@ -1201,7 +1201,16 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         // The answer is read, not discarded: a revoke a drive did not take, or
         // one refused on a device without the identity, is an error to the
         // person, never a success.
-        match kotton_device::users::drive_devices::revoke(self.runtime, user_rt.as_ref(), self.db, user_id, did.to_owned())
+        // The occupant is an app in the runner, not the terminal: it reaches the
+        // person's rows, and no member with no row, which its roster never lists.
+        match kotton_device::users::drive_devices::revoke(
+            self.runtime,
+            user_rt.as_ref(),
+            self.db,
+            user_id,
+            did.to_owned(),
+            kotton_peer::daemon::nodes::Asked::Remotely,
+        )
             .await
             .map_err(|e| format!("revoking the device: {e}"))?
         {
@@ -1524,7 +1533,7 @@ impl DaemonOccupantHost<'_> {
         &self,
         user_id: &str,
     ) -> Result<Vec<kotton_wire::peer::PairedNode>, String> {
-        match kotton_peer::daemon::nodes::node_list(self.db, user_id.to_string())
+        match kotton_peer::daemon::nodes::node_list(self.db, user_id.to_string(), None)
             .await
             .map_err(|e| format!("reading the device roster: {e}"))?
         {

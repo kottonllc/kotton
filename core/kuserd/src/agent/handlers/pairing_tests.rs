@@ -564,6 +564,7 @@ mod enrollment_tests {
             "alice".to_string(),
             "vps".to_string(),
             &paired_keys,
+            kotton_peer::daemon::nodes::Asked::Locally,
         )
         .await
         .unwrap();
@@ -631,6 +632,7 @@ mod enrollment_tests {
             &db,
             "alice".to_string(),
             "laptop".to_string(),
+            kotton_peer::daemon::nodes::Asked::Locally,
         )
         .await
         .unwrap();
@@ -662,6 +664,7 @@ mod enrollment_tests {
             &db,
             "alice".to_string(),
             "laptop".to_string(),
+            kotton_peer::daemon::nodes::Asked::Locally,
         )
         .await
         .unwrap();
@@ -678,5 +681,56 @@ mod enrollment_tests {
             network_db::paired_node_named(&db, "alice", "laptop").await.unwrap().is_none(),
             "the device is still revoked here"
         );
+    }
+
+    /// **A member of the set with no row is withdrawn at the person's drives as a row is**
+    /// (kottonllc/kotton#610, the issue's default), from its stored bytes and DID: on a device
+    /// without the identity the revoke is refused and the member stays; on the device that
+    /// holds it, the drive is asked, and the one that did not answer is named while the member
+    /// is removed here.
+    #[tokio::test]
+    async fn a_member_with_no_row_is_withdrawn_at_the_drives_as_a_row_is() {
+        use kotton_peer::membership::MemberStore as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, users, db) = alice_with_a_device_and_an_unreachable_drive(dir.path()).await;
+        let (_, bytes) = kotton_crypto::ed25519::refused_keys().remove(0);
+        let did = DidKeyMethod::spelled_over(&bytes).to_string();
+        let member = kotton_schemas::membership::Member {
+            did: did.clone(),
+            public_key: bytes,
+            role: kotton_schemas::membership::Role::OwnDevice,
+            admitted_by: kotton_schemas::membership::Ceremony::DeviceEnroll,
+            added_at: "2026-11-17T00:00:00Z".to_string(),
+            posture: Some(Posture::Full),
+            label: None,
+            reach: None,
+        };
+        let set = users.get("alice").unwrap();
+        set.member_write(&member.vfs_path(), &serde_json::to_vec(&member).unwrap()).await.unwrap();
+        let revoke = || {
+            kotton_device::users::drive_devices::revoke(
+                &runtime,
+                set.as_ref(),
+                &db,
+                "alice".to_string(),
+                did.clone(),
+                kotton_peer::daemon::nodes::Asked::Locally,
+            )
+        };
+
+        let signing = runtime.secrets().get_secret(&kdf_labels::identity_signing_key("alice")).unwrap().unwrap();
+        runtime.secrets().delete_secret(&kdf_labels::identity_signing_key("alice")).unwrap();
+        match revoke().await.unwrap() {
+            UserResponse::Error { message } => assert!(message.starts_with("not revoked") && message.contains("vault"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(set.list_members().await.unwrap(), vec![member.clone()], "a refused revoke removed the member");
+
+        runtime.secrets().set_secret(&kdf_labels::identity_signing_key("alice"), &signing).unwrap();
+        match revoke().await.unwrap() {
+            UserResponse::Error { message } => assert!(message.contains("still admits it: vault ("), "{message}"),
+            other => panic!("a withdrawal no drive took answered {other:?}"),
+        }
+        assert!(set.list_members().await.unwrap().is_empty(), "the member is still in the set");
     }
 }
