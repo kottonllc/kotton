@@ -721,6 +721,12 @@ pub struct RunnerOperatedRelay {
     pub standing: Vec<String>,
     /// Whether this device reserves here — its own relay proved this key.
     pub here: bool,
+    /// For a credential whose kept key is present and names no Ed25519 key,
+    /// the sentence that says so and the verb that removes it
+    /// ([`crate::note::sentence`]); such a card carries no `key`, nothing
+    /// `standing` and is not `here`. `None`, and off the wire, for every other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_key: Option<String>,
 }
 
 /// This machine's operators, mirroring `interface operators` in `world occupant`
@@ -2498,5 +2504,40 @@ mod secret_debug_tests {
         // The literal header value a fetcher writes is the thirteenth.
         assert_eq!(seen, 13, "the source names {seen} secret-named fields; a field added, renamed or removed changes this count, so change it here on purpose");
         assert!(plain.is_empty(), "runner fields that print a secret through Debug: {plain:?}");
+    }
+}
+
+#[cfg(test)]
+mod operated_relay_tests {
+    use super::*;
+
+    /// **A relay's card carries `no_key` only when it has a sentence to say**:
+    /// an empty field is left off the wire, so a card that names its key
+    /// encodes as it did before the field, and a card without the field still
+    /// decodes; one whose kept key names no key carries it (kottonllc/kotton#605).
+    #[test]
+    fn a_relays_card_leaves_no_key_off_the_wire_when_empty() {
+        let card = RunnerOperatedRelay {
+            name: "gate".to_owned(),
+            key: Some("00".repeat(32)),
+            address: "http://203.0.113.9:7700".to_owned(),
+            standing: vec!["kotton".to_owned()],
+            here: true,
+            no_key: None,
+        };
+        let json = serde_json::to_string(&card).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("no_key").is_none(), "an empty no_key is on the wire: {json}");
+        assert_eq!(
+            v.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),
+            ["address", "here", "key", "name", "standing"],
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<RunnerOperatedRelay>(&json).unwrap(), card);
+
+        let said = RunnerOperatedRelay { key: None, standing: Vec::new(), here: false, no_key: Some("a sentence".to_owned()), ..card };
+        let json = serde_json::to_string(&said).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap()["no_key"], "a sentence", "{json}");
+        assert_eq!(serde_json::from_str::<RunnerOperatedRelay>(&json).unwrap(), said);
     }
 }

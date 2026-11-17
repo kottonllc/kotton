@@ -47,7 +47,9 @@ impl Command for PeerCommand {
                 // reason to write these down before wiping anything — *takes* an
                 // address, and the only command that could have supplied it
                 // dropped the field.
-                Ok(CommandOutput::shapes(vec![list_table(&nodes)]))
+                let mut shapes = vec![list_table(&nodes)];
+                shapes.extend(super::device::notes_said(&nodes.notes));
+                Ok(CommandOutput::shapes(shapes))
             }
 
             Some("show") => {

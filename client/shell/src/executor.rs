@@ -466,14 +466,14 @@ impl ShellExecutor {
 
 /// Output redirection mode
 #[derive(Debug, PartialEq)]
-enum RedirectMode {
+pub(crate) enum RedirectMode {
     Overwrite, // >
     Append,    // >>
 }
 
 /// Scan command `parts` for `>` / `>>` redirect tokens.
 /// Returns `(command_parts_without_redirect, Option<(mode, target_path)>)`.
-fn parse_redirect(parts: Vec<String>) -> (Vec<String>, Option<(RedirectMode, String)>) {
+pub(crate) fn parse_redirect(parts: Vec<String>) -> (Vec<String>, Option<(RedirectMode, String)>) {
     let mut cmd_parts = Vec::new();
     let mut redirect: Option<(RedirectMode, String)> = None;
     let mut i = 0;

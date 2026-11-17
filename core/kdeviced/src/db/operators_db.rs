@@ -423,6 +423,62 @@ pub async fn list(pool: &SqlitePool) -> io::Result<Vec<DeviceOperator>> {
         .collect())
 }
 
+/// A note for each `operators` row, and each kept key, whose DID names no key
+/// ([`names_a_key`]), by the DID as stored, which is what `sudoers remove`
+/// takes (kottonllc/kotton#605). Operators first, oldest first; a DID in both
+/// tables is noted once.
+pub async fn notes(pool: &SqlitePool) -> io::Result<Vec<kotton_wire::note::RowNote>> {
+    let dids: Vec<String> = sqlx::query(
+        "SELECT did FROM (SELECT did, 0 AS t, added_at AS at FROM operators \
+         UNION ALL SELECT did, 1 AS t, kept_at AS at FROM operator_keys_kept) ORDER BY t, at, did",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db_err("list operators"))?
+    .into_iter()
+    .map(|r| r.get::<String, _>("did"))
+    .collect();
+    let mut notes: Vec<kotton_wire::note::RowNote> = Vec::new();
+    for did in dids.into_iter().filter(|d| !names_a_key(d)) {
+        if !notes.iter().any(|n| n.name == did) {
+            notes.push(kotton_wire::note::RowNote::names_no_key(did));
+        }
+    }
+    Ok(notes)
+}
+
+/// The line `kdeviced` logs at start when it holds operator rows and none of
+/// them names a key: nobody can sign in as an operator, so no listing can be
+/// reached to say so. `None` with no rows (a first run) or with one that names
+/// a key. The way back is the file, with the daemon stopped (`open`), and the
+/// line says all of what that is (kottonllc/kotton#597, 5B): accounts and their
+/// data are not in the file; this device's own settings, its operators and kept
+/// keys, and the record of operator acts and device events are, and the next
+/// start is a first run ([`bootstrap`]). Every table `migrations/` makes is one
+/// of those, held by a test in `system`.
+pub async fn none_names_a_key(pool: &SqlitePool) -> io::Result<Option<String>> {
+    let dids: Vec<String> = sqlx::query("SELECT did FROM operators")
+        .fetch_all(pool)
+        .await
+        .map_err(db_err("list operators"))?
+        .into_iter()
+        .map(|r| r.get::<String, _>("did"))
+        .collect();
+    if dids.is_empty() || dids.iter().any(|d| names_a_key(d)) {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "no operator row of this device names an Ed25519 key ({} row{} that nobody can sign as), so nobody can sign \
+         in as its operator. With kdeviced stopped, removing system/device.db makes the next start a first run, at \
+         which the first key proved to this device becomes its operator. That keeps accounts and their data, which \
+         are not in that file. It also removes what is: this device's own settings (its name, relay, TURN/STUN, \
+         gateway flags and peer port), its operators and the keys kept for them, and the record of operator acts \
+         and device events",
+        dids.len(),
+        if dids.len() == 1 { "" } else { "s" }
+    )))
+}
+
 /// Whether `person` holds any operator key here.
 pub async fn is_operator_person(pool: &SqlitePool, person: &str) -> io::Result<bool> {
     let row = sqlx::query("SELECT 1 FROM operators WHERE person = ? LIMIT 1")

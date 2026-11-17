@@ -354,6 +354,7 @@ pub async fn finalize_joined_node(
         node,
         session_token: Some(kotton_wire::ipc::SecretText::new(token)),
         relay_offer: None,
+        not_handed: Vec::new(),
     })
 }
 
@@ -456,7 +457,7 @@ pub async fn handle_device_add(
     let warm_key_expires_at = now_secs() + WARM_KEY_TTL_SECONDS;
     // The person's drives, handed to a `Full` joiner with its payload so its
     // first `sync` has drives to reach (`drives_to_hand`).
-    let handed_drives = drives_to_hand(&db, &user_id).await;
+    let Handout { handed: handed_drives, not_handed } = drives_to_hand(&db, &user_id).await;
 
     // Fresh offer id + bootstrap listener (its cert presents the operational key).
     let mut sid = [0u8; 16];
@@ -563,6 +564,7 @@ pub async fn handle_device_add(
                             node,
                             session_token: None,
                             relay_offer: None,
+                            not_handed,
                         }
                     }
                     Err(e) => UserResponse::PairFailed {
@@ -675,6 +677,7 @@ pub async fn handle_gateway_enroll(
                         node,
                         session_token: None,
                         relay_offer: None,
+                        not_handed: Vec::new(),
                     },
                     Err(e) => UserResponse::PairFailed {
                         reason: format!("Admitted the gateway, but saving it failed: {e}"),
@@ -1109,7 +1112,7 @@ pub async fn handle_device_admit(
     // device that has one keeps it; the vault reserves at its own and the
     // pair resolves the difference.
     let own_relay_url = runtime.reachability().nat().relay_url;
-    let handed_drives = drives_to_hand(&db, &user_id).await;
+    let Handout { handed: handed_drives, not_handed } = drives_to_hand(&db, &user_id).await;
     let relay_offer = invite
         .filter(|_| own_relay_url.is_empty())
         .map(|inv| relay_offered(&inv.invite.relay_url, inv.relay_key));
@@ -1224,6 +1227,7 @@ pub async fn handle_device_admit(
                             node,
                             session_token: None,
                             relay_offer,
+                            not_handed,
                         }
                     }
                     Err(reason) => UserResponse::PairFailed { reason },
@@ -1640,34 +1644,52 @@ pub async fn handle_device_invite(
 /// earlier build can have recorded one (`record_handed_drives` and the
 /// projection each construct the key first). It is not handed, and the rest
 /// are: the joiner refuses a handout that carries one, and a drive nothing can
-/// be checked under reaches nothing.
-pub async fn drives_to_hand(db: &Arc<SqlitePool>, user_id: &str) -> Vec<kotton_wire::peer::DriveHandout> {
-    match kotton_peer::daemon::drives::list(db, user_id).await {
-        Ok(drives) => drives
-            .into_iter()
-            .filter(|d| {
-                let names_a_key = VerifyingKey::from_bytes(&d.vault_key).is_ok();
-                if !names_a_key {
-                    tracing::warn!(user_id, node = %d.node.device_did, "a drive recorded under bytes that are no Ed25519 key is not handed at the join");
-                }
-                names_a_key
-            })
-            .map(|d| {
-                // The node is named by the `did:key` of its key, never by the
-                // DID stored beside the bytes, which may be another spelling
-                // (kottonllc/kotton#597): the joiner holds a node to its key.
-                let mut node = d.node;
-                if let Ok(did) = kotton_crypto::DidKeyMethod::from_public_key_bytes(&d.vault_key) {
-                    node.device_did = did;
-                }
-                kotton_wire::peer::DriveHandout { vault_key: d.vault_key, tenancy: d.tenancy, node }
-            })
-            .collect(),
+/// be checked under reaches nothing. The node each such drive is reached
+/// through is noted in [`Handout::not_handed`], by the name `device revoke`
+/// takes ([`kotton_peer::daemon::db::name_of`]), so the admitting side's
+/// answer tells the person, beside the log.
+pub async fn drives_to_hand(db: &Arc<SqlitePool>, user_id: &str) -> Handout {
+    let drives = match kotton_peer::daemon::drives::list(db, user_id).await {
+        Ok(drives) => drives,
         Err(e) => {
             tracing::warn!(user_id, error = %e, "the drive record does not read; the join hands no drive");
-            Vec::new()
+            return Handout::default();
         }
+    };
+    // The rows a note names its node among: the name `device revoke` takes.
+    let rows = kotton_peer::daemon::db::list_paired_nodes(db, user_id).await.unwrap_or_default();
+    let mut handout = Handout::default();
+    for d in drives {
+        if VerifyingKey::from_bytes(&d.vault_key).is_err() {
+            tracing::warn!(user_id, node = %d.node.device_did, "a drive recorded under bytes that are no Ed25519 key is not handed at the join");
+            let name = kotton_peer::daemon::db::name_of(&rows, &d.node);
+            if !handout.not_handed.iter().any(|n| n.name == name) {
+                handout.not_handed.push(kotton_wire::note::RowNote::names_no_key(name));
+            }
+            continue;
+        }
+        // The node is named by the `did:key` of its key, never by the
+        // DID stored beside the bytes, which may be another spelling
+        // (kottonllc/kotton#597): the joiner holds a node to its key.
+        let mut node = d.node;
+        if let Ok(did) = kotton_crypto::DidKeyMethod::from_public_key_bytes(&d.vault_key) {
+            node.device_did = did;
+        }
+        handout.handed.push(kotton_wire::peer::DriveHandout { vault_key: d.vault_key, tenancy: d.tenancy, node });
     }
+    handout
+}
+
+/// What [`drives_to_hand`] read: the drives a `Full` joiner is handed, and a
+/// note for the node of each drive it is not, which the admitting side's
+/// `PairingComplete` carries (kottonllc/kotton#597, 9B).
+#[derive(Debug, Default)]
+pub struct Handout {
+    /// The drives handed, each naming its node by its key's `did:key`.
+    pub handed: Vec<kotton_wire::peer::DriveHandout>,
+    /// One note per node a drive recorded under bytes that are no Ed25519 key
+    /// is reached through, by the name `device revoke` takes.
+    pub not_handed: Vec<kotton_wire::note::RowNote>,
 }
 
 /// Whether this device can record every drive `issuer` handed it at the join,
@@ -2018,10 +2040,65 @@ mod handed_drive_tests {
         }
         assert_eq!(kotton_peer::daemon::drives::list(&db, "alice").await.unwrap().len(), 15, "every drive is recorded");
 
-        let handed = drives_to_hand(&db, "alice").await;
-        let keys: Vec<[u8; 32]> = handed.iter().map(|d| d.vault_key).collect();
+        let handout = drives_to_hand(&db, "alice").await;
+        let keys: Vec<[u8; 32]> = handout.handed.iter().map(|d| d.vault_key).collect();
         assert_eq!(keys, vec![honest.vault_key], "the handout carried a drive that names no key, or dropped the honest one");
-        check_handed_drives("alice", &a_node("laptop", 1), &handed).unwrap();
+        check_handed_drives("alice", &a_node("laptop", 1), &handout.handed).unwrap();
+
+        // The join's answer names each drive it did not hand, by the name
+        // `device revoke` takes to its node; and that revoke removes the node
+        // and the drive reached through it (kottonllc/kotton#605).
+        let mut named: Vec<String> = handout.not_handed.iter().map(|n| n.name.clone()).collect();
+        named.sort();
+        let mut want: Vec<String> = (0..refused_keys().len()).map(|i| format!("old-{i}")).collect();
+        want.sort();
+        assert_eq!(named, want, "a drive not handed was not named");
+        assert!(handout.not_handed.iter().all(|n| n.is == kotton_wire::note::NoteKind::NamesNoKey));
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        for note in &handout.not_handed {
+            let said = kotton_peer::daemon::nodes::node_revoke(&Cards::default(), &db, "alice".into(), note.name.clone(), &keys)
+                .await
+                .unwrap();
+            assert!(matches!(said, UserResponse::NodeRevoked), "{}: {said:?}", note.name);
+        }
+        let left: Vec<[u8; 32]> = kotton_peer::daemon::drives::list(&db, "alice").await.unwrap().iter().map(|d| d.vault_key).collect();
+        assert_eq!(left, vec![honest.vault_key], "a revoke left a drive reached through nothing");
+        assert!(drives_to_hand(&db, "alice").await.not_handed.is_empty());
+    }
+
+    /// **`drive list` notes each vault of the person's whose key is no key, once, by the name
+    /// `device revoke` takes to its node, and that revoke removes it** (kottonllc/kotton#605),
+    /// for every key vector the rule refuses. An honest vault, and one under another spelling
+    /// of its key's `did:key`, carry no note (19A).
+    #[tokio::test]
+    async fn drive_list_notes_a_vault_that_names_no_key_and_its_revoke_removes_it() {
+        let (_dir, db) = machine_db().await;
+        let honest = a_drive("vault", 3, "alice");
+        network_db::insert_paired_node(&db, "vault", "alice", &honest.node.device_did.to_string(), &honest.vault_key, "[]", 0, Some("blind-storage"))
+            .await
+            .unwrap();
+        kotton_peer::daemon::drives::record(&db, "alice", &honest.vault_key).await.unwrap();
+        let spelled = a_drive("attic", 4, "alice");
+        let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(&spelled.vault_key).to_string();
+        network_db::insert_paired_node(&db, "attic", "alice", &otherwise, &spelled.vault_key, "[]", 0, Some("blind-storage"))
+            .await
+            .unwrap();
+        kotton_peer::daemon::drives::record(&db, "alice", &spelled.vault_key).await.unwrap();
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        for (i, key) in refused_keys().into_iter().enumerate() {
+            let did = kotton_crypto::DidKeyMethod::spelled_over(&key).to_string();
+            network_db::insert_paired_node(&db, "old", "alice", &did, &key, "[]", 0, Some("blind-storage")).await.unwrap();
+            kotton_peer::daemon::drives::record(&db, "alice", &key).await.unwrap();
+
+            let notes = crate::users::drive_verbs::vaults_noted(&db, "alice").await.unwrap();
+            assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key("old")], "vector {i}");
+            let said = kotton_peer::daemon::nodes::node_revoke(&Cards::default(), &db, "alice".into(), notes[0].name.clone(), &keys)
+                .await
+                .unwrap();
+            assert!(matches!(said, UserResponse::NodeRevoked), "vector {i}: {said:?}");
+            assert!(crate::users::drive_verbs::vaults_noted(&db, "alice").await.unwrap().is_empty(), "vector {i}");
+            assert_eq!(kotton_peer::daemon::drives::list(&db, "alice").await.unwrap().len(), 2, "vector {i}: an honest vault went");
+        }
     }
 
     /// **A join succeeds from a drive whose row is stored under another spelling
@@ -2038,7 +2115,8 @@ mod handed_drive_tests {
             .unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &vault.vault_key).await.unwrap();
 
-        let handed = drives_to_hand(&db, "alice").await;
+        let handed = drives_to_hand(&db, "alice").await.handed;
+        assert!(drives_to_hand(&db, "alice").await.not_handed.is_empty());
         assert_eq!(handed.len(), 1, "the drive was not handed");
         assert_eq!(handed[0].node.device_did, vault.node.device_did, "the node is not named by its key's did:key");
         check_handed_drives("alice", &a_node("laptop", 1), &handed).unwrap();
@@ -2086,7 +2164,7 @@ mod handed_drive_tests {
             .await
             .unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &vault.vault_key).await.unwrap();
-        let handed = drives_to_hand(&db, "alice").await;
+        let handed = drives_to_hand(&db, "alice").await.handed;
 
         let (_joiner_dir, joiner) = machine_db().await;
         let keys = Arc::new(RwLock::new(HashSet::new()));

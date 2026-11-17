@@ -279,13 +279,8 @@ async fn run() -> io::Result<()> {
         } => {
             let _did = authenticate(&mut dev, recover).await?;
             let operators = dev.device().sudoers().await?;
-            if operators.is_empty() {
-                println!("(no operators enrolled)");
-            } else {
-                for o in operators {
-                    let person = o.person.as_deref().unwrap_or("(first-run key, answering for nobody yet)");
-                    println!("{}  {person}  added by {}", o.did, o.added_by);
-                }
+            for line in sudoers_list_lines(&operators) {
+                println!("{line}");
             }
         }
 
@@ -527,9 +522,55 @@ fn format_kctl_count(n: u64) -> String {
     result.chars().rev().collect()
 }
 
+/// The verb that removes an operator row or a kept key by its DID as stored: the one
+/// a note's sentence names (`kotton_wire::note::sentence`).
+const SUDOERS_REMOVE: &str = "kctl sudoers remove";
+
+/// What `kctl sudoers list` prints: each operator, then a sentence for each row or
+/// kept key the device noted as naming no key, with [`SUDOERS_REMOVE`].
+fn sudoers_list_lines(listed: &kotton_wire::note::Listed<kotton_wire::DeviceOperator>) -> Vec<String> {
+    let mut lines: Vec<String> = if listed.rows.is_empty() {
+        vec!["(no operators enrolled)".to_string()]
+    } else {
+        listed
+            .rows
+            .iter()
+            .map(|o| {
+                let person = o.person.as_deref().unwrap_or("(first-run key, answering for nobody yet)");
+                format!("{}  {person}  added by {}", o.did, o.added_by)
+            })
+            .collect()
+    };
+    lines.extend(listed.notes.iter().map(|n| kotton_wire::note::sentence(n, SUDOERS_REMOVE)));
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::operator_signing_key_in;
+
+    /// **`kctl sudoers list` prints a sentence for each row that names no key, naming a
+    /// verb kctl has, and that verb with the note's name is `sudoers remove` of that DID**
+    /// (kottonllc/kotton#605), for every key vector the Ed25519 rule refuses.
+    #[test]
+    fn sudoers_list_says_each_row_that_names_no_key_with_the_remove_kctl_has() {
+        use clap::Parser as _;
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
+            let listed = kotton_wire::note::Listed {
+                rows: vec![kotton_wire::DeviceOperator { did: did.clone(), person: None, added_at: 0, added_by: "bootstrap".into() }],
+                notes: vec![kotton_wire::note::RowNote::names_no_key(did.clone())],
+            };
+            let lines = super::sudoers_list_lines(&listed);
+            let typed = format!("{} {did}", super::SUDOERS_REMOVE);
+            assert!(lines.iter().any(|l| l.contains("names no Ed25519 key") && l.contains(&typed)), "{name}: {lines:?}");
+            let cli = super::Cli::try_parse_from(typed.split(' ')).unwrap_or_else(|e| panic!("{name}: kctl has no `{typed}`: {e}"));
+            assert!(
+                matches!(cli.command, super::Commands::Sudoers { cmd: super::SudoersCmd::Remove { did: ref d } } if *d == did),
+                "{name}: `{typed}` is not the removal of that DID"
+            );
+        }
+    }
     use kotton_sys::secret::{SecretsError, SecretsResult, SecretsStore};
     use std::sync::atomic::{AtomicUsize, Ordering};
 

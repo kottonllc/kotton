@@ -375,6 +375,11 @@ impl SystemDaemon {
         // A key carried over from the `sudoers` list that is itself an
         // account's DID answers for that account.
         operators_db::bind_own_keys(&device_db, &registered_user_dids(&self.base)).await?;
+        // Said where it can be read: with no operator row that names a key, no
+        // listing is reachable to say it (kottonllc/kotton#597, 12).
+        if let Some(said) = operators_db::none_names_a_key(&device_db).await? {
+            tracing::warn!("{said}");
+        }
 
         let server = ChannelAcceptor::<DeviceRequest, DeviceResponse>::listen(self.endpoint.clone(), ADMITS).await?;
         println!("kdeviced listening on {:?}", self.endpoint);
@@ -625,7 +630,8 @@ async fn handle_operator_request(
 
                 DeviceRequest::SudoersList => {
                     let operators = operators_db::list(device_db).await?;
-                    Ok(DeviceResponse::SudoersList { operators })
+                    let notes = operators_db::notes(device_db).await?;
+                    Ok(DeviceResponse::SudoersList { operators, notes })
                 }
 
                 // Any operator adds one, from the people with an account here.
@@ -1339,7 +1345,7 @@ mod tests {
         assert!(matches!(device.add(&at_ana, &cai).await, DeviceResponse::SudoersModified));
         assert!(matches!(device.add(&at_ben, &dee).await, DeviceResponse::SudoersModified));
 
-        let DeviceResponse::SudoersList { operators } = device.say(&at_ben, DeviceRequest::SudoersList).await else {
+        let DeviceResponse::SudoersList { operators, .. } = device.say(&at_ben, DeviceRequest::SudoersList).await else {
             panic!("no list");
         };
         let whose = |p: &Person| operators.iter().find(|o| o.did == p.did).map(|o| (o.person.clone(), o.added_by.clone()));
@@ -1504,6 +1510,144 @@ mod tests {
         let honest = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[33; 32]));
         out.push(("another spelling".to_string(), DidKeyMethod::spelled_otherwise(honest.as_bytes()).to_string()));
         out
+    }
+
+    /// **`sudoers list` notes each operator row and kept key that names no key, by its DID as
+    /// stored, and `sudoers remove` of that name removes it** (kottonllc/kotton#605), for every
+    /// key vector the rule refuses and another spelling. The honest operator carries no note;
+    /// after the removals the listing carries none.
+    #[tokio::test]
+    async fn sudoers_list_notes_each_row_that_names_no_key_and_its_remove_removes_it() {
+        for (name, did) in strings_that_name_no_key() {
+            let (ana, ben) = (person(), person());
+            let device = device_with(&[&ana, &ben]).await;
+            let at_ana = first_operator(&device, &ana).await;
+            let kept = format!("{did}x");
+            sqlx::query("INSERT INTO operators (did, person, added_at, added_by) VALUES (?, NULL, 0, 'an earlier build')")
+                .bind(&did)
+                .execute(&device.db)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO operator_keys_kept (did, person, kept_at) VALUES (?, ?, 0)")
+                .bind(&kept)
+                .bind(&ben.did)
+                .execute(&device.db)
+                .await
+                .unwrap();
+            let DeviceResponse::SudoersList { operators, notes } = device.say(&at_ana, DeviceRequest::SudoersList).await else {
+                panic!("{name}: no listing");
+            };
+            assert_eq!(operators.len(), 2, "{name}: the row is listed as any other");
+            assert_eq!(
+                notes,
+                vec![kotton_wire::note::RowNote::names_no_key(did.clone()), kotton_wire::note::RowNote::names_no_key(kept.clone())],
+                "{name}"
+            );
+            for note in &notes {
+                assert!(matches!(
+                    device.say(&at_ana, DeviceRequest::SudoersRemove { did: note.name.clone() }).await,
+                    DeviceResponse::SudoersModified
+                ), "{name}: {}", note.name);
+            }
+            let DeviceResponse::SudoersList { operators, notes } = device.say(&at_ana, DeviceRequest::SudoersList).await else {
+                panic!("{name}: no listing");
+            };
+            assert_eq!(operators.into_iter().map(|o| o.did).collect::<Vec<_>>(), vec![ana.did.clone()], "{name}");
+            assert!(notes.is_empty(), "{name}: {notes:?}");
+            assert!(operators_db::kept_key(&device.db, &ben.did).await.unwrap().is_none(), "{name}: the kept row stayed");
+        }
+    }
+
+    /// **`kdeviced` says at start when no operator row names a key**, and only then: not on a
+    /// first run, and not beside one row that names a key.
+    #[tokio::test]
+    async fn the_start_says_when_no_operator_row_names_a_key() {
+        for (name, did) in strings_that_name_no_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let db = operators_db::open(&dir.path().join("device.db")).await.unwrap();
+            assert_eq!(operators_db::none_names_a_key(&db).await.unwrap(), None, "{name}: a first run");
+            sqlx::query("INSERT INTO operators (did, person, added_at, added_by) VALUES (?, NULL, 0, 'an earlier build')")
+                .bind(&did)
+                .execute(&db)
+                .await
+                .unwrap();
+            let said = operators_db::none_names_a_key(&db).await.unwrap().unwrap_or_else(|| panic!("{name}: nothing said"));
+            assert!(said.contains("no operator row of this device names an Ed25519 key"), "{said}");
+            // 5B's way back, whole: what stays, what goes with the file, and what a first run is.
+            for part in [
+                "with kdeviced stopped, removing system/device.db",
+                "keeps accounts and their data, which are not in that file",
+                "this device's own settings (its name, relay, TURN/STUN, gateway flags and peer port)",
+                "its operators and the keys kept for them",
+                "the record of operator acts and device events",
+                "the next start a first run, at which the first key proved to this device becomes its operator",
+            ] {
+                assert!(said.to_lowercase().contains(&part.to_lowercase()), "{name}: the line leaves out `{part}`: {said}");
+            }
+            for (table, part) in DEVICE_DB_TABLES {
+                assert!(said.contains(part), "{name}: the line does not say `{table}` goes: {said}");
+            }
+            let ana = person();
+            sqlx::query("INSERT INTO operators (did, person, added_at, added_by) VALUES (?, NULL, 1, 'bootstrap')")
+                .bind(&ana.did)
+                .execute(&db)
+                .await
+                .unwrap();
+            assert_eq!(operators_db::none_names_a_key(&db).await.unwrap(), None, "{name}: beside an operator");
+        }
+    }
+
+    /// Each table `device.db` holds, with the words of the start line that say it
+    /// goes with the file.
+    const DEVICE_DB_TABLES: &[(&str, &str)] = &[
+        ("device_settings", "this device's own settings"),
+        ("device_config", "this device's own settings"),
+        ("device_events", "device events"),
+        ("operators", "its operators"),
+        ("operator_acts", "operator acts"),
+        ("operator_keys_kept", "the keys kept for them"),
+    ];
+
+    /// **The start line names every table `device.db` holds** (kottonllc/kotton#597, 5B):
+    /// the tables `migrations/` creates and does not drop are exactly those
+    /// [`DEVICE_DB_TABLES`] covers, so a table added there without a word in the line that
+    /// says it goes with the file is red here.
+    #[test]
+    fn the_start_line_covers_every_table_the_migrations_make() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        let mut tables = std::collections::BTreeSet::new();
+        for file in files.iter().filter(|f| f.extension().is_some_and(|e| e == "sql")) {
+            let sql = std::fs::read_to_string(file).unwrap();
+            let words: Vec<String> = sql
+                .lines()
+                .map(|l| l.split("--").next().unwrap())
+                .flat_map(|l| l.split(|c: char| c.is_whitespace() || c == '(' || c == ';'))
+                .filter(|w| !w.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect();
+            for (i, w) in words.iter().enumerate() {
+                let rest = &words[i + 1..];
+                let name = |rest: &[String]| match rest {
+                    [if_, not, exists, name, ..] if if_ == "if" && not == "not" && exists == "exists" => name.clone(),
+                    [if_, exists, name, ..] if if_ == "if" && exists == "exists" => name.clone(),
+                    [name, ..] => name.clone(),
+                    [] => panic!("{}: a statement with no table", file.display()),
+                };
+                match (w.as_str(), rest.first().map(String::as_str)) {
+                    ("create", Some("table")) => {
+                        tables.insert(name(&rest[1..]));
+                    }
+                    ("drop", Some("table")) => {
+                        tables.remove(&name(&rest[1..]));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let covered: std::collections::BTreeSet<String> = DEVICE_DB_TABLES.iter().map(|(t, _)| t.to_string()).collect();
+        assert_eq!(tables, covered, "a table device.db holds is not said by the start line, or one said is gone");
     }
 
     /// **The operator a device keeps is a row that names a key.** Beside each row that names
@@ -1856,7 +2000,7 @@ mod tests {
             DeviceResponse::SudoersModified
         ));
         let at_ben = device.operator(&ben_key).await;
-        let DeviceResponse::SudoersList { operators } = device.say(&at_ben, DeviceRequest::SudoersList).await else {
+        let DeviceResponse::SudoersList { operators, .. } = device.say(&at_ben, DeviceRequest::SudoersList).await else {
             panic!("no list");
         };
         let row = operators.iter().find(|o| o.did == ben_key.did).expect("Ben's own key is an operator's");
@@ -1884,7 +2028,7 @@ mod tests {
         let device = device_with(&[&ana]).await;
         let (conn, answer) = device.connect_for(&ana_key, Some(&ana)).await;
         assert!(matches!(answer, DeviceResponse::Authenticated { .. }), "{answer:?}");
-        let DeviceResponse::SudoersList { operators } = device.say(&conn, DeviceRequest::SudoersList).await else {
+        let DeviceResponse::SudoersList { operators, .. } = device.say(&conn, DeviceRequest::SudoersList).await else {
             panic!("no list");
         };
         assert_eq!(operators.len(), 1);

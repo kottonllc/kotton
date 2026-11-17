@@ -383,7 +383,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
             .await
             .map_err(|e| format!("reading the device roster: {e}"))?
         {
-            UserResponse::NodeList { nodes } => nodes,
+            UserResponse::NodeList { nodes, .. } => nodes,
             other => return Err(format!("unexpected reply reading devices: {other:?}")),
         };
 
@@ -1528,7 +1528,7 @@ impl DaemonOccupantHost<'_> {
             .await
             .map_err(|e| format!("reading the device roster: {e}"))?
         {
-            UserResponse::NodeList { nodes } => Ok(nodes),
+            UserResponse::NodeList { nodes, .. } => Ok(nodes),
             other => Err(format!("unexpected reply reading the roster: {other:?}")),
         }
     }

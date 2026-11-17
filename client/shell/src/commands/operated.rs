@@ -1294,6 +1294,18 @@ fn at_the_relay(key: &str) -> String {
 mod tests {
     use super::*;
 
+    /// **The verbs the network readout's sentences name, `vault forget` and `relay forget`,
+    /// are ones this shell registers** (kottonllc/kotton#605): the readout is made in the
+    /// daemon and names the shell's verb.
+    #[test]
+    fn the_readouts_forget_verbs_are_registered() {
+        let registry = crate::executor::ShellExecutor::new().registry();
+        for (noun, verbs) in [("vault", VAULT_VERBS), ("relay", RELAY_VERBS)] {
+            assert!(registry.has_command(noun), "`{noun}` is not registered");
+            assert!(verbs.contains(&"forget"), "`{noun}` does not answer `forget`");
+        }
+    }
+
     /// The instances of a kind this desktop operates, by name, as
     /// `operator_held` answers them.
     fn held(names: &[&str]) -> Vec<String> {
