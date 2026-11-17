@@ -1165,20 +1165,22 @@ mod tests {
 
     /// The `device revoke` command `line` gives to type, cut out of its backticks, or
     /// `None` where the line gives none. It reads only the backtick span the sentence
-    /// opens as a command: the line's last span, opened after `; `, ending the line with
-    /// ` removes it`, and starting with the verb's words. A name between backticks holds
-    /// no backtick of its own (43A), so the spans are the line's own; the join's line is
-    /// read with a leading device name that holds none (kottonllc/kotton#643).
+    /// opens as a command: the line's last span, ending the line with ` removes it`, and
+    /// starting with the verb's words. A name between backticks holds no backtick of its
+    /// own (43A), so the spans are the line's own; the join's line is read with a leading
+    /// device name that holds none (kottonllc/kotton#643). It asks nothing of the text
+    /// before the span: each condition here can only turn a command the line gives into
+    /// none, which the no-command tests would then pass on, so it holds no more than a
+    /// command needs.
     fn command_in(line: &str) -> Option<String> {
         let parts: Vec<&str> = line.split('`').collect();
         if parts.len() < 3 || parts.len().is_multiple_of(2) {
             return None;
         }
         let span = parts[parts.len() - 2];
-        let opened = parts[parts.len() - 3].ends_with("; ");
         let closed = parts[parts.len() - 1] == " removes it";
         let command = span.starts_with(&format!("{} ", super::DEVICE_REVOKE));
-        (opened && closed && command).then(|| span.to_owned())
+        (closed && command).then(|| span.to_owned())
     }
 
     /// Names that begin with each verb's words, alone, with a word after them, and with

@@ -1422,7 +1422,8 @@ mod tests {
     /// — and the relays held settle it: a relay held by that name is read, and
     /// a rule is set; a word that is neither is not a rule. No relay is minted
     /// under a rule's word (`kuserd::agent::operator::tests::a_relay_is_not_minted_under_a_rules_word`),
-    /// so no word is both; one kept under such a word from before is read.
+    /// so no word is both; one kept under such a word from before is read, and a mint
+    /// under it is told it is held (`kuserd::agent::operator::tests::every_refusal_of_the_mint_prints_the_name_by_quoted`).
     #[test]
     fn relay_rule_reads_one_word_as_a_relay_held_or_as_a_rule() {
         let gate = held(&["gate"]);
