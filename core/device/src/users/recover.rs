@@ -50,8 +50,10 @@
 //! - **The node to dial.** Unless the person pairs a node under the line's key already,
 //!   the vault is added under `vault` (or `vault-` and eight hex of its key, when that
 //!   label is taken) at the line's address. One paired under the key at another address
-//!   is re-addressed as `peer add` does, keeping its posture and relay route: the line
-//!   is where the person says the vault is now.
+//!   is re-addressed by [`kotton_peer::daemon::nodes::peer_readdress`], which finds the
+//!   row by its key and keeps its DID as stored, its label, its posture and its relay
+//!   route, changing only its address: the line is where the person says the vault is
+//!   now. `peer add` is for a new row only.
 //! - **Steps 1 to 5**, against every node the person pairs, the vault among them.
 //! - **Refused: the node added is taken back.** Everything the steps can fail on comes
 //!   before the rotation is presented to any node, so a refused recovery has changed
