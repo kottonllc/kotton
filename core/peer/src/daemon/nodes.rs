@@ -109,7 +109,7 @@ pub async fn peer_add(
     let device_did_parsed = kotton_crypto::DidKeyMethod::from_public_key(&key);
     if peer_did != device_did_parsed.to_string() {
         return Err(io::Error::other(format!(
-            "peer_did '{peer_did}' is not the did:key of peer_pubkey_hex; that key's is \
+            "<did> '{peer_did}' is not the did:key of <pubkey-hex>; that key's is \
              '{device_did_parsed}', and nothing was added"
         )));
     }
@@ -141,6 +141,38 @@ pub async fn peer_add(
         posture: None,
     });
     Ok(UserResponse::NodePaired { node })
+}
+
+/// Point the row `user_id` already pairs for `public_key` at `peer_addr`: what the
+/// daemon's `Recover` runs for a line whose vault the person pairs at another
+/// address (`kotton_device::users::recover`). `Ok(None)`, with nothing written,
+/// when no row of theirs holds the key.
+///
+/// **A row that stands is re-addressed by its bytes, whatever DID is stored
+/// beside them** (kottonllc/kotton#597, 5B). Unlike [`peer_add`], which adds a
+/// row and so holds the DID it is given to the key's derivation, this adds no
+/// row and reads no DID: the row keeps its DID as stored, its label, its posture
+/// and its relay, and only its address and the time it was paired change
+/// ([`super::db::readdress_paired_node_for_key`]). The key goes on the live
+/// allowlist, as `peer add` puts it there. Bytes the Ed25519 rule refuses are no
+/// key, so no row under them is re-addressed or admitted.
+pub async fn peer_readdress(
+    db: &Arc<SqlitePool>,
+    paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
+    user_id: &str,
+    public_key: &[u8; 32],
+    peer_addr: SocketAddr,
+) -> io::Result<Option<PairedNode>> {
+    let key = VerifyingKey::from_bytes(public_key)
+        .map_err(|e| io::Error::other(format!("the key is not an Ed25519 key: {e}")))?;
+    let addresses_json = serde_json::to_string(&[peer_addr]).map_err(json_err)?;
+    let Some(node) =
+        network_db::readdress_paired_node_for_key(db, user_id, public_key, &addresses_json, now_secs()).await?
+    else {
+        return Ok(None);
+    };
+    paired_keys.write().unwrap().insert(key);
+    Ok(Some(node))
 }
 
 /// Take back a node row that a request added and nothing has used since: the
@@ -2293,6 +2325,48 @@ mod chosen_by_key {
         assert_eq!(ids(&cosigner_nodes(&members, rows)), vec!["first"]);
     }
 
+    /// **The first row the store lists is the one dialled**, against the store's
+    /// own order rather than a list put in order by hand: two rows for one key
+    /// written through the store, the more recently paired written first, and
+    /// the round dials the one `list_paired_nodes` lists first, the more
+    /// recently paired, once.
+    #[tokio::test]
+    async fn a_key_held_by_two_stored_rows_is_dialled_through_the_one_the_store_lists_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let signer = key(40);
+        let members = vec![member(&DidKeyMethod::from_public_key(&signer), *signer.as_bytes(), Posture::Full)];
+        let (newer, older) = (
+            DidKeyMethod::spelled_otherwise(signer.as_bytes()).to_string(),
+            DidKeyMethod::from_public_key(&signer).to_string(),
+        );
+        network_db::insert_paired_node(&db, "newer", "alice", &newer, signer.as_bytes(), "[]", 200, None).await.unwrap();
+        network_db::insert_paired_node(&db, "older", "alice", &older, signer.as_bytes(), "[]", 100, None).await.unwrap();
+
+        let listed = network_db::list_paired_nodes(&db, "alice").await.unwrap();
+        assert_eq!(ids(&listed), vec!["newer", "older"], "the premise: the store lists the more recently paired first");
+        assert_eq!(ids(&cosigner_nodes(&members, listed)), vec!["newer"]);
+    }
+
+    /// **A row under bytes the Ed25519 rule refuses is not re-addressed**, for
+    /// every vector in `kotton_ed25519::refused`: the address is as it was and
+    /// nothing is admitted.
+    #[tokio::test]
+    async fn peer_readdress_leaves_a_row_under_bytes_the_rule_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            let did = DidKeyMethod::spelled_over(&bytes).to_string();
+            network_db::insert_paired_node(&db, &name, "alice", &did, &bytes, "[]", 0, None).await.unwrap();
+            let said = peer_readdress(&db, &paired_keys, "alice", &bytes, "127.0.0.1:7".parse().unwrap()).await;
+            assert!(said.is_err(), "{name}: re-addressed: {said:?}");
+            let row = network_db::get_paired_node(&db, "alice", &did).await.unwrap().expect("the row stands");
+            assert!(row.addresses.is_empty(), "{name}: the row was re-addressed");
+            assert!(paired_keys.read().unwrap().is_empty(), "{name}: something was admitted");
+        }
+    }
+
     async fn agent_db(dir: &tempfile::TempDir) -> Arc<SqlitePool> {
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(dir.path().join("agent.db"))
@@ -2338,7 +2412,13 @@ mod chosen_by_key {
         ];
         for (name, did) in refused {
             let said = peer_add(&db, &paired_keys, "alice".into(), "laptop".into(), did, hex::encode(added.as_bytes()), "127.0.0.1:7".parse().unwrap()).await;
-            assert!(said.is_err(), "{name}: added: {said:?}");
+            let e = said.expect_err(&format!("{name}: added"));
+            assert!(
+                e.to_string().contains("<did>")
+                    && e.to_string().contains("<pubkey-hex>")
+                    && e.to_string().contains(&DidKeyMethod::from_public_key(&added).to_string()),
+                "{name}: the refusal does not name the usage's arguments and the key's did:key: {e}"
+            );
             assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty(), "{name}: a row was stored");
             assert!(paired_keys.read().unwrap().is_empty(), "{name}: the key was admitted");
         }

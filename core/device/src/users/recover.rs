@@ -228,17 +228,23 @@ async fn point_at_the_vault(
             return Ok(VaultNode { label: n.id.clone(), did: n.device_did.to_string(), added: false });
         }
     }
-    // A row already pairing the key is re-addressed under its own DID, the
-    // row's key; a new one is the line key's DID.
-    let (label, did, added) = match paired {
-        Some(n) => (n.id.clone(), n.device_did.to_string(), false),
-        None => {
-            let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key)
-                .map_err(|e| anyhow!("the line's key is not a vault's key: {e}; nothing was changed"))?
-                .to_string();
-            (label_for(&nodes, &key), did, true)
-        }
-    };
+    // A row already pairing the key stands by its bytes, whatever DID is stored
+    // beside them (kottonllc/kotton#597, 5B): it is re-addressed, by its key,
+    // under its DID as stored, and no row is added.
+    if paired.is_some() {
+        return match kotton_peer::daemon::nodes::peer_readdress(db, &runtime.paired_keys(), user_id, &key, addr)
+            .await
+            .map_err(|e| anyhow!("{e}; nothing was changed"))?
+        {
+            Some(n) => Ok(VaultNode { label: n.id, did: n.device_did.to_string(), added: false }),
+            None => Err(anyhow!("the line's key is no longer paired here; nothing was changed")),
+        };
+    }
+    // A new row is the line key's DID.
+    let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key)
+        .map_err(|e| anyhow!("the line's key is not a vault's key: {e}; nothing was changed"))?
+        .to_string();
+    let (label, added) = (label_for(&nodes, &key), true);
     match kotton_peer::daemon::nodes::peer_add(
         db,
         &runtime.paired_keys(),
@@ -700,6 +706,54 @@ mod tests {
         assert_eq!((row.id.as_str(), row.posture.as_deref()), ("laptop", Some("full")));
         assert!(row.addresses.is_empty(), "the device was re-addressed to the line's address");
         assert_eq!(kel_store::load_chain(rt.base_dir(), "alice").unwrap().len(), chain_before, "a rotation was appended");
+    }
+
+    /// **A row that stands by its bytes is re-addressed, under its DID as stored,
+    /// whatever that DID is** (kottonllc/kotton#597, 5B). Three rows hold the keys
+    /// of three lines, each paired somewhere other than its line's address: one
+    /// under another spelling of its key's `did:key`, one under a DID of another
+    /// method, one with no address at all. A recovery with each line reaches the
+    /// proof step (the words prove nothing, so it stops there), and afterwards the
+    /// key is held by exactly one row, under the DID it was stored under, at the
+    /// line's address, with its label and posture kept; no row is added, and the
+    /// key is on the live allowlist.
+    #[tokio::test]
+    async fn a_row_under_any_did_beside_the_lines_key_is_re_addressed_as_it_stands() {
+        let temp = tempfile::tempdir().unwrap();
+        let (rt, _phrase) = a_device_that_kept_its_sealed_copy(&temp).await;
+        let pool = agent_db().await;
+        let elsewhere = serde_json::to_string(&["127.0.0.1:7000".parse::<std::net::SocketAddr>().unwrap()]).unwrap();
+        let stood = [
+            ("spelled", kotton_crypto::DidKeyMethod::spelled_otherwise(&key(21)).to_string(), key(21), elsewhere.as_str(), Some("blind-storage")),
+            ("web", "did:web:vault.example".to_string(), key(22), elsewhere.as_str(), None),
+            ("addressless", did_of(&key(23)), key(23), "[]", Some("blind-storage")),
+        ];
+        for (label, did, k, addresses, posture) in &stood {
+            kotton_peer::daemon::db::insert_paired_node(&pool, label, "alice", did, k, addresses, 0, *posture)
+                .await
+                .unwrap();
+        }
+
+        for (label, did, k, _, posture) in &stood {
+            let refused = recover(&rt, &NobodyResident, &pool, "alice", NOT_THEIRS, NEW_PASSPHRASE, &line_of(*k, ADDR)).await;
+            let e = refused.expect_err("words that prove nothing recovered");
+            assert!(e.to_string().contains("not an authority"), "{label}: stopped before the proof step: {e:#}");
+
+            let all = rows(&pool).await;
+            assert_eq!(all.len(), stood.len(), "{label}: a row was added or removed: {all:?}");
+            let held: Vec<_> = all.iter().filter(|n| n.public_key == *k).collect();
+            assert_eq!(held.len(), 1, "{label}: {held:?}");
+            let n = held[0];
+            assert_eq!(n.device_did.to_string(), *did, "{label}: the DID stored was changed");
+            assert_eq!(n.id, *label, "{label}: the label was changed");
+            assert_eq!(n.posture.as_deref(), *posture, "{label}: the posture was changed");
+            assert_eq!(n.addresses, vec![ADDR.parse::<std::net::SocketAddr>().unwrap()], "{label}: not at the line's address");
+            assert!(
+                rt.paired_keys().read().unwrap().contains(&kotton_crypto::ed25519::VerifyingKey::from_bytes(k).unwrap()),
+                "{label}: the key is not on the live allowlist"
+            );
+        }
+        assert!(kotton_peer::daemon::drives::list(&pool, "alice").await.unwrap().is_empty(), "a refusal recorded a drive");
     }
 
     /// The vault is added as `vault`, or beside a `vault` already there under its key.

@@ -72,6 +72,8 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 workspace-hack = { path = "../../tools/workspace-hack" }
+# `DidKeyMethod::spelled_otherwise`, for a row stored under another spelling of its key's DID.
+kotton-crypto = { path = "../crypto", features = ["test-utils"] }
 tempfile = "3.8"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 

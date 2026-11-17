@@ -178,6 +178,64 @@ pub async fn update_paired_node_address(
     Ok(())
 }
 
+/// Point the row `user_id` already holds for `public_key` at `addresses_json`, as
+/// of `now`, and return it as it then stands; `Ok(None)`, with nothing written,
+/// when no row of theirs holds the key.
+///
+/// **The row is found by its bytes, and nothing else of it changes.** Its DID
+/// stays as stored, whatever string that is (a row is its bytes',
+/// kottonllc/kotton#597, 5B), and so do its label, its posture and the relay it
+/// was last known at; no row is added. Where two of the person's rows hold the
+/// key it is the one [`list_paired_nodes`] lists first. A drive under the key
+/// shows the row's label, as [`insert_paired_node`] keeps it.
+pub async fn readdress_paired_node_for_key(
+    db: &Arc<SqlitePool>,
+    user_id: &str,
+    public_key: &[u8; 32],
+    addresses_json: &str,
+    now: i64,
+) -> io::Result<Option<PairedNode>> {
+    let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT device_did, id FROM paired_nodes WHERE user_id = ? AND public_key = ? \
+         ORDER BY paired_at DESC, device_did LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(public_key.as_slice())
+    .fetch_optional(tx.conn())
+    .await
+    .map_err(db_err)?;
+    let Some((device_did, id)) = row else {
+        return Ok(None);
+    };
+    sqlx::query("UPDATE paired_nodes SET addresses = ?, paired_at = ? WHERE user_id = ? AND device_did = ?")
+        .bind(addresses_json)
+        .bind(now)
+        .bind(user_id)
+        .bind(&device_did)
+        .execute(tx.conn())
+        .await
+        .map_err(db_err)?;
+    sqlx::query("UPDATE drives SET node_id = ? WHERE user_id = ? AND vault_key = ?")
+        .bind(&id)
+        .bind(user_id)
+        .bind(public_key.as_slice())
+        .execute(tx.conn())
+        .await
+        .map_err(db_err)?;
+    let node = sqlx::query(&format!(
+        "SELECT {NODE_COLUMNS} FROM paired_nodes WHERE user_id = ? AND device_did = ?"
+    ))
+    .bind(user_id)
+    .bind(&device_did)
+    .fetch_one(tx.conn())
+    .await
+    .map_err(db_err)?;
+    let node = node_of(&node)?;
+    tx.commit().await?;
+    Ok(Some(node))
+}
+
 /// Record the relay a paired node told us it reserves at, so the
 /// next dial that cannot go direct goes there. `None` clears it.
 pub async fn update_paired_node_relay(
