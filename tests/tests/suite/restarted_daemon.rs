@@ -211,12 +211,12 @@ async fn a_restarted_daemon_still_lists_the_devices_it_has_paired() {
     a_person_with_a_passphrase(&mut env).await;
 
     let other = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
-    let other_did = "did:key:z6MkMorgansLaptop";
+    let other_did = kotton_crypto::DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&other)).to_string();
     env.client
         .peer_add(
             USER,
             "the-laptop",
-            other_did,
+            &other_did,
             &hex::encode(other.verifying_key().to_bytes()),
             "127.0.0.1:7".parse().unwrap(),
         )
