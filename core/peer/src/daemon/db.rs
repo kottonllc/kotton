@@ -313,17 +313,20 @@ pub async fn paired_node_named(
     }
 }
 
-/// The name [`paired_node_named`] takes to `row` among `rows`, the person's
-/// rows: its label where that resolver would take the label to this row and no
-/// other, and its DID as stored otherwise. The resolver reads a name as a DID
-/// first, so a label that is a row's DID finds that row and is no name for
-/// another; and a label two rows carry finds neither. One rule, the
-/// resolver's, read over rows already in hand (kottonllc/kotton#597, 20A).
+/// The name a verb takes to `row` among `rows`, the person's rows, as the
+/// surface reads it from a typed line: its label where the label is
+/// [`kotton_wire::note::one_plain_word`] and [`paired_node_named`] takes it to
+/// this row and no other, and its DID as stored otherwise. The resolver reads a
+/// name as a DID first, so a label that is a row's DID finds that row and is no
+/// name for another; and a label two rows carry finds neither. A DID as stored
+/// that is not one plain word gets a sentence with no command in it
+/// ([`kotton_wire::note::sentence`]). One rule, the resolver's at the
+/// surface's parser, read over rows already in hand (kottonllc/kotton#597, 20A).
 pub fn name_of(rows: &[PairedNode], row: &PairedNode) -> String {
     let label = row.id.as_str();
     let a_did = rows.iter().any(|r| r.device_did.to_string() == label);
     let carried = rows.iter().filter(|r| r.id == label).count();
-    if !a_did && carried == 1 {
+    if kotton_wire::note::one_plain_word(label) && !a_did && carried == 1 {
         label.to_string()
     } else {
         row.device_did.to_string()

@@ -485,7 +485,8 @@ pub enum UserResponse {
         nodes: Vec<PairedNode>,
         /// A note for each row of `nodes` that names no key, or that stands by
         /// its key's bytes under a DID that is not the key's `did:key`
-        /// ([`crate::note`]), made from that row and nothing else. Left off the
+        /// ([`crate::note`]), made from that row and nothing else: this answer
+        /// may be given to a remote asker (22A's first bound). Left off the
         /// wire when there is none; an older reader ignores it.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         notes: Vec<crate::note::RowNote>,
@@ -608,9 +609,11 @@ pub enum UserResponse {
     Drives {
         drives: Vec<crate::ipc::DriveDescriptor>,
         /// `drive list` only: a note for each vault of the person's whose key
-        /// is no key, named as its node is ([`crate::note`]); the drives kept
-        /// there are reached through nothing. Left off the wire when there is
-        /// none.
+        /// is no key, named as the node listing names its node
+        /// ([`crate::note`]); the drives kept there are reached through nothing.
+        /// Given only at the machine, so the note may be about a node this
+        /// answer carries no row for, one the asker can already list (22A's
+        /// second bound). Left off the wire when there is none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         notes: Vec<crate::note::RowNote>,
     },
@@ -710,8 +713,11 @@ pub enum UserResponse {
         relay_offer: Option<String>,
         /// The admitting side only: each drive of the person's this ceremony
         /// did not hand the joiner, because it is recorded under bytes that are
-        /// no Ed25519 key, as a note on the node it is reached through
-        /// ([`crate::note`]). Left off the wire when every drive was handed.
+        /// no Ed25519 key, as a note on the node it is reached through, named as
+        /// the node listing names it ([`crate::note`]). Given only at the
+        /// machine, so the note may be about a node this answer carries no row
+        /// for, one the asker can already list (22A's second bound). Left off
+        /// the wire when every drive was handed.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         not_handed: Vec<crate::note::RowNote>,
     },

@@ -14,8 +14,19 @@
 //! registers, so every surface says it the same way and none names a verb it
 //! does not have.
 //!
-//! A note is made from a row of the answer that carries it and from nothing
-//! else: the asker already holds what it says, in the row.
+//! Where a note may travel has two bounds (kottonllc/kotton#597, 22A):
+//!
+//! - **In an answer a remote asker may be given, a note is made from a row of
+//!   that answer and from nothing else** (the node listing's): the asker already
+//!   holds what it says, in the row.
+//! - **In an answer given only at the machine, a note may be about a node of the
+//!   person's that the answer carries no row for**, where that asker can already
+//!   list that node, and the note names it as the node listing does (`drive
+//!   list`'s, and the admitting side's of a join).
+//!
+//! A note's name is one the verb its sentence names takes to the row, typed as
+//! the sentence gives it (20A): it is put in a command only when it is
+//! [`one_plain_word`].
 
 use serde::{Deserialize, Serialize};
 
@@ -58,24 +69,51 @@ impl RowNote {
     }
 }
 
+/// Whether `name` is one plain word: one a surface reads back, from a typed
+/// line, as exactly that name (kottonllc/kotton#597, 20A: a note's name is one
+/// the verb takes to its row). A name is a note's name to type only when this
+/// holds, and [`sentence`] names a command with a name only when it holds.
+///
+/// It is an allow-list, read by the shell's parser and by a POSIX shell alike as
+/// one word with nothing to expand: one or more of the ASCII letters and digits
+/// and `.`, `_`, `:`, `-`, `+`, `/`, `=`, not starting with `-`. So no
+/// whitespace, no control character, no quote, backtick, `\\`, `$`, `*`, `;`,
+/// `|`, `&`, `<` or `>`, and nothing a command would read as a flag. A `did:key`
+/// is such a word in every multibase spelling but Base45's and Base256Emoji's.
+pub fn one_plain_word(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-' | '+' | '/' | '='))
+}
+
 /// The one sentence a person reads for `note`. `verb` is the removal verb the
 /// surface registers (`device revoke`, `kctl sudoers remove`, `vault forget`),
 /// and is said, with the note's name, for a row that names no key only: a row
 /// that stands by its bytes works, and its sentence is not an instruction.
+///
+/// A name is put in a command, or said to be one a command takes, only when it
+/// is [`one_plain_word`]; a row whose names are none such is told what is true
+/// of it and given no command to type.
 pub fn sentence(note: &RowNote, verb: &str) -> String {
     let name = &note.name;
     match &note.is {
-        NoteKind::NamesNoKey => format!(
+        NoteKind::NamesNoKey if one_plain_word(name) => format!(
             "`{name}` names no Ed25519 key, so nothing is reached or checked under it; `{verb} {name}` removes it"
         ),
-        NoteKind::StandsByBytes { did_key, stored } if stored == name => format!(
-            "`{name}` is reached and checked under its key, `{did_key}`, as before. It is recorded here as \
-             `{stored}`, and a command that names it takes that recorded name, not the key's"
-        ),
-        NoteKind::StandsByBytes { did_key, stored } => format!(
-            "`{name}` is reached and checked under its key, `{did_key}`, as before. It is recorded here as \
-             `{stored}`, and a command that names it takes `{name}` or that recorded name, not the key's"
-        ),
+        NoteKind::NamesNoKey => format!("`{name}` names no Ed25519 key, so nothing is reached or checked under it"),
+        NoteKind::StandsByBytes { did_key, stored } => {
+            let said = format!(
+                "`{name}` is reached and checked under its key, `{did_key}`, as before. It is recorded here as `{stored}`"
+            );
+            let takes = match (one_plain_word(name), one_plain_word(stored)) {
+                (_, true) if stored == name => "that recorded name".to_string(),
+                (true, true) => format!("`{name}` or that recorded name"),
+                (true, false) => format!("`{name}`"),
+                (false, true) => "that recorded name".to_string(),
+                (false, false) => return format!("{said}."),
+            };
+            format!("{said}, and a command that names it takes {takes}, not the key's")
+        }
     }
 }
 
@@ -140,6 +178,44 @@ mod tests {
         }
         assert!(sentence(&stands("phone"), "device revoke").contains("takes `phone` or that recorded name"));
         assert!(sentence(&stands("did:key:mOther"), "device revoke").contains("takes that recorded name"));
+    }
+
+    /// **A name is one plain word by the allow-list, and a sentence puts a name in
+    /// a command only when it is one** (20A): a row whose name is not one is told
+    /// what is true of it and given nothing to type.
+    #[test]
+    fn a_sentence_names_a_command_only_with_one_plain_word() {
+        for word in ["attic", "phone-2", "my_box.local", "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"] {
+            assert!(one_plain_word(word), "{word}");
+        }
+        let not_words =
+            ["", "my phone", "a;b", "a|b", "a&&b", "it's", "say\"x", "a`b", "--x", "--browser", "-x", "bell\u{7}", "a\tb", "$HOME", "a\\b", "a>b", "caf\u{e9}"];
+        for name in not_words {
+            assert!(!one_plain_word(name), "{name:?}");
+            let said = sentence(&RowNote::names_no_key(name), "device revoke");
+            assert!(!said.contains("device revoke") && said.contains("names no Ed25519 key"), "{said}");
+            let stands = RowNote {
+                name: name.into(),
+                is: NoteKind::StandsByBytes { did_key: "did:key:z6MkKey".into(), stored: name.into() },
+            };
+            let said = sentence(&stands, "device revoke");
+            assert!(!said.contains("takes") && said.ends_with('.'), "{said}");
+        }
+        let label_beside_odd_did = RowNote {
+            name: "phone".into(),
+            is: NoteKind::StandsByBytes { did_key: "did:key:z6MkKey".into(), stored: "did:key:a b".into() },
+        };
+        assert!(sentence(&label_beside_odd_did, "device revoke").ends_with("takes `phone`, not the key's"));
+
+        // A DID as stored is one plain word in every multibase spelling but
+        // Base45's and Base256Emoji's, whose row's sentence names no command.
+        for line in include_str!("did/did-key-spellings.txt").lines().filter(|l| !l.starts_with('#')) {
+            let (base, did) = line.split_once(' ').unwrap();
+            let a_word = !matches!(base, "Base45" | "Base256Emoji");
+            assert_eq!(one_plain_word(did), a_word, "{line}");
+            let said = sentence(&RowNote::names_no_key(did), "device revoke");
+            assert_eq!(said.contains("`device revoke "), a_word, "{said}");
+        }
     }
 
     /// **A note's wire is its name and its kind**, so an older reader that

@@ -420,24 +420,11 @@ impl DeviceCommand {
     /// next visit needs a human again, and a channel it holds open now is ended
     /// rather than left to run out.
     async fn revoke(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
-        if args.first().map(String::as_str) == Some(BROWSER_WORD) {
-            let Some(name) = args.get(1).cloned() else {
-                return Ok(CommandOutput::fail(revoke_browser_usage(), None));
-            };
-            let user_id = state.user_id.clone();
-            let mut client = state.client.lock().await;
-            client
-                .revoke_browser(&user_id, &name)
-                .await
-                .map_err(|e| anyhow::anyhow!("device revoke: {e}"))?;
-            return Ok(CommandOutput::shapes(vec![Out::Confirm {
-                action: format!("revoked browser '{name}'"),
-                subject: String::new(),
-            }]));
-        }
-        let id = match args.first() {
-            Some(i) => i.clone(),
-            None => return Ok(CommandOutput::fail("usage: device revoke <id>", None)),
+        let id = match revoke_target(args) {
+            Revoke::Browser(Some(name)) => return self.revoke_browser(name, state).await,
+            Revoke::Browser(None) => return Ok(CommandOutput::fail(revoke_browser_usage(), None)),
+            Revoke::Node(Some(id)) => id,
+            Revoke::Node(None) => return Ok(CommandOutput::fail("usage: device revoke <id>", None)),
         };
         let user_id = state.user_id.clone();
         let mut client = state.client.lock().await;
@@ -449,6 +436,38 @@ impl DeviceCommand {
             action: format!("revoked device '{id}'"),
             subject: String::new(),
         }]))
+    }
+
+    /// `device revoke --browser <name>`.
+    async fn revoke_browser(&self, name: String, state: &mut ShellState) -> Result<CommandOutput> {
+        let user_id = state.user_id.clone();
+        let mut client = state.client.lock().await;
+        client
+            .revoke_browser(&user_id, &name)
+            .await
+            .map_err(|e| anyhow::anyhow!("device revoke: {e}"))?;
+        Ok(CommandOutput::shapes(vec![Out::Confirm {
+            action: format!("revoked browser '{name}'"),
+            subject: String::new(),
+        }]))
+    }
+}
+
+/// What `device revoke`'s words name: a browser after [`BROWSER_WORD`], else a
+/// node by its first word; `None` where the word is missing.
+#[derive(Debug, PartialEq)]
+enum Revoke {
+    Node(Option<String>),
+    Browser(Option<String>),
+}
+
+/// How `device revoke` reads the words after `revoke`: the one reading its
+/// command and the test of a note's sentence both use.
+fn revoke_target(args: &[String]) -> Revoke {
+    if args.first().map(String::as_str) == Some(BROWSER_WORD) {
+        Revoke::Browser(args.get(1).cloned())
+    } else {
+        Revoke::Node(args.first().cloned())
     }
 }
 
@@ -1095,6 +1114,93 @@ mod tests {
             matches!(&said[..], [crate::out::Out::Note(t)] if !t.contains(super::DEVICE_REVOKE) && t.contains("did:key:mB")),
             "{said:?}"
         );
+    }
+
+    /// The labels a note's name is held over: none is one plain word.
+    const NOT_ONE_WORD: &[&str] =
+        &["my phone", "a;b", "a|b", "a&&b", "it's", "say\"x", "a`b", "--old", "--browser", "bell\u{7}"];
+
+    /// What this shell hands `device revoke` for `typed`, read as a typed line is:
+    /// the chain's parser, the variables, the words, the redirect, then
+    /// `revoke`'s own reading. Exactly one command must result.
+    fn read_as_typed(typed: &str) -> super::Revoke {
+        let chain = crate::parser::parse_command_chain(typed);
+        assert_eq!(chain.len(), 1, "`{typed}` is {} commands: {chain:?}", chain.len());
+        let words = crate::utils::parse_command(&crate::utils::expand_vars(&chain[0].command, &Default::default()));
+        let (words, redirect) = crate::executor::parse_redirect(words);
+        assert!(redirect.is_none(), "`{typed}` redirects");
+        let (noun, verb) = super::DEVICE_REVOKE.split_once(' ').unwrap();
+        assert_eq!(words.get(..2), Some(&[noun.to_owned(), verb.to_owned()][..]), "`{typed}`");
+        super::revoke_target(&words[2..])
+    }
+
+    /// The `device revoke` command `line` gives to type, cut out of its backticks.
+    fn command_in(line: &str) -> Option<String> {
+        let start = line.find(&format!("`{} ", super::DEVICE_REVOKE))? + 1;
+        let end = start + line[start..].find("` removes it").unwrap_or_else(|| panic!("no end to the command: {line}"));
+        Some(line[start..end].to_owned())
+    }
+
+    /// The names the second kind's sentence `said` says a command takes, with
+    /// `stored` for "that recorded name".
+    fn names_taken(said: &str, stored: &str) -> Vec<String> {
+        let Some((_, takes)) = said.split_once(", and a command that names it takes ") else { return Vec::new() };
+        let takes = takes.strip_suffix(", not the key's").unwrap_or_else(|| panic!("{said}"));
+        match takes.strip_suffix(" or that recorded name") {
+            _ if takes == "that recorded name" => vec![stored.to_owned()],
+            Some(named) => vec![named.trim_matches('`').to_owned(), stored.to_owned()],
+            None => vec![takes.trim_matches('`').to_owned()],
+        }
+    }
+
+    /// **A note's name is one word the shell takes to its row** (kottonllc/kotton#597,
+    /// 20A): each command a note's sentence gives to type, on `device list`, `peer list`,
+    /// `drive list` and a join's admitting side, reads back through this shell's parser and
+    /// `revoke`'s own reading as one command handing the revoke the note's name; and each
+    /// name the second kind's sentence says a command takes reads back the same. A name that
+    /// is not one plain word is given no command. That the name resolves to its row is held
+    /// in `kotton-peer` (`a_notes_name_is_one_word_the_shell_takes_to_its_row`).
+    #[test]
+    fn a_notes_name_is_one_word_the_shell_takes_to_its_row() {
+        use kotton_wire::note::{NoteKind, RowNote};
+        let did = "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX";
+        let base45 = "did:key:RD/T4NHD S5UEFOU51W*VRLU7R BKQPKA1CX30D2:YUW8HFYMN3E";
+        let words = ["attic", did];
+        for name in NOT_ONE_WORD.iter().copied().chain(words).chain([base45]) {
+            let note = RowNote::names_no_key(name);
+            let mut lines: Vec<String> = super::notes_said(std::slice::from_ref(&note))
+                .into_iter()
+                .map(|o| match o {
+                    crate::out::Out::Note(t) => t,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            lines.extend(super::not_handed_lines("laptop", std::slice::from_ref(&note)));
+            for line in &lines {
+                match command_in(line) {
+                    Some(typed) => assert_eq!(read_as_typed(&typed), super::Revoke::Node(Some(name.to_owned())), "{line}"),
+                    None => assert!(!words.contains(&name), "a word was given no command: {line}"),
+                }
+            }
+
+            for stored in [did, base45] {
+                let stands = RowNote {
+                    name: name.into(),
+                    is: NoteKind::StandsByBytes { did_key: "did:key:z6MkKey".into(), stored: stored.into() },
+                };
+                let said = match &super::notes_said(std::slice::from_ref(&stands))[..] {
+                    [crate::out::Out::Note(t)] => t.clone(),
+                    other => panic!("{other:?}"),
+                };
+                assert!(!said.contains(super::DEVICE_REVOKE), "{said}");
+                let taken = names_taken(&said, stored);
+                for taken in &taken {
+                    let typed = format!("{} {taken}", super::DEVICE_REVOKE);
+                    assert_eq!(read_as_typed(&typed), super::Revoke::Node(Some(taken.clone())), "{said}");
+                }
+                assert_eq!(taken.contains(&name.to_owned()), words.contains(&name), "{said}");
+            }
+        }
     }
 
     fn args(words: &[&str]) -> Vec<String> {

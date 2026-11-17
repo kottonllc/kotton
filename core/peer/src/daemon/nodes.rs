@@ -1981,6 +1981,80 @@ mod allowlist_rebuild {
         }
     }
 
+    /// The labels a note's name is held over where the shell reads a typed line
+    /// in words: each is not one plain word.
+    const LABELS_NOT_ONE_WORD: &[&str] =
+        &["my phone", "a;b", "a|b", "a&&b", "it's", "say\"x", "a`b", "--old", "--browser", "bell\u{7}"];
+
+    /// **A note's name is one word the shell takes to its row** (20A): a label
+    /// that is not one plain word is not a note's name, and the note names the
+    /// row by its DID as stored, which is one and which
+    /// [`network_db::paired_node_named`] takes to the noted row. A label that is
+    /// one plain word is the note's name and resolves to its row.
+    #[tokio::test]
+    async fn a_notes_name_is_one_word_the_shell_takes_to_its_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let (_, bytes) = kotton_crypto::ed25519::refused_keys()[0];
+        let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
+        assert!(kotton_wire::note::one_plain_word(&did), "the DID as stored is not one plain word: {did}");
+        for (i, label) in LABELS_NOT_ONE_WORD.iter().copied().chain(["attic"]).enumerate() {
+            let user = format!("person-{i}");
+            network_db::insert_paired_node(&db, label, &user, &did, &bytes, "[]", 0, None).await.unwrap();
+            let (nodes, notes) = listed(node_list(&db, user.clone()).await.unwrap());
+            assert_eq!((nodes.len(), notes.len()), (1, 1), "{label:?}");
+            let name = &notes[0].name;
+            let want = if label == "attic" { label } else { did.as_str() };
+            assert_eq!(name, want, "{label:?}");
+            assert!(kotton_wire::note::one_plain_word(name), "{label:?}: {name:?}");
+            let found = network_db::paired_node_named(&db, &user, name).await.unwrap().expect("the name finds a row");
+            assert_eq!(found.device_did.to_string(), did, "{label:?}");
+            assert_eq!(found.id, label, "{label:?}");
+        }
+
+        // A DID as stored whose identifier is not one plain word, under a label
+        // that is not one either: the note is carried, under the DID as stored,
+        // and its sentence names no command.
+        let odd = "did:key:RD/T4NHD S5UEFOU51W*VRLU7R";
+        network_db::insert_paired_node(&db, "my phone", "person-odd", odd, &bytes, "[]", 0, None).await.unwrap();
+        let (_, notes) = listed(node_list(&db, "person-odd".into()).await.unwrap());
+        assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key(odd)]);
+        let said = kotton_wire::note::sentence(&notes[0], "device revoke");
+        assert!(said.contains("names no Ed25519 key") && !said.contains("device revoke"), "{said}");
+    }
+
+    /// **The second kind's name is one word too**: a row under another spelling
+    /// whose label is not one plain word is named by its DID as stored, and its
+    /// sentence says a command takes that recorded name, which resolves to it.
+    #[tokio::test]
+    async fn the_second_kinds_name_is_one_word_the_shell_takes_to_its_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let spellings = include_str!("../../../wire/src/did/did-key-spellings.txt");
+        let mut lines = spellings.lines().filter(|l| !l.starts_with('#')).map(|l| l.split_once(' ').unwrap().1);
+        let did_key = lines.next().unwrap().to_string();
+        let other = lines.next().unwrap().to_string();
+        let key = kotton_crypto::DidKeyMethod::to_public_key(&did_key.parse().unwrap()).unwrap();
+        assert!(kotton_wire::note::one_plain_word(&other), "{other}");
+        for (i, label) in LABELS_NOT_ONE_WORD.iter().enumerate() {
+            let user = format!("person-{i}");
+            network_db::insert_paired_node(&db, label, &user, &other, key.as_bytes(), "[]", 0, None).await.unwrap();
+            let (_, notes) = listed(node_list(&db, user.clone()).await.unwrap());
+            assert_eq!(
+                notes,
+                vec![kotton_wire::note::RowNote {
+                    name: other.clone(),
+                    is: kotton_wire::note::NoteKind::StandsByBytes { did_key: did_key.clone(), stored: other.clone() },
+                }],
+                "{label:?}"
+            );
+            let said = kotton_wire::note::sentence(&notes[0], "device revoke");
+            assert!(said.ends_with("takes that recorded name, not the key's") && !said.contains(label), "{said}");
+            let found = network_db::paired_node_named(&db, &user, &other).await.unwrap().expect("the name finds a row");
+            assert_eq!(found.id, *label);
+        }
+    }
+
     /// **A row whose bytes pass under a `did:key` spelled another way is
     /// noted with its key's `did:key` and the DID as stored, and is admitted
     /// after the listing as before it** (5B, 18B).
