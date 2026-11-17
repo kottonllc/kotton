@@ -500,8 +500,9 @@ mod tests {
     ///
     /// A full device, a co-signer, a contact and a relay are each a member and
     /// none of them is a vault; the two blind own devices are, in DID order.
-    /// Removing one is the revocation `node_revoke` performs, and the view
-    /// follows it with nothing else edited.
+    /// Removing one is the revocation `device revoke` performs
+    /// (`daemon::nodes::revoke_named`), and the view follows it with nothing
+    /// else edited.
     #[tokio::test]
     async fn the_vault_view_is_the_blind_own_devices_and_follows_revocation() {
         let temp = TempDir::new().unwrap();

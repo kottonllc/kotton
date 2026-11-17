@@ -206,16 +206,12 @@ pub async fn revoke(
     node_id: String,
     asked: kotton_peer::daemon::nodes::Asked,
 ) -> std::io::Result<UserResponse> {
-    use kotton_peer::daemon::nodes::{node_named, revoke_named, Asked, Named, Reach};
+    use kotton_peer::daemon::nodes::{node_named, revoke_named, Named};
     // Read before anything goes: the withdrawal names the device's key.
-    // `node_id` is what the person named. A label two rows carry is refused
-    // here, before the drives are asked anything, rather than read as whichever
-    // row came first.
-    let reach = match asked {
-        Asked::Locally => Reach::RowsAndMembers(member_store),
-        Asked::Remotely => Reach::Rows,
-    };
-    let Some(named) = node_named(db, &user_id, &node_id, reach).await? else {
+    // `node_id` is what the person named, within what the asker reaches
+    // (`Asked::reach`). A label two rows carry is refused here, before the
+    // drives are asked anything, rather than read as whichever row came first.
+    let Some(named) = node_named(db, &user_id, &node_id, asked.reach(member_store)).await? else {
         return Ok(UserResponse::Error {
             message: format!("node '{}' not found for user '{}'", node_id, user_id),
         });

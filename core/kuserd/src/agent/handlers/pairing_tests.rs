@@ -42,7 +42,7 @@ mod enrollment_tests {
     use kotton_crypto::{derive_cek, derive_master_secret};
     use kotton_crypto::{derive_identity_key, DidKeyMethod};
     use kotton_peer::daemon::nodes::{
-        node_revoke, own_device_member, project_membership_into_allowlist,
+        node_named, own_device_member, project_membership_into_allowlist, revoke_named,
         record_own_device_member, reproject_allowlist, resolve_cek, resolve_data_keys,
     };
     use kotton_record::open_sqlite;
@@ -558,16 +558,12 @@ mod enrollment_tests {
         let members_before = users.get("alice").unwrap().list_members().await.unwrap();
         assert_eq!(members_before.len(), 1);
 
-        let resp = node_revoke(
-            users.get("alice").unwrap().as_ref(),
-            &db,
-            "alice".to_string(),
-            "vps".to_string(),
-            &paired_keys,
-            kotton_peer::daemon::nodes::Asked::Locally,
-        )
-        .await
-        .unwrap();
+        let set = users.get("alice").unwrap();
+        let named = node_named(&db, "alice", "vps", kotton_peer::daemon::nodes::Asked::Locally.reach(set.as_ref()))
+            .await
+            .unwrap()
+            .expect("the row is named");
+        let resp = revoke_named(set.as_ref(), &db, "alice", &named, &paired_keys).await.unwrap();
         assert!(matches!(resp, UserResponse::NodeRevoked));
 
         // Revoke once → every view closed: membership record, live allowlist, and

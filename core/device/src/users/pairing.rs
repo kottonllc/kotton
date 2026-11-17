@@ -2056,9 +2056,12 @@ mod handed_drive_tests {
         assert!(handout.not_handed.iter().all(|n| n.is == kotton_wire::note::NoteKind::NamesNoKey));
         let keys = Arc::new(RwLock::new(HashSet::new()));
         for note in &handout.not_handed {
-            let said = kotton_peer::daemon::nodes::node_revoke(&Cards::default(), &db, "alice".into(), note.name.clone(), &keys, kotton_peer::daemon::nodes::Asked::Locally)
+            let cards = Cards::default();
+            let named = kotton_peer::daemon::nodes::node_named(&db, "alice", &note.name, kotton_peer::daemon::nodes::Asked::Locally.reach(&cards))
                 .await
-                .unwrap();
+                .unwrap()
+                .expect("the note's name names its row");
+            let said = kotton_peer::daemon::nodes::revoke_named(&cards, &db, "alice", &named, &keys).await.unwrap();
             assert!(matches!(said, UserResponse::NodeRevoked), "{}: {said:?}", note.name);
         }
         let left: Vec<[u8; 32]> = kotton_peer::daemon::drives::list(&db, "alice").await.unwrap().iter().map(|d| d.vault_key).collect();
@@ -2092,9 +2095,12 @@ mod handed_drive_tests {
 
             let notes = crate::users::drive_verbs::vaults_noted(&db, "alice").await.unwrap();
             assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key("old")], "vector {i}");
-            let said = kotton_peer::daemon::nodes::node_revoke(&Cards::default(), &db, "alice".into(), notes[0].name.clone(), &keys, kotton_peer::daemon::nodes::Asked::Locally)
+            let cards = Cards::default();
+            let named = kotton_peer::daemon::nodes::node_named(&db, "alice", &notes[0].name, kotton_peer::daemon::nodes::Asked::Locally.reach(&cards))
                 .await
-                .unwrap();
+                .unwrap()
+                .expect("the note's name names its row");
+            let said = kotton_peer::daemon::nodes::revoke_named(&cards, &db, "alice", &named, &keys).await.unwrap();
             assert!(matches!(said, UserResponse::NodeRevoked), "vector {i}: {said:?}");
             assert!(crate::users::drive_verbs::vaults_noted(&db, "alice").await.unwrap().is_empty(), "vector {i}");
             assert_eq!(kotton_peer::daemon::drives::list(&db, "alice").await.unwrap().len(), 2, "vector {i}: an honest vault went");
