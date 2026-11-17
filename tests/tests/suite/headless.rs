@@ -251,7 +251,7 @@ async fn a_second_nameless_mint_typed_at_the_repl_is_refused_by_the_daemon() {
         Err(e) => format!("{e:#}"),
         Ok(out) => panic!("a second `mint relay` was minted: {:?}", out.out),
     };
-    assert!(said.contains("you already hold a relay called relay; name this one (`mint relay <name>`)"), "{said}");
+    assert!(said.contains("you already hold a relay called `relay`; name this one (`mint relay <name>`)"), "{said}");
     let gate = key_in(&data(&typed(&mut repl, "mint relay gate").await), "relay");
     assert_ne!(first, gate);
 }

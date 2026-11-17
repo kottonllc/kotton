@@ -1824,8 +1824,11 @@ fn relay_named_for_a_rule(name: &str) -> String {
     )
 }
 
-/// The refusal for a mint under a name whose credential this desktop keeps.
+/// The refusal for a mint under a name whose credential this desktop keeps. The
+/// name is printed by [`kotton_wire::note::quoted`], between its own backticks
+/// (kottonllc/kotton#618, kottonllc/kotton#597, 43A).
 fn name_kept(word: &str, name: &str) -> String {
+    let name = kotton_wire::note::quoted(name);
     format!(
         "you already hold a {word} called {name}; name this one (`mint {word} <name>`) — its credential \
          is enrolled, and a new key under that name would be one the {word} never enrolled"
@@ -1833,7 +1836,11 @@ fn name_kept(word: &str, name: &str) -> String {
 }
 
 /// The refusal for a second nameless mint while one waits under the kind's word.
+/// The name is printed by [`kotton_wire::note::quoted`], as [`name_kept`] prints
+/// it, so a nameless mint is refused in the same line whether the credential
+/// waits or is kept (kottonllc/kotton#597, 43A).
 fn name_waiting(word: &str, name: &str) -> String {
+    let name = kotton_wire::note::quoted(name);
     format!("you already hold a {word} called {name}; name this one (`mint {word} <name>`)")
 }
 
@@ -3112,7 +3119,7 @@ mod tests {
         keep_credentials(&store, &[a_relay("relay", "http://203.0.113.9:7700", [5u8; 32])]).unwrap();
         match mint(&users, "lee", OperatedService::Relay, Some("relay"), None) {
             UserResponse::Error { message } => assert!(
-                message.starts_with("you already hold a relay called relay; name this one (`mint relay <name>`)"),
+                message.starts_with("you already hold a relay called `relay`; name this one (`mint relay <name>`)"),
                 "{message}"
             ),
             other => panic!("a second relay under `relay`: {other:?}"),
@@ -3419,6 +3426,42 @@ mod tests {
         }
     }
 
+    /// **A mint under a name already kept is refused with the name printed between its own
+    /// backticks** (kottonllc/kotton#618 clause 4, kottonllc/kotton#597, 43A): for a kept
+    /// name that holds a character `shown` escapes, or a backtick, the refusal is
+    /// `name_kept`'s, reached before the mint's own rule, and prints the name by `quoted`
+    /// and never as stored.
+    #[test]
+    fn a_mint_under_a_name_kept_prints_the_name_by_quoted() {
+        for name in ["ph\u{200d}one", "ph\u{e000}one", "\u{202e}enohp", "a`b", "a\\b"] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = std::sync::Arc::new(a_store(&temp));
+            let users = UserRegistry::new();
+            users.insert("lee".to_string(), store.clone());
+            let vault = OperatorCredential {
+                operates: Operates::Vault { vault: [2u8; 32], addr: Some("192.0.2.1:7710".parse().unwrap()) },
+                ..a_vault(name)
+            };
+            keep_credentials(&store, &[vault, a_relay(name, "http://203.0.113.9:7700", [5u8; 32])]).unwrap();
+            for service in [OperatedService::Vault, OperatedService::Relay] {
+                let word = service.word();
+                match mint(&users, "lee", service, Some(name), None) {
+                    UserResponse::Error { message } => {
+                        assert_eq!(message, name_kept(word, name), "{name:?}");
+                        let quoted = kotton_wire::note::quoted(name);
+                        assert!(
+                            message.starts_with(&format!("you already hold a {word} called {quoted}; name this one")),
+                            "{message}"
+                        );
+                        assert!(!message.contains(name), "the name was printed as stored: {message:?}");
+                    }
+                    other => panic!("{name:?}: a mint under a name kept: {other:?}"),
+                }
+            }
+            assert!(minted(&store).unwrap().is_empty(), "{name:?}: a key was minted");
+        }
+    }
+
     /// **A kept relay credential that showed no key reads as it did**: no sentence.
     #[test]
     fn a_kept_relay_that_showed_no_key_carries_no_sentence() {
@@ -3491,7 +3534,7 @@ mod tests {
             UserResponse::OperatorMinted { name, key } => (name, key),
             other => panic!("{other:?}"),
         };
-        let line = "you already hold a relay called relay; name this one (`mint relay <name>`)";
+        let line = "you already hold a relay called `relay`; name this one (`mint relay <name>`)";
         let (label, first) = key(mint(&users, "lee", OperatedService::Relay, None, None));
         assert_eq!(label, "relay", "a nameless mint is labelled by its kind's word");
         match mint(&users, "lee", OperatedService::Relay, None, None) {

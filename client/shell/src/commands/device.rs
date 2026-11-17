@@ -1163,11 +1163,37 @@ mod tests {
         super::revoke_target(&words[2..])
     }
 
-    /// The `device revoke` command `line` gives to type, cut out of its backticks.
+    /// The `device revoke` command `line` gives to type, cut out of its backticks, or
+    /// `None` where the line gives none. It reads only the backtick span the sentence
+    /// opens as a command: the line's last span, opened after `; `, ending the line with
+    /// ` removes it`, and starting with the verb's words. A name between backticks holds
+    /// no backtick of its own (43A), so the spans are the line's own; the join's line is
+    /// read with a leading device name that holds none (kottonllc/kotton#643).
     fn command_in(line: &str) -> Option<String> {
-        let start = line.find(&format!("`{} ", super::DEVICE_REVOKE))? + 1;
-        let end = start + line[start..].find("` removes it").unwrap_or_else(|| panic!("no end to the command: {line}"));
-        Some(line[start..end].to_owned())
+        let parts: Vec<&str> = line.split('`').collect();
+        if parts.len() < 3 || parts.len().is_multiple_of(2) {
+            return None;
+        }
+        let span = parts[parts.len() - 2];
+        let opened = parts[parts.len() - 3].ends_with("; ");
+        let closed = parts[parts.len() - 1] == " removes it";
+        let command = span.starts_with(&format!("{} ", super::DEVICE_REVOKE));
+        (opened && closed && command).then(|| span.to_owned())
+    }
+
+    /// Names that begin with each verb's words, alone, with a word after them, and with
+    /// the words a sentence closes a command with.
+    fn names_beginning_with_a_verb() -> Vec<String> {
+        let mut names = Vec::new();
+        for verb in [super::DEVICE_REVOKE, "vault forget", "relay forget", "kctl sudoers remove"] {
+            names.push(verb.to_owned());
+            names.push(format!("{verb} x"));
+            names.push(format!("{verb} x removes it"));
+            names.push(format!("{verb} x` removes it"));
+            names.push(format!("{verb} `x` removes it"));
+            names.push(format!("; `{verb} x` removes it"));
+        }
+        names
     }
 
     /// The names the second kind's sentence `said` says a command takes, with
@@ -1198,7 +1224,8 @@ mod tests {
         let did = "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX";
         let base45 = "did:key:RD/T4NHD S5UEFOU51W*VRLU7R BKQPKA1CX30D2:YUW8HFYMN3E";
         let words = ["attic", did];
-        for name in NOT_ONE_WORD.iter().copied().chain(words).chain([base45]) {
+        let verbs = names_beginning_with_a_verb();
+        for name in NOT_ONE_WORD.iter().copied().chain(words).chain([base45]).chain(verbs.iter().map(String::as_str)) {
             let note = RowNote::names_no_key(name);
             let mut lines: Vec<String> = super::notes_said(std::slice::from_ref(&note))
                 .into_iter()
@@ -1227,7 +1254,9 @@ mod tests {
                     [crate::out::Out::Note(t)] => t.clone(),
                     other => panic!("{other:?}"),
                 };
-                assert!(!said.contains(super::DEVICE_REVOKE), "{said}");
+                assert_eq!(command_in(&said), None, "{said}");
+                let outside_the_name = said.replace(&kotton_wire::note::quoted(name), "");
+                assert!(!outside_the_name.contains(super::DEVICE_REVOKE), "{said}");
                 let taken = names_taken(&said, stored);
                 for taken in taken.iter().filter(|t| kotton_wire::note::one_plain_word(t)) {
                     let typed = format!("{} {taken}", super::DEVICE_REVOKE);
@@ -1244,8 +1273,8 @@ mod tests {
     /// **A row with no plain name is told `device revoke` and given no command, on
     /// `device list`, `peer list`, `drive list` and a join's admitting side**
     /// (kottonllc/kotton#618, 23A, 43A): a name in another script, one with a quote, one
-    /// that starts with `-`, and names that hold a backtick, a space and the verb's own
-    /// words. The verb is in the sentence, the name is printed between its backticks with
+    /// that starts with `-`, names that hold a backtick, a space and the verb's own
+    /// words, and names that begin with each verb's words. The verb is in the sentence, the name is printed between its backticks with
     /// none of its own, and no command is read from either line.
     #[test]
     fn a_row_with_no_plain_name_is_told_device_revoke_and_given_no_command() {
@@ -1273,7 +1302,8 @@ mod tests {
             lines
         };
         let ticks: Vec<usize> = lines_of("it's").iter().map(|l| l.matches('`').count()).collect();
-        for name in names {
+        let verbs = names_beginning_with_a_verb();
+        for name in names.into_iter().chain(verbs.iter().map(String::as_str)) {
             let lines = lines_of(name);
             assert_eq!(lines.len(), 2);
             for (line, ticks) in lines.iter().zip(&ticks) {

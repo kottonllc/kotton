@@ -398,27 +398,48 @@ mod tests {
         )
     }
 
-    /// **`shown` is held by class, not by list** (kottonllc/kotton#597, 42A): over every
-    /// code point, a control, format, private-use or unassigned character, a separator
-    /// other than the space, and a default-ignorable character is printed by its escape,
-    /// and a name that holds it prints apart from the name without it and from its own
-    /// print typed out. Every character the list `shown` was built on escaped is still
-    /// escaped, U+2800 and the Hangul fillers among them. A letter of another script, a
-    /// quote, a mark after a letter and the space are printed as they are.
+    /// **`shown` is held by class, not by list** (kottonllc/kotton#597, 42A), in both
+    /// directions, over every code point, each class read from Unicode's tables here:
+    ///
+    /// - a control, format, private-use or unassigned character, a separator other than
+    ///   the space, and a default-ignorable character is printed by its escape, and a name
+    ///   that holds it prints apart from the name without it and from its own print typed
+    ///   out; every character the list `shown` was built on escaped is still escaped,
+    ///   U+2800 and the Hangul fillers among them;
+    /// - each letter, mark after a letter, number, punctuation mark and symbol that is not
+    ///   default-ignorable, and the space, is printed as it is, less `\` and U+2800;
+    /// - a mark of any block with nothing before it is printed by its escape.
     #[test]
     fn shown_is_held_by_class_not_by_list() {
         use icu_properties::props::{GeneralCategory as Gc, GeneralCategoryGroup as G};
-        use kotton_schemas::petname::{is_combining_mark, is_hostile_char, renders_blank};
+        use kotton_schemas::petname::{is_hostile_char, renders_blank};
         let plain = shown("ab");
         let mut escaped = 0usize;
+        let mut as_is = 0usize;
+        let mut marks = 0usize;
         for c in (0..=0x10ffffu32).filter_map(char::from_u32) {
             let (class, ignorable) = class_of(c);
             let by_class = matches!(class, Gc::Control | Gc::Format | Gc::PrivateUse | Gc::Unassigned)
                 || (G::Separator.contains(class) && c != ' ')
                 || ignorable;
             let by_list = is_hostile_char(c) || (c.is_whitespace() && c != ' ') || renders_blank(c);
+            let drawn = c == ' '
+                || [G::Letter, G::Mark, G::Number, G::Punctuation, G::Symbol].iter().any(|g| g.contains(class));
             let name = format!("a{c}b");
             let print = shown(&name);
+            if drawn && !ignorable && !matches!(c, '\\' | '\u{2800}') {
+                as_is += 1;
+                assert_eq!(print, name, "{c:?} ({class:?}) after a letter was not printed as it is");
+            }
+            if G::Mark.contains(class) {
+                marks += 1;
+                let first = format!("{c}a");
+                assert_eq!(
+                    shown(&first),
+                    format!("\\u{{{:x}}}a", u32::from(c)),
+                    "{c:?} ({class:?}) with nothing before it was not printed by its escape"
+                );
+            }
             if by_class || by_list {
                 escaped += 1;
                 assert!(!print.contains(c), "{c:?} ({class:?}) was printed as it is: {print:?}");
@@ -432,11 +453,10 @@ mod tests {
                 assert_ne!(print, plain, "{c:?}: a name with it and without it print alike");
                 assert_ne!(print, shown(&print), "{c:?}: a name and its print typed out print alike");
             }
-            if is_combining_mark(c) {
-                assert!(!shown(&format!("{c}a")).contains(c), "{c:?} with nothing before it was printed as it is");
-            }
         }
         assert!(escaped > 900_000, "{escaped}: the tables were not read");
+        assert!(as_is > 150_000, "{as_is}: the printed-as-it-is classes were not read");
+        assert!(marks > 2_000, "{marks}: the marks were not read");
         for filler in ['\u{115f}', '\u{1160}', '\u{2800}', '\u{3164}', '\u{ffa0}'] {
             assert_eq!(shown(&format!("a{filler}")), format!("a\\u{{{:x}}}", u32::from(filler)));
         }

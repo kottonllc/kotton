@@ -2491,7 +2491,7 @@ async fn a_key_minted_on_the_desktop_is_enrolled_at_the_vault_by_its_public_half
     )
     .await
     .expect_err("a second key for an enrolled vault is refused");
-    assert!(again.to_string().contains("you already hold a vault called kotton; name this one (`mint vault <name>`)"), "{again}");
+    assert!(again.to_string().contains("you already hold a vault called `kotton`; name this one (`mint vault <name>`)"), "{again}");
 }
 
 /// The line `vault` prints — kind, where it is reached, its key — as creation
@@ -3335,7 +3335,7 @@ async fn a_relays_line_completes_nothing_until_its_terminal_enrols_the_key() {
     let again = within("mint relay said again", desk.client.operator_mint("lee", OperatedService::Relay, Some("kotton"), None))
         .await
         .expect_err("a second key for an enrolled relay is refused");
-    assert!(again.to_string().contains("you already hold a relay called kotton; name this one (`mint relay <name>`)"), "{again}");
+    assert!(again.to_string().contains("you already hold a relay called `kotton`; name this one (`mint relay <name>`)"), "{again}");
 }
 
 /// **With two relay keys waiting, a line completed under the wrong one keeps
@@ -5892,7 +5892,7 @@ async fn an_instance_destroyed_is_forgotten_and_its_name_minted_again() {
     let refused = within("mint vault, kept", desk.client.operator_mint("lee", OperatedService::Vault, None, None))
         .await
         .expect_err("a second key under a name kept");
-    assert!(refused.to_string().contains("you already hold a vault called vault"), "{refused}");
+    assert!(refused.to_string().contains("you already hold a vault called `vault`"), "{refused}");
 
     for kind in ["vault", "relay"] {
         let forgot = at_the_repl(&mut repl, &format!("{kind} forget"), &[]).await;
