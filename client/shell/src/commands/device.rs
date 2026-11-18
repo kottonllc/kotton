@@ -546,8 +546,9 @@ fn greeting(role: Role, label: Option<&str>) -> (&'static str, String) {
 ///
 /// What the tests hold is these strings, as `run_ceremony_to` hands them to
 /// [`ui::body`]: which of the node's names each line gives, and that every command
-/// carries the DID. How `ui::body` wraps a line to the column is the renderer's, and is
-/// held there (kottonllc/kotton#597, 58A; kottonllc/kotton#654).
+/// carries the DID (kottonllc/kotton#597, 58A). As [`ui::body`] wraps them, each
+/// name's print and each command is held whole on one written line, at the narrowest
+/// and the widest column (kottonllc/kotton#597, 56B and 57A; kottonllc/kotton#654).
 fn completion_lines(role: Role, node: &kotton_wire::peer::PairedNode, keeps: Option<&Kept>) -> Vec<String> {
     match role {
         Role::Issuer | Role::Box => vec![issuer_complete_line(node)],
@@ -1224,21 +1225,29 @@ mod tests {
     /// none, which the no-command tests would then pass on, so it holds no more than a
     /// command needs.
     fn command_in(line: &str) -> Option<String> {
+        command_for(line, super::DEVICE_REVOKE)
+    }
+
+    /// [`command_in`] for the removal verb `verb`.
+    fn command_for(line: &str, verb: &str) -> Option<String> {
         let parts: Vec<&str> = line.split('`').collect();
         if parts.len() < 3 || parts.len().is_multiple_of(2) {
             return None;
         }
         let span = parts[parts.len() - 2];
         let closed = parts[parts.len() - 1] == " removes it";
-        let command = span.starts_with(&format!("{} ", super::DEVICE_REVOKE));
+        let command = span.starts_with(&format!("{verb} "));
         (closed && command).then(|| span.to_owned())
     }
+
+    /// The removal verbs a note's sentence names, one for each surface that registers one.
+    const VERBS: [&str; 4] = [super::DEVICE_REVOKE, "vault forget", "relay forget", "kctl sudoers remove"];
 
     /// Names that begin with each verb's words, alone, with a word after them, and with
     /// the words a sentence closes a command with.
     fn names_beginning_with_a_verb() -> Vec<String> {
         let mut names = Vec::new();
-        for verb in [super::DEVICE_REVOKE, "vault forget", "relay forget", "kctl sudoers remove"] {
+        for verb in VERBS {
             names.push(verb.to_owned());
             names.push(format!("{verb} x"));
             names.push(format!("{verb} x removes it"));
@@ -1721,8 +1730,10 @@ mod tests {
     ///   shell's parser as one command with no redirect, and through `drive`'s own parser
     ///   with the joined node's DID after `--on` and `--to`.
     ///
-    /// What is held is the strings as handed to `ui::body` and `ui::greet`; how the
-    /// renderer wraps them is kottonllc/kotton#654's.
+    /// What is held here is the strings as handed to `ui::body` and `ui::greet`; that
+    /// the renderer keeps each name's print and each command whole on one line is held by
+    /// `a_wrapped_line_keeps_a_names_print_whole_and_a_command_on_one_line`
+    /// (kottonllc/kotton#654).
     #[test]
     fn a_joins_completion_prints_the_label_as_data_and_in_no_command() {
         use kotton_wire::note::{quoted, shown};
@@ -1808,6 +1819,153 @@ mod tests {
         assert_eq!(format!("{words} {name}"), "the phone is in — your browser");
         let (_, named) = super::greeting(Role::Browser, Some("your browser"));
         assert_eq!(named, "`your browser`");
+    }
+
+    /// `handed` as the renderer writes it at `width`, held: every rendered line, joined
+    /// by one space, gives back `handed`; each line's backticks are even, and its spans,
+    /// in order across the lines, are `handed`'s; a line wider than `width` is one word,
+    /// with no space outside a span; and each of `names`' `quoted` print is in the
+    /// rendered lines as often as in `handed`, each within one line. Returns the
+    /// rendered lines, each with its spans.
+    fn rendered(handed: &str, width: usize, names: &[&str]) -> Vec<(String, Vec<String>)> {
+        let lines = crate::ui::wrap_to(handed, width);
+        assert_eq!(lines.join(" "), handed, "at {width}: a character was changed or lost");
+        let mut all = Vec::new();
+        let mut out = Vec::new();
+        for line in &lines {
+            assert!(line.matches('`').count().is_multiple_of(2), "at {width}: a span is broken across lines: {lines:#?}");
+            if line.chars().count() > width {
+                let outside: Vec<&str> = line.split('`').step_by(2).collect();
+                assert!(!outside.iter().any(|o| o.contains(' ')), "at {width}: a line wider than the column holds two words: {line}");
+            }
+            let spans: Vec<String> = spans(line).into_iter().map(str::to_owned).collect();
+            all.extend(spans.iter().cloned());
+            out.push((line.clone(), spans));
+        }
+        assert_eq!(all, spans(handed), "at {width}: the spans are not the line's: {lines:#?}");
+        for name in names {
+            let print = kotton_wire::note::quoted(name);
+            let within: usize = lines.iter().map(|l| l.matches(&print).count()).sum();
+            assert_eq!(within, handed.matches(&print).count(), "at {width}: {print} is not whole on one line: {lines:#?}");
+        }
+        out
+    }
+
+    /// `typed`, read as a typed line is, is one `verb` command handing it `name`: through
+    /// `device revoke`'s own reading for that verb ([`read_as_typed`]), and for another
+    /// verb through the chain's parser, the variables, the words and the redirect.
+    fn reads_back(typed: &str, verb: &str, name: &str) {
+        if verb == super::DEVICE_REVOKE {
+            assert_eq!(read_as_typed(typed), super::Revoke::Node(Some(name.to_owned())), "`{typed}`");
+            return;
+        }
+        let chain = crate::parser::parse_command_chain(typed);
+        assert_eq!(chain.len(), 1, "`{typed}` is {} commands: {chain:?}", chain.len());
+        let words = crate::utils::parse_command(&crate::utils::expand_vars(&chain[0].command, &Default::default()));
+        let (words, redirect) = crate::executor::parse_redirect(words);
+        assert!(redirect.is_none(), "`{typed}` redirects");
+        let mut want: Vec<String> = verb.split(' ').map(str::to_owned).collect();
+        want.push(name.to_owned());
+        assert_eq!(words, want, "`{typed}`");
+    }
+
+    /// **A wrapped line keeps a name's print whole and a command on one line**
+    /// (kottonllc/kotton#654; kottonllc/kotton#597, 56B and 57A). Rendered by `ui::wrap_to`,
+    /// which `ui::body` and `Out::Note` print through, at the narrowest and the widest
+    /// content width: each string a join's completion hands the renderer for each role,
+    /// and each note's sentence for both kinds and each verb, over [`LABELS`],
+    /// [`NOT_ONE_WORD`], the names that begin with a verb's words, a name with two spaces
+    /// together, a plain word and a DID a join records (see [`rendered`] for what is held
+    /// of each line):
+    ///
+    /// - each name's `quoted` print is in one rendered line, character for character;
+    /// - each command span is in one rendered line, and read from it reads back through
+    ///   the shell's parser: a vault's two commands as `drive`'s with the joined node's DID,
+    ///   and a note's command as its verb's with the note's name.
+    ///
+    /// The greeting is written whole by `ui::greet`, and is rendered here too.
+    #[test]
+    fn a_wrapped_line_keeps_a_names_print_whole_and_a_command_on_one_line() {
+        use kotton_wire::note::{one_plain_word, sentence, NoteKind, RowNote};
+        let verbs = names_beginning_with_a_verb();
+        let names: Vec<&str> = LABELS
+            .iter()
+            .map(|(l, _)| *l)
+            .chain(NOT_ONE_WORD.iter().copied())
+            .chain(verbs.iter().map(String::as_str))
+            .chain([PLAIN, DID, "two  spaces"])
+            .collect();
+        let mut drive_commands = 0;
+        let mut note_commands = 0;
+        for width in [crate::ui::WIDTH_MIN, crate::ui::WIDTH_MAX] {
+            for role in ROLES {
+                for label in &names {
+                    for handed in completion_said(role, label) {
+                        for (_, spans) in rendered(&handed, width, &[label, "vps-1"]) {
+                            for span in spans.iter().filter(|s| s.contains("<name>")) {
+                                let typed = span.replace("<name>", "photos");
+                                let chain = crate::parser::parse_command_chain(&typed);
+                                assert_eq!(chain.len(), 1, "`{typed}` is {} commands", chain.len());
+                                let read =
+                                    crate::utils::parse_command(&crate::utils::expand_vars(&chain[0].command, &Default::default()));
+                                let (read, redirect) = crate::executor::parse_redirect(read);
+                                assert!(redirect.is_none(), "`{typed}` redirects");
+                                assert_eq!(read[0], "drive", "`{typed}`");
+                                use crate::commands::drive::Line;
+                                match crate::commands::drive::parse(&read[1..]) {
+                                    Ok(Line::Create { name: "photos", on: Some(on) }) => assert_eq!(on, DID, "`{typed}`"),
+                                    Ok(Line::Move { name: "photos", to, from: None }) => assert_eq!(to, DID, "`{typed}`"),
+                                    other => panic!("`{typed}` reads as {other:?}"),
+                                }
+                                drive_commands += 1;
+                            }
+                            for span in spans.iter().filter(|s| s.starts_with("device revoke vps-1")) {
+                                reads_back(span, super::DEVICE_REVOKE, "vps-1");
+                                note_commands += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            for verb in VERBS {
+                for name in &names {
+                    let kinds = [
+                        RowNote::names_no_key(*name),
+                        RowNote { name: (*name).into(), is: NoteKind::StandsByBytes { did_key: DID.into(), stored: DID.into() } },
+                        RowNote { name: (*name).into(), is: NoteKind::StandsByBytes { did_key: DID.into(), stored: (*name).into() } },
+                    ];
+                    for note in kinds {
+                        let handed = sentence(&note, verb);
+                        let lines = rendered(&handed, width, &[name, DID]);
+                        let Some(typed) = command_for(&handed, verb) else {
+                            assert!(!matches!(note.is, NoteKind::NamesNoKey) || !one_plain_word(name), "{handed}");
+                            continue;
+                        };
+                        let at = spans(&handed).len() - 1;
+                        let (line, spans) = lines
+                            .iter()
+                            .scan(0, |seen, (line, spans)| {
+                                let first = *seen;
+                                *seen += spans.len();
+                                Some((first, line, spans))
+                            })
+                            .find(|(first, _, spans)| at < first + spans.len())
+                            .map(|(first, line, spans)| (line, spans[at - first].clone()))
+                            .unwrap_or_else(|| panic!("at {width}: no line holds the command of {handed}"));
+                        assert_eq!(spans, typed, "at {width}: {line}");
+                        reads_back(&spans, verb, name);
+                        note_commands += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(drive_commands, 2 * 4 * names.len(), "a vault's two commands, for each vault role, label and width");
+        let plain = names.iter().filter(|n| one_plain_word(n)).count();
+        assert_eq!(
+            note_commands,
+            2 * (ROLES.len() * names.len() + VERBS.len() * plain),
+            "the not-handed line's command for each role and label, and each plain name's for each verb, at each width"
+        );
     }
 
     #[test]
