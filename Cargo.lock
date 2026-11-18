@@ -3470,6 +3470,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hkdf",
+ "icu_properties",
  "kotton-common",
  "kotton-crypto",
  "kotton-diag",

@@ -272,6 +272,17 @@ pub enum Commands {
     },
     /// Make the key a relay or a vault of your own is created for, and print the command its
     /// host runs — shares the REPL's `mint` verb
+    ///
+    /// A new name holds ASCII letters and digits and `.` `_` `:` `-` `+`, and does not start
+    /// with `-`. Outside ASCII it holds what Unicode gives for continuing an identifier in any
+    /// script (`XID_Continue`) that is printed as it is: letters, marks, digits and letter
+    /// numbers, the connectors and the middle dots, and the few other numbers and symbols that
+    /// set names; and no mark with nothing before it. It is in composed form (NFC). That is a
+    /// concession: a new name holds no emoji, no Braille pattern, no joiner, and no punctuation
+    /// mark or symbol outside ASCII but the few that set holds, so a word some scripts spell
+    /// with one is refused as a new name; the cost falls by script. A name kept from before is
+    /// held, listed and forgotten by that name as it was. The seam: the mint can be widened
+    /// later, by one rule, and nothing minted now is undone by it.
     #[command(after_help = shell_help("mint"))]
     Mint {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)

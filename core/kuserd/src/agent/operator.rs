@@ -3570,11 +3570,14 @@ mod tests {
     }
 
     /// **A kept credential whose name is not one plain word is told the verb that removes it,
-    /// by that name, and given no command; it is still held, and that verb given the name
-    /// whole forgets it** (kottonllc/kotton#618, 23A, 24B, 40A, 41A, 44A): a name in another
-    /// script, one with a quote, one that starts with `-`, one that holds a format character
-    /// and one in decomposed form. The mint now refuses all but the first, and a kept
-    /// credential is read by the rule as it was, so each is held as before.
+    /// by that name, and given no command; it is still held and listed, a mint under it is
+    /// refused by `name_kept`, and that verb given the name whole forgets it**
+    /// (kottonllc/kotton#618, kottonllc/kotton#644; kottonllc/kotton#597, 23A, 24B, 40A, 41A,
+    /// 44A, 45A, 49C): a name in another script, one with a quote, one that starts with `-`,
+    /// one that holds a format character, one in decomposed form, and one with a symbol and
+    /// one with a punctuation mark outside ASCII, which the mint admitted before 45A. The mint
+    /// now refuses all but the first, and a kept credential is read by the rule as it was, so
+    /// each is held as before.
     #[tokio::test]
     async fn a_kept_credential_with_no_plain_name_is_told_its_verb_and_forgotten_by_that_name() {
         use super::super::network_readout::{keyless_relay_words, keyless_vault_words, RELAY_FORGET, VAULT_FORGET};
@@ -3590,6 +3593,8 @@ mod tests {
             ("-attic", false),
             ("ph\u{200d}one", false),
             ("cafe\u{301}", false),
+            ("a\u{2603}", false),
+            ("a\u{3001}b", false),
         ] {
             assert_eq!(
                 kotton_peer::operator::minted_text(OperatedService::Vault, name, &key, None).is_ok(),
@@ -3615,6 +3620,12 @@ mod tests {
                 match held_of(&users, "lee", service) {
                     UserResponse::OperatorHeld { names } => assert_eq!(names, vec![name.to_string()], "{name}: not held"),
                     other => panic!("{name}: {other:?}"),
+                }
+                match mint(&users, "lee", service, Some(name), None) {
+                    UserResponse::Error { message } => {
+                        assert_eq!(message, name_kept(service.word(), name), "{name}: a mint under it")
+                    }
+                    other => panic!("{name}: a mint under a name kept: {other:?}"),
                 }
                 match tokio::time::timeout(WITHIN * 2, forget(&runtime, &users, "lee", service, name)).await.expect("bounded") {
                     UserResponse::OperatorForgotten { name: n, .. } => assert_eq!(n, name),
