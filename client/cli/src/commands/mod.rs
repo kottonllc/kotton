@@ -278,9 +278,9 @@ pub enum Commands {
     /// script (`XID_Continue`) that is printed as it is: letters, marks, digits and letter
     /// numbers, the connectors and the middle dots, and the few other numbers and symbols that
     /// set names; and no mark with nothing before it. It is in composed form (NFC). That is a
-    /// concession: a new name holds no emoji, no Braille pattern, no joiner, and no punctuation
-    /// mark or symbol outside ASCII but the few that set holds, so a word some scripts spell
-    /// with one is refused as a new name; the cost falls by script. A name kept from before is
+    /// concession: a new name holds no character with emoji presentation, no Braille pattern,
+    /// no joiner, and no punctuation mark or symbol outside ASCII but the few that set holds, so
+    /// a word some scripts spell with one is refused as a new name; the cost falls by script. A name kept from before is
     /// held, listed and forgotten by that name as it was. The seam: the mint can be widened
     /// later, by one rule, and nothing minted now is undone by it.
     #[command(after_help = shell_help("mint"))]
