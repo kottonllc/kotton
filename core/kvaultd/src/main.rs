@@ -506,7 +506,7 @@ async fn joined(user: &str, ep: &IpcEndpoint, mut rx: tokio::sync::mpsc::Receive
             UserResponse::PairAwaitingPeer => println!("waiting for the device to confirm…"),
             UserResponse::PairTransferring => println!("receiving the chain and the sealed recovery copy…"),
             UserResponse::PairingComplete { node, .. } => {
-                println!("this vault now keeps for {user}: paired with {} ({}).", node.id, node.device_did);
+                println!("{}", completed(user, &node).said);
                 return Ok(());
             }
             UserResponse::PairFailed { reason } => return Err(io::Error::other(format!("pairing failed: {reason}"))),
@@ -519,12 +519,41 @@ async fn joined(user: &str, ep: &IpcEndpoint, mut rx: tokio::sync::mpsc::Receive
     }))
 }
 
+/// The lines a completed join prints, made of the node it paired.
+struct Completed {
+    /// `enrolled=` and the joined node's DID: the one `key=value` line of a
+    /// completion, which a script reads as one plain word for every label
+    /// (kottonllc/kotton#597, 60B).
+    enrolled: String,
+    /// The sentence a person reads, with the node's label as data, by
+    /// [`kotton_wire::note::quoted`] (43A, 60B): `join` prints it on stdout,
+    /// `invite` on stderr.
+    said: String,
+}
+
+/// The lines a join that completed for `user` with `node` prints
+/// (kottonllc/kotton#655). `user` is what was typed at this terminal, not a
+/// label, and is printed as typed.
+fn completed(user: &str, node: &kotton_wire::peer::PairedNode) -> Completed {
+    Completed {
+        enrolled: format!("enrolled={}", node.device_did),
+        said: format!(
+            "this vault now keeps for {user}: paired with {} ({}).",
+            kotton_wire::note::quoted(&node.id),
+            node.device_did
+        ),
+    }
+}
+
 /// Mint an invite and wait to be admitted through the relay: print the invite
 /// for the landlord to hand the person, then the six digits when their device
 /// dials. Nothing listens on a public port, so this can run on the day the host
 /// is set up rather than the minute of pairing; the default window is a day.
 /// The person's device is the gate — they type the six there — so this side
-/// confirms on sight, as a gateway does. Lines are `key=value` on stdout.
+/// confirms on sight, as a gateway does. Lines are `key=value` on stdout:
+/// `invite=` the invite, `sas=` the six digits, and `enrolled=` the joined
+/// node's DID once the join completes (kottonllc/kotton#597, 60B); the
+/// sentences beside them, the label among them, are on stderr.
 ///
 /// `quota`, when given, is set once the vault has minted the invite and before
 /// the invite is printed (`TASK-networking-is-the-drawn-one`, 2026-09-23): an
@@ -589,8 +618,9 @@ async fn admitted(
             }
             UserResponse::PairTransferring => eprintln!("receiving the chain and the sealed recovery copy…"),
             UserResponse::PairingComplete { node, .. } => {
-                println!("enrolled={}", node.id);
-                eprintln!("this vault now keeps for {user}: paired with {} ({}).", node.id, node.device_did);
+                let Completed { enrolled, said } = completed(user, &node);
+                println!("{enrolled}");
+                eprintln!("{said}");
                 return Ok(());
             }
             UserResponse::PairFailed { reason } => return Err(io::Error::other(format!("pairing failed: {reason}"))),
@@ -1081,5 +1111,69 @@ mod tests {
         assert!(parse(&["create", "--state-dir", "/s", "--operator"]).is_err());
         assert!(parse(&["create", "--state-dir", "/s", "--operator", "ab", "--operator", "cd"]).is_err());
         assert!(parse(&["claim"]).is_err(), "there is no claim");
+    }
+
+    /// The shell's labels a completion's lines are held over
+    /// (`client/shell/src/commands/device.rs`, `LABELS`), mirrored here because a
+    /// vault does not link the shell: each holds a character of a class `shown`
+    /// prints by its escape (kottonllc/kotton#597, 42A), or a backtick, a letter of
+    /// another script and a quote, which are printed as they are. A change to the
+    /// shell's set is made here too.
+    const LABELS: [&str; 13] = [
+        "bell\u{7}",
+        "two\nlines",
+        "\u{202e}enohp",
+        "ph\u{200d}one",
+        "ph\u{e000}one",
+        "ph\u{378}one",
+        "ph\u{2029}one",
+        "ph\u{115f}one",
+        "ph\u{2800}one",
+        "\u{301}phone",
+        "a\\b",
+        "a`b",
+        "\u{5c4b}\u{6839}'s",
+    ];
+
+    /// **The lines a completed join prints give the label as data, and
+    /// `enrolled=` the joined node's DID** (kottonllc/kotton#655;
+    /// kottonllc/kotton#597, 43A, 59B and 60B), over [`LABELS`], each on a node
+    /// whose DID is not its label:
+    ///
+    /// - each line is one line;
+    /// - the sentence is the plain-word label's with that label's `quoted` print
+    ///   replaced by this label's, so it holds no character `shown` escapes, and
+    ///   as many backticks as the plain word's;
+    /// - `enrolled=` is followed by one plain word, the node's DID, for every label.
+    #[test]
+    fn a_completed_joins_lines_give_the_label_as_data_and_enrolled_the_did() {
+        use kotton_wire::note::{one_plain_word, quoted, shown};
+        const DID: &str = "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX";
+        const PLAIN: &str = "laptop";
+        let node = |label: &str| kotton_wire::peer::PairedNode {
+            id: label.into(),
+            device_did: kotton_wire::did::Did::parse(DID).expect("a DID"),
+            public_key: [0xab; 32],
+            paired_at: 0,
+            addresses: vec![],
+            relay_url: None,
+            posture: None,
+        };
+        let plain = completed("sam", &node(PLAIN));
+        for label in LABELS.into_iter().chain([PLAIN]) {
+            let Completed { enrolled, said } = completed("sam", &node(label));
+            for line in [&enrolled, &said] {
+                assert!(!line.contains(['\n', '\r']), "{label:?}: not one line: {line:?}");
+            }
+            assert_eq!(said, plain.said.replace(&quoted(PLAIN), &quoted(label)), "{label:?}: printed outside its quote");
+            let printed = shown(label);
+            for c in label.chars().filter(|c| !printed.contains(*c)) {
+                assert!(!said.contains(c), "{label:?}: {c:?} was printed as it is: {said:?}");
+            }
+            assert_eq!(said.matches('`').count(), plain.said.matches('`').count(), "{label:?}: {said:?}");
+            let word = enrolled.strip_prefix("enrolled=").expect("the line keeps its key");
+            assert!(one_plain_word(word), "{label:?}: `enrolled=` is not followed by one plain word: {enrolled:?}");
+            assert_eq!(word, DID, "{label:?}: `enrolled=` does not carry the node's DID");
+        }
     }
 }
