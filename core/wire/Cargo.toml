@@ -42,4 +42,6 @@ subtle = "2.6"
 workspace = true
 
 [dev-dependencies]
+# Test-only: Unicode's tables, read by the test that holds `note::shown` by class (42A).
+icu_properties = "2.2"
 workspace-hack = { path = "../../tools/workspace-hack" }

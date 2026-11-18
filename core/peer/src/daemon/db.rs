@@ -380,8 +380,8 @@ pub async fn paired_node_named(
 /// this row and no other, and its DID as stored otherwise. The resolver reads a
 /// name as a DID first, so a label that is a row's DID finds that row and is no
 /// name for another; and a label two rows carry finds neither. A DID as stored
-/// that is not one plain word gets a sentence with no command in it
-/// ([`kotton_wire::note::sentence`]). One rule, the resolver's at the
+/// that is not one plain word gets a sentence that names the verb and the name
+/// it takes, with no command in it ([`kotton_wire::note::sentence`], 23A). One rule, the resolver's at the
 /// surface's parser, read over rows already in hand (kottonllc/kotton#597, 20A).
 pub fn name_of(rows: &[PairedNode], row: &PairedNode) -> String {
     let label = row.id.as_str();

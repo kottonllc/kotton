@@ -39,6 +39,22 @@ pub struct Cli {
     /// `kotton drive list --json`, as the REPL's `drive list --json` is. There it is for
     /// `list` and `show` alone, and any other verb refuses it, exit 2 (`kotton --json
     /// drive create …`, `kotton --json pin <drive> whole`).
+    ///
+    /// A name in a table or a record is carried as stored, where styled text prints it
+    /// with each character shown, one that would not be seen or would change the line
+    /// by its escape. A note's sentence is carried as a person reads it, its names
+    /// printed so.
+    ///
+    /// A note's sentence gives a command to type only with a name that is one plain
+    /// word, in ASCII. That is a concession. A device, vault or relay named in another
+    /// script is stored, listed, shown in full and taken by its verb whole; what it costs
+    /// is the line to copy: its note gives the DID as stored to copy, or the verb and the
+    /// name with no line. It is made because a printed command must reach its row typed
+    /// as printed, and names are compared byte for byte: a name a vault or a relay is
+    /// minted under is in composed form (NFC), but a device's label and a DID are in no
+    /// normal form, and none is applied where a typed name is compared. The seam: once a
+    /// normal form is applied where a name is stored and where it is compared, the set
+    /// of plain words widens, and no store or message changes for it.
     #[arg(long)]
     pub json: bool,
     /// No subcommand → enter the runtime (identity-first). The front door is the

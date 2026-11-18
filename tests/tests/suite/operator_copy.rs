@@ -98,11 +98,21 @@ fn words_of_usage(help: &str) -> Vec<String> {
 }
 
 /// Every command in `said` the shell does not have, as it is written. Those
-/// typed at the host, and the credential form's own name, are not the shell's
-/// to have.
-fn commands_the_shell_lacks(verbs: &Verbs, said: &str) -> Vec<String> {
+/// typed at the host, the credential form's own name, and `name` as prose
+/// prints it are not the shell's to have.
+///
+/// Under kottonllc/kotton#597's 43A a name in prose is printed between
+/// backticks ([`kotton_wire::note::quoted`]), the delimiter a command is
+/// printed between, so the span that is exactly the printed name the copy is
+/// rendered for is the name and not a command. kottonllc/kotton#645 (47A)
+/// gives a name its own delimiter; this exemption goes with it.
+fn commands_the_shell_lacks_for(verbs: &Verbs, said: &str, name: Option<&str>) -> Vec<String> {
+    let printed = name.map(|n| kotton_wire::note::quoted(n).trim_start_matches('`').trim_end_matches('`').to_owned());
     let mut lacks = Vec::new();
     for span in backticked(said) {
+        if printed.as_deref() == Some(span) {
+            continue;
+        }
         let mut words = span.split_whitespace();
         let Some(first) = words.next() else { continue };
         if AT_THE_HOST.contains(&first) || span == kotton_peer::operator::FIRST_FORM {
@@ -123,6 +133,11 @@ fn commands_the_shell_lacks(verbs: &Verbs, said: &str) -> Vec<String> {
     lacks
 }
 
+/// Every command in `said` the shell does not have, for a sentence that prints no name.
+fn commands_the_shell_lacks(verbs: &Verbs, said: &str) -> Vec<String> {
+    commands_the_shell_lacks_for(verbs, said, None)
+}
+
 /// **Every command the daemon's operator copy tells a person to type is one the
 /// shell has**, for a vault and for a relay. Also held: that every rendered
 /// sentence says a command and is not empty (a builder that rendered nothing
@@ -135,7 +150,8 @@ fn every_command_the_daemons_operator_copy_tells_a_person_to_type_is_one_the_she
     let mut seen: Vec<String> = Vec::new();
     for service in [OperatedService::Vault, OperatedService::Relay] {
         let (kept, line) = kept_and_line(service);
-        let sentences = kuserd::agent::commands_the_copy_tells_a_person_to_type("attic", &kept, &line);
+        let name = "attic";
+        let sentences = kuserd::agent::commands_the_copy_tells_a_person_to_type(name, &kept, &line);
         // Sixteen for a vault, twenty-two for a relay: a sentence that stopped
         // being rendered is a sentence no longer held to the shell.
         let rendered = match service {
@@ -145,7 +161,7 @@ fn every_command_the_daemons_operator_copy_tells_a_person_to_type_is_one_the_she
         assert_eq!(sentences.len(), rendered, "the copy rendered for the {} changed in number", service.word());
         for (which, said) in &sentences {
             assert!(!backticked(said).is_empty(), "{which}, for the {}, rendered no command:\n{said:?}", service.word());
-            let lacks = commands_the_shell_lacks(&verbs, said);
+            let lacks = commands_the_shell_lacks_for(&verbs, said, Some(name));
             assert!(
                 lacks.is_empty(),
                 "{which}, for the {}, tells a person to type {lacks:?}, which the shell does not have:\n{said}",

@@ -571,6 +571,24 @@ mod tests {
             );
         }
     }
+    /// **`kctl sudoers list` tells a row with no plain name `kctl sudoers remove` and
+    /// composes no command** (kottonllc/kotton#618, 23A): a name in another script, one with
+    /// a quote, and one that starts with `-`. The verb is in the line, and no command with
+    /// the name is.
+    #[test]
+    fn sudoers_list_tells_a_row_with_no_plain_name_its_verb_and_no_command() {
+        for did in ["did:key:\u{5c4b}\u{6839}\u{88cf}", "did:key:it's", "-did:key:zOld"] {
+            let listed = kotton_wire::note::Listed {
+                rows: vec![kotton_wire::DeviceOperator { did: did.to_string(), person: None, added_at: 0, added_by: "bootstrap".into() }],
+                notes: vec![kotton_wire::note::RowNote::names_no_key(did)],
+            };
+            let lines = super::sudoers_list_lines(&listed);
+            let said = lines.iter().find(|l| l.contains("names no Ed25519 key")).unwrap_or_else(|| panic!("{lines:?}"));
+            assert!(said.contains(&format!("`{}` is the verb that removes it, by this name, as recorded", super::SUDOERS_REMOVE)), "{said}");
+            assert!(said.contains(&format!("`{did}`")), "{said}");
+            assert!(!said.contains(&format!("{} ", super::SUDOERS_REMOVE)), "a command was composed: {said}");
+        }
+    }
     use kotton_sys::secret::{SecretsError, SecretsResult, SecretsStore};
     use std::sync::atomic::{AtomicUsize, Ordering};
 

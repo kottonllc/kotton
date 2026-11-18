@@ -238,8 +238,9 @@ fn flag_u64(args: &[String], flag: &str) -> Option<u64> {
 }
 
 /// `peer list`'s table, as a pure function of the paired nodes so its columns are
-/// testable without a daemon.
-fn list_table(nodes: &[PairedNode]) -> Out {
+/// testable without a daemon. Each label is as stored: the renderer prints it with
+/// every character shown, and `--json` carries it as stored (kottonllc/kotton#597, 39A).
+pub(crate) fn list_table(nodes: &[PairedNode]) -> Out {
     let rows: Vec<Vec<String>> = nodes
         .iter()
         .map(|n| {

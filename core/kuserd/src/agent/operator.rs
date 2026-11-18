@@ -519,6 +519,13 @@ pub(crate) fn unread_answer(store: &UserStore) -> Option<UserResponse> {
 /// word, in one line naming the spelling that works. The refusal is here and not in the shell: a re-mint under a
 /// name still waiting replaces its key, so only the side that holds the keys
 /// can tell a second nameless mint from a mint again.
+///
+/// **The order it refuses in** (kottonllc/kotton#597, 49C): a name kept, then
+/// the mint's rule ([`kotton_peer::operator::minted_text`]), then a relay named
+/// for a rule, then a nameless mint while one waits. The kept refusal is the one
+/// ahead of the mint's rule, and the name it prints is a kept one; every
+/// refusal prints a name by [`kotton_wire::note::quoted`], and puts one in a
+/// command only where it is one plain word.
 pub(crate) fn mint(
     users: &UserRegistry,
     user_id: &str,
@@ -535,11 +542,8 @@ pub(crate) fn mint(
     let word = service.word();
     let named = name.is_some();
     let name = name.unwrap_or(word);
-    // `relay rule <word>` reads the rule of the relay `<word>` or sets the
-    // rule `<word>`; a relay named for a rule would be both.
-    if service == OperatedService::Relay && is_a_rule(name) {
-        return refused(relay_named_for_a_rule(name));
-    }
+    // A name kept is answered first, whatever rule a new name is held to now:
+    // "you already hold it" stays true however the mint's rule narrows.
     match held(&store) {
         Ok(kept) if kept.iter().any(|c| is(c, service, name)) => {
             return refused(name_kept(word, name))
@@ -552,6 +556,12 @@ pub(crate) fn mint(
         Ok(t) => t,
         Err(e) => return refused(format!("{e:#}")),
     };
+    // `relay rule <word>` reads the rule of the relay `<word>` or sets the
+    // rule `<word>`; a relay named for a rule would be both. Asked after the
+    // mint's rule, of a name it has admitted (kottonllc/kotton#597, 49C).
+    if service == OperatedService::Relay && is_a_rule(name) {
+        return refused(relay_named_for_a_rule(name));
+    }
     let mut all = match minted(&store) {
         Ok(all) => all,
         Err(e) => return refused(format!("the keys minted here do not open: {e:#}")),
@@ -1817,6 +1827,15 @@ pub(crate) fn requests_for(verb: OperatorVerb) -> Vec<VaultPeerRequest> {
 
 /// The refusal for a relay named for a rule: `relay rule <word>` would read
 /// the rule of a relay called `<word>` and set the rule `<word>` both.
+///
+/// The name is put in the command as typed. That holds only because [`mint`]
+/// reaches this refusal after the mint's rule
+/// ([`kotton_peer::operator::check_minted_name`]) has admitted the name, and the
+/// names both admit are nine, each one plain word
+/// ([`kotton_wire::note::one_plain_word`]): the three rules' words, each `_`
+/// written as `_` or `-` (kottonllc/kotton#618 clause 4, kottonllc/kotton#597,
+/// 49C). Held by `tests::the_rules_words_the_mint_admits_are_nine_plain_words`,
+/// and over the verb by `tests::every_refusal_of_the_mint_prints_the_name_by_quoted`.
 fn relay_named_for_a_rule(name: &str) -> String {
     format!(
         "a relay is not named for a rule — {RULE_WORDS} are the rules `relay rule` sets, so `relay rule {name}` \
@@ -1824,8 +1843,11 @@ fn relay_named_for_a_rule(name: &str) -> String {
     )
 }
 
-/// The refusal for a mint under a name whose credential this desktop keeps.
+/// The refusal for a mint under a name whose credential this desktop keeps. The
+/// name is printed by [`kotton_wire::note::quoted`], between its own backticks
+/// (kottonllc/kotton#618, kottonllc/kotton#597, 43A).
 fn name_kept(word: &str, name: &str) -> String {
+    let name = kotton_wire::note::quoted(name);
     format!(
         "you already hold a {word} called {name}; name this one (`mint {word} <name>`) — its credential \
          is enrolled, and a new key under that name would be one the {word} never enrolled"
@@ -1833,7 +1855,11 @@ fn name_kept(word: &str, name: &str) -> String {
 }
 
 /// The refusal for a second nameless mint while one waits under the kind's word.
+/// The name is printed by [`kotton_wire::note::quoted`], as [`name_kept`] prints
+/// it, so a nameless mint is refused in the same line whether the credential
+/// waits or is kept (kottonllc/kotton#597, 43A).
 fn name_waiting(word: &str, name: &str) -> String {
+    let name = kotton_wire::note::quoted(name);
     format!("you already hold a {word} called {name}; name this one (`mint {word} <name>`)")
 }
 
@@ -3112,7 +3138,7 @@ mod tests {
         keep_credentials(&store, &[a_relay("relay", "http://203.0.113.9:7700", [5u8; 32])]).unwrap();
         match mint(&users, "lee", OperatedService::Relay, Some("relay"), None) {
             UserResponse::Error { message } => assert!(
-                message.starts_with("you already hold a relay called relay; name this one (`mint relay <name>`)"),
+                message.starts_with("you already hold a relay called `relay`; name this one (`mint relay <name>`)"),
                 "{message}"
             ),
             other => panic!("a second relay under `relay`: {other:?}"),
@@ -3145,6 +3171,186 @@ mod tests {
         assert!(minted(&store).unwrap().is_empty(), "a refused mint kept a key");
         assert!(matches!(mint(&users, "lee", OperatedService::Relay, Some("anyone-home"), None), UserResponse::OperatorMinted { .. }));
         assert!(matches!(mint(&users, "lee", OperatedService::Vault, Some("anyone"), None), UserResponse::OperatorMinted { .. }));
+    }
+
+    /// The rules' words in each spelling `is_a_rule` reads: each `_` written as `_`
+    /// or `-`.
+    fn rules_words_spelled() -> Vec<String> {
+        let mut out = Vec::new();
+        for word in ["only_my_devices", "people_i_invite", "anyone"] {
+            let mut spellings = vec![String::new()];
+            for c in word.chars() {
+                let next: &[char] = if c == '_' { &['_', '-'] } else { &[c] };
+                spellings = spellings.iter().flat_map(|s| next.iter().map(move |n| format!("{s}{n}"))).collect();
+            }
+            out.extend(spellings);
+        }
+        out
+    }
+
+    /// **The names the rule's refusal is reached for are nine, each one plain word**
+    /// (kottonllc/kotton#618 clause 4, kottonllc/kotton#597, 49C). `is_a_rule`
+    /// accepts a name that, with each `-` read as `_` and the whitespace around it
+    /// trimmed, is a rule's word: so one of the rules' words, each `_` written as `_`
+    /// or `-`, with or without whitespace before and after it. The mint refuses a
+    /// name holding any whitespace, so one character of each kind on either side
+    /// stands for every run of it. Of all of these, the mint admits exactly the nine
+    /// spellings, and each is one plain word — which is what lets
+    /// `relay_named_for_a_rule` put the name in its command as typed.
+    #[test]
+    fn the_rules_words_the_mint_admits_are_nine_plain_words() {
+        let spelled = rules_words_spelled();
+        assert_eq!(spelled.len(), 9);
+        let spaces: Vec<String> = std::iter::once(String::new())
+            .chain((0..=0x10_ffff).filter_map(char::from_u32).filter(|c| c.is_whitespace()).map(String::from))
+            .collect();
+        let mut admitted = Vec::new();
+        for word in &spelled {
+            for before in &spaces {
+                for after in &spaces {
+                    let name = format!("{before}{word}{after}");
+                    assert!(is_a_rule(&name), "{name:?} is read as a rule's word");
+                    if kotton_peer::operator::check_minted_name(&name).is_ok() {
+                        admitted.push(name);
+                    }
+                }
+            }
+        }
+        assert_eq!(admitted, spelled, "the mint admits a rule's word only as one of the nine spellings");
+        for name in &admitted {
+            assert!(kotton_wire::note::one_plain_word(name), "{name:?}");
+        }
+    }
+
+    /// **Every refusal of the mint prints the name by `quoted`, and puts it in a
+    /// command only where it is one plain word** (kottonllc/kotton#618 clause 4,
+    /// kottonllc/kotton#597, 43A, 49C). `mint` for a vault and a relay, with the
+    /// store empty, with a credential of each kind kept under the name where one can
+    /// be kept, and with a key of each kind waiting under the kind's word, over a
+    /// name of each class `shown` escapes, a name that holds a backtick, and each
+    /// rule's word alone and with a character before or after it; and a mint with
+    /// no name in each. For every error: outside its backticks the line holds the
+    /// name nowhere but in the rules' own words; a backtick span is the name as
+    /// `quoted` prints it, or a command that holds the name only where it is one
+    /// plain word; and nothing is kept or minted. The order adds three: a rule's
+    /// word that is not one plain word is refused by the mint's own message; a relay
+    /// kept under a rule's word is refused a mint by `name_kept`; and a mint with no
+    /// name where one waits is refused naming the kind's word between backticks.
+    #[test]
+    fn every_refusal_of_the_mint_prints_the_name_by_quoted() {
+        use kotton_wire::note::{one_plain_word, quoted};
+        let mut names: Vec<String> = [
+            "bell\u{7}",
+            "two\nlines",
+            "tab\there",
+            "cr\rhere",
+            "\u{202e}enohp",
+            "ph\u{200d}one",
+            "ph\u{e000}one",
+            "ph\u{378}one",
+            "ph\u{2029}one",
+            "ph\u{115f}one",
+            "ph\u{2800}one",
+            "\u{301}phone",
+            "a\\b",
+            "a`b",
+            "`",
+        ]
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+        for word in ["only_my_devices", "people_i_invite", "anyone", "only-my-devices", "people-i-invite"] {
+            names.push(word.into());
+            for c in [' ', '\t', '\n', '`', '\u{200d}', '\u{3000}'] {
+                names.push(format!("{c}{word}"));
+                names.push(format!("{word}{c}"));
+            }
+        }
+        // Each error line, held to clause 4 for `name`.
+        let held_to_clause_4 = |message: &str, name: &str| {
+            let parts: Vec<&str> = message.split('`').collect();
+            assert!(parts.len() % 2 == 1, "{name:?}: a backtick of the name was printed as one: {message:?}");
+            for (i, part) in parts.iter().enumerate() {
+                if i % 2 == 0 {
+                    assert!(
+                        !part.replace(RULE_WORDS, "").contains(name),
+                        "{name:?}: the name printed as typed outside its backticks: {message:?}"
+                    );
+                } else if format!("`{part}`") != quoted(name) && part.contains(name) {
+                    assert!(one_plain_word(name), "{name:?}: a command holds a name that is not one plain word: {message:?}");
+                }
+            }
+        };
+        let kinds = [OperatedService::Vault, OperatedService::Relay];
+        for name in &names {
+            for state in ["empty", "kept", "waiting"] {
+                if state == "kept" && kotton_peer::operator::check_name(name).is_err() {
+                    continue; // no credential is kept under it to be told of
+                }
+                let temp = tempfile::tempdir().unwrap();
+                let store = std::sync::Arc::new(a_store(&temp));
+                let users = UserRegistry::new();
+                users.insert("lee".to_string(), store.clone());
+                match state {
+                    "kept" => {
+                        let vault = OperatorCredential {
+                            operates: Operates::Vault { vault: [2u8; 32], addr: Some("192.0.2.1:7710".parse().unwrap()) },
+                            ..a_vault(name)
+                        };
+                        keep_credentials(&store, &[vault, a_relay(name, "http://203.0.113.9:7700", [5u8; 32])]).unwrap()
+                    }
+                    "waiting" => {
+                        for service in kinds {
+                            assert!(matches!(mint(&users, "lee", service, None, None), UserResponse::OperatorMinted { .. }));
+                        }
+                    }
+                    _ => {}
+                }
+                let kept = |store: &UserStore| kotton_store::runtime::private::read(store, KEPT).unwrap();
+                let kept_before = kept(&store);
+                for service in kinds {
+                    let word = service.word();
+                    for typed in [Some(name.as_str()), None] {
+                        let minted_before = minted(&store).unwrap();
+                        let UserResponse::Error { message } = mint(&users, "lee", service, typed, None) else {
+                            let to_mint = typed.is_none_or(|n| {
+                                state != "kept"
+                                    && kotton_peer::operator::check_minted_name(n).is_ok()
+                                    && !(service == OperatedService::Relay && is_a_rule(n))
+                            });
+                            assert!(to_mint && !(typed.is_none() && state == "waiting"), "{name:?} {state}: minted {typed:?}");
+                            continue;
+                        };
+                        assert_eq!(minted(&store).unwrap(), minted_before, "{name:?} {state}: a refused mint kept a key");
+                        assert_eq!(kept(&store), kept_before, "{name:?} {state}: a refused mint changed what is kept");
+                        let Some(name) = typed else {
+                            assert_eq!(state, "waiting", "{name:?}: a nameless mint refused: {message:?}");
+                            assert_eq!(
+                                message,
+                                format!("you already hold a {word} called `{word}`; name this one (`mint {word} <name>`)"),
+                            );
+                            continue;
+                        };
+                        held_to_clause_4(&message, name);
+                        if state == "kept" {
+                            assert!(
+                                message.starts_with(&format!("you already hold a {word} called {}; ", quoted(name))),
+                                "{name:?}: a mint under a kept name is told it is held: {message:?}"
+                            );
+                        }
+                        if service == OperatedService::Relay && state != "kept" && is_a_rule(name) && one_plain_word(name) {
+                            assert_eq!(message, relay_named_for_a_rule(name), "{name:?}");
+                        }
+                        if is_a_rule(name) && !one_plain_word(name) {
+                            assert!(
+                                message.starts_with(&format!("{} is not a name for a new vault or relay", quoted(name))),
+                                "{name:?}: a rule's word that is not one plain word is refused by the mint's message: {message:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// **The instances of a kind this person operates are read by name, in
@@ -3363,6 +3569,98 @@ mod tests {
         }
     }
 
+    /// **A kept credential whose name is not one plain word is told the verb that removes it,
+    /// by that name, and given no command; it is still held, and that verb given the name
+    /// whole forgets it** (kottonllc/kotton#618, 23A, 24B, 40A, 41A, 44A): a name in another
+    /// script, one with a quote, one that starts with `-`, one that holds a format character
+    /// and one in decomposed form. The mint now refuses all but the first, and a kept
+    /// credential is read by the rule as it was, so each is held as before.
+    #[tokio::test]
+    async fn a_kept_credential_with_no_plain_name_is_told_its_verb_and_forgotten_by_that_name() {
+        use super::super::network_readout::{keyless_relay_words, keyless_vault_words, RELAY_FORGET, VAULT_FORGET};
+        let nobody = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let (_, bytes) = kotton_crypto::ed25519::refused_keys().into_iter().next().unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        for (name, minted) in [
+            ("\u{5c4b}\u{6839}\u{88cf}", true),
+            ("it's", false),
+            ("-attic", false),
+            ("ph\u{200d}one", false),
+            ("cafe\u{301}", false),
+        ] {
+            assert_eq!(
+                kotton_peer::operator::minted_text(OperatedService::Vault, name, &key, None).is_ok(),
+                minted,
+                "{name}: the mint's rule"
+            );
+            for (verb, said) in [(VAULT_FORGET, keyless_vault_words(name)), (RELAY_FORGET, keyless_relay_words(name))] {
+                assert!(said.contains(&format!("`{verb}` is the verb that removes it, by this name, as recorded")), "{said}");
+                let quoted = kotton_wire::note::quoted(name);
+                assert!(said.contains(&format!("{quoted} names no Ed25519 key")), "{said}");
+                assert!(!said.contains(&format!("{verb} ")), "a command was composed: {said}");
+            }
+
+            let temp = tempfile::tempdir().unwrap();
+            let store = std::sync::Arc::new(a_store(&temp));
+            let runtime = a_runtime(&temp).await;
+            let users = UserRegistry::new();
+            users.insert("lee".to_string(), store.clone());
+            let vault = OperatorCredential { operates: Operates::Vault { vault: bytes, addr: Some(nobody) }, ..a_vault(name) };
+            let relay = a_relay(name, &format!("http://{nobody}"), bytes);
+            keep_credentials(&store, &[vault, relay]).unwrap();
+            for service in [OperatedService::Vault, OperatedService::Relay] {
+                match held_of(&users, "lee", service) {
+                    UserResponse::OperatorHeld { names } => assert_eq!(names, vec![name.to_string()], "{name}: not held"),
+                    other => panic!("{name}: {other:?}"),
+                }
+                match tokio::time::timeout(WITHIN * 2, forget(&runtime, &users, "lee", service, name)).await.expect("bounded") {
+                    UserResponse::OperatorForgotten { name: n, .. } => assert_eq!(n, name),
+                    other => panic!("{name}: not forgotten by its name: {other:?}"),
+                }
+            }
+            assert!(held(&store).unwrap().is_empty(), "{name}");
+        }
+    }
+
+    /// **A mint under a name already kept is refused with the name printed between its own
+    /// backticks** (kottonllc/kotton#618 clause 4, kottonllc/kotton#597, 43A): for a kept
+    /// name that holds a character `shown` escapes, or a backtick, the refusal is
+    /// `name_kept`'s, reached before the mint's own rule, and prints the name by `quoted`
+    /// and never as stored.
+    #[test]
+    fn a_mint_under_a_name_kept_prints_the_name_by_quoted() {
+        for name in ["ph\u{200d}one", "ph\u{e000}one", "\u{202e}enohp", "a`b", "a\\b"] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = std::sync::Arc::new(a_store(&temp));
+            let users = UserRegistry::new();
+            users.insert("lee".to_string(), store.clone());
+            let vault = OperatorCredential {
+                operates: Operates::Vault { vault: [2u8; 32], addr: Some("192.0.2.1:7710".parse().unwrap()) },
+                ..a_vault(name)
+            };
+            keep_credentials(&store, &[vault, a_relay(name, "http://203.0.113.9:7700", [5u8; 32])]).unwrap();
+            for service in [OperatedService::Vault, OperatedService::Relay] {
+                let word = service.word();
+                match mint(&users, "lee", service, Some(name), None) {
+                    UserResponse::Error { message } => {
+                        assert_eq!(message, name_kept(word, name), "{name:?}");
+                        let quoted = kotton_wire::note::quoted(name);
+                        assert!(
+                            message.starts_with(&format!("you already hold a {word} called {quoted}; name this one")),
+                            "{message}"
+                        );
+                        assert!(!message.contains(name), "the name was printed as stored: {message:?}");
+                    }
+                    other => panic!("{name:?}: a mint under a name kept: {other:?}"),
+                }
+            }
+            assert!(minted(&store).unwrap().is_empty(), "{name:?}: a key was minted");
+        }
+    }
+
     /// **A kept relay credential that showed no key reads as it did**: no sentence.
     #[test]
     fn a_kept_relay_that_showed_no_key_carries_no_sentence() {
@@ -3435,7 +3733,7 @@ mod tests {
             UserResponse::OperatorMinted { name, key } => (name, key),
             other => panic!("{other:?}"),
         };
-        let line = "you already hold a relay called relay; name this one (`mint relay <name>`)";
+        let line = "you already hold a relay called `relay`; name this one (`mint relay <name>`)";
         let (label, first) = key(mint(&users, "lee", OperatedService::Relay, None, None));
         assert_eq!(label, "relay", "a nameless mint is labelled by its kind's word");
         match mint(&users, "lee", OperatedService::Relay, None, None) {

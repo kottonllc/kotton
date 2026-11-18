@@ -1133,6 +1133,7 @@ dependencies = [
  "blake3",
  "bs58",
  "chrono",
+ "icu_properties",
  "kotton-common",
  "serde",
  "serde_json",
