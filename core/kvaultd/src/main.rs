@@ -526,7 +526,7 @@ struct Completed {
     /// (kottonllc/kotton#597, 60B).
     enrolled: String,
     /// The sentence a person reads, with the node's label as data, by
-    /// [`kotton_wire::note::quoted`] (43A, 60B): `join` prints it on stdout,
+    /// [`kotton_wire::note::quoted`] (43A, 59B): `join` prints it on stdout,
     /// `invite` on stderr.
     said: String,
 }
