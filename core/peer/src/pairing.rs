@@ -2900,6 +2900,23 @@ mod tests {
         let result = parse_pairing_code(&code, 1_999_999_999); // now > expires_at
         assert!(result.is_err(), "expired code should be rejected");
     }
+
+    /// **The DID a join records for any key is one plain word** (kottonllc/kotton#597,
+    /// 52C): the shell's completion line puts the joined vault's DID in `drive create
+    /// --on` and `drive move --to` for every label, so the DID [`did_key`] makes, for
+    /// the joiner's node and the issuer's alike, is one word the shell takes as typed.
+    /// Held over generated keys, and over each repeated byte the rule admits as a key.
+    #[test]
+    fn the_did_a_join_records_for_any_key_is_one_plain_word() {
+        let mut keys: Vec<[u8; 32]> =
+            (0..512).map(|_| ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng).verifying_key().to_bytes()).collect();
+        keys.extend((0u8..=255).map(|b| [b; 32]).filter(|k| did_key(k).is_ok()));
+        for key in keys {
+            let did = did_key(&key).expect("the rule admits the key").to_string();
+            assert!(did.starts_with("did:key:z"), "{did}");
+            assert!(kotton_wire::note::one_plain_word(&did), "the DID a join records is not one plain word: {did}");
+        }
+    }
 }
 
 /// The relayed transport, minus the relay: both halves over an in-memory

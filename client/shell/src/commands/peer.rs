@@ -254,9 +254,9 @@ pub(crate) fn list_table(nodes: &[PairedNode]) -> Out {
         })
         .collect();
     Out::Table {
-        // `remote` is the word `sync [--push | --pull] <remote>` takes this value
-        // by. It was headed `label` until 2026-09-28, and a person with a vault
-        // paired had to ask which column `sync` wanted.
+        // `remote` is the word `peer show <remote>` takes this value by, and the
+        // word a join's completion line names the device by. `sync` takes no
+        // word after it: a device is not a sync target.
         columns: vec![
             "remote".into(),
             "did".into(),
