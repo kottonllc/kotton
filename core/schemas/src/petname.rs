@@ -181,24 +181,33 @@ pub fn is_printed_as_is(c: char, first: bool) -> bool {
 ///   character in it once it is in;
 /// - it is not default-ignorable, so a joiner or a variation selector that set holds is not
 ///   minted however [`is_printed_as_is`] grows;
-/// - [`is_printed_as_is`] holds it, so a minted name is one `shown` prints unchanged (40A), and
-///   a mark with nothing before it begins no new name. No rule for the first character is
-///   added beyond that one: a new name may begin with a digit (24B).
+/// - [`is_printed_as_is`] holds it, so a minted name is one `shown` prints unchanged (40A);
+/// - it is not a mark when nothing comes before it, so a mark begins no new name. That is this
+///   predicate's own clause, not read through [`is_printed_as_is`]. No other rule for the first
+///   character is added: a new name may begin with a digit (24B).
 ///
-/// So it holds no emoji, no Braille pattern, U+2800 among them, no symbol but the two that set
-/// names, no punctuation mark but its connectors and middle dots, and no number that is not a
-/// digit but its letter numbers and the ten others it names. It does not grow when what
-/// `shown` prints does. [`is_printed_as_is`]'s exception is a list, which may grow, and no
-/// stored name depends on it: this set does not reach the classes it is in.
+/// So it holds no character with emoji presentation, no Braille pattern, U+2800 among them, no
+/// symbol but the two that set names, no punctuation mark but its connectors and middle dots,
+/// and no number that is not a digit but its letter numbers and the ten others it names. It
+/// does not grow when what `shown` prints does, for the first character as for every other.
+/// [`is_printed_as_is`]'s exception is a list, which may grow, and no stored name depends on
+/// it: this set does not reach the classes it is in.
+///
+/// On the tables in the lock (Unicode 17), 147,791 characters outside ASCII are minted after a
+/// letter: that is the count after any letter, and after `q`, which composes with none of them.
+/// A character this predicate holds that is never in composed form is minted after none; after
+/// a letter a mark composes with, such as `a`, that mark is not minted there, since the name is
+/// then not in composed form.
 ///
 /// *The seam:* widening the mint is a change to this one function, by a property in the
 /// tables (emoji presentation, say) or by a character a script needs, by name. Nothing
 /// minted under it is undone by that.
 pub fn is_minted_as_is(c: char, first: bool) -> bool {
-    use icu_properties::props::{DefaultIgnorableCodePoint, XidContinue};
-    use icu_properties::CodePointSetData;
+    use icu_properties::props::{DefaultIgnorableCodePoint, GeneralCategory, GeneralCategoryGroup as G, XidContinue};
+    use icu_properties::{CodePointMapData, CodePointSetData};
     CodePointSetData::new::<XidContinue>().contains(c)
         && !CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
+        && !(first && G::Mark.contains(CodePointMapData::<GeneralCategory>::new().get(c)))
         && is_printed_as_is(c, first)
 }
 
