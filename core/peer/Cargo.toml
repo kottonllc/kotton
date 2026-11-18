@@ -76,6 +76,10 @@ tempfile = "3.8"
 kotton-fs = { path = "../fs" }
 rcgen = "0.13"
 tokio = { version = "1", features = ["full"] }
+# Test-only: the mint's test over every code point reads Unicode's tables itself, not
+# through the predicate the mint reads (kottonllc/kotton#597, 45A). Already a direct
+# dependency of `kotton-schemas` and `kotton-wire`.
+icu_properties = "2.2"
 
 [lints]
 workspace = true

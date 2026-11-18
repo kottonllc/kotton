@@ -145,11 +145,18 @@ pub fn is_combining_mark(c: char) -> bool {
 /// - it is not a mark with nothing before it to sit on (`first`).
 ///
 /// An unassigned character is escaped, so a name's print does not change silently when the
-/// tables grow. The same set bounds a name a vault or a relay is minted under from now on,
-/// which `shown` must print unchanged (40A). *The seam:* Unicode's identifier rules name the
-/// places a joiner belongs in a word, and admitting it there is a change to this one predicate,
-/// read by `shown` and the mint alike. [`is_hostile_char`], [`renders_blank`] and
-/// [`is_combining_mark`] are not read here; `petname`'s rule is kottonllc/kotton#498's.
+/// tables grow.
+///
+/// *The exception is a list.* `\` and U+2800 are taken out by name: no class gives them,
+/// and no property in Unicode's tables says whether a character draws anything, so the
+/// list may grow and no test over the tables can show it complete. No stored name depends
+/// on it: a print is not carried, and the mint does not rest on it, since a new name is held
+/// to [`is_minted_as_is`], which reads Unicode's identifier set (kottonllc/kotton#597, 45A).
+///
+/// *The seam:* Unicode's identifier rules name the places a joiner belongs in a word, and
+/// admitting it there is a change to this one predicate. It does not move the mint, whose set
+/// is defined on its own. [`is_hostile_char`], [`renders_blank`] and [`is_combining_mark`]
+/// are not read here; `petname`'s rule is kottonllc/kotton#498's.
 pub fn is_printed_as_is(c: char, first: bool) -> bool {
     use icu_properties::props::{DefaultIgnorableCodePoint, GeneralCategory, GeneralCategoryGroup as G};
     use icu_properties::{CodePointMapData, CodePointSetData};
@@ -160,6 +167,39 @@ pub fn is_printed_as_is(c: char, first: bool) -> bool {
         && !CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
         && !matches!(c, '\\' | '\u{2800}')
         && !(first && G::Mark.contains(class))
+}
+
+/// Whether `c`, outside ASCII, may be in a name a vault or a relay is minted under, from now on
+/// (kottonllc/kotton#597, 45A); `first` is whether nothing comes before it in the name. ASCII
+/// is held to 24B's own rule where the mint reads this (`kotton_peer::operator`).
+///
+/// It is Unicode's set for what continues an identifier, as far as it is printed as it is:
+///
+/// - it is in `XID_Continue` (UAX #31): a letter, a mark, a digit or a letter number of any
+///   script, the connectors, the middle dots and the few characters that set adds by name.
+///   It is the form of the set that is closed under normal forms, and Unicode keeps a
+///   character in it once it is in;
+/// - it is not default-ignorable, so a joiner or a variation selector that set holds is not
+///   minted however [`is_printed_as_is`] grows;
+/// - [`is_printed_as_is`] holds it, so a minted name is one `shown` prints unchanged (40A), and
+///   a mark with nothing before it begins no new name. No rule for the first character is
+///   added beyond that one: a new name may begin with a digit (24B).
+///
+/// So it holds no emoji, no Braille pattern, U+2800 among them, no symbol but the two that set
+/// names, no punctuation mark but its connectors and middle dots, and no number that is not a
+/// digit but its letter numbers and the ten others it names. It does not grow when what
+/// `shown` prints does. [`is_printed_as_is`]'s exception is a list, which may grow, and no
+/// stored name depends on it: this set does not reach the classes it is in.
+///
+/// *The seam:* widening the mint is a change to this one function, by a property in the
+/// tables (emoji presentation, say) or by a character a script needs, by name. Nothing
+/// minted under it is undone by that.
+pub fn is_minted_as_is(c: char, first: bool) -> bool {
+    use icu_properties::props::{DefaultIgnorableCodePoint, XidContinue};
+    use icu_properties::CodePointSetData;
+    CodePointSetData::new::<XidContinue>().contains(c)
+        && !CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
+        && is_printed_as_is(c, first)
 }
 
 /// `name` as names are compared for sameness: spaces around it trimmed, each run of

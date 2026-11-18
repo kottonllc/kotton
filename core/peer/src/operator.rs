@@ -299,7 +299,7 @@ pub fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// A name a key is minted under (kottonllc/kotton#597, 24B, 40A, 41A). It is
+/// A name a key is minted under (kottonllc/kotton#597, 24B, 41A, 45A). It is
 /// minted when all of these hold, and otherwise refused by one message, in the
 /// mint's words, with the name printed by [`kotton_wire::note::quoted`]:
 ///
@@ -308,18 +308,28 @@ pub fn check_name(name: &str) -> Result<()> {
 /// - its ASCII is in the set a note's command is printed with
 ///   ([`kotton_wire::note::plain_word_char`]), less `/` and `=`, which are the
 ///   form's own syntax, and it does not start with `-` (24B);
-/// - [`kotton_wire::note::shown`] prints it unchanged, so each character it
-///   holds is printed as it is, in any script (40A);
+/// - each character outside ASCII is one
+///   [`kotton_schemas::petname::is_minted_as_is`] holds: in Unicode's set for
+///   what continues an identifier (`XID_Continue`), not default-ignorable, and
+///   printed by [`kotton_wire::note::shown`] as it is, so a new name begins
+///   with no mark (45A). A minted name is so one `shown` prints unchanged (40A);
 /// - it is in NFC, so the name typed again is the name stored; nothing is
 ///   converted (41A). A name refused only for its form is told its composed form.
 ///
-/// *The concession* (40A): a new name holds no format character, a joiner or a
-/// variation selector among them, so a word some scripts spell with a joiner is
-/// refused as a new credential's name; the mint can be widened after a tag and
-/// not narrowed, since a minted name is carried. *The seam:* admitting a joiner
-/// where Unicode's identifier rules place one in a word is a change to the one
-/// predicate `shown` reads ([`kotton_schemas::petname::is_printed_as_is`]), and
-/// nothing minted under this rule is undone by it. A kept credential is read by
+/// *The concession* (45A): outside ASCII a new name holds what continues an
+/// identifier, in any script: letters, marks, digits and letter numbers, and
+/// the connectors and middle dots that set holds. *What it costs:* a new name holds no
+/// emoji, no punctuation mark outside ASCII but that set's connectors and
+/// middle dots, no symbol but the two it names, no number that is not a digit
+/// but its letter numbers and the ten others it names, and no Braille
+/// pattern; and no format character, a joiner or a variation selector among
+/// them. So a word some orthographies spell with a mark of punctuation or a
+/// joiner is refused as a new credential's name, and the cost falls by script.
+/// *Why now:* a minted name is carried, and the mint can be widened after a
+/// tag and not narrowed. *The seam:* widening it is a change to the one
+/// predicate it reads, [`kotton_schemas::petname::is_minted_as_is`], which is
+/// its own and does not move when what `shown` prints does; nothing minted
+/// under this rule is undone by it. A kept credential is read by
 /// [`check_name`] alone.
 pub fn check_minted_name(name: &str) -> Result<()> {
     use unicode_normalization::UnicodeNormalization;
@@ -339,7 +349,8 @@ pub fn check_minted_name(name: &str) -> Result<()> {
     };
     bail!(
         "{} is not a name for a new vault or relay — a new name holds ASCII letters and digits and {}, does not \
-         start with `-`, and may hold a character of any script that is printed as it is, in composed form{in_form}",
+         start with `-`, and outside ASCII may hold a character Unicode gives for continuing an identifier in any script \
+         (`XID_Continue`) that is printed as it is, in composed form{in_form}",
         kotton_wire::note::quoted(name),
         ascii.join(" "),
     )
@@ -355,8 +366,13 @@ fn in_minted_ascii(c: char) -> bool {
 fn mintable(name: &str) -> bool {
     check_name(name).is_ok()
         && !name.starts_with('-')
-        && name.chars().all(|c| !c.is_ascii() || in_minted_ascii(c))
-        && kotton_wire::note::shown(name) == name
+        && name.chars().enumerate().all(|(i, c)| {
+            if c.is_ascii() {
+                in_minted_ascii(c)
+            } else {
+                kotton_schemas::petname::is_minted_as_is(c, i == 0)
+            }
+        })
         && unicode_normalization::is_nfc(name)
 }
 
@@ -756,10 +772,13 @@ mod tests {
     }
 
     /// **A name minted from now on is one word of a line that `shown` prints unchanged, in
-    /// NFC, and every other name is refused by the mint's one message, with the name
-    /// printed; a kept credential is read by the rule as it was** (kottonllc/kotton#618;
-    /// kottonllc/kotton#597, 24B, 40A, 41A): one under a name the mint now refuses still
-    /// reads, under that name.
+    /// NFC, holding outside ASCII only what continues an identifier, and every other name
+    /// is refused by the mint's one message, with the name printed; a kept credential is
+    /// read by the rule as it was** (kottonllc/kotton#618, kottonllc/kotton#644;
+    /// kottonllc/kotton#597, 24B, 40A, 41A, 45A): a name of letters, marks and digits in
+    /// several scripts is minted, a name that holds an emoji, or a punctuation mark or a
+    /// number outside the set, is refused, and one kept under a name the mint now refuses
+    /// still reads, under that name.
     #[test]
     fn a_minted_name_is_one_word_of_a_line_and_a_kept_one_reads_as_it_did() {
         use kotton_wire::note::{plain_word_char, quoted, shown};
@@ -770,7 +789,8 @@ mod tests {
         let refusal = |name: &str| {
             format!(
                 "{} is not a name for a new vault or relay — a new name holds ASCII letters and digits and {}, does not \
-                 start with `-`, and may hold a character of any script that is printed as it is, in composed form",
+                 start with `-`, and outside ASCII may hold a character Unicode gives for continuing an identifier in \
+                 any script (`XID_Continue`) that is printed as it is, in composed form",
                 quoted(name),
                 punct.join(" ")
             )
@@ -806,7 +826,26 @@ mod tests {
         // mark and a symbol of another script.
         for name in [
             "kotton", "attic-2", "my_box.local", "a:b", "v+1", "\u{5c4b}\u{6839}\u{88cf}", "caf\u{e9}", "\u{0434}\u{043e}\u{043c}",
-            "a\u{663}", "\u{915}\u{93f}", "a\u{3001}b", "a\u{ab}b\u{bb}", "a\u{2603}", "a\u{20ac}",
+            "a\u{663}", "\u{915}\u{93f}",
+        ] {
+            minted(name);
+        }
+        // Minted (45A): letters, marks and digits in several scripts, and the connectors
+        // and middle dots `XID_Continue` holds.
+        for name in [
+            "\u{645}\u{646}\u{632}\u{644}2",        // Arabic letters, then a digit
+            "\u{628}\u{64e}\u{64a}\u{652}\u{62a}", // Arabic, with its vowel marks
+            "\u{5d1}\u{5bc}\u{5d9}\u{5ea}",         // Hebrew, with a point
+            "\u{e1a}\u{e49}\u{e32}\u{e19}\u{e51}", // Thai, a tone mark and a Thai digit
+            "\u{3c3}\u{3c0}\u{3af}\u{3c4}\u{3b9}", // Greek
+            "\u{c9d1}\u{c5d0}",                     // Hangul
+            "\u{30a2}\u{30c8}\u{30ea}\u{30a8}",     // Katakana
+            "\u{915}\u{93e}\u{92e}\u{967}",         // Devanagari, a vowel sign and a digit
+            "\u{995}\u{9cd}\u{9b7}\u{9e8}",         // Bengali, a virama and a digit
+            "\u{1200}\u{1369}",                     // Ethiopic, and a digit the set names
+            "l\u{b7}l",                              // a middle dot
+            "a\u{203f}b",                            // a connector
+            "1\u{301}",                              // a mark after a digit
         ] {
             minted(name);
         }
@@ -818,6 +857,10 @@ mod tests {
             "a\\b", "a>b", "a<b", "a(b)", "a#b", "a!b", "a?b", "a@b", "a%b", "a^b", "a~b", "a[b]", "a{b}", "a,b", "-attic",
             "--browser", "a\u{7}", "a\u{200d}b", "a\u{feff}", "a\u{e000}", "a\u{378}", "a\u{a0}b", "a\u{2029}b",
             "a\u{115f}", "a\u{fe0f}", "a\u{2800}", "\u{301}a", "a\u{202e}b",
+            // Refused since 45A: an emoji, a symbol, a punctuation mark and a number outside
+            // the set, a Braille pattern, and a mark of a script with nothing before it.
+            "a\u{1f600}", "\u{1f3e0}", "a\u{2603}", "a\u{20ac}", "a\u{3001}b", "a\u{ab}b\u{bb}", "\u{5d0}\u{5f3}",
+            "a\u{60c}b", "a\u{b2}", "a\u{bd}", "\u{2460}", "a\u{2801}", "\u{e49}a",
         ];
         for name in refused {
             refused_with(name, &refusal(name));
@@ -836,8 +879,9 @@ mod tests {
         }
 
         // A kept credential is read by `check_name` alone: under a name the mint refuses,
-        // a format character and a decomposed form among them, it still reads, under that name.
-        for name in ["it's", "-attic", "a;b", "$HOME", "ph\u{200d}one", "cafe\u{301}"] {
+        // a format character, a decomposed form, and a symbol and a punctuation mark outside
+        // ASCII that the mint admitted before 45A among them, it still reads, under that name.
+        for name in ["it's", "-attic", "a;b", "$HOME", "ph\u{200d}one", "cafe\u{301}", "a\u{2603}", "a\u{3001}b"] {
             assert!(check_minted_name(name).is_err() && check_name(name).is_ok(), "{name:?}");
             let kept = OperatorCredential {
                 name: name.to_string(),
@@ -847,6 +891,83 @@ mod tests {
             let read = OperatorCredential::parse(&kept.to_text()).unwrap_or_else(|e| panic!("{name:?}: {e:#}"));
             assert_eq!(read.name, name);
         }
+    }
+
+    /// **Outside ASCII, the mint admits a character only where it continues an identifier and
+    /// is printed as it is** (kottonllc/kotton#644; kottonllc/kotton#597, 40A, 45A), over every
+    /// code point outside ASCII, each property read from Unicode's tables here and not
+    /// through the predicate the mint reads:
+    ///
+    /// - each character the mint admits after a letter is in `XID_Continue`, is not
+    ///   default-ignorable, has no emoji presentation, and is printed by `shown` as it is;
+    /// - each it admits with nothing before it is all of that, and not a mark;
+    /// - each that is in `XID_Continue`, is not default-ignorable and is printed as it is
+    ///   after a letter is admitted there, where the name is in composed form;
+    /// - U+2800, every other Braille pattern, and the joiner and variation selectors
+    ///   `XID_Continue` holds are refused; of the symbols it admits two, of the punctuation
+    ///   marks only connectors and middle dots, and of the numbers that are not digits only
+    ///   letter numbers and ten others, as the mint's doc says.
+    #[test]
+    fn the_mint_admits_outside_ascii_only_what_continues_an_identifier() {
+        use icu_properties::props::{
+            DefaultIgnorableCodePoint, EmojiPresentation, GeneralCategory as Gc, GeneralCategoryGroup as G, XidContinue,
+        };
+        use icu_properties::{CodePointMapData, CodePointSetData};
+        use kotton_wire::note::shown;
+        let xid = CodePointSetData::new::<XidContinue>();
+        let ignorable = CodePointSetData::new::<DefaultIgnorableCodePoint>();
+        let emoji = CodePointSetData::new::<EmojiPresentation>();
+        let classes = CodePointMapData::<Gc>::new();
+        let (mut admitted, mut symbols, mut punctuation, mut numbers) = (0usize, Vec::new(), Vec::new(), Vec::new());
+        for c in (0x80..=0x10_ffffu32).filter_map(char::from_u32) {
+            let class = classes.get(c);
+            let after = format!("a{c}");
+            let alone = c.to_string();
+            let continues = xid.contains(c) && !ignorable.contains(c);
+            if check_minted_name(&after).is_ok() {
+                admitted += 1;
+                assert!(xid.contains(c), "{c:?} ({class:?}) was minted and is not in XID_Continue");
+                assert!(!ignorable.contains(c), "{c:?} ({class:?}) was minted and is default-ignorable");
+                assert!(!emoji.contains(c), "{c:?} ({class:?}) was minted and has emoji presentation");
+                assert_eq!(shown(&after), after, "{c:?} ({class:?}) was minted and is not printed as it is");
+                if G::Symbol.contains(class) {
+                    symbols.push(c);
+                }
+                if G::Punctuation.contains(class) {
+                    punctuation.push(c);
+                }
+                if G::Number.contains(class) && class != Gc::DecimalNumber {
+                    numbers.push(c);
+                }
+            } else if continues && shown(&after) == after && unicode_normalization::is_nfc(&after) {
+                panic!("{c:?} ({class:?}) continues an identifier, is printed as it is, and was refused");
+            }
+            if check_minted_name(&alone).is_ok() {
+                assert!(continues && !G::Mark.contains(class), "{c:?} ({class:?}) began a minted name");
+                assert_eq!(shown(&alone), alone, "{c:?} ({class:?}) began a minted name and is not printed as it is");
+            }
+        }
+        assert!(admitted > 140_000, "{admitted}: the tables were not read");
+        for c in '\u{2800}'..='\u{28ff}' {
+            assert!(check_minted_name(&format!("a{c}")).is_err(), "{c:?}, a Braille pattern, was minted");
+        }
+        // `XID_Continue` holds default-ignorable characters, a joiner and the variation
+        // selectors among them; the mint admits none.
+        for c in ['\u{200d}', '\u{fe0f}', '\u{e0100}'] {
+            assert!(xid.contains(c) && ignorable.contains(c), "{c:?}");
+            assert!(check_minted_name(&format!("a{c}")).is_err(), "{c:?} was minted");
+        }
+        // The doc's cost, read from the tables: two symbols, the connectors and the middle
+        // dots, and of the numbers that are not digits, the letter numbers and ten others.
+        assert_eq!(symbols, ['\u{2118}', '\u{212e}'], "the symbols the mint admits");
+        for c in &punctuation {
+            assert!(
+                classes.get(*c) == Gc::ConnectorPunctuation || matches!(c, '\u{b7}' | '\u{30fb}' | '\u{ff65}'),
+                "{c:?}: a punctuation mark the mint admits is a connector or a middle dot"
+            );
+        }
+        let others: Vec<char> = numbers.into_iter().filter(|c| classes.get(*c) != Gc::LetterNumber).collect();
+        assert_eq!(others, ('\u{1369}'..='\u{1371}').chain(['\u{19da}']).collect::<Vec<_>>(), "the other numbers");
     }
 
     /// **A minted key is completed from its instance's line, and the
