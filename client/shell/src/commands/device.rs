@@ -35,7 +35,7 @@ use crate::ui;
 /// device, short enough that a stray code expires.
 const ADD_TTL_SECS: u64 = 120;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Role {
     Issuer,
     Joiner,
@@ -77,7 +77,10 @@ fn known_verb(word: &str) -> bool {
 
 /// What the admitting side says of each drive the join did not hand: the device
 /// it joined, and the note's sentence for the node the drive is reached through.
+/// Both names are data in prose, printed by [`kotton_wire::note::quoted`]
+/// (kottonllc/kotton#597, 43A; kottonllc/kotton#643).
 pub(crate) fn not_handed_lines(joined: &str, not_handed: &[kotton_wire::note::RowNote]) -> Vec<String> {
+    let joined = kotton_wire::note::quoted(joined);
     not_handed
         .iter()
         .map(|n| {
@@ -505,15 +508,54 @@ fn revoke_target(args: &[String]) -> Revoke {
 const VAULT_POSTURE_LINE: &str =
     "it keeps what it cannot read: your data reaches it sealed, and no key to open it does.";
 
-/// The line a pairing ends on when this side added the other. Bare `sync` already
-/// reaches every paired node (`SyncCommand`'s no-argument branch), so that is what it
-/// says to run; the named form is only for syncing this one peer, and it names the
-/// peer by the word `sync`'s usage and `peer list`'s column both use.
-fn issuer_complete_line(remote: &str) -> String {
+/// The line a pairing ends on when this side added the other: bare `sync`, which takes
+/// no word after it (`SyncCommand`), and the joined device's label, `remote`, the word
+/// `peer list` heads its column with and `peer show` takes. The label is data in prose,
+/// printed by [`kotton_wire::note::quoted`], and is in no command
+/// (kottonllc/kotton#597, 43A and 51A).
+fn issuer_complete_line(node: &kotton_wire::peer::PairedNode) -> String {
     format!(
-        "run `sync` when you want to copy data to it — its remote is `{remote}`, \
-         and `sync {remote}` syncs with it alone."
+        "run `sync` when you want to copy data to it — its remote is {}.",
+        kotton_wire::note::quoted(&node.id)
     )
+}
+
+/// What a browser that gave no name is called in its greeting: the shell's own words,
+/// not a name, so they are printed with no delimiter (kottonllc/kotton#597, 55B).
+const UNNAMED_BROWSER: &str = "your browser";
+
+/// The greeting a join's completion hands the renderer for `role`: its words, and the
+/// joined device's label, last on its line, by [`kotton_wire::note::quoted`]
+/// (kottonllc/kotton#597, 43A and 55B; kottonllc/kotton#643). `label` is `None` only
+/// for a browser that gave no name, which is greeted as [`UNNAMED_BROWSER`].
+fn greeting(role: Role, label: Option<&str>) -> (&'static str, String) {
+    let words = match role {
+        Role::Issuer | Role::Box | Role::Vault => "added to your identity,",
+        Role::OwnVault => "you keep at your own vault now —",
+        Role::Joiner => "you're in — paired with",
+        Role::Browser => "the phone is in —",
+    };
+    (words, label.map_or_else(|| UNNAMED_BROWSER.to_string(), kotton_wire::note::quoted))
+}
+
+/// The lines a join's completion hands the renderer under the greeting for `role`,
+/// made from the joined `node`: its label, printed in prose by
+/// [`kotton_wire::note::quoted`], and its DID, the only one of its names a command here
+/// takes (kottonllc/kotton#597, 51A and 52C). `keeps` is what a vault keeps, read for
+/// [`Role::Vault`] and [`Role::OwnVault`] only.
+///
+/// What the tests hold is these strings, as `run_ceremony_to` hands them to
+/// [`ui::body`]: which of the node's names each line gives, and that every command
+/// carries the DID. How `ui::body` wraps a line to the column is the renderer's, and is
+/// held there (kottonllc/kotton#597, 58A; kottonllc/kotton#654).
+fn completion_lines(role: Role, node: &kotton_wire::peer::PairedNode, keeps: Option<&Kept>) -> Vec<String> {
+    match role {
+        Role::Issuer | Role::Box => vec![issuer_complete_line(node)],
+        Role::Vault => vault_complete_lines(node, keeps),
+        Role::OwnVault => vec![vault_keeps_line(node, keeps)],
+        Role::Joiner => vec!["run `sync` to pull your data when you want it.".to_string()],
+        Role::Browser => Vec::new(),
+    }
 }
 
 /// Drive a ceremony stream to completion: render each state, prompt the human on the
@@ -521,10 +563,10 @@ fn issuer_complete_line(remote: &str) -> String {
 /// `device` command and the first-run "join an identity" onboarding branch so both
 /// use the identical committed-SAS flow (no drift).
 /// What the ceremony says under the greeting when a vault is admitted: its
-/// posture in words, then what it keeps ([`vault_keeps_line`]). One function,
-/// so the test holds what `run_ceremony` prints and not a constant beside it.
-fn vault_complete_lines(node_id: &str, keeps: Option<&Kept>) -> Vec<String> {
-    vec![VAULT_POSTURE_LINE.to_string(), vault_keeps_line(node_id, keeps)]
+/// posture in words, then what it keeps ([`vault_keeps_line`]), as handed to the
+/// renderer ([`completion_lines`]).
+fn vault_complete_lines(node: &kotton_wire::peer::PairedNode, keeps: Option<&Kept>) -> Vec<String> {
+    vec![VAULT_POSTURE_LINE.to_string(), vault_keeps_line(node, keeps)]
 }
 
 /// What a vault just enrolled keeps of the person's (kotton-protocol's
@@ -544,10 +586,16 @@ struct Kept {
 /// says that, with the two verbs that do it. When no vault lists `personal` —
 /// it could not be made at this, the first, because a vault did not answer —
 /// the line says what `status` says of it, not that the vault holds nothing.
-fn vault_keeps_line(node_id: &str, keeps: Option<&Kept>) -> String {
+///
+/// The vault `node`'s label is printed in prose by [`kotton_wire::note::quoted`]. The
+/// two commands take its DID, whatever the label is: `--on` and `--to` take a DID to
+/// this vault alone, and the DID a join records is one plain word, made from the key
+/// (kottonllc/kotton#597, 52C). A label is in no command here.
+fn vault_keeps_line(node: &kotton_wire::peer::PairedNode, keeps: Option<&Kept>) -> String {
     let personal = kotton_wire::ipc::FIRST_DRIVE_NAME;
+    let did = &node.device_did;
     match keeps {
-        None => format!("`drive list` says what '{node_id}' keeps of yours."),
+        None => format!("`drive list` says what {} keeps of yours.", kotton_wire::note::quoted(&node.id)),
         Some(k) if k.here.iter().any(|n| n == personal) => format!(
             "it keeps `{personal}`, your first drive: this device's files sync with it there. run `sync` when you want \
              to copy data to it."
@@ -556,8 +604,8 @@ fn vault_keeps_line(node_id: &str, keeps: Option<&Kept>) -> String {
             kotton_wire::ipc::PinNotice::NotFound { drive: personal.to_string() }.said_after_enrol()
         }
         Some(k) if k.here.is_empty() => format!(
-            "it holds nothing of yours until a drive is made or moved there: `drive create <name> --on {node_id}` \
-             makes one, and `drive move <name> --to {node_id}` moves one."
+            "it holds nothing of yours until a drive is made or moved there: `drive create <name> --on {did}` \
+             makes one, and `drive move <name> --to {did}` moves one."
         ),
         Some(k) => format!("it keeps {}.", k.here.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")),
     }
@@ -722,7 +770,8 @@ pub(crate) async fn run_ceremony_to(
                     // answer lands; there is no transfer and no node to name.
                     return if matches {
                         ui::blank();
-                        ui::greet("the phone is in —", peer_label.as_deref().unwrap_or("your browser"));
+                        let (words, name) = greeting(role, peer_label.as_deref());
+                        ui::greet(words, &name);
                         ui::body("it reaches home with no digits shown from now on.");
                         Ok((CommandOutput::success(), None, None))
                     } else {
@@ -734,28 +783,14 @@ pub(crate) async fn run_ceremony_to(
             UserResponse::PairTransferring => ui::body("setting things up…"),
             UserResponse::PairingComplete { node, relay_offer, not_handed, .. } => {
                 ui::blank();
-                match role {
-                    Role::Issuer | Role::Box => {
-                        ui::greet("added to your identity,", &node.id);
-                        ui::body(&issuer_complete_line(&node.id));
-                    }
-                    Role::Vault => {
-                        ui::greet("added to your identity,", &node.id);
-                        let keeps = kept_at(client, user, &node).await;
-                        for line in vault_complete_lines(&node.id, keeps.as_ref()) {
-                            ui::body(&line);
-                        }
-                    }
-                    Role::OwnVault => {
-                        ui::greet("you keep at your own vault now —", &node.id);
-                        let keeps = kept_at(client, user, &node).await;
-                        ui::body(&vault_keeps_line(&node.id, keeps.as_ref()));
-                    }
-                    Role::Joiner => {
-                        ui::greet("you're in — paired with", &node.id);
-                        ui::body("run `sync` to pull your data when you want it.");
-                    }
-                    Role::Browser => ui::greet("the phone is in —", &node.id),
+                let (words, name) = greeting(role, Some(&node.id));
+                ui::greet(words, &name);
+                let keeps = match role {
+                    Role::Vault | Role::OwnVault => kept_at(client, user, &node).await,
+                    _ => None,
+                };
+                for line in completion_lines(role, &node, keeps.as_ref()) {
+                    ui::body(&line);
                 }
                 for line in not_handed_lines(&node.id, &not_handed) {
                     ui::body(&line);
@@ -1106,6 +1141,22 @@ mod tests {
     use crate::commands::{Command, ExitCode};
     use kotton_schemas::membership::Posture;
 
+    /// A DID a join records: the derivation's string for a key.
+    const DID: &str = "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX";
+
+    /// A node a join completes with: `label`, under [`DID`], which is never its label.
+    fn joined(label: &str) -> kotton_wire::peer::PairedNode {
+        kotton_wire::peer::PairedNode {
+            id: label.into(),
+            device_did: kotton_wire::did::Did::parse(DID).unwrap(),
+            public_key: [0xab; 32],
+            paired_at: 0,
+            addresses: vec![],
+            relay_url: None,
+            posture: None,
+        }
+    }
+
     /// **A note's sentence on `device list`, `peer list`, `drive list` and a join's
     /// admitting side names a verb this shell registers, with the note's name**
     /// (kottonllc/kotton#605), for every key vector the Ed25519 rule refuses: the noun is
@@ -1131,7 +1182,7 @@ mod tests {
                 assert_eq!(said.len(), 1, "{name}");
                 assert!(said[0].contains("names no Ed25519 key") && said[0].contains(&typed), "{name}: {said:?}");
                 let lines = super::not_handed_lines("laptop", std::slice::from_ref(&note));
-                assert!(lines[0].contains("laptop was not handed the drive") && lines[0].contains(&typed), "{name}: {lines:?}");
+                assert!(lines[0].contains("`laptop` was not handed the drive") && lines[0].contains(&typed), "{name}: {lines:?}");
             }
         }
         let stands = kotton_wire::note::RowNote {
@@ -1167,8 +1218,8 @@ mod tests {
     /// `None` where the line gives none. It reads only the backtick span the sentence
     /// opens as a command: the line's last span, ending the line with ` removes it`, and
     /// starting with the verb's words. A name between backticks holds no backtick of its
-    /// own (43A), so the spans are the line's own; the join's line is read with a leading
-    /// device name that holds none (kottonllc/kotton#643). It asks nothing of the text
+    /// own (43A), so the spans are the line's own, the join's leading device name among
+    /// them (kottonllc/kotton#643). It asks nothing of the text
     /// before the span: each condition here can only turn a command the line gives into
     /// none, which the no-command tests would then pass on, so it holds no more than a
     /// command needs.
@@ -1395,7 +1446,7 @@ mod tests {
         for (label, _) in LABELS {
             let lines = super::not_handed_lines("laptop", &[kotton_wire::note::RowNote::names_no_key(label)]);
             let quoted = kotton_wire::note::quoted(label);
-            assert!(lines[0].starts_with(&format!("laptop was not handed the drive reached through {quoted}: ")), "{lines:?}");
+            assert!(lines[0].starts_with(&format!("`laptop` was not handed the drive reached through {quoted}: ")), "{lines:?}");
         }
     }
 
@@ -1576,7 +1627,7 @@ mod tests {
         // The admit runs the vault's ceremony, and that ceremony's success says the
         // posture before what to do next.
         assert!(ADMIT_ROLE == Role::Vault, "`drive enrol` must run the vault's ceremony");
-        let said = vault_complete_lines("did:key:zV", Some(&Kept { here: vec![], personal_anywhere: true }));
+        let said = vault_complete_lines(&joined("vault"), Some(&Kept { here: vec![], personal_anywhere: true }));
         assert_eq!(said.first().map(String::as_str), Some(VAULT_POSTURE_LINE), "{said:?}");
         assert_eq!(said.len(), 2, "{said:?}");
     }
@@ -1589,18 +1640,18 @@ mod tests {
     #[test]
     fn the_line_after_enrol_says_a_later_vault_holds_nothing_until_a_drive_is_put_there() {
         let kept = |here: &[&str], personal_anywhere: bool| Kept { here: here.iter().map(|n| n.to_string()).collect(), personal_anywhere };
-        let first = vault_keeps_line("home", Some(&kept(&["personal"], true)));
+        let first = vault_keeps_line(&joined("home"), Some(&kept(&["personal"], true)));
         assert!(first.contains("keeps `personal`") && first.contains("sync"), "{first}");
-        let later = vault_keeps_line("office", Some(&kept(&[], true)));
+        let later = vault_keeps_line(&joined("office"), Some(&kept(&[], true)));
         assert!(later.starts_with("it holds nothing of yours until a drive is made or moved there"), "{later}");
-        assert!(later.contains("`drive create <name> --on office`") && later.contains("`drive move <name> --to office`"), "{later}");
+        assert!(later.contains(&format!("`drive create <name> --on {DID}`")) && later.contains(&format!("`drive move <name> --to {DID}`")), "{later}");
         assert!(!later.contains("sync"), "a vault that holds nothing is offered a sync: {later}");
-        let unknown = vault_keeps_line("office", None);
+        let unknown = vault_keeps_line(&joined("office"), None);
         assert!(unknown.contains("`drive list`") && !unknown.contains("holds nothing"), "{unknown}");
-        assert_eq!(vault_keeps_line("office", Some(&kept(&["photos"], true))), "it keeps `photos`.");
+        assert_eq!(vault_keeps_line(&joined("office"), Some(&kept(&["photos"], true))), "it keeps `photos`.");
         // The first enrolment could not make `personal`: what `status` says
         // of it, never that a drive made or moved there is all it lacks.
-        let unmade = vault_keeps_line("home", Some(&kept(&[], false)));
+        let unmade = vault_keeps_line(&joined("home"), Some(&kept(&[], false)));
         assert!(unmade.starts_with("it holds nothing yet, and none of your vaults has listed 'personal'"), "{unmade}");
         assert!(unmade.contains("add or enrol that vault first") && unmade.contains("only if no vault of yours holds it"), "{unmade}");
         assert!(!unmade.contains("until a drive is made or moved there"), "{unmade}");
@@ -1619,14 +1670,144 @@ mod tests {
         assert_eq!(said[1], format!("to stand this device there too: `relay set {line}`"));
     }
 
-    /// The pairing screen says bare `sync`, which reaches every paired node, and
-    /// names the peer by the word `peer list` heads it with for the one-peer form.
+    /// **The issuer's line says bare `sync` and names the remote, and gives no command
+    /// with it** (kottonllc/kotton#597, 51A): `sync` takes no word after it, so the line
+    /// ends at the label, printed by `quoted`.
     #[test]
-    fn the_pairing_line_names_the_remote_sync_takes() {
-        let line = issuer_complete_line("my-vps");
-        assert!(line.starts_with("run `sync` "), "{line}");
-        assert!(line.contains("its remote is `my-vps`"), "{line}");
-        assert!(line.contains("`sync my-vps` syncs with it alone"), "{line}");
+    fn the_pairing_line_says_bare_sync_and_names_the_remote() {
+        let line = issuer_complete_line(&joined("my-vps"));
+        assert_eq!(line, "run `sync` when you want to copy data to it — its remote is `my-vps`.");
+    }
+
+    /// The roles a join admits, each with a completion of its own.
+    const ROLES: [Role; 6] = [Role::Issuer, Role::Box, Role::Vault, Role::OwnVault, Role::Joiner, Role::Browser];
+
+    /// The label every other is held against: one plain word, in no fixed text.
+    const PLAIN: &str = "laptop";
+
+    /// Every string a join's completion hands the renderer for `role` and a node
+    /// labelled `label`, in order: the greeting (first), then the lines under it for each
+    /// answer `drive list` may give a vault, then the line for a drive the join did not
+    /// hand.
+    fn completion_said(role: Role, label: &str) -> Vec<String> {
+        let kept = |here: &[&str], personal_anywhere: bool| Kept { here: here.iter().map(|n| n.to_string()).collect(), personal_anywhere };
+        let node = joined(label);
+        let (words, name) = super::greeting(role, Some(&node.id));
+        let mut lines = vec![format!("{words} {name}")];
+        for keeps in [None, Some(kept(&["personal"], true)), Some(kept(&[], true)), Some(kept(&[], false)), Some(kept(&["photos"], true))] {
+            lines.extend(super::completion_lines(role, &node, keeps.as_ref()));
+        }
+        lines.extend(super::not_handed_lines(label, &[kotton_wire::note::RowNote::names_no_key("vps-1")]));
+        lines
+    }
+
+    /// The backtick spans of `line`: the text between each opening backtick and its close.
+    fn spans(line: &str) -> Vec<&str> {
+        line.split('`').skip(1).step_by(2).collect()
+    }
+
+    /// **Every string a join's completion hands the renderer gives the joined device's
+    /// label as data, and none puts it in a command** (kottonllc/kotton#643;
+    /// kottonllc/kotton#597, 39A, 43A, 51A, 52C, 53A, 55B and 58A), for each role a join
+    /// admits, the Browser's greeting among them, over labels that hold a character of
+    /// each class `shown` escapes, labels that are not one plain word, and labels that
+    /// begin with a verb's words, each on a node whose DID is not its label:
+    ///
+    /// - the greeting ends with the label by `quoted`, and every line, the greeting too,
+    ///   is the plain-word label's line with that label's `quoted` print replaced by this
+    ///   label's; so no line holds a character `shown` escapes;
+    /// - every line holds as many backticks as the plain-word label's, in the same spans;
+    /// - each command, with `<name>` filled by a plain word, reads back through the
+    ///   shell's parser as one command with no redirect, and through `drive`'s own parser
+    ///   with the joined node's DID after `--on` and `--to`.
+    ///
+    /// What is held is the strings as handed to `ui::body` and `ui::greet`; how the
+    /// renderer wraps them is kottonllc/kotton#654's.
+    #[test]
+    fn a_joins_completion_prints_the_label_as_data_and_in_no_command() {
+        use kotton_wire::note::{quoted, shown};
+        let verbs = names_beginning_with_a_verb();
+        let labels: Vec<&str> =
+            LABELS.iter().map(|(l, _)| *l).chain(NOT_ONE_WORD.iter().copied()).chain(verbs.iter().map(String::as_str)).collect();
+        let mut commands = 0;
+        for role in ROLES {
+            let plain = completion_said(role, PLAIN);
+            for label in &labels {
+                let said = completion_said(role, label);
+                assert_eq!(said.len(), plain.len(), "{role:?} {label:?}");
+                let printed = shown(label);
+                assert!(said[0].ends_with(&format!(" {}", quoted(label))), "{role:?}: the label is not last on its greeting: {}", said[0]);
+                for (line, plain) in said.iter().zip(&plain) {
+                    assert_eq!(*line, plain.replace(&quoted(PLAIN), &quoted(label)), "{role:?}: a label printed outside its quote");
+                }
+                for (line, plain) in said.iter().zip(&plain) {
+                    for c in label.chars().filter(|c| !printed.contains(*c)) {
+                        assert!(!line.contains(c), "{role:?}: {c:?} was printed as it is: {line}");
+                    }
+                    assert_eq!(line.matches('`').count(), plain.matches('`').count(), "{role:?}: {line}");
+                    let inner = quoted(label);
+                    let inner = &inner[1..inner.len() - 1];
+                    let ours: Vec<&str> = spans(line).into_iter().map(|s| if s == inner { PLAIN } else { s }).collect();
+                    assert_eq!(ours, spans(plain), "{role:?}: the spans are not the plain word's: {line}");
+                }
+            }
+            for line in labels.iter().chain([&PLAIN]).flat_map(|l| completion_said(role, l)) {
+                for span in spans(&line) {
+                    // A command this line composes for the joined node; the fixed words
+                    // `PinNotice` says, which name `<vault>` as usage, are not about it.
+                    if !span.contains("<name>") {
+                        continue;
+                    }
+                    let typed = span.replace("<name>", "photos");
+                    let chain = crate::parser::parse_command_chain(&typed);
+                    assert_eq!(chain.len(), 1, "`{typed}` is {} commands", chain.len());
+                    let read = crate::utils::parse_command(&crate::utils::expand_vars(&chain[0].command, &Default::default()));
+                    let (read, redirect) = crate::executor::parse_redirect(read);
+                    assert!(redirect.is_none(), "`{typed}` redirects");
+                    assert_eq!(read[0], "drive", "`{typed}`");
+                    use crate::commands::drive::Line;
+                    match crate::commands::drive::parse(&read[1..]) {
+                        Ok(Line::Create { name: "photos", on: Some(on) }) => assert_eq!(on, DID, "`{typed}`"),
+                        Ok(Line::Move { name: "photos", to, from: None }) => assert_eq!(to, DID, "`{typed}`"),
+                        other => panic!("`{typed}` reads as {other:?}"),
+                    }
+                    commands += 1;
+                }
+            }
+        }
+        assert_eq!(commands, 4 * (labels.len() + 1), "a vault's two commands, for each of the two vault roles and each label");
+    }
+
+    /// **A completion's commands take the joined node's DID, not its label**
+    /// (kottonllc/kotton#597, 52C; kottonllc/kotton#643): the lines are made from the
+    /// node, and for a node whose label is a plain word that is not its DID, every
+    /// command span in every role's lines carries the DID and not the label.
+    #[test]
+    fn a_completions_commands_take_the_nodes_did_and_not_its_label() {
+        let kept = Kept { here: vec![], personal_anywhere: true };
+        let node = joined("office");
+        let mut commands = 0;
+        for role in ROLES {
+            for line in super::completion_lines(role, &node, Some(&kept)).iter().chain(&super::completion_lines(role, &node, None)) {
+                for span in spans(line).into_iter().filter(|s| s.contains(" --on ") || s.contains(" --to ")) {
+                    let words: Vec<&str> = span.split(' ').collect();
+                    assert_eq!(words.last(), Some(&DID), "{role:?}: {span}");
+                    assert!(!words.contains(&"office"), "{role:?}: the label is in a command: {span}");
+                    commands += 1;
+                }
+            }
+        }
+        assert_eq!(commands, 4, "a vault's two commands, for each of the two vault roles");
+    }
+
+    /// **A browser that gave no name is greeted in the shell's own words** (kottonllc/kotton#597,
+    /// 55B): "the phone is in — your browser", with no delimiter, since it is not a name.
+    #[test]
+    fn a_browser_with_no_name_is_greeted_in_the_shells_words() {
+        let (words, name) = super::greeting(Role::Browser, None);
+        assert_eq!(format!("{words} {name}"), "the phone is in — your browser");
+        let (_, named) = super::greeting(Role::Browser, Some("your browser"));
+        assert_eq!(named, "`your browser`");
     }
 
     #[test]

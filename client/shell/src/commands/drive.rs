@@ -47,7 +47,7 @@ const VERBS: &[Verb] = &[
 
 /// A line of `drive`, parsed.
 #[derive(Debug, PartialEq, Eq)]
-enum Line<'a> {
+pub(super) enum Line<'a> {
     Create { name: &'a str, on: Option<&'a str> },
     List { json: bool },
     Show { name: &'a str, json: bool },
@@ -82,7 +82,7 @@ pub(super) fn split_invite(words: impl IntoIterator<Item = String>) -> Option<(S
 }
 
 /// The words after `drive`, as a [`Line`], or the usage refusal (exit 2).
-fn parse(args: &[String]) -> Result<Line<'_>, CommandOutput> {
+pub(super) fn parse(args: &[String]) -> Result<Line<'_>, CommandOutput> {
     let json = args.iter().any(|a| a == "--json");
     let words: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a != "--json").collect();
     let usage = |what: &str| Err(CommandOutput::usage(what.to_string(), Some(USAGE.into())));
