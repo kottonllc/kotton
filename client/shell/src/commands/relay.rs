@@ -22,6 +22,35 @@ use crate::state::ShellState;
 
 pub struct RelayCommand;
 
+/// A line of `relay` for this device's own relay, read: what [`RelayCommand`] runs once
+/// none of the operator's verbs ([`super::operated::relay_operator`]) has read it, and
+/// `set` is none of those.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Line<'a> {
+    /// `relay` or `relay status`.
+    Status,
+    /// `relay set <code>`: a relay's line or a relay's invite, to stand this device there,
+    /// held to the key the code names.
+    SetCode(&'a str),
+    /// `relay set <url>`.
+    SetUrl(&'a str),
+    /// `relay clear`.
+    Clear,
+}
+
+/// The words after `relay`, as a [`Line`], or `None` for the usage refusal. The one
+/// reading of this device's verbs: [`RelayCommand`] runs what it gives, and a test reads
+/// a printed `relay set` back through it.
+pub(super) fn read<'a>(words: &[&'a str]) -> Option<Line<'a>> {
+    match words {
+        [] | ["status"] => Some(Line::Status),
+        ["set", code] if code.starts_with("kotton-") => Some(Line::SetCode(code)),
+        ["set", url] => Some(Line::SetUrl(url)),
+        ["clear"] => Some(Line::Clear),
+        _ => None,
+    }
+}
+
 #[async_trait]
 impl Command for RelayCommand {
     fn help_text(&self) -> &'static str {
@@ -37,9 +66,9 @@ impl Command for RelayCommand {
         }
         let mut client = state.client.lock().await;
 
-        match words.as_slice() {
+        match read(&words) {
             // `relay` / `relay status` — show the configured relay + reachability.
-            [] | ["status"] => {
+            Some(Line::Status) => {
                 let info = client
                     .node_rendezvous_status()
                     .await
@@ -60,7 +89,7 @@ impl Command for RelayCommand {
 
             // `relay set <code>` — a relay's line or a relay's invite: stand
             // this device there, held to the key the code names.
-            ["set", code] if code.starts_with("kotton-") => {
+            Some(Line::SetCode(code)) => {
                 let user_id = state.user_id.clone();
                 client
                     .relay_stand(&user_id, code)
@@ -80,19 +109,19 @@ impl Command for RelayCommand {
             }
 
             // `relay set <url>` — point this device at a rendezvous relay.
-            ["set", url] => {
+            Some(Line::SetUrl(url)) => {
                 client
                     .node_rendezvous_set(Some(url))
                     .await
                     .map_err(|e| anyhow::anyhow!("relay set: {e}"))?;
                 Ok(CommandOutput::shapes(vec![Out::Confirm {
                     action: "relay set".into(),
-                    subject: (*url).to_string(),
+                    subject: url.to_string(),
                 }]))
             }
 
             // `relay clear` — remove the relay; fall back to direct-only.
-            ["clear"] => {
+            Some(Line::Clear) => {
                 client
                     .node_rendezvous_set(None)
                     .await
@@ -103,7 +132,7 @@ impl Command for RelayCommand {
                 }]))
             }
 
-            _ => Ok(CommandOutput::fail(
+            None => Ok(CommandOutput::fail(
                 format!("usage: relay [set <url> | clear | status] | {}", super::operated::RELAY_OPERATOR_USAGE),
                 None,
             )),

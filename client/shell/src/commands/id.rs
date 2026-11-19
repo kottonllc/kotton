@@ -67,6 +67,16 @@ pub fn id_answer(sub: &str) -> Option<IdAnswer> {
     }
 }
 
+/// The identity `id use <name>` names, from the words after `id`, or `None` for any
+/// other line. The one reading of `use`: [`IdCommand`] switches to what it gives, and a
+/// test reads a printed `kotton id use` back through it, after `kotton`.
+pub(super) fn used<'a>(parts: &[&'a str]) -> Option<&'a str> {
+    match parts {
+        ["use", name] => Some(name),
+        _ => None,
+    }
+}
+
 const USAGE: &str = "usage: id list | id use <name> | id lock | id add-recovery | id rotate | id recover";
 
 #[async_trait]
@@ -98,8 +108,8 @@ impl Command for IdCommand {
                     rows,
                 }]))
             }
-            ["use", name] => {
-                if *name == state.user_id {
+            _ if let Some(name) = used(&parts) => {
+                if name == state.user_id {
                     return Ok(CommandOutput::shapes(vec![Out::Note(format!(
                         "already acting as '{name}'"
                     ))]));
@@ -126,7 +136,7 @@ impl Command for IdCommand {
                     return Ok(CommandOutput::error(1, format!("could not record the active identity: {e}")));
                 }
                 // Signal the REPL loop to re-establish as this identity.
-                state.pending_identity_switch = Some((*name).to_string());
+                state.pending_identity_switch = Some(name.to_string());
                 Ok(CommandOutput::shapes(vec![Out::Progress(format!(
                     "switching to '{name}'…"
                 ))]))
