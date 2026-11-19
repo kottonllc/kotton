@@ -2020,7 +2020,7 @@ where
     let recv: Box<dyn AsyncRead + Unpin + Send> = Box::new(recv);
 
     let mut channel =
-        crate::pair_channel::joiner_establish_with(send, recv, sid, confirmer, pake.as_deref())
+        crate::pair_channel::joiner_establish_with(send, recv, sid, confirmer, clean_device_name, pake.as_deref())
             .await
             .map_err(|e| anyhow!("pairing handshake failed: {e}"))?;
 
@@ -2090,9 +2090,14 @@ where
         kotton_crypto::DidKeyMethod::from_public_key_bytes(&attestation.identity_pubkey)
             .map_err(|e| anyhow!("derive root did: {e}"))?;
 
-    // The issuer announced its own name during establish; adopt it (falling back
-    // to a placeholder if it advertised none). Never typed by this device.
-    let issuer_name = clean_device_name(channel.peer_label().unwrap_or_default());
+    // The issuer announced its own name during establish, and the channel named
+    // it by `clean_device_name` before the person was asked: the row is recorded
+    // under that name, the one the prompt showed (kottonllc/kotton#652). Never
+    // typed by this device.
+    let issuer_name = match channel.peer_label() {
+        Some(name) => name.to_owned(),
+        None => clean_device_name(""),
+    };
     let now = now_secs();
     let issuer_node = PairedNode {
         id: issuer_name,
@@ -2234,7 +2239,8 @@ use kotton_common::time::now_secs;
 
 /// Normalize a peer-announced device name before it becomes a `PairedNode.id`:
 /// trim whitespace, cap at 64 chars, and fall back to `"device"` when the peer
-/// advertised nothing usable. The name is cosmetic (a label in the node table),
+/// advertised nothing usable. A joiner applies it once, in the channel, to the
+/// issuer's label: the name its person confirms is this one (kottonllc/kotton#652). The name is cosmetic (a label in the node table),
 /// so this only needs to keep it sane — identity rests on the keys, not the name.
 fn clean_device_name(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -2930,11 +2936,13 @@ mod relayed_tests {
     use kotton_schemas::membership::Posture;
     use std::sync::Mutex;
 
-    struct Yes(Mutex<Option<u32>>);
+    /// Says yes, holding the digits it was shown and the label beside them.
+    struct Yes(Mutex<Option<u32>>, Mutex<Option<String>>);
     #[async_trait]
     impl SasConfirmer for Yes {
-        async fn confirm(&self, sas: u32, _label: Option<&str>) -> bool {
+        async fn confirm(&self, sas: u32, label: Option<&str>) -> bool {
             *self.0.lock().unwrap() = Some(sas);
+            *self.1.lock().unwrap() = label.map(str::to_owned);
             true
         }
     }
@@ -3008,6 +3016,20 @@ mod relayed_tests {
         answering: Answering,
         kept_within: Duration,
     ) -> (Result<EnrolledNode>, Result<JoinedNode>, u32, u32) {
+        let (e, j, si, sj, _) = run_labelled("laptop", code_issuer, code_joiner, pin, answering, kept_within).await;
+        (e, j, si, sj)
+    }
+
+    /// [`run_answering`], with the issuer announcing `issuer_label`; also
+    /// returns the label the joiner's confirmer was shown beside the digits.
+    async fn run_labelled(
+        issuer_label: &str,
+        code_issuer: &str,
+        code_joiner: &str,
+        pin: impl FnOnce([u8; 32]) -> Option<[u8; 32]>,
+        answering: Answering,
+        kept_within: Duration,
+    ) -> (Result<EnrolledNode>, Result<JoinedNode>, u32, u32, Option<String>) {
         let (a, b) = a_relay_between();
         let issuer_identity = key();
         let issuer_op = key();
@@ -3016,8 +3038,8 @@ mod relayed_tests {
         let warm = key();
         let rv_i = rendezvous_in(code_issuer, &ENROL_DOMAIN).unwrap();
         let rv_j = rendezvous_in(code_joiner, &ENROL_DOMAIN).unwrap();
-        let yes_i = Yes(Mutex::new(None));
-        let yes_j = Yes(Mutex::new(None));
+        let yes_i = Yes(Mutex::new(None), Mutex::new(None));
+        let yes_j = Yes(Mutex::new(None), Mutex::new(None));
         let issuer_side = async {
             let (read, write) = tokio::io::split(a);
             issuer_over(
@@ -3027,7 +3049,7 @@ mod relayed_tests {
                 rv_i.sid,
                 None,
                 Posture::BlindStorage,
-                "laptop",
+                issuer_label,
                 None,
                 0,
                 Vec::new(),
@@ -3078,7 +3100,37 @@ mod relayed_tests {
         };
         let si = yes_i.0.lock().unwrap().unwrap_or(u32::MAX);
         let sj = yes_j.0.lock().unwrap().unwrap_or(u32::MAX);
-        (e, j, si, sj)
+        let shown = yes_j.1.lock().unwrap().clone();
+        (e, j, si, sj, shown)
+    }
+
+    /// **The label the joiner is asked about is the name the issuer's row is
+    /// recorded under** (kottonllc/kotton#652; #597, 54C): for labels the store
+    /// trims and cuts — whitespace around it, more than 64 characters, a cut that
+    /// ends on a space, and nothing at all — the label beside the digits is
+    /// `clean_device_name`'s, and the joined row's name is that same string. A
+    /// plain label is shown and recorded as it is.
+    #[tokio::test]
+    async fn the_label_a_joiner_is_asked_about_is_the_name_recorded() {
+        let long = "x".repeat(70);
+        let cut_on_a_space = format!("{} {}", "y".repeat(63), "z".repeat(10));
+        let cases: [(&str, String); 6] = [
+            ("laptop", "laptop".into()),
+            ("  laptop\t\n", "laptop".into()),
+            (&long, "x".repeat(64)),
+            (&cut_on_a_space, format!("{} ", "y".repeat(63))),
+            ("   ", "device".into()),
+            ("", "device".into()),
+        ];
+        let code = normalize_code("ripple canyon ember");
+        for (announced, recorded) in &cases {
+            let (e, j, _, _, shown) =
+                run_labelled(announced, &code, &code, |_| None, Answering::Kept, JOINER_KEEPS_WITHIN).await;
+            e.expect("issuer");
+            let j = j.expect("joiner");
+            assert_eq!(&j.peer.id, recorded, "{announced:?}: recorded under another name");
+            assert_eq!(shown.as_deref(), Some(j.peer.id.as_str()), "{announced:?}: the prompt was not shown the name recorded");
+        }
     }
 
     /// The headline: an invite enrols a blind node over a bare byte stream, with

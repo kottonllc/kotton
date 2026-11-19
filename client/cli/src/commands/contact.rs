@@ -205,8 +205,7 @@ async fn drive(
                 sas,
                 peer_label,
             } => {
-                let who = peer_label.as_deref().unwrap_or("they");
-                println!("\nSix digits — check {who} sees the same:\n");
+                println!("\n{}\n", compare_line(peer_label.as_deref()));
                 println!("    {}\n", format_sas(sas));
                 let matched = ask("Do they match? [y/N] ")?;
                 client
@@ -232,6 +231,14 @@ async fn drive(
     ))
 }
 
+/// The line over the six digits, before the person answers: the other side's
+/// label as the `PairShowCode` frame carries it, as data by
+/// [`kotton_wire::note::quoted`] (kottonllc/kotton#652); with none, "they".
+fn compare_line(peer_label: Option<&str>) -> String {
+    let who = peer_label.map_or_else(|| "they".to_string(), kotton_wire::note::quoted);
+    format!("Six digits — check {who} sees the same:")
+}
+
 /// `"472 913"` — grouped, because it is read aloud.
 fn format_sas(sas: u32) -> String {
     let s = format!("{sas:06}");
@@ -249,7 +256,57 @@ fn ask(prompt: &str) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{contact_did, Named};
+    use super::{compare_line, contact_did, Named};
+
+    /// The shell's labels a join's lines and prompts are held over
+    /// (`client/shell/src/commands/device.rs`, `LABELS`), copied here because the
+    /// CLI does not link the shell (one shared set is kottonllc/kotton#661): each
+    /// holds a character of a class `shown` prints by its escape
+    /// (kottonllc/kotton#597, 42A), or a backtick, a letter of another script and
+    /// a quote, which are printed as they are.
+    const LABELS: [&str; 13] = [
+        "bell\u{7}",
+        "two\nlines",
+        "\u{202e}enohp",
+        "ph\u{200d}one",
+        "ph\u{e000}one",
+        "ph\u{378}one",
+        "ph\u{2029}one",
+        "ph\u{115f}one",
+        "ph\u{2800}one",
+        "\u{301}phone",
+        "a\\b",
+        "a`b",
+        "\u{5c4b}\u{6839}'s",
+    ];
+
+    /// **The line over the digits gives the other side's label as data**
+    /// (kottonllc/kotton#652; kottonllc/kotton#597, 54C), over [`LABELS`]: it is
+    /// the plain word's line with that word's `quoted` print replaced by the
+    /// label's, so it is one line holding the label's print once, no character
+    /// `shown` escapes, and its own words after the name once. With no label it
+    /// is this program's own words.
+    #[test]
+    fn the_prompt_prints_the_label_as_data() {
+        use kotton_wire::note::{quoted, shown};
+        const PLAIN: &str = "sam";
+        let plain = compare_line(Some(PLAIN));
+        let (_, own) = plain.split_once(&quoted(PLAIN)).expect("the plain word is printed by `quoted`");
+        assert_eq!(own, " sees the same:");
+        for label in LABELS {
+            let line = compare_line(Some(label));
+            assert!(!line.contains(['\n', '\r']), "{label:?}: not one line: {line:?}");
+            assert_eq!(line, plain.replace(&quoted(PLAIN), &quoted(label)), "{label:?}: printed outside its quote");
+            assert_eq!(line.matches(&quoted(label)).count(), 1, "{label:?}: {line:?}");
+            assert_eq!(line.matches(own).count(), 1, "{label:?}: its own words do not follow the name once: {line:?}");
+            assert!(line.ends_with(&format!("{}{own}", quoted(label))), "{label:?}: {line:?}");
+            let printed = shown(label);
+            for c in label.chars().filter(|c| !printed.contains(*c)) {
+                assert!(!line.contains(c), "{label:?}: {c:?} was printed as it is: {line:?}");
+            }
+        }
+        assert_eq!(compare_line(None), "Six digits — check they sees the same:");
+    }
 
     fn contacts() -> Vec<(String, Option<String>)> {
         vec![

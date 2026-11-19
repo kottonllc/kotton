@@ -142,8 +142,9 @@ impl<W: AsyncWrite + Unpin + Send, R: AsyncRead + Unpin + Send> EstablishedChann
         self.session.sas()
     }
 
-    /// The issuer's label, learned by the joiner over the encrypted channel. `None`
-    /// on the issuer side (it does not receive a joiner label).
+    /// The issuer's label, learned by the joiner over the encrypted channel and
+    /// named by the joiner's rule (see [`joiner_establish`]): the name the person
+    /// was shown. `None` on the issuer side (it does not receive a joiner label).
     pub fn peer_label(&self) -> Option<&str> {
         self.peer_label.as_deref()
     }
@@ -308,17 +309,23 @@ where
 /// bi-stream. `sid` is the offer's session id (from the mDNS advertisement or the
 /// connection code). `confirmer` is asked to compare the SAS after the joiner
 /// learns the issuer's label.
+///
+/// `name` is the rule the joiner's store records the issuer under, applied once,
+/// here, to the label the issuer announced: the confirmer is shown that name and
+/// [`EstablishedChannel::peer_label`] holds it, so the name a person confirms is
+/// the name the row is recorded under (kottonllc/kotton#652; #597, 54C).
 pub async fn joiner_establish<W, R>(
     send: W,
     recv: R,
     sid: [u8; 16],
     confirmer: &dyn SasConfirmer,
+    name: fn(&str) -> String,
 ) -> std::result::Result<EstablishedChannel<W, R>, PairChannelError>
 where
     W: AsyncWrite + Unpin + Send,
     R: AsyncRead + Unpin + Send,
 {
-    joiner_establish_with(send, recv, sid, confirmer, None).await
+    joiner_establish_with(send, recv, sid, confirmer, name, None).await
 }
 
 /// [`joiner_establish`] for a ceremony keyed by a typed `code` as well.
@@ -328,6 +335,7 @@ pub async fn joiner_establish_with<W, R>(
     mut recv: R,
     sid: [u8; 16],
     confirmer: &dyn SasConfirmer,
+    name: fn(&str) -> String,
     code: Option<&[u8]>,
 ) -> std::result::Result<EstablishedChannel<W, R>, PairChannelError>
 where
@@ -401,11 +409,13 @@ where
     let session = derive_session_with(&eph_j, &reveal_i.eph_pub, &transcript, &extra_ikm)?;
     let mut aead = AeadChannel::new(session.k_enc(), EnrollmentSide::Joiner);
 
-    // 7. Read the issuer's label (first encrypted frame).
+    // 7. Read the issuer's label (first encrypted frame), and name it as the
+    //    row will be recorded: the person is asked about that name.
     let info: PairInfo = recv_aead(&mut recv, &mut aead).await?;
+    let label = name(&info.label);
 
     // 8. Ask the human to compare the SAS; abort if they decline.
-    if !confirmer.confirm(session.sas(), Some(&info.label)).await {
+    if !confirmer.confirm(session.sas(), Some(&label)).await {
         return Err(PairChannelError::SasRejected);
     }
 
@@ -420,7 +430,7 @@ where
     Ok(EstablishedChannel {
         session,
         transcript,
-        peer_label: Some(info.label),
+        peer_label: Some(label),
         aead,
         send,
         recv,

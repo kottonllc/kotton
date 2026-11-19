@@ -342,6 +342,14 @@ pub async fn run_issuer(
     Ok(contact)
 }
 
+/// The name a contact is shown under while the digits are compared: the label as
+/// the issuer sent it. A contact's row is recorded under its signed record's
+/// name, as sent, with no trim or cut ([`verify_identity`]), so no rule is
+/// applied here (kottonllc/kotton#652).
+fn as_sent(label: &str) -> String {
+    label.to_owned()
+}
+
 /// The joiner's half: open a circuit to the code's handle at `relay_url` as a
 /// one-time key, run the ceremony, and return who was waiting.
 ///
@@ -386,7 +394,7 @@ pub async fn run_joiner(
         }
     };
     let (read, write) = tokio::io::split(stream);
-    let mut channel = joiner_establish_with(write, read, rv.sid, confirmer, Some(code.as_bytes())).await?;
+    let mut channel = joiner_establish_with(write, read, rv.sid, confirmer, as_sent, Some(code.as_bytes())).await?;
     let transcript = channel.transcript().to_bytes();
     let theirs: ContactIdentityRecord =
         serde_json::from_slice(&channel.recv_encrypted().await?).context("contact identity record")?;
@@ -426,7 +434,7 @@ async fn run_in_memory(
     };
     let joiner_side = async {
         let (read, write) = tokio::io::split(b);
-        let mut ch = joiner_establish_with(write, read, rv_j.sid, conf_j, Some(code_j.as_bytes())).await?;
+        let mut ch = joiner_establish_with(write, read, rv_j.sid, conf_j, as_sent, Some(code_j.as_bytes())).await?;
         let t = ch.transcript().to_bytes();
         let theirs: ContactIdentityRecord = serde_json::from_slice(&ch.recv_encrypted().await?)?;
         let c = verify_identity(&t, &theirs)?;
@@ -579,7 +587,7 @@ mod tests {
         };
         let joiner = async {
             let (r, w) = tokio::io::split(b);
-            joiner_establish_with(w, r, sid, &yb, Some(b"a-guess-that-is-wrong")).await.map(|_| ())
+            joiner_establish_with(w, r, sid, &yb, as_sent, Some(b"a-guess-that-is-wrong")).await.map(|_| ())
         };
         let (ri, rj) = tokio::join!(issuer, joiner);
         assert!(ri.unwrap_err().to_string().contains("codes differ"), "issuer");
