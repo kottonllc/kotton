@@ -27,8 +27,9 @@
 
 /// The trust regions this tree holds, in dependency order.
 ///
-/// `core/` acts on a principal's authority; `client/` only asks. `tier-check` holds the
-/// boundary. The reference's other two, `system/` and `guest/`, are not in this tree.
+/// `core/` acts on a principal's authority; `client/` only asks. `tier-check` refuses an edge
+/// from an earlier region into a later one, whatever its rows' owed lists say. The reference's
+/// other two, `system/` and `guest/`, are not in this tree.
 pub const REGIONS: &[&str] = &["core", "client"];
 
 /// Every top-level root that holds compilable code.
@@ -97,6 +98,32 @@ mod tests {
     fn the_regions_are_code_roots() {
         for r in REGIONS {
             assert!(CODE_ROOTS.contains(r), "region `{r}` is not in CODE_ROOTS");
+        }
+    }
+
+    /// `tier-check`'s rows are held to the roots: every root a row lies in is a code root, every
+    /// region is one, and every code root is a row's or named as no row. A root in neither is
+    /// code `tier-check` walks past.
+    #[test]
+    fn the_rows_lie_in_the_code_roots() {
+        let rowed = crate::tier_check::row_roots();
+        for r in &rowed {
+            assert!(CODE_ROOTS.contains(r), "a row lies in `{r}`, which is not in CODE_ROOTS");
+        }
+        for r in REGIONS {
+            assert!(rowed.contains(r), "region `{r}` holds no row");
+        }
+        for r in CODE_ROOTS {
+            let not = crate::tier_check::NOT_ROWS.contains(r);
+            assert!(
+                rowed.contains(r) != not,
+                "code root `{r}` must be a row's or named as no row, and not both"
+            );
+        }
+        for row in crate::tier_check::ROWS {
+            for p in row.paths {
+                assert!(repo().join(p).is_dir(), "row `{}` names `{p}`, which is not a directory", row.name);
+            }
         }
     }
 

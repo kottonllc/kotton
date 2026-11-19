@@ -100,6 +100,7 @@ mod worktrees;
 mod user_database_check;
 mod wx_check;
 mod ship_check;
+mod tier_check;
 #[cfg_attr(not(feature = "cli-docs"), allow(dead_code))]
 mod verb_check;
 #[cfg_attr(not(feature = "cli-docs"), allow(dead_code))]
@@ -332,7 +333,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "Unknown subcommand: {}\n\nAvailable:\n  gen-docs                                                   Re-generate docs/cli/reference.md (cargo xtask-docs)\n  gen-types                                                  Re-generate the TypeScript type surface from ts-rs annotations\n  build-apps [--force]                                       Compile bundled WASM apps for wasm32-wasip2\n  build-relay [cargo args]                                   Build kotton-relay into out/relay (or CARGO_TARGET_DIR) and print the binary's path\n  out [what]                                                 Print where a build output lives: target, xtask, relay, dist, bindwatch, guest/<app>, merge, release[/workspace|/relay]\n  release [--allow-dirty] [--no-build]                       Build the system's daemons and the CLI --release, pack them as one archive under out/dist/, and install-test it — prefer `just release::desktop`\n  release-test <archive>                                     Install an archive into a clean directory, run `kotton --help`, start it, and run `kotton id create` from it\n  release-server relay|vault|host [--not-a-release] [--no-build]  Build the relay or the vault for Linux, or both as the host's archive, pack it with its systemd units and SHA256SUMS under out/dist/, install-test it, and print its sha256\n  release-server-test <archive> [--relay <archive>]          Install a server or host archive into a clean root, start it there, and read /health or its first log line\n  run::headless                                              Run headless (kuserd + REPL). Assumes built — prefer `just headless::run`\n  run::desktop [user]                                        Run with the kuid display server; no user means the window onboards — prefer `just desktop::run`\n  run::first-run                                             Wipe .kotton.firstrun and start the daemon there with no user — prefer `just desktop::first-run`\n  demo::sync                                                 Two-node encrypted file transfer demo (QUIC mTLS)\n  doctor [--tier T]                                          Check this checkout has what it needs (lint | test | build | desktop | server)\n  constitution-check                                         Check the code against the principles it inspects: II, III and IV\n  tier-check                                                 Check core/ crate deps obey the region and platform-seam rules\n  blindness-check                                            Check terminal storage backends hold no key material\n  vault-check                                                Check the vault names none of the crates that carry plaintext verbs, inference, the apps or the display\n  infer-check                                                Check core/infer links and names no socket\n  wx-check                                                   Check a server whose unit says MemoryDenyWriteExecute=yes links no code-emitting crate\n  ship-check                                                 Check every binary an archive packs links only the system's crates and crates.io, and print the cuts still owed\n  bind-check [-- args]                                       Run the tests and fail if any binds a non-loopback socket (Linux)\n  key-reach-check                                            Check only entitled crates can name SealingKeys\n  residency-check                                            Check `device` may name a user store but not enumerate one\n  scope-check                                                Check a declared IPC scope names verbs the channel has\n  channel-check                                              Check one acceptor serves one request type\n  caller-check                                               Check no request is accepted without being told who sent it\n  relay-address-check                                        Check a relay's address is compared in one place\n  device-add-check                                           Check no code under core/ spells `device add --` (tests, comments skipped)\n  recovery-set-check                                         Check an event's carried recovery set is read through kel_verify::committed_set alone (tests skipped)\n  ed25519-check                                              Check every Ed25519 check made with ed25519-dalek is strict: clippy.toml refuses the unstrict one, one exemption, and one seam\n  allowlist-check                                            Check the allowlist's element is the key type: each holder declares a set of kotton_ed25519::VerifyingKey, and no live set of byte arrays is declared\n  config-key-check                                           Check every device-config key read is also written\n  request-domains                                            Check every UserRequest variant has a domain\n  wire-check                                                 Check the request, peer-request, vault-peer-request, relay-operator, operator-verb and response wire surfaces match their recordings in core/wire, each peer verb records its door twin's block, and each \"Answered with `X`\" doc under core/wire/src names a recorded response variant whose \"Answer to\" doc names that verb back\n  wire-surface                                               Re-record those surfaces after a deliberate wire change, then print (exit 0) any peer verb whose block no longer matches its door twin's, and any answer a doc names that is not recorded or does not name the verb back\n  remote-request[-check]                                     Re-generate, or check, RemoteRequest from required_trust()'s Remote arms\n  windows-check                                              Check no Unix-only path is compiled on Windows too\n  suite-check                                                Check every integration test file is compiled into the suite\n  port-check                                                 Check the relay and the vault compose onto one machine\n  license-check                                              Check every dependency's licence, every crate's and file's own, and LICENSE's table\n  third-party-notices                                        Print an archive's THIRD-PARTY-NOTICES\n  link-check                                                 Check relative Markdown links in docs/ and the root docs, and that none holds a merge-conflict marker\n  docs-check                                                 Check docs/cli/reference.md matches `gen-docs` output (cargo xtask-docs)\n  verb-check [--pinned]                                      Check the clap tree and the REPL's registry are the command-tree decision's, one tree for drive, pin and sync, and that no line a person reads names a retired verb (cargo xtask-docs)\n  schemas-check                                              Check every file of the core set under core/schemas/schemas/kotton/ is the protocol's file of that name byte for byte, or is named as not yet published there\n  docs-present-check                                         Check no page under docs/ or at the root, no line xtask prints and no Rust comment under the trees host-word-check reads (but the files not yet swept) names a record or narrates a date, and no file beside the pages names a record\n  claim-check [page…]                                        Check every `kotton` command README.md (and each page named) gives is one the binary has, and every script it runs is in the tree\n  host-word-check                                            Check the copy a person reads says host, instance, relay or vault\n  facts-check                                                Check repo paths named in CLAUDE.md, README.md and CONTRIBUTING.md exist\n  actions-check                                              Check every GitHub workflow is the release on a pushed tag or the pull-request lint, on Linux\n  signoff-check                                              Check no commit since origin/main is made as an agent and each is certified by a person\n  workspace-hack[-check]                                     Re-generate, or check, the one feature set every test build shares\n  merge <branch> -m <msg> [--no-fetch] [--no-push]           Merge a branch current with main into main, build the merged tree, run signoff-check at the tip, commit as the owner and push\n  worktrees [--prune]                                        Report each worktree's branch, age and out/ size; remove merged ones\n  reclaim [--dry-run]                                        Reclaim disk from this checkout's build caches\n  seed                                                       Populate a running daemon with a plausible household, through the real CLI",
+                "Unknown subcommand: {}\n\nAvailable:\n  gen-docs                                                   Re-generate docs/cli/reference.md (cargo xtask-docs)\n  gen-types                                                  Re-generate the TypeScript type surface from ts-rs annotations\n  build-apps [--force]                                       Compile bundled WASM apps for wasm32-wasip2\n  build-relay [cargo args]                                   Build kotton-relay into out/relay (or CARGO_TARGET_DIR) and print the binary's path\n  out [what]                                                 Print where a build output lives: target, xtask, relay, dist, bindwatch, guest/<app>, merge, release[/workspace|/relay]\n  release [--allow-dirty] [--no-build]                       Build the system's daemons and the CLI --release, pack them as one archive under out/dist/, and install-test it — prefer `just release::desktop`\n  release-test <archive>                                     Install an archive into a clean directory, run `kotton --help`, start it, and run `kotton id create` from it\n  release-server relay|vault|host [--not-a-release] [--no-build]  Build the relay or the vault for Linux, or both as the host's archive, pack it with its systemd units and SHA256SUMS under out/dist/, install-test it, and print its sha256\n  release-server-test <archive> [--relay <archive>]          Install a server or host archive into a clean root, start it there, and read /health or its first log line\n  run::headless                                              Run headless (kuserd + REPL). Assumes built — prefer `just headless::run`\n  run::desktop [user]                                        Run with the kuid display server; no user means the window onboards — prefer `just desktop::run`\n  run::first-run                                             Wipe .kotton.firstrun and start the daemon there with no user — prefer `just desktop::first-run`\n  demo::sync                                                 Two-node encrypted file transfer demo (QUIC mTLS)\n  doctor [--tier T]                                          Check this checkout has what it needs (lint | test | build | desktop | server)\n  constitution-check                                         Check the code against the principles it inspects: II, III and IV\n  tier-check                                                 Check the platform seam, and each repository's row: what it may link, and its owed list, printed, which only shrinks\n  blindness-check                                            Check terminal storage backends hold no key material\n  vault-check                                                Check the vault names none of the crates that carry plaintext verbs, inference, the apps or the display\n  infer-check                                                Check core/infer links and names no socket\n  wx-check                                                   Check a server whose unit says MemoryDenyWriteExecute=yes links no code-emitting crate\n  ship-check                                                 Check every binary an archive packs links only the system's crates and crates.io, and print the cuts still owed\n  bind-check [-- args]                                       Run the tests and fail if any binds a non-loopback socket (Linux)\n  key-reach-check                                            Check only entitled crates can name SealingKeys\n  residency-check                                            Check `device` may name a user store but not enumerate one\n  scope-check                                                Check a declared IPC scope names verbs the channel has\n  channel-check                                              Check one acceptor serves one request type\n  caller-check                                               Check no request is accepted without being told who sent it\n  relay-address-check                                        Check a relay's address is compared in one place\n  device-add-check                                           Check no code under core/ spells `device add --` (tests, comments skipped)\n  recovery-set-check                                         Check an event's carried recovery set is read through kel_verify::committed_set alone (tests skipped)\n  ed25519-check                                              Check every Ed25519 check made with ed25519-dalek is strict: clippy.toml refuses the unstrict one, one exemption, and one seam\n  allowlist-check                                            Check the allowlist's element is the key type: each holder declares a set of kotton_ed25519::VerifyingKey, and no live set of byte arrays is declared\n  config-key-check                                           Check every device-config key read is also written\n  request-domains                                            Check every UserRequest variant has a domain\n  wire-check                                                 Check the request, peer-request, vault-peer-request, relay-operator, operator-verb and response wire surfaces match their recordings in core/wire, each peer verb records its door twin's block, and each \"Answered with `X`\" doc under core/wire/src names a recorded response variant whose \"Answer to\" doc names that verb back\n  wire-surface                                               Re-record those surfaces after a deliberate wire change, then print (exit 0) any peer verb whose block no longer matches its door twin's, and any answer a doc names that is not recorded or does not name the verb back\n  remote-request[-check]                                     Re-generate, or check, RemoteRequest from required_trust()'s Remote arms\n  windows-check                                              Check no Unix-only path is compiled on Windows too\n  suite-check                                                Check every integration test file is compiled into the suite\n  port-check                                                 Check the relay and the vault compose onto one machine\n  license-check                                              Check every dependency's licence, every crate's and file's own, and LICENSE's table\n  third-party-notices                                        Print an archive's THIRD-PARTY-NOTICES\n  link-check                                                 Check relative Markdown links in docs/ and the root docs, and that none holds a merge-conflict marker\n  docs-check                                                 Check docs/cli/reference.md matches `gen-docs` output (cargo xtask-docs)\n  verb-check [--pinned]                                      Check the clap tree and the REPL's registry are the command-tree decision's, one tree for drive, pin and sync, and that no line a person reads names a retired verb (cargo xtask-docs)\n  schemas-check                                              Check every file of the core set under core/schemas/schemas/kotton/ is the protocol's file of that name byte for byte, or is named as not yet published there\n  docs-present-check                                         Check no page under docs/ or at the root, no line xtask prints and no Rust comment under the trees host-word-check reads (but the files not yet swept) names a record or narrates a date, and no file beside the pages names a record\n  claim-check [page…]                                        Check every `kotton` command README.md (and each page named) gives is one the binary has, and every script it runs is in the tree\n  host-word-check                                            Check the copy a person reads says host, instance, relay or vault\n  facts-check                                                Check repo paths named in CLAUDE.md, README.md and CONTRIBUTING.md exist\n  actions-check                                              Check every GitHub workflow is the release on a pushed tag or the pull-request lint, on Linux\n  signoff-check                                              Check no commit since origin/main is made as an agent and each is certified by a person\n  workspace-hack[-check]                                     Re-generate, or check, the one feature set every test build shares\n  merge <branch> -m <msg> [--no-fetch] [--no-push]           Merge a branch current with main into main, build the merged tree, run signoff-check at the tip, commit as the owner and push\n  worktrees [--prune]                                        Report each worktree's branch, age and out/ size; remove merged ones\n  reclaim [--dry-run]                                        Reclaim disk from this checkout's build caches\n  seed                                                       Populate a running daemon with a plausible household, through the real CLI",
                 other.unwrap_or("<none>")
             );
             std::process::exit(1);
@@ -1889,103 +1890,10 @@ fn only_the_handshake_skips_authentication(root: &Path, violations: &mut Vec<Str
 /// protocol, a bare-metal port would need the wire protocol — the exact
 /// foreclosure the seam exists to prevent, and not a cycle, so Cargo permits it.
 /// Rust enforces its own version structurally: `core` cannot depend on `std`.
-/// The four regions, and which regions a crate in each may path-depend on.
 ///
-/// A region is neither a tier nor a domain. A domain says *what capability area* —
-/// `store`, `grant`, `surface` — and RFC-0054 owns that vocabulary. A region says
-/// *on whose authority this acts*, at directory granularity, and directory
-/// granularity is the whole point: it is what a check can read.
-///
-/// Until 2026-08-25 this axis existed only as comments in the workspace
-/// `Cargo.toml` (`# consumers — no authority of their own; they ask`, sitting above
-/// `core/shell` and `core/cli`) and as one sentence of prose in
-/// `.github/copilot-instructions.md` (*"`sdk/` crates may depend on `core/` crates
-/// but not vice versa"*). Both were correct. Neither was read by anything.
-///
-/// **The rule that bites is the reverse edge.** "`client/` may depend on `core/`"
-/// forbids nothing — it is already true. The `core` row is the one that does work:
-/// it forbids `core/store` from depending on `client/cli`, which Cargo permits and
-/// nothing else here would have caught.
-///
-/// The reference has two more regions, `system/` (the trusted-path occupant, held to a crate
-/// list) and `guest/` (the confined apps). This tree holds neither, so neither has a row: a
-/// rule over a region that is absent reads nothing. A region added here is a top-level
-/// directory holding Rust, which `tree`'s tests refuse until it is named.
-const REGIONS: &[(&str, &[&str])] = &[
-    ("core", &["core"]),
-    ("client", &["core", "client"]),
-];
-
-/// Every `Cargo.toml` under `root`, depth-first, skipping `target/`.
-fn manifests_under(root: &Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if path.file_name().is_some_and(|n| n == "target") {
-                    continue;
-                }
-                stack.push(path);
-            } else if path.file_name().is_some_and(|n| n == "Cargo.toml") {
-                out.push(path);
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Normalise a repo-relative directory path for comparison.
-fn as_repo_path(p: &Path) -> String {
-    normalise_path(&p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
-}
-
-/// Check that no crate path-depends across a region boundary it may not cross.
-fn region_check(violations: &mut Vec<String>) {
-    for (region, allowed) in REGIONS {
-        let root = Path::new(region);
-        if !root.exists() {
-            violations.push(format!(
-                "tier-check: the region `{region}/` is not a directory here, so its rule reads \
-                 nothing. Repoint REGIONS in xtask/src/main.rs."
-            ));
-            continue;
-        }
-        for manifest in manifests_under(root) {
-            let Ok(content) = std::fs::read_to_string(&manifest) else {
-                continue;
-            };
-            let Some(dir) = manifest.parent() else {
-                continue;
-            };
-            let from = as_repo_path(dir);
-            for dep in regex_find_paths(&content) {
-                let to = as_repo_path(&dir.join(&dep));
-                let Some(to_region) = to.split('/').next() else {
-                    continue;
-                };
-                // Only edges landing inside a region are this rule's business; a
-                // crates.io dependency or a path into `tests/` is not.
-                if !crate::tree::REGIONS.contains(&to_region) {
-                    continue;
-                }
-                if !allowed.contains(&to_region) {
-                    violations.push(format!(
-                        "{from} depends on {to} — crossing a region boundary. `{region}/` may \
-                         depend on: {}",
-                        allowed.join(", ")
-                    ));
-                }
-            }
-        }
-    }
-}
-
+/// Beside the seam, the rows ([`tier_check::rows_check`]): one for each repository of
+/// kotton-protocol's repository plan that this tree holds a part of, each with what it may
+/// link and an owed list that is printed on every run and only shrinks.
 fn tier_check() {
     let core_dir = Path::new("core");
     if !core_dir.exists() {
@@ -2027,15 +1935,15 @@ fn tier_check() {
         }
     }
 
-    region_check(&mut violations);
+    violations.extend(tier_check::rows_check(Path::new(".")));
 
     if violations.is_empty() {
         println!(
-            "tier-check: OK — common and sys hold the platform seam, and no crate \
-             path-depends across a region boundary it may not cross."
+            "\ntier-check: OK — common and sys hold the platform seam, and every edge out of a \
+             row is one it may link or one on its owed list."
         );
     } else {
-        eprintln!("SEAM VIOLATIONS ({}):", violations.len());
+        eprintln!("\nTIER VIOLATIONS ({}):", violations.len());
         for v in &violations {
             eprintln!("  x {v}");
         }
@@ -2043,10 +1951,12 @@ fn tier_check() {
             "\nThe platform seam: a bare-metal port substitutes core/sys \
              implementations, and a dependency reaching upward from the seam takes the \
              rest of the system with it.\n\
-             \nThe region boundary (docs/design/processes.md, *Crates*): core/ acts on a \
-             principal's authority, client/ only asks, system/ holds a handed channel and \
-             nothing else, and guest/ is confined. An edge the wrong way across one of \
-             those is not a layering preference — it is authority moving somewhere it was not granted."
+             \nThe rows (xtask/src/tier_check.rs): one for each repository of kotton-protocol's repository plan \
+             this tree holds a part of, each held to the rows its repository may link. An edge \
+             it may not link is on its owed list in xtask/tier-owed.toml, by crate name, and \
+             a list only shrinks: a part is cut when its list is empty. No list owes an edge \
+             from core/, which acts on a principal's authority, into client/, which only asks: \
+             that is authority moving somewhere it was not granted."
         );
         std::process::exit(1);
     }
@@ -3287,27 +3197,6 @@ fn normalise_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The dependency-rule table and `tree::REGIONS` must name the same set. They are
-    /// separate types — one carries the rules, the other is just the names — and two lists of
-    /// the same thing is exactly the shape `tree` exists to stop. So they are checked against
-    /// each other rather than merged into a type that would make the rules awkward to read.
-    #[test]
-    fn the_region_rules_cover_every_region() {
-        let ruled: Vec<&str> = REGIONS.iter().map(|(r, _)| *r).collect();
-        for r in crate::tree::REGIONS {
-            assert!(
-                ruled.contains(r),
-                "region `{r}` has no dependency rule in tier-check"
-            );
-        }
-        for r in &ruled {
-            assert!(
-                crate::tree::REGIONS.contains(r),
-                "tier-check rules `{r}`, which is not a region"
-            );
-        }
-    }
 
     /// A closure cargo could not give is carried to the gate as the reason, never read as an
     /// empty tree — the false OK of `TASK-vault-check-reports-ok-when-cargo-tree-fails`.
