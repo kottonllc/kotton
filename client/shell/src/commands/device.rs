@@ -887,11 +887,7 @@ fn prompt_code_match(sas: u32, peer_label: Option<&str>, role: Role) -> Result<b
             ui::blank();
             ui::literal(&format_sas(sas));
             ui::blank();
-            let question = match peer_label {
-                Some(l) => format!("join \"{l}\"? [y/N]"),
-                None => "join this identity? [y/N]".to_string(),
-            };
-            Ok(is_yes(&prompt_line(&ui::ask(&question))?))
+            Ok(is_yes(&prompt_line(&ui::ask(&join_question(peer_label)))?))
         }
         Role::Issuer | Role::Box | Role::Vault => {
             if role == Role::Vault {
@@ -902,8 +898,7 @@ fn prompt_code_match(sas: u32, peer_label: Option<&str>, role: Role) -> Result<b
                      or from the `sas=` line where they ran `kvaultd invite`.",
                 );
             } else if role == Role::Box {
-                let who = peer_label.unwrap_or("the machine you are admitting");
-                ui::body(&format!("{who} printed six digits in its own terminal, on the `sas=` line."));
+                ui::body(&box_digits_line(peer_label));
             } else {
                 ui::body("on the new device you'll see six digits.");
             }
@@ -931,6 +926,25 @@ fn prompt_code_match(sas: u32, peer_label: Option<&str>, role: Role) -> Result<b
             Ok(ok)
         }
     }
+}
+
+/// The joining side's question, about the admitting device's label as the
+/// `PairShowCode` frame carries it: the name its row is recorded under
+/// (kottonllc/kotton#652). The label is data in prose, printed by
+/// [`kotton_wire::note::quoted`]; with none, the shell's own words.
+fn join_question(peer_label: Option<&str>) -> String {
+    match peer_label {
+        Some(l) => format!("join {}? [y/N]", kotton_wire::note::quoted(l)),
+        None => "join this identity? [y/N]".to_string(),
+    }
+}
+
+/// The line admitting a machine with no screen prints before the digits are
+/// typed: its label by [`kotton_wire::note::quoted`] where the frame carries one
+/// (kottonllc/kotton#652), else the shell's own words.
+fn box_digits_line(peer_label: Option<&str>) -> String {
+    let who = peer_label.map_or_else(|| "the machine you are admitting".to_string(), kotton_wire::note::quoted);
+    format!("{who} printed six digits in its own terminal, on the `sas=` line.")
 }
 
 /// Keep only the ASCII digits, so `798 095`, `798095`, and `798-095` all compare equal.
@@ -1475,6 +1489,42 @@ mod tests {
             let quoted = kotton_wire::note::quoted(label);
             assert!(lines[0].starts_with(&format!("`laptop` was not handed the drive reached through {quoted}: ")), "{lines:?}");
         }
+    }
+
+    /// **The pairing prompts print the label the frame carries as data**
+    /// (kottonllc/kotton#652; kottonllc/kotton#597, 54C), over [`LABELS`]: the
+    /// joining side's question and the line admitting a machine with no screen
+    /// are each the plain word's line with that word's `quoted` print replaced by
+    /// the label's, so each holds the label's print once, no character `shown`
+    /// escapes, and its own words after the name once. With no label, each is the
+    /// shell's own words, with no delimiter.
+    #[test]
+    fn the_pairing_prompts_print_the_label_as_data() {
+        use kotton_wire::note::{quoted, shown};
+        type Prompt = fn(Option<&str>) -> String;
+        const PLAIN: &str = "laptop";
+        let prompts: [(&str, Prompt); 2] = [("join", super::join_question), ("no screen", super::box_digits_line)];
+        for (which, prompt) in prompts {
+            let plain = prompt(Some(PLAIN));
+            let (_, own) = plain.split_once(&quoted(PLAIN)).expect("the plain word is printed by `quoted`");
+            assert!(!own.is_empty(), "{which}: no words follow the name");
+            for (label, _) in LABELS {
+                let line = prompt(Some(label));
+                assert_eq!(line, plain.replace(&quoted(PLAIN), &quoted(label)), "{which} {label:?}: printed outside its quote");
+                assert_eq!(line.matches(&quoted(label)).count(), 1, "{which} {label:?}: {line:?}");
+                assert_eq!(line.matches(own).count(), 1, "{which} {label:?}: its own words do not follow the name once: {line:?}");
+                assert!(line.ends_with(&format!("{}{own}", quoted(label))), "{which} {label:?}: {line:?}");
+                let printed = shown(label);
+                for c in label.chars().filter(|c| !printed.contains(*c)) {
+                    assert!(!line.contains(c), "{which} {label:?}: {c:?} was printed as it is: {line:?}");
+                }
+            }
+        }
+        assert_eq!(super::join_question(None), "join this identity? [y/N]");
+        assert_eq!(
+            super::box_digits_line(None),
+            "the machine you are admitting printed six digits in its own terminal, on the `sas=` line."
+        );
     }
 
     fn args(words: &[&str]) -> Vec<String> {

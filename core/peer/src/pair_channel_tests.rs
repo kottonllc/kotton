@@ -113,7 +113,7 @@ async fn channel_establishes_and_transfers_only_after_confirm() {
     });
     let joiner = tokio::spawn(async move {
         let (js, jr) = jc_conn.open_bi().await.unwrap();
-        let mut ch = joiner_establish(js, jr, SID, jc2.as_ref())
+        let mut ch = joiner_establish(js, jr, SID, jc2.as_ref(), str::to_owned)
             .await
             .expect("joiner establishes");
         let got = ch.recv_encrypted().await.unwrap();
@@ -152,7 +152,7 @@ async fn joiner_cancel_transfers_nothing() {
     let joiner = tokio::spawn(async move {
         let (js, jr) = jc_conn.open_bi().await.unwrap();
         matches!(
-            joiner_establish(js, jr, SID, jc2.as_ref()).await,
+            joiner_establish(js, jr, SID, jc2.as_ref(), str::to_owned).await,
             Err(PairChannelError::SasRejected)
         )
     });
@@ -181,7 +181,7 @@ async fn issuer_cancel_transfers_nothing() {
     });
     let joiner = tokio::spawn(async move {
         let (js, jr) = jc_conn.open_bi().await.unwrap();
-        let mut result = joiner_establish(js, jr, SID, jc2.as_ref()).await;
+        let mut result = joiner_establish(js, jr, SID, jc2.as_ref(), str::to_owned).await;
         if let Ok(ch) = &mut result {
             // Would block forever if it tried to read a payload; just report.
             let _ = ch.sas();
@@ -212,7 +212,7 @@ async fn wrong_offer_sid_is_rejected() {
     });
     let joiner = tokio::spawn(async move {
         let (js, jr) = jc_conn.open_bi().await.unwrap();
-        joiner_establish(js, jr, [2u8; 16], jc2.as_ref()).await.is_ok()
+        joiner_establish(js, jr, [2u8; 16], jc2.as_ref(), str::to_owned).await.is_ok()
     });
 
     assert!(issuer.await.unwrap(), "issuer rejects the mismatched offer");
@@ -239,7 +239,7 @@ async fn two_ceremonies_with_same_long_term_keys_derive_different_sas() {
         });
         let joiner = tokio::spawn(async move {
             let (js, jr) = jc_conn.open_bi().await.unwrap();
-            joiner_establish(js, jr, SID, jc2.as_ref()).await.map(|c| c.sas())
+            joiner_establish(js, jr, SID, jc2.as_ref(), str::to_owned).await.map(|c| c.sas())
         });
         let s = issuer.await.unwrap().unwrap();
         let _ = joiner.await.unwrap().unwrap();

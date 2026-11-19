@@ -758,7 +758,12 @@ pub enum UserResponse {
         /// The six-digit SAS (0..1_000_000).
         sas: u32,
         /// The peer's label, when known (the joiner learns the issuer's). `None`
-        /// on the issuer side.
+        /// on the issuer side. In a device join it is the name the issuer's row
+        /// is recorded under, trimmed and cut as the store records it; in a
+        /// browser's admission, the name the browser's row is recorded under, as
+        /// its hello gave it; in a contact join, the label the issuer sent in the
+        /// channel, where the row is recorded under the name in its signed
+        /// identity record (kottonllc/kotton#652, #668).
         peer_label: Option<String>,
     },
     /// The local human confirmed; waiting for the peer's confirmation.

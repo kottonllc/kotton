@@ -696,6 +696,10 @@ async fn admit(
         // and declines (#436).
         let confirmer = StreamingConfirmer::new(desk, Arc::clone(pending_confirms), std::time::Duration::from_secs(300));
         use kotton_peer::pair_channel::SasConfirmer as _;
+        // The person is asked about the name the row below is recorded under:
+        // one string, the browser's as its hello gave it. A browser's name is
+        // stored as given, not held to a node's trim and cut
+        // (kottonllc/kotton#652), so no rule is applied to either.
         if !confirmer.confirm(sas, Some(&name)).await {
             return Out::terminal(refused("the person at the node did not confirm the code"));
         }

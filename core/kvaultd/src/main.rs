@@ -482,8 +482,7 @@ async fn joined(user: &str, ep: &IpcEndpoint, mut rx: tokio::sync::mpsc::Receive
             UserResponse::PairConnecting => println!("connecting to the device that offered the code…"),
             UserResponse::PairConnected => println!("connected."),
             UserResponse::PairShowCode { token, sas, peer_label } => {
-                let who = peer_label.as_deref().unwrap_or("the device");
-                println!("type these six digits on {who}: {sas:06}");
+                println!("{}", show_code(peer_label.as_deref(), sas));
                 print!("join? [y/N] ");
                 io::stdout().flush()?;
                 let mut line = String::new();
@@ -517,6 +516,15 @@ async fn joined(user: &str, ep: &IpcEndpoint, mut rx: tokio::sync::mpsc::Receive
         Some(answer) => kotton_wire::ipc::answer_said(&answer),
         None => "the vault closed the ceremony without a result".to_string(),
     }))
+}
+
+/// The line a join prints beside the six digits, before the person answers:
+/// the admitting device's label as the `PairShowCode` frame carries it, the
+/// name its row is recorded under, as data by [`kotton_wire::note::quoted`]
+/// (kottonllc/kotton#652); with none, this program's own words.
+fn show_code(peer_label: Option<&str>, sas: u32) -> String {
+    let who = peer_label.map_or_else(|| "the device".to_string(), kotton_wire::note::quoted);
+    format!("type these six digits on {who}: {sas:06}")
 }
 
 /// The lines a completed join prints, made of the node it paired.
@@ -1134,6 +1142,34 @@ mod tests {
         "a`b",
         "\u{5c4b}\u{6839}'s",
     ];
+
+    /// **The line a join prints beside the digits gives the label as data**
+    /// (kottonllc/kotton#652; kottonllc/kotton#597, 54C), over [`LABELS`]: it is
+    /// the plain word's line with that word's `quoted` print replaced by the
+    /// label's, so it is one line holding the label's print once, no character
+    /// `shown` escapes, and its own words after the name once. With no label it
+    /// is this program's own words.
+    #[test]
+    fn the_join_prompt_prints_the_label_as_data() {
+        use kotton_wire::note::{quoted, shown};
+        const PLAIN: &str = "laptop";
+        let plain = show_code(Some(PLAIN), 4_729);
+        let (_, own) = plain.split_once(&quoted(PLAIN)).expect("the plain word is printed by `quoted`");
+        assert_eq!(own, ": 004729");
+        for label in LABELS {
+            let line = show_code(Some(label), 4_729);
+            assert!(!line.contains(['\n', '\r']), "{label:?}: not one line: {line:?}");
+            assert_eq!(line, plain.replace(&quoted(PLAIN), &quoted(label)), "{label:?}: printed outside its quote");
+            assert_eq!(line.matches(&quoted(label)).count(), 1, "{label:?}: {line:?}");
+            assert_eq!(line.matches(own).count(), 1, "{label:?}: its own words do not follow the name once: {line:?}");
+            assert!(line.ends_with(&format!("{}{own}", quoted(label))), "{label:?}: {line:?}");
+            let printed = shown(label);
+            for c in label.chars().filter(|c| !printed.contains(*c)) {
+                assert!(!line.contains(c), "{label:?}: {c:?} was printed as it is: {line:?}");
+            }
+        }
+        assert_eq!(show_code(None, 4_729), "type these six digits on the device: 004729");
+    }
 
     /// **The lines a completed join prints give the label as data, and
     /// `enrolled=` the joined node's DID** (kottonllc/kotton#655;
