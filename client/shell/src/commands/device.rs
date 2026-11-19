@@ -628,6 +628,14 @@ async fn kept_at(client: &KottonClient, user: &str, node: &kotton_wire::peer::Pa
 /// at — this device stands at none: the offer in words, and the command that
 /// takes it, holding it to the key the invite named. Nothing is taken unless
 /// the person runs it (`TASK-an-invite-is-the-codes-other-clause-and-its-relay-is-offered`).
+///
+/// What the tests hold is these strings, for a relay's line as the daemon makes it
+/// ([`kotton_wire::line::InstanceLine::to_text`]), as `run_ceremony_to` hands them to
+/// [`ui::body`]: as [`ui::body`] wraps them, each is written character for character and
+/// `relay set` with the line is on one written line, at the narrowest and the widest
+/// column, and read from it reads back through the shell's parser as one command, and
+/// through `relay`'s own reading as `set` with the line handed (kottonllc/kotton#659).
+/// What they print is kottonllc/kotton#636's.
 fn relay_offer_lines(line: &str) -> Vec<String> {
     let at = kotton_wire::line::InstanceLine::parse(line).map(|l| l.hint).unwrap_or_default();
     vec![
@@ -659,6 +667,18 @@ fn join_args(args: &[String]) -> (String, Option<String>) {
         .cloned()
         .unwrap_or_default();
     (code, as_name)
+}
+
+/// The line a join ends on when this device already acts as `acting`, another identity
+/// than `user`, the one it joined as: the command that makes it act as `user`, in the
+/// terminal's form, which every door that runs a join gives ([`join_identity`]).
+///
+/// What the tests hold is this string, as [`join_identity`] hands it to [`ui::body`]: as
+/// [`ui::body`] wraps it, the command is on one written line and, read from it, reads
+/// back after `kotton` through `id`'s own reading as `use` with `user`, at the narrowest
+/// and the widest column (kottonllc/kotton#659).
+fn still_acts_line(acting: &str, user: &str) -> String {
+    format!("this device still acts as {acting}; `kotton id use {user}` makes it act as {user}.")
 }
 
 /// Join, as `user` on this device, the identity another device is offering with
@@ -693,9 +713,7 @@ pub(crate) async fn join_identity(
         // With no file at all, `initialise` has already said why it could not write one.
         match kotton::active_identity::get() {
             Some(acting) if acting == user => ui::greet("this device acts as", user),
-            Some(acting) => ui::body(&format!(
-                "this device still acts as {acting}; `kotton id use {user}` makes it act as {user}."
-            )),
+            Some(acting) => ui::body(&still_acts_line(&acting, user)),
             None => {}
         }
     }
@@ -1851,6 +1869,17 @@ mod tests {
         out
     }
 
+    /// The words of `typed`, read as a typed line is: held to be one command, through the
+    /// chain's parser, the variables and the words, with no redirect.
+    fn read_words(typed: &str) -> Vec<String> {
+        let chain = crate::parser::parse_command_chain(typed);
+        assert_eq!(chain.len(), 1, "`{typed}` is {} commands: {chain:?}", chain.len());
+        let words = crate::utils::parse_command(&crate::utils::expand_vars(&chain[0].command, &Default::default()));
+        let (words, redirect) = crate::executor::parse_redirect(words);
+        assert!(redirect.is_none(), "`{typed}` redirects");
+        words
+    }
+
     /// `typed`, read as a typed line is, is one `verb` command handing it `name`: through
     /// `device revoke`'s own reading for that verb ([`read_as_typed`]), and for another
     /// verb through the chain's parser, the variables, the words and the redirect.
@@ -1881,7 +1910,18 @@ mod tests {
     /// - each name's `quoted` print is in one rendered line, character for character;
     /// - each command span is in one rendered line, and read from it reads back through
     ///   the shell's parser: a vault's two commands as `drive`'s with the joined node's DID,
-    ///   and a note's command as its verb's with the note's name.
+    ///   and a note's command as its verb's with the note's name;
+    /// - in a completion's lines, every other span is read back or named: `sync` reads
+    ///   back as one command with no word after it, `drive list` as itself, and
+    ///   `PinNotice`'s usage, with `<vault>` filled by a plain word, as `drive create`
+    ///   with it, each counted; a name's `quoted` print and a drive's name
+    ///   (kottonllc/kotton#636's) are held whole and not read back.
+    ///
+    /// It renders too, at both widths (kottonllc/kotton#659): [`relay_offer_lines`] for a
+    /// relay's line as the daemon makes it, whose `relay set` and line, read from the
+    /// rendered line, read back as one command and through `relay`'s own reading as `set`
+    /// with that line; and [`still_acts_line`], whose `kotton id use` and name read back
+    /// after `kotton` through `id`'s own reading as `use` with that name.
     ///
     /// The greeting is written whole by `ui::greet`, and is rendered here too.
     #[test]
@@ -1895,33 +1935,102 @@ mod tests {
             .chain(verbs.iter().map(String::as_str))
             .chain([PLAIN, DID, "two  spaces"])
             .collect();
+        // The relay's line as the daemon makes it, at the address that makes it the widest
+        // a join prints; and identities a join's last line names, the longest a device
+        // records among them (`kuserd`'s `validate_user_id`: 64 characters).
+        let relay = kotton_wire::line::InstanceLine {
+            kind: kotton_wire::ipc::OperatedService::Relay,
+            hint: "http://relay.example:7700".into(),
+            key: [0xab; 32],
+        }
+        .to_text();
+        let longest = format!("h{}", "0".repeat(63));
+        let users = ["home", longest.as_str()];
         let mut drive_commands = 0;
         let mut note_commands = 0;
+        let mut relay_commands = 0;
+        let mut id_commands = 0;
+        let (mut syncs, mut lists, mut usages) = (0, 0, 0);
         for width in [crate::ui::WIDTH_MIN, crate::ui::WIDTH_MAX] {
+            for handed in super::relay_offer_lines(&relay) {
+                for (line, spans) in rendered(&handed, width, &[]) {
+                    for span in &spans {
+                        let words = read_words(span);
+                        assert_eq!(words, ["relay", "set", relay.as_str()], "at {width}: {line}");
+                        let words: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+                        assert_eq!(
+                            crate::commands::relay::read(&words),
+                            Some(crate::commands::relay::Line::SetCode(&relay)),
+                            "at {width}: {line}"
+                        );
+                        relay_commands += 1;
+                    }
+                }
+            }
+            for user in users {
+                let handed = super::still_acts_line("work", user);
+                for (line, spans) in rendered(&handed, width, &[]) {
+                    for span in &spans {
+                        let words = read_words(span);
+                        assert_eq!(words.first().map(String::as_str), Some("kotton"), "at {width}: {line}");
+                        let words: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+                        assert_eq!(words.first(), Some(&"id"), "at {width}: {line}");
+                        assert_eq!(crate::commands::id::used(&words[1..]), Some(user), "at {width}: {line}");
+                        id_commands += 1;
+                    }
+                }
+            }
             for role in ROLES {
+                let plain = completion_said(role, PLAIN);
                 for label in &names {
-                    for handed in completion_said(role, label) {
-                        for (_, spans) in rendered(&handed, width, &[label, "vps-1"]) {
-                            for span in spans.iter().filter(|s| s.contains("<name>")) {
-                                let typed = span.replace("<name>", "photos");
-                                let chain = crate::parser::parse_command_chain(&typed);
-                                assert_eq!(chain.len(), 1, "`{typed}` is {} commands", chain.len());
-                                let read =
-                                    crate::utils::parse_command(&crate::utils::expand_vars(&chain[0].command, &Default::default()));
-                                let (read, redirect) = crate::executor::parse_redirect(read);
-                                assert!(redirect.is_none(), "`{typed}` redirects");
-                                assert_eq!(read[0], "drive", "`{typed}`");
-                                use crate::commands::drive::Line;
-                                match crate::commands::drive::parse(&read[1..]) {
-                                    Ok(Line::Create { name: "photos", on: Some(on) }) => assert_eq!(on, DID, "`{typed}`"),
-                                    Ok(Line::Move { name: "photos", to, from: None }) => assert_eq!(to, DID, "`{typed}`"),
-                                    other => panic!("`{typed}` reads as {other:?}"),
+                    let said = completion_said(role, label);
+                    assert_eq!(said.len(), plain.len(), "{role:?} {label:?}");
+                    for (handed, plain) in said.iter().zip(&plain) {
+                        let read: Vec<String> =
+                            rendered(handed, width, &[label, "vps-1"]).into_iter().flat_map(|(_, spans)| spans).collect();
+                        let fixed = spans(plain);
+                        assert_eq!(read.len(), fixed.len(), "at {width}: {handed}");
+                        // Each span read from the rendered lines, by the span at its place in
+                        // the plain word's line: a label changes only its own print
+                        // (`a_joins_completion_prints_the_label_as_data_and_in_no_command`).
+                        for (span, fixed) in read.iter().zip(fixed) {
+                            match fixed {
+                                // A name's `quoted` print, held whole by `rendered` and not
+                                // read back: the joined device's, and the node a drive is
+                                // reached through.
+                                PLAIN | "vps-1" => {}
+                                // A drive's name, held whole and not read back: #636's.
+                                "personal" | "photos" => {}
+                                f if f.split(' ').next() == Some("sync") => {
+                                    assert_eq!(read_words(span), ["sync"], "at {width}: `sync` takes no word after it: {handed}");
+                                    syncs += 1;
                                 }
-                                drive_commands += 1;
-                            }
-                            for span in spans.iter().filter(|s| s.starts_with("device revoke vps-1")) {
-                                reads_back(span, super::DEVICE_REVOKE, "vps-1");
-                                note_commands += 1;
+                                "drive list" => {
+                                    assert_eq!(read_words(span), ["drive", "list"], "at {width}: {handed}");
+                                    lists += 1;
+                                }
+                                f if f.contains("<vault>") => {
+                                    let typed = span.replace("<vault>", "home");
+                                    assert_eq!(read_words(&typed), ["drive", "create", "personal", "--on", "home"], "at {width}: {handed}");
+                                    usages += 1;
+                                }
+                                f if f.contains("<name>") => {
+                                    let typed = span.replace("<name>", "photos");
+                                    let read = read_words(&typed);
+                                    assert_eq!(read[0], "drive", "`{typed}`");
+                                    use crate::commands::drive::Line;
+                                    match crate::commands::drive::parse(&read[1..]) {
+                                        Ok(Line::Create { name: "photos", on: Some(on) }) => assert_eq!(on, DID, "`{typed}`"),
+                                        Ok(Line::Move { name: "photos", to, from: None }) => assert_eq!(to, DID, "`{typed}`"),
+                                        other => panic!("`{typed}` reads as {other:?}"),
+                                    }
+                                    drive_commands += 1;
+                                }
+                                f if f.starts_with("device revoke vps-1") => {
+                                    reads_back(span, super::DEVICE_REVOKE, "vps-1");
+                                    note_commands += 1;
+                                }
+                                other => panic!("at {width}: `{other}` is neither read back nor named here: {handed}"),
                             }
                         }
                     }
@@ -1960,6 +2069,15 @@ mod tests {
             }
         }
         assert_eq!(drive_commands, 2 * 4 * names.len(), "a vault's two commands, for each vault role, label and width");
+        assert_eq!(relay_commands, 2, "the relay offer's one command, at each width");
+        assert_eq!(id_commands, 2 * users.len(), "the join's last line's one command, for each identity and width");
+        // Each role's lines over the five answers `drive list` may give a vault: the
+        // issuer's, the box's and the joiner's `sync`, five times each; a vault's (each of
+        // two roles) after `personal` and in `PinNotice`'s; `drive list` where a vault did
+        // not answer, and `PinNotice`'s usage, once for each vault role.
+        assert_eq!(syncs, 2 * (3 * 5 + 2 * 2) * names.len(), "`sync`, for each role, label and width");
+        assert_eq!(lists, 2 * 2 * names.len(), "`drive list`, for each vault role, label and width");
+        assert_eq!(usages, 2 * 2 * names.len(), "`PinNotice`'s usage, for each vault role, label and width");
         let plain = names.iter().filter(|n| one_plain_word(n)).count();
         assert_eq!(
             note_commands,
