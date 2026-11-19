@@ -2093,11 +2093,12 @@ where
     // The issuer announced its own name during establish, and the channel named
     // it by `clean_device_name` before the person was asked: the row is recorded
     // under that name, the one the prompt showed (kottonllc/kotton#652). Never
-    // typed by this device.
-    let issuer_name = match channel.peer_label() {
-        Some(name) => name.to_owned(),
-        None => clean_device_name(""),
-    };
+    // typed by this device. A joiner's channel always holds it, so the row has
+    // this one source and its absence is an error, not a second naming.
+    let issuer_name = channel
+        .peer_label()
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("the issuer's channel holds no label"))?;
     let now = now_secs();
     let issuer_node = PairedNode {
         id: issuer_name,

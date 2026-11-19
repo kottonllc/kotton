@@ -143,8 +143,10 @@ impl<W: AsyncWrite + Unpin + Send, R: AsyncRead + Unpin + Send> EstablishedChann
     }
 
     /// The issuer's label, learned by the joiner over the encrypted channel and
-    /// named by the joiner's rule (see [`joiner_establish`]): the name the person
-    /// was shown. `None` on the issuer side (it does not receive a joiner label).
+    /// named by the caller's rule (see [`joiner_establish`]): the name the person
+    /// was shown. A device join records the issuer under this name; a contact
+    /// join records the name in the signed identity record (kottonllc/kotton#668).
+    /// `None` on the issuer side (it does not receive a joiner label).
     pub fn peer_label(&self) -> Option<&str> {
         self.peer_label.as_deref()
     }
@@ -310,10 +312,20 @@ where
 /// connection code). `confirmer` is asked to compare the SAS after the joiner
 /// learns the issuer's label.
 ///
-/// `name` is the rule the joiner's store records the issuer under, applied once,
-/// here, to the label the issuer announced: the confirmer is shown that name and
-/// [`EstablishedChannel::peer_label`] holds it, so the name a person confirms is
-/// the name the row is recorded under (kottonllc/kotton#652; #597, 54C).
+/// `name` is applied once, here, to the label the issuer announced: the
+/// confirmer is shown that name and [`EstablishedChannel::peer_label`] holds it
+/// (kottonllc/kotton#652; #597, 54C). What that name is to the row depends on the
+/// caller:
+///
+/// - **A device join** passes the store's trim and cut and makes the issuer's row
+///   from [`EstablishedChannel::peer_label`], so the name a person confirms is the
+///   name the row is recorded under.
+/// - **A contact join** passes the label as sent. The confirmer is shown the
+///   channel's label; the row is recorded under the name in the issuer's signed
+///   identity record, read after the answer. Holding the two to one string is
+///   kottonllc/kotton#668.
+///
+/// A browser's admission does not run this channel (`kotton_pair::browser`).
 pub async fn joiner_establish<W, R>(
     send: W,
     recv: R,

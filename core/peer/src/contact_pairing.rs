@@ -343,9 +343,11 @@ pub async fn run_issuer(
 }
 
 /// The name a contact is shown under while the digits are compared: the label as
-/// the issuer sent it. A contact's row is recorded under its signed record's
-/// name, as sent, with no trim or cut ([`verify_identity`]), so no rule is
-/// applied here (kottonllc/kotton#652).
+/// the issuer sent it in the channel. No rule applied here could make it the name
+/// the row is recorded under: that is read from the issuer's signed identity
+/// record ([`verify_identity`]), after the person has answered. For an issuer of
+/// this build the two are one string (`display_name`, sent in both); holding them
+/// to one for any issuer is kottonllc/kotton#668.
 fn as_sent(label: &str) -> String {
     label.to_owned()
 }
@@ -394,7 +396,26 @@ pub async fn run_joiner(
         }
     };
     let (read, write) = tokio::io::split(stream);
-    let mut channel = joiner_establish_with(write, read, rv.sid, confirmer, as_sent, Some(code.as_bytes())).await?;
+    joiner_half(write, read, rv.sid, &code, ours, identity_key, confirmer).await
+}
+
+/// The joiner's ceremony over an open circuit: the handshake, then each side's
+/// signed identity record, theirs first. [`run_joiner`] runs it over a relay's
+/// circuit and the tests over a duplex, so both are the one joiner.
+async fn joiner_half<W, R>(
+    write: W,
+    read: R,
+    sid: [u8; 16],
+    code: &str,
+    ours: &ContactIdentity,
+    identity_key: &SigningKey,
+    confirmer: &dyn SasConfirmer,
+) -> Result<PairedContact>
+where
+    W: AsyncWrite + Unpin + Send,
+    R: AsyncRead + Unpin + Send,
+{
+    let mut channel = joiner_establish_with(write, read, sid, confirmer, as_sent, Some(code.as_bytes())).await?;
     let transcript = channel.transcript().to_bytes();
     let theirs: ContactIdentityRecord =
         serde_json::from_slice(&channel.recv_encrypted().await?).context("contact identity record")?;
@@ -434,13 +455,7 @@ async fn run_in_memory(
     };
     let joiner_side = async {
         let (read, write) = tokio::io::split(b);
-        let mut ch = joiner_establish_with(write, read, rv_j.sid, conf_j, as_sent, Some(code_j.as_bytes())).await?;
-        let t = ch.transcript().to_bytes();
-        let theirs: ContactIdentityRecord = serde_json::from_slice(&ch.recv_encrypted().await?)?;
-        let c = verify_identity(&t, &theirs)?;
-        let mine = sign_identity(&t, ours_j, key_j)?;
-        ch.send_encrypted(&serde_json::to_vec(&mine)?).await?;
-        Ok(c)
+        joiner_half(write, read, rv_j.sid, &code_j, ours_j, key_j, conf_j).await
     };
     tokio::join!(issuer_side, joiner_side)
 }
@@ -466,6 +481,39 @@ mod tests {
             true
         }
     }
+    /// Says yes, holding the label it was shown beside the digits.
+    struct Shown(Mutex<Option<String>>);
+    #[async_trait]
+    impl SasConfirmer for Shown {
+        async fn confirm(&self, _sas: u32, label: Option<&str>) -> bool {
+            *self.0.lock().unwrap() = label.map(str::to_owned);
+            true
+        }
+    }
+
+    /// **For a contact join between two parties of this build, the label the
+    /// joiner is shown is the label of the contact it returns**
+    /// (kottonllc/kotton#652): over a plain name, one with whitespace around it,
+    /// and one longer than 64 characters, none of which a contact's name is
+    /// trimmed or cut from. For an issuer of another build the two are not yet
+    /// held to one (kottonllc/kotton#668).
+    #[tokio::test]
+    async fn the_label_a_contact_joiner_is_shown_is_the_label_returned() {
+        let long = "n".repeat(70);
+        for name in ["alice", "  alice\t", long.as_str()] {
+            let (mut alice, ka) = identity("alice");
+            alice.display_name = name.into();
+            let (bob, kb) = identity("bob");
+            let (ya, shown) = (Yes(Mutex::new(None)), Shown(Mutex::new(None)));
+            let (ra, rb) =
+                run_in_memory("ripple canyon ember", "ripple canyon ember", (&alice, &ka, &ya), (&bob, &kb, &shown)).await;
+            ra.expect("the issuer pairs");
+            let got_alice = rb.expect("the joiner pairs");
+            assert_eq!(got_alice.label, name, "{name:?}: the contact is not recorded under its name as sent");
+            assert_eq!(shown.0.lock().unwrap().as_deref(), Some(got_alice.label.as_str()), "{name:?}: the joiner was shown another name");
+        }
+    }
+
     struct No;
     #[async_trait]
     impl SasConfirmer for No {
