@@ -36,13 +36,15 @@
 //! directory (whose manifests are not read), and a normal or build dependency into a root that
 //! is no row, which ships what it links. A `path` under `[workspace.dependencies]`, `[patch]` or
 //! `[replace]` in any manifest read (cargo honours the last two in whichever manifest roots a
-//! workspace, declared or not), and `paths` or a `[patch]` path in the `.cargo/` config of a
-//! directory that declares a workspace, are refused: each puts an edge or a crate where no
-//! manifest read here says so. `include` in such a config is refused outright, since cargo
-//! honours both in the files it names and those files are not read here. A crate whose `package.workspace` names
-//! no workspace read here is refused. A row's dev-dependencies into a root that is no row
-//! (`tools/workspace-hack`, for most crates) are on no list; each row prints how many it does
-//! not count.
+//! workspace, declared or not) is refused: each puts an edge or a crate where no manifest read
+//! here says so. The `.cargo/` config of a directory that declares a workspace may hold only the
+//! top-level keys of [`CONFIG_KEYS`]; any other is refused, naming the file and the key. Each of
+//! `paths`, `[patch]`, `[source]` (`directory`, `local-registry`), `[registries]` and
+//! `[path-bases]` can make a directory of this checkout a package's source where no manifest
+//! read here says so, and a key cargo adds later may; `include` loads files not read here. A
+//! crate whose `package.workspace` names no workspace read here is refused. A row's
+//! dev-dependencies into a root that is no row (`tools/workspace-hack`, for most crates) are on
+//! no list; each row prints how many it does not count.
 //!
 //! Each edge is judged by the row of each end. Inside one row, or into a row the first may link,
 //! it is admitted. Otherwise it is on the first row's owed list, by crate name, or it is refused,
@@ -477,10 +479,18 @@ fn patch_paths(manifest: &Table, at: &str) -> Vec<String> {
     out
 }
 
+/// The top-level keys a `.cargo/` config file [`config_refusals`] reads may hold: the four the
+/// tree's config holds today. None of them makes a directory of this checkout a package's
+/// source. A key not here is refused unread, whatever it holds, so a key that does, and one
+/// cargo adds later, is refused without being named in this source.
+const CONFIG_KEYS: &[&str] = &["build", "alias", "target", "env"];
+
 /// What a workspace declared in repo-relative `dir` is held to beyond its manifest: each of its
-/// `.cargo/` config files, read for `paths` and `[patch]`, both refused, and for `include`,
-/// refused outright: cargo loads the files it names and honours `paths` and `[patch]` there,
-/// and those files are not read here. A config file that cannot be read is refused.
+/// `.cargo/` config files may hold only the top-level keys of [`CONFIG_KEYS`], and any other is
+/// refused, naming the file and the key. `include`, `paths` and `[patch]` keep lines of their
+/// own, saying what each does: `include` loads files that are not read here, `paths` and a
+/// `[patch]` path each put a crate in a dependency's place. A config file that cannot be read
+/// is refused.
 fn config_refusals(root: &Path, dir: &str) -> Vec<String> {
     let mut out = Vec::new();
     for name in [".cargo/config.toml", ".cargo/config"] {
@@ -504,6 +514,7 @@ fn config_refusals(root: &Path, dir: &str) -> Vec<String> {
                  {at}"
             ));
         }
+        let before_paths = out.len();
         if let Some(paths) = config.get("paths") {
             let named: Vec<String> = match paths.as_array() {
                 Some(a) => a.iter().map(|p| p.as_str().map_or_else(|| format!("{p:?}"), str::to_string)).collect(),
@@ -517,7 +528,28 @@ fn config_refusals(root: &Path, dir: &str) -> Vec<String> {
                 ));
             }
         }
-        out.extend(patch_paths(&config, &at));
+        let paths_named = out.len() > before_paths;
+        let patched = patch_paths(&config, &at);
+        let patch_named = !patched.is_empty();
+        out.extend(patched);
+        // A key on the list passes; `include`, `paths` and `[patch]` pass here only where a
+        // line above already refused them, so each refused key gets one line.
+        for key in config.keys() {
+            let answered = match key.as_str() {
+                "include" => true,
+                "paths" => paths_named,
+                "patch" => patch_named,
+                k => CONFIG_KEYS.contains(&k),
+            };
+            if !answered {
+                out.push(format!(
+                    "{at} has `{key}`, which is not a config key tier-check admits (it admits \
+                     {}): a key it does not admit may make a directory of this checkout a \
+                     package's source, which no manifest it reads would say. Drop it",
+                    CONFIG_KEYS.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
     }
     out
 }
@@ -1606,6 +1638,48 @@ mod tests {
         write(&t, "infra/relay/.cargo/config.toml", "include = [\"extra.toml\"]\n");
         let r = refused_once(&t);
         assert!(r.starts_with("infra/relay/.cargo/config.toml has `include`"), "{r}");
+    }
+
+    /// A workspace's `.cargo/` config may hold only the top-level keys of `CONFIG_KEYS`: the
+    /// four together pass, and any other key is refused once, naming the file and the key,
+    /// whatever it holds. `paths` and `[patch]` that name no path are refused by the list.
+    #[test]
+    fn config_keys_off_the_list_are_refused() {
+        let t = tree();
+        write(&t, "Cargo.toml", "[workspace]\nmembers = []\n");
+        write(
+            &t,
+            ".cargo/config.toml",
+            "[build]\ntarget-dir = \"out/target\"\n[alias]\nx = \"run\"\n\
+             [target.x86_64-pc-windows-msvc]\nlinker = \"rust-lld.exe\"\n[env]\nA = \"1\"\n",
+        );
+        assert!(read(&t).refused.is_empty(), "the four admitted keys");
+
+        for (file, text, key) in [
+            (".cargo/config.toml", "[source.vendored]\ndirectory = \"vendor\"\n[source.crates-io]\nreplace-with = \"vendored\"\n", "source"),
+            (".cargo/config.toml", "[source.local]\nlocal-registry = \"core\"\n", "source"),
+            (".cargo/config.toml", "[registries.local]\nindex = \"file:///tmp/x\"\n", "registries"),
+            (".cargo/config.toml", "[path-bases]\nhere = \"core\"\n", "path-bases"),
+            (".cargo/config.toml", "[net]\noffline = true\n", "net"),
+            (".cargo/config", "[unstable]\n", "unstable"),
+            (".cargo/config.toml", "paths = []\n", "paths"),
+            (".cargo/config.toml", "[patch.crates-io]\nserde = { git = \"https://example.com/serde\" }\n", "patch"),
+        ] {
+            let t = tree();
+            write(&t, "Cargo.toml", "[workspace]\nmembers = []\n");
+            write(&t, file, text);
+            let r = refused_once(&t);
+            assert!(
+                r.starts_with(&format!("{file} has `{key}`, which is not a config key tier-check admits")),
+                "{text:?}: {r}"
+            );
+        }
+
+        let t = tree();
+        add_dep(&t, "infra/relay", "[workspace]\n");
+        write(&t, "infra/relay/.cargo/config.toml", "[source.v]\ndirectory = \"v\"\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("infra/relay/.cargo/config.toml has `source`"), "{r}");
     }
 
     /// A crate whose `package.workspace` names no workspace this run read is refused; one that
