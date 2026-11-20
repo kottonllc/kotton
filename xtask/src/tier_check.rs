@@ -24,7 +24,10 @@
 //! with it. Nothing is built. The walk passes over hidden, `target` and `target-*` directories,
 //! which hold build output and tool state; so that it passes over no manifest, git is asked for
 //! every `Cargo.toml` it tracks under those roots, and one the walk did not read is refused. Git
-//! failing to answer is refused too: the run cannot then say it read every manifest.
+//! failing to answer is refused too: the run cannot then say it read every manifest. A manifest
+//! that names no package is passed over only when it is virtual (no `[package]`, no dependency
+//! table of its own); `[project]`, which cargo reads as `[package]` before the 2024 edition, is
+//! refused wherever it is.
 //!
 //! What it cannot place it refuses, naming the crate and the path. Every dependency `path` ends
 //! at a directory whose manifest this run read as a row's crate, or is a dev-dependency into a
@@ -368,6 +371,52 @@ fn package_name(manifest: &Table) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Why the manifest at `at` cannot be read as a crate or passed over as a virtual one. A
+/// `[project]` table is refused in any manifest: cargo still reads it as the package before the
+/// 2024 edition, and [`package_name`] reads `[package]` only. A manifest that names no package
+/// passes only when it is virtual: no `[package]`, and no dependency table of its own, at the
+/// top level or under `[target.'…']`. Anything else is a crate whose dependencies no rule reads.
+fn shape_refusals(manifest: &Table, at: &str) -> Vec<String> {
+    if manifest.contains_key("project") {
+        return vec![format!(
+            "{at} names its package under [project]: cargo reads that table as [package] before \
+             the 2024 edition, and tier-check reads [package] only, so nothing judges what that \
+             crate links. Rename it [package]"
+        )];
+    }
+    if package_name(manifest).is_some() {
+        return Vec::new();
+    }
+    let mut found: Vec<String> = Vec::new();
+    if manifest.contains_key("package") {
+        found.push("[package] with no name".to_string());
+    }
+    for t in DEPENDENCY_TABLES {
+        if manifest.contains_key(*t) {
+            found.push(format!("[{t}]"));
+        }
+    }
+    if let Some(Value::Table(targets)) = manifest.get("target") {
+        for (spec, tables) in targets {
+            let Value::Table(tables) = tables else { continue };
+            for t in DEPENDENCY_TABLES {
+                if tables.contains_key(*t) {
+                    found.push(format!("[target.'{spec}'.{t}]"));
+                }
+            }
+        }
+    }
+    if found.is_empty() {
+        return Vec::new();
+    }
+    vec![format!(
+        "{at} names no package and is not a virtual manifest: it has {}, so it is a crate whose \
+         dependencies tier-check does not read. Name it under [package], or drop {}",
+        found.join(", "),
+        if found.len() == 1 { "it" } else { "them" }
+    )]
+}
+
 fn parse_manifest(path: &Path) -> Result<Table, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     text.parse::<Table>()
@@ -490,9 +539,12 @@ fn declares_workspace(manifest: &Table) -> bool {
 /// refused, not skipped:
 ///
 /// - a manifest that cannot be read, or a package in no row;
+/// - a `[project]` table in any manifest read, and a manifest read that names no package and
+///   is not virtual: one with `[package]`, or a dependency table at the top level or under
+///   `[target.'…']` ([`shape_refusals`]);
 /// - a manifest git tracks under the rows' roots that the walk did not read (one under a
-///   hidden, `target` or `target-*` directory), and the run itself when git cannot list them
-///   ([`Tracked`]);
+///   hidden, `target` or `target-*` directory, or one missing from the working tree), and the
+///   run itself when git cannot list them ([`Tracked`]);
 /// - a dependency `path` that does not end at a directory whose manifest this run read as a
 ///   row's crate, unless it is a dev-dependency into a root named in [`NOT_ROWS`]. That refuses
 ///   a path that leaves the repository (even to come back), one into a directory under no row
@@ -513,6 +565,7 @@ pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
     if root_manifest.exists() {
         match parse_manifest(&root_manifest) {
             Ok(m) => {
+                refused.extend(shape_refusals(&m, "Cargo.toml"));
                 refused.extend(workspace_paths(&m, "Cargo.toml"));
                 refused.extend(patch_paths(&m, "Cargo.toml"));
                 refused.extend(config_refusals(root, ""));
@@ -543,12 +596,14 @@ pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
             let dir_path = manifest_path.parent().unwrap_or(root);
             let dir = rel(dir_path);
             let at = format!("{dir}/Cargo.toml");
+            refused.extend(shape_refusals(&manifest, &at));
             refused.extend(workspace_paths(&manifest, &at));
             refused.extend(patch_paths(&manifest, &at));
             if declares_workspace(&manifest) {
                 refused.extend(config_refusals(root, &dir));
                 workspaces.insert(dir.clone());
             }
+            // No name: virtual, or refused above by [`shape_refusals`].
             let Some(name) = package_name(&manifest) else {
                 continue;
             };
@@ -566,14 +621,30 @@ pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
     match tracked {
         Ok(files) => {
             for f in files.iter().map(|f| crate::normalise_path(&f.replace('\\', "/"))) {
-                if !walked.contains(&f) {
-                    refused.push(format!(
-                        "{f} is tracked by git under a row's root, and tier-check did not read \
-                         it: it reads no manifest under a hidden, `target` or `target-*` \
-                         directory, so nothing judges what that crate links. Move the crate to \
-                         a directory of its own in a row"
-                    ));
+                if walked.contains(&f) {
+                    continue;
                 }
+                let skipped_dir = f
+                    .split('/')
+                    .rev()
+                    .skip(1)
+                    .any(|d| d.starts_with('.') || d == "target" || d.starts_with("target-"));
+                let absent = matches!(
+                    std::fs::symlink_metadata(root.join(&f)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                );
+                let why = if skipped_dir {
+                    ": it reads no manifest under a hidden, `target` or `target-*` directory. Move \
+                     the crate to a directory of its own in a row"
+                } else if absent {
+                    ": it is not in the working tree. Restore it, or stage its deletion"
+                } else {
+                    ""
+                };
+                refused.push(format!(
+                    "{f} is tracked by git under a row's root, and tier-check did not read it, so \
+                     nothing judges what that crate links{why}"
+                ));
             }
         }
         Err(e) => refused.push(format!(
@@ -1363,6 +1434,85 @@ mod tests {
         let refused = read_tree(r.path(), &tracked_manifests(r.path())).refused;
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].starts_with("core/.vendor/bridge/Cargo.toml is tracked by git"), "{refused:?}");
+    }
+
+    /// A tracked manifest missing from the working tree is refused with that as its reason, not
+    /// a hidden or `target` directory; one under such a directory is given that reason.
+    #[test]
+    fn a_tracked_manifest_missing_from_the_working_tree_is_refused_as_missing() {
+        let t = tree();
+        let mut tracked = every_manifest(t.path());
+        tracked.push("core/gone/Cargo.toml".into());
+        tracked.push("core/.vendor/gone/Cargo.toml".into());
+        let mut refused = read_tree(t.path(), &Ok(tracked)).refused;
+        refused.sort();
+        assert_eq!(
+            refused,
+            vec![
+                "core/.vendor/gone/Cargo.toml is tracked by git under a row's root, and tier-check \
+                 did not read it, so nothing judges what that crate links: it reads no manifest \
+                 under a hidden, `target` or `target-*` directory. Move the crate to a directory \
+                 of its own in a row"
+                    .to_string(),
+                "core/gone/Cargo.toml is tracked by git under a row's root, and tier-check did not \
+                 read it, so nothing judges what that crate links: it is not in the working tree. \
+                 Restore it, or stage its deletion"
+                    .to_string(),
+            ]
+        );
+    }
+
+    /// `[project]` is refused in a row's manifest and in the root's, with `[package]` beside it
+    /// or without.
+    #[test]
+    fn a_package_under_project_is_refused() {
+        let t = tree();
+        write(&t, "core/fs/Cargo.toml", "[project]\nname = \"kotton-fs\"\n\n[dependencies]\nkotton-shell = { path = \"../../client/shell\" }\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("core/fs/Cargo.toml names its package under [project]: cargo reads"), "{r}");
+
+        let t = tree();
+        write(&t, "core/fs/Cargo.toml", "[package]\nname = \"kotton-fs\"\n\n[project]\nname = \"kotton-fs\"\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("core/fs/Cargo.toml names its package under [project]"), "{r}");
+
+        let t = tree();
+        write(&t, "Cargo.toml", "[workspace]\nmembers = []\n\n[project]\nname = \"root\"\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("Cargo.toml names its package under [project]"), "{r}");
+    }
+
+    /// A manifest that names no package passes only when it is virtual: no `[package]` and no
+    /// dependency table, at the top level or under `[target.'…']`, empty or not.
+    #[test]
+    fn a_manifest_with_no_name_passes_only_when_virtual() {
+        for virtual_ in ["[workspace]\nmembers = []\n", "", "[target.'cfg(unix)']\n"] {
+            let t = tree();
+            write(&t, "core/virt/Cargo.toml", virtual_);
+            assert!(read(&t).refused.is_empty(), "{virtual_:?}: {:?}", read(&t).refused);
+        }
+        let prefix = "core/virt/Cargo.toml names no package and is not a virtual manifest: it has";
+        for (text, found) in [
+            ("[dependencies]\nx = { path = \"../wire\" }\n", "[dependencies]"),
+            ("[dev-dependencies]\n", "[dev-dependencies]"),
+            ("[build_dependencies]\nx = { path = \"../wire\" }\n", "[build_dependencies]"),
+            ("[target.'cfg(unix)'.dependencies]\nx = { path = \"../wire\" }\n", "[target.'cfg(unix)'.dependencies]"),
+            ("[package]\nversion = \"0.1.0\"\n", "[package] with no name"),
+            (
+                "[workspace]\n\n[dependencies]\nx = { path = \"../wire\" }\n\n[target.'cfg(unix)'.dev-dependencies]\n",
+                "[dependencies], [target.'cfg(unix)'.dev-dependencies]",
+            ),
+        ] {
+            let t = tree();
+            write(&t, "core/virt/Cargo.toml", text);
+            let r = refused_once(&t);
+            assert!(r.starts_with(&format!("{prefix} {found}, so it is a crate")), "{text:?}: {r}");
+        }
+
+        let t = tree();
+        write(&t, "Cargo.toml", "[workspace]\nmembers = []\n\n[dependencies]\nx = { path = \"core/wire\" }\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("Cargo.toml names no package and is not a virtual manifest: it has [dependencies]"), "{r}");
     }
 
     /// When git cannot list the tracked manifests, the run is refused: it cannot say it read
