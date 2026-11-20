@@ -21,8 +21,14 @@
 //! TOML: the package's name, and every `path` dependency in `[dependencies]`,
 //! `[dev-dependencies]`, `[build-dependencies]` and their `[target.'…']` forms. A dev-dependency
 //! is an edge: the rule reads manifests, and a crate cut into another repository takes its tests
-//! with it. An edge landing in no row (`tools/`, `tests/`, `xtask/`) is not this rule's
-//! business: nothing there ships. Nothing is built.
+//! with it. Nothing is built.
+//!
+//! A `path` under `[workspace.dependencies]`, in the root manifest or in a row's manifest that
+//! declares a workspace, is refused: a crate that inherits it writes no path of its own, so the
+//! edge would be in no manifest read here. And a dependency that is not a dev-dependency, from a
+//! row's crate into a root that is no row, is refused: it ships what it links, and nothing under
+//! that root is read. A row's dev-dependencies into those roots (`tools/workspace-hack`, for most
+//! crates) are on no list; each row prints how many it does not count.
 //!
 //! Each edge is judged by the row of each end. Inside one row, or into a row the first may link,
 //! it is admitted. Otherwise it is on the first row's owed list, by crate name, or it is refused,
@@ -124,8 +130,12 @@ pub(crate) const ROWS: &[Row] = &[
 
 /// The code roots that are no row: nothing in them ships. `tools/` holds test instruments
 /// (`tools/workspace-hack` among them, which crates dev-depend on), `xtask/` the gates and
-/// `tests/` the integration suite.
+/// `tests/` the integration suite. A row's crate may dev-depend on them and on nothing else
+/// there ([`read_tree`]).
 pub(crate) const NOT_ROWS: &[&str] = &["tools", "xtask", "tests"];
+
+/// The one feature set every test build shares: most crates dev-depend on it, and it is no row.
+const WORKSPACE_HACK: &str = "tools/workspace-hack";
 
 /// The owed lists, repo-relative.
 pub(crate) const OWED_FILE: &str = "xtask/tier-owed.toml";
@@ -273,12 +283,14 @@ const DEPENDENCY_TABLES: &[&str] = &[
     "build_dependencies",
 ];
 
-/// The `path` of every dependency a parsed manifest declares, target-specific tables included.
-fn dependency_paths(manifest: &Table) -> Vec<String> {
-    let mut tables: Vec<&Table> = Vec::new();
+/// The `path` of every dependency a parsed manifest declares, target-specific tables included,
+/// and whether it is a dev-dependency.
+fn dependency_paths(manifest: &Table) -> Vec<(String, bool)> {
+    let mut tables: Vec<(&Table, bool)> = Vec::new();
+    let is_dev = |t: &str| t.starts_with("dev");
     for t in DEPENDENCY_TABLES {
         if let Some(Value::Table(deps)) = manifest.get(*t) {
-            tables.push(deps);
+            tables.push((deps, is_dev(t)));
         }
     }
     if let Some(Value::Table(targets)) = manifest.get("target") {
@@ -286,20 +298,54 @@ fn dependency_paths(manifest: &Table) -> Vec<String> {
             let Value::Table(spec) = spec else { continue };
             for t in DEPENDENCY_TABLES {
                 if let Some(Value::Table(deps)) = spec.get(*t) {
-                    tables.push(deps);
+                    tables.push((deps, is_dev(t)));
                 }
             }
         }
     }
     let mut out = Vec::new();
-    for deps in tables {
+    for (deps, dev) in tables {
         for dep in deps.values() {
             if let Some(Value::String(p)) = dep.as_table().and_then(|d| d.get("path")) {
-                out.push(p.clone());
+                out.push((p.clone(), dev));
             }
         }
     }
     out
+}
+
+/// Every `path` under a manifest's `[workspace.dependencies]`, refused. A crate that inherits
+/// one (`{ workspace = true }`) declares no `path` of its own, so the edge would be in no
+/// manifest this check reads; with no `path` there, the edge cannot be written that way.
+fn workspace_paths(manifest: &Table, at: &str) -> Vec<String> {
+    let Some(Value::Table(deps)) = manifest
+        .get("workspace")
+        .and_then(Value::as_table)
+        .and_then(|w| w.get("dependencies"))
+    else {
+        return Vec::new();
+    };
+    deps.iter()
+        .filter_map(|(key, dep)| {
+            let path = dep.as_table()?.get("path")?.as_str()?;
+            Some(format!(
+                "{at} names `{key}` by path (`{path}`) under [workspace.dependencies]: a crate \
+                 that inherits it declares no path of its own, so tier-check would not read the \
+                 edge. Write the path in each crate's own manifest"
+            ))
+        })
+        .collect()
+}
+
+/// What [`read_tree`] read.
+#[derive(Debug, Default)]
+pub(crate) struct Tree {
+    pub(crate) crates: Vec<Crate>,
+    pub(crate) edges: BTreeSet<Edge>,
+    /// The dev-dependencies of each row's crates into a root that is no row, which no list
+    /// counts: row, then the directory depended on, then the crates that depend on it.
+    pub(crate) uncounted: BTreeMap<&'static str, BTreeMap<String, BTreeSet<String>>>,
+    pub(crate) refused: Vec<String>,
 }
 
 fn package_name(manifest: &Table) -> Option<String> {
@@ -319,11 +365,21 @@ fn parse_manifest(path: &Path) -> Result<Table, String> {
 
 /// The crates of every row under `root`, and the path dependencies between them. A manifest
 /// that cannot be read, a package in no row, or a path that names no package is refused: a
-/// reader that skips what it cannot read reports OK over less than the tree.
-pub(crate) fn read_tree(root: &Path) -> (Vec<Crate>, BTreeSet<Edge>, Vec<String>) {
-    let mut crates = Vec::new();
-    let mut edges = BTreeSet::new();
-    let mut refused = Vec::new();
+/// reader that skips what it cannot read reports OK over less than the tree. So is a `path`
+/// under `[workspace.dependencies]`, in the root manifest or in a row's, and a dependency that
+/// is not a dev-dependency from a row's crate into a root that is no row: it ships what it
+/// links, and nothing reads what that is.
+pub(crate) fn read_tree(root: &Path) -> Tree {
+    let mut t = Tree::default();
+    let (crates, edges, refused) = (&mut t.crates, &mut t.edges, &mut t.refused);
+    let uncounted = &mut t.uncounted;
+    let root_manifest = root.join("Cargo.toml");
+    if root_manifest.exists() {
+        match parse_manifest(&root_manifest) {
+            Ok(m) => refused.extend(workspace_paths(&m, "Cargo.toml")),
+            Err(e) => refused.push(e),
+        }
+    }
     let rel = |p: &Path| -> String {
         let s = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
         crate::normalise_path(&s)
@@ -337,11 +393,12 @@ pub(crate) fn read_tree(root: &Path) -> (Vec<Crate>, BTreeSet<Edge>, Vec<String>
                     continue;
                 }
             };
+            let dir_path = manifest_path.parent().unwrap_or(root);
+            let dir = rel(dir_path);
+            refused.extend(workspace_paths(&manifest, &format!("{dir}/Cargo.toml")));
             let Some(name) = package_name(&manifest) else {
                 continue;
             };
-            let dir_path = manifest_path.parent().unwrap_or(root);
-            let dir = rel(dir_path);
             let Some(row) = row_of(&dir) else {
                 refused.push(format!(
                     "{name} ({dir}) is in no row: name it in a row of xtask/src/tier_check.rs, \
@@ -350,9 +407,29 @@ pub(crate) fn read_tree(root: &Path) -> (Vec<Crate>, BTreeSet<Edge>, Vec<String>
                 continue;
             };
             crates.push(Crate { name: name.clone(), dir: dir.clone(), row: row.name });
-            for dep in dependency_paths(&manifest) {
+            for (dep, dev) in dependency_paths(&manifest) {
                 let to_dir = crate::normalise_path(&format!("{dir}/{dep}"));
                 if row_of(&to_dir).is_none() {
+                    let top = to_dir.split('/').next().unwrap_or("");
+                    if !NOT_ROWS.contains(&top) {
+                        continue;
+                    }
+                    if dev {
+                        uncounted
+                            .entry(row.name)
+                            .or_default()
+                            .entry(to_dir)
+                            .or_default()
+                            .insert(name.clone());
+                    } else {
+                        refused.push(format!(
+                            "{name} ({dir}, row `{}`) depends on {to_dir}, under `{top}/`, which \
+                             is no row: a dependency that is not a dev-dependency ships what it \
+                             links, and tier-check reads nothing under `{top}/`. Move the crate \
+                             into a row, or drop the dependency",
+                            row.name
+                        ));
+                    }
                     continue;
                 }
                 let to = parse_manifest(&root.join(&to_dir).join("Cargo.toml"))
@@ -369,7 +446,7 @@ pub(crate) fn read_tree(root: &Path) -> (Vec<Crate>, BTreeSet<Edge>, Vec<String>
             }
         }
     }
-    (crates, edges, refused)
+    t
 }
 
 /// The index of the region of [`crate::tree::REGIONS`] a directory is in, if any.
@@ -604,10 +681,10 @@ pub(crate) fn rows_check(root: &Path) -> Vec<String> {
             ));
         }
     }
-    let (crates, edges, read_refused) = read_tree(root);
-    refused.extend(read_refused);
+    let tree = read_tree(root);
+    refused.extend(tree.refused.iter().cloned());
     let base = base_owed(root);
-    let judged = judge(&crates, &edges, &owed, &base);
+    let judged = judge(&tree.crates, &tree.edges, &owed, &base);
 
     println!("tier-check: one row for each repository of kotton-protocol's repository plan this tree holds a part of, over today's paths");
     for row in ROWS {
@@ -626,6 +703,19 @@ pub(crate) fn rows_check(root: &Path) -> Vec<String> {
             for to in tos {
                 println!("      {from} -> {to}");
             }
+        }
+        let none = BTreeMap::new();
+        let uncounted = tree.uncounted.get(row.name).unwrap_or(&none);
+        let hack = uncounted.get(WORKSPACE_HACK).map(BTreeSet::len).unwrap_or(0);
+        println!(
+            "    not counted: dev-dependencies on {WORKSPACE_HACK}, which is no row ({hack} of \
+             this row's crates)"
+        );
+        for (to_dir, froms) in uncounted.iter().filter(|(d, _)| d.as_str() != WORKSPACE_HACK) {
+            println!(
+                "    not counted: dev-dependencies on {to_dir}, which is no row ({} of this row's crates)",
+                froms.len()
+            );
         }
     }
     match &base {
@@ -682,9 +772,9 @@ mod tests {
                         [\"client library\"]\n[vault]\n[operator]\n[system]\n";
 
     fn run(t: &tempfile::TempDir, owed: &str, base: &Base) -> Judged {
-        let (crates, edges, refused) = read_tree(t.path());
-        assert!(refused.is_empty(), "{refused:?}");
-        judge(&crates, &edges, &parse_owed(owed).unwrap(), base)
+        let tree = read_tree(t.path());
+        assert!(tree.refused.is_empty(), "{:?}", tree.refused);
+        judge(&tree.crates, &tree.edges, &parse_owed(owed).unwrap(), base)
     }
 
     fn at(owed: &str) -> Base {
@@ -810,11 +900,64 @@ mod tests {
         assert!(j.refused.iter().any(|r| r.contains("row `operator` has no list")), "{:?}", j.refused);
     }
 
+    /// Ground of the first review: a `path` under `[workspace.dependencies]` is refused, in the
+    /// root manifest and in a row's manifest that declares a workspace, because the crate that
+    /// inherits it writes no path of its own.
+    #[test]
+    fn a_path_under_workspace_dependencies_is_refused() {
+        let t = tree();
+        std::fs::write(
+            t.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []\n\n[workspace.dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
+        add_dep(&t, "client/shell", "kotton-fs = { workspace = true }\n");
+        assert!(read_tree(t.path()).refused.is_empty(), "a version under the table is not a path");
+
+        std::fs::write(
+            t.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []\n\n[workspace.dependencies]\nkotton-fs = { path = \"core/fs\" }\n",
+        )
+        .unwrap();
+        let refused = read_tree(t.path()).refused;
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].starts_with("Cargo.toml names `kotton-fs` by path"), "{refused:?}");
+
+        let t = tree();
+        add_dep(&t, "infra/relay", "[workspace.dependencies.kotton-fs]\npath = \"../../core/fs\"\n");
+        let refused = read_tree(t.path()).refused;
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].starts_with("infra/relay/Cargo.toml names `kotton-fs` by path"), "{refused:?}");
+    }
+
+    /// Ground of the second review: a dependency from a row's crate into a root that is no row
+    /// is refused unless it is a dev-dependency, which is counted aside and printed.
+    #[test]
+    fn a_shipped_dependency_into_a_root_that_is_no_row_is_refused() {
+        let t = tree();
+        add_dep(&t, "infra/relay", "bridge = { path = \"../../tools/bridge\" }\n");
+        let refused = read_tree(t.path()).refused;
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].contains("kotton-relay") && refused[0].contains("tools/bridge"), "{refused:?}");
+
+        let t = tree();
+        add_dep(&t, "infra/relay", "[build-dependencies]\nbridge = { path = \"../../tests/bridge\" }\n");
+        assert_eq!(read_tree(t.path()).refused.len(), 1);
+
+        let t = tree();
+        add_dep(&t, "infra/relay", "[dev-dependencies]\nworkspace-hack = { path = \"../../tools/workspace-hack\" }\n");
+        add_dep(&t, "client/shell", "[target.'cfg(unix)'.dev-dependencies]\nworkspace-hack = { path = \"../../tools/workspace-hack\" }\n");
+        let tree = read_tree(t.path());
+        assert!(tree.refused.is_empty(), "{:?}", tree.refused);
+        assert_eq!(tree.uncounted["relay"][WORKSPACE_HACK].len(), 1);
+        assert_eq!(tree.uncounted["cli"][WORKSPACE_HACK].len(), 1);
+    }
+
     /// A crate under a row's root that no row names is refused, not skipped.
     #[test]
     fn a_crate_in_no_row_is_refused() {
         let t = fixture(&[("client/newthing", "kotton-new", &[])]);
-        let (_, _, refused) = read_tree(t.path());
+        let refused = read_tree(t.path()).refused;
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].contains("kotton-new") && refused[0].contains("in no row"));
     }
@@ -868,10 +1011,10 @@ mod tests {
     #[test]
     fn the_tree_as_it_is_is_in_the_rows() {
         let root = crate::out::root();
-        let (crates, edges, refused) = read_tree(&root);
-        assert!(refused.is_empty(), "{refused:?}");
+        let tree = read_tree(&root);
+        assert!(tree.refused.is_empty(), "{:?}", tree.refused);
         let owed = parse_owed(&std::fs::read_to_string(root.join(OWED_FILE)).unwrap()).unwrap();
-        let j = judge(&crates, &edges, &owed, &Base::Absent { commit: String::new() });
+        let j = judge(&tree.crates, &tree.edges, &owed, &Base::Absent { commit: String::new() });
         assert!(j.refused.is_empty(), "{:?}", j.refused);
     }
 }
