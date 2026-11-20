@@ -23,12 +23,18 @@
 //! is an edge: the rule reads manifests, and a crate cut into another repository takes its tests
 //! with it. Nothing is built.
 //!
-//! A `path` under `[workspace.dependencies]`, in the root manifest or in a row's manifest that
-//! declares a workspace, is refused: a crate that inherits it writes no path of its own, so the
-//! edge would be in no manifest read here. And a dependency that is not a dev-dependency, from a
-//! row's crate into a root that is no row, is refused: it ships what it links, and nothing under
-//! that root is read. A row's dev-dependencies into those roots (`tools/workspace-hack`, for most
-//! crates) are on no list; each row prints how many it does not count.
+//! What it cannot place it refuses, naming the crate and the path. Every dependency `path` ends
+//! at a directory whose manifest this run read as a row's crate, or is a dev-dependency into a
+//! root that is no row; anything else is refused: a path that leaves the repository, even to
+//! come back, one into a directory in no row, one into a hidden or `target*` directory (whose
+//! manifests are not read), and a normal or build dependency into a root that is no row, which
+//! ships what it links. Where a workspace is declared (the root manifest, or a row's that
+//! declares one), a `path` under `[workspace.dependencies]`, `[patch]` or `[replace]`, and
+//! `paths` or a `[patch]` path in that workspace's `.cargo/` config, are refused: each puts an
+//! edge or a crate where no manifest read here says so. A crate whose `package.workspace` names
+//! no workspace read here is refused. A row's dev-dependencies into a root that is no row
+//! (`tools/workspace-hack`, for most crates) are on no list; each row prints how many it does
+//! not count.
 //!
 //! Each edge is judged by the row of each end. Inside one row, or into a row the first may link,
 //! it is admitted. Otherwise it is on the first row's owed list, by crate name, or it is refused,
@@ -363,20 +369,130 @@ fn parse_manifest(path: &Path) -> Result<Table, String> {
         .map_err(|e| format!("{}: not TOML: {e}", path.display()))
 }
 
-/// The crates of every row under `root`, and the path dependencies between them. A manifest
-/// that cannot be read, a package in no row, or a path that names no package is refused: a
-/// reader that skips what it cannot read reports OK over less than the tree. So is a `path`
-/// under `[workspace.dependencies]`, in the root manifest or in a row's, and a dependency that
-/// is not a dev-dependency from a row's crate into a root that is no row: it ships what it
-/// links, and nothing reads what that is.
+/// Resolve a dependency `path` written in the manifest in repo-relative `dir` to the
+/// repo-relative directory it names. `None` when it is absolute or climbs above the repository
+/// at any point, even to come back: where it lands then depends on what the checkout is named,
+/// which nothing here reads.
+fn resolve(dir: &str, path: &str) -> Option<String> {
+    let path = path.replace('\\', "/");
+    if path.starts_with('/') || path.as_bytes().get(1) == Some(&b':') {
+        return None;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in dir.split('/').chain(path.split('/')) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            s => parts.push(s),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// Every `path` under a manifest's `[patch.*]` or `[replace]`, or a config file's `[patch.*]`,
+/// refused. A patch puts another crate where a dependency was, and that crate is not placed by
+/// any row, so what it links would be read by nothing.
+fn patch_paths(manifest: &Table, at: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut refuse = |key: &str, path: &str, table: &str| {
+        out.push(format!(
+            "{at} names `{key}` by path (`{path}`) under [{table}]: the crate it puts in a \
+             dependency's place is in no manifest tier-check reads as a row's, so nothing reads \
+             what it links. Drop it"
+        ));
+    };
+    if let Some(Value::Table(sources)) = manifest.get("patch") {
+        for (source, deps) in sources {
+            for (key, dep) in deps.as_table().into_iter().flatten() {
+                if let Some(path) = dep.as_table().and_then(|d| d.get("path")).and_then(Value::as_str) {
+                    refuse(key, path, &format!("patch.{source}"));
+                }
+            }
+        }
+    }
+    if let Some(Value::Table(deps)) = manifest.get("replace") {
+        for (key, dep) in deps {
+            if let Some(path) = dep.as_table().and_then(|d| d.get("path")).and_then(Value::as_str) {
+                refuse(key, path, "replace");
+            }
+        }
+    }
+    out
+}
+
+/// What a workspace declared in repo-relative `dir` is held to beyond its manifest: each of its
+/// `.cargo/` config files, read for `paths` and `[patch]`, both refused. A config file that
+/// cannot be read is refused.
+fn config_refusals(root: &Path, dir: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in [".cargo/config.toml", ".cargo/config"] {
+        let at = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
+        let file = root.join(&at);
+        if !file.is_file() {
+            continue;
+        }
+        let config = match parse_manifest(&file) {
+            Ok(c) => c,
+            Err(e) => {
+                out.push(e);
+                continue;
+            }
+        };
+        if let Some(paths) = config.get("paths") {
+            let named: Vec<String> = match paths.as_array() {
+                Some(a) => a.iter().map(|p| p.as_str().map_or_else(|| format!("{p:?}"), str::to_string)).collect(),
+                None => vec![format!("{paths:?}")],
+            };
+            for p in named {
+                out.push(format!(
+                    "{at} names `{p}` under `paths`: a path override puts a crate in a \
+                     dependency's place that is in no manifest tier-check reads as a row's, so \
+                     nothing reads what it links. Drop it"
+                ));
+            }
+        }
+        out.extend(patch_paths(&config, &at));
+    }
+    out
+}
+
+fn declares_workspace(manifest: &Table) -> bool {
+    matches!(manifest.get("workspace"), Some(Value::Table(_)))
+}
+
+/// The crates of every row under `root`, and the path dependencies between them. A reader that
+/// skips what it cannot read reports OK over less than the tree, so what it cannot place is
+/// refused, not skipped:
+///
+/// - a manifest that cannot be read, or a package in no row;
+/// - a dependency `path` that does not end at a directory whose manifest this run read as a
+///   row's crate, unless it is a dev-dependency into a root named in [`NOT_ROWS`]. That refuses
+///   a path that leaves the repository (even to come back), one into a directory under no row
+///   and no such root, one into a hidden or `target*` directory (whose manifests are not read),
+///   and a normal or build dependency into a root that is no row, which ships what it links;
+/// - a `path` under `[workspace.dependencies]`, `[patch]` or `[replace]` where a workspace is
+///   declared (the root manifest, or a row's that declares one), and `paths` or a `[patch]`
+///   path in that workspace's `.cargo/` config;
+/// - a crate whose `package.workspace` names no workspace this run read.
 pub(crate) fn read_tree(root: &Path) -> Tree {
     let mut t = Tree::default();
     let (crates, edges, refused) = (&mut t.crates, &mut t.edges, &mut t.refused);
     let uncounted = &mut t.uncounted;
+    // The directories that declare a workspace this run read, repo-relative ("" is the root).
+    let mut workspaces: BTreeSet<String> = BTreeSet::new();
     let root_manifest = root.join("Cargo.toml");
     if root_manifest.exists() {
         match parse_manifest(&root_manifest) {
-            Ok(m) => refused.extend(workspace_paths(&m, "Cargo.toml")),
+            Ok(m) => {
+                refused.extend(workspace_paths(&m, "Cargo.toml"));
+                refused.extend(patch_paths(&m, "Cargo.toml"));
+                refused.extend(config_refusals(root, ""));
+                if declares_workspace(&m) {
+                    workspaces.insert(String::new());
+                }
+            }
             Err(e) => refused.push(e),
         }
     }
@@ -384,6 +500,8 @@ pub(crate) fn read_tree(root: &Path) -> Tree {
         let s = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
         crate::normalise_path(&s)
     };
+    // First every manifest, so a dependency is placed against everything this run read.
+    let mut read: Vec<(String, String, &'static Row, Table)> = Vec::new();
     for top in row_roots() {
         for manifest_path in manifests_under(&root.join(top)) {
             let manifest = match parse_manifest(&manifest_path) {
@@ -395,7 +513,13 @@ pub(crate) fn read_tree(root: &Path) -> Tree {
             };
             let dir_path = manifest_path.parent().unwrap_or(root);
             let dir = rel(dir_path);
-            refused.extend(workspace_paths(&manifest, &format!("{dir}/Cargo.toml")));
+            let at = format!("{dir}/Cargo.toml");
+            refused.extend(workspace_paths(&manifest, &at));
+            if declares_workspace(&manifest) {
+                refused.extend(patch_paths(&manifest, &at));
+                refused.extend(config_refusals(root, &dir));
+                workspaces.insert(dir.clone());
+            }
             let Some(name) = package_name(&manifest) else {
                 continue;
             };
@@ -407,42 +531,79 @@ pub(crate) fn read_tree(root: &Path) -> Tree {
                 continue;
             };
             crates.push(Crate { name: name.clone(), dir: dir.clone(), row: row.name });
-            for (dep, dev) in dependency_paths(&manifest) {
-                let to_dir = crate::normalise_path(&format!("{dir}/{dep}"));
-                if row_of(&to_dir).is_none() {
-                    let top = to_dir.split('/').next().unwrap_or("");
-                    if !NOT_ROWS.contains(&top) {
-                        continue;
-                    }
-                    if dev {
-                        uncounted
-                            .entry(row.name)
-                            .or_default()
-                            .entry(to_dir)
-                            .or_default()
-                            .insert(name.clone());
-                    } else {
-                        refused.push(format!(
-                            "{name} ({dir}, row `{}`) depends on {to_dir}, under `{top}/`, which \
-                             is no row: a dependency that is not a dev-dependency ships what it \
-                             links, and tier-check reads nothing under `{top}/`. Move the crate \
-                             into a row, or drop the dependency",
-                            row.name
-                        ));
-                    }
-                    continue;
-                }
-                let to = parse_manifest(&root.join(&to_dir).join("Cargo.toml"))
-                    .ok()
-                    .and_then(|m| package_name(&m));
-                let Some(to) = to else {
+            read.push((name, dir, row, manifest));
+        }
+    }
+    let by_dir: BTreeMap<&str, &str> = read.iter().map(|(n, d, _, _)| (d.as_str(), n.as_str())).collect();
+    for (name, dir, row, manifest) in &read {
+        let workspace = manifest
+            .get("package")
+            .and_then(Value::as_table)
+            .and_then(|p| p.get("workspace"))
+            .and_then(Value::as_str);
+        if let Some(ws) = workspace {
+            if !resolve(dir, ws).is_some_and(|w| workspaces.contains(&w)) {
+                refused.push(format!(
+                    "{name} ({dir}, row `{}`) names its workspace at `{ws}`, which is no workspace \
+                     tier-check read: it reads [workspace.dependencies], [patch] and [replace] only \
+                     in the root manifest and in a row's that declares a workspace",
+                    row.name
+                ));
+            }
+        }
+        for (dep, dev) in dependency_paths(manifest) {
+            let Some(to_dir) = resolve(dir, &dep) else {
+                refused.push(format!(
+                    "{name} ({dir}, row `{}`) depends on `{dep}`, which leaves the repository: \
+                     tier-check places only a path that stays inside it, so nothing reads what \
+                     that crate links. Write the path from {dir} without climbing above the \
+                     repository",
+                    row.name
+                ));
+                continue;
+            };
+            if let Some(to) = by_dir.get(to_dir.as_str()) {
+                edges.insert(Edge {
+                    from: name.clone(),
+                    from_dir: dir.clone(),
+                    to: (*to).to_string(),
+                    to_dir,
+                });
+                continue;
+            }
+            let top = to_dir.split('/').next().unwrap_or("").to_string();
+            if NOT_ROWS.contains(&top.as_str()) {
+                if dev {
+                    uncounted
+                        .entry(row.name)
+                        .or_default()
+                        .entry(to_dir)
+                        .or_default()
+                        .insert(name.clone());
+                } else {
                     refused.push(format!(
-                        "{name} ({dir}) path-depends on {to_dir}, which holds no package tier-check \
-                         can read"
+                        "{name} ({dir}, row `{}`) depends on {to_dir}, under `{top}/`, which \
+                         is no row: a dependency that is not a dev-dependency ships what it \
+                         links, and tier-check reads nothing under `{top}/`. Move the crate \
+                         into a row, or drop the dependency",
+                        row.name
                     ));
-                    continue;
-                };
-                edges.insert(Edge { from: name.clone(), from_dir: dir.clone(), to, to_dir });
+                }
+            } else if row_of(&to_dir).is_some() {
+                refused.push(format!(
+                    "{name} ({dir}, row `{}`) path-depends on {to_dir}, which is no crate \
+                     tier-check read as a row's: it reads no manifest under a hidden or \
+                     `target*` directory, so nothing reads what that crate links. Move the \
+                     crate to a directory of its own in a row",
+                    row.name
+                ));
+            } else {
+                refused.push(format!(
+                    "{name} ({dir}, row `{}`) depends on {to_dir}, which is in no row and under \
+                     no root named in NOT_ROWS: tier-check reads nothing there, so nothing reads \
+                     what that crate links. Move the crate into a row",
+                    row.name
+                ));
             }
         }
     }
@@ -960,6 +1121,157 @@ mod tests {
         let refused = read_tree(t.path()).refused;
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].contains("kotton-new") && refused[0].contains("in no row"));
+    }
+
+    /// What one change to [`tree`] makes [`read_tree`] refuse: exactly one line.
+    fn refused_once(t: &tempfile::TempDir) -> String {
+        let refused = read_tree(t.path()).refused;
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        refused[0].clone()
+    }
+
+    fn write(t: &tempfile::TempDir, file: &str, text: &str) {
+        let p = t.path().join(file);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
+    /// A path that leaves the repository is refused, absolute or relative.
+    #[test]
+    fn a_path_outside_the_repository_is_refused() {
+        for path in ["../../../elsewhere", "/opt/elsewhere"] {
+            let t = tree();
+            add_dep(&t, "infra/relay", &format!("elsewhere = {{ path = \"{path}\" }}\n"));
+            let r = refused_once(&t);
+            assert!(
+                r.starts_with(&format!("kotton-relay (infra/relay, row `relay`) depends on `{path}`, which leaves the repository")),
+                "{r}"
+            );
+        }
+    }
+
+    /// A path that climbs out of the repository and back in is refused, though on disk it
+    /// lands on a crate of a row.
+    #[test]
+    fn a_path_that_climbs_out_and_returns_is_refused() {
+        let t = tree();
+        let name = t.path().file_name().unwrap().to_string_lossy().to_string();
+        let path = format!("../../../{name}/core/fs");
+        add_dep(&t, "client/shell", &format!("kotton-fs = {{ path = \"{path}\" }}\n"));
+        assert!(t.path().join("client/shell").join(&path).join("Cargo.toml").is_file());
+        let r = refused_once(&t);
+        assert!(
+            r.starts_with(&format!("kotton-shell (client/shell, row `cli`) depends on `{path}`, which leaves the repository")),
+            "{r}"
+        );
+    }
+
+    /// A path into a hidden top-level directory is in no row and under no root named in
+    /// `NOT_ROWS`, and is refused, a dev-dependency too.
+    #[test]
+    fn a_path_into_a_hidden_top_level_directory_is_refused() {
+        for table in ["", "[dev-dependencies]\n"] {
+            let t = tree();
+            write(&t, ".hidden/bridge/Cargo.toml", "[package]\nname = \"bridge\"\n");
+            add_dep(&t, "infra/relay", &format!("{table}bridge = {{ path = \"../../.hidden/bridge\" }}\n"));
+            let r = refused_once(&t);
+            assert!(
+                r.starts_with("kotton-relay (infra/relay, row `relay`) depends on .hidden/bridge, which is in no row and under no root named in NOT_ROWS"),
+                "{table}: {r}"
+            );
+        }
+    }
+
+    /// A crate under a hidden or `target*` directory inside a row is never read, so an edge
+    /// into it is refused rather than admitted as same-row.
+    #[test]
+    fn a_crate_under_a_hidden_or_target_directory_in_a_row_is_refused() {
+        for under in [".vendored/bridge", "target/bridge", "target-x/bridge"] {
+            let t = tree();
+            write(
+                &t,
+                &format!("infra/relay/{under}/Cargo.toml"),
+                "[package]\nname = \"bridge\"\n\n[dependencies]\nkotton-crypto = { path = \"../../../../core/crypto\" }\n",
+            );
+            add_dep(&t, "infra/relay", &format!("bridge = {{ path = \"{under}\" }}\n"));
+            let r = refused_once(&t);
+            assert!(
+                r.starts_with(&format!(
+                    "kotton-relay (infra/relay, row `relay`) path-depends on infra/relay/{under}, which is no crate tier-check read as a row's"
+                )),
+                "{under}: {r}"
+            );
+        }
+    }
+
+    /// A `path` under `[patch]` is refused in the root manifest and in a row's that declares a
+    /// workspace; a patch that names no path is not.
+    #[test]
+    fn a_path_under_patch_is_refused() {
+        let t = tree();
+        write(&t, "Cargo.toml", "[workspace]\nmembers = []\n\n[patch.crates-io]\nserde = { git = \"https://example.invalid/serde\" }\n");
+        assert!(read_tree(t.path()).refused.is_empty(), "a patch with no path");
+
+        write(&t, "Cargo.toml", "[workspace]\nmembers = []\n\n[patch.crates-io]\nserde = { path = \"core/fs\" }\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("Cargo.toml names `serde` by path (`core/fs`) under [patch.crates-io]"), "{r}");
+
+        let t = tree();
+        add_dep(&t, "infra/relay", "[workspace]\n\n[patch.crates-io.serde]\npath = \"../../core/fs\"\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("infra/relay/Cargo.toml names `serde` by path (`../../core/fs`) under [patch.crates-io]"), "{r}");
+    }
+
+    /// A `path` under `[replace]` is refused where a workspace is declared.
+    #[test]
+    fn a_path_under_replace_is_refused() {
+        let t = tree();
+        write(&t, "Cargo.toml", "[workspace]\nmembers = []\n\n[replace]\n\"serde:1.0.0\" = { path = \"core/fs\" }\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("Cargo.toml names `serde:1.0.0` by path (`core/fs`) under [replace]"), "{r}");
+
+        let t = tree();
+        add_dep(&t, "infra/relay", "[workspace]\n\n[replace]\n\"serde:1.0.0\" = { path = \"../../core/fs\" }\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("infra/relay/Cargo.toml names `serde:1.0.0` by path"), "{r}");
+    }
+
+    /// `paths`, and a `[patch]` path, in a workspace's `.cargo/` config are refused; a config
+    /// with neither is not.
+    #[test]
+    fn config_paths_are_refused() {
+        let t = tree();
+        write(&t, "Cargo.toml", "[workspace]\nmembers = []\n");
+        write(&t, ".cargo/config.toml", "[build]\ntarget-dir = \"out/target\"\n");
+        assert!(read_tree(t.path()).refused.is_empty(), "a config with no paths");
+
+        write(&t, ".cargo/config.toml", "paths = [\"core/fs\"]\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with(".cargo/config.toml names `core/fs` under `paths`"), "{r}");
+
+        write(&t, ".cargo/config.toml", "[patch.crates-io]\nserde = { path = \"core/fs\" }\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with(".cargo/config.toml names `serde` by path (`core/fs`) under [patch.crates-io]"), "{r}");
+
+        let t = tree();
+        add_dep(&t, "infra/relay", "[workspace]\n");
+        write(&t, "infra/relay/.cargo/config", "paths = [\"../../core/fs\"]\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("infra/relay/.cargo/config names `../../core/fs` under `paths`"), "{r}");
+    }
+
+    /// A crate whose `package.workspace` names no workspace this run read is refused; one that
+    /// names a read workspace is not.
+    #[test]
+    fn a_workspace_outside_the_rows_is_refused() {
+        let t = tree();
+        write(&t, "Cargo.toml", "[workspace]\nmembers = []\n");
+        write(&t, "core/fs/Cargo.toml", "[package]\nname = \"kotton-fs\"\nworkspace = \"../..\"\n");
+        assert!(read_tree(t.path()).refused.is_empty(), "the root's workspace");
+
+        write(&t, "core/fs/Cargo.toml", "[package]\nname = \"kotton-fs\"\nworkspace = \"../../../elsewhere\"\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("kotton-fs (core/fs, row `system`) names its workspace at `../../../elsewhere`, which is no workspace tier-check read"), "{r}");
     }
 
     /// The merge base's lists are read from git objects, and a file absent there means every
