@@ -83,13 +83,16 @@ pub(crate) const SYSTEM_CRATES: &[&str] = &[
     "kotton-device",
     "kotton-session",
     // The CLI, here until it has a repository of its own (`kotton-cli` in kotton-protocol's
-    // repository plan).
+    // repository plan). What it may link, and each edge it has today that it may not, are
+    // `tier-check`'s `cli` row and that row's owed list (xtask/src/tier_check.rs,
+    // xtask/tier-owed.toml); this list says only that it may ship from here.
     "kotton-cli",
     "kotton",
     "kotton-operator",
     "kotton-shell",
     "kotton-record-file",
-    // The relay and the vault, here until each has a repository of its own.
+    // The relay and the vault, here until each has a repository of its own. What each may
+    // link, and what each owes, are `tier-check`'s `relay` and `vault` rows.
     "kotton-relay",
     "kvaultd",
 ];

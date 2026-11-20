@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# The owed lists of `tier-check`'s rows (xtask/src/tier_check.rs): for each row, every edge a
+# crate of it has today that the row may not link, by crate name. A part is cut when its row's
+# list is empty.
+#
+# A list only shrinks. `tier-check` refuses an entry that is not on its row's list at the merge
+# base with origin/main, an entry no manifest has (an untangling that lands deletes its entry),
+# an entry for an edge the row may link, and an edge out of its row that no entry names. Every
+# row has a table here, empty when it owes nothing.
+#
+# Shape: [row] then `crate = ["crate it path-depends on", ...]`.
+
+[protocol]
+kotton-handshake = ["kotton-crypto"]
+
+[relay]
+
+[cli]
+kotton-cli = [
+    "kotton-crypto",
+    "kotton-identity",
+    "kotton-ipc",
+    "kotton-operator",
+    "kotton-secret",
+    "kotton-sys",
+    "kotton-version",
+]
+kotton-shell = ["kotton-crypto", "kotton-sys"]
+
+["client library"]
+kotton = ["kotton-ipc", "kotton-sys"]
+
+[vault]
+kvaultd = [
+    "kotton-crypto",
+    "kotton-device",
+    "kotton-diag",
+    "kotton-fs",
+    "kotton-identity",
+    "kotton-ipc",
+    "kotton-net",
+    "kotton-peer",
+    "kotton-record",
+    "kotton-secret",
+    "kotton-session",
+    "kotton-store",
+    "kotton-sys",
+]
+
+[operator]
+
+[system]
