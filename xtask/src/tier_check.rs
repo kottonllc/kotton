@@ -480,17 +480,21 @@ fn patch_paths(manifest: &Table, at: &str) -> Vec<String> {
 }
 
 /// The top-level keys a `.cargo/` config file [`config_refusals`] reads may hold: the four the
-/// tree's config holds today. None of them makes a directory of this checkout a package's
-/// source. A key not here is refused unread, whatever it holds, so a key that does, and one
-/// cargo adds later, is refused without being named in this source.
+/// tree's config holds today. None of them, as tier-check admits it, makes a directory of this
+/// checkout a package's source: an `[alias]` is a command line cargo expands in place, and the
+/// pinned cargo applies `--config` written in one, in a string or a list, joined as
+/// `--config=…` or after the subcommand, as if it were written in this file (shown by a run,
+/// pull request #678), so an alias holding `--config` is refused ([`alias_refusals`]). A key
+/// not here is refused unread, whatever it holds, so a key that does, and one cargo adds later,
+/// is refused without being named in this source.
 const CONFIG_KEYS: &[&str] = &["build", "alias", "target", "env"];
 
 /// What a workspace declared in repo-relative `dir` is held to beyond its manifest: each of its
 /// `.cargo/` config files may hold only the top-level keys of [`CONFIG_KEYS`], and any other is
 /// refused, naming the file and the key. `include`, `paths` and `[patch]` keep lines of their
 /// own, saying what each does: `include` loads files that are not read here, `paths` and a
-/// `[patch]` path each put a crate in a dependency's place. A config file that cannot be read
-/// is refused.
+/// `[patch]` path each put a crate in a dependency's place, and an alias holding `--config`
+/// sets config this file does not show. A config file that cannot be read is refused.
 fn config_refusals(root: &Path, dir: &str) -> Vec<String> {
     let mut out = Vec::new();
     for name in [".cargo/config.toml", ".cargo/config"] {
@@ -549,6 +553,33 @@ fn config_refusals(root: &Path, dir: &str) -> Vec<String> {
                     CONFIG_KEYS.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
                 ));
             }
+        }
+        if let Some(Value::Table(aliases)) = config.get("alias") {
+            out.extend(alias_refusals(aliases, &at));
+        }
+    }
+    out
+}
+
+/// Every alias under a config file's `[alias]` that holds `--config`, refused, naming the file
+/// and the alias. Cargo splits a string alias on whitespace and takes a list alias element by
+/// element, and applies a `--config` it finds there wherever it stands, so the token is looked
+/// for in every whitespace-separated word of the value, in either form, alone or as
+/// `--config=…`.
+fn alias_refusals(aliases: &Table, at: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, value) in aliases {
+        let words: Vec<&str> = match value {
+            Value::String(s) => s.split_whitespace().collect(),
+            Value::Array(a) => a.iter().filter_map(Value::as_str).flat_map(str::split_whitespace).collect(),
+            _ => Vec::new(),
+        };
+        if let Some(word) = words.iter().find(|w| **w == "--config" || w.starts_with("--config=")) {
+            out.push(format!(
+                "{at} has alias `{name}` holding `{word}`: cargo applies config given in an alias \
+                 as if it were written in {at}, so it may set a key tier-check refuses, which \
+                 this file would not show. Drop `--config` from the alias"
+            ));
         }
     }
     out
@@ -1680,6 +1711,45 @@ mod tests {
         write(&t, "infra/relay/.cargo/config.toml", "[source.v]\ndirectory = \"v\"\n");
         let r = refused_once(&t);
         assert!(r.starts_with("infra/relay/.cargo/config.toml has `source`"), "{r}");
+    }
+
+    /// An `[alias]` that holds `--config` is refused once, naming the file and the alias, in
+    /// every form the pinned cargo applies: a string, a list, joined with `=`, and after the
+    /// subcommand. An alias without it passes, and the tree's three aliases pass.
+    #[test]
+    fn an_alias_holding_config_is_refused() {
+        let t = tree();
+        write(&t, "Cargo.toml", "[workspace]\nmembers = []\n");
+        write(
+            &t,
+            ".cargo/config.toml",
+            "[alias]\nxtask = \"run --manifest-path xtask/Cargo.toml --target-dir out/xtask --\"\n\
+             dash = \"run -q --manifest-path xtask/Cargo.toml --target-dir out/xtask -- dash\"\n\
+             xtask-docs = \"run --manifest-path xtask/Cargo.toml --target-dir out/xtask --features cli-docs --\"\n\
+             l = [\"build\", \"--configure-nothing\"]\n",
+        );
+        assert!(read(&t).refused.is_empty(), "aliases without `--config`");
+
+        for (file, alias, word) in [
+            (".cargo/config.toml", "p = \"--config paths=['core/fs'] build\"", "--config"),
+            (".cargo/config.toml", "p = [\"--config\", \"paths=['core/fs']\", \"build\"]", "--config"),
+            (".cargo/config.toml", "p = \"--config=patch.crates-io.serde.path='core/fs' build\"", "--config=patch.crates-io.serde.path='core/fs'"),
+            (".cargo/config.toml", "p = [\"--config=paths=['core/fs']\", \"build\"]", "--config=paths=['core/fs']"),
+            (".cargo/config.toml", "p = \"build --config paths=['core/fs']\"", "--config"),
+            (".cargo/config", "p = [\"build\", \"--config\", \"paths=['core/fs']\"]", "--config"),
+        ] {
+            let t = tree();
+            write(&t, "Cargo.toml", "[workspace]\nmembers = []\n");
+            write(&t, file, &format!("[alias]\n{alias}\n"));
+            let r = refused_once(&t);
+            assert!(r.starts_with(&format!("{file} has alias `p` holding `{word}`: cargo applies config")), "{alias}: {r}");
+        }
+
+        let t = tree();
+        add_dep(&t, "infra/relay", "[workspace]\n");
+        write(&t, "infra/relay/.cargo/config.toml", "[alias]\nq = \"--config build.target-dir='x' build\"\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("infra/relay/.cargo/config.toml has alias `q` holding `--config`"), "{r}");
     }
 
     /// A crate whose `package.workspace` names no workspace this run read is refused; one that
