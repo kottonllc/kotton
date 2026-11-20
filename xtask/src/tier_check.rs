@@ -21,17 +21,21 @@
 //! TOML: the package's name, and every `path` dependency in `[dependencies]`,
 //! `[dev-dependencies]`, `[build-dependencies]` and their `[target.'…']` forms. A dev-dependency
 //! is an edge: the rule reads manifests, and a crate cut into another repository takes its tests
-//! with it. Nothing is built.
+//! with it. Nothing is built. The walk passes over hidden, `target` and `target-*` directories,
+//! which hold build output and tool state; so that it passes over no manifest, git is asked for
+//! every `Cargo.toml` it tracks under those roots, and one the walk did not read is refused. Git
+//! failing to answer is refused too: the run cannot then say it read every manifest.
 //!
 //! What it cannot place it refuses, naming the crate and the path. Every dependency `path` ends
 //! at a directory whose manifest this run read as a row's crate, or is a dev-dependency into a
 //! root that is no row; anything else is refused: a path that leaves the repository, even to
-//! come back, one into a directory in no row, one into a hidden or `target*` directory (whose
-//! manifests are not read), and a normal or build dependency into a root that is no row, which
-//! ships what it links. Where a workspace is declared (the root manifest, or a row's that
-//! declares one), a `path` under `[workspace.dependencies]`, `[patch]` or `[replace]`, and
-//! `paths` or a `[patch]` path in that workspace's `.cargo/` config, are refused: each puts an
-//! edge or a crate where no manifest read here says so. A crate whose `package.workspace` names
+//! come back, one into a directory in no row, one into a hidden, `target` or `target-*`
+//! directory (whose manifests are not read), and a normal or build dependency into a root that
+//! is no row, which ships what it links. A `path` under `[workspace.dependencies]`, `[patch]` or
+//! `[replace]` in any manifest read (cargo honours the last two in whichever manifest roots a
+//! workspace, declared or not), and `paths` or a `[patch]` path in the `.cargo/` config of a
+//! directory that declares a workspace, are refused: each puts an edge or a crate where no
+//! manifest read here says so. A crate whose `package.workspace` names
 //! no workspace read here is refused. A row's dev-dependencies into a root that is no row
 //! (`tools/workspace-hack`, for most crates) are on no list; each row prints how many it does
 //! not count.
@@ -256,7 +260,8 @@ pub(crate) fn parse_owed(text: &str) -> Result<Owed, String> {
     Ok(owed)
 }
 
-/// Every `Cargo.toml` under `dir`, depth-first, skipping build output and hidden directories.
+/// Every `Cargo.toml` under `dir`, depth-first, skipping hidden, `target` and `target-*`
+/// directories. [`read_tree`] refuses a manifest git tracks that this passed over.
 fn manifests_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -458,6 +463,24 @@ fn config_refusals(root: &Path, dir: &str) -> Vec<String> {
     out
 }
 
+/// The manifests git tracks under the rows' roots, repo-relative, or why git could not list
+/// them. [`read_tree`] refuses each one its walk did not read, and refuses the run when git
+/// cannot be asked.
+pub(crate) type Tracked = Result<Vec<String>, String>;
+
+/// Every `Cargo.toml` git tracks under the rows' roots in the checkout at `root`.
+pub(crate) fn tracked_manifests(root: &Path) -> Tracked {
+    let mut args = vec!["ls-files", "-z", "--cached", "--"];
+    let roots = row_roots();
+    args.extend(roots.iter().copied());
+    let listed = git(root, &args)?;
+    Ok(listed
+        .split('\0')
+        .filter(|f| *f == "Cargo.toml" || f.ends_with("/Cargo.toml"))
+        .map(str::to_string)
+        .collect())
+}
+
 fn declares_workspace(manifest: &Table) -> bool {
     matches!(manifest.get("workspace"), Some(Value::Table(_)))
 }
@@ -467,16 +490,20 @@ fn declares_workspace(manifest: &Table) -> bool {
 /// refused, not skipped:
 ///
 /// - a manifest that cannot be read, or a package in no row;
+/// - a manifest git tracks under the rows' roots that the walk did not read (one under a
+///   hidden, `target` or `target-*` directory), and the run itself when git cannot list them
+///   ([`Tracked`]);
 /// - a dependency `path` that does not end at a directory whose manifest this run read as a
 ///   row's crate, unless it is a dev-dependency into a root named in [`NOT_ROWS`]. That refuses
 ///   a path that leaves the repository (even to come back), one into a directory under no row
-///   and no such root, one into a hidden or `target*` directory (whose manifests are not read),
+///   and no such root, one into a hidden, `target` or `target-*` directory (whose manifests are
+///   not read),
 ///   and a normal or build dependency into a root that is no row, which ships what it links;
-/// - a `path` under `[workspace.dependencies]`, `[patch]` or `[replace]` where a workspace is
-///   declared (the root manifest, or a row's that declares one), and `paths` or a `[patch]`
-///   path in that workspace's `.cargo/` config;
+/// - a `path` under `[workspace.dependencies]`, `[patch]` or `[replace]` in the root manifest
+///   or any manifest the walk read, and `paths` or a `[patch]` path in the `.cargo/` config of
+///   a directory that declares a workspace;
 /// - a crate whose `package.workspace` names no workspace this run read.
-pub(crate) fn read_tree(root: &Path) -> Tree {
+pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
     let mut t = Tree::default();
     let (crates, edges, refused) = (&mut t.crates, &mut t.edges, &mut t.refused);
     let uncounted = &mut t.uncounted;
@@ -502,8 +529,10 @@ pub(crate) fn read_tree(root: &Path) -> Tree {
     };
     // First every manifest, so a dependency is placed against everything this run read.
     let mut read: Vec<(String, String, &'static Row, Table)> = Vec::new();
+    let mut walked: BTreeSet<String> = BTreeSet::new();
     for top in row_roots() {
         for manifest_path in manifests_under(&root.join(top)) {
+            walked.insert(rel(&manifest_path));
             let manifest = match parse_manifest(&manifest_path) {
                 Ok(m) => m,
                 Err(e) => {
@@ -515,8 +544,8 @@ pub(crate) fn read_tree(root: &Path) -> Tree {
             let dir = rel(dir_path);
             let at = format!("{dir}/Cargo.toml");
             refused.extend(workspace_paths(&manifest, &at));
+            refused.extend(patch_paths(&manifest, &at));
             if declares_workspace(&manifest) {
-                refused.extend(patch_paths(&manifest, &at));
                 refused.extend(config_refusals(root, &dir));
                 workspaces.insert(dir.clone());
             }
@@ -533,6 +562,25 @@ pub(crate) fn read_tree(root: &Path) -> Tree {
             crates.push(Crate { name: name.clone(), dir: dir.clone(), row: row.name });
             read.push((name, dir, row, manifest));
         }
+    }
+    match tracked {
+        Ok(files) => {
+            for f in files.iter().map(|f| crate::normalise_path(&f.replace('\\', "/"))) {
+                if !walked.contains(&f) {
+                    refused.push(format!(
+                        "{f} is tracked by git under a row's root, and tier-check did not read \
+                         it: it reads no manifest under a hidden, `target` or `target-*` \
+                         directory, so nothing judges what that crate links. Move the crate to \
+                         a directory of its own in a row"
+                    ));
+                }
+            }
+        }
+        Err(e) => refused.push(format!(
+            "the manifests git tracks under {} cannot be listed, so whether this run read every \
+             one cannot be judged: {e}",
+            row_roots().iter().map(|r| format!("{r}/")).collect::<Vec<_>>().join(", ")
+        )),
     }
     let by_dir: BTreeMap<&str, &str> = read.iter().map(|(n, d, _, _)| (d.as_str(), n.as_str())).collect();
     for (name, dir, row, manifest) in &read {
@@ -572,6 +620,7 @@ pub(crate) fn read_tree(root: &Path) -> Tree {
                 continue;
             }
             let top = to_dir.split('/').next().unwrap_or("").to_string();
+            let shown = if to_dir.is_empty() { "the repository root".to_string() } else { to_dir.clone() };
             if NOT_ROWS.contains(&top.as_str()) {
                 if dev {
                     uncounted
@@ -591,15 +640,15 @@ pub(crate) fn read_tree(root: &Path) -> Tree {
                 }
             } else if row_of(&to_dir).is_some() {
                 refused.push(format!(
-                    "{name} ({dir}, row `{}`) path-depends on {to_dir}, which is no crate \
-                     tier-check read as a row's: it reads no manifest under a hidden or \
-                     `target*` directory, so nothing reads what that crate links. Move the \
+                    "{name} ({dir}, row `{}`) path-depends on {shown}, which is no crate \
+                     tier-check read as a row's: it reads no manifest under a hidden, `target` \
+                     or `target-*` directory, so nothing reads what that crate links. Move the \
                      crate to a directory of its own in a row",
                     row.name
                 ));
             } else {
                 refused.push(format!(
-                    "{name} ({dir}, row `{}`) depends on {to_dir}, which is in no row and under \
+                    "{name} ({dir}, row `{}`) depends on {shown}, which is in no row and under \
                      no root named in NOT_ROWS: tier-check reads nothing there, so nothing reads \
                      what that crate links. Move the crate into a row",
                     row.name
@@ -842,7 +891,7 @@ pub(crate) fn rows_check(root: &Path) -> Vec<String> {
             ));
         }
     }
-    let tree = read_tree(root);
+    let tree = read_tree(root, &tracked_manifests(root));
     refused.extend(tree.refused.iter().cloned());
     let base = base_owed(root);
     let judged = judge(&tree.crates, &tree.edges, &owed, &base);
@@ -932,8 +981,31 @@ mod tests {
     const OWED: &str = "[protocol]\n[relay]\n[cli]\nkotton-shell = [\"kotton-crypto\"]\n\
                         [\"client library\"]\n[vault]\n[operator]\n[system]\n";
 
+    /// Every `Cargo.toml` under the rows' roots in a fixture, hidden and `target` directories
+    /// included: what git would list had every file been added.
+    fn every_manifest(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack: Vec<PathBuf> = row_roots().iter().map(|r| root.join(r)).collect();
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if entry.file_name() == "Cargo.toml" {
+                    out.push(path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        out
+    }
+
+    /// [`read_tree`] over a fixture, every manifest in it tracked.
+    fn read(t: &tempfile::TempDir) -> Tree {
+        read_tree(t.path(), &Ok(every_manifest(t.path())))
+    }
+
     fn run(t: &tempfile::TempDir, owed: &str, base: &Base) -> Judged {
-        let tree = read_tree(t.path());
+        let tree = read(t);
         assert!(tree.refused.is_empty(), "{:?}", tree.refused);
         judge(&tree.crates, &tree.edges, &parse_owed(owed).unwrap(), base)
     }
@@ -1073,20 +1145,20 @@ mod tests {
         )
         .unwrap();
         add_dep(&t, "client/shell", "kotton-fs = { workspace = true }\n");
-        assert!(read_tree(t.path()).refused.is_empty(), "a version under the table is not a path");
+        assert!(read(&t).refused.is_empty(), "a version under the table is not a path");
 
         std::fs::write(
             t.path().join("Cargo.toml"),
             "[workspace]\nmembers = []\n\n[workspace.dependencies]\nkotton-fs = { path = \"core/fs\" }\n",
         )
         .unwrap();
-        let refused = read_tree(t.path()).refused;
+        let refused = read(&t).refused;
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].starts_with("Cargo.toml names `kotton-fs` by path"), "{refused:?}");
 
         let t = tree();
         add_dep(&t, "infra/relay", "[workspace.dependencies.kotton-fs]\npath = \"../../core/fs\"\n");
-        let refused = read_tree(t.path()).refused;
+        let refused = read(&t).refused;
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].starts_with("infra/relay/Cargo.toml names `kotton-fs` by path"), "{refused:?}");
     }
@@ -1097,18 +1169,18 @@ mod tests {
     fn a_shipped_dependency_into_a_root_that_is_no_row_is_refused() {
         let t = tree();
         add_dep(&t, "infra/relay", "bridge = { path = \"../../tools/bridge\" }\n");
-        let refused = read_tree(t.path()).refused;
+        let refused = read(&t).refused;
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].contains("kotton-relay") && refused[0].contains("tools/bridge"), "{refused:?}");
 
         let t = tree();
         add_dep(&t, "infra/relay", "[build-dependencies]\nbridge = { path = \"../../tests/bridge\" }\n");
-        assert_eq!(read_tree(t.path()).refused.len(), 1);
+        assert_eq!(read(&t).refused.len(), 1);
 
         let t = tree();
         add_dep(&t, "infra/relay", "[dev-dependencies]\nworkspace-hack = { path = \"../../tools/workspace-hack\" }\n");
         add_dep(&t, "client/shell", "[target.'cfg(unix)'.dev-dependencies]\nworkspace-hack = { path = \"../../tools/workspace-hack\" }\n");
-        let tree = read_tree(t.path());
+        let tree = read(&t);
         assert!(tree.refused.is_empty(), "{:?}", tree.refused);
         assert_eq!(tree.uncounted["relay"][WORKSPACE_HACK].len(), 1);
         assert_eq!(tree.uncounted["cli"][WORKSPACE_HACK].len(), 1);
@@ -1118,14 +1190,14 @@ mod tests {
     #[test]
     fn a_crate_in_no_row_is_refused() {
         let t = fixture(&[("client/newthing", "kotton-new", &[])]);
-        let refused = read_tree(t.path()).refused;
+        let refused = read(&t).refused;
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].contains("kotton-new") && refused[0].contains("in no row"));
     }
 
     /// What one change to [`tree`] makes [`read_tree`] refuse: exactly one line.
     fn refused_once(t: &tempfile::TempDir) -> String {
-        let refused = read_tree(t.path()).refused;
+        let refused = read(t).refused;
         assert_eq!(refused.len(), 1, "{refused:?}");
         refused[0].clone()
     }
@@ -1182,8 +1254,9 @@ mod tests {
         }
     }
 
-    /// A crate under a hidden or `target*` directory inside a row is never read, so an edge
-    /// into it is refused rather than admitted as same-row.
+    /// A crate under a hidden, `target` or `target-*` directory inside a row is never read, so
+    /// an edge into it is refused rather than admitted as same-row, and the manifest itself is
+    /// refused as tracked and unread.
     #[test]
     fn a_crate_under_a_hidden_or_target_directory_in_a_row_is_refused() {
         for under in [".vendored/bridge", "target/bridge", "target-x/bridge"] {
@@ -1194,23 +1267,30 @@ mod tests {
                 "[package]\nname = \"bridge\"\n\n[dependencies]\nkotton-crypto = { path = \"../../../../core/crypto\" }\n",
             );
             add_dep(&t, "infra/relay", &format!("bridge = {{ path = \"{under}\" }}\n"));
-            let r = refused_once(&t);
+            let mut refused = read(&t).refused;
+            refused.sort();
+            assert_eq!(refused.len(), 2, "{under}: {refused:?}");
             assert!(
-                r.starts_with(&format!(
+                refused[0].starts_with(&format!("infra/relay/{under}/Cargo.toml is tracked by git under a row's root, and tier-check did not read it")),
+                "{under}: {refused:?}"
+            );
+            assert!(
+                refused[1].starts_with(&format!(
                     "kotton-relay (infra/relay, row `relay`) path-depends on infra/relay/{under}, which is no crate tier-check read as a row's"
                 )),
-                "{under}: {r}"
+                "{under}: {refused:?}"
             );
         }
     }
 
-    /// A `path` under `[patch]` is refused in the root manifest and in a row's that declares a
-    /// workspace; a patch that names no path is not.
+    /// A `path` under `[patch]` is refused in the root manifest, in a row's that declares a
+    /// workspace, and in one that declares none (cargo honours it where such a manifest roots a
+    /// workspace, as a crate under the root's `exclude` does); a patch that names no path is not.
     #[test]
     fn a_path_under_patch_is_refused() {
         let t = tree();
         write(&t, "Cargo.toml", "[workspace]\nmembers = []\n\n[patch.crates-io]\nserde = { git = \"https://example.invalid/serde\" }\n");
-        assert!(read_tree(t.path()).refused.is_empty(), "a patch with no path");
+        assert!(read(&t).refused.is_empty(), "a patch with no path");
 
         write(&t, "Cargo.toml", "[workspace]\nmembers = []\n\n[patch.crates-io]\nserde = { path = \"core/fs\" }\n");
         let r = refused_once(&t);
@@ -1220,9 +1300,14 @@ mod tests {
         add_dep(&t, "infra/relay", "[workspace]\n\n[patch.crates-io.serde]\npath = \"../../core/fs\"\n");
         let r = refused_once(&t);
         assert!(r.starts_with("infra/relay/Cargo.toml names `serde` by path (`../../core/fs`) under [patch.crates-io]"), "{r}");
+
+        let t = tree();
+        add_dep(&t, "core/fs", "[patch.crates-io]\nserde = { path = \"../wire\" }\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("core/fs/Cargo.toml names `serde` by path (`../wire`) under [patch.crates-io]"), "{r}");
     }
 
-    /// A `path` under `[replace]` is refused where a workspace is declared.
+    /// A `path` under `[replace]` is refused where a workspace is declared and where none is.
     #[test]
     fn a_path_under_replace_is_refused() {
         let t = tree();
@@ -1234,6 +1319,76 @@ mod tests {
         add_dep(&t, "infra/relay", "[workspace]\n\n[replace]\n\"serde:1.0.0\" = { path = \"../../core/fs\" }\n");
         let r = refused_once(&t);
         assert!(r.starts_with("infra/relay/Cargo.toml names `serde:1.0.0` by path"), "{r}");
+
+        let t = tree();
+        add_dep(&t, "core/fs", "[replace]\n\"serde:1.0.0\" = { path = \"../wire\" }\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("core/fs/Cargo.toml names `serde:1.0.0` by path (`../wire`) under [replace]"), "{r}");
+    }
+
+    /// A manifest git tracks under a row's root that the walk passed over is refused, with
+    /// what it depends on or without; one git does not track is git's to refuse first.
+    #[test]
+    fn a_tracked_manifest_the_walk_passed_over_is_refused() {
+        for under in ["infra/relay/.vendor/bridge", "infra/relay/target-vendor/bridge", "core/target/bridge"] {
+            let t = tree();
+            write(
+                &t,
+                &format!("{under}/Cargo.toml"),
+                "[package]\nname = \"bridge\"\n\n[dependencies]\nkotton-shell = { path = \"../../../../client/shell\" }\n",
+            );
+            let r = refused_once(&t);
+            assert!(
+                r.starts_with(&format!("{under}/Cargo.toml is tracked by git under a row's root, and tier-check did not read it")),
+                "{under}: {r}"
+            );
+        }
+    }
+
+    /// The same, read from a real repository: git's index is what is held, so a manifest is
+    /// refused once it is added, and the tree passes once it is gone.
+    #[test]
+    fn the_tracked_manifests_are_read_from_git() {
+        let r = crate::git_fixture::Repo::new();
+        r.write("core/wire/Cargo.toml", "[package]\nname = \"kotton-wire\"\n");
+        r.write("tools/x/Cargo.toml", "[package]\nname = \"x\"\n");
+        r.commit("first");
+        let tracked = tracked_manifests(r.path());
+        assert_eq!(tracked, Ok(vec!["core/wire/Cargo.toml".to_string()]));
+        assert!(read_tree(r.path(), &tracked).refused.is_empty());
+
+        r.write("core/.vendor/bridge/Cargo.toml", "[package]\nname = \"bridge\"\n");
+        assert!(read_tree(r.path(), &tracked_manifests(r.path())).refused.is_empty(), "untracked");
+        r.git(&["add", "core/.vendor/bridge/Cargo.toml"]);
+        let refused = read_tree(r.path(), &tracked_manifests(r.path())).refused;
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].starts_with("core/.vendor/bridge/Cargo.toml is tracked by git"), "{refused:?}");
+    }
+
+    /// When git cannot list the tracked manifests, the run is refused: it cannot say it read
+    /// every one.
+    #[test]
+    fn git_failing_to_list_the_manifests_is_refused() {
+        let t = tree();
+        let refused = read_tree(t.path(), &Err("git ls-files: not a git repository".into())).refused;
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(
+            refused[0].starts_with("the manifests git tracks under core/, infra/, client/ cannot be listed")
+                && refused[0].ends_with("not a git repository"),
+            "{refused:?}"
+        );
+    }
+
+    /// A path that resolves to the repository root is refused, naming the root.
+    #[test]
+    fn a_path_to_the_repository_root_names_the_root() {
+        let t = tree();
+        add_dep(&t, "infra/relay", "root = { path = \"../..\" }\n");
+        let r = refused_once(&t);
+        assert!(
+            r.starts_with("kotton-relay (infra/relay, row `relay`) depends on the repository root, which is in no row"),
+            "{r}"
+        );
     }
 
     /// `paths`, and a `[patch]` path, in a workspace's `.cargo/` config are refused; a config
@@ -1243,7 +1398,7 @@ mod tests {
         let t = tree();
         write(&t, "Cargo.toml", "[workspace]\nmembers = []\n");
         write(&t, ".cargo/config.toml", "[build]\ntarget-dir = \"out/target\"\n");
-        assert!(read_tree(t.path()).refused.is_empty(), "a config with no paths");
+        assert!(read(&t).refused.is_empty(), "a config with no paths");
 
         write(&t, ".cargo/config.toml", "paths = [\"core/fs\"]\n");
         let r = refused_once(&t);
@@ -1267,7 +1422,7 @@ mod tests {
         let t = tree();
         write(&t, "Cargo.toml", "[workspace]\nmembers = []\n");
         write(&t, "core/fs/Cargo.toml", "[package]\nname = \"kotton-fs\"\nworkspace = \"../..\"\n");
-        assert!(read_tree(t.path()).refused.is_empty(), "the root's workspace");
+        assert!(read(&t).refused.is_empty(), "the root's workspace");
 
         write(&t, "core/fs/Cargo.toml", "[package]\nname = \"kotton-fs\"\nworkspace = \"../../../elsewhere\"\n");
         let r = refused_once(&t);
@@ -1323,7 +1478,7 @@ mod tests {
     #[test]
     fn the_tree_as_it_is_is_in_the_rows() {
         let root = crate::out::root();
-        let tree = read_tree(&root);
+        let tree = read_tree(&root, &tracked_manifests(&root));
         assert!(tree.refused.is_empty(), "{:?}", tree.refused);
         let owed = parse_owed(&std::fs::read_to_string(root.join(OWED_FILE)).unwrap()).unwrap();
         let j = judge(&tree.crates, &tree.edges, &owed, &Base::Absent { commit: String::new() });
