@@ -38,7 +38,8 @@
 //! `[replace]` in any manifest read (cargo honours the last two in whichever manifest roots a
 //! workspace, declared or not), and `paths` or a `[patch]` path in the `.cargo/` config of a
 //! directory that declares a workspace, are refused: each puts an edge or a crate where no
-//! manifest read here says so. A crate whose `package.workspace` names
+//! manifest read here says so. `include` in such a config is refused outright, since cargo
+//! honours both in the files it names and those files are not read here. A crate whose `package.workspace` names
 //! no workspace read here is refused. A row's dev-dependencies into a root that is no row
 //! (`tools/workspace-hack`, for most crates) are on no list; each row prints how many it does
 //! not count.
@@ -477,8 +478,9 @@ fn patch_paths(manifest: &Table, at: &str) -> Vec<String> {
 }
 
 /// What a workspace declared in repo-relative `dir` is held to beyond its manifest: each of its
-/// `.cargo/` config files, read for `paths` and `[patch]`, both refused. A config file that
-/// cannot be read is refused.
+/// `.cargo/` config files, read for `paths` and `[patch]`, both refused, and for `include`,
+/// refused outright: cargo loads the files it names and honours `paths` and `[patch]` there,
+/// and those files are not read here. A config file that cannot be read is refused.
 fn config_refusals(root: &Path, dir: &str) -> Vec<String> {
     let mut out = Vec::new();
     for name in [".cargo/config.toml", ".cargo/config"] {
@@ -494,6 +496,14 @@ fn config_refusals(root: &Path, dir: &str) -> Vec<String> {
                 continue;
             }
         };
+        if config.contains_key("include") {
+            out.push(format!(
+                "{at} has `include`: cargo loads the config files it names and honours `paths` \
+                 and [patch] in them, and tier-check does not read the files it names, so a \
+                 path they hold would be read by nothing. Drop it, and write what it held in \
+                 {at}"
+            ));
+        }
         if let Some(paths) = config.get("paths") {
             let named: Vec<String> = match paths.as_array() {
                 Some(a) => a.iter().map(|p| p.as_str().map_or_else(|| format!("{p:?}"), str::to_string)).collect(),
@@ -552,8 +562,8 @@ fn declares_workspace(manifest: &Table) -> bool {
 ///   not read),
 ///   and a normal or build dependency into a root that is no row, which ships what it links;
 /// - a `path` under `[workspace.dependencies]`, `[patch]` or `[replace]` in the root manifest
-///   or any manifest the walk read, and `paths` or a `[patch]` path in the `.cargo/` config of
-///   a directory that declares a workspace;
+///   or any manifest the walk read, and `paths`, a `[patch]` path or `include` in the `.cargo/`
+///   config of a directory that declares a workspace;
 /// - a crate whose `package.workspace` names no workspace this run read.
 pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
     let mut t = Tree::default();
@@ -712,9 +722,8 @@ pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
             } else if row_of(&to_dir).is_some() {
                 refused.push(format!(
                     "{name} ({dir}, row `{}`) path-depends on {shown}, which is no crate \
-                     tier-check read as a row's: it reads no manifest under a hidden, `target` \
-                     or `target-*` directory, so nothing reads what that crate links. Move the \
-                     crate to a directory of its own in a row",
+                     tier-check read as a row's, so nothing reads what that crate links. Where \
+                     tier-check refused {shown}/Cargo.toml, that refusal gives the cause",
                     row.name
                 ));
             } else {
@@ -1345,11 +1354,15 @@ mod tests {
                 refused[0].starts_with(&format!("infra/relay/{under}/Cargo.toml is tracked by git under a row's root, and tier-check did not read it")),
                 "{under}: {refused:?}"
             );
-            assert!(
-                refused[1].starts_with(&format!(
-                    "kotton-relay (infra/relay, row `relay`) path-depends on infra/relay/{under}, which is no crate tier-check read as a row's"
-                )),
-                "{under}: {refused:?}"
+            assert_eq!(
+                refused[1],
+                format!(
+                    "kotton-relay (infra/relay, row `relay`) path-depends on infra/relay/{under}, which \
+                     is no crate tier-check read as a row's, so nothing reads what that crate links. \
+                     Where tier-check refused infra/relay/{under}/Cargo.toml, that refusal gives the \
+                     cause"
+                ),
+                "{under}"
             );
         }
     }
@@ -1563,6 +1576,36 @@ mod tests {
         write(&t, "infra/relay/.cargo/config", "paths = [\"../../core/fs\"]\n");
         let r = refused_once(&t);
         assert!(r.starts_with("infra/relay/.cargo/config names `../../core/fs` under `paths`"), "{r}");
+    }
+
+    /// `include` in a workspace's `.cargo/` config is refused, naming the file, in each form
+    /// cargo accepts and whether or not the file it names exists: the files it names are not
+    /// read, and cargo honours `paths` and `[patch]` there.
+    #[test]
+    fn config_include_is_refused() {
+        for (file, text) in [
+            (".cargo/config.toml", "include = [\"extra.toml\"]\n"),
+            (".cargo/config.toml", "include = \"extra.toml\"\n"),
+            (".cargo/config.toml", "include = [{ path = \"extra.toml\", optional = true }]\n"),
+            (".cargo/config", "include = []\n"),
+        ] {
+            for exists in [false, true] {
+                let t = tree();
+                write(&t, "Cargo.toml", "[workspace]\nmembers = []\n");
+                write(&t, file, text);
+                if exists {
+                    write(&t, ".cargo/extra.toml", "[build]\ntarget-dir = \"out/target\"\n");
+                }
+                let r = refused_once(&t);
+                assert!(r.starts_with(&format!("{file} has `include`: cargo loads the config files it names")), "{text:?}: {r}");
+            }
+        }
+
+        let t = tree();
+        add_dep(&t, "infra/relay", "[workspace]\n");
+        write(&t, "infra/relay/.cargo/config.toml", "include = [\"extra.toml\"]\n");
+        let r = refused_once(&t);
+        assert!(r.starts_with("infra/relay/.cargo/config.toml has `include`"), "{r}");
     }
 
     /// A crate whose `package.workspace` names no workspace this run read is refused; one that
