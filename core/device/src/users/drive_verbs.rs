@@ -1250,15 +1250,6 @@ pub struct Settled {
     pub refused: Vec<NotCanonical>,
 }
 
-/// **The admission of a move** (kotton #274; the rule is kotton #265's,
-/// `kotton_store::StorageKey`). The source's listing is what that vault chose
-/// to answer, and every key in it becomes a read there and a write at the
-/// other vault, so each is parsed into a [`StorageKey`] here, where the
-/// listing enters the move, and carried typed from here on. A key that is not
-/// canonical (`../x`, `./p`, `/p`, `p/`) is refused: named in the log,
-/// returned, and never read or written. It is no object any device wrote,
-/// since a store writes only canonical keys, so the rest of the drive moves
-/// without it, as a sync pass skips and counts it.
 /// A key a vault's listing named that is not canonical, as a line names it:
 /// the key printed as data, to a bounded length ([`quoted_cut`];
 /// kottonllc/kotton#597, 43A, 74A, 77A), and why it was refused.
@@ -1274,6 +1265,15 @@ fn on_key(verb: &str, key: &StorageKey, e: &str) -> String {
     format!("{verb} {}: {e}", quoted_cut(key.as_str()))
 }
 
+/// **The admission of a move** (kotton #274; the rule is kotton #265's,
+/// `kotton_store::StorageKey`). The source's listing is what that vault chose
+/// to answer, and every key in it becomes a read there and a write at the
+/// other vault, so each is parsed into a [`StorageKey`] here, where the
+/// listing enters the move, and carried typed from here on. A key that is not
+/// canonical (`../x`, `./p`, `/p`, `p/`) is refused: named in the log,
+/// returned, and never read or written. It is no object any device wrote,
+/// since a store writes only canonical keys, so the rest of the drive moves
+/// without it, as a sync pass skips and counts it.
 fn admit_listing(listed: Vec<(String, u64)>) -> (Vec<(StorageKey, u64)>, Vec<NotCanonical>) {
     let mut admitted = Vec::with_capacity(listed.len());
     let mut refused = Vec::new();
@@ -1299,9 +1299,10 @@ pub const NAMED_AT_MOST: usize = 32;
 /// `logs` reads; at `warn`, which the note that counts the keys names (`logs
 /// --level warn`). Each names the drive and the vault (`from`) as the person
 /// calls them, and the key as the vault listed it, printed as data to a
-/// bounded length ([`quoted_cut`]); the payload keeps it as listed. The first [`NAMED_AT_MOST`] are
-/// named, one event each, and one more event counts any past them: the listing
-/// is the vault's, and how much it writes into the person's log is not.
+/// bounded length ([`quoted_cut`]); the payload keeps it as listed. The first
+/// [`NAMED_AT_MOST`] are named, one event each, and one more event counts any
+/// past them: the listing is the vault's, and how much it writes into the
+/// person's log is not.
 pub fn refused_events(user_id: &str, name: &str, from: &str, refused: &[NotCanonical]) -> Vec<Event> {
     let scope = EventScope::User(user_id.to_string());
     let mut events: Vec<Event> = refused
