@@ -195,7 +195,11 @@ async fn tell(
 /// admits it and why, and that running revoke again will not reach them — the
 /// row is gone here, so a second run finds no such device — and that nothing
 /// retries yet. Telling those drives again is a later queue's; the person is
-/// told now.
+/// told now. Where another row of the person's still holds the revoked row's
+/// key (kottonllc/kotton#597, 34A), that is not so: the answer names each such
+/// row, says it is still listed, and says that `device revoke` given its name
+/// tells the drives of the key again, as it does, since a withdrawal names the
+/// key ([`change_for`]) ([`missed_answer`]).
 ///
 /// [`Asked::Locally`]: kotton_peer::daemon::nodes::Asked::Locally
 pub async fn revoke(
@@ -264,28 +268,106 @@ pub async fn revoke(
     // of, or the members the set's own listing returned.
     let revoked = revoke_named(member_store, db, &user_id, &named, &runtime.paired_keys()).await?;
     // A row's revoke that leaves another row of the person's under its key
-    // answers with an error that names it (kottonllc/kotton#597, 34A); a drive
-    // missed is said beside it, not instead.
-    let also = match &revoked {
-        UserResponse::NodeRevoked => String::new(),
-        UserResponse::Error { message } => format!(" {message}"),
-        _ => return Ok(revoked),
-    };
-    if missed.is_empty() {
+    // answers with an error that names it (kottonllc/kotton#597, 34A). Where a
+    // drive was missed too, one answer says both, and says what revoking that
+    // row does.
+    if !matches!(revoked, UserResponse::NodeRevoked | UserResponse::Error { .. }) || missed.is_empty() {
         return Ok(revoked);
     }
-    let still: Vec<String> = missed.iter().map(|(d, why)| format!("{d} ({why})")).collect();
-    Ok(UserResponse::Error {
-        message: format!(
-            "'{node_id}' is revoked on this device, but {} still admit{} it: {}. Running `device \
-             revoke` again will not reach {}: the device is no longer listed here, and nothing \
-             retries the withdrawal yet. Until {} told, that device can still reach the sealed \
-             copy kept there.{also}",
-            if missed.len() == 1 { "a drive" } else { "these drives" },
-            if missed.len() == 1 { "s" } else { "" },
-            still.join("; "),
-            if missed.len() == 1 { "it" } else { "them" },
-            if missed.len() == 1 { "it is" } else { "they are" },
+    let still_listed = match &named {
+        Named::Row(node) => kotton_peer::daemon::nodes::still_paired_as(
+            &kotton_peer::daemon::db::list_paired_nodes(db, &user_id).await?,
+            &node.public_key,
         ),
-    })
+        Named::Members(_) => Vec::new(),
+    };
+    Ok(UserResponse::Error { message: missed_answer(&node_id, &missed, &still_listed) })
+}
+
+/// The answer to a revoke that drives in `missed` did not take, for the device
+/// the person named `node_id`. `still_listed` is the name `device revoke` takes
+/// to each other row of the person's that still holds the revoked row's key
+/// ([`kotton_peer::daemon::nodes::still_paired_as`]).
+///
+/// With none, a second run of `device revoke` finds no such device, and the
+/// answer says so. With some, the device is still listed under each, and
+/// revoking one by that name withdraws it at every drive again: a withdrawal
+/// names the key ([`change_for`]), whichever row it was revoked through. Each
+/// name is printed as data ([`kotton_wire::note::quoted`]).
+fn missed_answer(node_id: &str, missed: &[(String, String)], still_listed: &[String]) -> String {
+    let one = missed.len() == 1;
+    let still: Vec<String> = missed.iter().map(|(d, why)| format!("{d} ({why})")).collect();
+    let head = format!(
+        "'{node_id}' is revoked on this device, but {} still admit{} it: {}.",
+        if one { "a drive" } else { "these drives" },
+        if one { "s" } else { "" },
+        still.join("; "),
+    );
+    let until = format!(
+        "Until {} told, that device can still reach the sealed copy kept there.",
+        if one { "it is" } else { "they are" }
+    );
+    if still_listed.is_empty() {
+        return format!(
+            "{head} Running `device revoke` again will not reach {}: the device is no longer listed here, \
+             and nothing retries the withdrawal yet. {until}",
+            if one { "it" } else { "them" },
+        );
+    }
+    let rows_one = still_listed.len() == 1;
+    format!(
+        "{head} This device still pairs its key for you as {}, and {} still listed: `device revoke` \
+         given {} name removes it here and tells your drives of the key again. {until}",
+        still_listed.iter().map(|n| kotton_wire::note::quoted(n)).collect::<Vec<_>>().join(", "),
+        if rows_one { "that row is" } else { "those rows are" },
+        if rows_one { "its" } else { "each" },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The missed-drive answer is as it was where no other row holds the
+    /// key**, word for word, for one drive and for two.
+    #[test]
+    fn the_missed_drive_answer_with_no_second_row_is_unchanged() {
+        let one = [("vault".to_string(), "it did not answer".to_string())];
+        assert_eq!(
+            missed_answer("laptop", &one, &[]),
+            "'laptop' is revoked on this device, but a drive still admits it: vault (it did not answer). \
+             Running `device revoke` again will not reach it: the device is no longer listed here, and nothing \
+             retries the withdrawal yet. Until it is told, that device can still reach the sealed copy kept there."
+        );
+        let two = [one[0].clone(), ("office".to_string(), "refused".to_string())];
+        assert_eq!(
+            missed_answer("laptop", &two, &[]),
+            "'laptop' is revoked on this device, but these drives still admit it: vault (it did not answer); \
+             office (refused). Running `device revoke` again will not reach them: the device is no longer listed \
+             here, and nothing retries the withdrawal yet. Until they are told, that device can still reach the \
+             sealed copy kept there."
+        );
+    }
+
+    /// **Where a second row of the person's holds the key, the answer says the
+    /// row is still listed and that revoking it by its name tells the drives
+    /// again** (kottonllc/kotton#597, 34A), and does not say the device is gone
+    /// or that a revoke will not reach it. Each name is printed as data.
+    #[test]
+    fn the_missed_drive_answer_with_a_second_row_names_it_as_still_listed() {
+        let one = [("vault".to_string(), "it did not answer".to_string())];
+        for (names, says) in [
+            (vec!["old-laptop".to_string()], "as `old-laptop`, and that row is still listed: `device revoke` given its name"),
+            (
+                vec!["did:key:z6Mk`x".to_string(), "spare".to_string()],
+                "as `did:key:z6Mk\\u{60}x`, `spare`, and those rows are still listed: `device revoke` given each name",
+            ),
+        ] {
+            let said = missed_answer("laptop", &one, &names);
+            assert!(said.contains(says), "{said}");
+            assert!(said.contains("tells your drives of the key again"), "{said}");
+            assert!(said.contains("still admits it: vault (it did not answer)"), "{said}");
+            assert!(!said.contains("no longer listed") && !said.contains("will not reach"), "{said}");
+        }
+    }
 }
