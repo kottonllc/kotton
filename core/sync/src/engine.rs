@@ -1342,11 +1342,13 @@ async fn keep_for(
     }
     let budget = match (resources.machine_db(), user_rt.peer_of(remote)) {
         (Some(db), Some(peer_did)) => {
-            let node = kotton_peer::daemon::drives::list(&db, user_id)
+            // The remote names its row by the row's DID as stored; the drive
+            // it reaches is found by that row's key.
+            let node = kotton_peer::daemon::drives::node_for_row(&db, user_id, &peer_did)
                 .await
                 .ok()
-                .and_then(|drives| drives.into_iter().find(|d| d.node.device_did.to_string() == peer_did))
-                .map(|d| d.node.id);
+                .flatten()
+                .map(|n| n.id);
             // The budget is the person's mount for that drive, in their own
             // database, as `peer mount add … --budget` writes it.
             match (node, resources.agent_db(user_id).await) {

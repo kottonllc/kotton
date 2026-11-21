@@ -176,3 +176,45 @@ async fn the_asking_persons_own_row_decides_whether_a_key_is_their_device() {
     network_db::insert_paired_node(&db, "old", "carol", &vk(&old), "[]", 0, None).await.unwrap();
     assert!(asks_as_own_device(&db, &old, "carol").await);
 }
+
+/// **Two rows of one person's under one key: the peer path reads the narrowest
+/// of them** (kottonllc/kotton#597: the narrowest of a key's rows answers what
+/// it may ask). For every pair of what a row can say, under both arrangements
+/// of DID and of time: the key is the person's own device at `NodeRelay` only
+/// where both rows say `full` or nothing, and is the person's gateway, held to
+/// the gateway's verb, where either says `gateway`.
+#[tokio::test]
+async fn of_two_rows_under_one_key_the_peer_path_reads_the_narrowest() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = machine_db(dir.path()).await;
+    let says = [Some("gateway"), Some("blind-storage"), Some("cosigner"), Some("posture-of-a-later-build"), Some("full"), None];
+    let mut seed = 100u8;
+    for a in says {
+        for b in says {
+            let own = [a, b].iter().all(|p| matches!(p, None | Some("full")));
+            let gateway = [a, b].contains(&Some("gateway"));
+            for (a_derived, a_first) in [(true, true), (true, false), (false, true), (false, false)] {
+                seed = seed.wrapping_add(1);
+                let (key, derived) = key_and_did(seed);
+                let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(&key).to_string();
+                let (a_did, b_did) = if a_derived { (&derived, &spelled) } else { (&spelled, &derived) };
+                let (a_at, b_at) = if a_first { (100, 200) } else { (200, 100) };
+                network_db::seed_paired_node_as_stored(&db, "a", "alice", a_did, &key, "[]", a_at, a).await.unwrap();
+                network_db::seed_paired_node_as_stored(&db, "b", "alice", b_did, &key, "[]", b_at, b).await.unwrap();
+                let case = format!("rows {a:?} and {b:?}, the first under the key's did:key: {a_derived}, paired first: {a_first}");
+
+                assert_eq!(asks_as_own_device(&db, &key, "alice").await, own, "{case}: NodeRelay's own-device check");
+                let other = peer_ask(&db, Some(&key), &other_for("alice")).await;
+                let frame = peer_ask(&db, Some(&key), &frame_for(Some("alice"))).await;
+                if gateway {
+                    assert_eq!(other, Ok(PeerAsk::Gateway(uid("alice"))), "{case}: not held to the gateway's verb");
+                    assert_eq!(frame, Ok(PeerAsk::Gateway(uid("alice"))), "{case}: the gateway's frame was refused");
+                } else {
+                    assert_eq!(other, Ok(PeerAsk::Person(uid("alice"))), "{case}: taken for a gateway");
+                    assert!(frame.is_err(), "{case}: a frame was carried for a key no row says is a gateway");
+                }
+                sqlx::query("DELETE FROM paired_nodes").execute(db.as_ref()).await.unwrap();
+            }
+        }
+    }
+}

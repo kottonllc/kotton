@@ -93,6 +93,53 @@ async fn the_shells_revoke_is_an_error_for_a_device_not_paired_and_for_a_revoke_
     assert!(partial.contains("will not reach it"), "{partial}");
 }
 
+/// **A revoke a drive did not take, of a row whose key a second row of the
+/// person's holds, says that row is still listed and that revoking it tells
+/// the drives again** (kottonllc/kotton#597, 34A), and does not say the device
+/// is gone. Revoking the second row by the name the answer gave withdraws the
+/// key at the drive again: the vault, unreachable, is missed again, and with
+/// no row left the answer is the one that says a second run will not reach it.
+#[tokio::test]
+async fn a_revoke_a_drive_did_not_take_names_a_second_row_under_the_key_as_still_listed() {
+    use kotton_schemas::membership::Posture;
+    let temp = tempfile::tempdir().unwrap();
+    let daemon = alice_at(temp.path()).await;
+    let ctx = daemon.agent_context();
+    let host = occupant_host::occupant_host(
+        &ctx.runtime,
+        &ctx.users,
+        &ctx.sessions,
+        &ctx.base,
+        &ctx.db,
+        &ctx.record_stores,
+        &ctx.ceremonies,
+        &ctx.user_dbs,
+        &ctx.event_log_tasks,
+        &ctx.device_db,
+        &ctx.connected_peers,
+        &ctx.surface_proxy,
+        ctx.browser_admissions(),
+    );
+    paired(&ctx.db, "laptop", 6, Posture::Full).await;
+    paired(&ctx.db, "vault", 9, Posture::BlindStorage).await;
+    let key = ed25519_dalek::SigningKey::from_bytes(&[6; 32]).verifying_key().to_bytes();
+    let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(&key).to_string();
+    kotton_peer::daemon::db::seed_paired_node_as_stored(&ctx.db, "old-laptop", "alice", &spelled, &key, "[]", 0, Some("full"))
+        .await
+        .unwrap();
+
+    let partial = host.revoke_device("laptop").await.expect_err("a revoke no drive took was success");
+    assert!(partial.contains("still admits it: vault ("), "{partial}");
+    assert!(partial.contains("as `old-laptop`, and that row is still listed"), "{partial}");
+    assert!(partial.contains("tells your drives of the key again"), "{partial}");
+    assert!(!partial.contains("no longer listed") && !partial.contains("will not reach"), "{partial}");
+
+    let again = host.revoke_device("old-laptop").await.expect_err("the second revoke no drive took was success");
+    assert!(again.contains("still admits it: vault ("), "the drive was not told again: {again}");
+    assert!(again.contains("will not reach it"), "{again}");
+    assert!(kotton_peer::daemon::db::list_paired_nodes(&ctx.db, "alice").await.unwrap().iter().all(|n| n.public_key != key));
+}
+
 /// **The occupant reaches rows only** (kottonllc/kotton#597, 33A): an own-device
 /// member of alice's set with no row, under each key vector the Ed25519 rule
 /// refuses, is not found by `DaemonOccupantHost::revoke_device` given its DID as
