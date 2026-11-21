@@ -739,6 +739,25 @@ mod tests {
         db
     }
 
+    /// **The longest sentence a vault sends a drive verb today is printed whole
+    /// on the device** (kottonllc/kotton#597, 74A): the refusal of a key paired
+    /// here to another pool, with a DID of 56 characters and names of 64, the
+    /// most a device takes for an account's name, fits `MAX_SAID_CHARS`.
+    #[test]
+    fn the_refusal_of_a_key_paired_to_another_pool_is_printed_whole() {
+        let key = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]));
+        let did = kotton_crypto::DidKeyMethod::from_public_key(&key).to_string();
+        assert_eq!(did.chars().count(), 56, "{did}");
+        let (asked, held) = ("a".repeat(64), "h".repeat(64));
+        let message = match refusal(&PeerStanding::Stranger, &did, Some(&asked), Some(&held), "TenantDrives") {
+            UserResponse::Error { message } => message,
+            other => panic!("a stranger is refused: {other:?}"),
+        };
+        let printed = kotton_wire::note::quoted_cut(&message);
+        assert_eq!(printed, kotton_wire::note::quoted(&message), "the sentence was cut");
+        assert_eq!(printed.chars().count() - 2, 358, "{printed}");
+    }
+
     /// The refusal a key reads when its request names a pool it is not paired
     /// to (`TASK-a-vault-invite-names-a-tenant-the-device-does-not-sync-as`).
     /// A key paired here, to another pool, reads its own pool's name and the

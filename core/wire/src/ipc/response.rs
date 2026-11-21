@@ -1501,8 +1501,10 @@ pub fn answer_said(answer: &UserResponse) -> String {
 impl UserResponse {
     /// The variant's name and nothing of its fields: the leading word of its
     /// derived `Debug`, which is the variant's identifier. Nothing past that
-    /// word is kept, and a secret field prints redacted in `Debug` anyway.
-    fn name(&self) -> String {
+    /// word is kept, and a secret field prints redacted in `Debug` anyway. A
+    /// reader that did not ask for an answer says it by this and no field of it
+    /// (kottonllc/kotton#597, 76B).
+    pub fn name(&self) -> String {
         let printed = format!("{self:?}");
         printed
             .split(|c: char| !(c.is_alphanumeric() || c == '_'))
