@@ -2002,10 +2002,11 @@ mod tests {
     /// **A holding device is named by the key the vault's DID names**
     /// (kottonllc/kotton#597, 29A): a device the person's set listed, under
     /// whatever DID, is named by its label when the vault says its key's
-    /// `did:key`. A `did:key` of no device this one names is another of the
-    /// person's devices by that DID; a string that is not a `did:key`, another
-    /// spelling of the same bytes among them, names no device and is said to be
-    /// none. A name found and a DID are each printed as data (43A).
+    /// `did:key`. A `did:key` of no device this one names is a device the vault
+    /// names, by that DID; a string that is not a `did:key`, another spelling of
+    /// the same bytes or one over bytes the rule refuses among them, names no
+    /// device and is said to be none. A name found and a DID are each printed as
+    /// data (43A).
     #[test]
     fn a_holding_device_is_named_by_its_key() {
         let laptop = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[2; 32]));
@@ -2017,13 +2018,15 @@ mod tests {
         assert_eq!(named_in(&names, &phone_did), "`my \\u{60}phone\\u{60}\\n`");
         let unnamed = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[4; 32]));
         let unnamed = kotton_crypto::DidKeyMethod::from_public_key(&unnamed).to_string();
-        assert_eq!(named_in(&names, &unnamed), format!("another of your devices (`{unnamed}`)"));
+        assert_eq!(named_in(&names, &unnamed), format!("a device the vault names `{unnamed}`"));
         let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(laptop.as_bytes()).to_string();
-        assert_eq!(named_in(&names, &spelled), format!("a device the vault names `{spelled}` (not a `did:key`)"));
-        assert_eq!(named_in(&names, "not a did"), "a device the vault names `not a did` (not a `did:key`)");
+        assert_eq!(named_in(&names, &spelled), format!("a device the vault names `{spelled}` (not a did:key)"));
+        let refused = kotton_crypto::DidKeyMethod::spelled_over(&[0; 32]).to_string();
+        assert_eq!(named_in(&names, &refused), format!("a device the vault names `{refused}` (not a did:key)"));
+        assert_eq!(named_in(&names, "not a did"), "a device the vault names `not a did` (not a did:key)");
         assert_eq!(
             named_in(&names, "did:key:z`x\nmore"),
-            "a device the vault names `did:key:z\\u{60}x\\nmore` (not a `did:key`)"
+            "a device the vault names `did:key:z\\u{60}x\\nmore` (not a did:key)"
         );
     }
 

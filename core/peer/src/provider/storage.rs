@@ -242,23 +242,25 @@ pub fn holding_key(device_did: &str) -> Option<kotton_crypto::ed25519::Verifying
 }
 
 /// The holding device a sentence names when this device has no name of its own
-/// for it. A DID that reads as a `did:key` ([`holding_key`]) is another of the
-/// person's devices, by that DID; a string that does not is said to be none. Either
-/// is printed as data, by [`kotton_wire::note::quoted`].
+/// for it: a device the vault names, by the string the vault said, since the
+/// vault's word is all this device has for it. A string that does not read as a
+/// `did:key` ([`holding_key`]) is said to be none. Either is printed as data, by
+/// [`kotton_wire::note::quoted`].
 pub fn another_holder(device_did: &str) -> String {
     let said = kotton_wire::note::quoted(device_did);
     match holding_key(device_did) {
-        Some(_) => format!("another of your devices ({said})"),
-        None => format!("a device the vault names {said} (not a `did:key`)"),
+        Some(_) => format!("a device the vault names {said}"),
+        None => format!("a device the vault names {said} (not a did:key)"),
     }
 }
 
-/// The sentence a sealed write refused with `DriveHeld` says: the write is kept
-/// here, and the holder is named by [`another_holder`].
+/// The sentence a sealed write refused with `DriveHeld` says: the vault holds the
+/// drive for a device it names ([`another_holder`]), that the holder is moving it
+/// is the vault's word, and the write is kept here.
 fn held_write(path: &str, device_did: &str, for_secs: u32) -> String {
     format!(
-        "peer refused sealed write at {path}: {} is moving this drive and holds it for {for_secs}s more; \
-         what was written is kept on this device and sent again at the next pass",
+        "peer refused sealed write at {path}: the vault holds this drive for {for_secs}s more for {}, \
+         which it says is moving this drive; what was written is kept on this device and sent again at the next pass",
         another_holder(device_did)
     )
 }
@@ -702,13 +704,13 @@ mod tests {
         let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string();
         let refused = kotton_crypto::DidKeyMethod::spelled_over(&[0; 32]).to_string();
         vec![
-            (did.clone(), format!("another of your devices (`{did}`)")),
-            ("not a did".to_string(), "a device the vault names `not a did` (not a `did:key`)".to_string()),
-            (spelled.clone(), format!("a device the vault names `{spelled}` (not a `did:key`)")),
-            (refused.clone(), format!("a device the vault names `{refused}` (not a `did:key`)")),
+            (did.clone(), format!("a device the vault names `{did}`")),
+            ("not a did".to_string(), "a device the vault names `not a did` (not a did:key)".to_string()),
+            (spelled.clone(), format!("a device the vault names `{spelled}` (not a did:key)")),
+            (refused.clone(), format!("a device the vault names `{refused}` (not a did:key)")),
             (
                 "did:key:z`x\nmore".to_string(),
-                "a device the vault names `did:key:z\\u{60}x\\nmore` (not a `did:key`)".to_string(),
+                "a device the vault names `did:key:z\\u{60}x\\nmore` (not a did:key)".to_string(),
             ),
         ]
     }
@@ -726,8 +728,8 @@ mod tests {
             let ch = Arc::new(MockPeerChannel::new(vec![held_by(&said)]));
             let err = make_storage(ch).put(Path::new("/notes/a.md"), b"content").await.unwrap_err();
             let want = format!(
-                "peer refused sealed write at /notes/a.md: {named} is moving this drive and holds it for 7s more; \
-                 what was written is kept on this device and sent again at the next pass"
+                "peer refused sealed write at /notes/a.md: the vault holds this drive for 7s more for {named}, \
+                 which it says is moving this drive; what was written is kept on this device and sent again at the next pass"
             );
             assert!(matches!(&err, ObjectStorageError::BackendError(m) if *m == want), "{said:?}: {err:?}");
         }
@@ -741,8 +743,8 @@ mod tests {
             let storage = make_storage(ch).with_domain_id("d".to_string());
             let err = storage.put_sealed(Path::new("_pack/0a"), b"blob").await.unwrap_err();
             let want = format!(
-                "peer refused sealed write at _pack/0a: {named} is moving this drive and holds it for 7s more; \
-                 what was written is kept on this device and sent again at the next pass"
+                "peer refused sealed write at _pack/0a: the vault holds this drive for 7s more for {named}, \
+                 which it says is moving this drive; what was written is kept on this device and sent again at the next pass"
             );
             assert!(matches!(&err, ObjectStorageError::BackendError(m) if *m == want), "{said:?}: {err:?}");
         }
