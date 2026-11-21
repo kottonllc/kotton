@@ -190,26 +190,19 @@ async fn write_row(
     // `INSERT OR REPLACE` rewrites the whole row, and callers that only know an
     // address (`peer_add`) know no posture. A posture already projected for
     // this node is kept rather than erased: erasing it turned a blind node into
-    // a node of unknown posture, which no delivery would then reach. **Only for
-    // the same key**: a posture is a fact about the node that holds the key, and
-    // a DID may be recorded beside a key it does not name (the operational key a
-    // device presents, beside its identity's DID), so the row this person held
-    // for the DID under another key gives the new key none. The relay the peer
-    // was last known to reserve at is kept.
-    let existing: Option<(Vec<u8>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT public_key, posture, relay_url FROM paired_nodes WHERE user_id = ? AND device_did = ?",
-    )
-    .bind(user_id)
-    .bind(&device_did)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(db_err)?;
-    let (existing_key, existing_posture, existing_relay) = existing.unwrap_or((Vec::new(), None, None));
-    let posture: Option<String> = match posture {
-        Some(p) => Some(p.to_string()),
-        None if existing_key.as_slice() == public_key => existing_posture,
-        None => None,
-    };
+    // a node of unknown posture, which no delivery would then reach. The row
+    // under this DID, where there is one, holds this key: the DID is the key's
+    // row's or a string no row is under. The relay the peer was last known to
+    // reserve at is kept.
+    let existing: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT posture, relay_url FROM paired_nodes WHERE user_id = ? AND device_did = ?")
+            .bind(user_id)
+            .bind(&device_did)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    let (existing_posture, existing_relay) = existing.unwrap_or((None, None));
+    let posture: Option<String> = posture.map(str::to_string).or(existing_posture);
     sqlx::query(
         "INSERT OR REPLACE INTO paired_nodes \
          (id, user_id, device_did, public_key, addresses, paired_at, posture, relay_url) \
@@ -235,12 +228,6 @@ async fn write_row(
         .execute(&mut *conn)
         .await
         .map_err(db_err)?;
-    // The key this DID's row carried before, when it was another: a drive under
-    // that key that no row of this person's still carries has no node left to
-    // reach it through.
-    if !existing_key.is_empty() && existing_key.as_slice() != public_key {
-        drop_unreachable_drive(&mut *conn, user_id, &existing_key).await?;
-    }
     let row = sqlx::query(&format!(
         "SELECT {NODE_COLUMNS} FROM paired_nodes WHERE user_id = ? AND device_did = ?"
     ))
