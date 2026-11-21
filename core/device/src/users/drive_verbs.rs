@@ -1259,6 +1259,21 @@ pub struct Settled {
 /// returned, and never read or written. It is no object any device wrote,
 /// since a store writes only canonical keys, so the rest of the drive moves
 /// without it, as a sync pass skips and counts it.
+/// A key a vault's listing named that is not canonical, as a line names it:
+/// the key printed as data, to a bounded length ([`quoted_cut`];
+/// kottonllc/kotton#597, 43A, 74A, 77A), and why it was refused.
+/// [`NotCanonical`]'s own `Display` is not used for it.
+fn refused_key(not: &NotCanonical) -> String {
+    format!("storage key {} refused: {}", quoted_cut(&not.key), not.why)
+}
+
+/// A read or a write of a listed key that failed (`verb`, `"reading"` or
+/// `"writing"`), as a move says it: the key, the vault's listing's, printed as
+/// data to a bounded length ([`quoted_cut`]; kottonllc/kotton#597, 77A).
+fn on_key(verb: &str, key: &StorageKey, e: &str) -> String {
+    format!("{verb} {}: {e}", quoted_cut(key.as_str()))
+}
+
 fn admit_listing(listed: Vec<(String, u64)>) -> (Vec<(StorageKey, u64)>, Vec<NotCanonical>) {
     let mut admitted = Vec::with_capacity(listed.len());
     let mut refused = Vec::new();
@@ -1266,7 +1281,7 @@ fn admit_listing(listed: Vec<(String, u64)>) -> (Vec<(StorageKey, u64)>, Vec<Not
         match StorageKey::parse(&key) {
             Ok(key) => admitted.push((key, size)),
             Err(not) => {
-                tracing::warn!("drive move: the vault the drive leaves listed a key: {not}; nothing is read or written under it");
+                tracing::warn!("drive move: the vault the drive leaves listed a key: {}; nothing is read or written under it", refused_key(&not));
                 refused.push(not);
             }
         }
@@ -1297,9 +1312,8 @@ pub fn refused_events(user_id: &str, name: &str, from: &str, refused: &[NotCanon
                 EventCategory::Storage,
                 EventLevel::Warn,
                 format!(
-                    "drive move of '{name}' from '{from}': storage key {} refused: {}; the move read and wrote nothing under it, and did not carry it",
-                    quoted_cut(&not.key),
-                    not.why
+                    "drive move of '{name}' from '{from}': {}; the move read and wrote nothing under it, and did not carry it",
+                    refused_key(not)
                 ),
                 serde_json::json!({ "drive": name, "from": from, "key": not.key, "why": not.why }),
             )
@@ -1349,8 +1363,8 @@ pub async fn carry_and_settle(
         }
         refused = not_canonical;
         for (key, _) in &wanted {
-            let blob = from.read(key).await.map_err(|e| format!("reading {key}: {e}"))?;
-            to.write(key, &blob).await.map_err(|e| format!("writing {key}: {e}"))?;
+            let blob = from.read(key).await.map_err(|e| on_key("reading", key, &e))?;
+            to.write(key, &blob).await.map_err(|e| on_key("writing", key, &e))?;
         }
         // What the other vault lists is compared with what was sent, as it
         // spelled it: a key that was not sent, canonical or not, fails it.
@@ -1416,8 +1430,8 @@ pub async fn top_up_and_settle(
         let held: Vec<(String, u64)> = to.objects().await.map_err(|e| format!("the copy could not be listed: {e}"))?;
         let lacking: Vec<&(StorageKey, u64)> = wanted.iter().filter(|(k, _)| !held.iter().any(|(h, _)| h == k.as_str())).collect();
         for (key, _) in &lacking {
-            let blob = from.read(key).await.map_err(|e| format!("reading {key}: {e}"))?;
-            to.write(key, &blob).await.map_err(|e| format!("writing {key}: {e}"))?;
+            let blob = from.read(key).await.map_err(|e| on_key("reading", key, &e))?;
+            to.write(key, &blob).await.map_err(|e| on_key("writing", key, &e))?;
         }
         let landed = to.objects().await.map_err(|e| format!("the copy could not list what it took: {e}"))?;
         // Each key the tree it left lists is at the copy; each one sent is
@@ -2134,6 +2148,10 @@ mod tests {
         reads: Mutex<Vec<String>>,
         /// The write of this key fails.
         fail_write: Option<&'static str>,
+        /// The read of this key fails.
+        fail_read: Option<String>,
+        /// The write of this key fails, a key made at run time.
+        fail_write_of: Option<String>,
         /// Its listing says this key is one byte larger than it is.
         misreport: Option<&'static str>,
         /// Its listing leaves this key out, as a vault that lost the write.
@@ -2176,10 +2194,13 @@ mod tests {
         }
         async fn read(&self, key: &StorageKey) -> Result<Vec<u8>, String> {
             self.reads.lock().unwrap().push(key.to_string());
+            if self.fail_read.as_deref() == Some(key.as_str()) {
+                return Err("the connection dropped".into());
+            }
             self.objects.lock().unwrap().iter().find(|(k, _)| k == key.as_str()).map(|(_, v)| v.clone()).ok_or("not found".into())
         }
         async fn write(&self, key: &StorageKey, blob: &[u8]) -> Result<(), String> {
-            if self.fail_write == Some(key.as_str()) {
+            if self.fail_write == Some(key.as_str()) || self.fail_write_of.as_deref() == Some(key.as_str()) {
                 return Err("the connection dropped".into());
             }
             self.objects.lock().unwrap().push((key.to_string(), blob.to_vec()));
@@ -2398,13 +2419,46 @@ mod tests {
     async fn a_copy_that_fails_mid_way_leaves_the_drive_where_it_was() {
         let (from, to) = (source(), Fake { fail_write: Some("p/two"), ..Fake::default() });
         match settle(&from, &to).await {
-            Carried::NotMoved(why) => assert!(why.contains("writing p/two") && why.contains("dropped"), "{why}"),
+            Carried::NotMoved(why) => assert!(why.contains("writing `p/two`") && why.contains("dropped"), "{why}"),
             other => panic!("{other:?}"),
         }
         assert_eq!(to.told(), ["TenantDriveRetire"]);
         assert!(to.keys().is_empty(), "the unfinished tree kept what it took");
         assert!(from.told().is_empty());
         assert_eq!(from.keys(), ["p/one", "p/two"]);
+    }
+
+    /// A listed key past the bound that holds a backtick, and how a move's
+    /// sentence prints it (kottonllc/kotton#597, 43A, 74A, 77A).
+    fn a_long_key() -> (String, String) {
+        let key = format!("p/a`b{}", "k".repeat(600));
+        let printed = format!("`p/a\\u{{60}}b{}` (cut: 98 more characters)", "k".repeat(kotton_wire::note::MAX_SAID_CHARS - 10));
+        (key, printed)
+    }
+
+    /// **A read that fails names the listed key as data, to the bound.**
+    #[tokio::test]
+    async fn a_failed_read_names_the_key_as_data() {
+        let (key, printed) = a_long_key();
+        let from = Fake { fail_read: Some(key.clone()), ..Fake::holding(&[(key.as_str(), b"x")]) };
+        match settle(&from, &Fake::default()).await {
+            Carried::NotMoved(why) => assert_eq!(why, format!("reading {printed}: the connection dropped")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// **A top-up's write that fails names the listed key as data, to the
+    /// bound.**
+    #[tokio::test]
+    async fn a_failed_top_up_write_names_the_key_as_data() {
+        let (key, printed) = a_long_key();
+        let from = Fake::holding(&[(key.as_str(), b"x")]);
+        let to = Fake { fail_write_of: Some(key.clone()), ..Fake::default() };
+        let settled = top_up_and_settle("alice", &from, FROM, &to, &|_| {}).await;
+        match settled.carried {
+            Carried::SourceKept(why) => assert_eq!(why, format!("writing {printed}: the connection dropped")),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// **A clean-up retire that acted and whose answer was lost is read as
@@ -2416,7 +2470,7 @@ mod tests {
         let (from, to) = (source(), Fake { fail_write: Some("p/two"), ..Fake::default() });
         to.lose_retire_answer.store(true, Ordering::SeqCst);
         match settle(&from, &to).await {
-            Carried::NotMoved(why) => assert!(why.contains("writing p/two"), "{why}"),
+            Carried::NotMoved(why) => assert!(why.contains("writing `p/two`"), "{why}"),
             other => panic!("a retire that acted was said to leave the tree: {other:?}"),
         }
         assert!(to.keys().is_empty());
@@ -2433,7 +2487,7 @@ mod tests {
         to.refuse_retire.store(true, Ordering::SeqCst);
         match settle(&from, &to).await {
             Carried::NotMovedTreeLeft { why, left } => {
-                assert!(why.contains("writing p/two"), "{why}");
+                assert!(why.contains("writing `p/two`"), "{why}");
                 assert!(left.contains("would not"), "{left}");
             }
             other => panic!("{other:?}"),
@@ -2565,7 +2619,7 @@ mod tests {
         // A top-up that cannot write leaves both trees as they are.
         let failing = Fake { objects: Mutex::new(to.objects.lock().unwrap().clone()), fail_write: Some("p/three"), ..Fake::default() };
         let settled = top_up_and_settle("alice", &from, FROM, &failing, &|_| {}).await;
-        assert!(matches!(&settled.carried, Carried::SourceKept(why) if why.contains("writing p/three")), "{settled:?}");
+        assert!(matches!(&settled.carried, Carried::SourceKept(why) if why.contains("writing `p/three`")), "{settled:?}");
         assert!(from.keys().contains(&"p/three".to_string()), "a failed top-up lost B's write");
         assert!(failing.told().is_empty(), "a failed top-up told the copy {:?}", failing.told());
 
