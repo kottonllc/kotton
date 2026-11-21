@@ -1413,7 +1413,9 @@ async fn refused_as(runtime: &DeviceRuntime, node: kotton_wire::peer::PairedNode
 }
 
 /// What the admit prints when the vault its ceremony reached refuses this
-/// device: the vault's own sentence, that this device kept nothing of it
+/// device: the vault's own sentence, printed as data and to the one stated
+/// length ([`kotton_wire::note::quoted_cut`]) after this device's own words,
+/// that this device kept nothing of it
 /// ([`keep_the_admitted`] reads the refusal before it writes), and what to
 /// type. When the vault holds this device's key under another pool, it has
 /// said which ([`crate::users::admission::paired_as_another`]), and the way out
@@ -1422,6 +1424,9 @@ async fn refused_as(runtime: &DeviceRuntime, node: kotton_wire::peer::PairedNode
 /// sweeps the key's row, which leaves the device paired nowhere and still
 /// refused — so it is named only as the cleanup after the new invite is
 /// admitted.
+///
+/// Which way out is offered is read from `message` as it came: the cut and the
+/// escapes are made where it is printed, and nowhere it is compared.
 fn not_kept_as(user_id: &str, message: &str) -> String {
     let what_to_do = if message.contains(crate::users::admission::PAIRED_AS_ANOTHER) {
         format!(
@@ -1438,8 +1443,9 @@ fn not_kept_as(user_id: &str, message: &str) -> String {
         )
     };
     format!(
-        "Not admitted: the vault will not keep for this device as `{user_id}`: {message}. Nothing of it was \
-         recorded here, so there is nothing to revoke. {what_to_do}"
+        "Not admitted: the vault will not keep for this device as `{user_id}`: {}. Nothing of it was \
+         recorded here, so there is nothing to revoke. {what_to_do}",
+        kotton_wire::note::quoted_cut(message)
     )
 }
 
@@ -2515,7 +2521,9 @@ mod admit_tests {
     fn a_device_paired_as_another_tenant_is_told_to_invite_first_and_drop_after() {
         let vault = format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice': {}", paired_as_another("sam", "alice"));
         let said = not_kept_as("alice", &vault);
-        assert!(said.contains("tenant `sam`, and asked as `alice`"), "{said}");
+        // The vault's sentence is printed as data: its backticks by their escape.
+        assert!(said.contains("tenant \\u{60}sam\\u{60}, and asked as \\u{60}alice\\u{60}"), "{said}");
+        assert!(said.ends_with(&remedy_on_main("alice", true)), "the remedy is not main's: {said}");
         let invite = said.find("kvaultd invite alice").expect(&said);
         let drop = said.find("dropped").expect(&said);
         assert!(invite < drop, "the invite comes before the drop: {said}");
@@ -2683,6 +2691,74 @@ mod admit_tests {
         // From the desktop, the vault is named only where it operates several.
         assert!(said.contains("`vault invite [<v>] alice`"), "{said}");
         assert!(!said.contains("drop"), "{said}");
+        assert!(said.ends_with(&remedy_on_main("alice", false)), "the remedy is not main's: {said}");
+    }
+
+    /// The way out each of today's refusals is offered, word for word as
+    /// `not_kept_as` said it before the vault's sentence was printed as data:
+    /// `paired_as` for a key the vault holds under another tenant.
+    fn remedy_on_main(user_id: &str, paired_as: bool) -> String {
+        if paired_as {
+            format!(
+                "The vault was given another name for this device than it syncs as. On the host, invite again \
+                 under this device's user — `kvaultd invite {user_id}` (or `vault invite [<v>] {user_id}` \
+                 from the desktop that holds its credential) — and admit that invite here first. Once \
+                 it is admitted, the other tenant can be dropped on the host, if it was only ever this \
+                 device's."
+            )
+        } else {
+            format!(
+                "On the host, `kvaultd invite {user_id}` (or `vault invite [<v>] {user_id}` from the desktop \
+                 that holds its credential), and admit that invite here."
+            )
+        }
+    }
+
+    /// The text between the vault's backticks in what the admit printed: after
+    /// the device's own words, up to the `. Nothing of it` that follows.
+    fn the_vaults_print(said: &str) -> &str {
+        let opens = "as `alice`: `";
+        let from = said.find(opens).expect(said) + opens.len();
+        let to = said[from..].find('`').expect(said) + from;
+        &said[from..to]
+    }
+
+    /// **A vault's refusal is printed as data, to the stated length** (how
+    /// another node's text is printed, kottonllc/kotton#597, 43A and 74A): after the device's own
+    /// words, between backticks, a backtick and a line break by their escapes,
+    /// and cut at [`kotton_wire::note::MAX_SAID_CHARS`] with the count of what
+    /// was left out. The way out it offers is main's.
+    #[test]
+    fn a_vaults_refusal_is_printed_as_data_and_to_the_bound() {
+        use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+        let tail = "y".repeat(600);
+        let vault = format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice': `ok`\nNot admitted: {tail}");
+        let said = not_kept_as("alice", &vault);
+        assert!(said.starts_with("Not admitted: the vault will not keep for this device as `alice`: `"), "{said}");
+        assert!(said.contains(&quoted_cut(&vault)), "{said}");
+        assert!(!said.contains('\n'), "a line break the vault sent was printed as one: {said}");
+        assert!(said.contains("\\u{60}ok\\u{60}\\nNot admitted"), "{said}");
+        let inside = the_vaults_print(&said);
+        assert_eq!(inside.chars().count(), MAX_SAID_CHARS, "{said}");
+        let kept = inside.rsplit_once("Not admitted: ").expect(&said).1.chars().count();
+        // Everything before the tail prints whole, so what is left out is the tail's rest.
+        let left = 600 - kept;
+        assert!(said.contains(&format!("` (cut: {left} more characters). Nothing of it was recorded here")), "{said}");
+        assert!(!said.contains(&tail), "the whole of the vault's text was printed: {said}");
+        assert!(said.ends_with(&remedy_on_main("alice", false)), "the remedy is not main's: {said}");
+    }
+
+    /// The way out is chosen from the vault's sentence as it came, not as it is
+    /// printed: a refusal for a key held under another tenant whose words past
+    /// the bound are cut from the print is still offered that remedy.
+    #[test]
+    fn the_remedy_is_read_from_the_refusal_as_it_came_not_as_it_is_cut() {
+        let did = format!("did:key:z{}", "D".repeat(600));
+        let vault = format!("peer {did} {NOT_PAIRED_WITH} 'alice': {}", paired_as_another("sam", "alice"));
+        let said = not_kept_as("alice", &vault);
+        assert!(said.contains(" more characters). Nothing of it was recorded here"), "{said}");
+        assert!(!said.contains(crate::users::admission::PAIRED_AS_ANOTHER), "{said}");
+        assert!(said.ends_with(&remedy_on_main("alice", true)), "the remedy is not main's: {said}");
     }
 
     /// A member store that keeps what it is told, so a test sees whether the
@@ -2786,7 +2862,7 @@ mod admit_tests {
         .expect_err("a vault that refuses this device was kept");
 
         assert!(said.starts_with("Not admitted"), "{said}");
-        assert!(said.contains(&refusal), "the admit does not say the vault's words: {said}");
+        assert!(said.contains(&kotton_wire::note::quoted_cut(&refusal)), "the admit does not say the vault's words: {said}");
         assert!(said.contains("Nothing of it was recorded here"), "{said}");
         assert!(said.contains("kvaultd invite alice"), "{said}");
         let after = recorded(&db, &paired_keys, &members).await;
