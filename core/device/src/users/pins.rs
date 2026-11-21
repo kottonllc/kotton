@@ -450,24 +450,45 @@ pub async fn claim(registry: &RwLock<SchemaRegistry>, records: &SqliteRecordStor
 /// **A device is its key's bytes, not the DID spelled beside them.** The
 /// member that holds `me` is this device, whatever DID the set holds it
 /// under, and is listed once, as [`THIS_DEVICE`]; two members that hold one
-/// key are one device, under the name of the first the set lists. Its DID as
-/// stored is read only as the name shown where the member has no label.
+/// key are one device. That device is named by the member under its key's own
+/// `did:key`, the one name this build's writer gives an own device; where no
+/// member is under it, by the first the set lists, in the order the mount
+/// keeps the set's objects. Its DID as stored is read only as the name shown
+/// where the member has no label.
 pub async fn devices(store: &UserStore, me: &VerifyingKey) -> Vec<([u8; 32], String)> {
     use kotton_peer::membership::Membership as _;
-    let mut out = vec![(*me.as_bytes(), THIS_DEVICE.to_string())];
     match store.list_members().await {
-        Ok(members) => {
-            for m in members {
-                let full = matches!(m.posture, None | Some(Posture::Full));
-                if matches!(m.role, Role::OwnDevice) && full && !out.iter().any(|(key, _)| *key == m.public_key) {
-                    let name = m.label.clone().unwrap_or_else(|| m.did.clone());
-                    out.push((m.public_key, name));
-                }
-            }
+        Ok(members) => devices_among(members, me),
+        Err(e) => {
+            tracing::warn!(error = format!("{e:#}"), "pins: the membership set did not read; only this device's claims are counted");
+            devices_among(Vec::new(), me)
         }
-        Err(e) => tracing::warn!(error = format!("{e:#}"), "pins: the membership set did not read; only this device's claims are counted"),
+    }
+}
+
+/// [`devices`], of `members` as the set listed them.
+fn devices_among(members: Vec<kotton_schemas::membership::Member>, me: &VerifyingKey) -> Vec<([u8; 32], String)> {
+    let mut out = vec![(*me.as_bytes(), THIS_DEVICE.to_string())];
+    let mut own: Vec<_> = members
+        .into_iter()
+        .filter(|m| matches!(m.role, Role::OwnDevice) && matches!(m.posture, None | Some(Posture::Full)))
+        .collect();
+    // A stable sort: the members under their key's own `did:key` first, each
+    // kind in the order the set listed them.
+    own.sort_by_key(|m| !under_its_did_key(m));
+    for m in own {
+        if !out.iter().any(|(key, _)| *key == m.public_key) {
+            let name = m.label.clone().unwrap_or_else(|| m.did.clone());
+            out.push((m.public_key, name));
+        }
     }
     out
+}
+
+/// Whether `m` is under its key's own `did:key`: its bytes pass the rule and
+/// its DID as stored is their derivation.
+fn under_its_did_key(m: &kotton_schemas::membership::Member) -> bool {
+    VerifyingKey::from_bytes(&m.public_key).is_ok_and(|key| did_of(&key) == m.did)
 }
 
 /// The names of the devices among `devices` that claim the drive whose id is
@@ -908,7 +929,8 @@ mod tests {
     /// the laptop's claim, under its key's `did:key` as every device writes
     /// one, counts for the laptop; a claim under the member's DID as stored
     /// names no key and counts for no device; and a second member under the
-    /// laptop's key is the same device, listed once. `status` says the same.
+    /// laptop's key is the same device, listed once, under the label of the
+    /// member under its key's own `did:key`. `status` says the same.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_claim_counts_for_the_member_that_holds_its_key_and_this_device_is_listed_once() {
         use kotton_peer::membership::Membership as _;
@@ -936,6 +958,32 @@ mod tests {
         let found = devices(&f.store, &me).await;
         assert_eq!(found.iter().filter(|(k, _)| k == laptop.as_bytes()).count(), 1, "one key was listed as two devices: {found:?}");
         assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(
+            found[1],
+            (*laptop.as_bytes(), "laptop again".to_string()),
+            "the device is not named by the member under its key's own did:key"
+        );
+        // Whatever order the set lists them in: the members under the
+        // laptop's key in both orders, beside more under strings that name no
+        // key, give the label of the one under its `did:key`.
+        let others: Vec<_> = ["did:example:laptop", "did:web:laptop.example"]
+            .into_iter()
+            .map(|did| kotton_schemas::membership::Member { did: did.into(), label: Some(format!("not {did}")), ..spelled.clone() })
+            .collect();
+        for listed in [
+            [vec![spelled.clone()], others.clone(), vec![again.clone()]].concat(),
+            [vec![again.clone()], others.clone(), vec![spelled.clone()]].concat(),
+        ] {
+            let named = devices_among(listed.clone(), &me);
+            assert_eq!(
+                named,
+                [(*me.as_bytes(), THIS_DEVICE.to_string()), (*laptop.as_bytes(), "laptop again".to_string())],
+                "listed as {:?}",
+                listed.iter().map(|m| &m.did).collect::<Vec<_>>()
+            );
+        }
+        let none_under_its_did_key = [others.clone(), vec![spelled.clone()]].concat();
+        assert_eq!(devices_among(none_under_its_did_key, &me)[1].1, "not did:example:laptop", "with none under its did:key, the first listed");
 
         Record::new(&f.rt.schema_registry, &f.records).insert(CLAIM_NSID, claims[0].to_record()).await.unwrap();
         claim(&f.rt.schema_registry, &f.records, &[], &did_of(&me)).await.unwrap();

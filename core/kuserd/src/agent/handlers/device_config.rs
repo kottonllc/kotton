@@ -503,11 +503,14 @@ pub(crate) async fn sync_status(
 
 /// Each of the person's rows, and whether it is connected: **a row is
 /// connected where a connected peer presents the key it holds**
-/// (kottonllc/kotton#597, 29A). Each peer in `connected` is the DID the
-/// transport derives from the key its handshake proved, and is decoded under
-/// the Ed25519 rule, which gives a key only for that key's own `did:key`; a
-/// row is matched by its bytes, and the DID stored beside them is read only
-/// as the row's name. A peer whose string names no key connects no row.
+/// (kottonllc/kotton#597, 29A). `connected` is the set ksyncd reports in
+/// `VfsReport` ([`vfs_report`]), and ksyncd reports it empty today, so every
+/// row reads as not connected until it fills the set. Each peer in it is to be
+/// the DID the transport derives from the key its handshake proved, and is
+/// decoded under the Ed25519 rule, which gives a key only for that key's own
+/// `did:key`; a row is matched by its bytes, and the DID stored beside them is
+/// read only as the row's name. A peer whose string names no key connects no
+/// row.
 fn peer_statuses(nodes: Vec<kotton_wire::peer::PairedNode>, connected: &HashSet<String>) -> Vec<kotton_wire::ipc::PeerStatus> {
     let keys: HashSet<[u8; 32]> = connected
         .iter()
