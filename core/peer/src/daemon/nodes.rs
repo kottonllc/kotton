@@ -63,7 +63,10 @@ pub fn json_err(e: serde_json::Error) -> io::Error {
 /// `peer_pubkey_hex` must be 64 lowercase hex characters (32 bytes raw Ed25519),
 /// and `peer_did` the `did:key` of that key, as
 /// [`kotton_crypto::DidKeyMethod::from_public_key`] makes it; any other string,
-/// another spelling of the key's `did:key` included, is refused.
+/// another spelling of the key's `did:key` included, is refused, and nothing
+/// is written. The row is the store's to name ([`super::db::insert_paired_node`]):
+/// where the person already has a row for the key, that row is rewritten with
+/// this label and address under its DID as stored, and no second row is added.
 /// The key is inserted into both the `paired_nodes` DB table and the live
 /// `paired_keys` mTLS allowlist, so the peer can connect immediately.
 ///
@@ -102,10 +105,10 @@ pub async fn peer_add(
     let id = label.clone();
     let addresses_json = serde_json::to_string(&[peer_addr]).map_err(json_err)?;
 
-    // The DID stored is the key's own: the derivation's string for the bytes
-    // stored beside it, or nothing is stored. A row is its bytes'
-    // (kottonllc/kotton#597, 5B), and the DID beside them is what the person's
-    // other surfaces name the row by, so it names the key the row holds.
+    // A typed DID that is not the key's derivation is refused, and nothing is
+    // written: the person said two things of one node that do not agree, and
+    // neither is taken (kottonllc/kotton#597, 28A). The writer takes the key
+    // alone, so the string is checked here and stored nowhere.
     let device_did_parsed = kotton_crypto::DidKeyMethod::from_public_key(&key);
     if peer_did != device_did_parsed.to_string() {
         return Err(io::Error::other(format!(
@@ -114,32 +117,14 @@ pub async fn peer_add(
         )));
     }
 
-    super::db::insert_paired_node(
-        db,
-        &id,
-        &user_id,
-        &peer_did,
-        &pubkey,
-        &addresses_json,
-        now,
-        None,
-    )
-    .await?;
+    // The writer names the row: a row the person has for the key is rewritten
+    // under its DID as stored, and a new one is written under the key's
+    // derivation, which is the DID checked above (kottonllc/kotton#597, 27A,
+    // 30A). A posture an earlier pairing projected is kept.
+    let node = super::db::insert_paired_node(db, &id, &user_id, &key, &addresses_json, now, None).await?;
 
     // Update live mTLS allowlist.
     paired_keys.write().unwrap().insert(key);
-
-    // The row as it now stands: a posture an earlier pairing projected is kept
-    // (`insert_paired_node`).
-    let node = super::db::get_paired_node(db, &user_id, &peer_did).await?.unwrap_or(PairedNode {
-        id,
-        device_did: device_did_parsed,
-        public_key: pubkey,
-        paired_at: now,
-        addresses: vec![peer_addr],
-        relay_url: None,
-        posture: None,
-    });
     Ok(UserResponse::NodePaired { node })
 }
 
@@ -1188,9 +1173,18 @@ pub const WARM_KEY_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 /// The posture is the caller's — the one the enrollment ran under, which
 /// [`finalize_enrolled_node`] passes through. The label carries the human name
 /// the issuer gave the device.
+///
+/// **Its DID is its key's derivation**, made here from the node's key and not
+/// read from the node: an own device's DID is a name for its key
+/// (kottonllc/kotton#597, 27A), and [`crate::membership::Membership::write_member`]
+/// writes no own-device member under any other. Bytes the Ed25519 rule refuses
+/// have no derivation; the member keeps the node's DID, and `write_member`
+/// refuses it by its key.
 pub fn own_device_member(node: &PairedNode, posture: Posture, added_at: &str) -> Member {
+    let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&node.public_key)
+        .map_or_else(|_| node.device_did.to_string(), |d| d.to_string());
     Member {
-        did: node.device_did.to_string(),
+        did,
         public_key: node.public_key,
         role: Role::OwnDevice,
         admitted_by: Ceremony::DeviceEnroll,
@@ -1274,13 +1268,6 @@ pub async fn project_membership_into_allowlist(
     // the name it wrote it under, and no row of the person's own that happens
     // to hold the same bytes.
     let existing_dids: HashSet<String> = existing.iter().map(|n| n.device_did.to_string()).collect();
-    // An own device is already recorded when a row of the person's holds its
-    // key: a row is its bytes', and the DID beside them is never read as the
-    // key's name (kottonllc/kotton#597). A row under another spelling of the
-    // member's `did:key` (a drive's node handed at a join under its key's
-    // `did:key`, beside a member an earlier build wrote under another) is the
-    // member's row, and no second row is written for the same key.
-    let mut existing_keys: HashSet<[u8; 32]> = existing.iter().map(|n| n.public_key).collect();
     let now = chrono::Utc::now().timestamp();
     let mut added = 0usize;
     // Every member, not only the ones the allowlist admits.
@@ -1301,8 +1288,8 @@ pub async fn project_membership_into_allowlist(
             }
         }
         // Ensure a paired_nodes cache row exists without clobbering learned
-        // addresses (keyed by the person and the DID; address-less until reachability
-        // fills it). Skip members already cached.
+        // addresses (address-less until reachability fills it). A member whose key
+        // a row of the person's already holds is already cached.
         //
         // **Own devices only.** `paired_nodes` is what `peer_standing` reads to
         // answer `PeerStanding::Paired`, and that standing serves `ReadFile`,
@@ -1325,13 +1312,20 @@ pub async fn project_membership_into_allowlist(
                 Err(e) => tracing::warn!(did = %m.did, error = %e, "could not un-cache a contact"),
             }
         }
-        if key.is_some() && m.is_own_device() && existing_keys.insert(m.public_key) {
-            if let Err(e) = network_db::insert_paired_node(
+        // The row is written by the member's key, under its derivation, with the
+        // member's label where it has one (kottonllc/kotton#597, 27A, 28A): a
+        // member an earlier build wrote under another spelling stands by its
+        // bytes (5B), and its row is named as every row is. Where a row of the
+        // person's already holds the key, nothing is written or changed (69A).
+        // A derivation that is already a row's DID beside another key is
+        // refused by the writer: the member is then a member with no row.
+        if let Some(key) = key.as_ref().filter(|_| m.is_own_device()) {
+            let label = m.label.clone().unwrap_or_else(|| kotton_crypto::DidKeyMethod::from_public_key(key).to_string());
+            if let Err(e) = network_db::add_paired_node_if_absent(
                 db,
-                &m.did,
+                &label,
                 user_id,
-                &m.did,
-                &m.public_key,
+                key,
                 "[]",
                 now,
                 m.posture.map(|p| p.as_str()),
@@ -1781,24 +1775,19 @@ pub async fn finalize_enrolled_node(
     let node = enrolled.node;
     let now = now_secs();
     let addresses_json = serde_json::to_string(&node.addresses).map_err(json_err)?;
-    network_db::insert_paired_node(
-        db,
-        &node.id,
-        user_id,
-        &node.device_did.to_string(),
-        &node.public_key,
-        &addresses_json,
-        now,
-        Some(posture.as_str()),
-    )
-    .await?;
+    // The row is written by its key, and the store names it: the row the person
+    // has for the key, under its DID as stored, or a new one under the key's
+    // derivation (kottonllc/kotton#597, 27A, 30A). The node's own DID is not
+    // handed to the store.
+    let row = network_db::insert_paired_node(db, &node.id, user_id, &key, &addresses_json, now, Some(posture.as_str()))
+        .await?;
     // The relay the peer said it reserves at, when the ceremony learned one
     // (the relayed transport does; a peer reached on a socket said nothing
     // and is asked at the first connect). Without this a vault
     // admitted through its relay has no address *and* no relay on the row —
-    // paired, and unreachable.
+    // paired, and unreachable. Written to the row just written, by its DID.
     if let Some(relay) = node.relay_url.as_deref() {
-        network_db::update_paired_node_relay(db, user_id, &node.device_did.to_string(), Some(relay)).await?;
+        network_db::update_paired_node_relay(db, user_id, &row.device_did.to_string(), Some(relay)).await?;
     }
     // A vault admitted blind keeps the person's things: its tenancy is a drive,
     // recorded as one here, as `recover` records the vault it is pointed at
@@ -1975,10 +1964,12 @@ mod allowlist_rebuild {
         let row = *kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[21u8; 32])).as_bytes();
         let member = *kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[22u8; 32])).as_bytes();
         let row_did = kotton_crypto::DidKeyMethod::spelled_otherwise(&row).to_string();
-        network_db::insert_paired_node(&db, "laptop", "alice", &row_did, &row, "[]", 0, None).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, "laptop", "alice", &row_did, &row, "[]", 0, None).await.unwrap();
         let members = Members::default();
+        // As an earlier build wrote it: `write_member` writes no own-device
+        // member under another spelling of its key.
         let m = own_device(&kotton_crypto::DidKeyMethod::spelled_otherwise(&member).to_string(), member);
-        members.write_member(&m).await.unwrap();
+        members.member_write(&m.vfs_path(), &serde_json::to_vec(&m).unwrap()).await.unwrap();
 
         let paired_keys = Arc::new(RwLock::new(HashSet::new()));
         let users: Vec<(String, Arc<dyn MemberStore>)> = vec![("alice".to_string(), Arc::new(members))];
@@ -2014,8 +2005,10 @@ mod allowlist_rebuild {
         assert_eq!(refused_keys.len(), 14, "one row and one member per refused key vector");
 
         let members = Members::default();
-        members.write_member(&own_device("did:peer:honest-member", honest_member)).await.unwrap();
-        // As an earlier build wrote them: `write_member` refuses a member under such bytes.
+        // As an earlier build wrote them: `write_member` refuses a member under such
+        // bytes, and an own-device member under a DID of another method.
+        let m = own_device("did:peer:honest-member", honest_member);
+        members.member_write(&m.vfs_path(), &serde_json::to_vec(&m).unwrap()).await.unwrap();
         for (i, key) in refused_keys.iter().enumerate() {
             let m = own_device(&format!("did:peer:refused-member-{i}"), *key);
             members.member_write(&m.vfs_path(), &serde_json::to_vec(&m).unwrap()).await.unwrap();
@@ -2036,12 +2029,12 @@ mod allowlist_rebuild {
             sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
             let db = Arc::new(pool);
 
-            network_db::insert_paired_node(&db, "laptop", "alice", "did:peer:laptop", &honest_row, "[]", 0, None)
+            network_db::seed_paired_node_as_stored(&db, "laptop", "alice", "did:peer:laptop", &honest_row, "[]", 0, None)
                 .await
                 .unwrap();
             for (i, key) in refused_keys.iter().enumerate() {
                 let (id, did) = (format!("refused-{i}"), format!("did:peer:refused-{i}"));
-                network_db::insert_paired_node(&db, &id, "alice", &did, key, "[]", 0, None)
+                network_db::seed_paired_node_as_stored(&db, &id, "alice", &did, key, "[]", 0, None)
                     .await
                     .unwrap();
             }
@@ -2100,10 +2093,10 @@ mod allowlist_rebuild {
 
         let key = SigningKey::from_bytes(&[12u8; 32]).verifying_key().to_bytes();
         let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key).unwrap().to_string();
-        for user in ["alice", "bob"] {
-            network_db::insert_paired_node(&db, "household", user, &did, &key, "[]", 0, None).await.unwrap();
-        }
         let admitted = VerifyingKey::from_bytes(&key).unwrap();
+        for user in ["alice", "bob"] {
+            network_db::insert_paired_node(&db, "household", user, &admitted, "[]", 0, None).await.unwrap();
+        }
         let paired_keys = Arc::new(RwLock::new(HashSet::from([admitted])));
 
         let said = revoke(&NoMembers, &db, "alice", "household", &paired_keys, Asked::Locally).await;
@@ -2133,12 +2126,12 @@ mod allowlist_rebuild {
 
         let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[12u8; 32]));
         let honest_did = kotton_crypto::DidKeyMethod::from_public_key(&honest).to_string();
-        network_db::insert_paired_node(&db, "laptop", "alice", &honest_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+        network_db::insert_paired_node(&db, "laptop", "alice", &honest, "[]", 0, None).await.unwrap();
         let paired_keys = Arc::new(RwLock::new(HashSet::from([honest])));
 
         for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
             let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
-            network_db::insert_paired_node(&db, "old", "alice", &did, &bytes, "[]", 0, None).await.unwrap();
+            network_db::seed_paired_node_as_stored(&db, "old", "alice", &did, &bytes, "[]", 0, None).await.unwrap();
             let said = revoke(&NoMembers, &db, "alice", &did, &paired_keys, Asked::Locally).await;
             assert!(matches!(said, UserResponse::NodeRevoked), "{name}: {said:?}");
             let left: Vec<String> =
@@ -2195,11 +2188,10 @@ mod allowlist_rebuild {
         let db = agent_db(&dir).await;
         let key = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[31u8; 32]));
         let other = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[32u8; 32]));
-        let did = kotton_crypto::DidKeyMethod::from_public_key(&key).to_string();
-        network_db::insert_paired_node(&db, "laptop", "alice", &did, key.as_bytes(), "[]", 0, None).await.unwrap();
+        network_db::insert_paired_node(&db, "laptop", "alice", &key, "[]", 0, None).await.unwrap();
         let members = Members::default();
         let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string();
-        members.write_member(&own_device(&spelled, *key.as_bytes())).await.unwrap();
+        stored(&members, &own_device(&spelled, *key.as_bytes())).await;
         let stays = own_device(&kotton_crypto::DidKeyMethod::from_public_key(&other).to_string(), *other.as_bytes());
         members.write_member(&stays).await.unwrap();
         let mut contact = own_device("did:kel:Ecarol", *key.as_bytes());
@@ -2228,7 +2220,7 @@ mod allowlist_rebuild {
         let db = agent_db(&dir).await;
         let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[33u8; 32]));
         let honest_did = kotton_crypto::DidKeyMethod::from_public_key(&honest).to_string();
-        network_db::insert_paired_node(&db, "laptop", "alice", &honest_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+        network_db::insert_paired_node(&db, "laptop", "alice", &honest, "[]", 0, None).await.unwrap();
         let members = Members::default();
         let kept = own_device(&honest_did, *honest.as_bytes());
         members.write_member(&kept).await.unwrap();
@@ -2344,7 +2336,7 @@ mod allowlist_rebuild {
         assert!(!kotton_wire::note::one_plain_word(label) && !kotton_wire::note::one_plain_word(did));
         let paired_keys = Arc::new(RwLock::new(HashSet::from([key])));
         for name in [label, did] {
-            network_db::insert_paired_node(&db, label, "alice", did, key.as_bytes(), "[]", 0, None).await.unwrap();
+            network_db::seed_paired_node_as_stored(&db, label, "alice", did, key.as_bytes(), "[]", 0, None).await.unwrap();
             match node_named(&db, "alice", name, Reach::Rows).await.unwrap() {
                 Some(Named::Row(row)) => assert_eq!(row.device_did.to_string(), did, "{name}"),
                 other => panic!("{name:?} resolved to {other:?}"),
@@ -2365,8 +2357,7 @@ mod allowlist_rebuild {
         let (_, refused) = kotton_crypto::ed25519::refused_keys().remove(0);
         let did = kotton_crypto::DidKeyMethod::spelled_over(&refused).to_string();
         let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[37u8; 32]));
-        let honest_did = kotton_crypto::DidKeyMethod::from_public_key(&honest).to_string();
-        network_db::insert_paired_node(&db, &did, "alice", &honest_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+        network_db::insert_paired_node(&db, &did, "alice", &honest, "[]", 0, None).await.unwrap();
         let members = Members::default();
         stored(&members, &own_device(&did, refused)).await;
         let (_, notes) = listed(node_list(&db, "alice".into(), Some(&members)).await.unwrap());
@@ -2418,8 +2409,8 @@ mod allowlist_rebuild {
         let key = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[39u8; 32]));
         let did = kotton_crypto::DidKeyMethod::from_public_key(&key).to_string();
         let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string();
-        network_db::insert_paired_node(&db, "laptop", "alice", &did, key.as_bytes(), "[]", 0, None).await.unwrap();
-        network_db::insert_paired_node(&db, "laptop-before", "alice", &spelled, key.as_bytes(), "[]", 0, None).await.unwrap();
+        network_db::insert_paired_node(&db, "laptop", "alice", &key, "[]", 0, None).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, "laptop-before", "alice", &spelled, key.as_bytes(), "[]", 0, None).await.unwrap();
         let members = Members::default();
         members.write_member(&own_device(&did, *key.as_bytes())).await.unwrap();
         let paired_keys = Arc::new(RwLock::new(HashSet::from([key])));
@@ -2452,7 +2443,11 @@ mod allowlist_rebuild {
         for (label, row_did) in [("laptop", name), (name, honest_did.as_str())] {
             let dir = tempfile::tempdir().unwrap();
             let db = agent_db(&dir).await;
-            network_db::insert_paired_node(&db, label, "alice", row_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+            if row_did == honest_did {
+                network_db::insert_paired_node(&db, label, "alice", &honest, "[]", 0, None).await.unwrap();
+            } else {
+                network_db::seed_paired_node_as_stored(&db, label, "alice", row_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+            }
             let members = Members::default();
             let member = own_device(name, refused);
             stored(&members, &member).await;
@@ -2484,12 +2479,11 @@ mod allowlist_rebuild {
         let dir = tempfile::tempdir().unwrap();
         let db = agent_db(&dir).await;
         let key = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[41u8; 32]));
-        let did = kotton_crypto::DidKeyMethod::from_public_key(&key).to_string();
         let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string();
-        network_db::insert_paired_node(&db, "laptop", "alice", &did, key.as_bytes(), "[]", 0, None).await.unwrap();
+        network_db::insert_paired_node(&db, "laptop", "alice", &key, "[]", 0, None).await.unwrap();
         let members = Members::default();
         let member = own_device(&spelled, *key.as_bytes());
-        members.write_member(&member).await.unwrap();
+        stored(&members, &member).await;
         let paired_keys = Arc::new(RwLock::new(HashSet::from([key])));
 
         let said = revoke(&members, &db, "alice", &spelled, &paired_keys, Asked::Locally).await;
@@ -2517,12 +2511,12 @@ mod allowlist_rebuild {
         let db = agent_db(&dir).await;
         let honest = kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[12u8; 32]));
         let honest_did = kotton_crypto::DidKeyMethod::from_public_key(&honest).to_string();
-        network_db::insert_paired_node(&db, "laptop", "alice", &honest_did, honest.as_bytes(), "[]", 0, None).await.unwrap();
+        network_db::insert_paired_node(&db, "laptop", "alice", &honest, "[]", 0, None).await.unwrap();
         let paired_keys = Arc::new(RwLock::new(HashSet::from([honest])));
 
         for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
             let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
-            network_db::insert_paired_node(&db, "old", "alice", &did, &bytes, "[]", 0, None).await.unwrap();
+            network_db::seed_paired_node_as_stored(&db, "old", "alice", &did, &bytes, "[]", 0, None).await.unwrap();
             let (nodes, notes) = listed(node_list(&db, "alice".into(), None).await.unwrap());
             assert_eq!(nodes.len(), 2, "{name}: the row is listed as any other");
             assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key("old")], "{name}");
@@ -2551,12 +2545,12 @@ mod allowlist_rebuild {
         let (three, three_did) = row(2);
         let (four, four_did) = row(3);
         // A label only this row carries.
-        network_db::insert_paired_node(&db, "attic", "alice", &one_did, &one, "[]", 0, None).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, "attic", "alice", &one_did, &one, "[]", 0, None).await.unwrap();
         // A label two rows carry.
-        network_db::insert_paired_node(&db, "twin", "alice", &two_did, &two, "[]", 0, None).await.unwrap();
-        network_db::insert_paired_node(&db, "twin", "alice", &three_did, &three, "[]", 0, None).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, "twin", "alice", &two_did, &two, "[]", 0, None).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, "twin", "alice", &three_did, &three, "[]", 0, None).await.unwrap();
         // A label that is another row's DID.
-        network_db::insert_paired_node(&db, &one_did, "alice", &four_did, &four, "[]", 0, None).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, &one_did, "alice", &four_did, &four, "[]", 0, None).await.unwrap();
 
         let (nodes, notes) = listed(node_list(&db, "alice".into(), None).await.unwrap());
         assert_eq!(notes.len(), 4, "{notes:?}");
@@ -2590,7 +2584,7 @@ mod allowlist_rebuild {
         assert!(kotton_wire::note::one_plain_word(&did), "the DID as stored is not one plain word: {did}");
         for (i, label) in LABELS_NOT_ONE_WORD.iter().copied().chain(["attic"]).enumerate() {
             let user = format!("person-{i}");
-            network_db::insert_paired_node(&db, label, &user, &did, &bytes, "[]", 0, None).await.unwrap();
+            network_db::seed_paired_node_as_stored(&db, label, &user, &did, &bytes, "[]", 0, None).await.unwrap();
             let (nodes, notes) = listed(node_list(&db, user.clone(), None).await.unwrap());
             assert_eq!((nodes.len(), notes.len()), (1, 1), "{label:?}");
             let name = &notes[0].name;
@@ -2606,7 +2600,7 @@ mod allowlist_rebuild {
         // that is not one either: the note is carried, under the DID as stored,
         // and its sentence names its verb and composes no command (23A).
         let odd = "did:key:RD/T4NHD S5UEFOU51W*VRLU7R";
-        network_db::insert_paired_node(&db, "my phone", "person-odd", odd, &bytes, "[]", 0, None).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, "my phone", "person-odd", odd, &bytes, "[]", 0, None).await.unwrap();
         let (_, notes) = listed(node_list(&db, "person-odd".into(), None).await.unwrap());
         assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key(odd)]);
         let said = kotton_wire::note::sentence(&notes[0], "device revoke");
@@ -2629,7 +2623,7 @@ mod allowlist_rebuild {
         assert!(kotton_wire::note::one_plain_word(&other), "{other}");
         for (i, label) in LABELS_NOT_ONE_WORD.iter().enumerate() {
             let user = format!("person-{i}");
-            network_db::insert_paired_node(&db, label, &user, &other, key.as_bytes(), "[]", 0, None).await.unwrap();
+            network_db::seed_paired_node_as_stored(&db, label, &user, &other, key.as_bytes(), "[]", 0, None).await.unwrap();
             let (_, notes) = listed(node_list(&db, user.clone(), None).await.unwrap());
             assert_eq!(
                 notes,
@@ -2658,7 +2652,7 @@ mod allowlist_rebuild {
         let did_key = lines.next().unwrap().to_string();
         let other = lines.next().unwrap().to_string();
         let key = kotton_crypto::DidKeyMethod::to_public_key(&did_key.parse().unwrap()).unwrap();
-        network_db::insert_paired_node(&db, "phone", "alice", &other, key.as_bytes(), "[]", 0, None).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, "phone", "alice", &other, key.as_bytes(), "[]", 0, None).await.unwrap();
         let paired_keys = Arc::new(RwLock::new(HashSet::new()));
         let none: Vec<(String, Arc<dyn crate::membership::MemberStore>)> = vec![("alice".into(), Arc::new(NoMembers))];
 
@@ -2872,8 +2866,8 @@ mod chosen_by_key {
             DidKeyMethod::spelled_otherwise(signer.as_bytes()).to_string(),
             DidKeyMethod::from_public_key(&signer).to_string(),
         );
-        network_db::insert_paired_node(&db, "newer", "alice", &newer, signer.as_bytes(), "[]", 200, None).await.unwrap();
-        network_db::insert_paired_node(&db, "older", "alice", &older, signer.as_bytes(), "[]", 100, None).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, "newer", "alice", &newer, signer.as_bytes(), "[]", 200, None).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, "older", "alice", &older, signer.as_bytes(), "[]", 100, None).await.unwrap();
 
         let listed = network_db::list_paired_nodes(&db, "alice").await.unwrap();
         assert_eq!(ids(&listed), vec!["newer", "older"], "the premise: the store lists the more recently paired first");
@@ -2890,7 +2884,7 @@ mod chosen_by_key {
         let paired_keys = Arc::new(RwLock::new(HashSet::new()));
         for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
             let did = DidKeyMethod::spelled_over(&bytes).to_string();
-            network_db::insert_paired_node(&db, &name, "alice", &did, &bytes, "[]", 0, None).await.unwrap();
+            network_db::seed_paired_node_as_stored(&db, &name, "alice", &did, &bytes, "[]", 0, None).await.unwrap();
             let said = peer_readdress(&db, &paired_keys, "alice", &bytes, "127.0.0.1:7".parse().unwrap()).await;
             assert!(said.is_err(), "{name}: re-addressed: {said:?}");
             let row = network_db::get_paired_node(&db, "alice", &did).await.unwrap().expect("the row stands");
@@ -2954,5 +2948,307 @@ mod chosen_by_key {
             assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty(), "{name}: a row was stored");
             assert!(paired_keys.read().unwrap().is_empty(), "{name}: the key was admitted");
         }
+    }
+}
+
+/// **A row is named by its key, and no writer hands the store a second name**
+/// (kottonllc/kotton#624; kottonllc/kotton#597, 27A, 28A, 30A, 65A, 69A): the
+/// store's writer, the membership projection and `peer add`, each with keys
+/// from seeds.
+#[cfg(test)]
+mod named_by_key {
+    use super::*;
+    use crate::membership::MemberStore;
+    use kotton_crypto::DidKeyMethod;
+
+    fn key(seed: u8) -> VerifyingKey {
+        kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[seed; 32]))
+    }
+
+    fn derived(key: &VerifyingKey) -> String {
+        DidKeyMethod::from_public_key(key).to_string()
+    }
+
+    fn spelled(key: &VerifyingKey) -> String {
+        DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string()
+    }
+
+    async fn agent_db(dir: &tempfile::TempDir) -> Arc<SqlitePool> {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        Arc::new(pool)
+    }
+
+    /// One row as the store holds it: label, DID, key, addresses, time, posture, relay.
+    type Stored = (String, String, Vec<u8>, String, i64, Option<String>, Option<String>);
+
+    /// Every row of `user`'s, column for column, in DID order.
+    async fn rows(db: &Arc<SqlitePool>, user: &str) -> Vec<Stored> {
+        sqlx::query_as(
+            "SELECT id, device_did, public_key, addresses, paired_at, posture, relay_url FROM paired_nodes \
+             WHERE user_id = ? ORDER BY device_did",
+        )
+        .bind(user)
+        .fetch_all(db.as_ref())
+        .await
+        .unwrap()
+    }
+
+    /// A member store that keeps what it is told.
+    #[derive(Default)]
+    struct Members(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+    #[async_trait::async_trait]
+    impl MemberStore for Members {
+        async fn member_write(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.0.lock().unwrap().insert(path.to_string(), data.to_vec());
+            Ok(())
+        }
+        async fn member_read(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+            self.0.lock().unwrap().get(path).cloned().ok_or_else(|| anyhow::anyhow!("no member at {path}"))
+        }
+        async fn member_delete(&self, path: &str) -> anyhow::Result<()> {
+            self.0.lock().unwrap().remove(path);
+            Ok(())
+        }
+        async fn member_list(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+            Ok(self.0.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect())
+        }
+    }
+
+    fn own_device(did: &str, key: &VerifyingKey, label: Option<&str>) -> Member {
+        Member {
+            did: did.to_string(),
+            public_key: *key.as_bytes(),
+            role: Role::OwnDevice,
+            admitted_by: Ceremony::DeviceEnroll,
+            added_at: "2026-11-21T00:00:00Z".to_string(),
+            posture: Some(Posture::Full),
+            label: label.map(str::to_string),
+            reach: None,
+        }
+    }
+
+    const AT: &str = r#"["127.0.0.1:7"]"#;
+
+    /// **A new row is written under its key's derivation**, and the writer
+    /// returns it as stored.
+    #[tokio::test]
+    async fn the_writer_names_a_new_row_by_its_keys_derivation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        for (seed, label) in [(51u8, "laptop"), (52, "phone")] {
+            let k = key(seed);
+            let node = network_db::insert_paired_node(&db, label, "alice", &k, AT, 10, Some("full")).await.unwrap();
+            assert_eq!(node.device_did.to_string(), derived(&k), "{label}");
+            assert_eq!((node.id.as_str(), node.public_key), (label, *k.as_bytes()), "{label}");
+        }
+        let stored: Vec<(String, Vec<u8>)> = rows(&db, "alice").await.into_iter().map(|r| (r.1, r.2)).collect();
+        let mut want = vec![(derived(&key(51)), key(51).as_bytes().to_vec()), (derived(&key(52)), key(52).as_bytes().to_vec())];
+        want.sort();
+        assert_eq!(stored, want);
+    }
+
+    /// **A key with a row under another spelling rewrites that row in place**,
+    /// under its DID as stored: the label, address and time the write brings,
+    /// the posture where it brings one, and the relay the row was last known
+    /// at; no second row. The writer returns the row under that DID.
+    #[tokio::test]
+    async fn a_key_with_a_row_under_another_spelling_is_rewritten_under_its_did_as_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let k = key(53);
+        let stored = spelled(&k);
+        network_db::seed_paired_node_as_stored(&db, "old-laptop", "alice", &stored, k.as_bytes(), "[]", 5, Some("full")).await.unwrap();
+        network_db::update_paired_node_relay(&db, "alice", &stored, Some("https://relay.test")).await.unwrap();
+
+        let node = network_db::insert_paired_node(&db, "laptop", "alice", &k, AT, 10, None).await.unwrap();
+        assert_eq!(node.device_did.to_string(), stored, "the writer did not return the row as stored");
+        let relay = Some("https://relay.test".to_string());
+        assert_eq!(
+            rows(&db, "alice").await,
+            vec![("laptop".into(), stored.clone(), k.as_bytes().to_vec(), AT.into(), 10, Some("full".into()), relay.clone())]
+        );
+
+        network_db::insert_paired_node(&db, "laptop", "alice", &k, AT, 11, Some("cosigner")).await.unwrap();
+        assert_eq!(
+            rows(&db, "alice").await,
+            vec![("laptop".into(), stored, k.as_bytes().to_vec(), AT.into(), 11, Some("cosigner".into()), relay)]
+        );
+    }
+
+    /// **The derivation's string as a row's DID beside another key refuses the
+    /// write, which names the row and writes nothing**, in both of the writer's
+    /// forms.
+    #[tokio::test]
+    async fn the_derivation_as_a_rows_did_beside_another_key_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let (k, other) = (key(54), key(55));
+        let did = derived(&k);
+        network_db::seed_paired_node_as_stored(&db, "attic", "alice", &did, other.as_bytes(), "[]", 5, Some("full")).await.unwrap();
+        let before = rows(&db, "alice").await;
+
+        let refused = [
+            network_db::insert_paired_node(&db, "laptop", "alice", &k, AT, 10, None).await.map(|_| ()),
+            network_db::add_paired_node_if_absent(&db, "laptop", "alice", &k, AT, 10, None).await.map(|_| ()),
+        ];
+        for said in refused {
+            let why = said.expect_err("written over a row beside another key").to_string();
+            assert!(
+                why.contains("'attic'") && why.contains(&did) && why.contains("nothing was written") && why.contains("device revoke"),
+                "{why}"
+            );
+            assert_eq!(rows(&db, "alice").await, before, "the store changed");
+        }
+        // Another person's row under the same string is theirs, and refuses nothing.
+        let node = network_db::insert_paired_node(&db, "laptop", "bob", &k, AT, 10, None).await.unwrap();
+        assert_eq!(node.device_did.to_string(), did);
+    }
+
+    /// **Two rows for one key, written at different times, one of them
+    /// `gateway`** (65A): a write rewrites the one `list_paired_nodes` lists
+    /// first, the more recently paired; the other is byte for byte as it was;
+    /// no third row is written; and the key is still read as a gateway's.
+    #[tokio::test]
+    async fn two_rows_for_one_key_one_a_gateway_the_first_listed_is_rewritten() {
+        let k = key(56);
+        for (gateway_at, full_at) in [(200, 100), (100, 200)] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = agent_db(&dir).await;
+            let (gateway_did, full_did) = (derived(&k), spelled(&k));
+            network_db::seed_paired_node_as_stored(&db, "front-door", "alice", &gateway_did, k.as_bytes(), "[]", gateway_at, Some("gateway"))
+                .await
+                .unwrap();
+            network_db::seed_paired_node_as_stored(&db, "laptop", "alice", &full_did, k.as_bytes(), "[]", full_at, Some("full"))
+                .await
+                .unwrap();
+            let before = rows(&db, "alice").await;
+            let first = network_db::list_paired_nodes(&db, "alice").await.unwrap()[0].device_did.to_string();
+            let want_first = if gateway_at > full_at { &gateway_did } else { &full_did };
+            assert_eq!(&first, want_first, "the premise: the more recently paired is listed first");
+
+            let node = network_db::insert_paired_node(&db, "renamed", "alice", &k, AT, 300, None).await.unwrap();
+            assert_eq!(node.device_did.to_string(), first, "{gateway_at}: another row was rewritten");
+            let after = rows(&db, "alice").await;
+            assert_eq!(after.len(), 2, "{gateway_at}: a row was added or removed: {after:?}");
+            for (was, now) in before.iter().zip(&after) {
+                if was.1 == first {
+                    assert_eq!((now.0.as_str(), now.3.as_str(), now.4, &now.5), ("renamed", AT, 300, &was.5), "{gateway_at}");
+                } else {
+                    assert_eq!(now, was, "{gateway_at}: the other row changed");
+                }
+            }
+            assert_eq!(
+                network_db::paired_posture_for_user(&db, k.as_bytes(), "alice").await.unwrap(),
+                Some(Some("gateway".to_string())),
+                "{gateway_at}: the key is no longer read as a gateway's"
+            );
+        }
+    }
+
+    /// **The add-only form writes no row and changes none where a row holds the
+    /// key** (69A), and writes under the derivation where none does.
+    #[tokio::test]
+    async fn the_add_only_form_changes_no_row_that_holds_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let (held, free) = (key(57), key(58));
+        network_db::seed_paired_node_as_stored(&db, "laptop", "alice", &spelled(&held), held.as_bytes(), AT, 5, Some("full")).await.unwrap();
+        let before = rows(&db, "alice").await;
+        assert!(network_db::add_paired_node_if_absent(&db, "recovered", "alice", &held, "[]", 10, None).await.unwrap().is_none());
+        assert_eq!(rows(&db, "alice").await, before, "a row that holds the key was changed");
+
+        let node = network_db::add_paired_node_if_absent(&db, "recovered", "alice", &free, "[]", 10, None).await.unwrap();
+        assert_eq!(node.map(|n| n.device_did.to_string()), Some(derived(&free)));
+        assert_eq!(rows(&db, "alice").await.len(), 2);
+    }
+
+    /// **The projection writes a member's row under its key's derivation, with
+    /// the member's label where it has one**, and the derivation where it has none.
+    #[tokio::test]
+    async fn the_projection_writes_a_members_row_under_its_keys_derivation_with_its_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let (named, unnamed) = (key(59), key(60));
+        let members = Members::default();
+        members.write_member(&own_device(&derived(&named), &named, Some("phone"))).await.unwrap();
+        members.write_member(&own_device(&derived(&unnamed), &unnamed, None)).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        project_membership_into_allowlist(&members, &db, &paired_keys, "alice").await;
+
+        let mut got: Vec<(String, String)> = rows(&db, "alice").await.into_iter().map(|r| (r.0, r.1)).collect();
+        got.sort();
+        let mut want = vec![("phone".to_string(), derived(&named)), (derived(&unnamed), derived(&unnamed))];
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    /// **An own-device member under another spelling has one row, under its
+    /// key's derivation, and is admitted; the member is unchanged in the set**
+    /// (28A, 5B).
+    #[tokio::test]
+    async fn an_own_device_member_under_another_spelling_has_one_row_under_its_keys_derivation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let k = key(61);
+        let members = Members::default();
+        // As an earlier build wrote it: `write_member` writes no such member.
+        let m = own_device(&spelled(&k), &k, Some("laptop"));
+        members.member_write(&m.vfs_path(), &serde_json::to_vec(&m).unwrap()).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        for _ in 0..2 {
+            project_membership_into_allowlist(&members, &db, &paired_keys, "alice").await;
+        }
+        let stored: Vec<(String, String, Vec<u8>)> = rows(&db, "alice").await.into_iter().map(|r| (r.0, r.1, r.2)).collect();
+        assert_eq!(stored, vec![("laptop".to_string(), derived(&k), k.as_bytes().to_vec())]);
+        assert!(paired_keys.read().unwrap().contains(&k), "the member's key is not admitted");
+        assert_eq!(members.list_members().await.unwrap(), vec![m], "the member changed in the set");
+    }
+
+    /// **The projection leaves a row that holds a member's key byte for byte as
+    /// it was** (69A), whatever DID the row is stored under, and admits the key.
+    #[tokio::test]
+    async fn the_projection_leaves_a_row_under_another_spelling_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let k = key(62);
+        network_db::seed_paired_node_as_stored(&db, "old-laptop", "alice", &spelled(&k), k.as_bytes(), AT, 5, Some("cosigner")).await.unwrap();
+        let before = rows(&db, "alice").await;
+        let members = Members::default();
+        members.write_member(&own_device(&derived(&k), &k, Some("laptop"))).await.unwrap();
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        project_membership_into_allowlist(&members, &db, &paired_keys, "alice").await;
+        assert_eq!(rows(&db, "alice").await, before);
+        assert!(paired_keys.read().unwrap().contains(&k));
+    }
+
+    /// **`peer add` of a key that has a row under another spelling rewrites that
+    /// row**, under its DID as stored, with the label and address it brings and
+    /// the posture the row had; it answers with that row, and adds none.
+    #[tokio::test]
+    async fn peer_add_of_a_key_with_a_row_under_another_spelling_rewrites_that_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let k = key(63);
+        let stored = spelled(&k);
+        network_db::seed_paired_node_as_stored(&db, "old", "alice", &stored, k.as_bytes(), "[]", 5, Some("full")).await.unwrap();
+        let addr: SocketAddr = "127.0.0.1:7".parse().unwrap();
+
+        let said = peer_add(&db, &paired_keys, "alice".into(), "laptop".into(), derived(&k), hex::encode(k.as_bytes()), addr).await.unwrap();
+        let UserResponse::NodePaired { node } = said else { panic!("{said:?}") };
+        assert_eq!((node.id.as_str(), node.device_did.to_string(), node.addresses.clone()), ("laptop", stored.clone(), vec![addr]));
+        let all = rows(&db, "alice").await;
+        assert_eq!(all.len(), 1, "{all:?}");
+        let (label, did, bytes, addresses, _, posture, relay) = all[0].clone();
+        assert_eq!(
+            (label.as_str(), did, bytes, addresses, posture.as_deref(), relay),
+            ("laptop", stored, k.as_bytes().to_vec(), AT.to_string(), Some("full"), None)
+        );
+        assert!(paired_keys.read().unwrap().contains(&k));
     }
 }

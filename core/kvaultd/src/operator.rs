@@ -140,7 +140,7 @@ mod tests {
         let public = |seed: u8| ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
         let (shared, alone) = (public(7), public(9));
         for user in ["pat", "sam"] {
-            kotton_peer::daemon::db::insert_paired_node(&db, "laptop", user, "did:key:zShared", &shared, "[]", 0, Some("full"))
+            kotton_peer::daemon::db::insert_paired_node(&db, "laptop", user, &VerifyingKey::from_bytes(&shared).unwrap(), "[]", 0, Some("full"))
                 .await
                 .expect("paired");
         }

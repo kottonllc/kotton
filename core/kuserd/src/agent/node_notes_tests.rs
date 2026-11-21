@@ -41,10 +41,10 @@ async fn a_remote_node_listing_carries_the_same_notes_as_the_local_one() {
 
     let (_, refused) = kotton_crypto::ed25519::refused_keys().remove(0);
     let old = kotton_crypto::DidKeyMethod::spelled_over(&refused).to_string();
-    kotton_peer::daemon::db::insert_paired_node(&db, "old", "alice", &old, &refused, "[]", 0, None).await.unwrap();
+    kotton_peer::daemon::db::seed_paired_node_as_stored(&db, "old", "alice", &old, &refused, "[]", 0, None).await.unwrap();
     let honest = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[41u8; 32]));
     let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(honest.as_bytes()).to_string();
-    kotton_peer::daemon::db::insert_paired_node(&db, "phone", "alice", &otherwise, honest.as_bytes(), "[]", 0, None)
+    kotton_peer::daemon::db::seed_paired_node_as_stored(&db, "phone", "alice", &otherwise, honest.as_bytes(), "[]", 0, None)
         .await
         .unwrap();
 

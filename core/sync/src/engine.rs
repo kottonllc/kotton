@@ -2558,13 +2558,19 @@ mod drive_packs_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(kotton_record::open_sqlite(&dir.path().join("agent.db")).await.unwrap());
         kotton_device::db::MIGRATOR.run(db.as_ref()).await.unwrap();
-        let vault_key = [5u8; 32];
+        // The public key of the Ed25519 secret `[5; 32]`: the store's writer
+        // takes a key the rule admits (kottonllc/kotton#597, 27A).
+        let vault = kotton_ed25519::VerifyingKey::from_bytes(&[
+            110, 122, 28, 221, 41, 176, 183, 143, 209, 58, 244, 197, 89, 143, 239, 244, 239, 42, 151, 22, 110, 60, 166, 242,
+            228, 251, 252, 205, 128, 80, 91, 241,
+        ])
+        .unwrap();
+        let vault_key = *vault.as_bytes();
         kotton_peer::daemon::db::insert_paired_node(
             &db,
             "vault",
             "alice",
-            "did:key:z6MkVault",
-            &vault_key,
+            &vault,
             "[]",
             0,
             Some(kotton_schemas::membership::Posture::BlindStorage.as_str()),

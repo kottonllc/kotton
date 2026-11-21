@@ -1329,7 +1329,7 @@ mod tests {
         let insert = |id: String, k: kotton_crypto::ed25519::VerifyingKey, drive: bool| {
             let db = Arc::clone(&db);
             async move {
-                kotton_peer::daemon::db::insert_paired_node(&db, &id, "alice", &did(&k), k.as_bytes(), "[]", 0, None).await.unwrap();
+                kotton_peer::daemon::db::insert_paired_node(&db, &id, "alice", &k, "[]", 0, None).await.unwrap();
                 if drive {
                     kotton_peer::daemon::drives::record(&db, "alice", k.as_bytes()).await.unwrap();
                 }

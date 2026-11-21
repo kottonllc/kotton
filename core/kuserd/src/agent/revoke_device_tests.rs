@@ -49,8 +49,8 @@ async fn alice_at(base: &Path) -> DeviceDaemon {
 /// enrolling it does (`kotton_peer::daemon::drives`).
 async fn paired(db: &Arc<SqlitePool>, id: &str, seed: u8, posture: kotton_schemas::membership::Posture) {
     let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
-    let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key).unwrap();
-    kotton_peer::daemon::db::insert_paired_node(db, id, "alice", &did.to_string(), &key, "[]", 0, Some(posture.as_str()))
+    let rule_key = kotton_crypto::ed25519::VerifyingKey::from_bytes(&key).unwrap();
+    kotton_peer::daemon::db::insert_paired_node(db, id, "alice", &rule_key, "[]", 0, Some(posture.as_str()))
         .await
         .unwrap();
     if posture == kotton_schemas::membership::Posture::BlindStorage {

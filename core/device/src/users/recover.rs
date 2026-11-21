@@ -696,7 +696,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (rt, phrase) = a_device_that_kept_its_sealed_copy(&temp).await;
         let pool = agent_db().await;
-        kotton_peer::daemon::db::insert_paired_node(&pool, "laptop", "alice", &did_of(&key(6)), &key(6), "[]", 0, Some("full"))
+        kotton_peer::daemon::db::insert_paired_node(&pool, "laptop", "alice", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&key(6)).unwrap(), "[]", 0, Some("full"))
             .await
             .unwrap();
         let chain_before = kel_store::load_chain(rt.base_dir(), "alice").unwrap().len();
@@ -731,7 +731,7 @@ mod tests {
             ("addressless", did_of(&key(23)), key(23), "[]", Some("blind-storage")),
         ];
         for (label, did, k, addresses, posture) in &stood {
-            kotton_peer::daemon::db::insert_paired_node(&pool, label, "alice", did, k, addresses, 0, *posture)
+            kotton_peer::daemon::db::seed_paired_node_as_stored(&pool, label, "alice", did, k, addresses, 0, *posture)
                 .await
                 .unwrap();
         }

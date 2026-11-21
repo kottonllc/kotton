@@ -32,6 +32,11 @@ mod tests {
 
     /// A valid `(public_key, did:key)` pair derived from a deterministic seed
     /// (arbitrary 32 bytes are not necessarily valid Edwards points).
+    /// The rule's key for `key`'s bytes, as the store's writer takes it.
+    fn vk(key: &[u8; 32]) -> kotton_crypto::ed25519::VerifyingKey {
+        kotton_crypto::ed25519::VerifyingKey::from_bytes(key).unwrap()
+    }
+
     fn key_and_did(seed: u8) -> ([u8; 32], String) {
         let pk = SigningKey::from_bytes(&[seed; 32])
             .verifying_key()
@@ -53,11 +58,11 @@ mod tests {
         let db = migrated_pool(&dir.path().join("net.db")).await;
         let rows = [(7u8, "cosigner", Some("cosigner")), (8, "vault", Some("blind-storage")), (9, "desktop", Some("full")), (10, "old", None)];
         for (seed, id, posture) in rows {
-            let (pk, did) = key_and_did(seed);
-            insert_paired_node(&db, id, "alice", &did, &pk, "[]", 0, posture).await.unwrap();
+            let (pk, _) = key_and_did(seed);
+            insert_paired_node(&db, id, "alice", &vk(&pk), "[]", 0, posture).await.unwrap();
         }
-        let (pk, did) = key_and_did(7);
-        insert_paired_node(&db, "cosigner", "alice", &did, &pk, "[]", 1, None).await.unwrap();
+        let (pk, _) = key_and_did(7);
+        insert_paired_node(&db, "cosigner", "alice", &vk(&pk), "[]", 1, None).await.unwrap();
 
         let read = |id: &str, nodes: &[kotton_wire::peer::PairedNode]| nodes.iter().find(|n| n.id == id).unwrap().posture.clone();
         let nodes = list_paired_nodes(&db, "alice").await.unwrap();
@@ -81,8 +86,8 @@ mod tests {
         use kotton_peer::relay_keys::offers_from;
         let dir = tempfile::tempdir().unwrap();
         let db = migrated_pool(&dir.path().join("net.db")).await;
-        let (pk, did) = key_and_did(11);
-        insert_paired_node(&db, "newer", "alice", &did, &pk, "[]", 0, Some("steward")).await.unwrap();
+        let (pk, _) = key_and_did(11);
+        insert_paired_node(&db, "newer", "alice", &vk(&pk), "[]", 0, Some("steward")).await.unwrap();
         let node = list_paired_nodes(&db, "alice").await.unwrap().pop().unwrap();
         assert!(!offers_from(node.posture), "an unrecognised posture was read as full");
         let one = paired_node_named(&db, "alice", "newer").await.unwrap().unwrap();
@@ -101,8 +106,7 @@ mod tests {
             &db,
             "node1",
             "alice",
-            &did,
-            &pk,
+            &vk(&pk),
             &serde_json::to_string(&vec![stale]).unwrap(),
             0,
             None,

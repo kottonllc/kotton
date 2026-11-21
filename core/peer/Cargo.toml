@@ -6,8 +6,10 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-# `daemon::nodes::threshold_sign`: a distributed round over bytes the caller hands it.
-# The integration suite turns it on; no daemon's build does.
+# `daemon::nodes::threshold_sign`: a distributed round over bytes the caller hands it; and
+# `daemon::db::seed_paired_node_as_stored`: a row stored as an earlier build stored it.
+# The integration suite turns it on; no daemon's build does, and `cargo xtask ship-check`
+# refuses a packed binary whose closure turns it on.
 test-support = []
 
 [dependencies]

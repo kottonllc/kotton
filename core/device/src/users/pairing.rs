@@ -260,21 +260,13 @@ pub async fn finalize_joined_node(
     let node = joined.peer;
     let now = now_secs();
     let addresses_json = serde_json::to_string(&node.addresses).map_err(json_err)?;
-    network_db::insert_paired_node(
-        db,
-        &node.id,
-        user_id,
-        &node.device_did.to_string(),
-        &node.public_key,
-        &addresses_json,
-        now,
-        None,
-    )
-    .await?;
+    // Written by its key, and named by the store (kottonllc/kotton#597, 27A,
+    // 30A): the issuer's DID is not handed to it.
+    let row = network_db::insert_paired_node(db, &node.id, user_id, &key, &addresses_json, now, None).await?;
     // The relay the issuer announced, when the ceremony learned one — see
-    // `finalize_enrolled_node`.
+    // `finalize_enrolled_node`. Written to the row just written, by its DID.
     if let Some(relay) = node.relay_url.as_deref() {
-        network_db::update_paired_node_relay(db, user_id, &node.device_did.to_string(), Some(relay)).await?;
+        network_db::update_paired_node_relay(db, user_id, &row.device_did.to_string(), Some(relay)).await?;
     }
     paired_keys.write().unwrap().insert(key);
 
@@ -1818,21 +1810,13 @@ pub async fn record_handed_drives(
         let node = &drive.node;
         let key = VerifyingKey::from_bytes(&node.public_key)
             .map_err(|e| io::Error::other(format!("a handed drive's key is not an Ed25519 key: {e}")))?;
-        let did = node.device_did.to_string();
         let addresses = serde_json::to_string(&node.addresses).map_err(json_err)?;
-        network_db::insert_paired_node(
-            db,
-            &node.id,
-            user_id,
-            &did,
-            &node.public_key,
-            &addresses,
-            now_secs(),
-            None,
-        )
-        .await?;
+        // Written by the vault's key, and named by the store: the DID the
+        // handout carried was held to that key before anything was written
+        // (`check_handed_drives`), and is not handed to the store.
+        let row = network_db::insert_paired_node(db, &node.id, user_id, &key, &addresses, now_secs(), None).await?;
         if let Some(relay) = node.relay_url.as_deref() {
-            network_db::update_paired_node_relay(db, user_id, &did, Some(relay)).await?;
+            network_db::update_paired_node_relay(db, user_id, &row.device_did.to_string(), Some(relay)).await?;
         }
         kotton_peer::daemon::drives::record(db, user_id, &drive.vault_key).await?;
         paired_keys.write().unwrap().insert(key);
@@ -1925,7 +1909,7 @@ mod handed_drive_tests {
 
     async fn pair(db: &Arc<SqlitePool>, user_id: &str, id: &str, seed: u8, posture: Option<&str>) {
         let node = a_node(id, seed);
-        network_db::insert_paired_node(db, id, user_id, &node.device_did.to_string(), &node.public_key, "[]", 0, posture)
+        network_db::insert_paired_node(db, id, user_id, &kotton_crypto::ed25519::VerifyingKey::from_bytes(&node.public_key).unwrap(), "[]", 0, posture)
             .await
             .unwrap();
     }
@@ -1951,6 +1935,16 @@ mod handed_drive_tests {
 
     /// [`join_handing`], with the joining device's state under `base`.
     async fn join_handing_at(base: &std::path::Path, db: &Arc<SqlitePool>, drives: Vec<DriveHandout>) -> UserResponse {
+        join_handing_from(base, db, a_node("issuer", 1), drives).await
+    }
+
+    /// [`join_handing_at`], from the issuer `issuer`.
+    async fn join_handing_from(
+        base: &std::path::Path,
+        db: &Arc<SqlitePool>,
+        issuer: PairedNode,
+        drives: Vec<DriveHandout>,
+    ) -> UserResponse {
         let runtime = crate::runtime::DeviceRuntime::new_with_secrets(
             base.to_path_buf(),
             crate::config::RuntimeConfig::default(),
@@ -1958,7 +1952,6 @@ mod handed_drive_tests {
         )
         .await
         .unwrap();
-        let issuer = a_node("issuer", 1);
         let joined = kotton_peer::pairing::JoinedNode {
             root_did: issuer.device_did.clone(),
             peer: issuer,
@@ -2027,13 +2020,13 @@ mod handed_drive_tests {
     async fn the_handout_at_a_join_skips_a_drive_that_names_no_key() {
         let (_dir, db) = machine_db().await;
         let honest = a_drive("vault", 3, "alice");
-        network_db::insert_paired_node(&db, "vault", "alice", &honest.node.device_did.to_string(), &honest.vault_key, "[]", 0, Some("blind-storage"))
+        network_db::insert_paired_node(&db, "vault", "alice", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&honest.vault_key).unwrap(), "[]", 0, Some("blind-storage"))
             .await
             .unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &honest.vault_key).await.unwrap();
         for (i, key) in refused_keys().into_iter().enumerate() {
             let did = kotton_crypto::DidKeyMethod::spelled_over(&key).to_string();
-            network_db::insert_paired_node(&db, &format!("old-{i}"), "alice", &did, &key, "[]", 0, Some("blind-storage"))
+            network_db::seed_paired_node_as_stored(&db, &format!("old-{i}"), "alice", &did, &key, "[]", 0, Some("blind-storage"))
                 .await
                 .unwrap();
             kotton_peer::daemon::drives::record(&db, "alice", &key).await.unwrap();
@@ -2077,20 +2070,20 @@ mod handed_drive_tests {
     async fn drive_list_notes_a_vault_that_names_no_key_and_its_revoke_removes_it() {
         let (_dir, db) = machine_db().await;
         let honest = a_drive("vault", 3, "alice");
-        network_db::insert_paired_node(&db, "vault", "alice", &honest.node.device_did.to_string(), &honest.vault_key, "[]", 0, Some("blind-storage"))
+        network_db::insert_paired_node(&db, "vault", "alice", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&honest.vault_key).unwrap(), "[]", 0, Some("blind-storage"))
             .await
             .unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &honest.vault_key).await.unwrap();
         let spelled = a_drive("attic", 4, "alice");
         let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(&spelled.vault_key).to_string();
-        network_db::insert_paired_node(&db, "attic", "alice", &otherwise, &spelled.vault_key, "[]", 0, Some("blind-storage"))
+        network_db::seed_paired_node_as_stored(&db, "attic", "alice", &otherwise, &spelled.vault_key, "[]", 0, Some("blind-storage"))
             .await
             .unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &spelled.vault_key).await.unwrap();
         let keys = Arc::new(RwLock::new(HashSet::new()));
         for (i, key) in refused_keys().into_iter().enumerate() {
             let did = kotton_crypto::DidKeyMethod::spelled_over(&key).to_string();
-            network_db::insert_paired_node(&db, "old", "alice", &did, &key, "[]", 0, Some("blind-storage")).await.unwrap();
+            network_db::seed_paired_node_as_stored(&db, "old", "alice", &did, &key, "[]", 0, Some("blind-storage")).await.unwrap();
             kotton_peer::daemon::drives::record(&db, "alice", &key).await.unwrap();
 
             let notes = crate::users::drive_verbs::vaults_noted(&db, "alice").await.unwrap();
@@ -2116,7 +2109,7 @@ mod handed_drive_tests {
         let (_dir, db) = machine_db().await;
         let vault = a_drive("vault", 3, "alice");
         let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(&vault.vault_key).to_string();
-        network_db::insert_paired_node(&db, "vault", "alice", &otherwise, &vault.vault_key, "[]", 0, Some("blind-storage"))
+        network_db::seed_paired_node_as_stored(&db, "vault", "alice", &otherwise, &vault.vault_key, "[]", 0, Some("blind-storage"))
             .await
             .unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &vault.vault_key).await.unwrap();
@@ -2162,11 +2155,11 @@ mod handed_drive_tests {
     /// second row for the same key under the member's spelling.
     #[tokio::test]
     async fn a_joined_device_ends_with_one_row_per_vault() {
-        use kotton_peer::membership::Membership as _;
+        use kotton_peer::membership::MemberStore as _;
         let (_dir, db) = machine_db().await;
         let vault = a_drive("vault", 3, "alice");
         let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(&vault.vault_key).to_string();
-        network_db::insert_paired_node(&db, "vault", "alice", &otherwise, &vault.vault_key, "[]", 0, Some("blind-storage"))
+        network_db::seed_paired_node_as_stored(&db, "vault", "alice", &otherwise, &vault.vault_key, "[]", 0, Some("blind-storage"))
             .await
             .unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &vault.vault_key).await.unwrap();
@@ -2176,10 +2169,11 @@ mod handed_drive_tests {
         let keys = Arc::new(RwLock::new(HashSet::new()));
         record_handed_drives(&joiner, &keys, "alice", &handed).await.unwrap();
         let members = Cards::default();
-        let mut node = vault.node.clone();
-        node.device_did = kotton_wire::did::Did::parse(&otherwise).unwrap();
-        let member = kotton_peer::daemon::nodes::own_device_member(&node, kotton_schemas::membership::Posture::BlindStorage, "2026-11-16T00:00:00Z");
-        members.write_member(&member).await.unwrap();
+        // The member as an earlier build of the issuer wrote it, under the row's
+        // spelling: `write_member` writes no own-device member under another.
+        let member = kotton_peer::daemon::nodes::own_device_member(&vault.node, kotton_schemas::membership::Posture::BlindStorage, "2026-11-16T00:00:00Z");
+        let member = kotton_schemas::membership::Member { did: otherwise.clone(), ..member };
+        members.member_write(&member.vfs_path(), &serde_json::to_vec(&member).unwrap()).await.unwrap();
         kotton_peer::daemon::nodes::project_membership_into_allowlist(&members, &joiner, &keys, "alice").await;
 
         let rows: Vec<String> = network_db::list_paired_nodes(&joiner, "alice")
@@ -2224,6 +2218,136 @@ mod handed_drive_tests {
         let answer = join_handing_at(temp.path(), &db, vec![a_drive("other", 3, "alice")]).await;
         assert!(!matches!(answer, UserResponse::PairFailed { .. }), "the honest join was refused: {answer:?}");
         assert!(named_alice(temp.path()), "the honest join provisioned no user where this test looks");
+    }
+
+    /// Every row of `user`'s, column for column: label, DID, key, addresses,
+    /// posture, relay.
+    async fn stored_rows(db: &Arc<SqlitePool>, user: &str) -> Vec<(String, String, Vec<u8>, String, Option<String>, Option<String>)> {
+        sqlx::query_as(
+            "SELECT id, device_did, public_key, addresses, posture, relay_url FROM paired_nodes \
+             WHERE user_id = ? ORDER BY device_did",
+        )
+        .bind(user)
+        .fetch_all(db.as_ref())
+        .await
+        .unwrap()
+    }
+
+    /// **The join writes the issuer's row under its key's derivation**
+    /// (kottonllc/kotton#597, 27A), with the relay the ceremony learned, and
+    /// takes no DID from the node it was handed: the node here says another
+    /// spelling of its key.
+    #[tokio::test]
+    async fn the_join_writes_the_issuers_row_under_its_keys_derivation() {
+        let (_dir, db) = machine_db().await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut issuer = a_node("issuer", 1);
+        let derived = issuer.device_did.to_string();
+        issuer.device_did = kotton_crypto::DidKeyMethod::spelled_otherwise(&issuer.public_key);
+        issuer.relay_url = Some("https://relay.test".into());
+        let answer = join_handing_from(temp.path(), &db, issuer.clone(), Vec::new()).await;
+        assert!(!matches!(answer, UserResponse::PairFailed { .. }), "the join was refused: {answer:?}");
+        assert_eq!(
+            stored_rows(&db, "alice").await,
+            vec![("issuer".into(), derived, issuer.public_key.to_vec(), "[]".into(), None, Some("https://relay.test".into()))]
+        );
+    }
+
+    /// **The join, given the issuer's key with a row under another spelling,
+    /// leaves one row under its DID as stored**, with the label, address and
+    /// relay the join brought and the posture the row had (30A).
+    #[tokio::test]
+    async fn the_join_rewrites_the_issuers_row_under_another_spelling_in_place() {
+        let (_dir, db) = machine_db().await;
+        let temp = tempfile::tempdir().unwrap();
+        let mut issuer = a_node("issuer", 1);
+        issuer.relay_url = Some("https://relay.test".into());
+        let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(&issuer.public_key).to_string();
+        network_db::seed_paired_node_as_stored(&db, "old-laptop", "alice", &otherwise, &issuer.public_key, r#"["127.0.0.1:7"]"#, 0, Some("full"))
+            .await
+            .unwrap();
+        let answer = join_handing_from(temp.path(), &db, issuer.clone(), Vec::new()).await;
+        assert!(!matches!(answer, UserResponse::PairFailed { .. }), "the join was refused: {answer:?}");
+        assert_eq!(
+            stored_rows(&db, "alice").await,
+            vec![("issuer".into(), otherwise, issuer.public_key.to_vec(), "[]".into(), Some("full".into()), Some("https://relay.test".into()))]
+        );
+    }
+
+    /// **A handed drive is written under its key's derivation**, with the
+    /// address and relay it was handed with.
+    #[tokio::test]
+    async fn a_handed_drive_is_written_under_its_keys_derivation() {
+        let (_dir, db) = machine_db().await;
+        let mut drive = a_drive("vault", 2, "alice");
+        drive.node.addresses = vec!["127.0.0.1:9".parse().unwrap()];
+        drive.node.relay_url = Some("https://relay.test".into());
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        record_handed_drives(&db, &keys, "alice", std::slice::from_ref(&drive)).await.unwrap();
+        assert_eq!(
+            stored_rows(&db, "alice").await,
+            vec![(
+                "vault".into(),
+                drive.node.device_did.to_string(),
+                drive.vault_key.to_vec(),
+                r#"["127.0.0.1:9"]"#.into(),
+                Some("blind-storage".into()),
+                Some("https://relay.test".into())
+            )]
+        );
+    }
+
+    /// **A handed drive whose key has a row under another spelling leaves one
+    /// row, under its DID as stored**, with the label, address and relay it was
+    /// handed with, and is recorded as the drive.
+    #[tokio::test]
+    async fn a_handed_drive_rewrites_a_row_under_another_spelling_in_place() {
+        let (_dir, db) = machine_db().await;
+        let mut drive = a_drive("vault", 2, "alice");
+        drive.node.addresses = vec!["127.0.0.1:9".parse().unwrap()];
+        drive.node.relay_url = Some("https://relay.test".into());
+        let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(&drive.vault_key).to_string();
+        network_db::seed_paired_node_as_stored(&db, "attic", "alice", &otherwise, &drive.vault_key, "[]", 0, None).await.unwrap();
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        record_handed_drives(&db, &keys, "alice", std::slice::from_ref(&drive)).await.unwrap();
+        assert_eq!(
+            stored_rows(&db, "alice").await,
+            vec![(
+                "vault".into(),
+                otherwise,
+                drive.vault_key.to_vec(),
+                r#"["127.0.0.1:9"]"#.into(),
+                Some("blind-storage".into()),
+                Some("https://relay.test".into())
+            )]
+        );
+        assert_eq!(drive_records(&db).await, 1, "the drive was not recorded");
+    }
+
+    /// **A drive handed under a string that is not its key's derivation is
+    /// refused, and the join writes nothing** (28A): another spelling of its
+    /// key's `did:key`, another key's `did:key`, and a DID of another method,
+    /// each beside a key from a seed.
+    #[tokio::test]
+    async fn a_join_handed_a_drive_under_a_string_that_is_not_its_derivation_writes_nothing() {
+        let (_dir, db) = machine_db().await;
+        let temp = tempfile::tempdir().unwrap();
+        let honest = a_drive("vault", 2, "alice");
+        // The decode gives a key only for the derivation's string (4A), so a
+        // string that decodes to none is refused as naming no key.
+        let (names_none, names_another) = ("its node's DID names bytes that are not an Ed25519 key", "its node's DID does not name its key");
+        for (name, did, said) in [
+            ("another spelling", kotton_crypto::DidKeyMethod::spelled_otherwise(&honest.vault_key), names_none),
+            ("another key's did:key", a_node("other", 4).device_did, names_another),
+            ("another method", kotton_wire::did::Did::parse("did:web:vault.example").unwrap(), names_none),
+        ] {
+            let mut drive = honest.clone();
+            drive.node.device_did = did;
+            let why = refusal(join_handing_at(temp.path(), &db, vec![drive]).await);
+            assert!(why.contains(said) && why.contains("This device was not joined"), "{name}: {why}");
+            assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty(), "{name}: a row was written");
+            assert_eq!(drive_records(&db).await, 0, "{name}: a drive was recorded");
+        }
     }
 
     fn refusal(answer: UserResponse) -> String {
@@ -2699,6 +2823,71 @@ mod admit_tests {
         let after = recorded(&db, &paired_keys, &members).await;
         assert!(after.row && after.allowed && after.members > 0, "the vault was not recorded");
         assert_eq!(after.drives, 1, "the vault was not recorded as a drive");
+    }
+
+    /// The members `store` holds, as written.
+    fn members_in(store: &Members) -> Vec<kotton_schemas::membership::Member> {
+        store.0.lock().unwrap().values().map(|b| serde_json::from_slice(b).unwrap()).collect()
+    }
+
+    /// **Enrolment writes the row, and the member, under the key's derivation**
+    /// (kottonllc/kotton#597, 27A), with the relay the ceremony learned, and
+    /// takes no DID from the node it was handed: the node here says another
+    /// spelling of its key.
+    #[tokio::test]
+    async fn enrolment_writes_the_row_and_the_member_under_the_keys_derivation() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, RwLock};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::open_machine_db(dir.path().join("agent.db")).await.unwrap());
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let members = Members::default();
+        let secrets = kotton_secret::MemorySecrets::new();
+        let mut enrolled = an_enrolled_vault();
+        let derived = enrolled.node.device_did.to_string();
+        enrolled.node.device_did = kotton_crypto::DidKeyMethod::spelled_otherwise(&enrolled.node.public_key);
+        let key = enrolled.node.public_key;
+
+        kotton_peer::daemon::nodes::finalize_enrolled_node(&secrets, &members, &db, &paired_keys, "alice", Posture::BlindStorage, enrolled)
+            .await
+            .unwrap();
+        let rows = kotton_peer::daemon::db::list_paired_nodes(&db, "alice").await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!((rows[0].id.as_str(), rows[0].device_did.to_string(), rows[0].public_key), ("vault", derived.clone(), key));
+        assert_eq!(rows[0].relay_url.as_deref(), Some("http://relay.test:7700"));
+        let dids: Vec<String> = members_in(&members).into_iter().map(|m| m.did).collect();
+        assert_eq!(dids, vec![derived], "the member is not under its key's derivation");
+    }
+
+    /// **Enrolment, given a key with a row under another spelling, leaves one
+    /// row under its DID as stored**, with the label, address, relay and
+    /// posture the enrolment brought (30A).
+    #[tokio::test]
+    async fn enrolment_rewrites_a_row_under_another_spelling_in_place() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, RwLock};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::open_machine_db(dir.path().join("agent.db")).await.unwrap());
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let members = Members::default();
+        let secrets = kotton_secret::MemorySecrets::new();
+        let enrolled = an_enrolled_vault();
+        let key = enrolled.node.public_key;
+        let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(&key).to_string();
+        kotton_peer::daemon::db::seed_paired_node_as_stored(&db, "attic", "alice", &otherwise, &key, r#"["127.0.0.1:7"]"#, 0, None)
+            .await
+            .unwrap();
+
+        kotton_peer::daemon::nodes::finalize_enrolled_node(&secrets, &members, &db, &paired_keys, "alice", Posture::BlindStorage, enrolled)
+            .await
+            .unwrap();
+        let rows = kotton_peer::daemon::db::list_paired_nodes(&db, "alice").await.unwrap();
+        assert_eq!(rows.len(), 1, "a second row was written for the key: {rows:?}");
+        let row = &rows[0];
+        assert_eq!((row.id.as_str(), row.device_did.to_string(), row.public_key), ("vault", otherwise, key));
+        assert!(row.addresses.is_empty(), "the address the enrolment brought was not written: {:?}", row.addresses);
+        assert_eq!(row.relay_url.as_deref(), Some("http://relay.test:7700"), "the relay was not written to the row as stored");
+        assert_eq!(row.posture.as_deref(), Some("blind-storage"));
     }
 }
 

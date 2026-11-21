@@ -870,8 +870,7 @@ mod tests {
         let db = Arc::new(kotton_record::open_sqlite(&temp.path().join("machine.db")).await.unwrap());
         crate::db::MIGRATOR.run(db.as_ref()).await.unwrap();
         let vault = ed25519_dalek::SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
-        let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&vault).unwrap().to_string();
-        kotton_peer::daemon::db::insert_paired_node(&db, "vault", "alice", &did, &vault, "[]", 0, None).await.unwrap();
+        kotton_peer::daemon::db::insert_paired_node(&db, "vault", "alice", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&vault).unwrap(), "[]", 0, None).await.unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &vault).await.unwrap();
         kotton_peer::daemon::drives::reconcile(&db, "alice", &vault, &[personal_at(1)]).await.unwrap();
         Fixture { _temp: temp, rt, store, records, db }
@@ -1117,8 +1116,7 @@ mod tests {
 
         // A second vault, and personal at both.
         let office = ed25519_dalek::SigningKey::from_bytes(&[4; 32]).verifying_key().to_bytes();
-        let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&office).unwrap().to_string();
-        kotton_peer::daemon::db::insert_paired_node(&f.db, "office", "alice", &did, &office, "[]", 0, None).await.unwrap();
+        kotton_peer::daemon::db::insert_paired_node(&f.db, "office", "alice", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&office).unwrap(), "[]", 0, None).await.unwrap();
         record::record(&f.db, "alice", &office).await.unwrap();
         record::reconcile(&f.db, "alice", &home, &[personal_at(1)]).await.unwrap();
         record::reconcile(&f.db, "alice", &office, &[personal_at(3)]).await.unwrap();

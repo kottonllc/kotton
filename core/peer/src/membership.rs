@@ -77,9 +77,27 @@ pub trait Membership: MemberStore {
     /// is left in the set and read as no key (the projection writes nothing for
     /// it), and is removed by [`Self::remove_found`], found in the set's own
     /// listing by its DID as stored.
+    ///
+    /// **An own device's DID is its key's derivation, or it is not written**
+    /// (kottonllc/kotton#597, 27A): for an own device the DID is a name for its
+    /// key, [`kotton_crypto::DidKeyMethod::from_public_key`], and no writer can
+    /// hand the set a second one. A contact's DID names the person, and the key
+    /// beside it is what their key log resolves to today, so it changes under
+    /// the same DID when they rotate: a contact's member, and a relay's, are
+    /// written as given.
     async fn write_member(&self, member: &Member) -> Result<()> {
-        kotton_crypto::ed25519::VerifyingKey::from_bytes(&member.public_key)
+        let key = kotton_crypto::ed25519::VerifyingKey::from_bytes(&member.public_key)
             .map_err(|e| anyhow::anyhow!("member {}: its key is not an Ed25519 key: {e}", member.did))?;
+        if member.is_own_device() {
+            let derived = kotton_crypto::DidKeyMethod::from_public_key(&key);
+            if member.did != derived.to_string() {
+                anyhow::bail!(
+                    "own-device member {}: its DID is not the did:key of its key, which is {derived}; \
+                     nothing was written",
+                    member.did
+                );
+            }
+        }
         let json = serde_json::to_vec(member).context("serialize member record")?;
         self.member_write(&member.vfs_path(), &json)
             .await
@@ -355,6 +373,17 @@ mod tests {
         }
     }
 
+    /// An own device under `seed`'s key, named by its key's derivation, as every
+    /// writer of an own-device member names it (kottonllc/kotton#597, 27A).
+    fn own(seed: u8, posture: Posture) -> Member {
+        let key = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[seed; 32]));
+        Member {
+            did: kotton_crypto::DidKeyMethod::from_public_key(&key).to_string(),
+            public_key: *key.as_bytes(),
+            ..member("", Role::OwnDevice, Some(posture))
+        }
+    }
+
     /// A store with an encrypted local mount, as an enrolled node has.
     ///
     /// These came from `05_runtime`, where they ran against a `UserRuntime`.
@@ -411,7 +440,7 @@ mod tests {
     async fn a_member_under_bytes_the_rule_refuses_is_not_written_and_one_stored_is_removed() {
         let temp = TempDir::new().unwrap();
         let store = store(&temp);
-        let own = member("did:key:zNode2", Role::OwnDevice, Some(Posture::Full));
+        let own = own(2, Posture::Full);
         store.write_member(&own).await.unwrap();
         for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
             let mut m = member("did:key:zEarlier", Role::OwnDevice, Some(Posture::Full));
@@ -432,11 +461,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let store = store(&temp);
 
-        let own = member("did:key:zNode2", Role::OwnDevice, Some(Posture::Full));
+        let own = own(2, Posture::Full);
         store.write_member(&own).await.unwrap();
 
         assert_eq!(
-            store.read_member("did:key:zNode2").await.unwrap(),
+            store.read_member(&own.did).await.unwrap(),
             Some(own.clone())
         );
         // A missing DID is None, not an error.
@@ -449,29 +478,28 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let store = store(&temp);
 
-        store
-            .write_member(&member("did:key:zA", Role::OwnDevice, Some(Posture::Full)))
-            .await
-            .unwrap();
+        let a = own(3, Posture::Full);
+        store.write_member(&a).await.unwrap();
         store
             .write_member(&member("did:key:zB", Role::Contact, None))
             .await
             .unwrap();
         assert_eq!(store.list_members().await.unwrap().len(), 2);
 
-        remove(&store, "did:key:zA").await;
+        remove(&store, &a.did).await;
         let remaining = store.list_members().await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].did, "did:key:zB");
-        assert_eq!(store.read_member("did:key:zA").await.unwrap(), None);
+        assert_eq!(store.read_member(&a.did).await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn computed_views_filter_by_role() {
         let temp = TempDir::new().unwrap();
         let store = store(&temp);
+        let dev = own(4, Posture::Full);
         for m in [
-            member("did:key:zDev", Role::OwnDevice, Some(Posture::Full)),
+            dev.clone(),
             member("did:key:zContact", Role::Contact, None),
             member("did:key:zRelay", Role::Relay, None),
         ] {
@@ -489,11 +517,11 @@ mod tests {
             .filter(|m| m.in_paired_key_allowlist())
             .collect();
         assert_eq!(admitted.len(), 1, "own devices only: {admitted:?}");
-        assert_eq!(admitted[0].did, "did:key:zDev");
+        assert_eq!(admitted[0].did, dev.did);
         // device-list view = own-device only.
         let devices: Vec<_> = all.iter().filter(|m| m.is_own_device()).collect();
         assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].did, "did:key:zDev");
+        assert_eq!(devices[0].did, dev.did);
     }
 
     /// The vault view is the blind own devices, and revoking one takes it out.
@@ -507,11 +535,14 @@ mod tests {
     async fn the_vault_view_is_the_blind_own_devices_and_follows_revocation() {
         let temp = TempDir::new().unwrap();
         let store = store(&temp);
+        let (one, two) = (own(5, Posture::BlindStorage), own(8, Posture::BlindStorage));
+        // In DID order, as the view lists them.
+        let (first, second) = if one.did < two.did { (one.clone(), two.clone()) } else { (two.clone(), one.clone()) };
         for m in [
-            member("did:key:zVaultB", Role::OwnDevice, Some(Posture::BlindStorage)),
-            member("did:key:zDev", Role::OwnDevice, Some(Posture::Full)),
-            member("did:key:zCosigner", Role::OwnDevice, Some(Posture::Cosigner)),
-            member("did:key:zVaultA", Role::OwnDevice, Some(Posture::BlindStorage)),
+            one,
+            own(6, Posture::Full),
+            own(7, Posture::Cosigner),
+            two,
             member("did:key:zContact", Role::Contact, None),
             member("did:key:zRelay", Role::Relay, None),
         ] {
@@ -521,15 +552,15 @@ mod tests {
         assert_eq!(
             store.list_vaults().await.unwrap(),
             vec![
-                ("did:key:zVaultA".to_string(), Some("home-vps".to_string())),
-                ("did:key:zVaultB".to_string(), Some("home-vps".to_string())),
+                (first.did.clone(), Some("home-vps".to_string())),
+                (second.did.clone(), Some("home-vps".to_string())),
             ]
         );
 
-        remove(&store, "did:key:zVaultA").await;
+        remove(&store, &first.did).await;
         assert_eq!(
             store.list_vaults().await.unwrap(),
-            vec![("did:key:zVaultB".to_string(), Some("home-vps".to_string()))],
+            vec![(second.did.clone(), Some("home-vps".to_string()))],
             "a revoked vault is out of the view with nothing else edited"
         );
     }
@@ -566,5 +597,53 @@ mod tests {
         }
         writer.await.unwrap();
         assert!(listings > 0, "the listing ran beside the writes");
+    }
+
+    /// **An own device's DID is its key's derivation, or it is not written**
+    /// (kottonllc/kotton#597, 27A): an own-device member under another spelling
+    /// of its key's `did:key`, under another key's `did:key`, and under a DID of
+    /// another method, each beside a key from a seed, is refused and the set
+    /// holds what it held; the same member under its key's derivation is
+    /// written.
+    #[tokio::test]
+    async fn an_own_device_member_whose_did_is_not_its_keys_derivation_is_not_written() {
+        let temp = TempDir::new().unwrap();
+        let store = store(&temp);
+        let honest = own(21, Posture::Full);
+        let other = own(22, Posture::Full);
+        for (name, did) in [
+            ("another spelling", kotton_crypto::DidKeyMethod::spelled_otherwise(&honest.public_key).to_string()),
+            ("another key's did:key", other.did.clone()),
+            ("another method", "did:web:laptop.example".to_string()),
+        ] {
+            let m = Member { did, ..honest.clone() };
+            let why = store.write_member(&m).await.expect_err(name).to_string();
+            assert!(why.contains("not the did:key of its key") && why.contains(&honest.did), "{name}: {why}");
+            assert!(store.list_members().await.unwrap().is_empty(), "{name}: a member was written");
+        }
+        store.write_member(&honest).await.unwrap();
+        assert_eq!(store.list_members().await.unwrap(), vec![honest]);
+    }
+
+    /// **A contact's key changes under its DID, and a relay's member is written
+    /// as given** (kottonllc/kotton#597, 27A): a contact's DID names the person,
+    /// and the key beside it is what their key log resolves to today, so a
+    /// rotation writes the new key under the same DID and the set holds one
+    /// member for them, with the new key. Neither DID is the key's derivation.
+    #[tokio::test]
+    async fn a_contacts_key_changes_under_its_did_and_a_relays_member_is_written_as_given() {
+        let temp = TempDir::new().unwrap();
+        let store = store(&temp);
+        let (before, after) = (own(23, Posture::Full).public_key, own(24, Posture::Full).public_key);
+        let mut bob = Member { public_key: before, ..member("did:kel:Ebob", Role::Contact, None) };
+        store.write_member(&bob).await.unwrap();
+        bob.public_key = after;
+        store.write_member(&bob).await.unwrap();
+        assert_eq!(store.read_member("did:kel:Ebob").await.unwrap(), Some(bob.clone()));
+        let relay = Member { public_key: before, ..member("did:key:zRelay", Role::Relay, None) };
+        store.write_member(&relay).await.unwrap();
+        let mut set = store.list_members().await.unwrap();
+        set.sort_by(|a, b| a.did.cmp(&b.did));
+        assert_eq!(set, vec![bob, relay]);
     }
 }

@@ -619,8 +619,13 @@ mod tests {
         kotton_crypto::DidKeyMethod::from_public_key_bytes(key).unwrap().to_string()
     }
 
+    /// The rule's key for `key`'s bytes, as the store's writer takes it.
+    fn vk(key: &[u8; 32]) -> kotton_crypto::ed25519::VerifyingKey {
+        kotton_crypto::ed25519::VerifyingKey::from_bytes(key).unwrap()
+    }
+
     async fn pair(db: &Arc<SqlitePool>, id: &str, key: [u8; 32], posture: Option<&str>) {
-        network_db::insert_paired_node(db, id, "alice", &did(&key), &key, "[]", 0, posture).await.unwrap();
+        network_db::insert_paired_node(db, id, "alice", &vk(&key), "[]", 0, posture).await.unwrap();
     }
 
     /// **The record is the vault's key and the tenancy, and the node it is
@@ -723,7 +728,7 @@ mod tests {
     #[tokio::test]
     async fn two_peoples_rows_under_one_label_are_both_kept() {
         let (_dir, db) = machine_db().await;
-        network_db::insert_paired_node(&db, "vault", "bob", &did(&key(7)), &key(7), "[]", 0, None).await.unwrap();
+        network_db::insert_paired_node(&db, "vault", "bob", &vk(&key(7)), "[]", 0, None).await.unwrap();
         record(&db, "bob", &key(7)).await.unwrap();
 
         pair(&db, "vault", key(9), None).await;
@@ -740,7 +745,7 @@ mod tests {
 
         // One key, two people (two tenants of one vault): each keeps a row,
         // and revoking it for one leaves the other's.
-        network_db::insert_paired_node(&db, "household", "bob", &did(&key(9)), &key(9), "[]", 0, None).await.unwrap();
+        network_db::insert_paired_node(&db, "household", "bob", &vk(&key(9)), "[]", 0, None).await.unwrap();
         assert_eq!(network_db::list_paired_nodes(&db, "alice").await.unwrap().len(), 1);
         assert_eq!(network_db::list_paired_nodes(&db, "bob").await.unwrap().len(), 2);
         assert!(network_db::delete_paired_node(&db, "bob", &did(&key(9))).await.unwrap());
@@ -967,7 +972,7 @@ mod tests {
         for round in 0..150u8 {
             let k = key(round.wrapping_add(10));
             let d = did(&k);
-            network_db::insert_paired_node(&db, "vault", "alice", &d, &k, "[]", 0, None)
+            network_db::insert_paired_node(&db, "vault", "alice", &vk(&k), "[]", 0, None)
                 .await
                 .unwrap_or_else(|e| panic!("round {round}: pairing: {e}"));
             record(&db, "alice", &k).await.unwrap_or_else(|e| panic!("round {round}: recording: {e}"));

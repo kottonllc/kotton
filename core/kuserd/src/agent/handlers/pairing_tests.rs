@@ -297,8 +297,7 @@ mod enrollment_tests {
             ("alice", alices_peer, "alice-laptop"),
             ("bob", bobs_peer, "bob-laptop"),
         ] {
-            let did = DidKeyMethod::from_public_key_bytes(&key).unwrap();
-            network_db::insert_paired_node(&db, id, user, &did.to_string(), &key, "[]", 0, None)
+            network_db::insert_paired_node(&db, id, user, &VerifyingKey::from_bytes(&key).unwrap(), "[]", 0, None)
                 .await
                 .unwrap();
         }
@@ -471,7 +470,7 @@ mod enrollment_tests {
 
         // A row an earlier build would have written, so the projection is asked
         // to repair rather than only to stop.
-        network_db::insert_paired_node(&db, &bob_did, "alice", &bob_did, &bob_key, "[]", 0, None)
+        network_db::insert_paired_node(&db, &bob_did, "alice", &VerifyingKey::from_bytes(&bob_key).unwrap(), "[]", 0, None)
             .await
             .unwrap();
         assert!(network_db::is_pubkey_paired_to_user(&db, &bob_key, "alice")
@@ -541,8 +540,7 @@ mod enrollment_tests {
             &db,
             &node.id,
             "alice",
-            &did.to_string(),
-            &node.public_key,
+            &VerifyingKey::from_bytes(&node.public_key).unwrap(),
             &addresses_json,
             0,
             None,
@@ -600,8 +598,7 @@ mod enrollment_tests {
         users.insert("alice".to_string(), alice_rt);
         for (id, seed, posture) in [("laptop", 6u8, Posture::Full), ("vault", 9u8, Posture::BlindStorage)] {
             let key = SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
-            let did = DidKeyMethod::from_public_key_bytes(&key).unwrap();
-            network_db::insert_paired_node(&db, id, "alice", &did.to_string(), &key, "[]", 0, Some(posture.as_str()))
+            network_db::insert_paired_node(&db, id, "alice", &VerifyingKey::from_bytes(&key).unwrap(), "[]", 0, Some(posture.as_str()))
                 .await
                 .unwrap();
             // A vault is a drive as enrolling it records one.

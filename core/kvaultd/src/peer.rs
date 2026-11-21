@@ -733,7 +733,7 @@ mod tests {
     async fn a_vault_with_sams_device(sams: [u8; 32]) -> Arc<SqlitePool> {
         let db = Arc::new(SqlitePool::connect("sqlite::memory:").await.expect("db"));
         kotton_device::db::MIGRATOR.run(db.as_ref()).await.expect("migrations");
-        kotton_peer::daemon::db::insert_paired_node(&db, "sams-laptop", "sam", "did:key:zSam", &sams, "[]", 0, Some("full"))
+        kotton_peer::daemon::db::insert_paired_node(&db, "sams-laptop", "sam", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&sams).unwrap(), "[]", 0, Some("full"))
             .await
             .expect("sam's device paired");
         db
@@ -747,7 +747,7 @@ mod tests {
     /// exists or not.
     #[tokio::test]
     async fn a_refused_key_learns_its_own_pool_and_a_key_paired_nowhere_learns_none() {
-        let sams = [7u8; 32];
+        let sams = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes();
         let db = a_vault_with_sams_device(sams).await;
         let said = |held: Option<String>| match refusal(&PeerStanding::Stranger, "did:key:zPeer", Some("alice"), held.as_deref(), "VaultCapacity") {
             UserResponse::Error { message } => message,
@@ -778,7 +778,7 @@ mod tests {
 
         // A key two pools pair — a state `crate::devices` does not make on a
         // vault — names neither, rather than the first by name.
-        kotton_peer::daemon::db::insert_paired_node(&db, "sams-laptop", "pat", "did:key:zSam", &sams, "[]", 0, Some("full"))
+        kotton_peer::daemon::db::insert_paired_node(&db, "sams-laptop", "pat", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&sams).unwrap(), "[]", 0, Some("full"))
             .await
             .expect("a second pool's row for sam's key");
         assert_eq!(held_by(&db, &PeerStanding::Stranger, Some(sams), Some("alice")).await, None);
