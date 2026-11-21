@@ -528,19 +528,18 @@ async fn device_names(runtime: &DeviceRuntime, store: &UserStore) -> Names {
 }
 
 /// The device whose key `did` names, under this device's name for it: `this
-/// device`, the person's own label for another of theirs, or `did` as the
-/// vault said it when this device knows none. A device is found by the key's
-/// bytes (`pins::devices`): `did` is decoded under the Ed25519 rule, which
-/// gives a key only for that key's own `did:key`, and is never compared with
-/// a DID the set spells beside a key.
+/// device`, the person's own label for another of theirs, or, when this device
+/// knows none, `did` as the vault said it ([`kotton_peer::storage::another_holder`]).
+/// A device is found by the key's bytes (`pins::devices`): `did` is read on
+/// receipt as a `did:key` ([`kotton_peer::storage::holding_key`]), which gives a
+/// key only for that key's own `did:key`, and is never compared with a DID the
+/// set spells beside a key. A name found and a DID are each printed as data, by
+/// [`kotton_wire::note::quoted`].
 fn named_in(names: &[([u8; 32], String)], did: &str) -> String {
-    let key = kotton_wire::did::Did::parse(did)
-        .ok()
-        .and_then(|d| kotton_crypto::did::DidKeyMethod::to_public_key(&d).ok())
-        .map(|k| *k.as_bytes());
+    let key = kotton_peer::storage::holding_key(did).map(|k| *k.as_bytes());
     match key.and_then(|key| names.iter().find(|(k, _)| *k == key)) {
-        Some((_, name)) => format!("'{name}'"),
-        None => format!("another of your devices ({})", kotton_wire::note::quoted(did)),
+        Some((_, name)) => kotton_wire::note::quoted(name),
+        None => kotton_peer::storage::another_holder(did),
     }
 }
 
@@ -1171,7 +1170,7 @@ impl VaultEnd for PeerEnd {
             UserResponse::DriveHeld { device_did, for_secs } => {
                 let holder = match &self.1 {
                     Some(leased) => named_in(&leased.names, &device_did),
-                    None => format!("another of your devices ({})", kotton_wire::note::quoted(&device_did)),
+                    None => kotton_peer::storage::another_holder(&device_did),
                 };
                 Err(format!("{holder} holds the drive there, for {for_secs}s more"))
             }
@@ -2003,17 +2002,32 @@ mod tests {
     /// **A holding device is named by the key the vault's DID names**
     /// (kottonllc/kotton#597, 29A): a device the person's set listed, under
     /// whatever DID, is named by its label when the vault says its key's
-    /// `did:key`; a string that names no key, another spelling of the same
-    /// bytes among them, is named by no device and printed as data.
+    /// `did:key`. A `did:key` of no device this one names is a device the vault
+    /// names, by that DID; a string that is not a `did:key`, another spelling of
+    /// the same bytes or one over bytes the rule refuses among them, names no
+    /// device and is said to be none. A name found and a DID are each printed as
+    /// data (43A).
     #[test]
     fn a_holding_device_is_named_by_its_key() {
         let laptop = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[2; 32]));
-        let names = [(*laptop.as_bytes(), "laptop".to_string())];
+        let phone = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[3; 32]));
+        let names = [(*laptop.as_bytes(), "laptop".to_string()), (*phone.as_bytes(), "my `phone`\n".to_string())];
         let did = kotton_crypto::DidKeyMethod::from_public_key(&laptop).to_string();
-        assert_eq!(named_in(&names, &did), "'laptop'");
+        assert_eq!(named_in(&names, &did), "`laptop`");
+        let phone_did = kotton_crypto::DidKeyMethod::from_public_key(&phone).to_string();
+        assert_eq!(named_in(&names, &phone_did), "`my \\u{60}phone\\u{60}\\n`");
+        let unnamed = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[4; 32]));
+        let unnamed = kotton_crypto::DidKeyMethod::from_public_key(&unnamed).to_string();
+        assert_eq!(named_in(&names, &unnamed), format!("a device the vault names `{unnamed}`"));
         let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(laptop.as_bytes()).to_string();
-        assert_eq!(named_in(&names, &spelled), format!("another of your devices (`{spelled}`)"));
-        assert_eq!(named_in(&names, "not a did"), "another of your devices (`not a did`)");
+        assert_eq!(named_in(&names, &spelled), format!("a device the vault names `{spelled}` (not a did:key)"));
+        let refused = kotton_crypto::DidKeyMethod::spelled_over(&[0; 32]).to_string();
+        assert_eq!(named_in(&names, &refused), format!("a device the vault names `{refused}` (not a did:key)"));
+        assert_eq!(named_in(&names, "not a did"), "a device the vault names `not a did` (not a did:key)");
+        assert_eq!(
+            named_in(&names, "did:key:z`x\nmore"),
+            "a device the vault names `did:key:z\\u{60}x\\nmore` (not a did:key)"
+        );
     }
 
     /// A vault's tree, in memory, with what can go wrong at it. Its retire is
