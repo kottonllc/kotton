@@ -74,21 +74,17 @@ impl Command for PeerCommand {
             }
 
             Some("add") => {
-                let label = args.get(1).cloned().unwrap_or_default();
-                let did = args.get(2).cloned().unwrap_or_default();
-                let pubkey_hex = args.get(3).cloned().unwrap_or_default();
-                let addr_str = args.get(4).cloned().unwrap_or_default();
-                if label.is_empty() || did.is_empty() || pubkey_hex.is_empty() || addr_str.is_empty() {
+                let Some([label, did, pubkey_hex, addr_str]) = add_words(&args[1..]) else {
                     return Ok(CommandOutput::fail(
                         "usage: peer add <remote> <did> <pubkey-hex> <addr>",
                         None,
                     ));
-                }
+                };
                 let addr: SocketAddr = addr_str
                     .parse()
                     .map_err(|e| anyhow::anyhow!("invalid addr '{}': {e}", addr_str))?;
                 let node = client
-                    .peer_add(&user_id, &label, &did, &pubkey_hex, addr)
+                    .peer_add(&user_id, label, did, pubkey_hex, addr)
                     .await
                     .map_err(|e| anyhow::anyhow!("peer add: {e}"))?;
                 Ok(CommandOutput::shapes(vec![Out::Confirm {
@@ -232,6 +228,14 @@ impl Command for PeerCommand {
     }
 }
 
+/// The four words `peer add` reads after its verb, `<remote> <did> <pubkey-hex>
+/// <addr>`, or `None` where one is missing or empty. The one reading of them, so
+/// the line `peer show` prints is held to what this verb hands the daemon.
+fn add_words(args: &[String]) -> Option<[&str; 4]> {
+    let word = |i: usize| args.get(i).map(String::as_str).filter(|w| !w.is_empty());
+    Some([word(0)?, word(1)?, word(2)?, word(3)?])
+}
+
 fn flag_u64(args: &[String], flag: &str) -> Option<u64> {
     let pos = args.iter().position(|a| a == flag)?;
     args.get(pos + 1)?.parse().ok()
@@ -291,19 +295,10 @@ fn shown_by<'a>(nodes: &'a [PairedNode], name: &str) -> Vec<&'a PairedNode> {
 
 /// A `Record` is not fitted, so every value here is printed whole, including the
 /// public key the table never showed; `peer add` needs all four, and the last row is
-/// that command.
+/// that command where there is one ([`add_line`]), or says why there is none.
 fn show_record(n: &PairedNode) -> Out {
     let pubkey: String = n.public_key.iter().map(|b| format!("{b:02x}")).collect();
-    let add = format!(
-        "peer add {} {} {} {}",
-        n.id,
-        n.device_did,
-        pubkey,
-        n.addresses
-            .first()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| "<no address recorded>".to_string()),
-    );
+    let add = add_line(n).unwrap_or_else(|why| format!("— none: {why}"));
     let line = super::id::recovery_line(n)
         .map(|(line, _)| line)
         .unwrap_or_else(|| "— none: no address is recorded for it".to_string());
@@ -317,6 +312,40 @@ fn show_record(n: &PairedNode) -> Out {
         ("paired".into(), format_paired_at(n.paired_at)),
         ("to add it".into(), add),
     ])
+}
+
+/// The `peer add` line that adds `n` as it is recorded, or why there is none.
+///
+/// **The line's DID is the key's derivation, made from the row's bytes, and not the
+/// DID stored beside them.** `peer add` refuses a DID that is not the `did:key` of the
+/// key it is given, and where the person has a row for that key it rewrites that row,
+/// under its DID as stored, with the label and address the line brings, and adds
+/// none (kottonllc/kotton#597, 28A and 30A). So the one line is taken for a row stored
+/// under the derivation's string and for a row an earlier build stored under another
+/// spelling of the key's `did:key`, and on a device with no row for the key it adds
+/// one under the derivation. The row's `did` is printed as stored in the record above.
+///
+/// There is none:
+///
+/// - where the row's bytes are no Ed25519 key: they have no `did:key`, and `peer add`
+///   takes no such key (kottonllc/kotton#597, 1A and 2A);
+/// - where the row's label is not [`kotton_wire::note::one_plain_word`]: a command is
+///   printed only with a name that reads back, typed as printed, as that name
+///   (kottonllc/kotton#597, 20A), and `peer add` rewrites the row's label with the
+///   one it is given;
+/// - where no address is recorded for the row: `peer add` takes one.
+fn add_line(n: &PairedNode) -> Result<String, &'static str> {
+    let Ok(did) = kotton_crypto::DidKeyMethod::from_public_key_bytes(&n.public_key) else {
+        return Err("the key recorded for it is no Ed25519 key, and `peer add` takes none");
+    };
+    if !kotton_wire::note::one_plain_word(&n.id) {
+        return Err("its remote is not one plain word, and a line is printed only with one");
+    }
+    let Some(address) = n.addresses.first() else {
+        return Err("no address is recorded for it, and `peer add` takes one");
+    };
+    let pubkey: String = n.public_key.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("peer add {} {did} {pubkey} {address}", n.id))
 }
 
 fn format_addresses(n: &PairedNode) -> String {
@@ -362,7 +391,8 @@ USAGE:
   peer list                                        paired peers: the remote `peer show <remote>` takes,
                                                    where each is reachable, and its relay
   peer show <remote>                               one peer whole: its line (the one `id recover` asks
-                                                   for), its full DID, key, and `peer add` line
+                                                   for), its full DID and key, and the `peer add` line
+                                                   that adds it, or why there is none
   peer add <remote> <did> <pubkey-hex> <addr>      add a peer manually (no ceremony)
   peer revoke <remote>                             remove a peer from the allowlist
   peer mount list                                  list configured peer mounts
@@ -422,25 +452,123 @@ mod peer_list_tests {
     /// address `peer add` takes, so a person can write a peer down before a wipe.
     #[test]
     fn peer_show_prints_the_whole_did_and_the_peer_add_line() {
-        let n = node("ubuntu-s-1vcpu-1gb-nyc1", DID);
+        let (bytes, did) = seeded(7);
+        let n = PairedNode { public_key: bytes, ..node("ubuntu-s-1vcpu-1gb-nyc1", &did) };
         let shape = show_record(&n);
         let Out::Record(pairs) = &shape else {
             panic!("peer show is a record");
         };
         let get = |k: &str| pairs.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
         assert_eq!(get("remote").as_deref(), Some("ubuntu-s-1vcpu-1gb-nyc1"));
-        assert_eq!(get("did").as_deref(), Some(DID));
-        let key = "ab".repeat(32);
+        assert_eq!(get("did").as_deref(), Some(did.as_str()));
+        let key = hex_of(&bytes);
         assert_eq!(get("pubkey").as_deref(), Some(key.as_str()));
         assert_eq!(
             get("to add it"),
-            Some(format!("peer add ubuntu-s-1vcpu-1gb-nyc1 {DID} {key} 203.0.113.84:7710"))
+            Some(format!("peer add ubuntu-s-1vcpu-1gb-nyc1 {did} {key} 203.0.113.84:7710"))
         );
         // Rendered, the DID survives whole: a Record is not truncated the way a
         // table is. The same DID in `peer list` is the widest cell, and the one cut.
         let rendered = crate::out::render_shape(&shape);
-        assert!(rendered.contains(DID), "rendered: {rendered}");
+        assert!(rendered.contains(&did), "rendered: {rendered}");
         assert!(!rendered.contains('…'), "rendered: {rendered}");
+    }
+
+    /// The key made from `seed`, as the row's bytes, and its `did:key` as the
+    /// derivation makes it.
+    fn seeded(seed: u8) -> ([u8; 32], String) {
+        use kotton_crypto::ed25519::Ed25519Keypair;
+        let (_, public) = Ed25519Keypair::new().from_seed(&[seed; 32]).expect("a 32-byte seed");
+        let bytes: [u8; 32] = public.try_into().expect("an Ed25519 key is 32 bytes");
+        let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&bytes).expect("a key made from a seed passes");
+        (bytes, did.to_string())
+    }
+
+    fn hex_of(bytes: &[u8; 32]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// `peer show`'s last row for `n`.
+    fn to_add_it(n: &PairedNode) -> String {
+        let Out::Record(pairs) = show_record(n) else {
+            panic!("peer show is a record");
+        };
+        let (last, value) = pairs.last().expect("a record has rows").clone();
+        assert_eq!(last, "to add it", "the `peer add` row is the record's last: {pairs:?}");
+        value
+    }
+
+    /// The words this shell hands `peer add` for `typed`, read as a typed line is:
+    /// the chain's parser, the variables, the words, the redirect, then the verb's
+    /// own reading ([`add_words`]). Exactly one command, `peer add`, must result.
+    fn read_as_typed(typed: &str) -> [String; 4] {
+        let chain = crate::parser::parse_command_chain(typed);
+        assert_eq!(chain.len(), 1, "`{typed}` is {} commands: {chain:?}", chain.len());
+        let words = crate::utils::parse_command(&crate::utils::expand_vars(&chain[0].command, &Default::default()));
+        let (words, redirect) = crate::executor::parse_redirect(words);
+        assert!(redirect.is_none(), "`{typed}` redirects");
+        assert_eq!(words.get(..2), Some(&["peer".to_owned(), "add".to_owned()][..]), "`{typed}`");
+        assert_eq!(words.len(), 6, "`{typed}` hands `peer add` other than its four words: {words:?}");
+        add_words(&words[2..]).unwrap_or_else(|| panic!("`{typed}` is `peer add`'s usage")).map(str::to_owned)
+    }
+
+    /// **The `peer add` line `peer show` prints is one `peer add` takes, for a row
+    /// stored under its key's derivation and for one stored under another spelling**
+    /// (kottonllc/kotton#620). For a key made from a seed, each row's line is the same
+    /// line, and reads back through this shell's parser as `peer add` with the row's
+    /// label, the `did:key` the derivation makes of the row's bytes (the one DID the
+    /// daemon takes beside them, kottonllc/kotton#597, 28A), those bytes and the row's
+    /// first address, at an IPv4 address and at an IPv6 one. The string stored beside
+    /// the bytes is in the record's `did` row and in no command. That the daemon takes
+    /// the line and adds no row is held in the suite
+    /// (`the_peer_add_line_peer_show_prints_is_one_the_daemon_takes`).
+    #[test]
+    fn peer_shows_a_line_peer_add_takes_for_a_row_under_any_spelling_of_its_key() {
+        let (bytes, derived) = seeded(61);
+        let other = kotton_crypto::DidKeyMethod::spelled_otherwise(&bytes).to_string();
+        assert_ne!(other, derived, "the other spelling is another string");
+        for address in ["203.0.113.84:7710", "[2001:db8::7]:7710"] {
+            let row = |did: &str| PairedNode {
+                public_key: bytes,
+                addresses: vec![address.parse().unwrap(), "198.51.100.9:1".parse().unwrap()],
+                ..node("laptop", did)
+            };
+            let (under_derived, under_other) = (row(&derived), row(&other));
+            let line = to_add_it(&under_derived);
+            assert_eq!(to_add_it(&under_other), line, "one key, one line, whatever its row is stored under");
+            assert!(!line.contains(&other), "the line names the stored string: {line}");
+            let [label, did, pubkey, addr] = read_as_typed(&line);
+            assert_eq!((label.as_str(), did.as_str(), pubkey.as_str()), ("laptop", derived.as_str(), hex_of(&bytes).as_str()));
+            assert_eq!(addr.parse::<std::net::SocketAddr>().unwrap(), under_other.addresses[0]);
+            let Out::Record(pairs) = show_record(&under_other) else { panic!("peer show is a record") };
+            assert!(pairs.contains(&("did".to_string(), other.clone())), "the DID as stored is shown: {pairs:?}");
+        }
+    }
+
+    /// **Where there is no line, the record says so and gives no command**
+    /// (kottonllc/kotton#620): for a row under each key `kotton_ed25519::refused`
+    /// names, which has no `did:key` and which `peer add` refuses; for a label that is
+    /// not one plain word, which no line typed as printed hands `peer add`
+    /// (kottonllc/kotton#597, 20A); and for a row with no address recorded.
+    #[test]
+    fn peer_show_says_there_is_no_line_where_there_is_none() {
+        let (bytes, derived) = seeded(62);
+        let none = |n: &PairedNode, why: &str| {
+            let said = to_add_it(n);
+            assert!(said.starts_with("— none: ") && said.contains(why), "{:?}: {said}", n.id);
+            assert!(!said.contains("peer add "), "a command was printed: {said}");
+        };
+        for (name, refused) in kotton_crypto::ed25519::refused_keys() {
+            let n = PairedNode { public_key: refused, ..node("laptop", &derived) };
+            assert!(kotton_wire::note::one_plain_word(&n.id) && !n.addresses.is_empty(), "{name}");
+            none(&n, "no Ed25519 key");
+        }
+        for label in ["my phone", "a;b", "a|b", "a&&b", "it's", "say\"x", "a`b", "--old", "-x", "bell\u{7}", "$HOME", "caf\u{e9}", ""] {
+            none(&PairedNode { public_key: bytes, ..node(label, &derived) }, "not one plain word");
+        }
+        none(&PairedNode { public_key: bytes, addresses: vec![], ..node("laptop", &derived) }, "no address is recorded");
+        // The same row with a plain label and an address has its line.
+        assert!(to_add_it(&PairedNode { public_key: bytes, ..node("laptop", &derived) }).starts_with("peer add laptop "));
     }
 
     /// `peer show`'s first row is the node's line, the one `kotton id recover` asks

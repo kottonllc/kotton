@@ -24,6 +24,9 @@
 //!   at the REPL through the registry with the retired line, exit 2.
 //! - `logs --level warn` answers the same at both doors: the REPL's registry and
 //!   `kotton logs`, which runs the one verb through `bridge::run_verb` (kotton #355).
+//! - the `peer add` line `peer show` prints is one the daemon takes, typed back at
+//!   the REPL, for a row under its key's derivation and for one under another
+//!   spelling, and it adds no row (kottonllc/kotton#620).
 
 use std::sync::Arc;
 
@@ -548,4 +551,79 @@ async fn kotton_logs_answers_what_the_repls_logs_answers() {
     let text = crate::common::cli::said(&line);
     assert_eq!(line.status.code(), Some(0), "`kotton logs --level warn` did not exit 0.\n{text}");
     assert!(text.contains(WARNED) && !text.contains(INFORMED), "`kotton logs --level warn` did not show the warn line alone.\n{text}");
+}
+
+/// **The `peer add` line `peer show` prints is a command the daemon takes**
+/// (kottonllc/kotton#620). Two rows of the person's, each for a key made from a seed:
+/// one stored under the key's derivation, and one stored as an earlier build could
+/// have stored it, under another spelling of its key's `did:key` (through the seed
+/// writer: no writer of this build stores one, kottonllc/kotton#597, 27A). For each,
+/// the line `peer show` prints, typed back at the REPL's registry word for word, is
+/// taken, and the store after it holds the same two rows: the row the key had, under
+/// its DID as stored, with its label and address, and no second row for the key
+/// (kottonllc/kotton#597, 30A).
+#[tokio::test]
+async fn the_peer_add_line_peer_show_prints_is_one_the_daemon_takes() {
+    use kotton_crypto::DidKeyMethod;
+    use kotton_peer::daemon::db::{list_paired_nodes, seed_paired_node_as_stored};
+
+    let mut env = TestEnv::spawn().await;
+    env.client.create_user(USER, TEST_PASSPHRASE).await.expect("create_user");
+    let token = env.client.session_token.clone().expect("create_user binds a session");
+    let mut client = KottonClient::connect_to(env.endpoint.clone()).await.expect("connect");
+    client.authenticate(&token).await.expect("authenticate as the REPL's identity");
+    let mut state = ShellState::new(USER.to_string(), Arc::new(Mutex::new(client)));
+    let executor = kotton_cli::bridge::repl_executor();
+
+    let key = |seed: u8| kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[seed; 32]));
+    let (laptop, phone) = (key(61), key(62));
+    let derived = DidKeyMethod::from_public_key(&laptop).to_string();
+    let spelled = DidKeyMethod::spelled_otherwise(phone.as_bytes()).to_string();
+    assert_ne!(spelled, DidKeyMethod::from_public_key(&phone).to_string());
+    let db = env.daemon.machine_db();
+    seed_paired_node_as_stored(&db, "laptop", USER, &derived, laptop.as_bytes(), "[\"127.0.0.1:7\"]", 5, None)
+        .await
+        .expect("a row under the key's derivation");
+    seed_paired_node_as_stored(&db, "phone", USER, &spelled, phone.as_bytes(), "[\"[::1]:9\"]", 5, None)
+        .await
+        .expect("a row under another spelling of the key's did:key");
+    let before = list_paired_nodes(&db, USER).await.expect("the rows");
+    assert_eq!(before.len(), 2, "{before:?}");
+
+    for (label, k, stored) in [("laptop", &laptop, &derived), ("phone", &phone, &spelled)] {
+        let shown = executor
+            .registry()
+            .execute("peer", &["show".to_string(), label.to_string()], &mut state)
+            .await
+            .unwrap_or_else(|e| panic!("peer show {label}: {e:#}"));
+        assert!(matches!(shown.exit_code, ExitCode::Success), "`peer show {label}` failed: {:?}", shown.out);
+        let [Out::Record(pairs)] = shown.out.as_slice() else {
+            panic!("`peer show {label}` is not one record: {:?}", shown.out)
+        };
+        let line = pairs
+            .iter()
+            .find(|(k, _)| k == "to add it")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("`peer show {label}` has no `peer add` row: {pairs:?}"));
+        let words: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
+        assert_eq!(words.first().map(String::as_str), Some("peer"), "{line}");
+
+        let added = executor
+            .registry()
+            .execute("peer", &words[1..], &mut state)
+            .await
+            .unwrap_or_else(|e| panic!("`{line}`: {e:#}"));
+        assert!(matches!(added.exit_code, ExitCode::Success), "the daemon refused `{line}`: {:?}", added.out);
+
+        let after = list_paired_nodes(&db, USER).await.expect("the rows");
+        assert_eq!(after.len(), 2, "`{line}` added a row: {after:?}");
+        let mine: Vec<_> = after.iter().filter(|n| n.public_key == *k.as_bytes()).collect();
+        let was = before.iter().find(|n| n.public_key == *k.as_bytes()).expect("the row before");
+        assert_eq!(mine.len(), 1, "`{line}`: {after:?}");
+        assert_eq!(
+            (mine[0].id.as_str(), mine[0].device_did.to_string(), &mine[0].addresses),
+            (label, stored.clone(), &was.addresses),
+            "`{line}` did not leave the key's row as it was, under its DID as stored"
+        );
+    }
 }
