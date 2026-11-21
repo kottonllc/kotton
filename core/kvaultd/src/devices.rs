@@ -34,8 +34,13 @@
 //!    joins across tenants.
 //!
 //! An admit writes the row the enrolment writes — `paired_nodes`, under the
-//! tenant, posture `full` — keyed by the device's DID rather than a name it
-//! chose, and admits the key at the handshake. A withdrawal deletes the key's
+//! tenant, posture `full` — under the derivation of the key condition 2
+//! constructed, and labelled by it rather than by a name the device chose, and
+//! admits the key at the handshake (kottonllc/kotton#597, 27A). A key the
+//! tenant has a row for keeps that row as it is; where the derivation is
+//! already a row of the tenant's beside another key, which only an earlier
+//! build can have stored, the admit is refused, names that row, writes nothing
+//! and records no change (30A). A withdrawal deletes the key's
 //! row for the tenant and recomputes the allowlist from what is left, as a
 //! landlord's drop does (`crate::tenancy`). Both tables carry `user_id`, so a
 //! drop sweeps them with the rest.

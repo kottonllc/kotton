@@ -133,10 +133,11 @@
 //! the row it records with no posture of its own, so `record` is handed the
 //! row as the device held it. No writer of the record relabels a row.
 //! What holds them together after that is what may rewrite the row, and a row
-//! is the person's and the node's DID's, never a label's ([`super::db`]):
-//! re-adding the same key keeps the posture, a different key under the same
-//! label is another row and takes neither the posture nor the drive, and
-//! removing the row removes the record — each in one transaction. A caller
+//! is the person's and is named by its key, never by a label ([`super::db`]):
+//! re-adding the same key rewrites that row and keeps the posture, a different
+//! key under the same label is another row and takes neither the posture nor
+//! the drive, and removing the row removes the record — each in one
+//! transaction. A caller
 //! that writes an explicit posture over a drive's row (no caller does) would
 //! make them disagree, and the record, not the posture, is what readers
 //! believe.
@@ -158,10 +159,11 @@
 //! reached through removes the record with it, in one transaction, unless
 //! another row of the person's still carries the key
 //! ([`super::db::delete_paired_node`]). [`super::db::insert_paired_node`]
-//! writes the row and keeps its drive with it in one transaction: a node row
-//! rewritten under another label for the same key keeps its drive and its
-//! posture; a different key under a label some row carries is another row,
-//! and inherits neither.
+//! writes the row and keeps its drive with it in one transaction: a write for
+//! a key the person has a row for rewrites that row, under its DID as stored
+//! and whatever label it brings, and the row keeps its drive and its posture; a
+//! different key under a label some row carries is another row, and inherits
+//! neither.
 //!
 //! **What it composes into.** Nothing beyond what the node row already holds:
 //! the vault's key is on that row, and the tenancy is the person's own name on

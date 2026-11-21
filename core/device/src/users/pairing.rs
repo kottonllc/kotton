@@ -1732,11 +1732,14 @@ pub fn check_handed_drives(
 }
 
 /// Whether this device can record every drive handed at the join without
-/// writing over a row it holds. A row is keyed by the person and the node's
-/// DID (`kotton_peer::daemon::db`), so the join's write (`insert_paired_node`)
-/// can take only this person's row under the drive's DID, and `drives::record`
-/// reads this person's row under the vault's key; those are the rows read
-/// here, and no other person's, which no write of this person's reaches. The
+/// writing over a row it holds. A row is named by its key
+/// (`kotton_peer::daemon::db`): the join's write (`insert_paired_node`) takes
+/// this person's row for the vault's key, under its DID as stored, or writes
+/// one under the key's derivation, which is the drive's DID
+/// ([`check_handed_drives`]), and refuses where that DID is a row's beside
+/// another key; `drives::record` reads this person's row under the vault's key.
+/// Those are the rows read here, and no other person's, which no write of this
+/// person's reaches. The
 /// one the join may take is a row for the vault's key under no posture or
 /// `blind-storage`. `Ok(Err)` says which drive and why.
 ///

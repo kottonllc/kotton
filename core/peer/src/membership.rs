@@ -15,6 +15,13 @@
 //! `master_secret`). One object per DID keeps concurrent admissions on different
 //! nodes conflict-free and makes revocation a per-member tombstone.
 //!
+//! **What a member's DID is.** For an own device, a name for its key: the key's
+//! derivation, its `did:key`, and nothing else ([`Membership::write_member`]
+//! writes no other, kottonllc/kotton#597, 27A). For a contact, the person's
+//! identifier, beside the key their key log resolves to today, which changes
+//! under the same DID when they rotate. A member is admitted by its key's
+//! bytes, whatever an earlier build spelled beside them (5B).
+//!
 //! ## Why this lives in `peer`
 //!
 //! As an inherent impl on the user runtime, every peer handler needing

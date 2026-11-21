@@ -8,8 +8,19 @@
 //! here that write or remove a node row keep its drive with it. A device's
 //! sync rules, which name drives, are [`super::drive_rules`]'s.
 //!
-//! **A `paired_nodes` row is one person's**, keyed by that person and the
-//! node's DID (`migrations/0027_paired_nodes_per_person.sql`). Its `id` is the
+//! **A `paired_nodes` row is one person's, and is named by its key.** The
+//! table is keyed by that person and the node's DID
+//! (`migrations/0027_paired_nodes_per_person.sql`), and the DID is the row's
+//! name and nothing else: the store's key for the row, and a name a person
+//! types (kottonllc/kotton#597, 29A). The one writer, [`insert_paired_node`],
+//! takes the key and makes the name: the DID the person's row for that key is
+//! stored under, or the key's derivation, its `did:key`, for a new row (27A,
+//! 30A). So a row this build writes has a DID that is a function of its key,
+//! and a person has one row per key. A row an earlier build stored under
+//! another string, or a second row for a key, stands by its bytes (5B): it is
+//! rewritten under the name it has, and is removed by `device revoke`, never
+//! renamed. The vault's admit keeps its own statement (`kvaultd::devices`) and
+//! holds the same rule. Its `id` is the
 //! label the person sees it under and keys nothing: a label may come from
 //! elsewhere (the name a device announced at a join, a drive's label handed at
 //! one), so a write under it reaches no other row, and two of one person's
@@ -614,9 +625,9 @@ pub async fn paired_users_for_pubkey(
 /// decides what a key may ask *for this person* — the peer path's gateway
 /// confinement and `NodeRelay`'s own-device check both read it, for the person
 /// the request names; another person's row for the same key says nothing of
-/// what it is to this one. When this person pairs the key under two DIDs, a
-/// `gateway` row answers first: within one person's rows, the narrower verb
-/// wins.
+/// what it is to this one. Where two rows of this person's hold the key, which
+/// only an earlier build can have stored, a `gateway` row answers first: within
+/// one person's rows, the narrower verb wins.
 pub async fn paired_posture_for_user(
     db: &Arc<SqlitePool>,
     public_key: &[u8; 32],
