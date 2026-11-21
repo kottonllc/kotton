@@ -33,8 +33,19 @@
 //! **No packed binary turns on a `test-support` feature of a crate of this repository.** Such a
 //! feature compiles a door only a test may have, such as the writer that stores a
 //! `paired_nodes` row as an earlier build stored it (`kotton_peer::daemon::db`,
-//! kottonllc/kotton#597, 68A). The same `cargo tree` prints the features each crate is built
-//! with ([`judge`]), and a path crate of this repository built with `test-support` is refused,
+//! kottonllc/kotton#597, 68A). Features are read over the selection each part is built with:
+//!
+//! - **each binary's own closure**, the same `cargo tree` [`judge`] reads, which prints the
+//!   features each crate is built with. That is the selection of a part built with `-p` or its
+//!   own manifest: the vault's and the relay's.
+//! - **the whole workspace's normal edges**, for a part built at the workspace root with no
+//!   `-p` ([`built_over_the_workspace`]): the system's, which `release` builds with one
+//!   `cargo build --release --bin …`. Cargo resolves its features over every member's normal
+//!   edges, members no archive packs included, so an edge from one of them turns a feature on
+//!   in what ships. This reading judges features only ([`judge_features`]): a member no
+//!   archive packs is not judged by the lists above.
+//!
+//! A path crate of this repository built with `test-support` in either reading is refused,
 //! whatever list it is on.
 //!
 //! ## What it does not refuse yet
@@ -191,6 +202,46 @@ fn features(after_bar: &str) -> impl Iterator<Item = &str> {
     after_bar.trim().trim_end_matches("(*)").split(',').map(str::trim).filter(|f| !f.is_empty())
 }
 
+/// Whether the crate `name`, from `source`, is a crate of this repository at `repo` built with
+/// [`TEST_SUPPORT`], as the features after a line's `|` say.
+fn built_with_test_support(source: Option<&str>, built_with: &str, repo: &Path) -> bool {
+    source.is_some_and(|s| Path::new(s).is_absolute() && Path::new(s).starts_with(repo))
+        && features(built_with).any(|f| f == TEST_SUPPORT)
+}
+
+/// Whether `part` is built at its workspace's root with no `-p`, so that cargo resolves its
+/// features over every member of the workspace: the system's part, which `release` builds with
+/// one `cargo build --release --bin …` over [`crate::release::BINS`]
+/// (`release::build_command`, whose test holds that it selects no package).
+pub(crate) fn built_over_the_workspace(part: &Part) -> bool {
+    part.roots == crate::release::BINS
+}
+
+/// The features of a part [`built_over_the_workspace`], `tree` as `cargo tree --workspace
+/// --edges normal --prefix depth -f {p}|{f}` prints it: one refusal for each crate of this
+/// repository at `repo` built with [`TEST_SUPPORT`], and nothing else. The lists are not read
+/// here: this selection holds members no archive packs, which are not judged as shipped.
+pub(crate) fn judge_features(tree: &str, repo: &Path, what: &str) -> Vec<String> {
+    let mut refused = Vec::new();
+    for line in tree.lines().filter(|l| !l.trim().is_empty()) {
+        let (line, built_with) = line.split_once('|').unwrap_or((line, ""));
+        let Some((_, name, source)) = parse(line) else {
+            refused.push(format!("{what}: cannot read `cargo tree --workspace` line {line:?}"));
+            continue;
+        };
+        if built_with_test_support(source, built_with, repo) {
+            let refusal = format!(
+                "{what} is built over the workspace, where {name} has its `{TEST_SUPPORT}` feature on through a \
+                 member's normal edge, which compiles a door only a test may have: turn it on in dev-dependencies alone"
+            );
+            if !refused.contains(&refusal) {
+                refused.push(refusal);
+            }
+        }
+    }
+    refused
+}
+
 /// Judge one closure, `tree` as `cargo tree --edges normal --prefix depth -f {p}|{f}` prints it,
 /// against this repository at `repo`. `what` names the binary in what is printed. A line with no
 /// `|` is read as a crate built with no features.
@@ -209,9 +260,7 @@ pub(crate) fn judge(tree: &str, repo: &Path, what: &str) -> Judged {
         path.truncate(depth);
         let parent = path.last().cloned();
         path.push(name.to_string());
-        if source.is_some_and(|s| Path::new(s).is_absolute() && Path::new(s).starts_with(repo))
-            && features(built_with).any(|f| f == TEST_SUPPORT)
-        {
+        if built_with_test_support(source, built_with, repo) {
             let refusal = format!(
                 "{what} links {name} with its `{TEST_SUPPORT}` feature on, which compiles a door only a test may have: \
                  turn it on in dev-dependencies alone"
@@ -300,6 +349,27 @@ fn tree(repo: &Path, part: &Part, package: &str) -> Result<String, String> {
     Ok(tree)
 }
 
+/// The normal closure of every member of `part`'s workspace, with the features each crate is
+/// built with, as [`judge_features`] reads it.
+fn workspace_tree(repo: &Path, part: &Part) -> Result<String, String> {
+    let out = Command::new("cargo")
+        .args(["tree", "--locked", "--manifest-path"])
+        .arg(repo.join(part.workspace).join("Cargo.toml"))
+        .args(["--workspace", "--edges", "normal", "--target", part.target.unwrap_or("all")])
+        .args(["--prefix", "depth", "-f", "{p}|{f}"])
+        .current_dir(repo)
+        .output()
+        .map_err(|e| format!("cannot run cargo tree: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("cargo tree --workspace failed:\n{}", String::from_utf8_lossy(&out.stderr)));
+    }
+    let tree = String::from_utf8_lossy(&out.stdout).into_owned();
+    if tree.trim().is_empty() {
+        return Err("cargo tree --workspace listed nothing, which cannot be true: the check would be vacuous".to_string());
+    }
+    Ok(tree)
+}
+
 pub(crate) fn ship_check(repo: &Path) {
     let repo: PathBuf = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
     let mut refused = Vec::new();
@@ -308,6 +378,13 @@ pub(crate) fn ship_check(repo: &Path) {
     let mut owed: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
     for archive in ARCHIVES {
         for part in archive.parts {
+            if built_over_the_workspace(part) {
+                let what = format!("the {} archive", archive.name);
+                match workspace_tree(&repo, part) {
+                    Ok(t) => refused.extend(judge_features(&t, &repo, &what)),
+                    Err(e) => refused.push(format!("{what}: {e}")),
+                }
+            }
             for root in part.roots {
                 let what = format!("{root} ({})", archive.name);
                 let judged = package_of(&repo, part.workspace, root)
@@ -469,6 +546,37 @@ mod tests {
              1kotton-common v0.1.0 (/r/core/common) (*)\n",
         );
         assert_eq!(j.refused, Vec::<String>::new());
+    }
+
+    /// **Over the workspace, features alone are judged.** A crate of this repository built with
+    /// `test-support` through a member no archive packs is refused, once, by name; that member,
+    /// which is on neither list, and a crates.io crate with a feature of that name are not.
+    #[test]
+    fn over_the_workspace_a_crate_built_with_test_support_is_refused_and_nothing_else_is_judged() {
+        let tree = "0kuserd v0.1.0 (/r/core/kuserd)|default\n\
+                    1kotton-peer v0.1.0 (/r/core/peer)|test-support\n\
+                    0kotton-mock-runner v0.1.0 (/r/tests/fixtures/mock-runner)|\n\
+                    1kotton-peer v0.1.0 (/r/core/peer)|test-support (*)\n\
+                    1serde v1.0.0|test-support\n";
+        let refused = judge_features(tree, Path::new(REPO), "the system archive");
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].contains("kotton-peer") && refused[0].contains("over the workspace"), "{}", refused[0]);
+
+        let clean = "0kuserd v0.1.0 (/r/core/kuserd)|default\n\
+                     1kotton-peer v0.1.0 (/r/core/peer)|\n\
+                     0kotton-mock-runner v0.1.0 (/r/tests/fixtures/mock-runner)|\n";
+        assert_eq!(judge_features(clean, Path::new(REPO), "the system archive"), Vec::<String>::new());
+    }
+
+    /// **The parts read over the workspace are the ones built that way**: the system's, and
+    /// not the vault's or the relay's, which are built with `-p` or their own manifest.
+    #[test]
+    fn only_the_systems_part_is_read_over_the_workspace() {
+        let over: Vec<&str> = ARCHIVES
+            .iter()
+            .flat_map(|a| a.parts.iter().filter(|p| built_over_the_workspace(p)).map(move |_| a.name))
+            .collect();
+        assert_eq!(over, vec!["system"]);
     }
 
     /// The two lists are disjoint, and each names a package of this repository — the
