@@ -227,6 +227,43 @@ impl KottonPeerObjectStorage {
 }
 
 // ---------------------------------------------------------------------------
+// A holding device, as a vault names it
+// ---------------------------------------------------------------------------
+
+/// The key a holding device's DID names, read where a vault's `DriveHeld` is
+/// received: the DID is read as a `did:key` under the Ed25519 rule
+/// ([`kotton_crypto::DidKeyMethod::to_public_key`]), which gives a key only for
+/// that key's own `did:key`. `None` for any other string, however it is
+/// spelled; nothing is found or compared under it.
+pub fn holding_key(device_did: &str) -> Option<kotton_crypto::ed25519::VerifyingKey> {
+    kotton_wire::did::Did::parse(device_did)
+        .ok()
+        .and_then(|did| kotton_crypto::DidKeyMethod::to_public_key(&did).ok())
+}
+
+/// The holding device a sentence names when this device has no name of its own
+/// for it. A DID that reads as a `did:key` ([`holding_key`]) is another of the
+/// person's devices, by that DID; a string that does not is said to be none. Either
+/// is printed as data, by [`kotton_wire::note::quoted`].
+pub fn another_holder(device_did: &str) -> String {
+    let said = kotton_wire::note::quoted(device_did);
+    match holding_key(device_did) {
+        Some(_) => format!("another of your devices ({said})"),
+        None => format!("a device the vault names {said} (not a `did:key`)"),
+    }
+}
+
+/// The sentence a sealed write refused with `DriveHeld` says: the write is kept
+/// here, and the holder is named by [`another_holder`].
+fn held_write(path: &str, device_did: &str, for_secs: u32) -> String {
+    format!(
+        "peer refused sealed write at {path}: {} is moving this drive and holds it for {for_secs}s more; \
+         what was written is kept on this device and sent again at the next pass",
+        another_holder(device_did)
+    )
+}
+
+// ---------------------------------------------------------------------------
 // ObjectStorage impl
 // ---------------------------------------------------------------------------
 
@@ -296,11 +333,7 @@ impl ObjectStorage for KottonPeerObjectStorage {
                 // to move it (kotton #143): the write is refused there and kept
                 // here, and the next pass sends it where the drive is then.
                 UserResponse::DriveHeld { device_did, for_secs } => {
-                    return Err(ObjectStorageError::BackendError(format!(
-                        "peer refused sealed write at {path}: another of your devices ({device_did}) is \
-                         moving this drive and holds it for {for_secs}s more; what was written is kept on \
-                         this device and sent again at the next pass"
-                    )));
+                    return Err(ObjectStorageError::BackendError(held_write(&path, &device_did, for_secs)));
                 }
                 UserResponse::Error { message } => {
                     return Err(ObjectStorageError::BackendError(message))
@@ -525,11 +558,7 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                 // to move it (kotton #143): the write is refused there and kept
                 // here, and the next pass sends it where the drive is then.
                 UserResponse::DriveHeld { device_did, for_secs } => {
-                    return Err(ObjectStorageError::BackendError(format!(
-                        "peer refused sealed write at {path}: another of your devices ({device_did}) is \
-                         moving this drive and holds it for {for_secs}s more; what was written is kept on \
-                         this device and sent again at the next pass"
-                    )));
+                    return Err(ObjectStorageError::BackendError(held_write(&path, &device_did, for_secs)));
                 }
                 UserResponse::Error { message } => {
                     return Err(ObjectStorageError::BackendError(message))
@@ -659,6 +688,64 @@ mod tests {
         let sent = ch.take_received();
         let req: UserRequest = serde_json::from_slice(&sent[0]).unwrap();
         assert!(matches!(req, UserRequest::WriteFile { path, .. } if path == "/notes/a.md"));
+    }
+
+    // -- a write refused as held ---------------------------------------------
+
+    /// A holding device's DID as a vault might say it: its key's own `did:key`,
+    /// and strings that are not one (no DID, another spelling of the same bytes,
+    /// a `did:key` over bytes the rule refuses, and one holding a backtick and a
+    /// line break), each with the words a sentence names its holder by.
+    fn holders() -> Vec<(String, String)> {
+        let key = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[2; 32]));
+        let did = kotton_crypto::DidKeyMethod::from_public_key(&key).to_string();
+        let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string();
+        let refused = kotton_crypto::DidKeyMethod::spelled_over(&[0; 32]).to_string();
+        vec![
+            (did.clone(), format!("another of your devices (`{did}`)")),
+            ("not a did".to_string(), "a device the vault names `not a did` (not a `did:key`)".to_string()),
+            (spelled.clone(), format!("a device the vault names `{spelled}` (not a `did:key`)")),
+            (refused.clone(), format!("a device the vault names `{refused}` (not a `did:key`)")),
+            (
+                "did:key:z`x\nmore".to_string(),
+                "a device the vault names `did:key:z\\u{60}x\\nmore` (not a `did:key`)".to_string(),
+            ),
+        ]
+    }
+
+    fn held_by(device_did: &str) -> Vec<u8> {
+        mock_response(&UserResponse::DriveHeld { device_did: device_did.to_string(), for_secs: 7 })
+    }
+
+    /// **A write refused as held names its holder as read on receipt**
+    /// (kottonllc/kotton#597, 43A): the vault's DID is read as a `did:key`, one
+    /// that does not read is said to be none, and either is printed as data.
+    #[tokio::test]
+    async fn a_write_refused_as_held_reads_the_holders_did() {
+        for (said, named) in holders() {
+            let ch = Arc::new(MockPeerChannel::new(vec![held_by(&said)]));
+            let err = make_storage(ch).put(Path::new("/notes/a.md"), b"content").await.unwrap_err();
+            let want = format!(
+                "peer refused sealed write at /notes/a.md: {named} is moving this drive and holds it for 7s more; \
+                 what was written is kept on this device and sent again at the next pass"
+            );
+            assert!(matches!(&err, ObjectStorageError::BackendError(m) if *m == want), "{said:?}: {err:?}");
+        }
+    }
+
+    /// **A sealed write refused as held names its holder the same way.**
+    #[tokio::test]
+    async fn a_sealed_write_refused_as_held_reads_the_holders_did() {
+        for (said, named) in holders() {
+            let ch = Arc::new(MockPeerChannel::new(vec![held_by(&said)]));
+            let storage = make_storage(ch).with_domain_id("d".to_string());
+            let err = storage.put_sealed(Path::new("_pack/0a"), b"blob").await.unwrap_err();
+            let want = format!(
+                "peer refused sealed write at _pack/0a: {named} is moving this drive and holds it for 7s more; \
+                 what was written is kept on this device and sent again at the next pass"
+            );
+            assert!(matches!(&err, ObjectStorageError::BackendError(m) if *m == want), "{said:?}: {err:?}");
+        }
     }
 
     // -- delete ---------------------------------------------------------------
