@@ -82,7 +82,9 @@ async fn joiner(client: &KottonClient, user: &str, code: String, verdict: bool) 
     joiner_of(client, user, "alice", code, verdict).await
 }
 
-/// [`joiner`], pairing with an issuer whose screen name is `issuer`.
+/// [`joiner`], pairing with an issuer whose screen name is `issuer`: its prompt
+/// names nobody, and the contact it completes with is recorded under that name,
+/// the one the issuer signed (kottonllc/kotton#668).
 async fn joiner_of(client: &KottonClient, user: &str, issuer: &str, code: String, verdict: bool) -> Outcome {
     let mut rx = client
         .contact_pair_join_stream(user, &code, Some("Bob from the bakery"))
@@ -92,11 +94,12 @@ async fn joiner_of(client: &KottonClient, user: &str, issuer: &str, code: String
     while let Some(frame) = rx.recv().await {
         match frame {
             UserResponse::PairShowCode { token, sas, peer_label } => {
-                assert_eq!(peer_label.as_deref(), Some(issuer), "the joiner's screen names who it is pairing with");
+                assert_eq!(peer_label.as_deref(), None, "a contact join's prompt carries no label");
                 out.sas = Some(sas);
                 client.pair_confirm_code(user, token.expose(), verdict).await.expect("joiner confirm");
             }
             UserResponse::ContactPaired { did, label } => {
+                assert_eq!(label, issuer, "the joiner's contact is not recorded under the name the issuer signed");
                 out.paired = Some((did, label));
                 break;
             }

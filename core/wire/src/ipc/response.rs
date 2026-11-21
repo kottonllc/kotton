@@ -757,13 +757,15 @@ pub enum UserResponse {
         token: crate::ipc::SecretText,
         /// The six-digit SAS (0..1_000_000).
         sas: u32,
-        /// The peer's label, when known (the joiner learns the issuer's). `None`
-        /// on the issuer side. In a device join it is the name the issuer's row
-        /// is recorded under, trimmed and cut as the store records it; in a
-        /// browser's admission, the name the browser's row is recorded under, as
-        /// its hello gave it; in a contact join, the label the issuer sent in the
-        /// channel, where the row is recorded under the name in its signed
-        /// identity record (kottonllc/kotton#652, #668).
+        /// The peer's label, where the ceremony shows one: wherever it is
+        /// `Some`, it is the name the peer's row is recorded under
+        /// (kottonllc/kotton#652). In a device join the joiner is given the
+        /// issuer's, trimmed and cut as the store records it; in a browser's
+        /// admission, the name the browser's row is recorded under, as its hello
+        /// gave it. `None` on a device join's issuer side, and on both sides of
+        /// a contact pairing, whose contact is recorded under the name in the
+        /// other's signed identity record and said first in `ContactPaired`
+        /// (kottonllc/kotton#668).
         peer_label: Option<String>,
     },
     /// The local human confirmed; waiting for the peer's confirmation.
