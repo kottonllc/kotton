@@ -166,7 +166,7 @@ async fn two_node_transfer_across_key_domains_is_refused() {
         Err(e) => {
             let msg = e.to_string();
             assert!(
-                msg.contains(&format!("belongs to key domain {a_domain}, this node holds {b_domain}")),
+                msg.contains(&format!("belongs to key domain `{a_domain}`, this node holds {b_domain}")),
                 "pull must be refused at the key-domain boundary naming both domains, got: {e}"
             );
         }

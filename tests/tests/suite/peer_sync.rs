@@ -534,10 +534,11 @@ async fn a_drive_serving_another_key_domain_is_refused() {
         .await
         .expect_err("a pull across unrelated key domains must be refused, not silently succeed");
     // The boundary's own refusal, naming both domains: the object's (A's) and
-    // the one this node holds (B's) — not any earlier failure.
+    // the one this node holds (B's) — not any earlier failure. The object's is
+    // the peer's word, printed as data (kottonllc/kotton#597, 77A).
     let msg = err.to_string();
     assert!(
-        msg.contains(&format!("belongs to key domain {a_domain}, this node holds {b_domain}")),
+        msg.contains(&format!("belongs to key domain `{a_domain}`, this node holds {b_domain}")),
         "the refusal is not the key-domain boundary naming both domains, got: {msg}"
     );
 

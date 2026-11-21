@@ -265,6 +265,7 @@ use kotton_wire::ipc::{
     TENANCY_TREE,
 };
 use kotton_wire::peer::PairedNode;
+use kotton_wire::note::quoted_cut;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -397,8 +398,8 @@ pub async fn follow(
 ) -> io::Result<Vec<Copy>> {
     let listed = match ask(client, VaultPeerRequest::TenantDrives { user_id: user_id.to_string() }).await? {
         UserResponse::TenantDrivesResult { drives } => drives,
-        UserResponse::Error { message } => return Err(io::Error::other(message)),
-        other => return Err(io::Error::other(format!("the vault answered {other:?} to TenantDrives"))),
+        UserResponse::Error { message } => return Err(io::Error::other(vault_answered(&message))),
+        other => return Err(io::Error::other(format!("the vault answered {} to TenantDrives", unasked(&other)))),
     };
     let recorded: Vec<(String, String, Option<String>)> = record::all(db, user_id)
         .await?
@@ -439,8 +440,8 @@ async fn seal_with_id(store: &UserStore, user_id: &str, client: &KottonPeerObjec
             tracing::debug!(user_id, tree = %copy.tree, "a drive's name was not sealed again: another device holds it");
             Ok(())
         }
-        UserResponse::Error { message } => Err(io::Error::other(message)),
-        other => Err(io::Error::other(format!("the vault answered {other:?} to TenantDriveName"))),
+        UserResponse::Error { message } => Err(io::Error::other(vault_answered(&message))),
+        other => Err(io::Error::other(format!("the vault answered {} to TenantDriveName", unasked(&other)))),
     }
 }
 
@@ -486,6 +487,19 @@ fn read_listing(
         }
     }
     copies
+}
+
+/// A vault's `Error`, where the sentence has no words of the device's around
+/// it: the vault's text printed as data, to a bounded length
+/// ([`quoted_cut`]; kottonllc/kotton#597, 43A, 74A).
+fn vault_answered(message: &str) -> String {
+    format!("the vault answered: {}", quoted_cut(message))
+}
+
+/// An answer the reader did not ask for, by its name and no field of it
+/// ([`UserResponse::name`]; kottonllc/kotton#597, 76B).
+fn unasked(other: &UserResponse) -> String {
+    kotton_wire::note::quoted(&other.name())
 }
 
 async fn ask(client: &KottonPeerObjectStorage, request: VaultPeerRequest) -> io::Result<UserResponse> {
@@ -569,8 +583,8 @@ async fn renew_lease(client: &KottonPeerObjectStorage, user_id: &str, holding: H
         UserResponse::DriveHeld { device_did, for_secs } => {
             Err(format!("{} holds it now, for {for_secs}s more", named_in(names, &device_did)))
         }
-        UserResponse::Error { message } => Err(message),
-        other => Err(format!("the vault answered {other:?}")),
+        UserResponse::Error { message } => Err(vault_answered(&message)),
+        other => Err(format!("the vault answered {}", unasked(&other))),
     }
 }
 
@@ -610,8 +624,8 @@ impl Leased {
         match ask(&client, asked).await? {
             UserResponse::DriveHold { lease, .. } => Ok(Ok(Self::holding(client, names, user_id, holding, lease))),
             UserResponse::DriveHeld { device_did, for_secs } => Ok(Err(HeldBy { device_did, for_secs })),
-            UserResponse::Error { message } => Err(io::Error::other(format!("the vault '{}' gave no lease: {message}", node.id))),
-            other => Err(io::Error::other(format!("the vault '{}' answered {other:?} to TenantDriveHold", node.id))),
+            UserResponse::Error { message } => Err(io::Error::other(format!("the vault '{}' gave no lease: {}", node.id, quoted_cut(&message)))),
+            other => Err(io::Error::other(format!("the vault '{}' answered {} to TenantDriveHold", node.id, unasked(&other)))),
         }
     }
 
@@ -920,8 +934,8 @@ async fn create_holding(
     match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
         // The new tree's lease, which nothing here holds it under: let go.
         UserResponse::DriveHold { lease, .. } => holds.keep(&Leased::holding(client.clone(), &device_names(runtime, store).await, user_id, Holding::Drive(drive), lease)),
-        UserResponse::Error { message } => return refused(format!("drive create: the vault '{}' refused: {message}", vault.node.id)),
-        other => return refused(format!("drive create: the vault answered {other:?}")),
+        UserResponse::Error { message } => return refused(format!("drive create: the vault '{}' refused: {}", vault.node.id, quoted_cut(&message))),
+        other => return refused(format!("drive create: the vault answered {}", unasked(&other))),
     }
     let copies = follow(store, db, user_id, &vault.vault_key, &client).await?;
     let sizes = Seen { copies, unanswered: vec![] }.sizes();
@@ -1014,8 +1028,8 @@ async fn make_first_holding(
     let sealed_name = SealedName { name: FIRST_DRIVE_NAME.to_string(), id: FIRST_DRIVE_ID.to_string() }.seal(store, &tree, true)?;
     match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
         UserResponse::DriveHold { lease, .. } => holds.keep(&Leased::holding(client.clone(), &device_names(runtime, store).await, user_id, Holding::Drive(drive), lease)),
-        UserResponse::Error { message } => return Err(io::Error::other(format!("the vault '{}' refused it: {message}", vault.node.id))),
-        other => return Err(io::Error::other(format!("the vault '{}' answered {other:?}", vault.node.id))),
+        UserResponse::Error { message } => return Err(io::Error::other(format!("the vault '{}' refused it: {}", vault.node.id, quoted_cut(&message)))),
+        other => return Err(io::Error::other(format!("the vault '{}' answered {}", vault.node.id, unasked(&other)))),
     }
     follow(store, db, user_id, vault_key, &client).await?;
     let made = record::all(db, user_id)
@@ -1174,8 +1188,8 @@ impl VaultEnd for PeerEnd {
                 };
                 Err(format!("{holder} holds the drive there, for {for_secs}s more"))
             }
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("the vault answered {other:?}")),
+            UserResponse::Error { message } => Err(vault_answered(&message)),
+            other => Err(format!("the vault answered {}", unasked(&other))),
         }
     }
     async fn renew(&self) -> Result<(), String> {
@@ -1236,6 +1250,21 @@ pub struct Settled {
     pub refused: Vec<NotCanonical>,
 }
 
+/// A key a vault's listing named that is not canonical, as a line names it:
+/// the key printed as data, to a bounded length ([`quoted_cut`];
+/// kottonllc/kotton#597, 43A, 74A, 77A), and why it was refused.
+/// [`NotCanonical`]'s own `Display` is not used for it.
+fn refused_key(not: &NotCanonical) -> String {
+    format!("storage key {} refused: {}", quoted_cut(&not.key), not.why)
+}
+
+/// A read or a write of a listed key that failed (`verb`, `"reading"` or
+/// `"writing"`), as a move says it: the key, the vault's listing's, printed as
+/// data to a bounded length ([`quoted_cut`]; kottonllc/kotton#597, 77A).
+fn on_key(verb: &str, key: &StorageKey, e: &str) -> String {
+    format!("{verb} {}: {e}", quoted_cut(key.as_str()))
+}
+
 /// **The admission of a move** (kotton #274; the rule is kotton #265's,
 /// `kotton_store::StorageKey`). The source's listing is what that vault chose
 /// to answer, and every key in it becomes a read there and a write at the
@@ -1252,7 +1281,7 @@ fn admit_listing(listed: Vec<(String, u64)>) -> (Vec<(StorageKey, u64)>, Vec<Not
         match StorageKey::parse(&key) {
             Ok(key) => admitted.push((key, size)),
             Err(not) => {
-                tracing::warn!("drive move: the vault the drive leaves listed a key: {not}; nothing is read or written under it");
+                tracing::warn!("drive move: the vault the drive leaves listed a key: {}; nothing is read or written under it", refused_key(&not));
                 refused.push(not);
             }
         }
@@ -1269,10 +1298,11 @@ pub const NAMED_AT_MOST: usize = 32;
 /// scoped to them, so their own log takes them ([`EventScope::User`]), which
 /// `logs` reads; at `warn`, which the note that counts the keys names (`logs
 /// --level warn`). Each names the drive and the vault (`from`) as the person
-/// calls them, and the key as the vault listed it, quoted, so a key with a
-/// control character in it is printed escaped. The first [`NAMED_AT_MOST`] are
-/// named, one event each, and one more event counts any past them: the listing
-/// is the vault's, and how much it writes into the person's log is not.
+/// calls them, and the key as the vault listed it, printed as data to a
+/// bounded length ([`quoted_cut`]); the payload keeps it as listed. The first
+/// [`NAMED_AT_MOST`] are named, one event each, and one more event counts any
+/// past them: the listing is the vault's, and how much it writes into the
+/// person's log is not.
 pub fn refused_events(user_id: &str, name: &str, from: &str, refused: &[NotCanonical]) -> Vec<Event> {
     let scope = EventScope::User(user_id.to_string());
     let mut events: Vec<Event> = refused
@@ -1282,7 +1312,10 @@ pub fn refused_events(user_id: &str, name: &str, from: &str, refused: &[NotCanon
             Event::with_payload(
                 EventCategory::Storage,
                 EventLevel::Warn,
-                format!("drive move of '{name}' from '{from}': {not}; the move read and wrote nothing under it, and did not carry it"),
+                format!(
+                    "drive move of '{name}' from '{from}': {}; the move read and wrote nothing under it, and did not carry it",
+                    refused_key(not)
+                ),
                 serde_json::json!({ "drive": name, "from": from, "key": not.key, "why": not.why }),
             )
             .in_scope(scope.clone())
@@ -1331,8 +1364,8 @@ pub async fn carry_and_settle(
         }
         refused = not_canonical;
         for (key, _) in &wanted {
-            let blob = from.read(key).await.map_err(|e| format!("reading {key}: {e}"))?;
-            to.write(key, &blob).await.map_err(|e| format!("writing {key}: {e}"))?;
+            let blob = from.read(key).await.map_err(|e| on_key("reading", key, &e))?;
+            to.write(key, &blob).await.map_err(|e| on_key("writing", key, &e))?;
         }
         // What the other vault lists is compared with what was sent, as it
         // spelled it: a key that was not sent, canonical or not, fails it.
@@ -1398,8 +1431,8 @@ pub async fn top_up_and_settle(
         let held: Vec<(String, u64)> = to.objects().await.map_err(|e| format!("the copy could not be listed: {e}"))?;
         let lacking: Vec<&(StorageKey, u64)> = wanted.iter().filter(|(k, _)| !held.iter().any(|(h, _)| h == k.as_str())).collect();
         for (key, _) in &lacking {
-            let blob = from.read(key).await.map_err(|e| format!("reading {key}: {e}"))?;
-            to.write(key, &blob).await.map_err(|e| format!("writing {key}: {e}"))?;
+            let blob = from.read(key).await.map_err(|e| on_key("reading", key, &e))?;
+            to.write(key, &blob).await.map_err(|e| on_key("writing", key, &e))?;
         }
         let landed = to.objects().await.map_err(|e| format!("the copy could not list what it took: {e}"))?;
         // Each key the tree it left lists is at the copy; each one sent is
@@ -1781,8 +1814,8 @@ async fn move_holding(
     let renews_copy = dial(runtime, &dest.node, user_id).await?;
     let dest_held = match ask(&dest_client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive: to_id, sealed_name: unfinished_name }).await? {
         UserResponse::DriveHold { lease, .. } => Leased::holding(renews_copy, &names, user_id, Holding::Drive(to_id), lease),
-        UserResponse::Error { message } => return refused(format!("drive move: '{}' refused the drive: {message}", dest.node.id)),
-        other => return refused(format!("drive move: '{}' answered {other:?}", dest.node.id)),
+        UserResponse::Error { message } => return refused(format!("drive move: '{}' refused the drive: {}", dest.node.id, quoted_cut(&message))),
+        other => return refused(format!("drive move: '{}' answered {}", dest.node.id, unasked(&other))),
     };
     holds.keep(&dest_held);
     // What lets a rerun of this move through, should it be cut off between
@@ -2028,6 +2061,81 @@ mod tests {
             named_in(&names, "did:key:z`x\nmore"),
             "a device the vault names `did:key:z\\u{60}x\\nmore` (not a did:key)"
         );
+        let long = format!("did:key:z{}", "x".repeat(kotton_wire::note::MAX_SAID_CHARS));
+        assert_eq!(
+            named_in(&names, &long),
+            format!(
+                "a device the vault names `did:key:z{}` (cut: 9 more characters) (not a did:key)",
+                "x".repeat(kotton_wire::note::MAX_SAID_CHARS - 9)
+            )
+        );
+    }
+
+    /// A vault that answers each request with the next of `answers`.
+    struct Answering(Mutex<std::collections::VecDeque<UserResponse>>);
+
+    #[async_trait::async_trait]
+    impl kotton_peer::PeerChannel for Answering {
+        async fn request(&self, _: &[u8]) -> anyhow::Result<Vec<u8>> {
+            let next = self.0.lock().unwrap().pop_front().expect("an answer queued");
+            Ok(serde_json::to_vec(&next)?)
+        }
+    }
+
+    fn answering(answer: UserResponse) -> KottonPeerObjectStorage {
+        let node = PairedNode {
+            id: "attic".to_string(),
+            device_did: kotton_wire::did::Did::new("key", "z6MkAttic"),
+            public_key: [0; 32],
+            paired_at: 0,
+            addresses: vec![],
+            relay_url: None,
+            posture: None,
+        };
+        KottonPeerObjectStorage::new(Arc::new(Answering(Mutex::new([answer].into()))), node, "alice".to_string(), "local")
+    }
+
+    /// What `follow`, `renew_lease` and a move's `tell` say of `answer`.
+    async fn each_said(answer: UserResponse) -> Vec<(&'static str, String)> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = a_store(dir.path());
+        let db = Arc::new(SqlitePool::connect_lazy("sqlite::memory:").unwrap());
+        let followed = follow(&store, &db, "alice", &[0; 32], &answering(answer.clone())).await.unwrap_err().to_string();
+        let renewed = renew_lease(&answering(answer.clone()), "alice", Holding::Making, DriveLease([1; 16]), &[]).await.unwrap_err();
+        let told = PeerEnd(answering(answer), None)
+            .tell(VaultPeerRequest::TenantDrives { user_id: "alice".to_string() })
+            .await
+            .unwrap_err();
+        vec![("follow", followed), ("renew_lease", renewed), ("tell", told)]
+    }
+
+    /// **A vault's `Error` is printed as data, after the device's own words,
+    /// and to the bound** (kottonllc/kotton#597, 43A, 74A): a backtick and a
+    /// line break in it are printed by their escapes, and a longer one is cut
+    /// and says so.
+    #[tokio::test]
+    async fn a_vaults_error_is_printed_as_data_and_to_the_bound() {
+        for (verb, said) in each_said(UserResponse::Error { message: "no `drive`\nhere".to_string() }).await {
+            assert_eq!(said, "the vault answered: `no \\u{60}drive\\u{60}\\nhere`", "{verb}");
+        }
+        let long = "x".repeat(kotton_wire::note::MAX_SAID_CHARS + 5);
+        let want = format!("the vault answered: `{}` (cut: 5 more characters)", "x".repeat(kotton_wire::note::MAX_SAID_CHARS));
+        for (verb, said) in each_said(UserResponse::Error { message: long }).await {
+            assert_eq!(said, want, "{verb}");
+        }
+    }
+
+    /// **An answer a verb did not ask for is said by its name, and no field of
+    /// it** (kottonllc/kotton#597, 76B).
+    #[tokio::test]
+    async fn an_answer_not_asked_for_is_said_by_its_name_alone() {
+        let want = [
+            ("follow", "the vault answered `VaultFull` to TenantDrives"),
+            ("renew_lease", "the vault answered `VaultFull`"),
+            ("tell", "the vault answered `VaultFull`"),
+        ];
+        let said = each_said(UserResponse::VaultFull { held: 17, quota: 9 }).await;
+        assert_eq!(said, want.map(|(v, s)| (v, s.to_string())).to_vec());
     }
 
     /// A vault's tree, in memory, with what can go wrong at it. Its retire is
@@ -2041,6 +2149,10 @@ mod tests {
         reads: Mutex<Vec<String>>,
         /// The write of this key fails.
         fail_write: Option<&'static str>,
+        /// The read of this key fails.
+        fail_read: Option<String>,
+        /// The write of this key fails, a key made at run time.
+        fail_write_of: Option<String>,
         /// Its listing says this key is one byte larger than it is.
         misreport: Option<&'static str>,
         /// Its listing leaves this key out, as a vault that lost the write.
@@ -2083,10 +2195,13 @@ mod tests {
         }
         async fn read(&self, key: &StorageKey) -> Result<Vec<u8>, String> {
             self.reads.lock().unwrap().push(key.to_string());
+            if self.fail_read.as_deref() == Some(key.as_str()) {
+                return Err("the connection dropped".into());
+            }
             self.objects.lock().unwrap().iter().find(|(k, _)| k == key.as_str()).map(|(_, v)| v.clone()).ok_or("not found".into())
         }
         async fn write(&self, key: &StorageKey, blob: &[u8]) -> Result<(), String> {
-            if self.fail_write == Some(key.as_str()) {
+            if self.fail_write == Some(key.as_str()) || self.fail_write_of.as_deref() == Some(key.as_str()) {
                 return Err("the connection dropped".into());
             }
             self.objects.lock().unwrap().push((key.to_string(), blob.to_vec()));
@@ -2222,13 +2337,33 @@ mod tests {
         assert!(!event.belongs_to(&EventScope::User("bob".into())));
         assert_eq!(event.level, EventLevel::Warn);
         assert!(
-            event.message.contains("'photos'") && event.message.contains("'vault-1'") && event.message.contains(&format!("{:?}", not.key)),
+            event.message.contains("'photos'") && event.message.contains("'vault-1'") && event.message.contains("storage key `../x\\u{7}` refused"),
             "{}",
             event.message
         );
         let payload = event.payload.as_ref().unwrap();
         assert_eq!(payload["key"], not.key);
         assert_eq!(payload["drive"], "photos");
+    }
+
+    /// **A refused key is printed as data, to the bound** (kottonllc/kotton#597,
+    /// 43A, 74A, 77A): the key is the vault's listing's, so a backtick and a line
+    /// break in it are printed by their escapes and a longer one is cut and says
+    /// so; the payload keeps the key as listed.
+    #[test]
+    fn a_refused_key_is_printed_as_data_to_the_bound() {
+        let key = format!("a`\n{}", "k".repeat(kotton_wire::note::MAX_SAID_CHARS));
+        let not = NotCanonical { key: key.clone(), why: "it is not canonical" };
+        let events = refused_events("alice", "photos", "vault-1", std::slice::from_ref(&not));
+        let [event] = events.as_slice() else { panic!("one refused key is not one event: {events:?}") };
+        let printed = format!("`a\\u{{60}}\\n{}` (cut: 9 more characters)", "k".repeat(kotton_wire::note::MAX_SAID_CHARS - 9));
+        assert_eq!(
+            event.message,
+            format!(
+                "drive move of 'photos' from 'vault-1': storage key {printed} refused: it is not canonical; the move read and wrote nothing under it, and did not carry it"
+            )
+        );
+        assert_eq!(event.payload.as_ref().unwrap()["key"], key);
     }
 
     /// **A vault cannot fill the person's log**: past [`NAMED_AT_MOST`] refused
@@ -2285,13 +2420,46 @@ mod tests {
     async fn a_copy_that_fails_mid_way_leaves_the_drive_where_it_was() {
         let (from, to) = (source(), Fake { fail_write: Some("p/two"), ..Fake::default() });
         match settle(&from, &to).await {
-            Carried::NotMoved(why) => assert!(why.contains("writing p/two") && why.contains("dropped"), "{why}"),
+            Carried::NotMoved(why) => assert!(why.contains("writing `p/two`") && why.contains("dropped"), "{why}"),
             other => panic!("{other:?}"),
         }
         assert_eq!(to.told(), ["TenantDriveRetire"]);
         assert!(to.keys().is_empty(), "the unfinished tree kept what it took");
         assert!(from.told().is_empty());
         assert_eq!(from.keys(), ["p/one", "p/two"]);
+    }
+
+    /// A listed key past the bound that holds a backtick, and how a move's
+    /// sentence prints it (kottonllc/kotton#597, 43A, 74A, 77A).
+    fn a_long_key() -> (String, String) {
+        let key = format!("p/a`b{}", "k".repeat(600));
+        let printed = format!("`p/a\\u{{60}}b{}` (cut: 98 more characters)", "k".repeat(kotton_wire::note::MAX_SAID_CHARS - 10));
+        (key, printed)
+    }
+
+    /// **A read that fails names the listed key as data, to the bound.**
+    #[tokio::test]
+    async fn a_failed_read_names_the_key_as_data() {
+        let (key, printed) = a_long_key();
+        let from = Fake { fail_read: Some(key.clone()), ..Fake::holding(&[(key.as_str(), b"x")]) };
+        match settle(&from, &Fake::default()).await {
+            Carried::NotMoved(why) => assert_eq!(why, format!("reading {printed}: the connection dropped")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// **A top-up's write that fails names the listed key as data, to the
+    /// bound.**
+    #[tokio::test]
+    async fn a_failed_top_up_write_names_the_key_as_data() {
+        let (key, printed) = a_long_key();
+        let from = Fake::holding(&[(key.as_str(), b"x")]);
+        let to = Fake { fail_write_of: Some(key.clone()), ..Fake::default() };
+        let settled = top_up_and_settle("alice", &from, FROM, &to, &|_| {}).await;
+        match settled.carried {
+            Carried::SourceKept(why) => assert_eq!(why, format!("writing {printed}: the connection dropped")),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// **A clean-up retire that acted and whose answer was lost is read as
@@ -2303,7 +2471,7 @@ mod tests {
         let (from, to) = (source(), Fake { fail_write: Some("p/two"), ..Fake::default() });
         to.lose_retire_answer.store(true, Ordering::SeqCst);
         match settle(&from, &to).await {
-            Carried::NotMoved(why) => assert!(why.contains("writing p/two"), "{why}"),
+            Carried::NotMoved(why) => assert!(why.contains("writing `p/two`"), "{why}"),
             other => panic!("a retire that acted was said to leave the tree: {other:?}"),
         }
         assert!(to.keys().is_empty());
@@ -2320,7 +2488,7 @@ mod tests {
         to.refuse_retire.store(true, Ordering::SeqCst);
         match settle(&from, &to).await {
             Carried::NotMovedTreeLeft { why, left } => {
-                assert!(why.contains("writing p/two"), "{why}");
+                assert!(why.contains("writing `p/two`"), "{why}");
                 assert!(left.contains("would not"), "{left}");
             }
             other => panic!("{other:?}"),
@@ -2452,7 +2620,7 @@ mod tests {
         // A top-up that cannot write leaves both trees as they are.
         let failing = Fake { objects: Mutex::new(to.objects.lock().unwrap().clone()), fail_write: Some("p/three"), ..Fake::default() };
         let settled = top_up_and_settle("alice", &from, FROM, &failing, &|_| {}).await;
-        assert!(matches!(&settled.carried, Carried::SourceKept(why) if why.contains("writing p/three")), "{settled:?}");
+        assert!(matches!(&settled.carried, Carried::SourceKept(why) if why.contains("writing `p/three`")), "{settled:?}");
         assert!(from.keys().contains(&"p/three".to_string()), "a failed top-up lost B's write");
         assert!(failing.told().is_empty(), "a failed top-up told the copy {:?}", failing.told());
 
