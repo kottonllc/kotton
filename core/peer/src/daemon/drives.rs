@@ -232,15 +232,12 @@ impl Drive {
 /// node is something else is not relabelled here (module doc).
 pub async fn record(db: &Arc<SqlitePool>, user_id: &str, vault_key: &[u8; 32]) -> io::Result<()> {
     let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
-    let node: Option<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, device_did, posture FROM paired_nodes WHERE user_id = ? AND public_key = ? \
-         ORDER BY device_did LIMIT 1",
-    )
-    .bind(user_id)
-    .bind(vault_key.as_slice())
-    .fetch_optional(tx.conn())
-    .await
-    .map_err(db_err)?;
+    // The row the drive is reached through, by the one function
+    // (`super::db::reached_through`), so the row whose posture is read and
+    // set is the row `list` gives as the drive's node.
+    let node = super::db::row_for_key(tx.conn(), user_id, vault_key)
+        .await?
+        .map(|n| (n.id, n.device_did.to_string(), n.posture));
     let Some((node_id, device_did, posture)) = node else {
         return Err(io::Error::other(format!(
             "'{user_id}' pairs no node under the vault key {}, so there is no drive to record",
@@ -579,22 +576,38 @@ async fn read(db: &Arc<SqlitePool>, user_id: &str, vaults_only: bool) -> io::Res
     Ok(drives)
 }
 
-/// The nodes `user_id`'s drives are reached through, one per node.
+/// The nodes `user_id`'s drives are reached through, one per drive's key: the
+/// row each key is reached through (`super::db::reached_through`).
 pub async fn nodes(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<PairedNode>> {
     let mut nodes: Vec<PairedNode> = Vec::new();
     for drive in list(db, user_id).await? {
-        if !nodes.iter().any(|n| n.device_did == drive.node.device_did) {
+        if !nodes.iter().any(|n| n.public_key == drive.vault_key) {
             nodes.push(drive.node);
         }
     }
     Ok(nodes)
 }
 
-/// Whether `node`, a row of `user_id`'s, is one a drive of theirs is reached
-/// through: the row a drive's key finds, by its DID, never by the label it
-/// shares with some other row.
+/// Whether `node`, a row of `user_id`'s, is a drive's node: it holds the key of
+/// a drive of theirs. Read by the drive's key and never by a DID or a label,
+/// so a second row of the person's under a drive's key is that drive's node
+/// too, whatever string is stored beside it (kottonllc/kotton#597, 29A).
 pub async fn is_drive(db: &Arc<SqlitePool>, user_id: &str, node: &PairedNode) -> io::Result<bool> {
-    Ok(list(db, user_id).await?.iter().any(|d| d.node.device_did == node.device_did))
+    Ok(list(db, user_id).await?.iter().any(|d| d.vault_key == node.public_key))
+}
+
+/// The node the drive of `user_id`'s that the row `device_did` reaches is
+/// reached through: the drive under that row's key, and the row that key is
+/// reached through (`super::db::reached_through`). `device_did` is the row's
+/// name, its DID as stored (a remote keeps the row it was added for by it);
+/// the drive is found by the row's key, so a remote kept under a second row of
+/// the person's for a drive's key finds that drive (kottonllc/kotton#597, 29A).
+/// `None` when no row is under that name or no drive is under its key.
+pub async fn node_for_row(db: &Arc<SqlitePool>, user_id: &str, device_did: &str) -> io::Result<Option<PairedNode>> {
+    let Some(row) = super::db::get_paired_node(db, user_id, device_did).await? else {
+        return Ok(None);
+    };
+    Ok(list(db, user_id).await?.into_iter().find(|d| d.vault_key == row.public_key).map(|d| d.node))
 }
 
 #[cfg(test)]
@@ -674,6 +687,69 @@ mod tests {
             assert_eq!(row.posture.as_deref(), Some(posture), "the row was relabelled");
         }
         assert!(list(&db, "alice").await.unwrap().is_empty(), "a device was recorded as a drive");
+    }
+
+    /// Two rows of alice's for one vault's key, as only an earlier build can
+    /// have stored them: the more recently paired under the key's `did:key`,
+    /// the other under another spelling. Returns (newer, older) as stored.
+    async fn two_rows_for(db: &Arc<SqlitePool>, k: [u8; 32]) -> (PairedNode, PairedNode) {
+        let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(&k).to_string();
+        network_db::seed_paired_node_as_stored(db, "vault", "alice", &did(&k), &k, "[]", 200, Some("blind-storage")).await.unwrap();
+        network_db::seed_paired_node_as_stored(db, "vault-before", "alice", &spelled, &k, "[]", 100, Some("blind-storage")).await.unwrap();
+        (
+            network_db::get_paired_node(db, "alice", &did(&k)).await.unwrap().unwrap(),
+            network_db::get_paired_node(db, "alice", &spelled).await.unwrap().unwrap(),
+        )
+    }
+
+    /// **A row is read as a drive's node by the drive's key**
+    /// (kottonllc/kotton#597, 29A): with two rows for a drive's key, each is a
+    /// drive's node, though the drive is reached through one of them; the
+    /// drive's nodes are one per key, that one; and a row under another key is
+    /// none.
+    #[tokio::test]
+    async fn every_row_under_a_drives_key_is_its_node_and_the_nodes_are_one_per_key() {
+        let (_dir, db) = machine_db().await;
+        let (newer, older) = two_rows_for(&db, key(9)).await;
+        pair(&db, "laptop", key(6), Some("full")).await;
+        record(&db, "alice", &key(9)).await.unwrap();
+
+        assert!(is_drive(&db, "alice", &newer).await.unwrap(), "the row the drive is reached through");
+        assert!(is_drive(&db, "alice", &older).await.unwrap(), "a second row under the drive's key");
+        let laptop = network_db::paired_node_named(&db, "alice", "laptop").await.unwrap().unwrap();
+        assert!(!is_drive(&db, "alice", &laptop).await.unwrap(), "a row under another key");
+        // A second tenancy's own row on the same vault: two vaults' rows, one key.
+        sqlx::query("INSERT INTO drives (user_id, vault_key, tenancy, tree, name, node_id, recorded_at) VALUES ('alice', ?, 'alice-2', ?, '', 'vault', 1)")
+            .bind(key(9).as_slice())
+            .bind(TENANCY_TREE)
+            .execute(db.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(list(&db, "alice").await.unwrap().len(), 2, "the premise: two rows of the record under the key");
+        let all = nodes(&db, "alice").await.unwrap();
+        assert_eq!(all.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["vault"], "{all:?}");
+    }
+
+    /// **The drive a remote reaches is found by its row's key**: what the
+    /// pass's budget lookup reads (`kotton_sync::engine`). A remote kept under
+    /// either of two rows for a drive's key finds the drive, and the node it
+    /// gives is the row the drive is reached through, whose label the budget is
+    /// kept under. A name no row is under, and a row under no drive's key, find
+    /// none.
+    #[tokio::test]
+    async fn a_remote_under_either_row_for_a_drives_key_finds_the_drive() {
+        let (_dir, db) = machine_db().await;
+        let (newer, older) = two_rows_for(&db, key(9)).await;
+        pair(&db, "laptop", key(6), Some("full")).await;
+        record(&db, "alice", &key(9)).await.unwrap();
+
+        for row in [&newer, &older] {
+            let found = node_for_row(&db, "alice", &row.device_did.to_string()).await.unwrap();
+            assert_eq!(found.map(|n| n.id), Some("vault".to_string()), "a remote under {}", row.id);
+        }
+        assert!(node_for_row(&db, "alice", &did(&key(6))).await.unwrap().is_none(), "a row under no drive's key");
+        assert!(node_for_row(&db, "alice", &did(&key(7))).await.unwrap().is_none(), "a name no row is under");
+        assert!(node_for_row(&db, "bob", &newer.device_did.to_string()).await.unwrap().is_none(), "another person's");
     }
 
     /// A key no node carries has no drive to record.

@@ -263,7 +263,15 @@ pub async fn revoke(
     // What was resolved is what is revoked: the row the drives were just told
     // of, or the members the set's own listing returned.
     let revoked = revoke_named(member_store, db, &user_id, &named, &runtime.paired_keys()).await?;
-    if !matches!(revoked, UserResponse::NodeRevoked) || missed.is_empty() {
+    // A row's revoke that leaves another row of the person's under its key
+    // answers with an error that names it (kottonllc/kotton#597, 34A); a drive
+    // missed is said beside it, not instead.
+    let also = match &revoked {
+        UserResponse::NodeRevoked => String::new(),
+        UserResponse::Error { message } => format!(" {message}"),
+        _ => return Ok(revoked),
+    };
+    if missed.is_empty() {
         return Ok(revoked);
     }
     let still: Vec<String> = missed.iter().map(|(d, why)| format!("{d} ({why})")).collect();
@@ -272,7 +280,7 @@ pub async fn revoke(
             "'{node_id}' is revoked on this device, but {} still admit{} it: {}. Running `device \
              revoke` again will not reach {}: the device is no longer listed here, and nothing \
              retries the withdrawal yet. Until {} told, that device can still reach the sealed \
-             copy kept there.",
+             copy kept there.{also}",
             if missed.len() == 1 { "a drive" } else { "these drives" },
             if missed.len() == 1 { "s" } else { "" },
             still.join("; "),

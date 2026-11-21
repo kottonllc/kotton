@@ -607,6 +607,14 @@ async fn drive_node_named(db: &Arc<SqlitePool>, user_id: &str, name: &str) -> io
 ///   logged, not fatal.
 /// - **Members with no row:** each is removed from the set by the key the set's
 ///   own listing gave for it, and a failure is the answer.
+///
+/// **A row's revoke is not a success while another row of the person's holds
+/// its key** (kottonllc/kotton#597, 34A). Such a row, which only an earlier
+/// build can have stored, still pairs the key here, so the answer is an error
+/// that names each, by the name `device revoke` takes to it
+/// ([`network_db::name_of`]), printed as data ([`kotton_wire::note::quoted`]).
+/// Only the person's own rows are named: another person's row under the key is
+/// theirs ([`still_paired_as`]).
 pub async fn revoke_named(
     member_store: &dyn crate::membership::MemberStore,
     db: &Arc<SqlitePool>,
@@ -614,6 +622,7 @@ pub async fn revoke_named(
     named: &Named,
     paired_keys: &Arc<RwLock<HashSet<VerifyingKey>>>,
 ) -> io::Result<UserResponse> {
+    let mut still: Option<(String, Vec<String>)> = None;
     let keys: Vec<[u8; 32]> = match named {
         Named::Row(node) => {
             match member_store.list_found().await {
@@ -629,7 +638,12 @@ pub async fn revoke_named(
                 }
                 Err(e) => tracing::warn!(user_id, node = %node.device_did, "revoked node but could not read the membership set to remove its member: {e:#}"),
             }
+            let name = network_db::name_of(&network_db::list_paired_nodes(db, user_id).await?, node);
             network_db::delete_paired_node(db, user_id, &node.device_did.to_string()).await?;
+            let others = still_paired_as(&network_db::list_paired_nodes(db, user_id).await?, &node.public_key);
+            if !others.is_empty() {
+                still = Some((name, others));
+            }
             vec![node.public_key]
         }
         Named::Members(found) => {
@@ -644,7 +658,28 @@ pub async fn revoke_named(
             unadmit(paired_keys, &key);
         }
     }
-    Ok(UserResponse::NodeRevoked)
+    Ok(match still {
+        None => UserResponse::NodeRevoked,
+        Some((name, others)) => UserResponse::Error {
+            message: format!(
+                "{} is revoked on this device, but this device still pairs its key for you as {}, so a \
+                 connection under that key is still admitted here. `device revoke` takes {} by that name.",
+                kotton_wire::note::quoted(&name),
+                others.iter().map(|n| kotton_wire::note::quoted(n)).collect::<Vec<_>>().join(", "),
+                if others.len() == 1 { "it" } else { "each" },
+            ),
+        },
+    })
+}
+
+/// The name `device revoke` takes to each of `rows`, one person's, that holds
+/// `key` ([`network_db::name_of`]), in the one order
+/// ([`network_db::listed_before`]). `rows` are the person's alone, so no other
+/// person's row is named.
+pub fn still_paired_as(rows: &[PairedNode], key: &[u8; 32]) -> Vec<String> {
+    let mut holding: Vec<&PairedNode> = rows.iter().filter(|r| r.public_key == *key).collect();
+    holding.sort_by(|a, b| network_db::listed_before(a, b));
+    holding.into_iter().map(|r| network_db::name_of(rows, r)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -714,11 +749,13 @@ pub async fn refresh_observed_peer_address(
 ///
 /// A member whose bytes the Ed25519 rule refuses chooses no row: nothing is
 /// dialled for a signature under bytes that are no key. A key held by more than
-/// one row is dialled once, through the first row the store lists, so no share
-/// is asked for twice in one round.
+/// one row is dialled once, through the row the key is reached through
+/// ([`network_db::reached_through`], kottonllc/kotton#622), so no share is
+/// asked for twice in one round. The rows come back in the order `rows` lists
+/// them, one per key.
 #[cfg(any(test, feature = "test-support"))]
 fn cosigner_nodes(members: &[Member], rows: Vec<PairedNode>) -> Vec<PairedNode> {
-    let mut keys: HashSet<[u8; 32]> = members
+    let keys: HashSet<[u8; 32]> = members
         .iter()
         // Any share-holding member can co-sign: `Full` and `Cosigner` both
         // hold a FROST share. Only `BlindStorage` is excluded.
@@ -726,7 +763,12 @@ fn cosigner_nodes(members: &[Member], rows: Vec<PairedNode>) -> Vec<PairedNode> 
         .filter(|m| VerifyingKey::from_bytes(&m.public_key).is_ok())
         .map(|m| m.public_key)
         .collect();
-    rows.into_iter().filter(|n| keys.remove(&n.public_key)).collect()
+    let chosen: Vec<String> = keys
+        .iter()
+        .filter_map(|k| network_db::reached_through(&rows, k))
+        .map(|n| n.device_did.to_string())
+        .collect();
+    rows.into_iter().filter(|n| chosen.contains(&n.device_did.to_string())).collect()
 }
 
 /// Coordinate a threshold signature over `message` across this node's own
@@ -2406,8 +2448,9 @@ mod allowlist_rebuild {
     /// row of the person's under that key** (kottonllc/kotton#597, 34A's removal): two
     /// rows under one key, by its `did:key` and by another spelling of it, and an
     /// own-device member holding the key. Revoking the first removes it and the
-    /// member; the second row stays, and the key stays on the allowlist while it
-    /// pairs it. Revoking the second removes it and takes the key off.
+    /// member, and answers an error that names the second (34A's answer); the
+    /// second row stays, and the key stays on the allowlist while it pairs it.
+    /// Revoking the second removes it and takes the key off.
     #[tokio::test]
     async fn a_rows_revoke_removes_its_members_and_leaves_a_second_row_under_its_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -2422,7 +2465,7 @@ mod allowlist_rebuild {
         let paired_keys = Arc::new(RwLock::new(HashSet::from([key])));
 
         let said = revoke(&members, &db, "alice", "laptop", &paired_keys, Asked::Locally).await;
-        assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
+        assert!(matches!(&said, UserResponse::Error { message } if message.contains("`laptop-before`")), "{said:?}");
         assert!(members.list_members().await.unwrap().is_empty(), "the member that holds the key stayed");
         let left: Vec<String> = network_db::list_paired_nodes(&db, "alice").await.unwrap().iter().map(|n| n.device_did.to_string()).collect();
         assert_eq!(left, vec![spelled.clone()], "the second row went, or the first stayed");
@@ -2844,17 +2887,19 @@ mod chosen_by_key {
         }
     }
 
-    /// **A key held by two rows is dialled once**, through the first row the
-    /// store lists: one co-signer is one share in the round.
+    /// **A key held by two rows is dialled once**, through the row the key is
+    /// reached through ([`network_db::reached_through`], kottonllc/kotton#622),
+    /// in whichever order the rows are handed: one co-signer is one share in
+    /// the round. Paired at one time, that is the row under the lower DID.
     #[test]
     fn a_key_held_by_two_rows_is_dialled_once() {
         let signer = key(36);
         let members = vec![member(&DidKeyMethod::from_public_key(&signer), *signer.as_bytes(), Posture::Full)];
-        let rows = vec![
-            row("first", DidKeyMethod::from_public_key(&signer), *signer.as_bytes()),
-            row("second", DidKeyMethod::spelled_otherwise(signer.as_bytes()), *signer.as_bytes()),
-        ];
-        assert_eq!(ids(&cosigner_nodes(&members, rows)), vec!["first"]);
+        let (derived, spelled) = (DidKeyMethod::from_public_key(&signer), DidKeyMethod::spelled_otherwise(signer.as_bytes()));
+        let want = if derived.to_string() < spelled.to_string() { "derived" } else { "spelled" };
+        let rows = vec![row("derived", derived, *signer.as_bytes()), row("spelled", spelled, *signer.as_bytes())];
+        assert_eq!(ids(&cosigner_nodes(&members, rows.clone())), vec![want]);
+        assert_eq!(ids(&cosigner_nodes(&members, rows.into_iter().rev().collect())), vec![want]);
     }
 
     /// **The first row the store lists is the one dialled**, against the store's
@@ -3256,5 +3301,271 @@ mod named_by_key {
             ("laptop", stored, k.as_bytes().to_vec(), AT.to_string(), Some("full"), None)
         );
         assert!(paired_keys.read().unwrap().contains(&k));
+    }
+}
+
+/// **One function and one order for the row a key is reached through**
+/// (kottonllc/kotton#622): two rows of a person's for one key, as only an
+/// earlier build can have stored them, read by every reader that takes one row
+/// for a key.
+#[cfg(test)]
+mod one_row_for_a_key {
+    use super::*;
+    use kotton_crypto::DidKeyMethod;
+
+    fn key(seed: u8) -> VerifyingKey {
+        kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[seed; 32]))
+    }
+
+    async fn agent_db(dir: &tempfile::TempDir) -> Arc<SqlitePool> {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        Arc::new(pool)
+    }
+
+    /// Two names for `k`, its `did:key` and another spelling of it, as (lower,
+    /// higher) by their bytes: the order `ORDER BY device_did` would read them in.
+    fn two_names(k: &VerifyingKey) -> (String, String) {
+        let (a, b) = (
+            DidKeyMethod::from_public_key(k).to_string(),
+            DidKeyMethod::spelled_otherwise(k.as_bytes()).to_string(),
+        );
+        if a < b { (a, b) } else { (b, a) }
+    }
+
+    fn node(id: &str, did: &str, k: &VerifyingKey, paired_at: i64, addresses: Vec<SocketAddr>) -> PairedNode {
+        PairedNode {
+            id: id.to_string(),
+            device_did: Did::parse(did).unwrap(),
+            public_key: *k.as_bytes(),
+            paired_at,
+            addresses,
+            relay_url: None,
+            posture: None,
+        }
+    }
+
+    /// **The one function gives one row whatever order the rows come in**: the
+    /// more recently paired, then the lower DID by its bytes where two were
+    /// paired at one time; a row under another key is never it, and a key no
+    /// row holds has none. Over a pure function, so both orders of listing are
+    /// held and not only the one the store happens to give.
+    #[test]
+    fn the_row_a_key_is_reached_through_is_one_row_in_either_order() {
+        let (k, other) = (key(81), key(82));
+        let (low, high) = two_names(&k);
+        let at: SocketAddr = "127.0.0.1:7000".parse().unwrap();
+        // The newer row has no address and the higher DID; the older has both.
+        let newer = node("newer", &high, &k, 200, vec![]);
+        let older = node("older", &low, &k, 100, vec![at]);
+        let elsewhere = node("elsewhere", &DidKeyMethod::from_public_key(&other).to_string(), &other, 300, vec![]);
+        for rows in [
+            vec![newer.clone(), older.clone(), elsewhere.clone()],
+            vec![elsewhere.clone(), older.clone(), newer.clone()],
+        ] {
+            assert_eq!(network_db::reached_through(&rows, k.as_bytes()).map(|n| n.id.as_str()), Some("newer"), "{rows:?}");
+        }
+        // Paired at one time: the lower DID.
+        let tied = node("tied", &high, &k, 100, vec![]);
+        for rows in [vec![tied.clone(), older.clone()], vec![older.clone(), tied.clone()]] {
+            assert_eq!(network_db::reached_through(&rows, k.as_bytes()).map(|n| n.id.as_str()), Some("older"), "{rows:?}");
+        }
+        assert!(network_db::reached_through(&[elsewhere], k.as_bytes()).is_none());
+        // The listing's order is the one order.
+        let mut listed = [older.clone(), newer.clone()];
+        listed.sort_by(network_db::listed_before);
+        assert_eq!(listed.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), vec!["newer", "older"]);
+    }
+
+    /// **Every reader that takes one row for a key takes the same row, at the
+    /// store** (kottonllc/kotton#622): two rows of alice's for one key, the
+    /// more recently paired with no address and the higher DID, the other with
+    /// an address and the lower DID, written to the store in both orders. The
+    /// row `paired_node_for_key` gives, the first `list_paired_nodes` lists for
+    /// the key, the co-signer dialled, the drive's node and the row whose
+    /// posture the drive record reads and sets, the row a write rewrites and
+    /// the row a re-address re-addresses are one row, the newer.
+    #[tokio::test]
+    async fn every_reader_of_a_keys_row_reads_the_same_row_of_two() {
+        let k = key(83);
+        let (low, high) = two_names(&k);
+        let at = serde_json::to_string(&["127.0.0.1:7000".parse::<SocketAddr>().unwrap()]).unwrap();
+        for newer_first in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = agent_db(&dir).await;
+            // The newer row was added by address (no posture); the older says
+            // it is a co-signer, so a drive recorded through it is refused.
+            let seeds = [("newer", high.as_str(), "[]", 200, None), ("older", low.as_str(), at.as_str(), 100, Some("cosigner"))];
+            let order: Vec<_> = if newer_first { seeds.iter().collect() } else { seeds.iter().rev().collect() };
+            for (id, did, addresses, paired_at, posture) in order {
+                network_db::seed_paired_node_as_stored(&db, id, "alice", did, k.as_bytes(), addresses, *paired_at, *posture)
+                    .await
+                    .unwrap();
+            }
+            let case = if newer_first { "newer written first" } else { "older written first" };
+
+            let for_key = network_db::paired_node_for_key(&db, "alice", k.as_bytes()).await.unwrap().unwrap();
+            assert_eq!((for_key.id.as_str(), for_key.device_did.to_string()), ("newer", high.clone()), "{case}: paired_node_for_key");
+            assert!(for_key.addresses.is_empty(), "{case}: the premise: the row reached has no address");
+            let listed = network_db::list_paired_nodes(&db, "alice").await.unwrap();
+            assert_eq!(listed[0].id, "newer", "{case}: list_paired_nodes");
+
+            let members = vec![Member {
+                did: DidKeyMethod::from_public_key(&k).to_string(),
+                public_key: *k.as_bytes(),
+                role: Role::OwnDevice,
+                admitted_by: Ceremony::DeviceEnroll,
+                added_at: "2026-11-21T00:00:00Z".to_string(),
+                posture: Some(Posture::Full),
+                label: None,
+                reach: None,
+            }];
+            let dialled = cosigner_nodes(&members, listed.clone());
+            assert_eq!(dialled.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), vec!["newer"], "{case}: co-signer");
+            // Over the rows in the other order too: selection does not lean on the listing.
+            let dialled = cosigner_nodes(&members, listed.into_iter().rev().collect());
+            assert_eq!(dialled.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), vec!["newer"], "{case}: co-signer, reversed");
+
+            super::super::drives::record(&db, "alice", k.as_bytes()).await.unwrap();
+            let drives = super::super::drives::list(&db, "alice").await.unwrap();
+            assert_eq!(drives[0].node.id, "newer", "{case}: the drive's node");
+            let postures: Vec<(String, Option<String>)> =
+                sqlx::query_as("SELECT id, posture FROM paired_nodes WHERE user_id = 'alice' ORDER BY id").fetch_all(db.as_ref()).await.unwrap();
+            assert_eq!(
+                postures,
+                vec![("newer".to_string(), Some("blind-storage".to_string())), ("older".to_string(), Some("cosigner".to_string()))],
+                "{case}: the drive record read or set another row's posture"
+            );
+
+            let readdressed = network_db::readdress_paired_node_for_key(&db, "alice", k.as_bytes(), &at, 300).await.unwrap().unwrap();
+            assert_eq!(readdressed.id, "newer", "{case}: the re-address");
+            let written = network_db::insert_paired_node(&db, "renamed", "alice", &k, &at, 400, None).await.unwrap();
+            assert_eq!(written.device_did.to_string(), high, "{case}: the write");
+            let left = network_db::get_paired_node(&db, "alice", &low).await.unwrap().unwrap();
+            assert_eq!((left.id.as_str(), left.paired_at), ("older", 100), "{case}: the other row changed");
+        }
+    }
+
+    /// **The re-address points the drive at the row it re-addressed**
+    /// (kottonllc/kotton#622): a drive recorded while one row held its key,
+    /// then a second, more recently paired row for the key, stored as an
+    /// earlier build could have (no drive touched). The re-address reaches the
+    /// newer row, and the drive's record shows that row's label: the drive is
+    /// reached through the row re-addressed. A write that follows names the
+    /// same row and keeps the record on its label.
+    #[tokio::test]
+    async fn the_drive_shows_the_label_of_the_row_re_addressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let k = key(84);
+        let (low, high) = two_names(&k);
+        network_db::seed_paired_node_as_stored(&db, "older", "alice", &low, k.as_bytes(), "[]", 100, Some("blind-storage")).await.unwrap();
+        super::super::drives::record(&db, "alice", k.as_bytes()).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, "newer", "alice", &high, k.as_bytes(), "[]", 200, Some("blind-storage")).await.unwrap();
+        let node_id = || async {
+            sqlx::query_scalar::<_, String>("SELECT node_id FROM drives WHERE user_id = 'alice'").fetch_all(db.as_ref()).await.unwrap()
+        };
+        assert_eq!(node_id().await, vec!["older"], "the premise: the record names the row it was recorded through");
+
+        let at = serde_json::to_string(&["127.0.0.1:7000".parse::<SocketAddr>().unwrap()]).unwrap();
+        let readdressed = network_db::readdress_paired_node_for_key(&db, "alice", k.as_bytes(), &at, 300).await.unwrap().unwrap();
+        assert_eq!(readdressed.id, "newer");
+        assert_eq!(node_id().await, vec!["newer"], "the drive's record does not show the row re-addressed");
+        let drives = super::super::drives::list(&db, "alice").await.unwrap();
+        assert_eq!(drives[0].node.device_did.to_string(), high, "the drive is not reached through the row re-addressed");
+
+        network_db::insert_paired_node(&db, "vault", "alice", &k, &at, 400, None).await.unwrap();
+        assert_eq!(node_id().await, vec!["vault"], "a write left the record on another label");
+        assert_eq!(super::super::drives::list(&db, "alice").await.unwrap()[0].node.id, "vault");
+    }
+
+    /// A store a test fills, holding what it is told.
+    #[derive(Default)]
+    struct Members(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+    #[async_trait::async_trait]
+    impl crate::membership::MemberStore for Members {
+        async fn member_write(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.0.lock().unwrap().insert(path.to_string(), data.to_vec());
+            Ok(())
+        }
+        async fn member_read(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+            self.0.lock().unwrap().get(path).cloned().ok_or_else(|| anyhow::anyhow!("no member at {path}"))
+        }
+        async fn member_delete(&self, path: &str) -> anyhow::Result<()> {
+            self.0.lock().unwrap().remove(path);
+            Ok(())
+        }
+        async fn member_list(&self, dir: &str) -> anyhow::Result<Vec<String>> {
+            Ok(self.0.lock().unwrap().keys().filter(|p| p.starts_with(dir)).cloned().collect())
+        }
+    }
+
+    async fn revoke(db: &Arc<SqlitePool>, user: &str, name: &str, keys: &Arc<RwLock<HashSet<VerifyingKey>>>) -> UserResponse {
+        let members = Members::default();
+        let named = node_named(db, user, name, Asked::Remotely.reach(&members)).await.unwrap().expect("the name names a row");
+        revoke_named(&members, db, user, &named, keys).await.unwrap()
+    }
+
+    /// **A row's revoke names each other row of the person's under its key, by
+    /// the name `device revoke` takes to it, and no other person's**
+    /// (kottonllc/kotton#597, 34A): alice pairs one key under two rows, one
+    /// labelled with a plain word and one labelled with words that are not one,
+    /// so it is named by its DID as stored; bob pairs the key too. Revoking
+    /// alice's first row answers an error naming her other row and nothing of
+    /// bob's; revoking by the name the answer gave removes it, and the answer
+    /// is a success. The key stays admitted while bob pairs it.
+    #[tokio::test]
+    async fn a_rows_revoke_names_the_persons_other_rows_under_its_key_and_no_one_elses() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let k = key(85);
+        let (low, high) = two_names(&k);
+        network_db::insert_paired_node(&db, "laptop", "alice", &k, "[]", 100, None).await.unwrap();
+        let other = if DidKeyMethod::from_public_key(&k).to_string() == low { &high } else { &low };
+        network_db::seed_paired_node_as_stored(&db, "old laptop", "alice", other, k.as_bytes(), "[]", 50, None).await.unwrap();
+        network_db::insert_paired_node(&db, "alices-laptop", "bob", &k, "[]", 10, None).await.unwrap();
+        let keys = Arc::new(RwLock::new(HashSet::from([k])));
+
+        let said = revoke(&db, "alice", "laptop", &keys).await;
+        let UserResponse::Error { message } = said else { panic!("a revoke that left a row under its key answered {said:?}") };
+        let rows = network_db::list_paired_nodes(&db, "alice").await.unwrap();
+        let names = still_paired_as(&rows, k.as_bytes());
+        assert_eq!(names, vec![other.clone()], "a label that is not one plain word is not the name: {names:?}");
+        assert!(message.contains(&kotton_wire::note::quoted(other)), "{message}");
+        assert!(message.contains("`laptop` is revoked"), "{message}");
+        assert!(!message.contains("alices-laptop"), "another person's row was named: {message}");
+
+        let said = revoke(&db, "alice", &names[0], &keys).await;
+        assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
+        assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty());
+        assert!(keys.read().unwrap().contains(&k), "the key left the allowlist while bob pairs it");
+    }
+
+    /// **Revoking by the name the answer gave takes the key off the allowlist**
+    /// (34A): with only alice's two rows under the key, revoking the first
+    /// leaves the key admitted and names the second; revoking that name removes
+    /// it and takes the key off.
+    #[tokio::test]
+    async fn revoking_by_the_name_the_answer_gave_takes_the_key_off_the_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let k = key(86);
+        let (low, high) = two_names(&k);
+        network_db::seed_paired_node_as_stored(&db, "phone", "alice", &low, k.as_bytes(), "[]", 100, None).await.unwrap();
+        network_db::seed_paired_node_as_stored(&db, "phone-before", "alice", &high, k.as_bytes(), "[]", 50, None).await.unwrap();
+        let keys = Arc::new(RwLock::new(HashSet::from([k])));
+
+        let said = revoke(&db, "alice", "phone", &keys).await;
+        let UserResponse::Error { message } = said else { panic!("{said:?}") };
+        assert!(message.contains("`phone-before`"), "{message}");
+        assert!(keys.read().unwrap().contains(&k), "the key left the allowlist while a row pairs it");
+
+        let said = revoke(&db, "alice", "phone-before", &keys).await;
+        assert!(matches!(said, UserResponse::NodeRevoked), "{said:?}");
+        assert!(keys.read().unwrap().is_empty(), "the key stayed on the allowlist with no row");
     }
 }

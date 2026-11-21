@@ -64,27 +64,54 @@ fn did_err(e: DidError) -> io::Error {
 // paired_nodes
 // ---------------------------------------------------------------------------
 
-/// The row of `user_id`'s that holds `public_key`, as its DID as stored and its
-/// label: where two of their rows hold the key, the one [`list_paired_nodes`]
-/// lists first. One statement for the writer ([`insert_paired_node`],
-/// [`add_paired_node_if_absent`]) and the re-address
-/// ([`readdress_paired_node_for_key`]), so every write for a key reaches the
-/// same row (kottonllc/kotton#597, 65A); kottonllc/kotton#622 replaces its order
-/// with its one function.
-async fn row_for_key(
+/// **The one order among a person's rows that hold one key**
+/// (kottonllc/kotton#622): the most recently paired first, then by DID as
+/// stored, compared as bytes (as SQLite compares the column). It is the order
+/// [`list_paired_nodes`] lists in, so the row a write reaches for a key is the
+/// row listed first for it (kottonllc/kotton#597, 65A): a write sets
+/// `paired_at`, and the row it rewrote is first afterwards. Two rows of one
+/// person's never share a DID (the table's key), so no two rows tie.
+pub fn listed_before(a: &PairedNode, b: &PairedNode) -> std::cmp::Ordering {
+    b.paired_at
+        .cmp(&a.paired_at)
+        .then_with(|| a.device_did.to_string().cmp(&b.device_did.to_string()))
+}
+
+/// **The row of `rows`, one person's, that `key` is reached through**: the first
+/// of those that hold it by [`listed_before`], in whatever order `rows` come.
+/// `None` when none holds it.
+///
+/// The one function for that row (kottonllc/kotton#622). Every reader that
+/// takes one row for a key goes through it: the writer and the re-address
+/// ([`insert_paired_node`], [`add_paired_node_if_absent`],
+/// [`readdress_paired_node_for_key`]), [`paired_node_for_key`] and so the drive
+/// record's node ([`super::drives`]), a recovery's row for its line
+/// (`kotton_device::users::recover`), and co-signer selection
+/// (`super::nodes`). So the row a write reaches, the row a drive is reached
+/// through and the row dialled are one row. Where two rows hold a key, which
+/// only an earlier build can have stored, the other is left as it is (5B), and
+/// the first is chosen whether or not it has an address.
+pub fn reached_through<'a>(rows: impl IntoIterator<Item = &'a PairedNode>, key: &[u8; 32]) -> Option<&'a PairedNode> {
+    rows.into_iter().filter(|r| r.public_key == *key).min_by(|a, b| listed_before(a, b))
+}
+
+/// [`reached_through`] over `user_id`'s rows that hold `public_key`, read inside
+/// the caller's transaction or on its connection.
+pub(crate) async fn row_for_key(
     conn: &mut sqlx::SqliteConnection,
     user_id: &str,
-    public_key: &[u8],
-) -> io::Result<Option<(String, String)>> {
-    sqlx::query_as(
-        "SELECT device_did, id FROM paired_nodes WHERE user_id = ? AND public_key = ? \
-         ORDER BY paired_at DESC, device_did LIMIT 1",
-    )
+    public_key: &[u8; 32],
+) -> io::Result<Option<PairedNode>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {NODE_COLUMNS} FROM paired_nodes WHERE user_id = ? AND public_key = ?"
+    ))
     .bind(user_id)
-    .bind(public_key)
-    .fetch_optional(conn)
+    .bind(public_key.as_slice())
+    .fetch_all(conn)
     .await
-    .map_err(db_err)
+    .map_err(db_err)?;
+    let rows = rows.iter().map(node_of).collect::<io::Result<Vec<_>>>()?;
+    Ok(reached_through(&rows, public_key).cloned())
 }
 
 /// Write `user_id`'s row for `key`, labelled `id`, at `addresses_json`, as of
@@ -251,8 +278,8 @@ async fn write_row(
     let public_key = key.as_bytes().as_slice();
     // The row's name: the DID the key's row is stored under, or the derivation's
     // string where the key has no row and no row is under that string.
-    let device_did = match row_for_key(&mut *conn, user_id, public_key).await? {
-        Some((stored, _)) => stored,
+    let device_did = match row_for_key(&mut *conn, user_id, key.as_bytes()).await? {
+        Some(row) => row.device_did.to_string(),
         None => {
             let derived = kotton_crypto::DidKeyMethod::from_public_key(key).to_string();
             let beside: Option<String> =
@@ -417,8 +444,8 @@ pub async fn update_paired_node_address(
 /// stays as stored, whatever string that is (a row is its bytes',
 /// kottonllc/kotton#597, 5B), and so do its label, its posture and the relay it
 /// was last known at; no row is added. Where two of the person's rows hold the
-/// key it is the one [`list_paired_nodes`] lists first. A drive under the key
-/// shows the row's label, as [`insert_paired_node`] keeps it.
+/// key it is the one [`reached_through`] gives. A drive under the key shows the
+/// row's label, as [`insert_paired_node`] keeps it.
 pub async fn readdress_paired_node_for_key(
     db: &Arc<SqlitePool>,
     user_id: &str,
@@ -427,9 +454,10 @@ pub async fn readdress_paired_node_for_key(
     now: i64,
 ) -> io::Result<Option<PairedNode>> {
     let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
-    let Some((device_did, id)) = row_for_key(tx.conn(), user_id, public_key.as_slice()).await? else {
+    let Some(row) = row_for_key(tx.conn(), user_id, public_key).await? else {
         return Ok(None);
     };
+    let (device_did, id) = (row.device_did.to_string(), row.id);
     sqlx::query("UPDATE paired_nodes SET addresses = ?, paired_at = ? WHERE user_id = ? AND device_did = ?")
         .bind(addresses_json)
         .bind(now)
@@ -511,18 +539,21 @@ fn node_of(row: &sqlx::sqlite::SqliteRow) -> io::Result<PairedNode> {
 
 const NODE_COLUMNS: &str = "id, device_did, public_key, paired_at, addresses, relay_url, posture";
 
+/// `user_id`'s rows, in the one order ([`listed_before`]): for each key, the
+/// row it is reached through ([`reached_through`]) is the first listed of
+/// those that hold it.
 pub async fn list_paired_nodes(
     db: &Arc<SqlitePool>,
     user_id: &str,
 ) -> io::Result<Vec<PairedNode>> {
-    let rows = sqlx::query(&format!(
-        "SELECT {NODE_COLUMNS} FROM paired_nodes WHERE user_id = ? ORDER BY paired_at DESC, device_did"
-    ))
-    .bind(user_id)
-    .fetch_all(db.as_ref())
-    .await
-    .map_err(db_err)?;
-    rows.iter().map(node_of).collect()
+    let rows = sqlx::query(&format!("SELECT {NODE_COLUMNS} FROM paired_nodes WHERE user_id = ?"))
+        .bind(user_id)
+        .fetch_all(db.as_ref())
+        .await
+        .map_err(db_err)?;
+    let mut nodes = rows.iter().map(node_of).collect::<io::Result<Vec<_>>>()?;
+    nodes.sort_by(listed_before);
+    Ok(nodes)
 }
 
 /// `user_id`'s row for the node `device_did`: the one row the key names.
@@ -543,22 +574,15 @@ pub async fn get_paired_node(
 }
 
 /// `user_id`'s row carrying `public_key`, the node a drive under that key is
-/// reached through ([`super::drives`]); the first by DID when two carry it.
+/// reached through ([`super::drives`]): the one [`reached_through`] gives when
+/// two carry it.
 pub async fn paired_node_for_key(
     db: &Arc<SqlitePool>,
     user_id: &str,
     public_key: &[u8; 32],
 ) -> io::Result<Option<PairedNode>> {
-    let row = sqlx::query(&format!(
-        "SELECT {NODE_COLUMNS} FROM paired_nodes WHERE user_id = ? AND public_key = ? \
-         ORDER BY device_did LIMIT 1"
-    ))
-    .bind(user_id)
-    .bind(public_key.as_slice())
-    .fetch_optional(db.as_ref())
-    .await
-    .map_err(db_err)?;
-    row.as_ref().map(node_of).transpose()
+    let mut conn = db.acquire().await.map_err(db_err)?;
+    row_for_key(&mut conn, user_id, public_key).await
 }
 
 /// The row `name` names among `user_id`'s rows: its DID as stored, or the label
