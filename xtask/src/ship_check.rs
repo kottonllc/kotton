@@ -30,6 +30,13 @@
 //! And both lists are held to the closures: an entry no packed binary reaches is a failure,
 //! so a cut that lands deletes its entry rather than leaving it to admit the crate back.
 //!
+//! **No packed binary turns on a `test-support` feature of a crate of this repository.** Such a
+//! feature compiles a door only a test may have, such as the writer that stores a
+//! `paired_nodes` row as an earlier build stored it (`kotton_peer::daemon::db`,
+//! kottonllc/kotton#597, 68A). The same `cargo tree` prints the features each crate is built
+//! with ([`judge`]), and a path crate of this repository built with `test-support` is refused,
+//! whatever list it is on.
+//!
 //! ## What it does not refuse yet
 //!
 //! [`NOT_THE_SYSTEMS`] is the list of cuts still owed. While it is not empty, the closures are
@@ -160,6 +167,9 @@ pub(crate) struct Judged {
     pub(crate) system: BTreeSet<String>,
 }
 
+/// The feature that compiles a door only a test may have, which no packed binary turns on.
+pub(crate) const TEST_SUPPORT: &str = "test-support";
+
 /// One line of `cargo tree --prefix depth -f {p}`: its depth, its name, and where it is from
 /// — `None` for crates.io, else the parenthesised source cargo prints (a path, a git URL, a
 /// registry).
@@ -175,8 +185,15 @@ fn parse(line: &str) -> Option<(usize, &str, Option<&str>)> {
     Some((depth, name, source))
 }
 
-/// Judge one closure, `tree` as `cargo tree --edges normal --prefix depth -f {p}` prints it,
-/// against this repository at `repo`. `what` names the binary in what is printed.
+/// The features one line of `cargo tree -f {p}|{f}` says its crate is built with: what follows
+/// the `|`, comma-separated, without the `(*)` cargo marks a crate already printed with.
+fn features(after_bar: &str) -> impl Iterator<Item = &str> {
+    after_bar.trim().trim_end_matches("(*)").split(',').map(str::trim).filter(|f| !f.is_empty())
+}
+
+/// Judge one closure, `tree` as `cargo tree --edges normal --prefix depth -f {p}|{f}` prints it,
+/// against this repository at `repo`. `what` names the binary in what is printed. A line with no
+/// `|` is read as a crate built with no features.
 pub(crate) fn judge(tree: &str, repo: &Path, what: &str) -> Judged {
     let ours = |n: &str| SYSTEM_CRATES.contains(&n);
     let owed = |n: &str| NOT_THE_SYSTEMS.iter().any(|c| c.name == n);
@@ -184,6 +201,7 @@ pub(crate) fn judge(tree: &str, repo: &Path, what: &str) -> Judged {
     // The crate at each depth on the path to this line, so a line's parent is known.
     let mut path: Vec<String> = Vec::new();
     for line in tree.lines().filter(|l| !l.trim().is_empty()) {
+        let (line, built_with) = line.split_once('|').unwrap_or((line, ""));
         let Some((depth, name, source)) = parse(line) else {
             judged.refused.push(format!("{what}: cannot read `cargo tree` line {line:?}"));
             continue;
@@ -191,6 +209,17 @@ pub(crate) fn judge(tree: &str, repo: &Path, what: &str) -> Judged {
         path.truncate(depth);
         let parent = path.last().cloned();
         path.push(name.to_string());
+        if source.is_some_and(|s| Path::new(s).is_absolute() && Path::new(s).starts_with(repo))
+            && features(built_with).any(|f| f == TEST_SUPPORT)
+        {
+            let refusal = format!(
+                "{what} links {name} with its `{TEST_SUPPORT}` feature on, which compiles a door only a test may have: \
+                 turn it on in dev-dependencies alone"
+            );
+            if !judged.refused.contains(&refusal) {
+                judged.refused.push(refusal);
+            }
+        }
         match source {
             Some(s) if Path::new(s).is_absolute() => {
                 if !Path::new(s).starts_with(repo) {
@@ -257,7 +286,7 @@ fn tree(repo: &Path, part: &Part, package: &str) -> Result<String, String> {
         .args(["tree", "--locked", "--manifest-path"])
         .arg(repo.join(part.workspace).join("Cargo.toml"))
         .args(["-p", package, "--edges", "normal", "--target", part.target.unwrap_or("all")])
-        .args(["--prefix", "depth", "-f", "{p}"])
+        .args(["--prefix", "depth", "-f", "{p}|{f}"])
         .current_dir(repo)
         .output()
         .map_err(|e| format!("cannot run cargo tree: {e}"))?;
@@ -416,6 +445,30 @@ mod tests {
             let name = line[1..].split_whitespace().next().unwrap();
             assert!(j.refused[0].contains(name) && j.refused[0].contains(why), "{line}: {}", j.refused[0]);
         }
+    }
+
+    /// **A crate of this repository built with `test-support` is refused, once, by name**,
+    /// whatever list it is on and however often the closure prints it; the same crate built
+    /// without it, a feature of another name, and a crates.io crate with a feature of that
+    /// name pass.
+    #[test]
+    fn a_crate_of_this_repository_built_with_test_support_is_refused() {
+        let j = judged(
+            "0kuserd v0.1.0 (/r/core/kuserd)|default\n\
+             1kotton-peer v0.1.0 (/r/core/peer)|default,test-support\n\
+             2kotton-common v0.1.0 (/r/core/common)|\n\
+             1kotton-peer v0.1.0 (/r/core/peer)|default,test-support (*)\n\
+             1serde v1.0.0|derive,test-support\n",
+        );
+        assert_eq!(j.refused.len(), 1, "{:?}", j.refused);
+        assert!(j.refused[0].contains("kotton-peer") && j.refused[0].contains("`test-support`"), "{}", j.refused[0]);
+
+        let j = judged(
+            "0kuserd v0.1.0 (/r/core/kuserd)|default\n\
+             1kotton-peer v0.1.0 (/r/core/peer)|test-utils\n\
+             1kotton-common v0.1.0 (/r/core/common) (*)\n",
+        );
+        assert_eq!(j.refused, Vec::<String>::new());
     }
 
     /// The two lists are disjoint, and each names a package of this repository — the
