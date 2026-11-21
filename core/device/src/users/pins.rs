@@ -60,7 +60,9 @@
 //! records, by its id. A claim counts for nothing once its device is no longer
 //! in the person's device set ([`devices`], the membership set's own filter):
 //! a removed device cannot write, and nobody else may delete its claims, so
-//! readers set them aside instead. A device lost but not removed is counted
+//! readers set them aside instead. A claim is matched to a device by the key
+//! its DID names, and a device in the set by the key it holds, never by the
+//! DID spelled beside that key (kottonllc/kotton#597, 29A). A device lost but not removed is counted
 //! until the person removes it. A drive retired by a move leaves no claim:
 //! its claims are in it and go with it, and a drive this device no longer
 //! records is told of to nobody. Claims ride the history log in the index
@@ -111,6 +113,7 @@
 //! the pins say, because a device needs them to run offline; they are named by
 //! no setting, so they are never the setting a short-of-room notice names.
 
+use kotton_crypto::ed25519::VerifyingKey;
 use kotton_record::{registry::SchemaRegistry, record_cmds::Record, SqliteRecordStore};
 use kotton_schemas::membership::{Posture, Role};
 use kotton_store::runtime::user::sync::{Keep, KeepReport};
@@ -379,6 +382,14 @@ impl Claim {
         let text = |f: &str| body.get(f).and_then(Value::as_str).map(str::to_string);
         Some(Self { device: text("device")?, drive: text("drive")? })
     }
+
+    /// The key the claiming device presents: the key its DID names, decoded
+    /// under the Ed25519 rule, which gives one only for that key's own
+    /// `did:key`. A claim under a string that names no key is no device's.
+    fn key(&self) -> Option<[u8; 32]> {
+        let did = kotton_wire::did::Did::parse(&self.device).ok()?;
+        kotton_crypto::did::DidKeyMethod::to_public_key(&did).ok().map(|key| *key.as_bytes())
+    }
 }
 
 /// Every whole-keeper claim this device has read: its own, and every other
@@ -430,38 +441,65 @@ pub async fn claim(registry: &RwLock<SchemaRegistry>, records: &SqliteRecordStor
     Ok(changed)
 }
 
-/// The person's devices whose claims count, by DID and name: this device, and
-/// every own device of theirs that holds the data keys (`Posture::Full`) in
-/// the membership set. A device removed is no member, so its claims count for
-/// nothing — which is how a removed device stops keeping anything whole.
-pub async fn devices(store: &UserStore, me: &str) -> Vec<(String, String)> {
+/// The person's devices whose claims count, by key and name: this device, by
+/// the key it presents (`me`), and every own device of theirs that holds the
+/// data keys (`Posture::Full`) in the membership set. A device removed is no
+/// member, so its claims count for nothing — which is how a removed device
+/// stops keeping anything whole.
+///
+/// **A device is its key's bytes, not the DID spelled beside them.** The
+/// member that holds `me` is this device, whatever DID the set holds it
+/// under, and is listed once, as [`THIS_DEVICE`]; two members that hold one
+/// key are one device. That device is named by the member under its key's own
+/// `did:key`, the one name this build's writer gives an own device; where no
+/// member is under it, by the first the set lists, in the order the mount
+/// keeps the set's objects. Its DID as stored is read only as the name shown
+/// where the member has no label.
+pub async fn devices(store: &UserStore, me: &VerifyingKey) -> Vec<([u8; 32], String)> {
     use kotton_peer::membership::Membership as _;
-    let mut out = vec![(me.to_string(), THIS_DEVICE.to_string())];
     match store.list_members().await {
-        Ok(members) => {
-            for m in members {
-                let full = matches!(m.posture, None | Some(Posture::Full));
-                if matches!(m.role, Role::OwnDevice) && full && m.did != me {
-                    let name = m.label.clone().unwrap_or_else(|| m.did.clone());
-                    out.push((m.did, name));
-                }
-            }
+        Ok(members) => devices_among(members, me),
+        Err(e) => {
+            tracing::warn!(error = format!("{e:#}"), "pins: the membership set did not read; only this device's claims are counted");
+            devices_among(Vec::new(), me)
         }
-        Err(e) => tracing::warn!(error = format!("{e:#}"), "pins: the membership set did not read; only this device's claims are counted"),
+    }
+}
+
+/// [`devices`], of `members` as the set listed them.
+fn devices_among(members: Vec<kotton_schemas::membership::Member>, me: &VerifyingKey) -> Vec<([u8; 32], String)> {
+    let mut out = vec![(*me.as_bytes(), THIS_DEVICE.to_string())];
+    let mut own: Vec<_> = members
+        .into_iter()
+        .filter(|m| matches!(m.role, Role::OwnDevice) && matches!(m.posture, None | Some(Posture::Full)))
+        .collect();
+    // A stable sort: the members under their key's own `did:key` first, each
+    // kind in the order the set listed them.
+    own.sort_by_key(|m| !under_its_did_key(m));
+    for m in own {
+        if !out.iter().any(|(key, _)| *key == m.public_key) {
+            let name = m.label.clone().unwrap_or_else(|| m.did.clone());
+            out.push((m.public_key, name));
+        }
     }
     out
+}
+
+/// Whether `m` is under its key's own `did:key`: its bytes pass the rule and
+/// its DID as stored is their derivation.
+fn under_its_did_key(m: &kotton_schemas::membership::Member) -> bool {
+    VerifyingKey::from_bytes(&m.public_key).is_ok_and(|key| did_of(&key) == m.did)
 }
 
 /// The names of the devices among `devices` that claim the drive whose id is
 /// `drive` whole: the claims, and nothing else (module doc). `None` — a drive
 /// recorded before ids, until its vault is next listed — is claimed by nobody.
-pub fn whole_on(claims: &[Claim], devices: &[(String, String)], drive: Option<&str>) -> Vec<String> {
+/// A claim counts for the device that holds the key it names
+/// ([`Claim::key`]), whatever DID the set holds that device under.
+pub fn whole_on(claims: &[Claim], devices: &[([u8; 32], String)], drive: Option<&str>) -> Vec<String> {
     let Some(drive) = drive else { return Vec::new() };
-    devices
-        .iter()
-        .filter(|(did, _)| claims.iter().any(|c| c.device == *did && c.drive == drive))
-        .map(|(_, name)| name.clone())
-        .collect()
+    let claiming: Vec<[u8; 32]> = claims.iter().filter(|c| c.drive == drive).filter_map(Claim::key).collect();
+    devices.iter().filter(|(key, _)| claiming.contains(key)).map(|(_, name)| name.clone()).collect()
 }
 
 /// The person's drives, by name, once each, in the order recorded: every
@@ -483,7 +521,7 @@ pub async fn drive_names(db: &Arc<SqlitePool>, user_id: &str) -> io::Result<Vec<
 /// that no device claims whole, and each drive this device's last pass found
 /// short of room. A drive kept at several vaults is one drive, by its id, and
 /// told of once.
-pub async fn notices(db: &Arc<SqlitePool>, user_id: &str, claims: &[Claim], devices: &[(String, String)]) -> io::Result<Vec<PinNotice>> {
+pub async fn notices(db: &Arc<SqlitePool>, user_id: &str, claims: &[Claim], devices: &[([u8; 32], String)]) -> io::Result<Vec<PinNotice>> {
     use kotton_peer::daemon::drives as record;
     let mut out = where_personal_is(db, user_id).await?;
     let mut told: Vec<(String, Option<String>)> = Vec::new();
@@ -602,25 +640,32 @@ pub async fn budget(db: &SqlitePool, user_id: &str, node_id: &str) -> io::Result
 }
 
 /// Everything a reader of this device's pins needs, read once: this device's
-/// settings, every claim it has read, and the devices whose claims count.
+/// settings, every claim it has read, and the devices whose claims count, by
+/// key ([`devices`]).
 pub struct Read {
     pub settings: Vec<PinSetting>,
     pub claims: Vec<Claim>,
-    pub devices: Vec<(String, String)>,
+    pub devices: Vec<([u8; 32], String)>,
+}
+
+/// The DID this device writes its own records under: its key's `did:key`.
+fn did_of(me: &VerifyingKey) -> String {
+    kotton_crypto::did::DidKeyMethod::from_public_key(me).to_string()
 }
 
 impl Read {
-    /// Read them, moving any of this device's settings kotton #155 left in the
-    /// drive into its own database first ([`migrate`]).
+    /// Read them, for this device `me`, by the key it presents, moving any of
+    /// this device's settings kotton #155 left in the drive into its own
+    /// database first ([`migrate`]).
     pub async fn now(
         registry: &RwLock<SchemaRegistry>,
         records: &SqliteRecordStore,
         store: &UserStore,
         db: &SqlitePool,
         user_id: &str,
-        me: &str,
+        me: &VerifyingKey,
     ) -> io::Result<Self> {
-        migrate(registry, records, db, user_id, me).await?;
+        migrate(registry, records, db, user_id, &did_of(me)).await?;
         Ok(Self { settings: settings(db, user_id).await?, claims: claims(registry, records).await?, devices: devices(store, me).await })
     }
 
@@ -697,7 +742,7 @@ fn no_such_drive(drive: &str, names: &[String], has_vault: bool) -> String {
     format!("you have no drive called '{drive}' (you have {had}); `drive list` names them")
 }
 
-/// `pin <scope> <value>`, on this device `me`: refused for a drive the person
+/// `pin <scope> <value>`, on this device `me`, by the key it presents: refused for a drive the person
 /// does not have, else written to this device's own database, this device's
 /// claims made to say what it now keeps ([`claim`]), and answered with what
 /// this device keeps after.
@@ -708,7 +753,7 @@ pub async fn set(
     store: &UserStore,
     db: &Arc<SqlitePool>,
     user_id: &str,
-    me: &str,
+    me: &VerifyingKey,
     scope: &PinScope,
     value: Option<PinValue>,
 ) -> io::Result<Result<PinReadout, String>> {
@@ -736,11 +781,12 @@ pub async fn set(
             )));
         }
     }
-    migrate(registry, records, db, user_id, me).await?;
+    let me_did = did_of(me);
+    migrate(registry, records, db, user_id, &me_did).await?;
     if let Err(e) = write(db, user_id, scope, value).await {
         return Ok(Err(e.to_string()));
     }
-    claim(registry, records, &settings(db, user_id).await?, me).await?;
+    claim(registry, records, &settings(db, user_id).await?, &me_did).await?;
     Ok(Ok(Read::now(registry, records, store, db, user_id, me).await?.readout(db, user_id).await?))
 }
 
@@ -831,6 +877,11 @@ mod tests {
         Claim { device: device.into(), drive: drive.into() }
     }
 
+    /// A device's key, from a seed, as the rule's type.
+    fn key(seed: u8) -> VerifyingKey {
+        kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[seed; 32]))
+    }
+
     /// **The telling reads the claims and nothing else, and a removed
     /// device's claim counts for nothing** (kotton #171's rules): a device in
     /// the set that claims the drive keeps it whole; a claim by a device no
@@ -839,13 +890,110 @@ mod tests {
     /// recorded with no id is claimed by nobody.
     #[test]
     fn whole_on_reads_claims_only_and_counts_no_removed_device() {
-        let devices = vec![("a".to_string(), THIS_DEVICE.to_string()), ("b".to_string(), "laptop".to_string())];
-        let claims = vec![claimed("b", FIRST_DRIVE_ID), claimed("c", FIRST_DRIVE_ID), claimed("a", "another-drive")];
+        let (a, b, c) = (key(1), key(2), key(3));
+        let devices = vec![(*a.as_bytes(), THIS_DEVICE.to_string()), (*b.as_bytes(), "laptop".to_string())];
+        let claims = vec![claimed(&did_of(&b), FIRST_DRIVE_ID), claimed(&did_of(&c), FIRST_DRIVE_ID), claimed(&did_of(&a), "another-drive")];
         assert_eq!(whole_on(&claims, &devices, Some(FIRST_DRIVE_ID)), ["laptop"]);
         assert_eq!(whole_on(&claims, &devices, Some("another-drive")), [THIS_DEVICE]);
         assert!(whole_on(&claims[1..2], &devices, Some(FIRST_DRIVE_ID)).is_empty(), "a removed device's claim was counted");
         assert!(whole_on(&claims, &devices, None).is_empty());
         assert!(whole_on(&[], &devices, Some(FIRST_DRIVE_ID)).is_empty(), "silence was read as a claim");
+    }
+
+    /// An own device's member as an earlier build could have stored it: under
+    /// another spelling of its key's `did:key`, which names no key
+    /// (`spelled_otherwise`), beside the key's own bytes. Written to the set's
+    /// store directly, since its writer refuses such a DID.
+    async fn store_as_spelled_otherwise(store: &UserStore, key: &VerifyingKey, label: &str) -> kotton_schemas::membership::Member {
+        use kotton_peer::membership::MemberStore as _;
+        let m = kotton_schemas::membership::Member {
+            did: kotton_crypto::DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string(),
+            public_key: *key.as_bytes(),
+            role: Role::OwnDevice,
+            admitted_by: kotton_schemas::membership::Ceremony::DeviceEnroll,
+            added_at: "2026-11-21T00:00:00Z".to_string(),
+            posture: Some(Posture::Full),
+            label: Some(label.to_string()),
+            reach: None,
+        };
+        assert_ne!(m.did, did_of(key));
+        store.member_write(&m.vfs_path(), &serde_json::to_vec(&m).unwrap()).await.unwrap();
+        m
+    }
+
+    /// **A claim counts for the member that holds the claiming device's key,
+    /// and this device is found among the members by its key**
+    /// (kottonllc/kotton#597, 29A). This device and a laptop are each in the
+    /// set under another spelling of their key's `did:key`, as an earlier
+    /// build could have stored them. This device is listed once, as itself;
+    /// the laptop's claim, under its key's `did:key` as every device writes
+    /// one, counts for the laptop; a claim under the member's DID as stored
+    /// names no key and counts for no device; and a second member under the
+    /// laptop's key is the same device, listed once, under the label of the
+    /// member under its key's own `did:key`. `status` says the same.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_claim_counts_for_the_member_that_holds_its_key_and_this_device_is_listed_once() {
+        use kotton_peer::membership::Membership as _;
+        let f = fixture().await;
+        let (me, laptop) = (key(1), key(2));
+        store_as_spelled_otherwise(&f.store, &me, "this desk").await;
+        let spelled = store_as_spelled_otherwise(&f.store, &laptop, "laptop").await;
+
+        let found = devices(&f.store, &me).await;
+        assert_eq!(
+            found,
+            [(*me.as_bytes(), THIS_DEVICE.to_string()), (*laptop.as_bytes(), "laptop".to_string())],
+            "this device is listed twice, or a member under another spelling is not its key's"
+        );
+        let claims = [claimed(&did_of(&laptop), FIRST_DRIVE_ID), claimed(&did_of(&me), "another-drive")];
+        assert_eq!(whole_on(&claims, &found, Some(FIRST_DRIVE_ID)), ["laptop"], "the laptop's claim did not count for it");
+        assert_eq!(whole_on(&claims, &found, Some("another-drive")), [THIS_DEVICE]);
+        assert!(
+            whole_on(&[claimed(&spelled.did, FIRST_DRIVE_ID)], &found, Some(FIRST_DRIVE_ID)).is_empty(),
+            "a claim under a string that names no key counted for a device"
+        );
+
+        let again = kotton_schemas::membership::Member { did: did_of(&laptop), label: Some("laptop again".into()), ..spelled.clone() };
+        f.store.write_member(&again).await.unwrap();
+        let found = devices(&f.store, &me).await;
+        assert_eq!(found.iter().filter(|(k, _)| k == laptop.as_bytes()).count(), 1, "one key was listed as two devices: {found:?}");
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(
+            found[1],
+            (*laptop.as_bytes(), "laptop again".to_string()),
+            "the device is not named by the member under its key's own did:key"
+        );
+        // Whatever order the set lists them in: the members under the
+        // laptop's key in both orders, beside more under strings that name no
+        // key, give the label of the one under its `did:key`.
+        let others: Vec<_> = ["did:example:laptop", "did:web:laptop.example"]
+            .into_iter()
+            .map(|did| kotton_schemas::membership::Member { did: did.into(), label: Some(format!("not {did}")), ..spelled.clone() })
+            .collect();
+        for listed in [
+            [vec![spelled.clone()], others.clone(), vec![again.clone()]].concat(),
+            [vec![again.clone()], others.clone(), vec![spelled.clone()]].concat(),
+        ] {
+            let named = devices_among(listed.clone(), &me);
+            assert_eq!(
+                named,
+                [(*me.as_bytes(), THIS_DEVICE.to_string()), (*laptop.as_bytes(), "laptop again".to_string())],
+                "listed as {:?}",
+                listed.iter().map(|m| &m.did).collect::<Vec<_>>()
+            );
+        }
+        let none_under_its_did_key = [others.clone(), vec![spelled.clone()]].concat();
+        assert_eq!(devices_among(none_under_its_did_key, &me)[1].1, "not did:example:laptop", "with none under its did:key, the first listed");
+
+        Record::new(&f.rt.schema_registry, &f.records).insert(CLAIM_NSID, claims[0].to_record()).await.unwrap();
+        claim(&f.rt.schema_registry, &f.records, &[], &did_of(&me)).await.unwrap();
+        let status = Read::now(&f.rt.schema_registry, &f.records, &f.store, &f.db, "alice", &me).await.unwrap().status(&f.db, "alice", None).await.unwrap();
+        let personal = status.drives.iter().find(|d| d.name == FIRST_DRIVE_NAME).expect("personal is not in the status");
+        let mut whole = personal.pinned_whole.clone();
+        whole.sort();
+        let mut expected = vec![THIS_DEVICE.to_string(), found.iter().find(|(k, _)| k == laptop.as_bytes()).unwrap().1.clone()];
+        expected.sort();
+        assert_eq!(whole, expected, "status names a device twice, or misses one");
     }
 
     /// A daemon, its records and its machine database, for one person, with a
@@ -906,7 +1054,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn settings_stay_in_the_devices_own_database_and_none_reaches_a_drive() {
         let f = fixture().await;
-        let me = "did:key:z6Mkme";
+        let me = &key(1);
         let set = |scope: PinScope, value: Option<PinValue>| {
             let f = &f;
             async move { super::set(&f.rt.schema_registry, &f.records, &f.store, &f.db, "alice", me, &scope, value).await.unwrap().unwrap() }
@@ -933,14 +1081,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_device_writes_only_its_own_claim_and_withdraws_it_by_a_delete() {
         let f = fixture().await;
-        let me = "did:key:z6Mkme";
+        let me_key = &key(1);
+        let me_did = did_of(me_key);
+        let me = me_did.as_str();
         let other = claimed("did:key:z6Mkother", FIRST_DRIVE_ID);
         Record::new(&f.rt.schema_registry, &f.records).insert(CLAIM_NSID, other.to_record()).await.unwrap();
         let mine = claimed(me, FIRST_DRIVE_ID);
         let personal = PinScope::Drive { drive: FIRST_DRIVE_NAME.into() };
         let set = |value: PinValue| {
             let (f, personal) = (&f, personal.clone());
-            async move { super::set(&f.rt.schema_registry, &f.records, &f.store, &f.db, "alice", me, &personal, Some(value)).await.unwrap().unwrap() }
+            async move { super::set(&f.rt.schema_registry, &f.records, &f.store, &f.db, "alice", me_key, &personal, Some(value)).await.unwrap().unwrap() }
         };
 
         set(PinValue::Whole).await;
@@ -1051,7 +1201,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_folder_is_held_to_its_form_where_the_setting_is_kept() {
         let f = fixture().await;
-        let me = "did:key:z6Mkme";
+        let me = &key(1);
         let folder = |p: &str| PinScope::Folder { drive: FIRST_DRIVE_NAME.into(), folder: p.into() };
         let set = |scope: PinScope| {
             let f = &f;
@@ -1080,11 +1230,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_retired_drive_leaves_no_claim_in_the_telling() {
         let f = fixture().await;
-        let devices = vec![("did:key:z6Mkme".to_string(), THIS_DEVICE.to_string())];
-        let claims = vec![claimed("did:key:z6Mkme", &"ab".repeat(16))];
+        let me = key(1);
+        let devices = vec![(*me.as_bytes(), THIS_DEVICE.to_string())];
+        let claims = vec![claimed(&did_of(&me), &"ab".repeat(16))];
         let told = notices(&f.db, "alice", &claims, &devices).await.unwrap();
         assert_eq!(told, [PinNotice::NoWholeDevice { drive: FIRST_DRIVE_NAME.into() }], "{told:?}");
-        let claims = vec![claimed("did:key:z6Mkme", FIRST_DRIVE_ID)];
+        let claims = vec![claimed(&did_of(&me), FIRST_DRIVE_ID)];
         assert!(notices(&f.db, "alice", &claims, &devices).await.unwrap().is_empty());
     }
 
@@ -1102,7 +1253,8 @@ mod tests {
         let home = ed25519_dalek::SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
         let photos = record::Listed { tree: kotton_wire::ipc::MadeDrive([2; 16]).tree(), name: "photos".into(), id: "ab".repeat(16) };
         record::reconcile(&f.db, "alice", &home, &[photos.clone(), personal_at(1)]).await.unwrap();
-        let devices = vec![("did:key:z6Mkme".to_string(), THIS_DEVICE.to_string())];
+        let me = key(1);
+        let devices = vec![(*me.as_bytes(), THIS_DEVICE.to_string())];
         let told = notices(&f.db, "alice", &[], &devices).await.unwrap();
         assert_eq!(
             told,
@@ -1111,7 +1263,7 @@ mod tests {
         );
 
         record::reconcile(&f.db, "alice", &home, &[photos]).await.unwrap();
-        let told = notices(&f.db, "alice", &[claimed("did:key:z6Mkme", FIRST_DRIVE_ID)], &devices).await.unwrap();
+        let told = notices(&f.db, "alice", &[claimed(&did_of(&me), FIRST_DRIVE_ID)], &devices).await.unwrap();
         assert_eq!(told[0], PinNotice::NotFound { drive: FIRST_DRIVE_NAME.into() }, "{told:?}");
 
         // A second vault, and personal at both.
@@ -1123,7 +1275,7 @@ mod tests {
         let mut vaults = vec![(home, "vault".to_string()), (office, "office".to_string())];
         vaults.sort();
         let vaults: Vec<String> = vaults.into_iter().map(|(_, label)| label).collect();
-        let claims = [claimed("did:key:z6Mkme", FIRST_DRIVE_ID)];
+        let claims = [claimed(&did_of(&me), FIRST_DRIVE_ID)];
         let told = notices(&f.db, "alice", &claims, &devices).await.unwrap();
         assert_eq!(told, [PinNotice::Twice { drive: FIRST_DRIVE_NAME.into(), vaults: vaults.clone(), synced: None, moving: None }]);
         record::mark_synced(&f.db, "alice", &office, &personal_at(3).tree).await.unwrap();

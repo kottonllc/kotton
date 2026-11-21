@@ -561,8 +561,14 @@ impl DeviceRuntime {
     /// certificate on connect. This is what `GetNodeIdentity` answers, what
     /// the pairing ceremony records, and what a person writes down.
     pub fn operational_did(&self) -> String {
-        kotton_crypto::DidKeyMethod::from_public_key(&kotton_crypto::ed25519::verifying_key(&self.device_signing_key))
-            .to_string()
+        kotton_crypto::DidKeyMethod::from_public_key(&self.operational_key()).to_string()
+    }
+
+    /// The key this node presents, as the Ed25519 rule's type: what
+    /// [`Self::operational_did`] names, and what a reader that finds this
+    /// device among the person's compares by its bytes.
+    pub fn operational_key(&self) -> kotton_crypto::ed25519::VerifyingKey {
+        kotton_crypto::ed25519::verifying_key(&self.device_signing_key)
     }
 
     /// Check if runtime is started
