@@ -3569,3 +3569,103 @@ mod one_row_for_a_key {
         assert!(keys.read().unwrap().is_empty(), "the key stayed on the allowlist with no row");
     }
 }
+
+/// **The narrowest of a key's rows answers what the key may ask**
+/// (kottonllc/kotton#597): where two rows of a person's hold one key, as only
+/// an earlier build can have stored them, `paired_posture_for_user` answers
+/// with the narrowest of what they say, whichever row holds which DID and
+/// whichever was paired first.
+#[cfg(test)]
+mod narrowest_of_a_keys_rows {
+    use super::*;
+    use kotton_crypto::DidKeyMethod;
+
+    /// Text no build of this one's recognises as a posture.
+    const UNRECOGNISED: &str = "posture-of-a-later-build";
+
+    /// The six things a row can say, narrowest first, as the addendum orders
+    /// them; stated here apart from the function under test.
+    const NARROWEST_FIRST: [Option<&str>; 6] =
+        [Some("gateway"), Some("blind-storage"), Some("cosigner"), Some(UNRECOGNISED), Some("full"), None];
+
+    fn key(seed: u8) -> VerifyingKey {
+        kotton_crypto::ed25519::verifying_key(&SigningKey::from_bytes(&[seed; 32]))
+    }
+
+    async fn agent_db(dir: &tempfile::TempDir) -> Arc<SqlitePool> {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        Arc::new(pool)
+    }
+
+    /// Two names for `k`, as (lower, higher) by their bytes.
+    fn two_names(k: &VerifyingKey) -> (String, String) {
+        let (a, b) = (
+            DidKeyMethod::from_public_key(k).to_string(),
+            DidKeyMethod::spelled_otherwise(k.as_bytes()).to_string(),
+        );
+        if a < b { (a, b) } else { (b, a) }
+    }
+
+    /// **Every pair of the six, in all four arrangements of DID and time.**
+    /// Rows `a` and `b` of alice's under one key: `a` under the lower DID or
+    /// the higher, paired before `b` or after. The answer is whichever of the
+    /// two comes first in [`NARROWEST_FIRST`], in every arrangement. Each case
+    /// is its own key, so no case reads another's rows; bob's row under each
+    /// key says `full` and changes nothing of alice's answer.
+    #[tokio::test]
+    async fn the_narrowest_of_two_rows_answers_in_every_arrangement() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let mut seed = 0u8;
+        for a in NARROWEST_FIRST {
+            for b in NARROWEST_FIRST {
+                let want = NARROWEST_FIRST.iter().copied().find(|p| *p == a || *p == b).unwrap().map(str::to_string);
+                for a_lower in [true, false] {
+                    for a_first in [true, false] {
+                        seed += 1;
+                        let k = key(seed);
+                        let (lower, higher) = two_names(&k);
+                        let (a_did, b_did) = if a_lower { (&lower, &higher) } else { (&higher, &lower) };
+                        let (a_at, b_at) = if a_first { (100, 200) } else { (200, 100) };
+                        network_db::seed_paired_node_as_stored(&db, "a", "alice", a_did, k.as_bytes(), "[]", a_at, a).await.unwrap();
+                        network_db::seed_paired_node_as_stored(&db, "b", "alice", b_did, k.as_bytes(), "[]", b_at, b).await.unwrap();
+                        network_db::seed_paired_node_as_stored(&db, "b", "bob", &lower, k.as_bytes(), "[]", 300, Some("full"))
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            network_db::paired_posture_for_user(&db, k.as_bytes(), "alice").await.unwrap(),
+                            Some(want.clone()),
+                            "rows {a:?} and {b:?}, the first under the lower DID: {a_lower}, paired first: {a_first}"
+                        );
+                        sqlx::query("DELETE FROM paired_nodes").execute(db.as_ref()).await.unwrap();
+                    }
+                }
+            }
+        }
+        assert_eq!(network_db::paired_posture_for_user(&db, key(1).as_bytes(), "alice").await.unwrap(), None, "no row: no posture");
+    }
+
+    /// **Two texts this build does not recognise: the least by its bytes
+    /// answers**, whichever row holds it.
+    #[tokio::test]
+    async fn of_two_unrecognised_texts_the_least_by_its_bytes_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let k = key(7);
+        let (lower, higher) = two_names(&k);
+        for (lower_says, higher_says) in [("zz-later", "aa-later"), ("aa-later", "zz-later")] {
+            network_db::seed_paired_node_as_stored(&db, "a", "alice", &lower, k.as_bytes(), "[]", 200, Some(lower_says)).await.unwrap();
+            network_db::seed_paired_node_as_stored(&db, "b", "alice", &higher, k.as_bytes(), "[]", 100, Some(higher_says)).await.unwrap();
+            assert_eq!(
+                network_db::paired_posture_for_user(&db, k.as_bytes(), "alice").await.unwrap(),
+                Some(Some("aa-later".to_string())),
+                "the lower DID says {lower_says}"
+            );
+            sqlx::query("DELETE FROM paired_nodes").execute(db.as_ref()).await.unwrap();
+        }
+    }
+}

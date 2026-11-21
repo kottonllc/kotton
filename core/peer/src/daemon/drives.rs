@@ -1067,4 +1067,41 @@ mod tests {
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(db.as_ref()).await.unwrap();
         assert_eq!(left, 0);
     }
+
+    /// **A key recorded as a drive is read as `blind-storage`, whatever a
+    /// second row under it says** (kottonllc/kotton#597: the narrowest of a
+    /// key's rows answers what it may ask). Two rows of alice's for the vault's
+    /// key; the drive is recorded through the newer, which names no posture
+    /// and is made `blind-storage`. The older says `full`, `cosigner`, text
+    /// this build does not recognise, or nothing, and holds the lower DID or
+    /// the higher. In every case the key is read as `blind-storage`.
+    #[tokio::test]
+    async fn a_key_recorded_as_a_drive_is_read_as_blind_storage_whatever_its_other_row_says() {
+        for (seed, older_says) in [(41u8, Some("full")), (42, Some("cosigner")), (43, Some("posture-of-a-later-build")), (44, None)] {
+            let k = key(seed);
+            let (derived, spelled) = (did(&k), kotton_crypto::DidKeyMethod::spelled_otherwise(&k).to_string());
+            for newer_lower in [true, false] {
+                let (dir, db) = machine_db().await;
+                let (lower, higher) = if derived < spelled { (&derived, &spelled) } else { (&spelled, &derived) };
+                let (newer, older) = if newer_lower { (lower, higher) } else { (higher, lower) };
+                network_db::seed_paired_node_as_stored(&db, "vault", "alice", newer, &k, "[]", 200, None).await.unwrap();
+                network_db::seed_paired_node_as_stored(&db, "vault-before", "alice", older, &k, "[]", 100, older_says)
+                    .await
+                    .unwrap();
+                record(&db, "alice", &k).await.unwrap();
+                let case = format!("the older says {older_says:?}, the newer holds the lower DID: {newer_lower}");
+                let drives = list(&db, "alice").await.unwrap();
+                assert_eq!(drives.len(), 1, "{case}: {drives:?}");
+                assert_eq!(drives[0].node.id, "vault", "{case}: the premise: recorded through the newer");
+                let older_row = network_db::get_paired_node(&db, "alice", older).await.unwrap().unwrap();
+                assert_eq!(older_row.posture.as_deref(), older_says, "{case}: the premise: the older row is as stored");
+                assert_eq!(
+                    network_db::paired_posture_for_user(&db, &k, "alice").await.unwrap(),
+                    Some(Some(Posture::BlindStorage.as_str().to_string())),
+                    "{case}: the key is not read as blind-storage"
+                );
+                drop(dir);
+            }
+        }
+    }
 }

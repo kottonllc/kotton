@@ -42,6 +42,7 @@ use kotton_wire::did::{Did, DidError};
 use kotton_wire::peer::{EphemeralSession, MountConfig, PairedNode};
 use kotton_wire::GrantEnvelope;
 use kotton_crypto::ed25519::VerifyingKey;
+use kotton_schemas::membership::Posture;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashSet;
 use std::io;
@@ -719,24 +720,54 @@ pub async fn paired_users_for_pubkey(
 /// decides what a key may ask *for this person* — the peer path's gateway
 /// confinement and `NodeRelay`'s own-device check both read it, for the person
 /// the request names; another person's row for the same key says nothing of
-/// what it is to this one. Where two rows of this person's hold the key, which
-/// only an earlier build can have stored, a `gateway` row answers first: within
-/// one person's rows, the narrower verb wins.
+/// what it is to this one.
+///
+/// Where two rows of this person's hold the key, which only an earlier build
+/// can have stored, the narrowest of what they say answers ([`narrowest`]):
+/// within one person's rows, the narrower verb wins. The answer is a function
+/// of the postures alone; it reads neither a row's DID nor its `paired_at`, so
+/// it is the same however the rows are spelled and whenever they were written.
+/// It picks no row to reach: the row a key is reached through is
+/// [`reached_through`]'s, and may be another (kottonllc/kotton#597).
 pub async fn paired_posture_for_user(
     db: &Arc<SqlitePool>,
     public_key: &[u8; 32],
     user_id: &str,
 ) -> io::Result<Option<Option<String>>> {
-    let row = sqlx::query(
-        "SELECT posture FROM paired_nodes WHERE public_key = ? AND user_id = ? \
-         ORDER BY (posture = 'gateway') DESC, device_did LIMIT 1",
-    )
-    .bind(public_key.as_slice())
-    .bind(user_id)
-    .fetch_optional(db.as_ref())
-    .await
-    .map_err(db_err)?;
-    Ok(row.map(|r| r.get::<Option<String>, _>("posture")))
+    let postures: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT posture FROM paired_nodes WHERE public_key = ? AND user_id = ?")
+            .bind(public_key.as_slice())
+            .bind(user_id)
+            .fetch_all(db.as_ref())
+            .await
+            .map_err(db_err)?;
+    Ok(narrowest(postures.iter().map(Option::as_deref)).map(|p| p.map(str::to_string)))
+}
+
+/// The narrowest of the postures a person's rows for one key say, `None` for
+/// no rows; `Some(None)` where the narrowest is a row naming none. Narrowest
+/// first: `gateway`; `blind-storage`; `cosigner`; text this build does not
+/// recognise, the least by its bytes; `full`; no posture.
+///
+/// `gateway` is first because a gateway holds nothing and is postured so
+/// pairing gives it no reach (`Posture::Gateway`). The postures after it up to
+/// `full` are those its readers take as not `full`, and so are given no key at
+/// `NodeRelay`; text this build does not recognise is among them, as every
+/// reader already reads it (`kotton_peer::relay_keys::offers_from`).
+pub fn narrowest<'a>(postures: impl IntoIterator<Item = Option<&'a str>>) -> Option<Option<&'a str>> {
+    /// Where `posture` stands, narrowest first; ties only between texts this
+    /// build does not recognise, which the text itself orders.
+    fn place(posture: Option<&str>) -> (u8, &str) {
+        match posture.map(|text| (Posture::parse(text), text)) {
+            Some((Some(Posture::Gateway), _)) => (0, ""),
+            Some((Some(Posture::BlindStorage), _)) => (1, ""),
+            Some((Some(Posture::Cosigner), _)) => (2, ""),
+            Some((None, text)) => (3, text),
+            Some((Some(Posture::Full), _)) => (4, ""),
+            None => (5, ""),
+        }
+    }
+    postures.into_iter().min_by(|a, b| place(*a).cmp(&place(*b)))
 }
 
 /// Return `true` if the peer's raw Ed25519 public key is recorded in `paired_nodes` for `user_id`.
