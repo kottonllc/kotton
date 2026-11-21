@@ -1574,7 +1574,7 @@ async fn answer_request(
                 Ok(both) => both,
                 Err(message) => return Ok(UserResponse::Error { message }),
             };
-            let me = runtime.operational_did();
+            let me = runtime.operational_key();
             match kotton_device::users::pins::set(&runtime.schema_registry, &records, &store, db, &user_id, &me, &scope, value).await? {
                 Ok(pins) => {
                     if value == Some(kotton_wire::ipc::PinValue::Whole) {
@@ -1591,7 +1591,7 @@ async fn answer_request(
                 Ok(both) => both,
                 Err(message) => return Ok(UserResponse::Error { message }),
             };
-            let read = kotton_device::users::pins::Read::now(&runtime.schema_registry, &records, &store, db, &user_id, &runtime.operational_did()).await?;
+            let read = kotton_device::users::pins::Read::now(&runtime.schema_registry, &records, &store, db, &user_id, &runtime.operational_key()).await?;
             Ok(UserResponse::Pins { pins: read.readout(db, &user_id).await? })
         }
         UserRequest::Status { user_id } => {
@@ -1599,7 +1599,7 @@ async fn answer_request(
                 Ok(both) => both,
                 Err(message) => return Ok(UserResponse::Error { message }),
             };
-            let read = kotton_device::users::pins::Read::now(&runtime.schema_registry, &records, &store, db, &user_id, &runtime.operational_did()).await?;
+            let read = kotton_device::users::pins::Read::now(&runtime.schema_registry, &records, &store, db, &user_id, &runtime.operational_key()).await?;
             let status = read.status(db, &user_id, sync_engine.last_sync_at(&user_id)).await?;
             Ok(UserResponse::Status { status })
         }

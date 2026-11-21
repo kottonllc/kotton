@@ -501,6 +501,31 @@ pub(crate) async fn sync_status(
     }))
 }
 
+/// Each of the person's rows, and whether it is connected: **a row is
+/// connected where a connected peer presents the key it holds**
+/// (kottonllc/kotton#597, 29A). Each peer in `connected` is the DID the
+/// transport derives from the key its handshake proved, and is decoded under
+/// the Ed25519 rule, which gives a key only for that key's own `did:key`; a
+/// row is matched by its bytes, and the DID stored beside them is read only
+/// as the row's name. A peer whose string names no key connects no row.
+fn peer_statuses(nodes: Vec<kotton_wire::peer::PairedNode>, connected: &HashSet<String>) -> Vec<kotton_wire::ipc::PeerStatus> {
+    let keys: HashSet<[u8; 32]> = connected
+        .iter()
+        .filter_map(|peer| kotton_wire::did::Did::parse(peer).ok())
+        .filter_map(|did| kotton_crypto::did::DidKeyMethod::to_public_key(&did).ok())
+        .map(|key| *key.as_bytes())
+        .collect();
+    nodes
+        .into_iter()
+        .map(|n| kotton_wire::ipc::PeerStatus {
+            connected: keys.contains(&n.public_key),
+            label: n.id,
+            did: n.device_did.to_string(),
+            last_seen_at: None, // not tracked
+        })
+        .collect()
+}
+
 /// Assemble a full network-status snapshot for the given user.
 ///
 /// Takes both pools: paired peers are the user's (`agent.db`), gateway and
@@ -513,20 +538,12 @@ pub(crate) async fn network_status(
     connected_peers: &Arc<RwLock<HashSet<String>>>,
     relay: kotton_wire::ipc::RelayReadout,
 ) -> io::Result<UserResponse> {
-    use kotton_wire::ipc::{GatewaySummary, PeerStatus, SyncStatusResult};
+    use kotton_wire::ipc::{GatewaySummary, SyncStatusResult};
 
     // -- Paired peers from DB ------------------------------------------------
     let nodes = network_db::list_paired_nodes(db, &user_id).await?;
     let peers_set = connected_peers.read().unwrap().clone();
-    let peers: Vec<PeerStatus> = nodes
-        .into_iter()
-        .map(|n| PeerStatus {
-            connected: peers_set.contains(&n.device_did.to_string()),
-            label: n.id,
-            did: n.device_did.to_string(),
-            last_seen_at: None, // not tracked
-        })
-        .collect();
+    let peers = peer_statuses(nodes, &peers_set);
 
     // -- Gateway summaries ---------------------------------------------------
     let quic_enabled = device_config_db::get_key(device_db.as_ref(), "quic-gateway.enabled")
@@ -643,7 +660,7 @@ pub(crate) async fn device_name(
 
 #[cfg(test)]
 mod tests {
-    use super::{config_status, coord_set, coord_status};
+    use super::{config_status, coord_set, coord_status, peer_statuses};
     use crate::agent::DeviceDaemon;
     use kotton_device::config::db::RelayChoice;
     use kotton_device::DeviceRuntime;
@@ -794,5 +811,41 @@ mod tests {
             UserResponse::RendezvousStatus(info) => assert_eq!(info.url, None),
             other => panic!("relay status answered {other:?}"),
         }
+    }
+    /// **`network status` reads a row as connected by its key**
+    /// (kottonllc/kotton#597, 29A): the transport reports the `did:key` it
+    /// derives from the handshake's key. A row an earlier build stored under
+    /// another spelling of that `did:key`, beside the key's bytes, is
+    /// connected; a row whose DID as stored is a reported string, but which
+    /// that string names no key of, is not; nor is a row whose key no peer
+    /// presents.
+    #[test]
+    fn a_row_is_connected_by_the_key_it_holds() {
+        use kotton_crypto::DidKeyMethod;
+        let key = |seed: u8| kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[seed; 32]));
+        let row = |id: &str, did: String, public_key: [u8; 32]| kotton_wire::peer::PairedNode {
+            id: id.to_string(),
+            device_did: kotton_wire::did::Did::parse(&did).unwrap(),
+            public_key,
+            paired_at: 0,
+            addresses: Vec::new(),
+            relay_url: None,
+            posture: None,
+        };
+        let (laptop, phone, desk) = (key(1), key(2), key(3));
+        let laptop_spelled = DidKeyMethod::spelled_otherwise(laptop.as_bytes()).to_string();
+        let phone_spelled = DidKeyMethod::spelled_otherwise(phone.as_bytes()).to_string();
+        let nodes = vec![
+            row("laptop", laptop_spelled, *laptop.as_bytes()),
+            row("phone", phone_spelled.clone(), *phone.as_bytes()),
+            row("desk", DidKeyMethod::from_public_key(&desk).to_string(), *desk.as_bytes()),
+        ];
+        let connected = [DidKeyMethod::from_public_key(&laptop).to_string(), phone_spelled].into_iter().collect();
+        let said: Vec<(String, bool)> = peer_statuses(nodes, &connected).into_iter().map(|p| (p.label, p.connected)).collect();
+        assert_eq!(
+            said,
+            [("laptop".to_string(), true), ("phone".to_string(), false), ("desk".to_string(), false)],
+            "a row was read as connected by the DID stored beside its key"
+        );
     }
 }
