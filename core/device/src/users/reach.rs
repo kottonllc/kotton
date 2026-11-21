@@ -476,10 +476,13 @@ mod tests {
     }
 
     /// `device` as a member of the person's set, as enrolment writes it.
+    /// The own-device member for `device`, named by its key's derivation, as
+    /// every writer of an own-device member names it.
     fn member(device: &DeviceRuntime, name: &str, posture: Option<Posture>) -> Member {
+        let public_key = device.device_signing_pubkey_bytes();
         Member {
-            did: format!("did:key:{name}"),
-            public_key: device.device_signing_pubkey_bytes(),
+            did: kotton_crypto::DidKeyMethod::from_public_key_bytes(&public_key).unwrap().to_string(),
+            public_key,
             role: Role::OwnDevice,
             admitted_by: kotton_schemas::membership::Ceremony::DeviceEnroll,
             added_at: "2026-10-07T00:00:00Z".into(),
@@ -628,6 +631,7 @@ mod tests {
         store.write_member(&member(&desktop, "desktop", Some(Posture::Full))).await.unwrap();
         let mut vault = member(&desktop, "vault", Some(Posture::BlindStorage));
         vault.public_key = SigningKey::from_bytes(&[4u8; 32]).verifying_key().to_bytes();
+        vault.did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&vault.public_key).unwrap().to_string();
         store.write_member(&vault).await.unwrap();
         let now = 1_900_000_000u64;
 

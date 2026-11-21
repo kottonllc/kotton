@@ -2619,8 +2619,7 @@ mod tests {
         crate::db::MIGRATOR.run(db.as_ref()).await.unwrap();
         let key = |seed: u8| ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
         for (label, k) in [("home", key(9)), ("office", key(4))] {
-            let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&k).unwrap().to_string();
-            network_db::insert_paired_node(&db, label, "alice", &did, &k, "[]", 0, None).await.unwrap();
+            network_db::insert_paired_node(&db, label, "alice", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&k).unwrap(), "[]", 0, None).await.unwrap();
             record::record(&db, "alice", &k).await.unwrap();
         }
         let (recorded, raced) = ("ab".repeat(16), "cd".repeat(16));

@@ -34,8 +34,13 @@
 //!    joins across tenants.
 //!
 //! An admit writes the row the enrolment writes — `paired_nodes`, under the
-//! tenant, posture `full` — keyed by the device's DID rather than a name it
-//! chose, and admits the key at the handshake. A withdrawal deletes the key's
+//! tenant, posture `full` — under the derivation of the key condition 2
+//! constructed, and labelled by it rather than by a name the device chose, and
+//! admits the key at the handshake (kottonllc/kotton#597, 27A). A key the
+//! tenant has a row for keeps that row as it is; where the derivation is
+//! already a row of the tenant's beside another key, which only an earlier
+//! build can have stored, the admit is refused, names that row, writes nothing
+//! and records no change (30A). A withdrawal deletes the key's
 //! row for the tenant and recomputes the allowlist from what is left, as a
 //! landlord's drop does (`crate::tenancy`). Both tables carry `user_id`, so a
 //! drop sweeps them with the rest.
@@ -133,11 +138,9 @@ pub async fn accept(
     // under bytes that are no key it is matched as stored (`stored`).
     let named = Did::parse(&change.device_did).ok().and_then(|d| DidKeyMethod::to_public_key(&d).ok());
     let taken = match (change.act, named) {
-        (TenantDeviceAct::Admit, Some(key)) if key.as_bytes() == &change.public_key => Some(Taken::Admit {
-            key,
-            device_did: &change.device_did,
-            said_at_ms: change.said_at_ms,
-        }),
+        (TenantDeviceAct::Admit, Some(key)) if key.as_bytes() == &change.public_key => {
+            Some(Taken::Admit { key, said_at_ms: change.said_at_ms })
+        }
         (TenantDeviceAct::Withdraw, Some(key)) if key.as_bytes() == &change.public_key => {
             Some(Taken::Withdraw { public_key: change.public_key, said_at_ms: change.said_at_ms, stored: None })
         }
@@ -170,7 +173,7 @@ pub async fn accept(
 /// is removed, and no change is recorded under bytes that are no key.
 #[derive(Clone, Copy)]
 enum Taken<'a> {
-    Admit { key: VerifyingKey, device_did: &'a str, said_at_ms: u64 },
+    Admit { key: VerifyingKey, said_at_ms: u64 },
     Withdraw { public_key: [u8; 32], said_at_ms: u64, stored: Option<&'a str> },
 }
 
@@ -266,7 +269,7 @@ async fn apply_in(
             .map_err(io::Error::other)?
             .map(|r| r.get("said_at"));
     let recorded = match taken {
-        Taken::Admit { device_did, .. } => {
+        Taken::Admit { key: admitted, .. } => {
             if last.is_some_and(|l| said_at <= l) {
                 return Ok(Err("an admit no later than a change already taken for this key".to_string()));
             }
@@ -292,18 +295,38 @@ async fn apply_in(
                 Some(held) if held != user_id => {
                     return Ok(Err("the key is paired here to another tenant".to_string()));
                 }
+                // A row of the tenant's already holds the key: it stands as it
+                // is, since this admit brings nothing it may lack
+                // (kottonllc/kotton#597, 69A).
                 Some(_) => {}
-                // The row the enrolment writes, keyed by the DID rather than
-                // a name the device chose.
+                // The row the enrolment writes, under the derivation of the key
+                // `accept` constructed, and labelled by it rather than by a
+                // name the device chose (27A). Where that string is already a
+                // row of the tenant's beside another key, which only an earlier
+                // build can have stored, the admit is refused, names the row,
+                // and writes nothing (30A, 71A).
                 None => {
+                    let device_did = DidKeyMethod::from_public_key(&admitted).to_string();
+                    let beside = sqlx::query("SELECT 1 FROM paired_nodes WHERE user_id = ? AND device_did = ? LIMIT 1")
+                        .bind(user_id)
+                        .bind(&device_did)
+                        .fetch_optional(&mut *conn)
+                        .await
+                        .map_err(io::Error::other)?;
+                    if beside.is_some() {
+                        return Ok(Err(format!(
+                            "the tenant's row {device_did} here holds another key than the one this admit \
+                             names, and is kept as that"
+                        )));
+                    }
                     sqlx::query(
                         "INSERT INTO paired_nodes \
                          (id, user_id, device_did, public_key, addresses, paired_at, posture, relay_url) \
                          VALUES (?, ?, ?, ?, '[]', ?, ?, NULL)",
                     )
-                    .bind(device_did)
+                    .bind(&device_did)
                     .bind(user_id)
-                    .bind(device_did)
+                    .bind(&device_did)
                     .bind(key)
                     .bind(kotton_common::time::now_secs())
                     .bind(kotton_schemas::membership::Posture::Full.as_str())
@@ -366,7 +389,6 @@ mod tests {
         let taken = match change.act {
             TenantDeviceAct::Admit => Taken::Admit {
                 key: VerifyingKey::from_bytes(&change.public_key).expect("a fixture admit is a key the rule admits"),
-                device_did: &change.device_did,
                 said_at_ms: change.said_at_ms,
             },
             TenantDeviceAct::Withdraw => Taken::Withdraw { public_key: change.public_key, said_at_ms: change.said_at_ms, stored: None },
@@ -375,10 +397,10 @@ mod tests {
         let outcome = apply(db, keys, user, taken).await;
         if matches!(outcome, Ok(Ok(()))) {
             match taken {
-                Taken::Admit { device_did, .. } => {
+                Taken::Admit { key, .. } => {
                     let row: Vec<u8> = sqlx::query("SELECT public_key FROM paired_nodes WHERE user_id = ? AND device_did = ?")
                         .bind(user)
-                        .bind(device_did)
+                        .bind(DidKeyMethod::from_public_key(&key).to_string())
                         .fetch_one(db.as_ref())
                         .await
                         .unwrap()
@@ -457,7 +479,7 @@ mod tests {
         let db = a_vault_db().await;
         let keys = Arc::new(RwLock::new(HashSet::new()));
         let (key, _) = a_device(5);
-        kotton_peer::daemon::db::insert_paired_node(&db, "bobs-laptop", "bob", "did:key:zBob", &key, "[]", 0, Some("full"))
+        kotton_peer::daemon::db::insert_paired_node(&db, "bobs-laptop", "bob", &VerifyingKey::from_bytes(&key).unwrap(), "[]", 0, Some("full"))
             .await
             .unwrap();
         let taken = apply_change(&db, &keys, "alice", &a_change(TenantDeviceAct::Admit, key, 1)).await.unwrap();
@@ -674,7 +696,7 @@ mod tests {
                     50.max(withdrawn_at)
                 }
                 Row::StoredOtherwise => {
-                    kotton_peer::daemon::db::insert_paired_node(&db, "old", "alice", &otherwise, &key, "[]", 0, Some("full"))
+                    kotton_peer::daemon::db::seed_paired_node_as_stored(&db, "old", "alice", &otherwise, &key, "[]", 0, Some("full"))
                         .await
                         .unwrap();
                     withdrawn_at
@@ -747,7 +769,7 @@ mod tests {
         let refused = kotton_crypto::ed25519::refused_keys();
         for (i, (_, bytes)) in refused.iter().enumerate() {
             let did = DidKeyMethod::spelled_over(bytes).to_string();
-            kotton_peer::daemon::db::insert_paired_node(&db, &format!("old-{i}"), "alice", &did, bytes, "[]", 0, Some("full"))
+            kotton_peer::daemon::db::seed_paired_node_as_stored(&db, &format!("old-{i}"), "alice", &did, bytes, "[]", 0, Some("full"))
                 .await
                 .unwrap();
         }
@@ -821,7 +843,7 @@ mod tests {
         let keys = Arc::new(RwLock::new(HashSet::new()));
         for (i, (name, bytes)) in kotton_crypto::ed25519::refused_keys().into_iter().enumerate() {
             let did = DidKeyMethod::spelled_over(&bytes);
-            kotton_peer::daemon::db::insert_paired_node(&db, &format!("old-{i}"), "alice", &did.to_string(), &bytes, "[]", 0, Some("full"))
+            kotton_peer::daemon::db::seed_paired_node_as_stored(&db, &format!("old-{i}"), "alice", &did.to_string(), &bytes, "[]", 0, Some("full"))
                 .await
                 .unwrap();
             let row = kotton_wire::peer::PairedNode {
@@ -857,7 +879,7 @@ mod tests {
         let keys = Arc::new(RwLock::new(HashSet::new()));
         let (key, _) = a_device(11);
         let otherwise = DidKeyMethod::spelled_otherwise(&key).to_string();
-        kotton_peer::daemon::db::insert_paired_node(&db, "laptop", "alice", &otherwise, &key, "[]", 0, Some("full"))
+        kotton_peer::daemon::db::seed_paired_node_as_stored(&db, "laptop", "alice", &otherwise, &key, "[]", 0, Some("full"))
             .await
             .unwrap();
         let tenants: Vec<(String, Arc<dyn kotton_peer::membership::MemberStore>)> = vec![("alice".into(), Arc::new(Sealed))];
@@ -942,8 +964,7 @@ mod tests {
         let (db, busy) = a_file_pool(dir.path()).await;
         let keys = Arc::new(RwLock::new(HashSet::new()));
         let (key, _) = a_device(8);
-        let change = a_change(TenantDeviceAct::Admit, key, 1);
-        let taken = Taken::Admit { key: VerifyingKey::from_bytes(&key).unwrap(), device_did: &change.device_did, said_at_ms: 1 };
+        let taken = Taken::Admit { key: VerifyingKey::from_bytes(&key).unwrap(), said_at_ms: 1 };
         let failed = apply_ending(&db, &keys, "alice", taken, Some("COMMIT TO NOWHERE")).await;
         assert!(failed.is_err(), "an end that failed was reported taken: {failed:?}");
         assert!(!paired(&db, "alice", &key).await, "a change whose end failed was kept");
@@ -976,5 +997,109 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, 0, "a dropped transaction's write was kept");
+    }
+
+    /// Every row of alice's, column for column: label, DID, key, addresses, time, posture.
+    async fn alices_rows(db: &Arc<SqlitePool>) -> Vec<(String, String, Vec<u8>, String, i64, Option<String>)> {
+        sqlx::query_as(
+            "SELECT id, device_did, public_key, addresses, paired_at, posture FROM paired_nodes \
+             WHERE user_id = 'alice' ORDER BY device_did",
+        )
+        .fetch_all(db.as_ref())
+        .await
+        .unwrap()
+    }
+
+    async fn changes_for(db: &Arc<SqlitePool>, key: &[u8; 32]) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM tenant_device_changes WHERE public_key = ?")
+            .bind(key.as_slice())
+            .fetch_one(db.as_ref())
+            .await
+            .unwrap()
+    }
+
+    /// **An admit writes the tenant's row under the derivation of the key it
+    /// constructed** (kottonllc/kotton#597, 27A), labelled by it, for keys from
+    /// seeds.
+    #[tokio::test]
+    async fn an_admit_writes_its_row_under_the_derivation_of_the_key_it_constructed() {
+        let base = tempfile::tempdir().unwrap();
+        let identity = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        a_tenant_at(base.path(), &identity);
+        let db = a_vault_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        for seed in [31u8, 32] {
+            let (key, did) = a_device(seed);
+            let admit = TenantDeviceChange { act: TenantDeviceAct::Admit, device_did: did.clone(), public_key: key, said_at_ms: 1 };
+            accept(base.path(), &db, &keys, "alice", &admit, &signed(&identity, &admit)).await.unwrap();
+            let row = alices_rows(&db).await.into_iter().find(|r| r.2 == key).expect("the admit wrote a row");
+            assert_eq!((row.0, row.1), (did.clone(), did), "seed {seed}");
+        }
+    }
+
+    /// **An admit beside a string that is not its key's derivation is refused,
+    /// and nothing is written** (28A): another spelling of the key's `did:key`,
+    /// and a DID of another method, each beside a key from a seed; no row, no
+    /// key admitted, no change recorded. (Another key's `did:key` is
+    /// `an_admit_whose_did_does_not_name_its_key_is_refused`.)
+    #[tokio::test]
+    async fn an_admit_under_a_string_that_is_not_its_derivation_is_refused_and_writes_nothing() {
+        let base = tempfile::tempdir().unwrap();
+        let identity = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        a_tenant_at(base.path(), &identity);
+        let db = a_vault_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        let (key, _) = a_device(33);
+        for did in [DidKeyMethod::spelled_otherwise(&key).to_string(), "did:web:laptop.example".to_string()] {
+            let admit = TenantDeviceChange { act: TenantDeviceAct::Admit, device_did: did.clone(), public_key: key, said_at_ms: 1 };
+            let why = accept(base.path(), &db, &keys, "alice", &admit, &signed(&identity, &admit)).await.unwrap_err();
+            assert!(why.contains("the device's DID does not name its key"), "{did}: {why}");
+            assert!(alices_rows(&db).await.is_empty(), "{did}: a row was written");
+            assert!(keys.read().unwrap().is_empty(), "{did}: a key was admitted");
+            assert_eq!(changes_for(&db, &key).await, 0, "{did}: a change was recorded");
+        }
+    }
+
+    /// **An admit whose key has a row under another spelling leaves that row
+    /// byte for byte as it was** (69A), admits the key, and records the change.
+    #[tokio::test]
+    async fn an_admit_leaves_a_row_under_another_spelling_as_it_is() {
+        let base = tempfile::tempdir().unwrap();
+        let identity = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        a_tenant_at(base.path(), &identity);
+        let db = a_vault_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        let (key, did) = a_device(34);
+        let otherwise = DidKeyMethod::spelled_otherwise(&key).to_string();
+        kotton_peer::daemon::db::seed_paired_node_as_stored(&db, "laptop", "alice", &otherwise, &key, "[]", 5, Some("cosigner"))
+            .await
+            .unwrap();
+        let before = alices_rows(&db).await;
+        let admit = TenantDeviceChange { act: TenantDeviceAct::Admit, device_did: did, public_key: key, said_at_ms: 1 };
+        accept(base.path(), &db, &keys, "alice", &admit, &signed(&identity, &admit)).await.unwrap();
+        assert_eq!(alices_rows(&db).await, before, "the row was changed");
+        assert!(keys.read().unwrap().contains(&VerifyingKey::from_bytes(&key).unwrap()), "the key was not admitted");
+        assert_eq!(changes_for(&db, &key).await, 1, "the change was not recorded");
+    }
+
+    /// **Where the derivation is already a row of the tenant's beside another
+    /// key, the admit is refused, names the row, writes nothing and records no
+    /// change** (30A, 71A); the row is as it was and the key is not admitted.
+    #[tokio::test]
+    async fn an_admit_whose_derivation_is_a_row_beside_another_key_is_refused_by_name() {
+        let base = tempfile::tempdir().unwrap();
+        let identity = ed25519_dalek::SigningKey::from_bytes(&[1; 32]);
+        a_tenant_at(base.path(), &identity);
+        let db = a_vault_db().await;
+        let keys = Arc::new(RwLock::new(HashSet::new()));
+        let ((key, did), (other, _)) = (a_device(35), a_device(36));
+        kotton_peer::daemon::db::seed_paired_node_as_stored(&db, &did, "alice", &did, &other, "[]", 5, Some("full")).await.unwrap();
+        let before = alices_rows(&db).await;
+        let admit = TenantDeviceChange { act: TenantDeviceAct::Admit, device_did: did.clone(), public_key: key, said_at_ms: 1 };
+        let why = accept(base.path(), &db, &keys, "alice", &admit, &signed(&identity, &admit)).await.unwrap_err();
+        assert!(why.contains(&did) && why.contains("holds another key"), "{why}");
+        assert_eq!(alices_rows(&db).await, before, "the store changed");
+        assert!(keys.read().unwrap().is_empty(), "a key was admitted");
+        assert_eq!(changes_for(&db, &key).await, 0, "a change was recorded");
     }
 }

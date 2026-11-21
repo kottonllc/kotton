@@ -10,6 +10,11 @@
 //!
 //! Records live in the user's VFS at [`member_path`] (`/network/members/<did>`), so
 //! they sync across the user's own nodes (RFC-0008) like any other record.
+//!
+//! **What a member's DID is** depends on what the member is. An own device's is
+//! a name for its key: the key's derivation, its `did:key`. A contact's is the
+//! person's identifier, and the key beside it is what their key log resolves to
+//! today, so it changes under the same DID when they rotate ([`Member`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -287,10 +292,15 @@ impl Posture {
 /// are from RFC-0024; `posture` and `label` carry the RFC-0025 own-device details.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
-    /// The member's DID (`did:key:z6Mk…`).
+    /// The member's DID. For an own device, the derivation of `public_key`,
+    /// its `did:key`, which names that key and nothing else: the set's writer
+    /// writes no own-device member under another string. For a contact, the
+    /// person's identifier, which may name no key at all (a `did:kel`), and
+    /// under which their key changes when they rotate.
     pub did: String,
-    /// The member's raw Ed25519 public key — redundant with `did`, but avoids
-    /// re-deriving it at every mTLS handshake / allowlist check.
+    /// The member's raw Ed25519 public key: for an own device, the key its DID
+    /// names; for a contact, the key their key log resolves to today. A member
+    /// is admitted by these bytes, whatever is spelled beside them.
     pub public_key: [u8; 32],
     /// What kind of principal this is.
     pub role: Role,

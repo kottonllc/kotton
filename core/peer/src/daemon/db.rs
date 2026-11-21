@@ -8,8 +8,19 @@
 //! here that write or remove a node row keep its drive with it. A device's
 //! sync rules, which name drives, are [`super::drive_rules`]'s.
 //!
-//! **A `paired_nodes` row is one person's**, keyed by that person and the
-//! node's DID (`migrations/0027_paired_nodes_per_person.sql`). Its `id` is the
+//! **A `paired_nodes` row is one person's, and is named by its key.** The
+//! table is keyed by that person and the node's DID
+//! (`migrations/0027_paired_nodes_per_person.sql`), and the DID is the row's
+//! name and nothing else: the store's key for the row, and a name a person
+//! types (kottonllc/kotton#597, 29A). The one writer, [`insert_paired_node`],
+//! takes the key and makes the name: the DID the person's row for that key is
+//! stored under, or the key's derivation, its `did:key`, for a new row (27A,
+//! 30A). So a row this build writes has a DID that is a function of its key,
+//! and a person has one row per key. A row an earlier build stored under
+//! another string, or a second row for a key, stands by its bytes (5B): it is
+//! rewritten under the name it has, and is removed by `device revoke`, never
+//! renamed. The vault's admit keeps its own statement (`kvaultd::devices`) and
+//! holds the same rule. Its `id` is the
 //! label the person sees it under and keys nothing: a label may come from
 //! elsewhere (the name a device announced at a join, a drive's label handed at
 //! one), so a write under it reaches no other row, and two of one person's
@@ -30,6 +41,7 @@
 use kotton_wire::did::{Did, DidError};
 use kotton_wire::peer::{EphemeralSession, MountConfig, PairedNode};
 use kotton_wire::GrantEnvelope;
+use kotton_crypto::ed25519::VerifyingKey;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashSet;
 use std::io;
@@ -52,51 +64,226 @@ fn did_err(e: DidError) -> io::Error {
 // paired_nodes
 // ---------------------------------------------------------------------------
 
-// Eight columns, eight arguments: a row, not a design.
-/// Write `user_id`'s row for the node `device_did`, or rewrite the row they
-/// already hold for it. A row is keyed by the person and the node's DID
-/// (`migrations/0027_paired_nodes_per_person.sql`), and `id` is the label it is
-/// shown under, which keys nothing: so this write reaches no other person's
-/// row, and no row of this person's under another DID, whatever label it
-/// carries.
+/// The row of `user_id`'s that holds `public_key`, as its DID as stored and its
+/// label: where two of their rows hold the key, the one [`list_paired_nodes`]
+/// lists first. One statement for the writer ([`insert_paired_node`],
+/// [`add_paired_node_if_absent`]) and the re-address
+/// ([`readdress_paired_node_for_key`]), so every write for a key reaches the
+/// same row (kottonllc/kotton#597, 65A); kottonllc/kotton#622 replaces its order
+/// with its one function.
+async fn row_for_key(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+    public_key: &[u8],
+) -> io::Result<Option<(String, String)>> {
+    sqlx::query_as(
+        "SELECT device_did, id FROM paired_nodes WHERE user_id = ? AND public_key = ? \
+         ORDER BY paired_at DESC, device_did LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(public_key)
+    .fetch_optional(conn)
+    .await
+    .map_err(db_err)
+}
+
+/// Write `user_id`'s row for `key`, labelled `id`, at `addresses_json`, as of
+/// `now`, and return it as it then stands.
+///
+/// **A row is named by its key, and the writer makes the name.** It takes the
+/// rule's key and no DID (kottonllc/kotton#597, 27A), so no caller hands the
+/// store a second name for a key:
+///
+/// - **A key the person has a row for** rewrites that row in place, under its
+///   DID as stored, whatever string an earlier build stored there (5B, 30A):
+///   the label and address this write brings, and the posture where it brings
+///   one; a posture it does not bring, and the relay the row was last known
+///   at, are kept. Where two of their rows hold the key, the one
+///   [`list_paired_nodes`] lists first is rewritten and the other is left as
+///   it is (65A). No second row is written for a key.
+/// - **Otherwise** the row is written under the derivation's string,
+///   [`kotton_crypto::DidKeyMethod::from_public_key`].
+/// - **Where that string is already a row's DID beside another key**, which
+///   only an earlier build can have stored, the write is refused, names that
+///   row, and writes nothing (30A).
+///
+/// A write that follows this one names the row by the DID returned (the relay a
+/// ceremony learned, [`update_paired_node_relay`]). A drive under the key shows
+/// the row's label ([`super::drives`]), written in the same transaction.
+// Seven arguments: the row's columns that a writer brings.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_paired_node(
     db: &Arc<SqlitePool>,
     id: &str,
     user_id: &str,
-    device_did: &str,
-    public_key: &[u8],
+    key: &VerifyingKey,
     addresses_json: &str,
     now: i64,
     posture: Option<&str>,
-) -> io::Result<()> {
+) -> io::Result<PairedNode> {
     // One transaction: the row, and the drive it may be reached for
     // (`super::drives`), are written together or not at all, so no reader sees
     // a row that says one thing and a record that says another.
     let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
+    let node = write_row(tx.conn(), id, user_id, key, addresses_json, now, posture).await?;
+    tx.commit().await?;
+    Ok(node)
+}
+
+/// [`insert_paired_node`] where no row of `user_id`'s holds `key`; `Ok(None)`,
+/// with nothing written and nothing changed, where one does.
+///
+/// For a writer that brings nothing a row may lack: a device admitted on proof,
+/// whose label is made and which knows no address, and the membership
+/// projection, which writes a cache row "without clobbering learned addresses"
+/// (kottonllc/kotton#597, 69A).
+///
+/// **It reads first, and begins as the writer only where it may write.** The
+/// projection asks this of every own-device member on every pass, and in the
+/// common case a row already holds the key: that is a plain read, which takes
+/// no writer's lock on the shared machine database. Where no row held the key,
+/// the read is made again inside the immediate transaction that writes, so a
+/// row written between the two is found and nothing is added beside it.
+#[allow(clippy::too_many_arguments)]
+pub async fn add_paired_node_if_absent(
+    db: &Arc<SqlitePool>,
+    id: &str,
+    user_id: &str,
+    key: &VerifyingKey,
+    addresses_json: &str,
+    now: i64,
+    posture: Option<&str>,
+) -> io::Result<Option<PairedNode>> {
+    add_paired_node_if_absent_after(db, id, user_id, key, addresses_json, now, posture, async {}).await
+}
+
+/// [`add_paired_node_if_absent`], with `between` awaited after the plain read
+/// finds no row and before the transaction begins: a test writes a row there,
+/// to hold that the read inside the transaction finds it.
+#[allow(clippy::too_many_arguments)]
+async fn add_paired_node_if_absent_after(
+    db: &Arc<SqlitePool>,
+    id: &str,
+    user_id: &str,
+    key: &VerifyingKey,
+    addresses_json: &str,
+    now: i64,
+    posture: Option<&str>,
+    between: impl std::future::Future<Output = ()>,
+) -> io::Result<Option<PairedNode>> {
+    {
+        let mut conn = db.acquire().await.map_err(db_err)?;
+        if row_for_key(&mut conn, user_id, key.as_bytes()).await?.is_some() {
+            return Ok(None);
+        }
+    }
+    between.await;
+    let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
+    if row_for_key(tx.conn(), user_id, key.as_bytes()).await?.is_some() {
+        // Dropped unended: the transaction rolls back, and it wrote nothing.
+        return Ok(None);
+    }
+    let node = write_row(tx.conn(), id, user_id, key, addresses_json, now, posture).await?;
+    tx.commit().await?;
+    Ok(Some(node))
+}
+
+#[cfg(test)]
+mod add_only {
+    use super::*;
+
+    async fn agent_db(dir: &tempfile::TempDir) -> Arc<SqlitePool> {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        Arc::new(pool)
+    }
+
+    /// **A row written after the plain read and before the transaction is found
+    /// inside the transaction**, and the add-only form writes nothing beside it:
+    /// one row for the key, the one written between, as it was written.
+    #[tokio::test]
+    async fn a_row_written_between_the_two_reads_is_found_and_nothing_is_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let key = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[64; 32]));
+        let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string();
+        let between = {
+            let (db, spelled) = (Arc::clone(&db), spelled.clone());
+            async move {
+                seed_paired_node_as_stored(&db, "laptop", "alice", &spelled, key.as_bytes(), "[]", 5, Some("full")).await.unwrap();
+            }
+        };
+        let added = add_paired_node_if_absent_after(&db, "recovered", "alice", &key, "[]", 10, None, between).await.unwrap();
+        assert!(added.is_none(), "a row was added beside the one written between: {added:?}");
+        let rows = list_paired_nodes(&db, "alice").await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!((rows[0].id.as_str(), rows[0].device_did.to_string(), rows[0].paired_at), ("laptop", spelled, 5));
+    }
+}
+
+/// What a write is refused with where the derivation's string for its key is
+/// already the DID of `user_id`'s row `label` beside another key. The label is
+/// printed as prose prints a name ([`kotton_wire::note::quoted`],
+/// kottonllc/kotton#597, 43A); `did` is the derivation, one plain word.
+fn under_another_key(label: &str, did: &str) -> io::Error {
+    io::Error::other(format!(
+        "this person pairs {} under {did}, this key's did:key, beside another key, and \
+         keeps it as that; nothing was written (`device revoke {did}` removes that row)",
+        kotton_wire::note::quoted(label)
+    ))
+}
+
+/// The write [`insert_paired_node`] and [`add_paired_node_if_absent`] make,
+/// inside the caller's transaction.
+#[allow(clippy::too_many_arguments)]
+async fn write_row(
+    conn: &mut sqlx::SqliteConnection,
+    id: &str,
+    user_id: &str,
+    key: &VerifyingKey,
+    addresses_json: &str,
+    now: i64,
+    posture: Option<&str>,
+) -> io::Result<PairedNode> {
+    let public_key = key.as_bytes().as_slice();
+    // The row's name: the DID the key's row is stored under, or the derivation's
+    // string where the key has no row and no row is under that string.
+    let device_did = match row_for_key(&mut *conn, user_id, public_key).await? {
+        Some((stored, _)) => stored,
+        None => {
+            let derived = kotton_crypto::DidKeyMethod::from_public_key(key).to_string();
+            let beside: Option<String> =
+                sqlx::query_scalar("SELECT id FROM paired_nodes WHERE user_id = ? AND device_did = ?")
+                    .bind(user_id)
+                    .bind(&derived)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(db_err)?;
+            if let Some(label) = beside {
+                return Err(under_another_key(&label, &derived));
+            }
+            derived
+        }
+    };
     // `INSERT OR REPLACE` rewrites the whole row, and callers that only know an
     // address (`peer_add`) know no posture. A posture already projected for
     // this node is kept rather than erased: erasing it turned a blind node into
-    // a node of unknown posture, which no delivery would then reach. **Only for
-    // the same key**: a posture is a fact about the node that holds the key, and
-    // a DID may be recorded beside a key it does not name (the operational key a
-    // device presents, beside its identity's DID), so the row this person held
-    // for the DID under another key gives the new key none. The relay the peer
-    // was last known to reserve at is kept.
-    let existing: Option<(Vec<u8>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT public_key, posture, relay_url FROM paired_nodes WHERE user_id = ? AND device_did = ?",
-    )
-    .bind(user_id)
-    .bind(device_did)
-    .fetch_optional(tx.conn())
-    .await
-    .map_err(db_err)?;
-    let (existing_key, existing_posture, existing_relay) = existing.unwrap_or((Vec::new(), None, None));
-    let posture: Option<String> = match posture {
-        Some(p) => Some(p.to_string()),
-        None if existing_key.as_slice() == public_key => existing_posture,
-        None => None,
-    };
+    // a node of unknown posture, which no delivery would then reach. The row
+    // under this DID, where there is one, holds this key: the DID is the key's
+    // row's or a string no row is under. The relay the peer was last known to
+    // reserve at is kept.
+    let existing: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT posture, relay_url FROM paired_nodes WHERE user_id = ? AND device_did = ?")
+            .bind(user_id)
+            .bind(&device_did)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    let (existing_posture, existing_relay) = existing.unwrap_or((None, None));
+    let posture: Option<String> = posture.map(str::to_string).or(existing_posture);
     sqlx::query(
         "INSERT OR REPLACE INTO paired_nodes \
          (id, user_id, device_did, public_key, addresses, paired_at, posture, relay_url) \
@@ -104,13 +291,13 @@ pub async fn insert_paired_node(
     )
     .bind(id)
     .bind(user_id)
-    .bind(device_did)
+    .bind(&device_did)
     .bind(public_key)
     .bind(addresses_json)
     .bind(now)
     .bind(posture)
     .bind(existing_relay)
-    .execute(tx.conn())
+    .execute(&mut *conn)
     .await
     .map_err(db_err)?;
     // A drive is reached through the node that carries the vault's key
@@ -119,16 +306,59 @@ pub async fn insert_paired_node(
         .bind(id)
         .bind(user_id)
         .bind(public_key)
-        .execute(tx.conn())
+        .execute(&mut *conn)
         .await
         .map_err(db_err)?;
-    // The key this DID's row carried before, when it was another: a drive under
-    // that key that no row of this person's still carries has no node left to
-    // reach it through.
-    if !existing_key.is_empty() && existing_key.as_slice() != public_key {
-        drop_unreachable_drive(tx.conn(), user_id, &existing_key).await?;
-    }
-    tx.commit().await
+    let row = sqlx::query(&format!(
+        "SELECT {NODE_COLUMNS} FROM paired_nodes WHERE user_id = ? AND device_did = ?"
+    ))
+    .bind(user_id)
+    .bind(&device_did)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    node_of(&row)
+}
+
+/// Store one row exactly as given, as an earlier build could have stored it: a
+/// DID that is not its key's derivation, bytes the Ed25519 rule refuses, a
+/// second row for a key. A plain `INSERT`: no drive is touched, and no row is
+/// replaced.
+///
+/// **For a test whose subject is such a row, and nothing else.** No writer of
+/// this build stores one ([`insert_paired_node`] takes a key and makes the
+/// name), so a test of a reader, a removal or a readout over an earlier
+/// build's row has it stored here (kottonllc/kotton#597, 68A). Compiled only
+/// under `test-support`, which no packed binary's closure turns on:
+/// `cargo xtask ship-check` refuses one that does.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::too_many_arguments)]
+pub async fn seed_paired_node_as_stored(
+    db: &SqlitePool,
+    id: &str,
+    user_id: &str,
+    device_did: &str,
+    public_key: &[u8],
+    addresses_json: &str,
+    now: i64,
+    posture: Option<&str>,
+) -> io::Result<()> {
+    sqlx::query(
+        "INSERT INTO paired_nodes \
+         (id, user_id, device_did, public_key, addresses, paired_at, posture, relay_url) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(device_did)
+    .bind(public_key)
+    .bind(addresses_json)
+    .bind(now)
+    .bind(posture)
+    .execute(db)
+    .await
+    .map_err(db_err)?;
+    Ok(())
 }
 
 /// Remove `user_id`'s drive record for `vault_key` when no row of theirs
@@ -197,16 +427,7 @@ pub async fn readdress_paired_node_for_key(
     now: i64,
 ) -> io::Result<Option<PairedNode>> {
     let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT device_did, id FROM paired_nodes WHERE user_id = ? AND public_key = ? \
-         ORDER BY paired_at DESC, device_did LIMIT 1",
-    )
-    .bind(user_id)
-    .bind(public_key.as_slice())
-    .fetch_optional(tx.conn())
-    .await
-    .map_err(db_err)?;
-    let Some((device_did, id)) = row else {
+    let Some((device_did, id)) = row_for_key(tx.conn(), user_id, public_key.as_slice()).await? else {
         return Ok(None);
     };
     sqlx::query("UPDATE paired_nodes SET addresses = ?, paired_at = ? WHERE user_id = ? AND device_did = ?")
@@ -474,9 +695,9 @@ pub async fn paired_users_for_pubkey(
 /// decides what a key may ask *for this person* — the peer path's gateway
 /// confinement and `NodeRelay`'s own-device check both read it, for the person
 /// the request names; another person's row for the same key says nothing of
-/// what it is to this one. When this person pairs the key under two DIDs, a
-/// `gateway` row answers first: within one person's rows, the narrower verb
-/// wins.
+/// what it is to this one. Where two rows of this person's hold the key, which
+/// only an earlier build can have stored, a `gateway` row answers first: within
+/// one person's rows, the narrower verb wins.
 pub async fn paired_posture_for_user(
     db: &Arc<SqlitePool>,
     public_key: &[u8; 32],

@@ -32,10 +32,13 @@ mod b3_tests {
     // daemon types on purpose. The engine's own body no longer names any.
     use kotton_schemas::membership::{Ceremony, Member, Posture, Role};
 
-    fn member(did: &str, posture: Option<Posture>) -> Member {
+    /// An own device, named by its key's derivation as every writer of an
+    /// own-device member names it (kottonllc/kotton#597, 27A).
+    fn member(posture: Option<Posture>) -> Member {
+        let public_key = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]).verifying_key().to_bytes();
         Member {
-            did: did.to_string(),
-            public_key: ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]).verifying_key().to_bytes(),
+            did: kotton_crypto::DidKeyMethod::from_public_key_bytes(&public_key).unwrap().to_string(),
+            public_key,
             role: Role::OwnDevice,
             admitted_by: Ceremony::DeviceEnroll,
             added_at: "2026-07-23T00:00:00Z".to_string(),
@@ -132,11 +135,9 @@ mod b3_tests {
     async fn a_full_peer_is_held_to_packs_as_any_peer_is() {
         let (_dir, runtime, resources) = env().await;
         let user_rt = resources.user_store("alice").expect("user runtime");
-        user_rt
-            .write_member(&member("did:key:zFull", Some(Posture::Full)))
-            .await
-            .expect("write_member");
-        a_plain_mount_and_a_peer(&user_rt, "did:key:zFull");
+        let peer = member(Some(Posture::Full));
+        user_rt.write_member(&peer).await.expect("write_member");
+        a_plain_mount_and_a_peer(&user_rt, &peer.did);
 
         let err = sync_mount_with_records(
             &runtime,
@@ -160,11 +161,9 @@ mod b3_tests {
     async fn a_keyless_peer_is_refused_a_mount_that_cannot_pack() {
         let (_dir, runtime, resources) = env().await;
         let user_rt = resources.user_store("alice").expect("user runtime");
-        user_rt
-            .write_member(&member("did:key:zBlind", Some(Posture::BlindStorage)))
-            .await
-            .expect("write_member");
-        a_plain_mount_and_a_peer(&user_rt, "did:key:zBlind");
+        let peer = member(Some(Posture::BlindStorage));
+        user_rt.write_member(&peer).await.expect("write_member");
+        a_plain_mount_and_a_peer(&user_rt, &peer.did);
 
         for direction in [Some(kotton_wire::ipc::SyncDirection::Push), None] {
             let err = sync_mount_with_records(&runtime, &*resources, "alice", "plain", "peer", direction.clone())

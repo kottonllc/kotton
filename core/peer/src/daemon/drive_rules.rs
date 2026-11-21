@@ -270,12 +270,11 @@ mod tests {
 
     /// A node paired to alice under `seed`'s key, as `posture`.
     async fn paired(db: &Arc<SqlitePool>, id: &str, seed: u8, posture: Posture) -> [u8; 32] {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
-        let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key).unwrap();
-        super::super::db::insert_paired_node(db, id, "alice", &did.to_string(), &key, "[]", 0, Some(posture.as_str()))
+        let key = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[seed; 32]));
+        super::super::db::insert_paired_node(db, id, "alice", &key, "[]", 0, Some(posture.as_str()))
             .await
             .unwrap();
-        key
+        *key.as_bytes()
     }
 
     /// **A rule names a drive**: kept under the vault's key and the tenancy,

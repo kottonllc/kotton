@@ -1871,33 +1871,24 @@ impl DeviceDaemon {
     /// Bypasses the full pair handshake.  Intended for integration tests that
     /// need to pre-configure pairing relationships between two in-process
     /// daemon instances.
+    ///
+    /// **It takes a key and no DID**, and writes through the store's one writer
+    /// ([`kotton_peer::daemon::db::insert_paired_node`]), which names the row
+    /// (kottonllc/kotton#597, 27A): it stores nothing the writer would not.
     pub async fn insert_paired_node(
         &self,
         user_id: &str,
-        peer_did: &str,
-        pubkey: [u8; 32],
+        key: VerifyingKey,
         addr: std::net::SocketAddr,
     ) -> io::Result<()> {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let key = VerifyingKey::from_bytes(&pubkey)
-            .map_err(|e| io::Error::other(format!("the peer's key is not an Ed25519 key: {e}")))?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         let id = uuid::Uuid::new_v4().to_string();
         let addresses_json = serde_json::to_string(&[addr]).map_err(io::Error::other)?;
-        kotton_peer::daemon::db::insert_paired_node(
-            &self.db,
-            &id,
-            user_id,
-            peer_did,
-            &pubkey,
-            &addresses_json,
-            now,
-            None,
-        )
-        .await?;
+        kotton_peer::daemon::db::insert_paired_node(&self.db, &id, user_id, &key, &addresses_json, now, None).await?;
         // Update the live TLS allowlist so the peer can connect immediately.
         self.paired_keys.write().unwrap().insert(key);
         // A new node may be a vault that should hold this user's doors;

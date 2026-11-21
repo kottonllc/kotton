@@ -590,7 +590,8 @@ pub(crate) mod tests {
         let secrets = MemorySecrets::new();
         let first = create(base.path(), &secrets, &a_key().1, String::new()).await.unwrap();
         let db = Arc::new(kotton_device::db::open_machine_db(machine_db(base.path())).await.unwrap());
-        kotton_peer::daemon::db::insert_paired_node(&db, "sams-laptop", "sam", "did:key:zSam", &[7u8; 32], "[]", 0, Some("full"))
+        let sams = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes();
+        kotton_peer::daemon::db::insert_paired_node(&db, "sams-laptop", "sam", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&sams).unwrap(), "[]", 0, Some("full"))
             .await
             .unwrap();
         db.close().await;
@@ -602,7 +603,7 @@ pub(crate) mod tests {
         assert_eq!(operators(base.path()).await, [unhex(&adopter)]);
         let db = Arc::new(kotton_device::db::open_machine_db(machine_db(base.path())).await.unwrap());
         assert!(
-            kotton_peer::daemon::db::is_pubkey_paired_to_user(&db, &[7u8; 32], "sam").await.unwrap(),
+            kotton_peer::daemon::db::is_pubkey_paired_to_user(&db, &sams, "sam").await.unwrap(),
             "its tenant is kept"
         );
         db.close().await;

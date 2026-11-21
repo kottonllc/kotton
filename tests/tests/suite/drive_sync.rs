@@ -376,13 +376,10 @@ async fn a_join_the_joiner_refuses_leaves_no_row_on_the_issuer_and_no_admission_
     let mut client_b = connect_when_ready(&b.ipc, "client B").await;
     let (_, b_key_hex) = client_b.get_node_identity().await.expect("B's identity");
     let b_key: [u8; 32] = hex::decode(&b_key_hex).unwrap().try_into().unwrap();
-    b.daemon
-        .insert_paired_node(
-            USER,
-            &drive.did,
-            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes(),
-            "127.0.0.1:9".parse().unwrap(),
-        )
+    // As an earlier build could have stored it: no writer of this build puts
+    // a DID beside a key it does not name (kottonllc/kotton#597, 27A).
+    let other = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes();
+    kotton_peer::daemon::db::seed_paired_node_as_stored(&b.daemon.machine_db(), "old", USER, &drive.did, &other, "[\"127.0.0.1:9\"]", 0, None)
         .await
         .expect("B pairs the drive's DID under another key");
 
@@ -950,7 +947,10 @@ async fn two_makings_of_personal_at_once_on_one_device_make_one() {
     let ghost = ed25519_dalek::SigningKey::from_bytes(&[42; 32]).verifying_key().to_bytes();
     let ghost_did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&ghost).unwrap().to_string();
     let at = elsewhere.vault.runtime().peer_listen_addr().expect("the vault listens");
-    a.daemon.insert_paired_node(USER, &ghost_did, ghost, at).await.expect("the unanswering vault");
+    a.daemon
+        .insert_paired_node(USER, kotton_crypto::ed25519::VerifyingKey::from_bytes(&ghost).unwrap(), at)
+        .await
+        .expect("the unanswering vault");
     kotton_peer::daemon::drives::record(&a.daemon.machine_db(), USER, &ghost).await.expect("recorded as a vault");
 
     let (mut client_a, first_id) = enrol_vault_from(client_a, "device-a", &first, USER, "vault").await;

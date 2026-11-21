@@ -23,6 +23,11 @@ fn uid(s: &str) -> crate::device_users::UserId {
     crate::device_users::UserId::parse(s).unwrap()
 }
 
+/// The rule's key for `key`'s bytes, as the store's writer takes it.
+fn vk(key: &[u8; 32]) -> kotton_crypto::ed25519::VerifyingKey {
+    kotton_crypto::ed25519::VerifyingKey::from_bytes(key).unwrap()
+}
+
 fn key_and_did(seed: u8) -> ([u8; 32], String) {
     let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
     let did = kotton_crypto::DidKeyMethod::from_public_key_bytes(&key).unwrap().to_string();
@@ -54,8 +59,8 @@ async fn one_gateway_two_people_each_frame_reaches_the_person_it_names() {
     let dir = tempfile::tempdir().unwrap();
     let db = machine_db(dir.path()).await;
     let (key, did) = key_and_did(25);
-    network_db::insert_paired_node(&db, "front-door", "bob", &did, &key, "[]", 0, Some("gateway")).await.unwrap();
-    network_db::insert_paired_node(&db, "front-door", "alice", &did, &key, "[]", 0, Some("gateway")).await.unwrap();
+    network_db::insert_paired_node(&db, "front-door", "bob", &vk(&key), "[]", 0, Some("gateway")).await.unwrap();
+    network_db::insert_paired_node(&db, "front-door", "alice", &vk(&key), "[]", 0, Some("gateway")).await.unwrap();
 
     assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("bob"))).await, Ok(PeerAsk::Gateway(uid("bob"))));
     assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("alice"))).await, Ok(PeerAsk::Gateway(uid("alice"))));
@@ -85,9 +90,9 @@ async fn one_gateway_two_people_each_frame_reaches_the_person_it_names() {
 async fn a_key_is_held_to_the_gateway_verb_for_the_person_who_pairs_it_as_one() {
     let dir = tempfile::tempdir().unwrap();
     let db = machine_db(dir.path()).await;
-    let (key, did) = key_and_did(21);
-    network_db::insert_paired_node(&db, "laptop", "alice", &did, &key, "[]", 0, Some("full")).await.unwrap();
-    network_db::insert_paired_node(&db, "front-door", "bob", &did, &key, "[]", 0, Some("gateway")).await.unwrap();
+    let (key, _) = key_and_did(21);
+    network_db::insert_paired_node(&db, "laptop", "alice", &vk(&key), "[]", 0, Some("full")).await.unwrap();
+    network_db::insert_paired_node(&db, "front-door", "bob", &vk(&key), "[]", 0, Some("gateway")).await.unwrap();
 
     assert_eq!(peer_ask(&db, Some(&key), &frame_for(Some("bob"))).await, Ok(PeerAsk::Gateway(uid("bob"))));
     assert_eq!(peer_ask(&db, Some(&key), &other_for("bob")).await, Ok(PeerAsk::Gateway(uid("bob"))));
@@ -110,8 +115,8 @@ async fn a_key_is_held_to_the_gateway_verb_for_the_person_who_pairs_it_as_one() 
 async fn a_request_naming_no_valid_user_id_is_refused_at_peer_ask() {
     let dir = tempfile::tempdir().unwrap();
     let db = machine_db(dir.path()).await;
-    let (key, did) = key_and_did(24);
-    network_db::insert_paired_node(&db, "laptop", "alice", &did, &key, "[]", 0, Some("full")).await.unwrap();
+    let (key, _) = key_and_did(24);
+    network_db::insert_paired_node(&db, "laptop", "alice", &vk(&key), "[]", 0, Some("full")).await.unwrap();
     let over_long = "a".repeat(65);
     for bad in ["../../x", "/tmp/abs", "alice/../bob", "..", "", over_long.as_str()] {
         for pk in [Some(&key), None] {
@@ -136,9 +141,9 @@ async fn a_minted_user_id_is_taken_as_the_person_it_names() {
     let db = machine_db(dir.path()).await;
     let gateway_person = crate::device_users::mint_user_id();
     let device_person = crate::device_users::mint_user_id();
-    let (key, did) = key_and_did(25);
-    network_db::insert_paired_node(&db, "front-door", &gateway_person, &did, &key, "[]", 0, Some("gateway")).await.unwrap();
-    network_db::insert_paired_node(&db, "laptop", &device_person, &did, &key, "[]", 0, Some("full")).await.unwrap();
+    let (key, _) = key_and_did(25);
+    network_db::insert_paired_node(&db, "front-door", &gateway_person, &vk(&key), "[]", 0, Some("gateway")).await.unwrap();
+    network_db::insert_paired_node(&db, "laptop", &device_person, &vk(&key), "[]", 0, Some("full")).await.unwrap();
     assert_eq!(
         peer_ask(&db, Some(&key), &frame_for(Some(&gateway_person))).await,
         Ok(PeerAsk::Gateway(uid(&gateway_person)))
@@ -158,16 +163,16 @@ async fn a_minted_user_id_is_taken_as_the_person_it_names() {
 async fn the_asking_persons_own_row_decides_whether_a_key_is_their_device() {
     let dir = tempfile::tempdir().unwrap();
     let db = machine_db(dir.path()).await;
-    let (key, did) = key_and_did(23);
-    network_db::insert_paired_node(&db, "vault", "bob", &did, &key, "[]", 0, Some("blind-storage")).await.unwrap();
-    network_db::insert_paired_node(&db, "desktop", "alice", &did, &key, "[]", 0, Some("full")).await.unwrap();
+    let (key, _) = key_and_did(23);
+    network_db::insert_paired_node(&db, "vault", "bob", &vk(&key), "[]", 0, Some("blind-storage")).await.unwrap();
+    network_db::insert_paired_node(&db, "desktop", "alice", &vk(&key), "[]", 0, Some("full")).await.unwrap();
 
     assert!(asks_as_own_device(&db, &key, "alice").await, "alice's full device was refused as hers");
     assert!(!asks_as_own_device(&db, &key, "bob").await, "bob's vault was taken for his device by alice's row");
     assert!(!asks_as_own_device(&db, &key, "carol").await);
 
     // A row from before postures is a full device.
-    let (old, old_did) = key_and_did(24);
-    network_db::insert_paired_node(&db, "old", "carol", &old_did, &old, "[]", 0, None).await.unwrap();
+    let (old, _) = key_and_did(24);
+    network_db::insert_paired_node(&db, "old", "carol", &vk(&old), "[]", 0, None).await.unwrap();
     assert!(asks_as_own_device(&db, &old, "carol").await);
 }

@@ -956,6 +956,24 @@ mod tests {
         }
     }
 
+    /// **The system's build selects no package, and `ship-check` reads its features over the
+    /// workspace**: no `-p`, `--package`, `--workspace` or `--exclude` is asked of cargo, so it
+    /// resolves features over every member of the workspace, and the system's part is the one
+    /// `ship_check::built_over_the_workspace` names (kottonllc/kotton#597, 68A).
+    #[test]
+    fn the_systems_build_selects_no_package_and_ship_check_reads_it_over_the_workspace() {
+        let args: Vec<String> = build_command(&crate::out::root())
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !args.iter().any(|a| a == "-p" || a.starts_with("--package") || a == "--workspace" || a.starts_with("--exclude")),
+            "{args:?}"
+        );
+        let system = crate::license_check::ARCHIVES.iter().find(|a| a.name == "system").expect("the system archive");
+        assert!(system.parts.iter().all(crate::ship_check::built_over_the_workspace));
+    }
+
     /// What `reclaim` prunes for the release is exactly where the release's builds go, read
     /// from the commands they run: the system's `--target-dir` and the relay's (the vault
     /// shares the system's) — as `merge::caches` is held to the gate's targets.

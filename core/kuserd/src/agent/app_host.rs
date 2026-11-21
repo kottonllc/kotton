@@ -746,7 +746,9 @@ mod tests {
         use kotton_schemas::membership::{Ceremony, Member, Posture, Role};
         use kotton_store::runtime::roots::Kept;
 
-        const VAULT: &str = "did:key:z6MkAdmittedVault";
+        // An own device's member is named by its key's derivation (kottonllc/kotton#597, 27A).
+        let vault_key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]).verifying_key().to_bytes();
+        let vault = kotton_crypto::DidKeyMethod::from_public_key_bytes(&vault_key).unwrap().to_string();
         let temp = tempfile::tempdir().unwrap();
         let user_dir = temp.path().join("users").join("alice");
         let store = UserStore::create(
@@ -761,8 +763,8 @@ mod tests {
         // Admitted: what `finalize_enrolled_node` writes.
         store
             .write_member(&Member {
-                did: VAULT.to_string(),
-                public_key: ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]).verifying_key().to_bytes(),
+                did: vault.clone(),
+                public_key: vault_key,
                 role: Role::OwnDevice,
                 admitted_by: Ceremony::DeviceEnroll,
                 added_at: "2026-09-23T00:00:00Z".to_string(),
@@ -784,7 +786,7 @@ mod tests {
                 shelf,
                 kotton_wire::remote::RemoteConfig {
                     backend: kotton_wire::remote::RemoteBackend::Kotton {
-                        peer_did: VAULT.to_string(),
+                        peer_did: vault.clone(),
                         label: "vault".to_string(),
                     },
                     cache_dir: None,
@@ -804,7 +806,7 @@ mod tests {
 
         assert_eq!(
             reopened.get(&personal).unwrap().targets.iter().map(|t| t.handle.as_str()).collect::<Vec<_>>(),
-            vec![VAULT],
+            vec![vault.as_str()],
             "Personal was kept at the vault and came back kept nowhere"
         );
         assert!(
