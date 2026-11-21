@@ -442,7 +442,8 @@ USAGE:
   peer list                                        paired peers: the remote `peer show <remote>` takes,
                                                    where each is reachable, and its relay
   peer show <remote>                               one peer whole: its line (the one `id recover` asks
-                                                   for), its full DID, key, and `peer add` line
+                                                   for), its full DID and key, and the `peer add` line
+                                                   that adds it, or why there is none
   peer add <remote> <did> <pubkey-hex> <addr>      add a peer manually (no ceremony)
   peer revoke <remote>                             remove a peer from the allowlist
   peer mount list                                  list configured peer mounts
