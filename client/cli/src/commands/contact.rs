@@ -231,12 +231,17 @@ async fn drive(
     ))
 }
 
-/// The line over the six digits, before the person answers: the other side's
-/// label as the `PairShowCode` frame carries it, as data by
-/// [`kotton_wire::note::quoted`] (kottonllc/kotton#652); with none, "they".
+/// The line over the six digits, before the person answers. A contact
+/// pairing's `PairShowCode` frame carries no label on either side
+/// (kottonllc/kotton#668), so both read this program's own words, and the other
+/// person's name is first printed on completion ([`paired_line`]). A frame that
+/// carries a label has it printed as data by [`kotton_wire::note::quoted`]
+/// (kottonllc/kotton#652).
 fn compare_line(peer_label: Option<&str>) -> String {
-    let who = peer_label.map_or_else(|| "they".to_string(), kotton_wire::note::quoted);
-    format!("Six digits — check {who} sees the same:")
+    match peer_label {
+        Some(label) => format!("Six digits — check {} sees the same:", kotton_wire::note::quoted(label)),
+        None => "Six digits — check they see the same:".to_string(),
+    }
 }
 
 /// The line a completed contact pairing prints, read after the pairing
@@ -291,8 +296,8 @@ mod tests {
     /// (kottonllc/kotton#652; kottonllc/kotton#597, 54C), over [`LABELS`]: it is
     /// the plain word's line with that word's `quoted` print replaced by the
     /// label's, so it is one line holding the label's print once, no character
-    /// `shown` escapes, and its own words after the name once. With no label it
-    /// is this program's own words.
+    /// `shown` escapes, and its own words after the name once. With no label —
+    /// a contact pairing's frame, on either side — it is this program's own words.
     #[test]
     fn the_prompt_prints_the_label_as_data() {
         use kotton_wire::note::{quoted, shown};
@@ -312,7 +317,7 @@ mod tests {
                 assert!(!line.contains(c), "{label:?}: {c:?} was printed as it is: {line:?}");
             }
         }
-        assert_eq!(compare_line(None), "Six digits — check they sees the same:");
+        assert_eq!(compare_line(None), "Six digits — check they see the same:");
     }
 
     /// **The line a completed pairing prints gives the label as data**

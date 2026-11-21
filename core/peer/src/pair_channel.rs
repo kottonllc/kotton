@@ -143,10 +143,11 @@ impl<W: AsyncWrite + Unpin + Send, R: AsyncRead + Unpin + Send> EstablishedChann
     }
 
     /// The issuer's label, learned by the joiner over the encrypted channel and
-    /// named by the caller's rule (see [`joiner_establish`]): the name the person
-    /// was shown. A device join records the issuer under this name; a contact
-    /// join records the name in the signed identity record (kottonllc/kotton#668).
-    /// `None` on the issuer side (it does not receive a joiner label).
+    /// named by the caller's [`PeerName`] (see [`joiner_establish`]): the name the
+    /// person was shown, and the name a device join records the issuer under.
+    /// `None` where the ceremony shows no label — a contact join, whose row is
+    /// the name in the issuer's signed identity record — and on the issuer side,
+    /// which does not receive a joiner label.
     pub fn peer_label(&self) -> Option<&str> {
         self.peer_label.as_deref()
     }
@@ -183,7 +184,9 @@ impl<W: AsyncWrite + Unpin + Send, R: AsyncRead + Unpin + Send> EstablishedChann
 /// Run the issuer (existing-device) side of the handshake over an accepted
 /// bi-stream. `expected_sid` is the offer's session id the issuer advertised;
 /// `label` is the issuer's human label, delivered to the joiner over the encrypted
-/// channel. `confirmer` is asked to compare the SAS.
+/// channel. A contact ceremony's issuer sends an empty one: its joiner shows no
+/// label ([`PeerName::NotShown`]), and the issuer's name is sent once, in its
+/// signed identity record. `confirmer` is asked to compare the SAS.
 ///
 /// Returns the [`EstablishedChannel`] only after **both** sides confirm; any
 /// abort (local reject, bad peer MAC, transport loss) returns an error and
@@ -307,23 +310,37 @@ where
 
 // ── Establish: joiner side ─────────────────────────────────────────────────────
 
+/// What the joiner makes of the label the issuer's first encrypted frame
+/// carries: the one place a ceremony says whether its prompt names the issuer.
+#[derive(Clone, Copy)]
+pub enum PeerName {
+    /// The label, named by this rule once: the confirmer is shown that name and
+    /// [`EstablishedChannel::peer_label`] holds it. A device join passes the
+    /// store's trim and cut, and records the issuer's row under the result.
+    Shown(fn(&str) -> String),
+    /// No label, whatever the frame holds: the confirmer is given `None` and
+    /// [`EstablishedChannel::peer_label`] is `None`. The frame is still read, as
+    /// the handshake's order has it, and its label is dropped unread. A contact
+    /// join passes this: the other person's name is the one their key signs in
+    /// the identity record, read once the pairing completes.
+    NotShown,
+}
+
 /// Run the joiner (new-device) side of the handshake over a freshly opened
 /// bi-stream. `sid` is the offer's session id (from the mDNS advertisement or the
 /// connection code). `confirmer` is asked to compare the SAS after the joiner
 /// learns the issuer's label.
 ///
-/// `name` is applied once, here, to the label the issuer announced: the
-/// confirmer is shown that name and [`EstablishedChannel::peer_label`] holds it
-/// (kottonllc/kotton#652; #597, 54C). What that name is to the row depends on the
-/// caller:
+/// `name` says what the label the issuer announced is to this ceremony
+/// ([`PeerName`]), so wherever a prompt carries a label it is the name recorded
+/// (kottonllc/kotton#652):
 ///
-/// - **A device join** passes the store's trim and cut and makes the issuer's row
-///   from [`EstablishedChannel::peer_label`], so the name a person confirms is the
-///   name the row is recorded under.
-/// - **A contact join** passes the label as sent. The confirmer is shown the
-///   channel's label; the row is recorded under the name in the issuer's signed
-///   identity record, read after the answer. Holding the two to one string is
-///   kottonllc/kotton#668.
+/// - **A device join** passes [`PeerName::Shown`] with the store's trim and cut,
+///   and makes the issuer's row from [`EstablishedChannel::peer_label`], so the
+///   name a person confirms is the name the row is recorded under.
+/// - **A contact join** passes [`PeerName::NotShown`]: its prompt carries no
+///   label, as the issuer's does not, and the contact is recorded under the name
+///   in the issuer's signed identity record (kottonllc/kotton#668).
 ///
 /// A browser's admission does not run this channel (`kotton_pair::browser`).
 pub async fn joiner_establish<W, R>(
@@ -331,7 +348,7 @@ pub async fn joiner_establish<W, R>(
     recv: R,
     sid: [u8; 16],
     confirmer: &dyn SasConfirmer,
-    name: fn(&str) -> String,
+    name: PeerName,
 ) -> std::result::Result<EstablishedChannel<W, R>, PairChannelError>
 where
     W: AsyncWrite + Unpin + Send,
@@ -347,7 +364,7 @@ pub async fn joiner_establish_with<W, R>(
     mut recv: R,
     sid: [u8; 16],
     confirmer: &dyn SasConfirmer,
-    name: fn(&str) -> String,
+    name: PeerName,
     code: Option<&[u8]>,
 ) -> std::result::Result<EstablishedChannel<W, R>, PairChannelError>
 where
@@ -422,12 +439,15 @@ where
     let mut aead = AeadChannel::new(session.k_enc(), EnrollmentSide::Joiner);
 
     // 7. Read the issuer's label (first encrypted frame), and name it as the
-    //    row will be recorded: the person is asked about that name.
+    //    row will be recorded, or not at all: the person is asked about that.
     let info: PairInfo = recv_aead(&mut recv, &mut aead).await?;
-    let label = name(&info.label);
+    let label = match name {
+        PeerName::Shown(rule) => Some(rule(&info.label)),
+        PeerName::NotShown => None,
+    };
 
     // 8. Ask the human to compare the SAS; abort if they decline.
-    if !confirmer.confirm(session.sas(), Some(&label)).await {
+    if !confirmer.confirm(session.sas(), label.as_deref()).await {
         return Err(PairChannelError::SasRejected);
     }
 
@@ -442,7 +462,7 @@ where
     Ok(EstablishedChannel {
         session,
         transcript,
-        peer_label: Some(label),
+        peer_label: label,
         aead,
         send,
         recv,

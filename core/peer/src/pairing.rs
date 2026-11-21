@@ -2019,8 +2019,9 @@ where
     let send: Box<dyn AsyncWrite + Unpin + Send> = Box::new(send);
     let recv: Box<dyn AsyncRead + Unpin + Send> = Box::new(recv);
 
+    let name = crate::pair_channel::PeerName::Shown(clean_device_name);
     let mut channel =
-        crate::pair_channel::joiner_establish_with(send, recv, sid, confirmer, clean_device_name, pake.as_deref())
+        crate::pair_channel::joiner_establish_with(send, recv, sid, confirmer, name, pake.as_deref())
             .await
             .map_err(|e| anyhow!("pairing handshake failed: {e}"))?;
 
