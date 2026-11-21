@@ -1283,8 +1283,8 @@ pub const NAMED_AT_MOST: usize = 32;
 /// scoped to them, so their own log takes them ([`EventScope::User`]), which
 /// `logs` reads; at `warn`, which the note that counts the keys names (`logs
 /// --level warn`). Each names the drive and the vault (`from`) as the person
-/// calls them, and the key as the vault listed it, quoted, so a key with a
-/// control character in it is printed escaped. The first [`NAMED_AT_MOST`] are
+/// calls them, and the key as the vault listed it, printed as data to a
+/// bounded length ([`quoted_cut`]); the payload keeps it as listed. The first [`NAMED_AT_MOST`] are
 /// named, one event each, and one more event counts any past them: the listing
 /// is the vault's, and how much it writes into the person's log is not.
 pub fn refused_events(user_id: &str, name: &str, from: &str, refused: &[NotCanonical]) -> Vec<Event> {
@@ -1296,7 +1296,11 @@ pub fn refused_events(user_id: &str, name: &str, from: &str, refused: &[NotCanon
             Event::with_payload(
                 EventCategory::Storage,
                 EventLevel::Warn,
-                format!("drive move of '{name}' from '{from}': {not}; the move read and wrote nothing under it, and did not carry it"),
+                format!(
+                    "drive move of '{name}' from '{from}': storage key {} refused: {}; the move read and wrote nothing under it, and did not carry it",
+                    quoted_cut(&not.key),
+                    not.why
+                ),
                 serde_json::json!({ "drive": name, "from": from, "key": not.key, "why": not.why }),
             )
             .in_scope(scope.clone())
@@ -1768,7 +1772,7 @@ async fn move_holding(
             Ok(Err(held)) => {
                 return refused(format!(
                     "drive move: {}",
-                    held.said(runtime, store, &format!("'{name}' is held at '{}'", dest.node.id), &dest.node.id).await
+                    held.said(runtime, store, &format!("'{name}' is being moved to '{}'", dest.node.id), &dest.node.id).await
                 ))
             }
             // Gone since it was listed, or the vault did not answer: the
@@ -2311,13 +2315,33 @@ mod tests {
         assert!(!event.belongs_to(&EventScope::User("bob".into())));
         assert_eq!(event.level, EventLevel::Warn);
         assert!(
-            event.message.contains("'photos'") && event.message.contains("'vault-1'") && event.message.contains(&format!("{:?}", not.key)),
+            event.message.contains("'photos'") && event.message.contains("'vault-1'") && event.message.contains("storage key `../x\\u{7}` refused"),
             "{}",
             event.message
         );
         let payload = event.payload.as_ref().unwrap();
         assert_eq!(payload["key"], not.key);
         assert_eq!(payload["drive"], "photos");
+    }
+
+    /// **A refused key is printed as data, to the bound** (kottonllc/kotton#597,
+    /// 43A, 74A, 77A): the key is the vault's listing's, so a backtick and a line
+    /// break in it are printed by their escapes and a longer one is cut and says
+    /// so; the payload keeps the key as listed.
+    #[test]
+    fn a_refused_key_is_printed_as_data_to_the_bound() {
+        let key = format!("a`\n{}", "k".repeat(kotton_wire::note::MAX_SAID_CHARS));
+        let not = NotCanonical { key: key.clone(), why: "it is not canonical" };
+        let events = refused_events("alice", "photos", "vault-1", std::slice::from_ref(&not));
+        let [event] = events.as_slice() else { panic!("one refused key is not one event: {events:?}") };
+        let printed = format!("`a\\u{{60}}\\n{}` (cut: 9 more characters)", "k".repeat(kotton_wire::note::MAX_SAID_CHARS - 9));
+        assert_eq!(
+            event.message,
+            format!(
+                "drive move of 'photos' from 'vault-1': storage key {printed} refused: it is not canonical; the move read and wrote nothing under it, and did not carry it"
+            )
+        );
+        assert_eq!(event.payload.as_ref().unwrap()["key"], key);
     }
 
     /// **A vault cannot fill the person's log**: past [`NAMED_AT_MOST`] refused

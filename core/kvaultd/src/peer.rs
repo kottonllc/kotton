@@ -755,7 +755,8 @@ mod tests {
         };
         let printed = kotton_wire::note::quoted_cut(&message);
         assert_eq!(printed, kotton_wire::note::quoted(&message), "the sentence was cut");
-        assert_eq!(printed.chars().count() - 2, 358, "{printed}");
+        // It prints in 358 characters today, of the 512 the bound allows (74A).
+        assert!(printed.chars().count() - 2 <= kotton_wire::note::MAX_SAID_CHARS, "{printed}");
     }
 
     /// The refusal a key reads when its request names a pool it is not paired
