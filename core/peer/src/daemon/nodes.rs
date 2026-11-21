@@ -1746,6 +1746,12 @@ pub fn ceremony_failure_copy(err: &str) -> String {
 /// the own-device membership + sync wiring.
 ///
 /// The single issuer-completion path for the pairing ceremony.
+///
+/// It returns the ceremony's node unchanged, and the store names the row
+/// (kottonllc/kotton#597, 27A, 30A): where the person's row for the key is
+/// stored under another spelling, the node returned carries the key's
+/// derivation and the row keeps its DID as stored. The label names the row
+/// either way.
 pub async fn finalize_enrolled_node(
     secrets: &dyn SecretsStore,
     member_store: &dyn crate::membership::MemberStore,
@@ -3099,7 +3105,7 @@ mod named_by_key {
         for said in refused {
             let why = said.expect_err("written over a row beside another key").to_string();
             assert!(
-                why.contains("'attic'") && why.contains(&did) && why.contains("nothing was written") && why.contains("device revoke"),
+                why.contains(&kotton_wire::note::quoted("attic")) && why.contains(&did) && why.contains("nothing was written") && why.contains("device revoke"),
                 "{why}"
             );
             assert_eq!(rows(&db, "alice").await, before, "the store changed");

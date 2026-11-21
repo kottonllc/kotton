@@ -126,6 +126,12 @@ use kotton_common::time::now_secs;
 /// The single joiner-completion path for the pairing ceremony. What it answers
 /// is what the caller tells the issuer ([`answer_the_issuer`]): `PairFailed`
 /// is a refusal, and the issuer keeps nothing of the join.
+///
+/// The `PairingComplete` it answers carries the ceremony's node for the issuer,
+/// and the store names the row (kottonllc/kotton#597, 27A, 30A): where the
+/// person's row for the issuer's key is stored under another spelling, the node
+/// carries the key's derivation and the row keeps its DID as stored. The label
+/// names the row either way.
 // Allowed: the daemon state a join's completion writes, as `handle_device_add` below takes it.
 #[allow(clippy::too_many_arguments)]
 pub async fn finalize_joined_node(
@@ -1280,8 +1286,8 @@ async fn first_drive_at(runtime: &DeviceRuntime, store: &kotton_store::runtime::
 /// ([`answer_the_issuer`] follows [`finalize_joined_node`] on its side), and
 /// the ceremony returned only on that answer. The question is a dial to the
 /// node the ceremony learned ([`kotton_peer::pairing::EnrolledNode::node`],
-/// the value [`finalize_enrolled_node`] records and returns unchanged), and a
-/// dial reads no row: [`kotton_peer::dialer::Dialer::connect`] takes the node
+/// which [`finalize_enrolled_node`] returns unchanged; the store names the row
+/// it records), and a dial reads no row: [`kotton_peer::dialer::Dialer::connect`] takes the node
 /// it is handed.
 ///
 /// `Err` is the `PairFailed` reason. A write that fails part-way through

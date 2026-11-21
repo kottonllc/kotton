@@ -136,7 +136,14 @@ pub async fn insert_paired_node(
 /// For a writer that brings nothing a row may lack: a device admitted on proof,
 /// whose label is made and which knows no address, and the membership
 /// projection, which writes a cache row "without clobbering learned addresses"
-/// (kottonllc/kotton#597, 69A). The read and the write are one transaction.
+/// (kottonllc/kotton#597, 69A).
+///
+/// **It reads first, and begins as the writer only where it may write.** The
+/// projection asks this of every own-device member on every pass, and in the
+/// common case a row already holds the key: that is a plain read, which takes
+/// no writer's lock on the shared machine database. Where no row held the key,
+/// the read is made again inside the immediate transaction that writes, so a
+/// row written between the two is found and nothing is added beside it.
 #[allow(clippy::too_many_arguments)]
 pub async fn add_paired_node_if_absent(
     db: &Arc<SqlitePool>,
@@ -147,6 +154,30 @@ pub async fn add_paired_node_if_absent(
     now: i64,
     posture: Option<&str>,
 ) -> io::Result<Option<PairedNode>> {
+    add_paired_node_if_absent_after(db, id, user_id, key, addresses_json, now, posture, async {}).await
+}
+
+/// [`add_paired_node_if_absent`], with `between` awaited after the plain read
+/// finds no row and before the transaction begins: a test writes a row there,
+/// to hold that the read inside the transaction finds it.
+#[allow(clippy::too_many_arguments)]
+async fn add_paired_node_if_absent_after(
+    db: &Arc<SqlitePool>,
+    id: &str,
+    user_id: &str,
+    key: &VerifyingKey,
+    addresses_json: &str,
+    now: i64,
+    posture: Option<&str>,
+    between: impl std::future::Future<Output = ()>,
+) -> io::Result<Option<PairedNode>> {
+    {
+        let mut conn = db.acquire().await.map_err(db_err)?;
+        if row_for_key(&mut conn, user_id, key.as_bytes()).await?.is_some() {
+            return Ok(None);
+        }
+    }
+    between.await;
     let mut tx = kotton_record::immediate::Immediate::begin(db).await?;
     if row_for_key(tx.conn(), user_id, key.as_bytes()).await?.is_some() {
         // Dropped unended: the transaction rolls back, and it wrote nothing.
@@ -157,12 +188,51 @@ pub async fn add_paired_node_if_absent(
     Ok(Some(node))
 }
 
+#[cfg(test)]
+mod add_only {
+    use super::*;
+
+    async fn agent_db(dir: &tempfile::TempDir) -> Arc<SqlitePool> {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("agent.db"))
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("../device/migrations").run(&pool).await.unwrap();
+        Arc::new(pool)
+    }
+
+    /// **A row written after the plain read and before the transaction is found
+    /// inside the transaction**, and the add-only form writes nothing beside it:
+    /// one row for the key, the one written between, as it was written.
+    #[tokio::test]
+    async fn a_row_written_between_the_two_reads_is_found_and_nothing_is_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = agent_db(&dir).await;
+        let key = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[64; 32]));
+        let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(key.as_bytes()).to_string();
+        let between = {
+            let (db, spelled) = (Arc::clone(&db), spelled.clone());
+            async move {
+                seed_paired_node_as_stored(&db, "laptop", "alice", &spelled, key.as_bytes(), "[]", 5, Some("full")).await.unwrap();
+            }
+        };
+        let added = add_paired_node_if_absent_after(&db, "recovered", "alice", &key, "[]", 10, None, between).await.unwrap();
+        assert!(added.is_none(), "a row was added beside the one written between: {added:?}");
+        let rows = list_paired_nodes(&db, "alice").await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!((rows[0].id.as_str(), rows[0].device_did.to_string(), rows[0].paired_at), ("laptop", spelled, 5));
+    }
+}
+
 /// What a write is refused with where the derivation's string for its key is
-/// already the DID of `user_id`'s row `label` beside another key.
+/// already the DID of `user_id`'s row `label` beside another key. The label is
+/// printed as prose prints a name ([`kotton_wire::note::quoted`],
+/// kottonllc/kotton#597, 43A); `did` is the derivation, one plain word.
 fn under_another_key(label: &str, did: &str) -> io::Error {
     io::Error::other(format!(
-        "this person pairs '{label}' under {did}, this key's did:key, beside another key, and \
-         keeps it as that; nothing was written (`device revoke {did}` removes that row)"
+        "this person pairs {} under {did}, this key's did:key, beside another key, and \
+         keeps it as that; nothing was written (`device revoke {did}` removes that row)",
+        kotton_wire::note::quoted(label)
     ))
 }
 
