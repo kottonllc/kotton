@@ -44,7 +44,7 @@
 //! what they share is the mechanism, because a second handshake is a second
 //! chance to get the transcript order wrong.
 
-use crate::pair_channel::{issuer_establish_with, joiner_establish_with, SasConfirmer};
+use crate::pair_channel::{issuer_establish_with, joiner_establish_with, PeerName, SasConfirmer};
 use crate::relay_keys::{FirstContact, Presenting, RefusedAtTheRelay};
 use crate::rendezvous::unix_now;
 use anyhow::{anyhow, bail, Context, Result};
@@ -321,15 +321,35 @@ pub async fn run_issuer(
         .map_err(|_| anyhow!("nobody joined with the code within {}s", ttl.as_secs()))?
         .map_err(|e| anyhow!("relay circuit: {e}"))?;
     let (read, write) = tokio::io::split(stream);
-    let mut channel = issuer_establish_with(
-        write,
-        read,
-        rv.sid,
-        &ours.display_name,
-        confirmer,
-        Some(code.as_bytes()),
-    )
-    .await?;
+    issuer_half(write, read, rv.sid, &code, ISSUER_FRAME_LABEL, ours, identity_key, confirmer).await
+}
+
+/// The label a contact ceremony's issuer puts in the channel's first frame:
+/// none. A contact join's prompt carries no label ([`PeerName::NotShown`]), so
+/// the issuer's name is sent once, in its signed identity record, and that is
+/// the name the joiner records it under (kottonllc/kotton#668).
+const ISSUER_FRAME_LABEL: &str = "";
+
+/// The issuer's ceremony over an open circuit: the handshake, with `frame_label`
+/// in its first frame, then each side's signed identity record, ours first.
+/// [`run_issuer`] passes [`ISSUER_FRAME_LABEL`]; the tests pass others, as an
+/// issuer of another build would.
+#[allow(clippy::too_many_arguments)]
+async fn issuer_half<W, R>(
+    write: W,
+    read: R,
+    sid: [u8; 16],
+    code: &str,
+    frame_label: &str,
+    ours: &ContactIdentity,
+    identity_key: &SigningKey,
+    confirmer: &dyn SasConfirmer,
+) -> Result<PairedContact>
+where
+    W: AsyncWrite + Unpin + Send,
+    R: AsyncRead + Unpin + Send,
+{
+    let mut channel = issuer_establish_with(write, read, sid, frame_label, confirmer, Some(code.as_bytes())).await?;
     let transcript = channel.transcript().to_bytes();
     let mine = sign_identity(&transcript, ours, identity_key)?;
     channel
@@ -340,16 +360,6 @@ pub async fn run_issuer(
     let contact = verify_identity(&transcript, &theirs)?;
     let _ = channel.finish().await;
     Ok(contact)
-}
-
-/// The name a contact is shown under while the digits are compared: the label as
-/// the issuer sent it in the channel. No rule applied here could make it the name
-/// the row is recorded under: that is read from the issuer's signed identity
-/// record ([`verify_identity`]), after the person has answered. For an issuer of
-/// this build the two are one string (`display_name`, sent in both); holding them
-/// to one for any issuer is kottonllc/kotton#668.
-fn as_sent(label: &str) -> String {
-    label.to_owned()
 }
 
 /// The joiner's half: open a circuit to the code's handle at `relay_url` as a
@@ -402,6 +412,13 @@ pub async fn run_joiner(
 /// The joiner's ceremony over an open circuit: the handshake, then each side's
 /// signed identity record, theirs first. [`run_joiner`] runs it over a relay's
 /// circuit and the tests over a duplex, so both are the one joiner.
+///
+/// Its confirmer is given no label, whatever the issuer's first frame holds
+/// ([`PeerName::NotShown`]): the person compares the digits with the person who
+/// read them the code, as the issuer's side does. The contact is recorded under
+/// the name in the issuer's signed identity record ([`verify_identity`]), read
+/// after both have answered and first printed on completion
+/// (kottonllc/kotton#668).
 async fn joiner_half<W, R>(
     write: W,
     read: R,
@@ -415,7 +432,7 @@ where
     W: AsyncWrite + Unpin + Send,
     R: AsyncRead + Unpin + Send,
 {
-    let mut channel = joiner_establish_with(write, read, sid, confirmer, as_sent, Some(code.as_bytes())).await?;
+    let mut channel = joiner_establish_with(write, read, sid, confirmer, PeerName::NotShown, Some(code.as_bytes())).await?;
     let transcript = channel.transcript().to_bytes();
     let theirs: ContactIdentityRecord =
         serde_json::from_slice(&channel.recv_encrypted().await?).context("contact identity record")?;
@@ -429,11 +446,24 @@ where
 }
 
 /// Run both halves over an in-memory duplex — the whole ceremony minus the
-/// relay, for tests of the ceremony itself.
+/// relay, for tests of the ceremony itself — with this build's issuer.
 #[cfg(test)]
 async fn run_in_memory(
     code_issuer: &str,
     code_joiner: &str,
+    issuer: (&ContactIdentity, &SigningKey, &dyn SasConfirmer),
+    joiner: (&ContactIdentity, &SigningKey, &dyn SasConfirmer),
+) -> (Result<PairedContact>, Result<PairedContact>) {
+    run_in_memory_framed(code_issuer, code_joiner, ISSUER_FRAME_LABEL, issuer, joiner).await
+}
+
+/// [`run_in_memory`] with an issuer that puts `frame_label` in the channel's
+/// first frame, as an issuer of another build may.
+#[cfg(test)]
+async fn run_in_memory_framed(
+    code_issuer: &str,
+    code_joiner: &str,
+    frame_label: &str,
     issuer: (&ContactIdentity, &SigningKey, &dyn SasConfirmer),
     joiner: (&ContactIdentity, &SigningKey, &dyn SasConfirmer),
 ) -> (Result<PairedContact>, Result<PairedContact>) {
@@ -446,12 +476,7 @@ async fn run_in_memory(
     let (ours_j, key_j, conf_j) = joiner;
     let issuer_side = async {
         let (read, write) = tokio::io::split(a);
-        let mut ch = issuer_establish_with(write, read, rv_i.sid, &ours_i.display_name, conf_i, Some(code_i.as_bytes())).await?;
-        let t = ch.transcript().to_bytes();
-        let mine = sign_identity(&t, ours_i, key_i)?;
-        ch.send_encrypted(&serde_json::to_vec(&mine)?).await?;
-        let theirs: ContactIdentityRecord = serde_json::from_slice(&ch.recv_encrypted().await?)?;
-        verify_identity(&t, &theirs)
+        issuer_half(write, read, rv_i.sid, &code_i, frame_label, ours_i, key_i, conf_i).await
     };
     let joiner_side = async {
         let (read, write) = tokio::io::split(b);
@@ -491,27 +516,80 @@ mod tests {
         }
     }
 
-    /// **For a contact join between two parties of this build, the label the
-    /// joiner is shown is the label of the contact it returns**
-    /// (kottonllc/kotton#652): over a plain name, one with whitespace around it,
-    /// and one longer than 64 characters, none of which a contact's name is
-    /// trimmed or cut from. For an issuer of another build the two are not yet
-    /// held to one (kottonllc/kotton#668).
+    /// The shell's labels a join's lines and prompts are held over
+    /// (`client/shell/src/commands/device.rs`, `LABELS`), copied here because this
+    /// crate does not link the shell (one shared set is kottonllc/kotton#661).
+    const LABELS: [&str; 13] = [
+        "bell\u{7}",
+        "two\nlines",
+        "\u{202e}enohp",
+        "ph\u{200d}one",
+        "ph\u{e000}one",
+        "ph\u{378}one",
+        "ph\u{2029}one",
+        "ph\u{115f}one",
+        "ph\u{2800}one",
+        "\u{301}phone",
+        "a\\b",
+        "a`b",
+        "\u{5c4b}\u{6839}'s",
+    ];
+
+    /// **A contact join's prompt carries no label, and the contact is recorded
+    /// under the name its key signed** (kottonllc/kotton#668): for an issuer
+    /// whose first frame holds each of [`LABELS`], a name with whitespace around
+    /// it, and one longer than 64 characters — signing that same string as its
+    /// name, or another — the joiner's confirmer is shown no label, and the
+    /// contact it returns holds the signed record's name as it was signed.
     #[tokio::test]
-    async fn the_label_a_contact_joiner_is_shown_is_the_label_returned() {
+    async fn a_contact_joiner_is_shown_no_label_and_records_the_signed_name() {
         let long = "n".repeat(70);
-        for name in ["alice", "  alice\t", long.as_str()] {
-            let (mut alice, ka) = identity("alice");
-            alice.display_name = name.into();
-            let (bob, kb) = identity("bob");
-            let (ya, shown) = (Yes(Mutex::new(None)), Shown(Mutex::new(None)));
-            let (ra, rb) =
-                run_in_memory("ripple canyon ember", "ripple canyon ember", (&alice, &ka, &ya), (&bob, &kb, &shown)).await;
-            ra.expect("the issuer pairs");
-            let got_alice = rb.expect("the joiner pairs");
-            assert_eq!(got_alice.label, name, "{name:?}: the contact is not recorded under its name as sent");
-            assert_eq!(shown.0.lock().unwrap().as_deref(), Some(got_alice.label.as_str()), "{name:?}: the joiner was shown another name");
+        let framed = LABELS.into_iter().chain(["  alice\t", long.as_str()]);
+        for frame in framed {
+            for signed in [frame, "alice"] {
+                let (mut alice, ka) = identity("alice");
+                alice.display_name = signed.into();
+                let (bob, kb) = identity("bob");
+                let (ya, shown) = (Yes(Mutex::new(None)), Shown(Mutex::new(Some("unasked".into()))));
+                let (ra, rb) = run_in_memory_framed(
+                    "ripple canyon ember",
+                    "ripple canyon ember",
+                    frame,
+                    (&alice, &ka, &ya),
+                    (&bob, &kb, &shown),
+                )
+                .await;
+                ra.expect("the issuer pairs");
+                let got_alice = rb.expect("the joiner pairs");
+                assert_eq!(shown.0.lock().unwrap().as_deref(), None, "{frame:?}: the joiner was shown a label");
+                assert_eq!(got_alice.label, signed, "{frame:?}: the contact is not recorded under the name it signed");
+            }
         }
+    }
+
+    /// **This build's issuer sends its name once, in the signed record**
+    /// (kottonllc/kotton#668): the label in its first frame is empty, which a
+    /// joiner that read the frame would see.
+    #[tokio::test]
+    async fn a_contact_issuer_puts_no_label_in_the_first_frame() {
+        let code = normalize_code("ripple canyon ember");
+        let rv = rendezvous_for(&code).unwrap();
+        let (alice, ka) = identity("alice");
+        let (ya, yb) = (Yes(Mutex::new(None)), Yes(Mutex::new(None)));
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let issuer = async {
+            let (r, w) = tokio::io::split(a);
+            issuer_half(w, r, rv.sid, &code, ISSUER_FRAME_LABEL, &alice, &ka, &ya).await
+        };
+        let joiner = async {
+            let (r, w) = tokio::io::split(b);
+            let ch = joiner_establish_with(w, r, rv.sid, &yb, PeerName::Shown(str::to_owned), Some(code.as_bytes()))
+                .await
+                .expect("the handshake completes");
+            ch.peer_label().map(str::to_owned)
+        };
+        let (_, framed) = tokio::join!(issuer, joiner);
+        assert_eq!(framed.as_deref(), Some(""), "the issuer's first frame carries a label");
     }
 
     struct No;
@@ -635,7 +713,7 @@ mod tests {
         };
         let joiner = async {
             let (r, w) = tokio::io::split(b);
-            joiner_establish_with(w, r, sid, &yb, as_sent, Some(b"a-guess-that-is-wrong")).await.map(|_| ())
+            joiner_establish_with(w, r, sid, &yb, PeerName::NotShown, Some(b"a-guess-that-is-wrong")).await.map(|_| ())
         };
         let (ri, rj) = tokio::join!(issuer, joiner);
         assert!(ri.unwrap_err().to_string().contains("codes differ"), "issuer");

@@ -1268,7 +1268,10 @@ pub enum RunnerPairingState {
     /// Both sides met. Compare these digits aloud and answer.
     Compare {
         digits: String,
-        /// What the other side calls itself, where it said.
+        /// `None` from this build: a contact pairing's prompt carries no label
+        /// on either side (kottonllc/kotton#668). The surface draws its own
+        /// words over the digits, and the other person's name from `Paired`,
+        /// as data.
         peer_label: Option<String>,
     },
     /// It held: this person is now a contact.
