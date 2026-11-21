@@ -43,7 +43,9 @@
 //! `kotton id recover` and the REPL's `id recover` send the same request:
 //!
 //! - **Before anything is written**, the words are read as a phrase, the passphrase is
-//!   held to the bar, and the line is read as a vault's. A line whose key this device
+//!   held to the bar, and the line is read as a vault's, its key put to the Ed25519
+//!   rule before any row is read: a line under bytes the rule refuses changes nothing,
+//!   whatever this device pairs under them. A line whose key this device
 //!   pairs for the person under a posture other than `blind-storage` (one of their own
 //!   devices, a cosigner) is refused here: a drive is a vault, and this recovery
 //!   relabels no row.
@@ -53,7 +55,10 @@
 //!   is re-addressed by [`kotton_peer::daemon::nodes::peer_readdress`], which finds the
 //!   row by its key and keeps its DID as stored, its label, its posture and its relay
 //!   route; only its address and the time it was paired change: the line is where the
-//!   person says the vault is now. `peer add` is for a new row only.
+//!   person says the vault is now. `peer add` is for a new row only. Where two rows
+//!   of the person's hold the key, the one read, re-addressed and recorded as the
+//!   drive's node is one row, the one [`kotton_peer::daemon::db::reached_through`]
+//!   gives.
 //! - **Steps 1 to 5**, against every node the person pairs, the vault among them.
 //! - **Refused: the node added is taken back.** Everything the steps can fail on comes
 //!   before the rotation is presented to any node, so a refused recovery has changed
@@ -148,6 +153,11 @@ pub async fn recover(
     let asked = what_was_asked(runtime, user_id, recovery_key, passphrase)?;
     let (vault_key, vault_addr) =
         kotton_wire::line::InstanceLine::vault(vault_line).map_err(|why| anyhow!("{why}; nothing was changed"))?;
+    // The line's key is put to the Ed25519 rule before any row is read
+    // (kottonllc/kotton#597, 31A): bytes it refuses are no key, so nothing is
+    // admitted, indexed or re-addressed by them, whatever this device stores.
+    kotton_crypto::ed25519::VerifyingKey::from_bytes(&vault_key)
+        .map_err(|e| anyhow!("the line's key is not a vault's key: {e}; nothing was changed"))?;
 
     let vault = point_at_the_vault(runtime, db, user_id, vault_key, vault_addr).await?;
     let mut done = match prove_and_rotate(runtime, users, db, user_id, recovery_key, passphrase, asked).await {
@@ -217,7 +227,10 @@ async fn point_at_the_vault(
     addr: std::net::SocketAddr,
 ) -> Result<VaultNode> {
     let nodes = kotton_peer::daemon::db::list_paired_nodes(db, user_id).await.context("list paired nodes")?;
-    let paired = nodes.iter().find(|n| n.public_key == key);
+    // The row the key is reached through, by the one function: the row whose
+    // posture is read is the row re-addressed and the row the drive is then
+    // recorded through (`drives::record`).
+    let paired = kotton_peer::daemon::db::reached_through(&nodes, &key);
     if let Some(n) = paired {
         if let Some(other) = n.posture.as_deref().filter(|p| *p != kotton_schemas::membership::Posture::BlindStorage.as_str()) {
             return Err(anyhow!(
@@ -756,6 +769,84 @@ mod tests {
             );
         }
         assert!(kotton_peer::daemon::drives::list(&pool, "alice").await.unwrap().is_empty(), "a refusal recorded a drive");
+    }
+
+    /// **A line under bytes the Ed25519 rule refuses changes nothing**
+    /// (kottonllc/kotton#597, 31A), for every vector in `kotton_ed25519::refused`
+    /// and the right words: where no row holds the bytes, where a row holds them
+    /// at another address, and where a row holds them at the line's address. The
+    /// line's key is put to the rule before any row is read, so each is refused
+    /// saying nothing was changed: the rows are as they were, nothing is
+    /// admitted, no rotation is appended and the sealed copy is untouched.
+    #[tokio::test]
+    async fn a_line_under_bytes_the_rule_refuses_changes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let (rt, phrase) = a_device_that_kept_its_sealed_copy(&temp).await;
+        let sealed = rt.base_dir().join("users").join("alice").join(VAULT_FILE);
+        let (chain_before, copy_before) =
+            (kel_store::load_chain(rt.base_dir(), "alice").unwrap().len(), std::fs::read(&sealed).unwrap());
+        let elsewhere = serde_json::to_string(&["127.0.0.1:7000".parse::<std::net::SocketAddr>().unwrap()]).unwrap();
+        let at_the_line = serde_json::to_string(&[ADDR.parse::<std::net::SocketAddr>().unwrap()]).unwrap();
+        for (name, bytes) in kotton_crypto::ed25519::refused_keys() {
+            for (case, stored) in [("no row", None), ("a row elsewhere", Some(&elsewhere)), ("a row at the line's address", Some(&at_the_line))] {
+                let pool = agent_db().await;
+                if let Some(addresses) = stored {
+                    let did = kotton_crypto::DidKeyMethod::spelled_over(&bytes).to_string();
+                    kotton_peer::daemon::db::seed_paired_node_as_stored(&pool, "vault", "alice", &did, &bytes, addresses, 5, Some("blind-storage"))
+                        .await
+                        .unwrap();
+                }
+                let before = format!("{:?}", rows(&pool).await);
+
+                let refused = recover(&rt, &NobodyResident, &pool, "alice", &phrase, NEW_PASSPHRASE, &line_of(bytes, ADDR)).await;
+                let e = refused.expect_err("a line under refused bytes recovered");
+                assert!(e.to_string().contains("nothing was changed"), "{name}, {case}: {e:#}");
+                assert_eq!(format!("{:?}", rows(&pool).await), before, "{name}, {case}: a row changed");
+                assert!(kotton_peer::daemon::drives::list(&pool, "alice").await.unwrap().is_empty(), "{name}, {case}: a drive was recorded");
+                assert!(rt.paired_keys().read().unwrap().is_empty(), "{name}, {case}: something was admitted");
+                assert_eq!(kel_store::load_chain(rt.base_dir(), "alice").unwrap().len(), chain_before, "{name}, {case}: a rotation was appended");
+                assert_eq!(std::fs::read(&sealed).unwrap(), copy_before, "{name}, {case}: the sealed copy changed");
+            }
+        }
+    }
+
+    /// **Where two rows hold the line's key, the row re-addressed is the row the
+    /// drive is reached through** (kottonllc/kotton#597, 31A;
+    /// kottonllc/kotton#622). Two rows of the person's hold the vault's key, as
+    /// only an earlier build can have stored them: the more recently paired
+    /// under the higher DID and at another address, the other at the line's
+    /// address, so the row read, the row re-addressed and the drive's node would
+    /// differ if any were found otherwise. The right words recover; afterwards
+    /// the row the one function gave is at the line's address, its label and
+    /// DID as they were, the drive is recorded and reached through it, and the
+    /// other row is as it was.
+    #[tokio::test]
+    async fn of_two_rows_for_the_lines_key_the_row_re_addressed_is_the_drives() {
+        let temp = tempfile::tempdir().unwrap();
+        let (rt, phrase) = a_device_that_kept_its_sealed_copy(&temp).await;
+        let pool = agent_db().await;
+        let k = key(24);
+        let (a, b) = (did_of(&k), kotton_crypto::DidKeyMethod::spelled_otherwise(&k).to_string());
+        let (low, high) = if a < b { (a, b) } else { (b, a) };
+        let elsewhere = serde_json::to_string(&["127.0.0.1:7000".parse::<std::net::SocketAddr>().unwrap()]).unwrap();
+        let at_the_line = serde_json::to_string(&[ADDR.parse::<std::net::SocketAddr>().unwrap()]).unwrap();
+        kotton_peer::daemon::db::seed_paired_node_as_stored(&pool, "home", "alice", &high, &k, &elsewhere, 200, Some("blind-storage")).await.unwrap();
+        kotton_peer::daemon::db::seed_paired_node_as_stored(&pool, "home-before", "alice", &low, &k, &at_the_line, 100, Some("blind-storage")).await.unwrap();
+        let other_before = kotton_peer::daemon::db::get_paired_node(&pool, "alice", &low).await.unwrap().unwrap();
+
+        let done = recover(&rt, &NobodyResident, &pool, "alice", &phrase, NEW_PASSPHRASE, &line_of(k, ADDR)).await.unwrap();
+        assert_eq!(done.drive_not_recorded, None);
+
+        let readdressed = kotton_peer::daemon::db::get_paired_node(&pool, "alice", &high).await.unwrap().unwrap();
+        assert_eq!(readdressed.id, "home");
+        assert_eq!(readdressed.addresses, vec![ADDR.parse::<std::net::SocketAddr>().unwrap()], "the row the key is reached through was not re-addressed");
+        let drives = kotton_peer::daemon::drives::list(&pool, "alice").await.unwrap();
+        assert_eq!(drives.len(), 1, "{drives:?}");
+        assert_eq!(drives[0].node.device_did.to_string(), high, "the drive is reached through a row other than the one re-addressed");
+        assert_eq!(drives[0].node.id, "home");
+        let other = kotton_peer::daemon::db::get_paired_node(&pool, "alice", &low).await.unwrap().unwrap();
+        assert_eq!(format!("{other:?}"), format!("{other_before:?}"), "the other row changed");
+        assert_eq!(rows(&pool).await.len(), 2, "a row was added or removed");
     }
 
     /// The vault is added as `vault`, or beside a `vault` already there under its key.
