@@ -5155,7 +5155,7 @@ async fn an_admit_under_an_invite_for_another_name_says_so_and_a_matching_one_sy
     match said {
         UserResponse::PairFailed { reason } => {
             assert!(
-                reason.contains("tenant `sam`") && reason.contains("as `alice`"),
+                reason.contains("tenant \\u{60}sam\\u{60}") && reason.contains("as `alice`"),
                 "the admit names the pool the vault holds and the name this device asked as: {reason}"
             );
             assert!(
