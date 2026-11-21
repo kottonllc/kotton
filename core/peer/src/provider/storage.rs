@@ -200,8 +200,25 @@ impl KottonPeerObjectStorage {
 
     async fn exchange_bytes(&self, bytes: Vec<u8>) -> anyhow::Result<UserResponse> {
         let resp_bytes = self.channel.request(&bytes).await?;
-        let resp = serde_json::from_slice::<UserResponse>(&resp_bytes)?;
-        Ok(resp)
+        // The parser's error quotes what it read of the answer, so it is
+        // printed as the peer's text (kottonllc/kotton#597, 77A).
+        serde_json::from_slice::<UserResponse>(&resp_bytes).map_err(|e| {
+            anyhow::anyhow!("the peer's answer did not read: {}", kotton_wire::note::quoted_cut(&e.to_string()))
+        })
+    }
+
+    /// A peer's `Error`, as a person reads it: the peer's text printed as data,
+    /// to a bounded length, after the device's own words
+    /// ([`kotton_wire::note::quoted_cut`]; kottonllc/kotton#597, 43A, 74A). The
+    /// answerer may be a paired peer of any kind.
+    fn answered(message: &str) -> ObjectStorageError {
+        ObjectStorageError::BackendError(format!("the peer answered: {}", kotton_wire::note::quoted_cut(message)))
+    }
+
+    /// An answer this reader did not ask for, said by its name and no field of
+    /// it ([`UserResponse::name`]; kottonllc/kotton#597, 76B).
+    fn unexpected(other: &UserResponse) -> ObjectStorageError {
+        ObjectStorageError::BackendError(format!("unexpected peer response: {}", kotton_wire::note::quoted(&other.name())))
     }
 
     /// Convert a runtime error into an `ObjectStorageError`.
@@ -244,10 +261,10 @@ pub fn holding_key(device_did: &str) -> Option<kotton_crypto::ed25519::Verifying
 /// The holding device a sentence names when this device has no name of its own
 /// for it: a device the vault names, by the string the vault said, since the
 /// vault's word is all this device has for it. A string that does not read as a
-/// `did:key` ([`holding_key`]) is said to be none. Either is printed as data, by
-/// [`kotton_wire::note::quoted`].
+/// `did:key` ([`holding_key`]) is said to be none. Either is printed as data, to
+/// a bounded length, by [`kotton_wire::note::quoted_cut`].
 pub fn another_holder(device_did: &str) -> String {
-    let said = kotton_wire::note::quoted(device_did);
+    let said = kotton_wire::note::quoted_cut(device_did);
     match holding_key(device_did) {
         Some(_) => format!("a device the vault names {said}"),
         None => format!("a device the vault names {said} (not a did:key)"),
@@ -300,14 +317,8 @@ impl ObjectStorage for KottonPeerObjectStorage {
                 }
                 // An error is the peer failing, whatever its words: absence is
                 // never read from an error's text (kotton #412).
-                UserResponse::Error { message } => {
-                    return Err(ObjectStorageError::BackendError(message))
-                }
-                other => {
-                    return Err(ObjectStorageError::BackendError(format!(
-                        "unexpected peer response: {other:?}"
-                    )))
-                }
+                UserResponse::Error { message } => return Err(Self::answered(&message)),
+                other => return Err(Self::unexpected(&other)),
             }
         }
     }
@@ -337,14 +348,8 @@ impl ObjectStorage for KottonPeerObjectStorage {
                 UserResponse::DriveHeld { device_did, for_secs } => {
                     return Err(ObjectStorageError::BackendError(held_write(&path, &device_did, for_secs)));
                 }
-                UserResponse::Error { message } => {
-                    return Err(ObjectStorageError::BackendError(message))
-                }
-                other => {
-                    return Err(ObjectStorageError::BackendError(format!(
-                        "unexpected peer response: {other:?}"
-                    )))
-                }
+                UserResponse::Error { message } => return Err(Self::answered(&message)),
+                other => return Err(Self::unexpected(&other)),
             }
             offset = end;
             if offset >= data.len() {
@@ -361,10 +366,8 @@ impl ObjectStorage for KottonPeerObjectStorage {
         match self.send(&req).await.map_err(Self::io_err)? {
             UserResponse::Ok => Ok(()),
             // As `get`: an error is a failure, never absence (kotton #412).
-            UserResponse::Error { message } => Err(ObjectStorageError::BackendError(message)),
-            other => Err(ObjectStorageError::BackendError(format!(
-                "unexpected peer response: {other:?}"
-            ))),
+            UserResponse::Error { message } => Err(Self::answered(&message)),
+            other => Err(Self::unexpected(&other)),
         }
     }
 
@@ -383,10 +386,8 @@ impl ObjectStorage for KottonPeerObjectStorage {
                     modified: None,
                 })
                 .collect()),
-            UserResponse::Error { message } => Err(ObjectStorageError::BackendError(message)),
-            other => Err(ObjectStorageError::BackendError(format!(
-                "unexpected peer response: {other:?}"
-            ))),
+            UserResponse::Error { message } => Err(Self::answered(&message)),
+            other => Err(Self::unexpected(&other)),
         }
     }
 
@@ -458,8 +459,9 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                     // something unreadable; refuse at the boundary instead.
                     if domain_id != domain {
                         return Err(ObjectStorageError::BackendError(format!(
-                            "peer object at {path} belongs to key domain {domain_id}, this node \
-                             holds {domain}"
+                            "peer object at {path} belongs to key domain {}, this node \
+                             holds {domain}",
+                            kotton_wire::note::quoted_cut(&domain_id)
                         )));
                     }
                     let advanced = !blob.is_empty();
@@ -484,14 +486,8 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                 // compaction delete what only a held generation names
                 // (kotton #412).
                 UserResponse::SealedNotFound => return Err(ObjectStorageError::NotFound(path)),
-                UserResponse::Error { message } => {
-                    return Err(ObjectStorageError::BackendError(message))
-                }
-                other => {
-                    return Err(ObjectStorageError::BackendError(format!(
-                        "unexpected peer response: {other:?}"
-                    )))
-                }
+                UserResponse::Error { message } => return Err(Self::answered(&message)),
+                other => return Err(Self::unexpected(&other)),
             }
         }
     }
@@ -516,10 +512,8 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                     modified: e.modified,
                 })
                 .collect()),
-            UserResponse::Error { message } => Err(ObjectStorageError::BackendError(message)),
-            other => Err(ObjectStorageError::BackendError(format!(
-                "unexpected peer response: {other:?}"
-            ))),
+            UserResponse::Error { message } => Err(Self::answered(&message)),
+            other => Err(Self::unexpected(&other)),
         }
     }
 
@@ -552,8 +546,10 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                 UserResponse::Ok => {}
                 UserResponse::SealedDomainMismatch { expected, got } => {
                     return Err(ObjectStorageError::BackendError(format!(
-                        "peer refused sealed write at {path}: it holds key domain {expected}, we \
-                         sent {got}"
+                        "peer refused sealed write at {path}: it holds key domain {}, we \
+                         sent {}",
+                        kotton_wire::note::quoted_cut(&expected),
+                        kotton_wire::note::quoted_cut(&got)
                     )));
                 }
                 // Another device of the person's holds the drive at the vault,
@@ -562,14 +558,8 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                 UserResponse::DriveHeld { device_did, for_secs } => {
                     return Err(ObjectStorageError::BackendError(held_write(&path, &device_did, for_secs)));
                 }
-                UserResponse::Error { message } => {
-                    return Err(ObjectStorageError::BackendError(message))
-                }
-                other => {
-                    return Err(ObjectStorageError::BackendError(format!(
-                        "unexpected peer response: {other:?}"
-                    )))
-                }
+                UserResponse::Error { message } => return Err(Self::answered(&message)),
+                other => return Err(Self::unexpected(&other)),
             }
             offset = end;
             // A zero-length object still sends one chunk (offset 0); otherwise
@@ -637,7 +627,7 @@ mod tests {
 
         let err = storage.get(Path::new("/missing.txt")).await.unwrap_err();
         assert!(
-            matches!(&err, ObjectStorageError::BackendError(m) if m == "file not found"),
+            matches!(&err, ObjectStorageError::BackendError(m) if m == "the peer answered: `file not found`"),
             "expected the peer's error, got {err:?}"
         );
     }
@@ -658,7 +648,7 @@ mod tests {
 
         let err = storage.get_sealed(Path::new("_pack/0a")).await.unwrap_err();
         assert!(
-            matches!(&err, ObjectStorageError::BackendError(m) if m == "user 'x' not found"),
+            matches!(&err, ObjectStorageError::BackendError(m) if m == "the peer answered: `user 'x' not found`"),
             "a vault's failure was read as something else: {err:?}"
         );
     }
@@ -696,8 +686,9 @@ mod tests {
 
     /// A holding device's DID as a vault might say it: its key's own `did:key`,
     /// and strings that are not one (no DID, another spelling of the same bytes,
-    /// a `did:key` over bytes the rule refuses, and one holding a backtick and a
-    /// line break), each with the words a sentence names its holder by.
+    /// a `did:key` over bytes the rule refuses, one holding a backtick and a
+    /// line break, and one past the bound), each with the words a sentence names
+    /// its holder by.
     fn holders() -> Vec<(String, String)> {
         let key = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[2; 32]));
         let did = kotton_crypto::DidKeyMethod::from_public_key(&key).to_string();
@@ -711,6 +702,13 @@ mod tests {
             (
                 "did:key:z`x\nmore".to_string(),
                 "a device the vault names `did:key:z\\u{60}x\\nmore` (not a did:key)".to_string(),
+            ),
+            (
+                format!("did:key:z{}", "x".repeat(kotton_wire::note::MAX_SAID_CHARS)),
+                format!(
+                    "a device the vault names `did:key:z{}` (cut: 9 more characters) (not a did:key)",
+                    "x".repeat(kotton_wire::note::MAX_SAID_CHARS - 9)
+                ),
             ),
         ]
     }
@@ -747,6 +745,102 @@ mod tests {
                  which it says is moving this drive; what was written is kept on this device and sent again at the next pass"
             );
             assert!(matches!(&err, ObjectStorageError::BackendError(m) if *m == want), "{said:?}: {err:?}");
+        }
+    }
+
+    // -- an answer's text, printed as data -----------------------------------
+
+    /// What each read in this file says, asked once of a peer that answers
+    /// `answer`.
+    async fn each_read(answer: &[u8]) -> Vec<(&'static str, String)> {
+        let storage = || make_storage(Arc::new(MockPeerChannel::new(vec![answer.to_vec()]))).with_domain_id("d".to_string());
+        fn said(e: ObjectStorageError) -> String {
+            match e {
+                ObjectStorageError::BackendError(m) => m,
+                other => panic!("{other:?}"),
+            }
+        }
+        vec![
+            ("get", said(storage().get(Path::new("/a")).await.unwrap_err())),
+            ("put", said(storage().put(Path::new("/a"), b"x").await.unwrap_err())),
+            ("delete", said(storage().delete(Path::new("/a")).await.unwrap_err())),
+            ("list", said(storage().list(Path::new("/")).await.unwrap_err())),
+            ("get_sealed", said(storage().get_sealed(Path::new("_pack/0a")).await.unwrap_err())),
+            ("list_sealed", said(storage().list_sealed(Path::new("_pack")).await.unwrap_err())),
+            ("put_sealed", said(storage().put_sealed(Path::new("_pack/0a"), b"x").await.unwrap_err())),
+        ]
+    }
+
+    /// **A peer's `Error` is printed as data at every read, after the device's
+    /// own words** (kottonllc/kotton#597, 43A, 74A): a backtick and a line break
+    /// in it are printed by their escapes.
+    #[tokio::test]
+    async fn a_peers_error_is_printed_as_data_at_every_read() {
+        let answer = mock_response(&UserResponse::Error { message: "no `drive`\nhere".to_string() });
+        for (read, said) in each_read(&answer).await {
+            assert_eq!(said, "the peer answered: `no \\u{60}drive\\u{60}\\nhere`", "{read}");
+        }
+    }
+
+    /// **A peer's `Error` past the bound is cut at every read, and says so**
+    /// (74A).
+    #[tokio::test]
+    async fn a_peers_error_past_the_bound_is_cut_at_every_read() {
+        let long = "x".repeat(kotton_wire::note::MAX_SAID_CHARS + 88);
+        let answer = mock_response(&UserResponse::Error { message: long });
+        let want = format!("the peer answered: `{}` (cut: 88 more characters)", "x".repeat(kotton_wire::note::MAX_SAID_CHARS));
+        for (read, said) in each_read(&answer).await {
+            assert_eq!(said, want, "{read}");
+        }
+    }
+
+    /// **An answer a read did not ask for is said by its name, and no field of
+    /// it** (kottonllc/kotton#597, 76B).
+    #[tokio::test]
+    async fn an_answer_not_asked_for_is_said_by_its_name_alone() {
+        let full = mock_response(&UserResponse::VaultFull { held: 17, quota: 9 });
+        for (read, said) in each_read(&full).await {
+            assert_eq!(said, "unexpected peer response: `VaultFull`", "{read}");
+        }
+        let secret = mock_response(&UserResponse::PairAdvertising {
+            code: kotton_wire::ipc::SecretText::new("kotton-invite:vault:the-words"),
+            expires_at: 1,
+        });
+        for (read, said) in each_read(&secret).await {
+            assert_eq!(said, "unexpected peer response: `PairAdvertising`", "{read}");
+        }
+    }
+
+    /// **The key domains a peer names are printed as data, to the bound**
+    /// (kottonllc/kotton#597, 77A).
+    #[tokio::test]
+    async fn the_key_domains_a_peer_names_are_printed_as_data() {
+        let long = "d".repeat(kotton_wire::note::MAX_SAID_CHARS + 3);
+        let cut = format!("`{}` (cut: 3 more characters)", "d".repeat(kotton_wire::note::MAX_SAID_CHARS));
+        let mismatch = mock_response(&UserResponse::SealedDomainMismatch { expected: "a`\nb".to_string(), got: long.clone() });
+        let ch = Arc::new(MockPeerChannel::new(vec![mismatch]));
+        let err = make_storage(ch).with_domain_id("d".to_string()).put_sealed(Path::new("_pack/0a"), b"x").await.unwrap_err();
+        let want = format!("peer refused sealed write at _pack/0a: it holds key domain `a\\u{{60}}\\nb`, we sent {cut}");
+        assert!(matches!(&err, ObjectStorageError::BackendError(m) if *m == want), "{err:?}");
+
+        let object = mock_response(&UserResponse::SealedObject { blob: vec![1], domain_id: "e`\nvil".to_string(), total_size: 1 });
+        let ch = Arc::new(MockPeerChannel::new(vec![object]));
+        let err = make_storage(ch).with_domain_id("d".to_string()).get_sealed(Path::new("_pack/0a")).await.unwrap_err();
+        let want = "peer object at _pack/0a belongs to key domain `e\\u{60}\\nvil`, this node holds d";
+        assert!(matches!(&err, ObjectStorageError::BackendError(m) if m == want), "{err:?}");
+    }
+
+    /// **An answer that does not read is said in the parser's words, printed as
+    /// the peer's text** (kottonllc/kotton#597, 77A): what the parser quotes of
+    /// it is escaped and bounded.
+    #[tokio::test]
+    async fn an_answer_that_does_not_read_is_printed_as_data() {
+        let answer = br#"{"no`\nsuch":1}"#;
+        for (read, said) in each_read(answer).await {
+            let parsed = serde_json::from_slice::<UserResponse>(answer).unwrap_err().to_string();
+            assert!(parsed.contains("no`\nsuch"), "the parser quotes the answer: {parsed}");
+            assert_eq!(said, format!("the peer's answer did not read: {}", kotton_wire::note::quoted_cut(&parsed)), "{read}");
+            assert!(said.contains("no\\u{60}\\nsuch") && !said.contains('\n'), "{read}: {said}");
         }
     }
 

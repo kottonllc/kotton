@@ -139,16 +139,23 @@ pub fn plain_word_char(c: char) -> bool {
 pub fn shown(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for (i, c) in name.chars().enumerate() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            c if !kotton_schemas::petname::is_printed_as_is(c, i == 0) => out.push_str(&escape(c)),
-            c => out.push(c),
-        }
+        shown_char(c, i == 0, &mut out);
     }
     out
+}
+
+/// One character of [`shown`]'s print, `first` when it is the string's first.
+/// Each character is printed by itself and by whether it is the first, so the
+/// print of a prefix is a prefix of the print.
+fn shown_char(c: char, first: bool, out: &mut String) {
+    match c {
+        '\\' => out.push_str("\\\\"),
+        '\t' => out.push_str("\\t"),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        c if !kotton_schemas::petname::is_printed_as_is(c, first) => out.push_str(&escape(c)),
+        c => out.push(c),
+    }
 }
 
 /// `c` by its `\u{…}` escape.
@@ -164,6 +171,44 @@ fn escape(c: char) -> String {
 /// a name through this and nowhere else.
 pub fn quoted(name: &str) -> String {
     format!("`{}`", shown(name).replace('`', &escape('`')))
+}
+
+/// The most characters [`quoted_cut`] prints between its backticks
+/// (kottonllc/kotton#597, 74A). It bounds the print, not the string: a
+/// character prints in 1 to 10 ([`shown`], [`quoted`]). 512 is past every
+/// sentence a vault's code sends today (the longest prints in 358) and short of
+/// a screen: six lines and a half at 80 columns.
+pub const MAX_SAID_CHARS: usize = 512;
+
+/// `text`, a string another node sent, as prose prints it: as [`quoted`] prints
+/// it when its print fits in [`MAX_SAID_CHARS`] characters (kottonllc/kotton#597,
+/// 74A, 75A). A longer one is printed as the longest prefix of `text` whose
+/// print fits, between its backticks, so the cut never ends inside an escape;
+/// then, after the closing backtick, in the device's own words, `(cut: N more
+/// characters)`, N the characters of `text` left out.
+///
+/// The cut is made where text is printed and nowhere a string is compared: a
+/// reader that looks for words in an answer reads the answer as it came.
+pub fn quoted_cut(text: &str) -> String {
+    let mut inside = String::with_capacity(text.len().min(MAX_SAID_CHARS));
+    let mut used = 0;
+    let mut piece = String::new();
+    for (i, c) in text.chars().enumerate() {
+        piece.clear();
+        match c {
+            '`' => piece.push_str(&escape('`')),
+            c => shown_char(c, i == 0, &mut piece),
+        }
+        let len = piece.chars().count();
+        if used + len > MAX_SAID_CHARS {
+            let left = text.chars().count() - i;
+            let unit = if left == 1 { "character" } else { "characters" };
+            return format!("`{inside}` (cut: {left} more {unit})");
+        }
+        used += len;
+        inside.push_str(&piece);
+    }
+    format!("`{inside}`")
 }
 
 /// The one sentence a person reads for `note`. `verb` is the removal verb the
@@ -525,6 +570,69 @@ mod tests {
             let said = sentence(&note, "device revoke");
             assert!(said.contains(&format!("under its key, {}, as before", quoted(did_key))), "{said}");
             assert!(!said.contains(did_key), "the key was printed as given: {said:?}");
+        }
+    }
+
+    /// What `quoted_cut` printed between its backticks, and the words after.
+    fn cut_parts(said: &str) -> (&str, &str) {
+        let close = said[1..].find('`').expect("a closing backtick") + 1;
+        assert!(said.starts_with('`'), "{said}");
+        (&said[1..close], &said[close + 1..])
+    }
+
+    /// **A string whose print fits is printed as `quoted` prints it, whole**
+    /// (kottonllc/kotton#597, 74A): at the bound, and with a backtick and a line
+    /// break, each printed by its escape.
+    #[test]
+    fn a_said_string_that_fits_is_printed_as_quoted_prints_it() {
+        let at = "a".repeat(MAX_SAID_CHARS);
+        assert_eq!(quoted_cut(&at), quoted(&at));
+        let said = quoted_cut("no drive `photos`\nhere");
+        assert_eq!(said, quoted("no drive `photos`\nhere"));
+        assert_eq!(said, "`no drive \\u{60}photos\\u{60}\\nhere`");
+        assert!(!said.contains('\n'), "{said:?}");
+        for text in ["", "attic", "\u{301}mark first", "caf\u{e9} \u{202e}x\u{7}", "a\\b\tc\r"] {
+            assert_eq!(quoted_cut(text), quoted(text), "{text:?}");
+        }
+    }
+
+    /// **A string past the bound is cut, and says so after its closing
+    /// backtick, counting the string's characters left out** (74A).
+    #[test]
+    fn a_said_string_past_the_bound_is_cut_and_says_by_how_much() {
+        let past = "\u{e9}".repeat(MAX_SAID_CHARS + 40);
+        let said = quoted_cut(&past);
+        let (inside, after) = cut_parts(&said);
+        assert_eq!(inside, "\u{e9}".repeat(MAX_SAID_CHARS));
+        assert_eq!(after, " (cut: 40 more characters)");
+        let one = "a".repeat(MAX_SAID_CHARS + 1);
+        assert_eq!(cut_parts(&quoted_cut(&one)).1, " (cut: 1 more character)");
+    }
+
+    /// **A string of escapes past the bound ends on a whole escape, with at most
+    /// `MAX_SAID_CHARS` characters between its backticks, and the count is the
+    /// string's, not the print's** (74A).
+    #[test]
+    fn a_cut_never_ends_inside_an_escape() {
+        // `\u{7}` prints in 6, a backtick in 6, `\u{10ffff}` in 10, `\n` in 2.
+        for unit in ["\u{7}", "`", "\u{10ffff}", "\n", "x\u{7}"] {
+            let text = unit.repeat(MAX_SAID_CHARS);
+            let said = quoted_cut(&text);
+            let (inside, after) = cut_parts(&said);
+            let printed = inside.chars().count();
+            assert!(printed <= MAX_SAID_CHARS, "{unit:?}: {printed}");
+            let whole = quoted(&text);
+            let whole = &whole[1..whole.len() - 1];
+            assert!(whole.starts_with(inside), "{unit:?}: the cut is not a prefix of the print");
+            // The longest prefix: one more character of the string would not fit.
+            let kept = (0..=text.chars().count())
+                .rev()
+                .find(|n| shown(&text.chars().take(*n).collect::<String>()).replace('`', "\\u{60}") == inside)
+                .expect("the cut is the print of a prefix");
+            let next: String = text.chars().take(kept + 1).collect();
+            assert!(quoted(&next).chars().count() - 2 > MAX_SAID_CHARS, "{unit:?}: a longer prefix fits");
+            let left = text.chars().count() - kept;
+            assert_eq!(after, format!(" (cut: {left} more characters)"), "{unit:?}");
         }
     }
 
