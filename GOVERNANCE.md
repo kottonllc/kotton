@@ -31,9 +31,15 @@ not rest on one person either.
   settled by a maintainer's written answer that the others accept; no maintainer merges over
   another's open objection, and a choice that would keep the ownership bar
   ([`CLAUDE.md`](CLAUDE.md)) less strong than the other is never the one taken.
-- **Where a decision is kept.** A design decision is recorded where the design is: the
-  protocol documents in kotton-protocol, or the module docs it governs. Code cites it by name,
-  never by number.
+- **Where a decision is kept.** A design decision is recorded where the design is: the protocol
+  documents in kotton-protocol, or the module docs it governs. Everything in the tree (code,
+  comments, docs, test names) cites it by name, the words of what it settles, never by a
+  tracker's number: not an issue's, nor a choice's or an addendum's within one. A tracker's
+  number means nothing to a reader of the tree, and goes stale. A protocol document is cited as
+  it names itself. Where a commit message or a pull request's description cites a decision, it
+  names it the same way, and may give the `decision` issue's number beside the name, as its
+  address; the `decision` issue itself numbers its choices as it needs. The reviewer holds the
+  lines a pull request changes, and its description, to this.
 - **What is not decided this way.** What does not bend ([`CONTRIBUTING.md`](CONTRIBUTING.md)),
   and everything [`CLAUDE.md`](CLAUDE.md) says never to do. No decision may weaken the ownership
   bar or capability confinement, carry a key across a process boundary, trust infrastructure the
