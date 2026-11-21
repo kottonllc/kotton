@@ -324,15 +324,19 @@ fn show_record(n: &PairedNode) -> Out {
 /// under the derivation's string and for a row an earlier build stored under another
 /// spelling of the key's `did:key`, and on a device with no row for the key it adds
 /// one under the derivation. The row's `did` is printed as stored in the record above.
+/// On another device the line adds the row; on this one, typing it rewrites the key's
+/// row with the line's one address, so the row's other addresses go, and its posture
+/// and relay are kept: 30A's rewrite.
 ///
 /// There is none:
 ///
 /// - where the row's bytes are no Ed25519 key: they have no `did:key`, and `peer add`
 ///   takes no such key (kottonllc/kotton#597, 1A and 2A);
 /// - where the row's label is not [`kotton_wire::note::one_plain_word`]: a command is
-///   printed only with a name that reads back, typed as printed, as that name
-///   (kottonllc/kotton#597, 20A), and `peer add` rewrites the row's label with the
-///   one it is given;
+///   printed only with a name that is one plain word (kottonllc/kotton#597, 23A, with
+///   25A's concession that the set is ASCII), so that a printed command is held to
+///   reach its row typed as printed (20A), and `peer add` rewrites the row's label
+///   with the one it is given;
 /// - where no address is recorded for the row: `peer add` takes one.
 fn add_line(n: &PairedNode) -> Result<String, &'static str> {
     let Ok(did) = kotton_crypto::DidKeyMethod::from_public_key_bytes(&n.public_key) else {
