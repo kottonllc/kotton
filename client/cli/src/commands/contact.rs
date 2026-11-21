@@ -217,7 +217,7 @@ async fn drive(
                 }
             }
             UserResponse::ContactPaired { did, label } => {
-                println!("\nPaired with {label}.\n    {did}");
+                println!("\n{}\n    {did}", paired_line(&label));
                 return Ok(());
             }
             UserResponse::PairFailed { reason } => {
@@ -239,6 +239,13 @@ fn compare_line(peer_label: Option<&str>) -> String {
     format!("Six digits — check {who} sees the same:")
 }
 
+/// The line a completed contact pairing prints, read after the pairing
+/// completes: the label the `ContactPaired` frame carries, as data by
+/// [`kotton_wire::note::quoted`] (kottonllc/kotton#669).
+fn paired_line(label: &str) -> String {
+    format!("Paired with {}.", kotton_wire::note::quoted(label))
+}
+
 /// `"472 913"` — grouped, because it is read aloud.
 fn format_sas(sas: u32) -> String {
     let s = format!("{sas:06}");
@@ -256,7 +263,7 @@ fn ask(prompt: &str) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_line, contact_did, Named};
+    use super::{compare_line, contact_did, paired_line, Named};
 
     /// The shell's labels a join's lines and prompts are held over
     /// (`client/shell/src/commands/device.rs`, `LABELS`), copied here because the
@@ -306,6 +313,31 @@ mod tests {
             }
         }
         assert_eq!(compare_line(None), "Six digits — check they sees the same:");
+    }
+
+    /// **The line a completed pairing prints gives the label as data**
+    /// (kottonllc/kotton#669; kottonllc/kotton#597, 54C), over [`LABELS`]: it is
+    /// the plain word's line with that word's `quoted` print replaced by the
+    /// label's, so it is one line holding the label's print once, no character
+    /// `shown` escapes, and its own words after the name once.
+    #[test]
+    fn the_completed_line_prints_the_label_as_data() {
+        use kotton_wire::note::{quoted, shown};
+        const PLAIN: &str = "sam";
+        let plain = paired_line(PLAIN);
+        let (before, own) = plain.split_once(&quoted(PLAIN)).expect("the plain word is printed by `quoted`");
+        assert_eq!((before, own), ("Paired with ", "."));
+        for label in LABELS {
+            let line = paired_line(label);
+            assert!(!line.contains(['\n', '\r']), "{label:?}: not one line: {line:?}");
+            assert_eq!(line, plain.replace(&quoted(PLAIN), &quoted(label)), "{label:?}: printed outside its quote");
+            assert_eq!(line.matches(&quoted(label)).count(), 1, "{label:?}: {line:?}");
+            assert!(line.ends_with(&format!("{}{own}", quoted(label))), "{label:?}: {line:?}");
+            let printed = shown(label);
+            for c in label.chars().filter(|c| !printed.contains(*c)) {
+                assert!(!line.contains(c), "{label:?}: {c:?} was printed as it is: {line:?}");
+            }
+        }
     }
 
     fn contacts() -> Vec<(String, Option<String>)> {
