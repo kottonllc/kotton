@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
-use crate::tier_check::{read_tree, row_of, tracked_manifests};
+use crate::tier_check::{read_tree, rows, tracked_manifests, Rows};
 
 /// The workspaces cargo is asked about, by manifest, repo-relative: the root's and the relay's.
 const WORKSPACES: &[&str] = &["Cargo.toml", "infra/relay/Cargo.toml"];
@@ -30,7 +30,7 @@ fn relative(root: &Path, p: &str) -> Option<String> {
 
 /// What cargo reports for the workspace at `manifest`: the directory of each member package,
 /// and every path dependency whose two ends are both in rows.
-fn cargo_edges(root: &Path, manifest: &str, target: &Path) -> (BTreeSet<String>, BTreeSet<PathEdge>) {
+fn cargo_edges(root: &Path, rows: &Rows, manifest: &str, target: &Path) -> (BTreeSet<String>, BTreeSet<PathEdge>) {
     let out = Command::new(env!("CARGO"))
         .args(["metadata", "--format-version", "1", "--no-deps", "--offline", "--manifest-path"])
         .arg(root.join(manifest))
@@ -53,13 +53,13 @@ fn cargo_edges(root: &Path, manifest: &str, target: &Path) -> (BTreeSet<String>,
             .and_then(|m| m.strip_suffix("Cargo.toml").map(|d| d.trim_end_matches('/').to_string()))
             .unwrap_or_else(|| panic!("{name}'s manifest {manifest_path} is not under {}", root.display()));
         members.insert(from_dir.clone());
-        if row_of(&from_dir).is_none() {
+        if rows.row_of(&from_dir).is_none() {
             continue;
         }
         for dep in pkg["dependencies"].as_array().expect("a package lists its dependencies") {
             let Some(path) = dep["path"].as_str() else { continue };
             let Some(to_dir) = relative(root, path) else { continue };
-            if row_of(&to_dir).is_none() {
+            if rows.row_of(&to_dir).is_none() {
                 continue;
             }
             let to = dep["name"].as_str().expect("a dependency has a name").to_string();
@@ -75,7 +75,8 @@ fn cargo_edges(root: &Path, manifest: &str, target: &Path) -> (BTreeSet<String>,
 #[test]
 fn every_path_edge_cargo_reports_is_one_tier_check_reads() {
     let root = crate::out::root();
-    let tree = read_tree(&root, &tracked_manifests(&root));
+    let rows = rows();
+    let tree = read_tree(&root, &rows, &tracked_manifests(&root, &rows));
     let read: BTreeSet<PathEdge> = tree
         .edges
         .iter()
@@ -87,7 +88,7 @@ fn every_path_edge_cargo_reports_is_one_tier_check_reads() {
     let mut members = BTreeSet::new();
     let mut missed = Vec::new();
     for manifest in WORKSPACES {
-        let (m, cargo) = cargo_edges(&root, manifest, &target);
+        let (m, cargo) = cargo_edges(&root, &rows, manifest, &target);
         assert!(
             !cargo.is_empty(),
             "cargo reports no path edge between crates of rows in {manifest}: the comparison would \

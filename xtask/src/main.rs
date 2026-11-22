@@ -1953,13 +1953,15 @@ fn tier_check() {
             "\nThe platform seam: a bare-metal port substitutes core/sys \
              implementations, and a dependency reaching upward from the seam takes the \
              rest of the system with it.\n\
-             \nThe rows (xtask/src/tier_check.rs): one for each repository of kotton-protocol's repository plan \
+             \nThe rows (xtask/tier-rows.toml): one for each repository of kotton-protocol's repository plan \
              this tree holds a part of, each held to the rows its repository may link. An edge \
              it may not link is on its owed list in xtask/tier-owed.toml, by crate name, and \
              a list only shrinks: a part is cut when its list is empty. No list owes an edge \
-             from the protocol's, the vault's or the system's row into the CLI's, the client \
-             library's or the operator's, which only ask, whatever directory holds either \
-             crate: that is authority moving somewhere it was not granted."
+             from a row marked acting (the protocol's, the vault's, the system's) into one \
+             marked asking (the CLI's, the client library's, the operator's), whatever \
+             directory holds either crate: that is authority moving somewhere it was not \
+             granted. The rows are compared with the rows at the merge base with origin/main, \
+             and a widening of them lands only where xtask/tier-widenings.toml there records it."
         );
         std::process::exit(1);
     }

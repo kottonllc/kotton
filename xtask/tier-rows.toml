@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# The rows of `tier-check` (xtask/src/tier_check.rs): one for each repository of kotton-protocol's
+# repository plan that this tree holds a part of, each over the paths that part has today, each
+# saying which rows it may path-depend on and how it is marked. Their owed lists are
+# xtask/tier-owed.toml.
+#
+# This is data rather than a table in the source so that `tier-check` reads it at the merge base
+# with origin/main too, as it reads the owed lists, and compares the two: no row arrives (a row
+# here matched with no row there, by name or, for a rename, by the same paths), a row's
+# `may_link` does not gain a row, `not_rows` does not gain a root, a row's mark does not change
+# from `acting` or `asking`, and a crate does not change rows where that admits an edge its row
+# at the merge base did not, or takes it out of a refusal no list may waive, unless the merge
+# base's xtask/tier-widenings.toml names that widening. An edge a list at the merge base owes is
+# never admitted while a manifest has it, however the rows change: a crate re-homed into its
+# dependency's row while that edge is owed has no route but untangling.
+#
+# Each `may_link` is the repository plan's: the CLI is built from the protocol and the client
+# library alone; the client library and the relay from the protocol; the vault from the protocol
+# and its own crates; the system and the device-owner tool, which the repository plan makes the
+# system's, from the protocol and the system.
+#
+# Each `mark` is one of three. `acting`: the row acts on a principal's authority (the system's,
+# the vault's), or is what such a row is built from (the protocol's); an acting row may link only
+# acting rows. `asking`: the row only asks (the CLI's, the client library's, the device-owner
+# tool's). `neither`: the relay's, which carries what it cannot read. No crate of an acting row
+# path-depends on a crate of an asking row, whatever the owed lists say: that is the refusal no
+# list may waive, and it is derived from these marks alone.
+#
+# Shape: `not_rows`, the code roots that are no row, then one [[row]] per row, in the order they
+# are printed. A directory is in the row whose path is the longest prefix of it, by component, so
+# `core` is the rest of `core/`.
+
+# The code roots that are no row: nothing in them ships. `tools/` holds test instruments
+# (`tools/workspace-hack` among them, which crates dev-depend on), `xtask/` the gates and
+# `tests/` the integration suite. A row's crate may dev-depend on them and on nothing else there.
+not_rows = ["tools", "xtask", "tests"]
+
+[[row]]
+name = "protocol"
+becomes = "becomes kotton-protocol's crates"
+mark = "acting"
+paths = [
+    "core/wire",
+    "core/schemas",
+    "core/pair",
+    "core/handshake",
+    "core/ed25519",
+    "core/common",
+]
+may_link = ["protocol"]
+
+[[row]]
+name = "relay"
+becomes = "becomes kotton-relay"
+mark = "neither"
+paths = ["infra/relay"]
+may_link = ["protocol"]
+
+[[row]]
+name = "cli"
+becomes = "becomes kotton-cli"
+mark = "asking"
+paths = ["client/cli", "client/shell"]
+may_link = ["protocol", "client library", "cli"]
+
+[[row]]
+name = "client library"
+becomes = "becomes kotton-protocol's client library"
+mark = "asking"
+paths = ["client/kotton-client", "client/record-file"]
+may_link = ["protocol", "client library"]
+
+[[row]]
+name = "vault"
+becomes = "becomes kotton-vault"
+mark = "acting"
+paths = ["core/kvaultd"]
+may_link = ["protocol", "vault"]
+
+[[row]]
+name = "operator"
+becomes = "stays in kotton: the device-owner tool"
+mark = "asking"
+paths = ["client/kotton-operator"]
+may_link = ["protocol", "system", "operator"]
+
+[[row]]
+name = "system"
+becomes = "stays in kotton: the system"
+mark = "acting"
+paths = ["core"]
+may_link = ["protocol", "system"]
