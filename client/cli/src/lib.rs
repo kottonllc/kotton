@@ -45,6 +45,22 @@ pub struct Cli {
     /// by its escape. A note's sentence is carried as a person reads it, its names
     /// printed so.
     ///
+    /// In a sentence a name is printed between backticks, so a person reading it can
+    /// tell where the name ends. Between them the delimiter and each character drawn as
+    /// it (U+02CB, U+02F4, U+1FEF, U+2035, U+FF40) are printed by their escape, the
+    /// backtick as `\u{60}`, and so are the two grave marks U+0300 and U+0340 where what
+    /// they are drawn on is a space; every other character is printed as a table prints
+    /// it. A table's cell, a listing and `--json` print or carry a name as before. The
+    /// list is by name, as no table of Unicode's says what a character is drawn as, and
+    /// it may grow. What it costs falls by script, and in sentences alone: a reader of
+    /// Bopomofo sees its fourth tone mark (U+02CB, also the tone letter of some
+    /// romanisations) by its escape, a reader of phonetic transcription U+02F4, a reader
+    /// of polytonic Greek the spacing varia (U+1FEF) where the text is not composed, a
+    /// reader of mathematics the reversed prime (U+2035), a reader of fullwidth text its
+    /// grave (U+FF40), and any reader a grave mark standing alone after a space. A letter
+    /// with a grave written as two characters is printed as it is, and so are quotes,
+    /// apostrophes, acutes and primes.
+    ///
     /// A note's sentence gives a command to type only with a name that is one plain
     /// word, in ASCII. That is a concession. A device, vault or relay named in another
     /// script is stored, listed, shown in full and taken by its verb whole; what it costs
