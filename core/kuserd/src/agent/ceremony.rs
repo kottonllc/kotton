@@ -411,7 +411,7 @@ pub enum Side {
 ///
 /// Frames with no surface meaning map to `None` and are skipped rather than
 /// shown as an error: the stream carries machinery the person has no use for.
-fn as_state(resp: UserResponse) -> Option<RunnerPairingState> {
+pub(super) fn as_state(resp: UserResponse) -> Option<RunnerPairingState> {
     match resp {
         UserResponse::PairAdvertising { code, .. } => {
             Some(RunnerPairingState::Advertising { code })
