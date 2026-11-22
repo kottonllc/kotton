@@ -72,17 +72,75 @@
 //! untangling that lands deletes its entry), when the edge is one its row may link, or when it
 //! is filed under a row its crate is not in.
 //!
+//! ## What holds the rows
+//!
+//! The rows, and the code roots that are no row, are [`ROWS_FILE`], data for the same reason:
+//! the check reads it at the merge base with `origin/main` as well and compares the two, so the
+//! gate, not review, holds what the rows admit. A row here is matched with the row of the same
+//! name there or, where its name is new, with the row there that has the same paths and whose
+//! name is gone (a rename). Against the merge base, the check refuses:
+//!
+//! - a `may_link` that gains a row: a name in it whose row is matched with no row the matched
+//!   row's `may_link` names there;
+//! - a root added to `not_rows`;
+//! - a crate that changes rows (its directory is in a row here that is not matched with the row
+//!   its directory is in there), where the change admits an edge between it and another crate
+//!   that the rows there did not admit, or takes such an edge out of the refusal no list may
+//!   waive, whether or not a manifest has the edge yet. A path that leaves a row, a path a row
+//!   gains from another's, and a row added over another row's paths each change the rows of the
+//!   crates under them;
+//! - a matched row marked `acting` or `asking` there that is marked otherwise here;
+//! - a row that arrives: a row here matched with no row there. A row added, and a row renamed
+//!   whose paths change with its name, each arrive.
+//!
+//! Each of these is a widening, and is accepted only where [`WIDENINGS_FILE`] at the merge base
+//! names it: so a widening lands in two pull requests, each read and merged through the loop,
+//! the first recording it and the second making it and deleting the record, and an entry whose
+//! widening the tree already has is refused. A pull request has `origin/main` merged into it
+//! before it lands, and then its merge base is main's tip: a record counts only while main's tip
+//! holds it. An entry names rows the tree has, so splitting a row whose crates link each other
+//! takes three: the first records the new row; the second adds it over a placeholder path, a
+//! directory that holds a tracked file and no crate, and records the moves of the crates and the
+//! `may_link` gains the split needs; the third makes them and deletes the records. Nothing
+//! accepts the one refusal more: an edge a list at the merge base owes, which a manifest here
+//! has, is refused when the rows here admit it, however they came to. An entry leaves the lists only when its
+//! crate is untangled, which is when no manifest here has its edge, from that crate to that
+//! crate by package name; a crate moved into its dependency's row, or a row's paths grown over
+//! it, or a row added over them, is not untangled. So a crate re-homed into its dependency's
+//! row while the edge is owed has no route but untangling: no record accepts it, and its
+//! directory and the rows stay as the merge base has them until no manifest has the edge.
+//!
+//! Where the merge base has no [`ROWS_FILE`] (the change that brought it), the rows there are
+//! read from the table that held them in this source at that commit, `ROWS` and `NOT_ROWS` in
+//! [`SOURCE_FILE`] ([`parse_source_rows`]), each row marked from the `never_links` it had
+//! there (a row with any is `acting`, a row one names is `asking`, any other `neither`), and
+//! compared the same way, with no widening recorded. Where that source has no `ROWS` table,
+//! every row arrives, and the run says so; where it has one this cannot read, the run is
+//! refused rather than read as no change.
+//!
+//! ## The invariant
+//!
+//! The lists taken together only shrink; a row's list may receive an entry that follows its
+//! crate. Taken together: an entry is compared with every list at the merge base by the edge it
+//! holds, under any row, so it may leave one row's list only for the list of the row its crate
+//! is in; and the rows, compared with theirs at the merge base, do not admit an edge those lists
+//! owe while a manifest has it, so no entry leaves the lists by the rows changing under it.
+//!
 //! ## What no list may owe
 //!
-//! The system's and the vault's rows act on a principal's authority, and the protocol's is what
-//! every other row is built from; the CLI's, the client library's and the device-owner tool's
-//! rows only ask. A crate of the first three that path-depends on a crate of the last three is
-//! refused whatever the lists say and whatever directory holds either crate: the rule is each
-//! row's `never_links`, judged by the row of each end before any list is read, so a crate that
-//! leaves `client/` takes it along. Cargo permits that edge and nothing else here would catch
-//! it; it is authority moving somewhere it was not granted, which is not a debt to be paid
-//! later. An exception is written only where the repository plan's table names a caller of the
-//! device-owner tool, and it names none, so none of the first three links it.
+//! Every row is marked, in [`ROWS_FILE`], `acting`, `asking` or `neither`, and a row with no
+//! mark, or with another word, is refused when the file is read. The system's and the vault's
+//! rows act on a principal's authority, and the protocol's is what every other row is built
+//! from, so the three are `acting`, and an acting row may link only acting rows; the CLI's, the
+//! client library's and the device-owner tool's rows only ask, and are `asking`; the relay's is
+//! `neither`. A crate of an acting row that path-depends on a crate of an asking row is refused
+//! whatever the lists say and whatever directory holds either crate: the rule is [`never`],
+//! derived from the marks of the rows of each end before any list is read, so a crate that
+//! leaves `client/` takes it along, and a row added later that only asks is held by it from its
+//! mark. Cargo permits that edge and nothing else here would catch it; it is authority moving
+//! somewhere it was not granted, which is not a debt to be paid later. An exception is written
+//! only where the repository plan's table names a caller of the device-owner tool, and it names
+//! none, so no acting row links it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -90,102 +148,480 @@ use std::process::Command;
 
 use toml::{Table, Value};
 
-/// A repository of kotton-protocol's repository plan that this tree holds a part of, over
-/// today's paths.
-pub(crate) struct Row {
-    /// The row's name, as the owed list files it.
-    pub(crate) name: &'static str,
-    /// What its part becomes: the repository it is cut into, or that it stays.
-    pub(crate) becomes: &'static str,
-    /// The directories it is today. A directory belongs to the row whose path is the longest
-    /// prefix of it, by component, so `core` is the rest of `core/`.
-    pub(crate) paths: &'static [&'static str],
-    /// The rows it may path-depend on. A row's own crates are always admitted.
-    pub(crate) may_link: &'static [&'static str],
-    /// The rows it never path-depends on, whatever directory holds either crate and whatever its
-    /// owed list says: [`judge`] refuses such an edge before it reads a list.
-    pub(crate) never_links: &'static [&'static str],
+/// How a row is marked: what the refusal no list may waive ([`never`]) is derived from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Mark {
+    /// It acts on a principal's authority, or is what such a row is built from.
+    Acting,
+    /// It only asks.
+    Asking,
+    /// Neither.
+    Neither,
 }
 
-/// The rows. Each `may_link` is the repository plan's: the CLI is built from the protocol and
-/// the client library alone; the client library and the relay from the protocol; the vault from the
-/// protocol and its own crates; the system and the device-owner tool, which the repository plan
-/// makes the system's, from the protocol and the system. Each `never_links` is what no list may
-/// owe ("What no list may owe", above): the protocol, the vault and the system link none of the
-/// CLI, the client library and the device-owner tool.
-pub(crate) const ROWS: &[Row] = &[
-    Row {
-        name: "protocol",
-        becomes: "becomes kotton-protocol's crates",
-        paths: &[
-            "core/wire",
-            "core/schemas",
-            "core/pair",
-            "core/handshake",
-            "core/ed25519",
-            "core/common",
-        ],
-        may_link: &["protocol"],
-        never_links: &["cli", "client library", "operator"],
-    },
-    Row {
-        name: "relay",
-        becomes: "becomes kotton-relay",
-        paths: &["infra/relay"],
-        may_link: &["protocol"],
-        never_links: &[],
-    },
-    Row {
-        name: "cli",
-        becomes: "becomes kotton-cli",
-        paths: &["client/cli", "client/shell"],
-        may_link: &["protocol", "client library", "cli"],
-        never_links: &[],
-    },
-    Row {
-        name: "client library",
-        becomes: "becomes kotton-protocol's client library",
-        paths: &["client/kotton-client", "client/record-file"],
-        may_link: &["protocol", "client library"],
-        never_links: &[],
-    },
-    Row {
-        name: "vault",
-        becomes: "becomes kotton-vault",
-        paths: &["core/kvaultd"],
-        may_link: &["protocol", "vault"],
-        never_links: &["cli", "client library", "operator"],
-    },
-    Row {
-        name: "operator",
-        becomes: "stays in kotton: the device-owner tool",
-        paths: &["client/kotton-operator"],
-        may_link: &["protocol", "system", "operator"],
-        never_links: &[],
-    },
-    Row {
-        name: "system",
-        becomes: "stays in kotton: the system",
-        paths: &["core"],
-        may_link: &["protocol", "system"],
-        never_links: &["cli", "client library", "operator"],
-    },
-];
+impl Mark {
+    fn word(self) -> &'static str {
+        match self {
+            Mark::Acting => "acting",
+            Mark::Asking => "asking",
+            Mark::Neither => "neither",
+        }
+    }
 
-/// The code roots that are no row: nothing in them ships. `tools/` holds test instruments
-/// (`tools/workspace-hack` among them, which crates dev-depend on), `xtask/` the gates and
-/// `tests/` the integration suite. A row's crate may dev-depend on them and on nothing else
-/// there ([`read_tree`]).
-pub(crate) const NOT_ROWS: &[&str] = &["tools", "xtask", "tests"];
+    fn from_word(word: &str) -> Option<Mark> {
+        [Mark::Acting, Mark::Asking, Mark::Neither].into_iter().find(|m| m.word() == word)
+    }
+}
+
+/// A repository of kotton-protocol's repository plan that this tree holds a part of, over
+/// today's paths.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Row {
+    /// The row's name, as the owed list files it.
+    pub(crate) name: String,
+    /// What its part becomes: the repository it is cut into, or that it stays.
+    pub(crate) becomes: String,
+    /// Whether it acts, asks or neither.
+    pub(crate) mark: Mark,
+    /// The directories it is today. A directory belongs to the row whose path is the longest
+    /// prefix of it, by component, so `core` is the rest of `core/`.
+    pub(crate) paths: Vec<String>,
+    /// The rows it may path-depend on. A row's own crates are always admitted.
+    pub(crate) may_link: Vec<String>,
+}
+
+/// The rows and the code roots that are no row: [`ROWS_FILE`], read.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Rows {
+    pub(crate) rows: Vec<Row>,
+    /// The code roots that are no row: nothing in them ships. A row's crate may dev-depend on
+    /// them and on nothing else there ([`read_tree`]).
+    pub(crate) not_rows: Vec<String>,
+}
+
+impl Rows {
+    pub(crate) fn named(&self, name: &str) -> Option<&Row> {
+        self.rows.iter().find(|r| r.name == name)
+    }
+
+    /// The row a repo-relative directory is in: the row whose path is its longest prefix.
+    pub(crate) fn row_of(&self, dir: &str) -> Option<&Row> {
+        row_in(self, dir)
+    }
+
+    /// The top-level directories the rows lie in, in order.
+    pub(crate) fn roots(&self) -> Vec<&str> {
+        let mut roots: Vec<&str> = Vec::new();
+        for row in &self.rows {
+            for p in &row.paths {
+                let top = p.split('/').next().unwrap_or(p);
+                if !roots.contains(&top) {
+                    roots.push(top);
+                }
+            }
+        }
+        roots
+    }
+
+    fn is_not_row(&self, root: &str) -> bool {
+        self.not_rows.iter().any(|r| r == root)
+    }
+}
+
+/// The rows and the roots that are no row, repo-relative.
+pub(crate) const ROWS_FILE: &str = "xtask/tier-rows.toml";
+
+/// The widenings of the rows recorded and not yet made, repo-relative.
+pub(crate) const WIDENINGS_FILE: &str = "xtask/tier-widenings.toml";
+
+/// Where the rows were a table before [`ROWS_FILE`]: read at a merge base that has no
+/// [`ROWS_FILE`].
+const SOURCE_FILE: &str = "xtask/src/tier_check.rs";
+
+/// The rows of the tree this binary was built in, read from its [`ROWS_FILE`], for the tests.
+#[cfg(test)]
+pub(crate) fn rows() -> Rows {
+    let root = crate::out::root();
+    let text = std::fs::read_to_string(root.join(ROWS_FILE)).unwrap_or_else(|e| panic!("{ROWS_FILE}: {e}"));
+    parse_rows(&text).unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn strings(v: Option<&Value>, at: &str, key: &str) -> Result<Vec<String>, String> {
+    let Some(Value::Array(a)) = v else {
+        return Err(format!("{ROWS_FILE}: {at} has no `{key}` list"));
+    };
+    let mut out: Vec<String> = Vec::new();
+    for x in a {
+        let Value::String(s) = x else {
+            return Err(format!("{ROWS_FILE}: {at} `{key}` holds a value that is not a string"));
+        };
+        if out.contains(s) {
+            return Err(format!("{ROWS_FILE}: {at} `{key}` names `{s}` twice"));
+        }
+        out.push(s.clone());
+    }
+    Ok(out)
+}
+
+/// Parse [`ROWS_FILE`]: `not_rows`, then a `[[row]]` per row with `name`, `becomes`, `mark`,
+/// `paths` and `may_link`, and nothing else; then [`held_together`].
+pub(crate) fn parse_rows(text: &str) -> Result<Rows, String> {
+    let table: Table = text
+        .parse()
+        .map_err(|e| format!("{ROWS_FILE} is not TOML: {e}"))?;
+    for key in table.keys() {
+        if key != "not_rows" && key != "row" {
+            return Err(format!("{ROWS_FILE} has `{key}`, which is neither `not_rows` nor `row`"));
+        }
+    }
+    let not_rows = strings(table.get("not_rows"), "the file", "not_rows")?;
+    let Some(Value::Array(entries)) = table.get("row") else {
+        return Err(format!("{ROWS_FILE} has no [[row]]"));
+    };
+    let mut rows = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let Value::Table(entry) = entry else {
+            return Err(format!("{ROWS_FILE}: row {} is not a table", i + 1));
+        };
+        let Some(Value::String(name)) = entry.get("name") else {
+            return Err(format!("{ROWS_FILE}: row {} has no `name`", i + 1));
+        };
+        let at = format!("row `{name}`");
+        for key in entry.keys() {
+            if !["name", "becomes", "mark", "paths", "may_link"].contains(&key.as_str()) {
+                return Err(format!("{ROWS_FILE}: {at} has `{key}`, which is no field of a row"));
+            }
+        }
+        let Some(Value::String(becomes)) = entry.get("becomes") else {
+            return Err(format!("{ROWS_FILE}: {at} has no `becomes`"));
+        };
+        let mark = match entry.get("mark") {
+            Some(Value::String(w)) => Mark::from_word(w).ok_or_else(|| {
+                format!("{ROWS_FILE}: {at} is marked `{w}`, which is not `acting`, `asking` or `neither`")
+            })?,
+            _ => {
+                return Err(format!(
+                    "{ROWS_FILE}: {at} has no mark: mark it `acting`, `asking` or `neither`, so \
+                     what no list may owe is derived for it"
+                ))
+            }
+        };
+        rows.push(Row {
+            name: name.clone(),
+            becomes: becomes.clone(),
+            mark,
+            paths: strings(entry.get("paths"), &at, "paths")?,
+            may_link: strings(entry.get("may_link"), &at, "may_link")?,
+        });
+    }
+    let rows = Rows { rows, not_rows };
+    held_together(&rows).map_err(|e| format!("{ROWS_FILE}: {e}"))?;
+    Ok(rows)
+}
+
+/// What a table of rows is held to wherever it is read: every row is named once and has a path;
+/// no path is two rows'; every `may_link` names a row; and an acting row may link only acting
+/// rows, so what it is built from is held by the refusal it is held by.
+fn held_together(rows: &Rows) -> Result<(), String> {
+    let mut names = BTreeSet::new();
+    let mut paths: BTreeMap<&str, &str> = BTreeMap::new();
+    for row in &rows.rows {
+        if !names.insert(row.name.as_str()) {
+            return Err(format!("row `{}` is named twice", row.name));
+        }
+        if row.paths.is_empty() {
+            return Err(format!("row `{}` has no path", row.name));
+        }
+        for p in &row.paths {
+            if let Some(other) = paths.insert(p.as_str(), row.name.as_str()) {
+                return Err(format!("`{p}` is a path of row `{other}` and of row `{}`", row.name));
+            }
+        }
+    }
+    for row in &rows.rows {
+        for l in &row.may_link {
+            let Some(to) = rows.named(l) else {
+                return Err(format!("row `{}` may link `{l}`, which is not a row", row.name));
+            };
+            if row.mark == Mark::Acting && to.mark != Mark::Acting {
+                return Err(format!(
+                    "row `{}` is marked `acting` and may link `{l}`, which is marked `{}`: an \
+                     acting row may link only acting rows",
+                    row.name,
+                    to.mark.word()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The rows as the table in [`SOURCE_FILE`] held them before [`ROWS_FILE`]: `ROWS` (each
+/// `Row { name, becomes, paths, may_link, never_links }`) and `NOT_ROWS`, read from the text,
+/// not compiled. `Ok(None)` when the text has no `ROWS` table; an error when it has one this
+/// cannot read. Each row is marked from `never_links`: a row with any is `acting`, a row one
+/// names is `asking`, any other `neither`; a row that is both is an error.
+pub(crate) fn parse_source_rows(text: &str) -> Result<Option<Rows>, String> {
+    const ROWS_HEAD: &str = "pub(crate) const ROWS: &[Row] = &[";
+    const NOT_ROWS_HEAD: &str = "pub(crate) const NOT_ROWS: &[&str] = &[";
+    let Some(start) = text.find(ROWS_HEAD) else {
+        return Ok(None);
+    };
+    let body = &text[start + ROWS_HEAD.len()..];
+    let tokens = source_tokens(body)?;
+    let mut t = tokens.iter().peekable();
+    let mut rows = Vec::new();
+    let mut never: Vec<(String, Vec<String>)> = Vec::new();
+    loop {
+        match t.next() {
+            Some(Tok::Punct(']')) => break,
+            Some(Tok::Ident(i)) if i == "Row" => {}
+            other => return Err(format!("{SOURCE_FILE}: ROWS holds {other:?} where a `Row` was")),
+        }
+        if t.next() != Some(&Tok::Punct('{')) {
+            return Err(format!("{SOURCE_FILE}: a `Row` in ROWS has no `{{`"));
+        }
+        let mut fields: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        loop {
+            let field = match t.next() {
+                Some(Tok::Punct('}')) => break,
+                Some(Tok::Ident(f)) => f.clone(),
+                other => return Err(format!("{SOURCE_FILE}: a `Row` in ROWS holds {other:?} where a field was")),
+            };
+            if t.next() != Some(&Tok::Punct(':')) {
+                return Err(format!("{SOURCE_FILE}: field `{field}` of a `Row` has no `:`"));
+            }
+            let value = match t.next() {
+                Some(Tok::Str(s)) => vec![s.clone()],
+                Some(Tok::Punct('&')) => {
+                    if t.next() != Some(&Tok::Punct('[')) {
+                        return Err(format!("{SOURCE_FILE}: field `{field}` is not a list"));
+                    }
+                    let mut list = Vec::new();
+                    loop {
+                        match t.next() {
+                            Some(Tok::Punct(']')) => break,
+                            Some(Tok::Str(s)) => list.push(s.clone()),
+                            other => return Err(format!("{SOURCE_FILE}: field `{field}` holds {other:?}")),
+                        }
+                        if t.peek() == Some(&&Tok::Punct(',')) {
+                            t.next();
+                        }
+                    }
+                    list
+                }
+                other => return Err(format!("{SOURCE_FILE}: field `{field}` holds {other:?}")),
+            };
+            if fields.insert(field.clone(), value).is_some() {
+                return Err(format!("{SOURCE_FILE}: a `Row` in ROWS names `{field}` twice"));
+            }
+            if t.peek() == Some(&&Tok::Punct(',')) {
+                t.next();
+            }
+        }
+        if t.peek() == Some(&&Tok::Punct(',')) {
+            t.next();
+        }
+        let keys: Vec<&str> = fields.keys().map(String::as_str).collect();
+        if keys != ["becomes", "may_link", "name", "never_links", "paths"] {
+            return Err(format!("{SOURCE_FILE}: a `Row` in ROWS has the fields {keys:?}"));
+        }
+        let one = |f: &str| -> Result<String, String> {
+            match fields[f].as_slice() {
+                [s] => Ok(s.clone()),
+                _ => Err(format!("{SOURCE_FILE}: `{f}` of a `Row` in ROWS is not one string")),
+            }
+        };
+        let name = one("name")?;
+        never.push((name.clone(), fields["never_links"].clone()));
+        rows.push(Row {
+            name,
+            becomes: one("becomes")?,
+            mark: Mark::Neither,
+            paths: fields["paths"].clone(),
+            may_link: fields["may_link"].clone(),
+        });
+    }
+    let named: BTreeSet<&str> = never.iter().flat_map(|(_, n)| n.iter().map(String::as_str)).collect();
+    for row in &mut rows {
+        let acts = never.iter().any(|(n, l)| *n == row.name && !l.is_empty());
+        let asks = named.contains(row.name.as_str());
+        row.mark = match (acts, asks) {
+            (true, true) => {
+                return Err(format!(
+                    "{SOURCE_FILE}: row `{}` has `never_links` and is named in one, so it reads as \
+                     both acting and asking",
+                    row.name
+                ))
+            }
+            (true, false) => Mark::Acting,
+            (false, true) => Mark::Asking,
+            (false, false) => Mark::Neither,
+        };
+    }
+    let Some(start) = text.find(NOT_ROWS_HEAD) else {
+        return Err(format!("{SOURCE_FILE} has ROWS and no NOT_ROWS"));
+    };
+    let mut not_rows = Vec::new();
+    for tok in source_tokens(&text[start + NOT_ROWS_HEAD.len()..])? {
+        match tok {
+            Tok::Punct(']') => break,
+            Tok::Punct(',') => {}
+            Tok::Str(s) => not_rows.push(s),
+            other => return Err(format!("{SOURCE_FILE}: NOT_ROWS holds {other:?}")),
+        }
+    }
+    let rows = Rows { rows, not_rows };
+    held_together(&rows).map_err(|e| format!("{SOURCE_FILE}: {e}"))?;
+    Ok(Some(rows))
+}
+
+/// A token of the table in [`SOURCE_FILE`].
+#[derive(Debug, PartialEq)]
+enum Tok {
+    Ident(String),
+    Str(String),
+    Punct(char),
+}
+
+/// The tokens of `text` up to the first `;` outside a string: identifiers, string literals
+/// (with `\"` and `\\`), and punctuation; `//` comments are passed over.
+fn source_tokens(text: &str) -> Result<Vec<Tok>, String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            ';' => return Ok(out),
+            c if c.is_whitespace() => {}
+            '/' if chars.peek() == Some(&'/') => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                let mut s = String::new();
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(e @ ('"' | '\\')) => s.push(e),
+                            other => return Err(format!("{SOURCE_FILE}: an escape `\\{other:?}` in the rows' table")),
+                        },
+                        Some(c) => s.push(c),
+                        None => return Err(format!("{SOURCE_FILE}: a string in the rows' table does not end")),
+                    }
+                }
+                out.push(Tok::Str(s));
+            }
+            c if c.is_alphanumeric() || c == '_' => {
+                let mut s = c.to_string();
+                while let Some(&n) = chars.peek() {
+                    if n.is_alphanumeric() || n == '_' {
+                        s.push(n);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                out.push(Tok::Ident(s));
+            }
+            '{' | '}' | '[' | ']' | ',' | ':' | '&' => out.push(Tok::Punct(c)),
+            other => return Err(format!("{SOURCE_FILE}: `{other}` in the rows' table")),
+        }
+    }
+    Err(format!("{SOURCE_FILE}: the rows' table does not end"))
+}
+
+/// One widening of the rows, as [`WIDENINGS_FILE`] records it and as the comparison with the
+/// merge base finds it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Widening {
+    /// Row `row`'s `may_link` gains row `gains`.
+    MayLink { row: String, gains: String },
+    /// Crate `krate` moves from row `from` to row `to`.
+    Moves { krate: String, from: String, to: String },
+    /// Row `row`, marked `acting` or `asking` at the merge base, is marked `mark`.
+    Mark { row: String, mark: Mark },
+    /// `not_rows` gains `root`.
+    NotRow { root: String },
+    /// Row `row` arrives: it is matched with no row at the merge base.
+    Arrives { row: String },
+}
+
+impl std::fmt::Display for Widening {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Widening::MayLink { row, gains } => write!(f, "row = \"{row}\", gains = \"{gains}\""),
+            Widening::Moves { krate, from, to } => write!(f, "crate = \"{krate}\", from = \"{from}\", to = \"{to}\""),
+            Widening::Mark { row, mark } => write!(f, "row = \"{row}\", mark = \"{}\"", mark.word()),
+            Widening::NotRow { root } => write!(f, "not_row = \"{root}\""),
+            Widening::Arrives { row } => write!(f, "row = \"{row}\""),
+        }
+    }
+}
+
+/// Parse [`WIDENINGS_FILE`]: a `[[widen]]` per widening, each one of the five shapes of
+/// [`Widening`] with a `why` that is not empty, and nothing else.
+pub(crate) fn parse_widenings(text: &str) -> Result<Vec<Widening>, String> {
+    let table: Table = text
+        .parse()
+        .map_err(|e| format!("{WIDENINGS_FILE} is not TOML: {e}"))?;
+    for key in table.keys() {
+        if key != "widen" {
+            return Err(format!("{WIDENINGS_FILE} has `{key}`, which is not `widen`"));
+        }
+    }
+    let entries = match table.get("widen") {
+        None => return Ok(Vec::new()),
+        Some(Value::Array(a)) => a,
+        Some(_) => return Err(format!("{WIDENINGS_FILE}: `widen` is not a list of [[widen]] tables")),
+    };
+    let mut out = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        let at = format!("{WIDENINGS_FILE}: widening {}", i + 1);
+        let Value::Table(e) = e else {
+            return Err(format!("{at} is not a table"));
+        };
+        let s = |k: &str| e.get(k).and_then(Value::as_str).map(str::to_string);
+        if s("why").is_none_or(|w| w.trim().is_empty()) {
+            return Err(format!("{at} has no `why`: say what a reader holds it to"));
+        }
+        let mut keys: Vec<&str> = e.keys().map(String::as_str).filter(|k| *k != "why").collect();
+        keys.sort_unstable();
+        let w = match (keys.as_slice(), s("row"), s("gains"), s("crate"), s("from"), s("to"), s("mark"), s("not_row")) {
+            (["gains", "row"], Some(row), Some(gains), ..) => Widening::MayLink { row, gains },
+            (["crate", "from", "to"], _, _, Some(krate), Some(from), Some(to), ..) => Widening::Moves { krate, from, to },
+            (["mark", "row"], Some(row), .., Some(mark), _) => Widening::Mark {
+                row,
+                mark: Mark::from_word(&mark).ok_or_else(|| format!("{at} names the mark `{mark}`"))?,
+            },
+            (["not_row"], .., Some(root)) => Widening::NotRow { root },
+            (["row"], Some(row), ..) => Widening::Arrives { row },
+            _ => {
+                return Err(format!(
+                    "{at} has {keys:?}: a widening is `row` and `gains`, `crate`, `from` and `to`, \
+                     `row` and `mark`, `not_row`, or `row` alone, each a string, with `why`"
+                ))
+            }
+        };
+        if out.contains(&w) {
+            return Err(format!("{at} records {w} twice"));
+        }
+        out.push(w);
+    }
+    Ok(out)
+}
+
+/// The branch the lists may only shrink against.
+const MAIN_REF: &str = "origin/main";
 
 /// The one feature set every test build shares: most crates dev-depend on it, and it is no row.
 const WORKSPACE_HACK: &str = "tools/workspace-hack";
 
 /// The owed lists, repo-relative.
 pub(crate) const OWED_FILE: &str = "xtask/tier-owed.toml";
-
-/// The branch the lists may only shrink against.
-const MAIN_REF: &str = "origin/main";
 
 /// Each row's owed list: row, then the crate the edge is from, then the crates it is to.
 pub(crate) type Owed = BTreeMap<String, BTreeMap<String, BTreeSet<String>>>;
@@ -195,7 +631,7 @@ pub(crate) type Owed = BTreeMap<String, BTreeMap<String, BTreeSet<String>>>;
 pub(crate) struct Crate {
     pub(crate) name: String,
     pub(crate) dir: String,
-    pub(crate) row: &'static str,
+    pub(crate) row: String,
 }
 
 /// One path dependency between two crates of rows.
@@ -219,29 +655,35 @@ pub(crate) enum Base {
     Unknown(String),
 }
 
+/// What the rows were at the merge base with `origin/main`.
+#[derive(Debug, PartialEq)]
+pub(crate) enum BaseRows {
+    /// [`ROWS_FILE`] and [`WIDENINGS_FILE`] at that commit (no widening where the second is
+    /// absent).
+    At { commit: String, rows: Rows, widenings: Vec<Widening> },
+    /// No [`ROWS_FILE`] there: the table in [`SOURCE_FILE`] at that commit, with no widening.
+    FromSource { commit: String, rows: Rows },
+    /// Neither: every row arrives.
+    Absent { commit: String },
+    /// The merge base or a file could not be read, and why: the gate fails rather than reading
+    /// it as no change.
+    Unknown(String),
+}
+
 /// What a run found.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Judged {
     pub(crate) refused: Vec<String>,
     /// The rows whose lists arrive because the merge base has no [`OWED_FILE`].
-    pub(crate) arriving: Vec<&'static str>,
+    pub(crate) arriving: Vec<String>,
 }
 
-fn row_named_in<'a>(rows: &'a [Row], name: &str) -> Option<&'a Row> {
-    rows.iter().find(|r| r.name == name)
-}
-
-/// The row a repo-relative directory is in: the row whose path is its longest prefix.
-pub(crate) fn row_of(dir: &str) -> Option<&'static Row> {
-    row_in(ROWS, dir)
-}
-
-/// [`row_of`] over `rows`.
-fn row_in<'a>(rows: &'a [Row], dir: &str) -> Option<&'a Row> {
+/// The row of `dir` in `rows`: the row whose path is its longest prefix, by component.
+fn row_in<'a>(rows: &'a Rows, dir: &str) -> Option<&'a Row> {
     let parts: Vec<&str> = dir.split('/').collect();
     let mut best: Option<(&'a Row, usize)> = None;
-    for row in rows {
-        for p in row.paths {
+    for row in &rows.rows {
+        for p in &row.paths {
             let pp: Vec<&str> = p.split('/').collect();
             if parts.len() >= pp.len()
                 && parts[..pp.len()] == pp[..]
@@ -252,20 +694,6 @@ fn row_in<'a>(rows: &'a [Row], dir: &str) -> Option<&'a Row> {
         }
     }
     best.map(|(r, _)| r)
-}
-
-/// The top-level directories the rows lie in, in order.
-pub(crate) fn row_roots() -> Vec<&'static str> {
-    let mut roots: Vec<&'static str> = Vec::new();
-    for row in ROWS {
-        for p in row.paths {
-            let top = p.split('/').next().unwrap_or(p);
-            if !roots.contains(&top) {
-                roots.push(top);
-            }
-        }
-    }
-    roots
 }
 
 /// Parse [`OWED_FILE`]: a table per row, each key a crate, each value the crates it owes.
@@ -394,7 +822,7 @@ pub(crate) struct Tree {
     pub(crate) edges: BTreeSet<Edge>,
     /// The dev-dependencies of each row's crates into a root that is no row, which no list
     /// counts: row, then the directory depended on, then the crates that depend on it.
-    pub(crate) uncounted: BTreeMap<&'static str, BTreeMap<String, BTreeSet<String>>>,
+    pub(crate) uncounted: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
     pub(crate) refused: Vec<String>,
 }
 
@@ -623,10 +1051,10 @@ fn alias_refusals(aliases: &Table, at: &str) -> Vec<String> {
 /// cannot be asked.
 pub(crate) type Tracked = Result<Vec<String>, String>;
 
-/// Every `Cargo.toml` git tracks under the rows' roots in the checkout at `root`.
-pub(crate) fn tracked_manifests(root: &Path) -> Tracked {
+/// Every `Cargo.toml` git tracks under the roots of `rows` in the checkout at `root`.
+pub(crate) fn tracked_manifests(root: &Path, rows: &Rows) -> Tracked {
     let mut args = vec!["ls-files", "-z", "--cached", "--"];
-    let roots = row_roots();
+    let roots = rows.roots();
     args.extend(roots.iter().copied());
     let listed = git(root, &args)?;
     Ok(listed
@@ -652,7 +1080,7 @@ fn declares_workspace(manifest: &Table) -> bool {
 ///   hidden, `target` or `target-*` directory, or one missing from the working tree), and the
 ///   run itself when git cannot list them ([`Tracked`]);
 /// - a dependency `path` that does not end at a directory whose manifest this run read as a
-///   row's crate, unless it is a dev-dependency into a root named in [`NOT_ROWS`]. That refuses
+///   row's crate, unless it is a dev-dependency into a root `not_rows` names. That refuses
 ///   a path that leaves the repository (even to come back), one into a directory under no row
 ///   and no such root, one into a hidden, `target` or `target-*` directory (whose manifests are
 ///   not read),
@@ -661,7 +1089,7 @@ fn declares_workspace(manifest: &Table) -> bool {
 ///   or any manifest the walk read, and `paths`, a `[patch]` path or `include` in the `.cargo/`
 ///   config of a directory that declares a workspace;
 /// - a crate whose `package.workspace` names no workspace this run read.
-pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
+pub(crate) fn read_tree(root: &Path, rows: &Rows, tracked: &Tracked) -> Tree {
     let mut t = Tree::default();
     let (crates, edges, refused) = (&mut t.crates, &mut t.edges, &mut t.refused);
     let uncounted = &mut t.uncounted;
@@ -687,9 +1115,9 @@ pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
         crate::normalise_path(&s)
     };
     // First every manifest, so a dependency is placed against everything this run read.
-    let mut read: Vec<(String, String, &'static Row, Table)> = Vec::new();
+    let mut read: Vec<(String, String, &Row, Table)> = Vec::new();
     let mut walked: BTreeSet<String> = BTreeSet::new();
-    for top in row_roots() {
+    for top in rows.roots() {
         for manifest_path in manifests_under(&root.join(top)) {
             walked.insert(rel(&manifest_path));
             let manifest = match parse_manifest(&manifest_path) {
@@ -713,14 +1141,14 @@ pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
             let Some(name) = package_name(&manifest) else {
                 continue;
             };
-            let Some(row) = row_of(&dir) else {
+            let Some(row) = rows.row_of(&dir) else {
                 refused.push(format!(
-                    "{name} ({dir}) is in no row: name it in a row of xtask/src/tier_check.rs, \
-                     by the repository of kotton-protocol's repository plan it becomes"
+                    "{name} ({dir}) is in no row: name it in a row of {ROWS_FILE}, by the \
+                     repository of kotton-protocol's repository plan it becomes"
                 ));
                 continue;
             };
-            crates.push(Crate { name: name.clone(), dir: dir.clone(), row: row.name });
+            crates.push(Crate { name: name.clone(), dir: dir.clone(), row: row.name.clone() });
             read.push((name, dir, row, manifest));
         }
     }
@@ -756,7 +1184,7 @@ pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
         Err(e) => refused.push(format!(
             "the manifests git tracks under {} cannot be listed, so whether this run read every \
              one cannot be judged: {e}",
-            row_roots().iter().map(|r| format!("{r}/")).collect::<Vec<_>>().join(", ")
+            rows.roots().iter().map(|r| format!("{r}/")).collect::<Vec<_>>().join(", ")
         )),
     }
     let by_dir: BTreeMap<&str, &str> = read.iter().map(|(n, d, _, _)| (d.as_str(), n.as_str())).collect();
@@ -798,10 +1226,10 @@ pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
             }
             let top = to_dir.split('/').next().unwrap_or("").to_string();
             let shown = if to_dir.is_empty() { "the repository root".to_string() } else { to_dir.clone() };
-            if NOT_ROWS.contains(&top.as_str()) {
+            if rows.is_not_row(&top) {
                 if dev {
                     uncounted
-                        .entry(row.name)
+                        .entry(row.name.clone())
                         .or_default()
                         .entry(to_dir)
                         .or_default()
@@ -815,7 +1243,7 @@ pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
                         row.name
                     ));
                 }
-            } else if row_of(&to_dir).is_some() {
+            } else if rows.row_of(&to_dir).is_some() {
                 refused.push(format!(
                     "{name} ({dir}, row `{}`) path-depends on {shown}, which is no crate \
                      tier-check read as a row's, so nothing reads what that crate links. Where \
@@ -825,8 +1253,8 @@ pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
             } else {
                 refused.push(format!(
                     "{name} ({dir}, row `{}`) depends on {shown}, which is in no row and under \
-                     no root named in NOT_ROWS: tier-check reads nothing there, so nothing reads \
-                     what that crate links. Move the crate into a row",
+                     no root `not_rows` names ({ROWS_FILE}): tier-check reads nothing there, so \
+                     nothing reads what that crate links. Move the crate into a row",
                     row.name
                 ));
             }
@@ -839,28 +1267,35 @@ fn admitted(from: &Row, to: &Row) -> bool {
     from.name == to.name || from.may_link.contains(&to.name)
 }
 
-/// Whether `from` never links `to`, which no list may owe.
-fn never(from: &Row, to: &Row) -> bool {
-    from.never_links.contains(&to.name)
+/// Whether `from` never links `to`, which no list may owe: an acting row never path-depends on
+/// an asking row. Derived from the marks alone, so every row is held by it from its mark.
+pub(crate) fn never(from: &Row, to: &Row) -> bool {
+    from.mark == Mark::Acting && to.mark == Mark::Asking
+}
+
+/// Whether a list at the merge base holds the edge, under any row.
+fn owed_at(base: &Base, from: &str, to: &str) -> bool {
+    match base {
+        Base::At { owed, .. } => owed
+            .values()
+            .any(|l| l.get(from).is_some_and(|tos| tos.contains(to))),
+        _ => false,
+    }
 }
 
 /// Judge the edges against `rows`, the owed lists against the edges, and the lists against the
 /// merge base. The merge base's lists are read by the edges they hold, not by the rows they are
 /// filed under: an entry is compared with every list there, so a row renamed, or a crate moved
-/// from one row to another, keeps the floor its edges had.
-pub(crate) fn judge(rows: &[Row], crates: &[Crate], edges: &BTreeSet<Edge>, owed: &Owed, base: &Base) -> Judged {
+/// from one row to another, keeps the floor its edges had. An edge a list there holds that the
+/// rows here admit is refused while a manifest has it: its entry leaves the lists only when its
+/// crate is untangled.
+pub(crate) fn judge(rows: &Rows, crates: &[Crate], edges: &BTreeSet<Edge>, owed: &Owed, base: &Base) -> Judged {
     let mut j = Judged::default();
     let row_of_crate: BTreeMap<&str, &Crate> = crates.iter().map(|c| (c.name.as_str(), c)).collect();
-    // Whether a list at the merge base holds the edge, under any row.
-    let owed_at_base = |from: &str, to: &str| match base {
-        Base::At { owed: at, .. } => at
-            .values()
-            .any(|l| l.get(from).is_some_and(|tos| tos.contains(to))),
-        _ => false,
-    };
+    let owed_at_base = |from: &str, to: &str| owed_at(base, from, to);
 
-    for row in rows {
-        if !owed.contains_key(row.name) {
+    for row in &rows.rows {
+        if !owed.contains_key(&row.name) {
             j.refused.push(format!(
                 "row `{}` has no list in {OWED_FILE}: give it one, empty if it owes nothing",
                 row.name
@@ -868,7 +1303,7 @@ pub(crate) fn judge(rows: &[Row], crates: &[Crate], edges: &BTreeSet<Edge>, owed
         }
     }
     for name in owed.keys() {
-        if row_named_in(rows, name).is_none() {
+        if rows.named(name).is_none() {
             j.refused.push(format!("{OWED_FILE} lists `[{name}]`, which is not a row"));
         }
     }
@@ -881,7 +1316,7 @@ pub(crate) fn judge(rows: &[Row], crates: &[Crate], edges: &BTreeSet<Edge>, owed
 
     // Every edge.
     for e in edges {
-        let (Some(fr), Some(tr)) = (row_in(rows, &e.from_dir), row_in(rows, &e.to_dir)) else {
+        let (Some(fr), Some(tr)) = (rows.row_of(&e.from_dir), rows.row_of(&e.to_dir)) else {
             continue;
         };
         if never(fr, tr) {
@@ -892,7 +1327,29 @@ pub(crate) fn judge(rows: &[Row], crates: &[Crate], edges: &BTreeSet<Edge>, owed
             ));
             continue;
         }
-        if admitted(fr, tr) || is_owed(fr.name, &e.from, &e.to) {
+        if admitted(fr, tr) {
+            if let (true, Base::At { commit, .. }) = (owed_at_base(&e.from, &e.to), base) {
+                j.refused.push(format!(
+                    "{} ({}, row `{}`) links {} ({}, row `{}`), which a list at the merge base \
+                     with {MAIN_REF} ({}) owes, and the rows here admit it: an owed entry leaves \
+                     the lists only when its crate is untangled, when no manifest has the edge, \
+                     and a row's paths or `may_link` changing under it does not untangle it. \
+                     Untangle {} from {}, or put the rows, and the directories of both crates, \
+                     back as they were there",
+                    e.from,
+                    e.from_dir,
+                    fr.name,
+                    e.to,
+                    e.to_dir,
+                    tr.name,
+                    short(commit),
+                    e.from,
+                    e.to
+                ));
+            }
+            continue;
+        }
+        if is_owed(&fr.name, &e.from, &e.to) {
             continue;
         }
         let remedy = match base {
@@ -927,7 +1384,7 @@ pub(crate) fn judge(rows: &[Row], crates: &[Crate], edges: &BTreeSet<Edge>, owed
 
     // Every entry.
     for (row_name, list) in owed {
-        let Some(row) = row_named_in(rows, row_name) else { continue };
+        let Some(row) = rows.named(row_name) else { continue };
         for (from, tos) in list {
             for to in tos {
                 let entry = format!("{from} -> {to} (row `{row_name}`)");
@@ -935,7 +1392,7 @@ pub(crate) fn judge(rows: &[Row], crates: &[Crate], edges: &BTreeSet<Edge>, owed
                     j.refused.push(format!("the owed entry {entry} names {from}, which is no crate of any row"));
                     continue;
                 };
-                let from_row = row_in(rows, &fc.dir).map_or("no row", |r| r.name);
+                let from_row = rows.row_of(&fc.dir).map_or("no row", |r| r.name.as_str());
                 if from_row != row.name {
                     j.refused.push(format!(
                         "the owed entry {entry} is filed under `{row_name}`, and {from} is in row `{from_row}`"
@@ -954,8 +1411,9 @@ pub(crate) fn judge(rows: &[Row], crates: &[Crate], edges: &BTreeSet<Edge>, owed
                     ));
                     continue;
                 }
-                if let Some(tr) = row_in(rows, &tc.dir) {
-                    if admitted(row, tr) {
+                if let Some(tr) = rows.row_of(&tc.dir) {
+                    // An edge a list at the merge base owes is refused above, as the edge.
+                    if admitted(row, tr) && !owed_at_base(from, to) {
                         j.refused.push(format!(
                             "the owed entry {entry} is not owed: `{row_name}` may link `{}`, so \
                              delete the entry from {OWED_FILE}",
@@ -975,11 +1433,16 @@ pub(crate) fn judge(rows: &[Row], crates: &[Crate], edges: &BTreeSet<Edge>, owed
              one grew cannot be judged: {why}"
         )),
         Base::Absent { .. } => {
-            j.arriving = rows.iter().map(|r| r.name).filter(|n| owed.contains_key(*n)).collect();
+            j.arriving = rows
+                .rows
+                .iter()
+                .map(|r| r.name.clone())
+                .filter(|n| owed.contains_key(n))
+                .collect();
         }
         Base::At { commit, .. } => {
             for (row_name, list) in owed {
-                if row_named_in(rows, row_name).is_none() {
+                if rows.named(row_name).is_none() {
                     continue;
                 }
                 for (from, tos) in list {
@@ -1002,6 +1465,241 @@ pub(crate) fn judge(rows: &[Row], crates: &[Crate], edges: &BTreeSet<Edge>, owed
     j
 }
 
+/// The row at the merge base matched with `row`, a row of `here`: the row of the same name
+/// there or, where no row there has its name, the row there with the same paths whose name no
+/// row here has (a rename).
+fn matched<'a>(row: &Row, here: &Rows, there: &'a Rows) -> Option<&'a Row> {
+    if let Some(b) = there.named(&row.name) {
+        return Some(b);
+    }
+    let paths: BTreeSet<&String> = row.paths.iter().collect();
+    there
+        .rows
+        .iter()
+        .find(|b| here.named(&b.name).is_none() && b.paths.iter().collect::<BTreeSet<_>>() == paths)
+}
+
+/// Why an entry of [`WIDENINGS_FILE`] here is refused, if it is: each names a widening this tree
+/// has not made yet, of rows and crates it has (a row that arrives excepted), and one that can
+/// be made: a `may_link` gain of an acting row names an acting row, or a row `all`, the file's
+/// entries, record becoming `acting`.
+fn entry_refusal(w: &Widening, all: &[Widening], here: &Rows, crates: &[Crate]) -> Option<String> {
+    let made = || {
+        Some(format!(
+            "{WIDENINGS_FILE} records `{w}`, which this tree has made: an entry is consumed by \
+             the change that makes it, so delete it there"
+        ))
+    };
+    let no_row = |r: &str| Some(format!("{WIDENINGS_FILE} records `{w}`, and `{r}` is no row of {ROWS_FILE}"));
+    match w {
+        Widening::MayLink { row, gains } => {
+            let Some(r) = here.named(row) else { return no_row(row) };
+            let Some(g) = here.named(gains) else { return no_row(gains) };
+            if r.may_link.contains(gains) {
+                return made();
+            }
+            let g_acts = g.mark == Mark::Acting || all.contains(&Widening::Mark { row: gains.clone(), mark: Mark::Acting });
+            if r.mark == Mark::Acting && !g_acts {
+                return Some(format!(
+                    "{WIDENINGS_FILE} records `{w}`, and row `{row}` is marked `acting` and row \
+                     `{gains}` `{}`: an acting row may link only acting rows, so it cannot be \
+                     made. Mark `{gains}` `acting` first, or record that with it, or delete it",
+                    g.mark.word()
+                ));
+            }
+        }
+        Widening::Moves { krate, from, to } => {
+            if here.named(from).is_none() {
+                return no_row(from);
+            }
+            if here.named(to).is_none() {
+                return no_row(to);
+            }
+            let Some(c) = crates.iter().find(|c| c.name == *krate) else {
+                return Some(format!("{WIDENINGS_FILE} records `{w}`, and `{krate}` is no crate of a row"));
+            };
+            if c.row == *to {
+                return made();
+            }
+            if c.row != *from {
+                return Some(format!(
+                    "{WIDENINGS_FILE} records `{w}`, and {krate} is in row `{}`, not `{from}`",
+                    c.row
+                ));
+            }
+        }
+        Widening::Mark { row, mark } => {
+            let Some(r) = here.named(row) else { return no_row(row) };
+            if r.mark == *mark {
+                return made();
+            }
+        }
+        Widening::NotRow { root } => {
+            if here.is_not_row(root) {
+                return made();
+            }
+        }
+        Widening::Arrives { row } => {
+            if here.named(row).is_some() {
+                return made();
+            }
+        }
+    }
+    None
+}
+
+/// Judge the rows against the rows at the merge base: a row that arrives, a `may_link` that
+/// gains a row, a root added to `not_rows`, a mark changed from `acting` or `asking`, and a crate
+/// that changes rows
+/// where that admits an edge the rows there did not or takes one out of [`never`], each refused
+/// unless [`WIDENINGS_FILE`] at the merge base records it; and every entry of `widenings`, the
+/// file here, held to name a widening not yet made. An edge a list at the merge base owes is
+/// [`judge`]'s to refuse, and is not named again here.
+pub(crate) fn judge_rows(
+    here: &Rows,
+    widenings: &[Widening],
+    base: &BaseRows,
+    crates: &[Crate],
+    edges: &BTreeSet<Edge>,
+    owed_base: &Base,
+) -> Vec<String> {
+    let mut refused: Vec<String> = widenings
+        .iter()
+        .filter_map(|w| entry_refusal(w, widenings, here, crates))
+        .collect();
+    let (commit, there, recorded): (&str, &Rows, &[Widening]) = match base {
+        BaseRows::Unknown(why) => {
+            refused.push(format!(
+                "the rows cannot be compared with the merge base with {MAIN_REF}, so whether they \
+                 widened cannot be judged: {why}. Fetch, and merge {MAIN_REF} into the branch, so \
+                 the merge base is main's tip"
+            ));
+            return refused;
+        }
+        BaseRows::Absent { .. } => return refused,
+        BaseRows::At { commit, rows, widenings } => (commit, rows, widenings),
+        BaseRows::FromSource { commit, rows } => (commit, rows, &[]),
+    };
+    let at = format!("the merge base with {MAIN_REF} ({})", short(commit));
+    let mut widened = |w: Widening, what: String| {
+        if !recorded.contains(&w) {
+            refused.push(format!(
+                "{what}. A widening lands only where {WIDENINGS_FILE} at {at} records it: record \
+                 `{w}` there, with `why`, in a pull request of its own, and make it in one after"
+            ));
+        }
+    };
+
+    for h in &here.rows {
+        let Some(b) = matched(h, here, there) else {
+            widened(
+                Widening::Arrives { row: h.name.clone() },
+                format!(
+                    "row `{}` arrives: at {at} no row has its name, and none whose name is gone has \
+                     its paths. A row arrives only as a widening",
+                    h.name
+                ),
+            );
+            continue;
+        };
+        for l in &h.may_link {
+            if *l == h.name {
+                continue;
+            }
+            let gained = here
+                .named(l)
+                .and_then(|lr| matched(lr, here, there))
+                .is_none_or(|lb| lb.name != b.name && !b.may_link.contains(&lb.name));
+            if gained {
+                widened(
+                    Widening::MayLink { row: h.name.clone(), gains: l.clone() },
+                    format!(
+                        "row `{}` may link `{l}`, and at {at} row `{}` may link only {}: a \
+                         `may_link` does not gain a row",
+                        h.name,
+                        b.name,
+                        b.may_link.join(", ")
+                    ),
+                );
+            }
+        }
+        if b.mark != Mark::Neither && h.mark != b.mark {
+            widened(
+                Widening::Mark { row: h.name.clone(), mark: h.mark },
+                format!(
+                    "row `{}` is marked `{}`, and at {at} row `{}` is marked `{}`: a row's mark \
+                     holds the refusal no list may waive, and one marked `acting` or `asking` \
+                     keeps it",
+                    h.name,
+                    h.mark.word(),
+                    b.name,
+                    b.mark.word()
+                ),
+            );
+        }
+    }
+
+    for r in &here.not_rows {
+        if !there.is_not_row(r) {
+            widened(
+                Widening::NotRow { root: r.clone() },
+                format!(
+                    "`not_rows` names `{r}`, and at {at} it does not: tier-check reads nothing \
+                     under a root that is no row, and `not_rows` does not gain one"
+                ),
+            );
+        }
+    }
+
+    // Every crate whose directory is in a row there and in an unmatched row here.
+    let placed: Vec<(&Crate, &Row, &Row)> = crates
+        .iter()
+        .filter_map(|c| Some((c, here.row_of(&c.dir)?, there.row_of(&c.dir)?)))
+        .collect();
+    for &(c, h, b) in &placed {
+        if matched(h, here, there).is_some_and(|m| m.name == b.name) {
+            continue;
+        }
+        let mut what: Vec<String> = Vec::new();
+        for &(o, oh, ob) in &placed {
+            if o.name == c.name {
+                continue;
+            }
+            for (from, to, fh, th, fb, tb) in [(c, o, h, oh, b, ob), (o, c, oh, h, ob, b)] {
+                let refused_as_owed = owed_at(owed_base, &from.name, &to.name)
+                    && edges.iter().any(|e| e.from == from.name && e.to == to.name);
+                if refused_as_owed {
+                    continue;
+                }
+                if admitted(fh, th) && !admitted(fb, tb) {
+                    what.push(format!("{} -> {} is admitted, and was not", from.name, to.name));
+                } else if never(fb, tb) && !never(fh, th) {
+                    what.push(format!(
+                        "{} -> {} leaves the refusal no list may waive",
+                        from.name, to.name
+                    ));
+                }
+            }
+        }
+        if !what.is_empty() {
+            widened(
+                Widening::Moves { krate: c.name.clone(), from: b.name.clone(), to: h.name.clone() },
+                format!(
+                    "{} ({}) is in row `{}`, and at {at} it is in row `{}`: a crate changes rows \
+                     only where that admits no edge the rows there did not, and takes none out of \
+                     the refusal no list may waive, and here {}",
+                    c.name,
+                    c.dir,
+                    h.name,
+                    b.name,
+                    what.join("; ")
+                ),
+            );
+        }
+    }
+    refused
+}
+
 fn short(commit: &str) -> &str {
     &commit[..commit.len().min(12)]
 }
@@ -1022,19 +1720,28 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// The merge base of `HEAD` with `origin/main`.
+fn merge_base(root: &Path) -> Result<String, String> {
+    git(root, &["merge-base", MAIN_REF, "HEAD"]).map(|c| c.trim().to_string())
+}
+
+/// `file` at `commit`, read from git objects, or `None` when that commit has no such file.
+fn file_at(root: &Path, commit: &str, file: &str) -> Result<Option<String>, String> {
+    if git(root, &["ls-tree", "--name-only", commit, "--", file])?.trim().is_empty() {
+        return Ok(None);
+    }
+    git(root, &["show", &format!("{commit}:{file}")]).map(Some)
+}
+
 /// The owed lists at the merge base of `HEAD` with `origin/main`, read from git objects.
 pub(crate) fn base_owed(root: &Path) -> Base {
-    let commit = match git(root, &["merge-base", MAIN_REF, "HEAD"]) {
-        Ok(c) => c.trim().to_string(),
+    let commit = match merge_base(root) {
+        Ok(c) => c,
         Err(e) => return Base::Unknown(e),
     };
-    match git(root, &["ls-tree", "--name-only", &commit, "--", OWED_FILE]) {
-        Ok(listed) if listed.trim().is_empty() => return Base::Absent { commit },
-        Ok(_) => {}
-        Err(e) => return Base::Unknown(e),
-    }
-    let text = match git(root, &["show", &format!("{commit}:{OWED_FILE}")]) {
-        Ok(t) => t,
+    let text = match file_at(root, &commit, OWED_FILE) {
+        Ok(Some(t)) => t,
+        Ok(None) => return Base::Absent { commit },
         Err(e) => return Base::Unknown(e),
     };
     match parse_owed(&text) {
@@ -1043,48 +1750,103 @@ pub(crate) fn base_owed(root: &Path) -> Base {
     }
 }
 
-/// Print every row, its paths, what it may link and its owed list with a count, and return
-/// what is refused. The lists are printed on every run, refused or not.
+/// The rows at the merge base of `HEAD` with `origin/main`, read from git objects: its
+/// [`ROWS_FILE`] and [`WIDENINGS_FILE`], or where it has no [`ROWS_FILE`], the table in its
+/// [`SOURCE_FILE`].
+pub(crate) fn base_rows(root: &Path) -> BaseRows {
+    let commit = match merge_base(root) {
+        Ok(c) => c,
+        Err(e) => return BaseRows::Unknown(e),
+    };
+    let unknown = |e: String| BaseRows::Unknown(format!("at {}: {e}", short(&commit)));
+    match file_at(root, &commit, ROWS_FILE) {
+        Err(e) => BaseRows::Unknown(e),
+        Ok(Some(text)) => {
+            let rows = match parse_rows(&text) {
+                Ok(r) => r,
+                Err(e) => return unknown(e),
+            };
+            let widenings = match file_at(root, &commit, WIDENINGS_FILE) {
+                Err(e) => return BaseRows::Unknown(e),
+                Ok(None) => Vec::new(),
+                Ok(Some(t)) => match parse_widenings(&t) {
+                    Ok(w) => w,
+                    Err(e) => return unknown(e),
+                },
+            };
+            BaseRows::At { commit, rows, widenings }
+        }
+        Ok(None) => match file_at(root, &commit, SOURCE_FILE) {
+            Err(e) => BaseRows::Unknown(e),
+            Ok(None) => BaseRows::Absent { commit },
+            Ok(Some(text)) => match parse_source_rows(&text) {
+                Ok(Some(rows)) => BaseRows::FromSource { commit, rows },
+                Ok(None) => BaseRows::Absent { commit },
+                Err(e) => unknown(e),
+            },
+        },
+    }
+}
+
+fn read_file(root: &Path, file: &str) -> Result<String, String> {
+    std::fs::read_to_string(root.join(file)).map_err(|e| format!("{file}: {e}"))
+}
+
+/// Print every row, its mark, its paths, what it may link and its owed list with a count, and
+/// return what is refused. The lists are printed on every run, refused or not.
 pub(crate) fn rows_check(root: &Path) -> Vec<String> {
     let mut refused = Vec::new();
-    for row in ROWS {
-        for p in row.paths {
+    let rows = match read_file(root, ROWS_FILE).and_then(|t| parse_rows(&t)) {
+        Ok(r) => r,
+        Err(e) => {
+            refused.push(e);
+            return refused;
+        }
+    };
+    for row in &rows.rows {
+        for p in &row.paths {
             if !root.join(p).is_dir() {
                 refused.push(format!(
                     "row `{}` names `{p}`, which is not a directory here, so it reads nothing: \
-                     repoint ROWS in xtask/src/tier_check.rs",
+                     repoint it in {ROWS_FILE}",
                     row.name
                 ));
             }
         }
     }
-    let owed = match std::fs::read_to_string(root.join(OWED_FILE))
-        .map_err(|e| format!("{OWED_FILE}: {e}"))
-        .and_then(|t| parse_owed(&t))
-    {
+    let owed = match read_file(root, OWED_FILE).and_then(|t| parse_owed(&t)) {
         Ok(o) => o,
         Err(e) => {
             refused.push(e);
             return refused;
         }
     };
-    let rowed = row_roots();
+    let widenings = match read_file(root, WIDENINGS_FILE).and_then(|t| parse_widenings(&t)) {
+        Ok(w) => w,
+        Err(e) => {
+            refused.push(e);
+            return refused;
+        }
+    };
+    let rowed = rows.roots();
     for r in crate::tree::CODE_ROOTS {
-        if rowed.contains(r) == NOT_ROWS.contains(r) {
+        if rowed.contains(r) == rows.is_not_row(r) {
             refused.push(format!(
-                "code root `{r}/` must be either a row's or named in NOT_ROWS, and not both \
-                 (xtask/src/tier_check.rs)"
+                "code root `{r}/` must be either a row's or named in `not_rows`, and not both \
+                 ({ROWS_FILE})"
             ));
         }
     }
-    let tree = read_tree(root, &tracked_manifests(root));
+    let tree = read_tree(root, &rows, &tracked_manifests(root, &rows));
     refused.extend(tree.refused.iter().cloned());
     let base = base_owed(root);
-    let judged = judge(ROWS, &tree.crates, &tree.edges, &owed, &base);
+    let judged = judge(&rows, &tree.crates, &tree.edges, &owed, &base);
+    let base_r = base_rows(root);
+    let rows_refused = judge_rows(&rows, &widenings, &base_r, &tree.crates, &tree.edges, &base);
 
     println!("tier-check: one row for each repository of kotton-protocol's repository plan this tree holds a part of, over today's paths");
-    for row in ROWS {
-        let list = owed.get(row.name);
+    for row in &rows.rows {
+        let list = owed.get(&row.name);
         let count: usize = list.map(|l| l.values().map(BTreeSet::len).sum()).unwrap_or(0);
         let paths = if row.name == "system" {
             "core/ (the rest of it)".to_string()
@@ -1092,6 +1854,7 @@ pub(crate) fn rows_check(root: &Path) -> Vec<String> {
             row.paths.join(", ")
         };
         println!("\n  {}: {}", row.name, row.becomes);
+        println!("    mark: {}", row.mark.word());
         println!("    paths: {paths}");
         println!("    may link: {}", row.may_link.join(", "));
         println!("    owed ({count}):");
@@ -1101,7 +1864,7 @@ pub(crate) fn rows_check(root: &Path) -> Vec<String> {
             }
         }
         let none = BTreeMap::new();
-        let uncounted = tree.uncounted.get(row.name).unwrap_or(&none);
+        let uncounted = tree.uncounted.get(&row.name).unwrap_or(&none);
         let hack = uncounted.get(WORKSPACE_HACK).map(BTreeSet::len).unwrap_or(0);
         println!(
             "    not counted: dev-dependencies on {WORKSPACE_HACK}, which is no row ({hack} of \
@@ -1114,6 +1877,7 @@ pub(crate) fn rows_check(root: &Path) -> Vec<String> {
             );
         }
     }
+    println!("\n  not rows: {}", rows.not_rows.join(", "));
     match &base {
         Base::Absent { commit } => println!(
             "\ntier-check: the merge base with {MAIN_REF} ({}) has no {OWED_FILE}, so every list \
@@ -1128,7 +1892,32 @@ pub(crate) fn rows_check(root: &Path) -> Vec<String> {
         ),
         _ => {}
     }
+    match &base_r {
+        BaseRows::At { commit, widenings: w, .. } => println!(
+            "tier-check: every row is compared with {ROWS_FILE} at the merge base with \
+             {MAIN_REF} ({}), which records {} widening(s) in {WIDENINGS_FILE}",
+            short(commit),
+            w.len()
+        ),
+        BaseRows::FromSource { commit, .. } => println!(
+            "tier-check: the merge base with {MAIN_REF} ({}) has no {ROWS_FILE}, so every row is \
+             compared with the table in {SOURCE_FILE} there, each row marked from its \
+             `never_links`, with no widening recorded",
+            short(commit)
+        ),
+        BaseRows::Absent { commit } => println!(
+            "tier-check: the merge base with {MAIN_REF} ({}) has neither {ROWS_FILE} nor a table \
+             of rows in {SOURCE_FILE}, so every row arrives: {}",
+            short(commit),
+            rows.rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+        BaseRows::Unknown(_) => {}
+    }
+    for w in &widenings {
+        println!("tier-check: recorded, not yet made ({WIDENINGS_FILE}): {w}");
+    }
     refused.extend(judged.refused);
+    refused.extend(rows_refused);
     refused
 }
 
@@ -1172,7 +1961,7 @@ mod tests {
     /// included: what git would list had every file been added.
     fn every_manifest(root: &Path) -> Vec<String> {
         let mut out = Vec::new();
-        let mut stack: Vec<PathBuf> = row_roots().iter().map(|r| root.join(r)).collect();
+        let mut stack: Vec<PathBuf> = rows().roots().iter().map(|r| root.join(r)).collect();
         while let Some(d) = stack.pop() {
             for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
                 let path = entry.path();
@@ -1188,13 +1977,13 @@ mod tests {
 
     /// [`read_tree`] over a fixture, every manifest in it tracked.
     fn read(t: &tempfile::TempDir) -> Tree {
-        read_tree(t.path(), &Ok(every_manifest(t.path())))
+        read_tree(t.path(), &rows(), &Ok(every_manifest(t.path())))
     }
 
     fn run(t: &tempfile::TempDir, owed: &str, base: &Base) -> Judged {
         let tree = read(t);
         assert!(tree.refused.is_empty(), "{:?}", tree.refused);
-        judge(ROWS, &tree.crates, &tree.edges, &parse_owed(owed).unwrap(), base)
+        judge(&rows(), &tree.crates, &tree.edges, &parse_owed(owed).unwrap(), base)
     }
 
     fn at(owed: &str) -> Base {
@@ -1274,7 +2063,7 @@ mod tests {
         // No list at the merge base: every row arrives.
         let j = run(&t, &grown, &Base::Absent { commit: "0123".into() });
         assert!(j.refused.is_empty(), "{:?}", j.refused);
-        assert_eq!(j.arriving.len(), ROWS.len());
+        assert_eq!(j.arriving.len(), rows().rows.len());
 
         // A merge base that cannot be read fails rather than reading as no growth.
         let j = run(&t, &grown, &Base::Unknown("no origin/main".into()));
@@ -1283,16 +2072,25 @@ mod tests {
     }
 
     /// The rows, with `old` called `new`. No `may_link` names the rows renamed here.
-    fn renamed(old: &str, new: &'static str) -> Vec<Row> {
-        ROWS.iter()
-            .map(|r| Row {
-                name: if r.name == old { new } else { r.name },
-                becomes: r.becomes,
-                paths: r.paths,
-                may_link: r.may_link,
-                never_links: r.never_links,
-            })
-            .collect()
+    fn renamed(old: &str, new: &str) -> Rows {
+        let mut rows = rows();
+        for r in &mut rows.rows {
+            if r.name == old {
+                r.name = new.to_string();
+            }
+        }
+        rows
+    }
+
+    /// The rows, with the paths of each row `paths` names replaced.
+    fn repathed(paths: &[(&str, &[&str])]) -> Rows {
+        let mut rows = rows();
+        for r in &mut rows.rows {
+            if let Some((_, p)) = paths.iter().find(|(n, _)| *n == r.name) {
+                r.paths = p.iter().map(|s| s.to_string()).collect();
+            }
+        }
+        rows
     }
 
     /// A row renamed is compared with the merge base by the edges its list holds, not by its
@@ -1300,7 +2098,7 @@ mod tests {
     #[test]
     fn a_renamed_row_keeps_the_floor_its_edges_had() {
         let rows = renamed("relay", "relay server");
-        assert!(rows.iter().all(|r| !r.may_link.contains(&"relay")));
+        assert!(rows.rows.iter().all(|r| !r.may_link.iter().any(|l| l == "relay")));
         let renamed_list = OWED.replace("[relay]\n", "[\"relay server\"]\n");
 
         let t = tree();
@@ -1333,20 +2131,10 @@ mod tests {
     /// row to file it under.
     #[test]
     fn an_entry_keeps_its_floor_when_its_crate_changes_rows() {
-        let rows: Vec<Row> = ROWS
-            .iter()
-            .map(|r| Row {
-                name: r.name,
-                becomes: r.becomes,
-                paths: match r.name {
-                    "cli" => &["client/cli"],
-                    "client library" => &["client/kotton-client", "client/record-file", "client/shell"],
-                    _ => r.paths,
-                },
-                may_link: r.may_link,
-                never_links: r.never_links,
-            })
-            .collect();
+        let rows = repathed(&[
+            ("cli", &["client/cli"]),
+            ("client library", &["client/kotton-client", "client/record-file", "client/shell"]),
+        ]);
         let t = tree();
         let tree = read(&t);
         let judged = |owed: &str| judge(&rows, &tree.crates, &tree.edges, &parse_owed(owed).unwrap(), &at(OWED));
@@ -1404,22 +2192,9 @@ mod tests {
     /// and the lists may arrive, and every edge is refused all the same.
     #[test]
     fn no_list_owes_a_row_that_acts_linking_one_that_only_asks_wherever_it_lies() {
-        let rows: Vec<Row> = ROWS
-            .iter()
-            .map(|r| Row {
-                name: r.name,
-                becomes: r.becomes,
-                paths: match r.name {
-                    "cli" => &["cli"],
-                    "operator" => &["operator"],
-                    _ => r.paths,
-                },
-                may_link: r.may_link,
-                never_links: r.never_links,
-            })
-            .collect();
+        let rows = repathed(&[("cli", &["cli"]), ("operator", &["operator"])]);
         let crate_of = |name: &str, dir: &str| {
-            let row = row_in(&rows, dir).unwrap_or_else(|| panic!("{dir} is in no row")).name;
+            let row = rows.row_of(dir).unwrap_or_else(|| panic!("{dir} is in no row")).name.clone();
             Crate { name: name.into(), dir: dir.into(), row }
         };
         let from = [crate_of("kotton-wire", "core/wire"), crate_of("kvaultd", "core/kvaultd"), crate_of("kotton-fs", "core/fs")];
@@ -1428,15 +2203,15 @@ mod tests {
             crate_of("kotton", "client/kotton-client"),
             crate_of("kotton-operator", "operator"),
         ];
-        assert_eq!(from.iter().map(|c| c.row).collect::<Vec<_>>(), ["protocol", "vault", "system"]);
-        assert_eq!(to.iter().map(|c| c.row).collect::<Vec<_>>(), ["cli", "client library", "operator"]);
+        assert_eq!(from.iter().map(|c| c.row.as_str()).collect::<Vec<_>>(), ["protocol", "vault", "system"]);
+        assert_eq!(to.iter().map(|c| c.row.as_str()).collect::<Vec<_>>(), ["cli", "client library", "operator"]);
 
         let mut edges = BTreeSet::new();
-        let mut owed: Owed = rows.iter().map(|r| (r.name.to_string(), BTreeMap::new())).collect();
+        let mut owed: Owed = rows.rows.iter().map(|r| (r.name.to_string(), BTreeMap::new())).collect();
         for f in &from {
             for t in &to {
                 edges.insert(Edge { from: f.name.clone(), from_dir: f.dir.clone(), to: t.name.clone(), to_dir: t.dir.clone() });
-                owed.get_mut(f.row).unwrap().entry(f.name.clone()).or_default().insert(t.name.clone());
+                owed.get_mut(&f.row).unwrap().entry(f.name.clone()).or_default().insert(t.name.clone());
             }
         }
         let crates: Vec<Crate> = from.iter().chain(&to).cloned().collect();
@@ -1584,8 +2359,8 @@ mod tests {
         );
     }
 
-    /// A path into a hidden top-level directory is in no row and under no root named in
-    /// `NOT_ROWS`, and is refused, a dev-dependency too.
+    /// A path into a hidden top-level directory is in no row and under no root `not_rows`
+    /// names, and is refused, a dev-dependency too.
     #[test]
     fn a_path_into_a_hidden_top_level_directory_is_refused() {
         for table in ["", "[dev-dependencies]\n"] {
@@ -1594,7 +2369,7 @@ mod tests {
             add_dep(&t, "infra/relay", &format!("{table}bridge = {{ path = \"../../.hidden/bridge\" }}\n"));
             let r = refused_once(&t);
             assert!(
-                r.starts_with("kotton-relay (infra/relay, row `relay`) depends on .hidden/bridge, which is in no row and under no root named in NOT_ROWS"),
+                r.starts_with("kotton-relay (infra/relay, row `relay`) depends on .hidden/bridge, which is in no row and under no root `not_rows` names"),
                 "{table}: {r}"
             );
         }
@@ -1703,14 +2478,14 @@ mod tests {
         r.write("core/wire/Cargo.toml", "[package]\nname = \"kotton-wire\"\n");
         r.write("tools/x/Cargo.toml", "[package]\nname = \"x\"\n");
         r.commit("first");
-        let tracked = tracked_manifests(r.path());
+        let tracked = tracked_manifests(r.path(), &rows());
         assert_eq!(tracked, Ok(vec!["core/wire/Cargo.toml".to_string()]));
-        assert!(read_tree(r.path(), &tracked).refused.is_empty());
+        assert!(read_tree(r.path(), &rows(), &tracked).refused.is_empty());
 
         r.write("core/.vendor/bridge/Cargo.toml", "[package]\nname = \"bridge\"\n");
-        assert!(read_tree(r.path(), &tracked_manifests(r.path())).refused.is_empty(), "untracked");
+        assert!(read_tree(r.path(), &rows(), &tracked_manifests(r.path(), &rows())).refused.is_empty(), "untracked");
         r.git(&["add", "core/.vendor/bridge/Cargo.toml"]);
-        let refused = read_tree(r.path(), &tracked_manifests(r.path())).refused;
+        let refused = read_tree(r.path(), &rows(), &tracked_manifests(r.path(), &rows())).refused;
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(refused[0].starts_with("core/.vendor/bridge/Cargo.toml is tracked by git"), "{refused:?}");
     }
@@ -1723,7 +2498,7 @@ mod tests {
         let mut tracked = every_manifest(t.path());
         tracked.push("core/gone/Cargo.toml".into());
         tracked.push("core/.vendor/gone/Cargo.toml".into());
-        let mut refused = read_tree(t.path(), &Ok(tracked)).refused;
+        let mut refused = read_tree(t.path(), &rows(), &Ok(tracked)).refused;
         refused.sort();
         assert_eq!(
             refused,
@@ -1799,7 +2574,7 @@ mod tests {
     #[test]
     fn git_failing_to_list_the_manifests_is_refused() {
         let t = tree();
-        let refused = read_tree(t.path(), &Err("git ls-files: not a git repository".into())).refused;
+        let refused = read_tree(t.path(), &rows(), &Err("git ls-files: not a git repository".into())).refused;
         assert_eq!(refused.len(), 1, "{refused:?}");
         assert!(
             refused[0].starts_with("the manifests git tracks under core/, infra/, client/ cannot be listed")
@@ -1987,26 +2762,503 @@ mod tests {
         assert_eq!(base_owed(r.path()), Base::At { commit: second, owed: parse_owed(OWED).unwrap() });
     }
 
+    /// The table of rows as it stood in this source before the rows were data, verbatim: what a
+    /// merge base with no rows file holds.
+    const TABLE_IN_SOURCE: &str = r#"pub(crate) const ROWS: &[Row] = &[
+    Row {
+        name: "protocol",
+        becomes: "becomes kotton-protocol's crates",
+        paths: &[
+            "core/wire",
+            "core/schemas",
+            "core/pair",
+            "core/handshake",
+            "core/ed25519",
+            "core/common",
+        ],
+        may_link: &["protocol"],
+        never_links: &["cli", "client library", "operator"],
+    },
+    Row {
+        name: "relay",
+        becomes: "becomes kotton-relay",
+        paths: &["infra/relay"],
+        may_link: &["protocol"],
+        never_links: &[],
+    },
+    Row {
+        name: "cli",
+        becomes: "becomes kotton-cli",
+        paths: &["client/cli", "client/shell"],
+        may_link: &["protocol", "client library", "cli"],
+        never_links: &[],
+    },
+    Row {
+        name: "client library",
+        becomes: "becomes kotton-protocol's client library",
+        paths: &["client/kotton-client", "client/record-file"],
+        may_link: &["protocol", "client library"],
+        never_links: &[],
+    },
+    Row {
+        name: "vault",
+        becomes: "becomes kotton-vault",
+        paths: &["core/kvaultd"],
+        may_link: &["protocol", "vault"],
+        never_links: &["cli", "client library", "operator"],
+    },
+    Row {
+        name: "operator",
+        becomes: "stays in kotton: the device-owner tool",
+        paths: &["client/kotton-operator"],
+        may_link: &["protocol", "system", "operator"],
+        never_links: &[],
+    },
+    Row {
+        name: "system",
+        becomes: "stays in kotton: the system",
+        paths: &["core"],
+        may_link: &["protocol", "system"],
+        never_links: &["cli", "client library", "operator"],
+    },
+];
+
+/// The code roots that are no row: nothing in them ships. `tools/` holds test instruments
+/// (`tools/workspace-hack` among them, which crates dev-depend on), `xtask/` the gates and
+/// `tests/` the integration suite. A row's crate may dev-depend on them and on nothing else
+/// there ([`read_tree`]).
+pub(crate) const NOT_ROWS: &[&str] = &["tools", "xtask", "tests"];
+"#;
+
+    fn rows_text() -> String {
+        std::fs::read_to_string(crate::out::root().join(ROWS_FILE)).unwrap()
+    }
+
+    fn base_at(rows: Rows, widenings: Vec<Widening>) -> BaseRows {
+        BaseRows::At { commit: "0123456789abcdef".into(), rows, widenings }
+    }
+
+    /// [`judge_rows`] over [`tree`] read by `here`, against `base`, the lists at the merge base
+    /// being [`OWED`].
+    fn judged_rows(here: &Rows, widenings: &[Widening], base: &BaseRows) -> Vec<String> {
+        held_together(here).unwrap();
+        let t = tree();
+        let tree = read_tree(t.path(), here, &Ok(every_manifest(t.path())));
+        assert!(tree.refused.is_empty(), "{:?}", tree.refused);
+        judge_rows(here, widenings, base, &tree.crates, &tree.edges, &at(OWED))
+    }
+
+    fn row_mut<'a>(rows: &'a mut Rows, name: &str) -> &'a mut Row {
+        rows.rows.iter_mut().find(|r| r.name == name).unwrap()
+    }
+
+    const AT: &str = "at the merge base with origin/main (0123456789ab)";
+
+    /// Every row is marked: a row with no mark, or with a word that is no mark, is refused when
+    /// the file is read, and so is an acting row that may link a row that is not acting.
+    #[test]
+    fn every_row_is_marked() {
+        let text = rows_text();
+        assert!(parse_rows(&text).is_ok());
+        let cli = "name = \"cli\"\nbecomes = \"becomes kotton-cli\"\nmark = \"asking\"\n";
+        assert!(text.contains(cli));
+
+        let unmarked = text.replace(cli, "name = \"cli\"\nbecomes = \"becomes kotton-cli\"\n");
+        let e = parse_rows(&unmarked).unwrap_err();
+        assert!(e.starts_with("xtask/tier-rows.toml: row `cli` has no mark"), "{e}");
+
+        let misnamed = text.replace(cli, "name = \"cli\"\nbecomes = \"becomes kotton-cli\"\nmark = \"asks\"\n");
+        let e = parse_rows(&misnamed).unwrap_err();
+        assert!(e.contains("row `cli` is marked `asks`, which is not"), "{e}");
+
+        let vault = "may_link = [\"protocol\", \"vault\"]";
+        assert!(text.contains(vault));
+        let e = parse_rows(&text.replace(vault, "may_link = [\"protocol\", \"vault\", \"relay\"]")).unwrap_err();
+        assert!(e.contains("row `vault` is marked `acting` and may link `relay`, which is marked `neither`"), "{e}");
+    }
+
+    /// The refusal no list may waive, derived from the marks, is exactly the one `never_links`
+    /// wrote on the protocol's, the vault's and the system's rows: each of them never links the
+    /// CLI's, the client library's or the operator's, and nothing else is refused.
+    #[test]
+    fn the_marks_refuse_what_never_links_refused() {
+        let rows = rows();
+        let mut derived = BTreeSet::new();
+        for a in &rows.rows {
+            for b in &rows.rows {
+                if never(a, b) {
+                    derived.insert((a.name.as_str(), b.name.as_str()));
+                }
+            }
+        }
+        let mut written = BTreeSet::new();
+        for a in ["protocol", "vault", "system"] {
+            for b in ["cli", "client library", "operator"] {
+                written.insert((a, b));
+            }
+        }
+        assert_eq!(derived, written);
+        assert_eq!(parse_source_rows(TABLE_IN_SOURCE).unwrap(), Some(rows));
+    }
+
+    /// The table that held the rows in this source reads as the rows file: the same rows, in
+    /// order, each marked from its `never_links`. Text with no table reads as none, and a table
+    /// that cannot be read is an error.
+    #[test]
+    fn the_table_in_source_reads_as_the_rows_file() {
+        assert_eq!(parse_source_rows(TABLE_IN_SOURCE).unwrap(), Some(rows()));
+        assert_eq!(parse_source_rows("fn main() {}\n").unwrap(), None);
+        let broken = TABLE_IN_SOURCE.replacen("may_link:", "may_links:", 1);
+        assert!(parse_source_rows(&broken).unwrap_err().contains("has the fields"));
+        let cli = "may_link: &[\"protocol\", \"client library\", \"cli\"],\n        never_links: &[],";
+        assert!(TABLE_IN_SOURCE.contains(cli));
+        let both = TABLE_IN_SOURCE.replace(cli, "may_link: &[\"protocol\", \"client library\", \"cli\"],\n        never_links: &[\"operator\"],");
+        let e = parse_source_rows(&both).unwrap_err();
+        assert!(e.contains("row `cli` has `never_links` and is named in one"), "{e}");
+    }
+
+    /// A row's `may_link` that gains a row is refused against the rows file at the merge base
+    /// and against the table in source there; recorded at the merge base it is accepted, and the
+    /// record, kept here, is refused as made. Recorded only here, it is refused.
+    #[test]
+    fn a_may_link_that_gains_a_row_is_refused() {
+        let mut here = rows();
+        row_mut(&mut here, "cli").may_link.push("relay".into());
+        let w = Widening::MayLink { row: "cli".into(), gains: "relay".into() };
+        for base in [base_at(rows(), vec![]), BaseRows::FromSource { commit: "0123456789abcdef".into(), rows: rows() }] {
+            let r = judged_rows(&here, &[], &base);
+            assert_eq!(r.len(), 1, "{r:?}");
+            assert!(
+                r[0].starts_with(&format!(
+                    "row `cli` may link `relay`, and {AT} row `cli` may link only protocol, client library, cli: a `may_link` does not gain a row. A widening lands only where xtask/tier-widenings.toml {AT} records it"
+                )),
+                "{}",
+                r[0]
+            );
+        }
+        assert_eq!(judged_rows(&here, &[], &base_at(rows(), vec![w.clone()])), Vec::<String>::new());
+        let r = judged_rows(&here, std::slice::from_ref(&w), &base_at(rows(), vec![w.clone()]));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].contains("which this tree has made"), "{r:?}");
+        let r = judged_rows(&here, std::slice::from_ref(&w), &base_at(rows(), vec![]));
+        assert!(r.iter().any(|l| l.contains("a `may_link` does not gain a row")), "{r:?}");
+        // Recorded and not yet made: pending.
+        assert_eq!(judged_rows(&rows(), &[w], &base_at(rows(), vec![])), Vec::<String>::new());
+    }
+
+    /// A path that leaves a row for one that admits an edge a list at the merge base owes is
+    /// refused, with its entry kept or deleted, whichever end's crate moves; once no manifest has
+    /// the edge (the crate untangled), the entry goes and nothing is refused.
+    #[test]
+    fn a_path_that_leaves_a_row_for_one_that_admits_an_owed_edge_is_refused() {
+        let shrunk = OWED.replace("kotton-shell = [\"kotton-crypto\"]\n", "");
+        for (here, to_row) in [
+            (repathed(&[("protocol", &["core/wire", "core/schemas", "core/pair", "core/handshake", "core/ed25519", "core/common", "core/crypto"])]), "protocol"),
+            (repathed(&[("cli", &["client/cli"]), ("system", &["core", "client/shell"])]), "system"),
+        ] {
+            held_together(&here).unwrap();
+            let shell_row = if to_row == "system" { "system" } else { "cli" };
+            for owed in [OWED.to_string(), shrunk.clone()] {
+                let t = tree();
+                let tree = read_tree(t.path(), &here, &Ok(every_manifest(t.path())));
+                let mut j = judge(&here, &tree.crates, &tree.edges, &parse_owed(&owed).unwrap(), &at(OWED));
+                // Kept under `cli` while the crate is in `system`, the entry is also misfiled.
+                j.refused.retain(|r| !r.contains("is filed under"));
+                assert_eq!(j.refused.len(), 1, "{to_row}: {:?}", j.refused);
+                let crypto_row = if to_row == "protocol" { "protocol" } else { "system" };
+                assert!(
+                    j.refused[0].starts_with(&format!(
+                        "kotton-shell (client/shell, row `{shell_row}`) links kotton-crypto (core/crypto, row `{crypto_row}`), which a list {AT} owes, and the rows here admit it: an owed entry leaves the lists only when its crate is untangled"
+                    )),
+                    "{}",
+                    j.refused[0]
+                );
+            }
+            let t = fixture(&[
+                ("core/wire", "kotton-wire", &[]),
+                ("core/crypto", "kotton-crypto", &["core/wire"]),
+                ("core/fs", "kotton-fs", &[]),
+                ("infra/relay", "kotton-relay", &["core/wire"]),
+                ("client/shell", "kotton-shell", &["core/wire"]),
+            ]);
+            let tree = read_tree(t.path(), &here, &Ok(every_manifest(t.path())));
+            let j = judge(&here, &tree.crates, &tree.edges, &parse_owed(&OWED.replace("kotton-shell = [\"kotton-crypto\"]\n", "")).unwrap(), &at(OWED));
+            assert_eq!(j, Judged::default(), "{to_row}: untangled");
+        }
+    }
+
+    /// A row added over another row's paths that admits an edge a list at the merge base owes
+    /// is refused, though the entry is gone; and the crates it takes are refused as moved.
+    #[test]
+    fn a_row_added_over_another_rows_paths_that_admits_an_owed_edge_is_refused() {
+        let mut here = repathed(&[("cli", &["client/cli"])]);
+        here.rows.push(Row {
+            name: "tangle".into(),
+            becomes: "becomes nothing".into(),
+            mark: Mark::Neither,
+            paths: vec!["client/shell".into(), "core/crypto".into()],
+            may_link: vec!["protocol".into()],
+        });
+        held_together(&here).unwrap();
+        let owed = OWED.replace("kotton-shell = [\"kotton-crypto\"]\n", "") + "[tangle]\n";
+        let t = tree();
+        let tree = read_tree(t.path(), &here, &Ok(every_manifest(t.path())));
+        let j = judge(&here, &tree.crates, &tree.edges, &parse_owed(&owed).unwrap(), &at(OWED));
+        assert_eq!(j.refused.len(), 1, "{:?}", j.refused);
+        assert!(
+            j.refused[0].starts_with(&format!(
+                "kotton-shell (client/shell, row `tangle`) links kotton-crypto (core/crypto, row `tangle`), which a list {AT} owes"
+            )),
+            "{}",
+            j.refused[0]
+        );
+        let r = judge_rows(&here, &[], &base_at(rows(), vec![]), &tree.crates, &tree.edges, &at(OWED));
+        assert!(r.iter().any(|l| l.starts_with(&format!("kotton-crypto (core/crypto) is in row `tangle`, and {AT} it is in row `system`"))), "{r:?}");
+    }
+
+    /// A crate that changes rows where that admits an edge the rows at the merge base did not
+    /// is refused, though no manifest has the edge, and so is one that leaves the refusal no
+    /// list may waive; recorded at the merge base, the move is accepted.
+    #[test]
+    fn a_crate_that_changes_rows_where_that_admits_more_is_refused() {
+        let here = repathed(&[("protocol", &["core/wire", "core/schemas", "core/pair", "core/handshake", "core/ed25519", "core/common", "core/fs"])]);
+        let r = judged_rows(&here, &[], &base_at(rows(), vec![]));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].starts_with(&format!("kotton-fs (core/fs) is in row `protocol`, and {AT} it is in row `system`")), "{}", r[0]);
+        assert!(r[0].contains("kotton-relay -> kotton-fs is admitted, and was not"), "{}", r[0]);
+        let w = Widening::Moves { krate: "kotton-fs".into(), from: "system".into(), to: "protocol".into() };
+        assert_eq!(judged_rows(&here, &[], &base_at(rows(), vec![w])), Vec::<String>::new());
+
+        let here = repathed(&[("cli", &["client/cli"]), ("relay", &["infra/relay", "client/shell"])]);
+        let r = judged_rows(&here, &[], &base_at(rows(), vec![]));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].contains("kotton-fs -> kotton-shell leaves the refusal no list may waive"), "{}", r[0]);
+    }
+
+    /// A root added to `not_rows` is refused, and accepted where the merge base records it.
+    #[test]
+    fn a_root_added_to_not_rows_is_refused() {
+        let mut here = rows();
+        here.not_rows.push("docs".into());
+        let r = judged_rows(&here, &[], &base_at(rows(), vec![]));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].starts_with(&format!("`not_rows` names `docs`, and {AT} it does not")), "{}", r[0]);
+        let w = Widening::NotRow { root: "docs".into() };
+        assert_eq!(judged_rows(&here, &[], &base_at(rows(), vec![w])), Vec::<String>::new());
+        let r = judged_rows(&here, &[], &BaseRows::FromSource { commit: "0123456789abcdef".into(), rows: rows() });
+        assert_eq!(r.len(), 1, "{r:?}");
+    }
+
+    /// A row marked `acting` or `asking` at the merge base keeps its mark; one marked `neither`
+    /// may take either.
+    #[test]
+    fn a_mark_that_changes_from_acting_or_asking_is_refused() {
+        for (row, mark) in [("cli", Mark::Neither), ("system", Mark::Neither)] {
+            let mut here = rows();
+            row_mut(&mut here, row).mark = mark;
+            if row == "system" {
+                // An acting row may link only acting rows.
+                row_mut(&mut here, "protocol").mark = Mark::Acting;
+            }
+            let r = judge_rows(&here, &[], &base_at(rows(), vec![]), &[], &BTreeSet::new(), &at(OWED));
+            assert_eq!(r.len(), 1, "{row}: {r:?}");
+            assert!(r[0].starts_with(&format!("row `{row}` is marked `neither`, and {AT} row `{row}` is marked")), "{}", r[0]);
+            let w = Widening::Mark { row: row.into(), mark };
+            assert_eq!(judge_rows(&here, &[], &base_at(rows(), vec![w]), &[], &BTreeSet::new(), &at(OWED)), Vec::<String>::new());
+        }
+        let mut here = rows();
+        row_mut(&mut here, "relay").mark = Mark::Acting;
+        held_together(&here).unwrap();
+        assert_eq!(judge_rows(&here, &[], &base_at(rows(), vec![]), &[], &BTreeSet::new(), &at(OWED)), Vec::<String>::new());
+    }
+
+    /// A row renamed, with every `may_link` that names it, widens nothing.
+    #[test]
+    fn a_renamed_row_is_no_widening() {
+        let mut here = renamed("protocol", "proto");
+        for r in &mut here.rows {
+            for l in &mut r.may_link {
+                if l == "protocol" {
+                    *l = "proto".into();
+                }
+            }
+        }
+        assert_eq!(judged_rows(&here, &[], &base_at(rows(), vec![])), Vec::<String>::new());
+    }
+
+    /// Rows that cannot be read at the merge base are refused rather than read as no change;
+    /// where there are none, every row arrives and nothing is compared.
+    #[test]
+    fn rows_the_merge_base_cannot_give_are_refused() {
+        let mut here = rows();
+        here.not_rows.push("docs".into());
+        let r = judged_rows(&here, &[], &BaseRows::Unknown("no origin/main".into()));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(
+            r[0].starts_with("the rows cannot be compared with the merge base")
+                && r[0].ends_with("no origin/main. Fetch, and merge origin/main into the branch, so the merge base is main's tip"),
+            "{r:?}"
+        );
+        assert_eq!(judged_rows(&here, &[], &BaseRows::Absent { commit: "0123".into() }), Vec::<String>::new());
+    }
+
+    /// The widenings file: each entry one of five shapes with a `why`, and each held to name a
+    /// widening this tree has not made, of rows and crates it has, that can be made.
+    #[test]
+    fn the_widenings_are_read_and_held_pending() {
+        let text = "[[widen]]\nrow = \"cli\"\ngains = \"relay\"\nwhy = \"a\"\n\
+                    [[widen]]\ncrate = \"kotton-fs\"\nfrom = \"system\"\nto = \"protocol\"\nwhy = \"b\"\n\
+                    [[widen]]\nrow = \"cli\"\nmark = \"neither\"\nwhy = \"c\"\n\
+                    [[widen]]\nnot_row = \"docs\"\nwhy = \"d\"\n\
+                    [[widen]]\nrow = \"wallet\"\nwhy = \"e\"\n";
+        let w = parse_widenings(text).unwrap();
+        assert_eq!(
+            w,
+            vec![
+                Widening::MayLink { row: "cli".into(), gains: "relay".into() },
+                Widening::Moves { krate: "kotton-fs".into(), from: "system".into(), to: "protocol".into() },
+                Widening::Mark { row: "cli".into(), mark: Mark::Neither },
+                Widening::NotRow { root: "docs".into() },
+                Widening::Arrives { row: "wallet".into() },
+            ]
+        );
+        assert!(parse_widenings("[[widen]]\nrow = \"wallet\"\n").unwrap_err().contains("has no `why`"));
+        assert_eq!(judged_rows(&rows(), &w, &base_at(rows(), vec![])), Vec::<String>::new());
+        assert!(parse_widenings("[[widen]]\nnot_row = \"docs\"\n").unwrap_err().contains("has no `why`"));
+        assert!(parse_widenings("[[widen]]\nnot_row = \"docs\"\nrow = \"cli\"\nwhy = \"x\"\n").unwrap_err().contains("a widening is"));
+        assert_eq!(parse_widenings(&std::fs::read_to_string(crate::out::root().join(WIDENINGS_FILE)).unwrap()), Ok(vec![]));
+
+        for (entry, says) in [
+            (Widening::MayLink { row: "cli".into(), gains: "protocol".into() }, "which this tree has made"),
+            (Widening::MayLink { row: "cli".into(), gains: "nowhere".into() }, "`nowhere` is no row"),
+            (Widening::Moves { krate: "kotton-fs".into(), from: "relay".into(), to: "protocol".into() }, "kotton-fs is in row `system`, not `relay`"),
+            (Widening::Moves { krate: "kotton-fs".into(), from: "protocol".into(), to: "system".into() }, "which this tree has made"),
+            (Widening::Moves { krate: "kotton-none".into(), from: "system".into(), to: "protocol".into() }, "`kotton-none` is no crate"),
+            (Widening::Mark { row: "cli".into(), mark: Mark::Asking }, "which this tree has made"),
+            (Widening::NotRow { root: "tools".into() }, "which this tree has made"),
+            (Widening::Arrives { row: "cli".into() }, "which this tree has made"),
+            (
+                Widening::MayLink { row: "vault".into(), gains: "relay".into() },
+                "row `vault` is marked `acting` and row `relay` `neither`: an acting row may link only acting rows, so it cannot be made",
+            ),
+            (
+                Widening::MayLink { row: "system".into(), gains: "cli".into() },
+                "row `system` is marked `acting` and row `cli` `asking`: an acting row may link only acting rows, so it cannot be made",
+            ),
+        ] {
+            let r = judged_rows(&rows(), std::slice::from_ref(&entry), &base_at(rows(), vec![]));
+            assert_eq!(r.len(), 1, "{entry}: {r:?}");
+            assert!(r[0].contains(says), "{entry}: {}", r[0]);
+        }
+        // An acting row's gain recorded with the row it names becoming acting can be made.
+        let both = [
+            Widening::MayLink { row: "vault".into(), gains: "relay".into() },
+            Widening::Mark { row: "relay".into(), mark: Mark::Acting },
+        ];
+        assert_eq!(judged_rows(&rows(), &both, &base_at(rows(), vec![])), Vec::<String>::new());
+    }
+
+    /// A row that arrives, matched with no row at the merge base, is refused there and against
+    /// the table in source; recorded at the merge base it is accepted, and the record, kept
+    /// here, is refused as made. A row renamed whose paths change with its name arrives.
+    #[test]
+    fn a_row_that_arrives_is_refused() {
+        let mut here = rows();
+        here.rows.push(Row {
+            name: "wallet".into(),
+            becomes: "becomes nothing".into(),
+            mark: Mark::Asking,
+            paths: vec!["client/wallet".into()],
+            may_link: vec!["protocol".into(), "wallet".into()],
+        });
+        let w = Widening::Arrives { row: "wallet".into() };
+        for base in [base_at(rows(), vec![]), BaseRows::FromSource { commit: "0123456789abcdef".into(), rows: rows() }] {
+            let r = judged_rows(&here, &[], &base);
+            assert_eq!(r.len(), 1, "{r:?}");
+            assert!(
+                r[0].starts_with(&format!(
+                    "row `wallet` arrives: {AT} no row has its name, and none whose name is gone has its paths. A row arrives only as a widening. A widening lands only where xtask/tier-widenings.toml {AT} records it: record `row = \"wallet\"` there"
+                )),
+                "{}",
+                r[0]
+            );
+        }
+        assert_eq!(judged_rows(&here, &[], &base_at(rows(), vec![w.clone()])), Vec::<String>::new());
+        let r = judged_rows(&here, std::slice::from_ref(&w), &base_at(rows(), vec![w.clone()]));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].contains("which this tree has made"), "{r:?}");
+        // Recorded and not yet made: pending.
+        assert_eq!(judged_rows(&rows(), std::slice::from_ref(&w), &base_at(rows(), vec![])), Vec::<String>::new());
+
+        let mut here = renamed("vault", "keep");
+        let keep = row_mut(&mut here, "keep");
+        keep.may_link = vec!["protocol".into(), "keep".into()];
+        keep.paths.push("core/keep".into());
+        let r = judged_rows(&here, &[], &base_at(rows(), vec![]));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].starts_with("row `keep` arrives"), "{}", r[0]);
+        let w = Widening::Arrives { row: "keep".into() };
+        assert_eq!(judged_rows(&here, &[], &base_at(rows(), vec![w])), Vec::<String>::new());
+    }
+
+    /// The rows at the merge base are read from git objects: the rows file and the widenings
+    /// there; with no rows file, the table in source there; with neither, nothing; and a table
+    /// there that cannot be read, refused.
+    #[test]
+    fn the_rows_at_the_merge_base_are_read_from_git() {
+        let r = crate::git_fixture::Repo::new();
+        let land = |message: &str| {
+            let c = r.commit(message);
+            r.git(&["update-ref", "refs/remotes/origin/main", &c]);
+            c
+        };
+        r.write("README", "x\n");
+        let c = land("first");
+        assert_eq!(base_rows(r.path()), BaseRows::Absent { commit: c });
+
+        r.write(SOURCE_FILE, &format!("// before\n{TABLE_IN_SOURCE}\n// after\n"));
+        let c = land("the table in source");
+        assert_eq!(base_rows(r.path()), BaseRows::FromSource { commit: c, rows: rows() });
+
+        r.write(SOURCE_FILE, &TABLE_IN_SOURCE.replacen("paths:", "path:", 1));
+        land("a table that cannot be read");
+        assert!(matches!(base_rows(r.path()), BaseRows::Unknown(e) if e.contains("has the fields")));
+
+        r.write(ROWS_FILE, &rows_text());
+        let c = land("the rows file");
+        assert_eq!(base_rows(r.path()), BaseRows::At { commit: c, rows: rows(), widenings: vec![] });
+
+        r.write(WIDENINGS_FILE, "[[widen]]\nnot_row = \"docs\"\nwhy = \"x\"\n");
+        let c = land("a widening");
+        r.write(WIDENINGS_FILE, "");
+        r.commit("consumed on a branch");
+        assert_eq!(
+            base_rows(r.path()),
+            BaseRows::At { commit: c, rows: rows(), widenings: vec![Widening::NotRow { root: "docs".into() }] }
+        );
+    }
+
     #[test]
     fn a_directory_is_in_the_row_of_its_longest_path() {
-        assert_eq!(row_of("core/wire").map(|r| r.name), Some("protocol"));
-        assert_eq!(row_of("core/kvaultd").map(|r| r.name), Some("vault"));
-        assert_eq!(row_of("core/crypto").map(|r| r.name), Some("system"));
-        assert_eq!(row_of("core/wirex").map(|r| r.name), Some("system"));
-        assert_eq!(row_of("client/shell").map(|r| r.name), Some("cli"));
+        let rows = rows();
+        let row_of = |d: &str| rows.row_of(d).map(|r| r.name.clone());
+        assert_eq!(row_of("core/wire").as_deref(), Some("protocol"));
+        assert_eq!(row_of("core/kvaultd").as_deref(), Some("vault"));
+        assert_eq!(row_of("core/crypto").as_deref(), Some("system"));
+        assert_eq!(row_of("core/wirex").as_deref(), Some("system"));
+        assert_eq!(row_of("client/shell").as_deref(), Some("cli"));
         assert!(row_of("client/elsewhere").is_none());
         assert!(row_of("tools/workspace-hack").is_none());
     }
 
-    /// Every `may_link` and `never_links` names a row, and no row may link a row it never links.
+    /// Every `may_link` names a row, and no row may link a row it never links.
     #[test]
     fn what_a_row_may_link_is_rows_it_does_not_never_link() {
-        for row in ROWS {
-            for l in row.may_link.iter().chain(row.never_links) {
-                assert!(row_named_in(ROWS, l).is_some(), "`{}` names `{l}`, which is not a row", row.name);
-            }
-            for l in row.may_link {
-                assert!(!row.never_links.contains(l), "`{}` may link `{l}`, which it never links", row.name);
+        let rows = rows();
+        for row in &rows.rows {
+            for l in &row.may_link {
+                let to = rows.named(l).unwrap_or_else(|| panic!("`{}` names `{l}`, which is not a row", row.name));
+                assert!(!never(row, to), "`{}` may link `{l}`, which it never links", row.name);
             }
         }
     }
@@ -2016,10 +3268,14 @@ mod tests {
     #[test]
     fn the_tree_as_it_is_is_in_the_rows() {
         let root = crate::out::root();
-        let tree = read_tree(&root, &tracked_manifests(&root));
+        let rows = rows();
+        let tree = read_tree(&root, &rows, &tracked_manifests(&root, &rows));
         assert!(tree.refused.is_empty(), "{:?}", tree.refused);
         let owed = parse_owed(&std::fs::read_to_string(root.join(OWED_FILE)).unwrap()).unwrap();
-        let j = judge(ROWS, &tree.crates, &tree.edges, &owed, &Base::Absent { commit: String::new() });
+        let j = judge(&rows, &tree.crates, &tree.edges, &owed, &Base::Absent { commit: String::new() });
         assert!(j.refused.is_empty(), "{:?}", j.refused);
+        let widenings = parse_widenings(&std::fs::read_to_string(root.join(WIDENINGS_FILE)).unwrap()).unwrap();
+        let none = judge_rows(&rows, &widenings, &BaseRows::Absent { commit: String::new() }, &tree.crates, &tree.edges, &Base::Absent { commit: String::new() });
+        assert!(none.is_empty(), "{none:?}");
     }
 }

@@ -102,7 +102,7 @@ pub(crate) const SYSTEM_CRATES: &[&str] = &[
     "kotton-session",
     // The CLI, here until it has a repository of its own (`kotton-cli` in kotton-protocol's
     // repository plan). What it may link, and each edge it has today that it may not, are
-    // `tier-check`'s `cli` row and that row's owed list (xtask/src/tier_check.rs,
+    // `tier-check`'s `cli` row and that row's owed list (xtask/tier-rows.toml,
     // xtask/tier-owed.toml); this list says only that it may ship from here.
     "kotton-cli",
     "kotton",
