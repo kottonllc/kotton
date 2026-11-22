@@ -1505,9 +1505,11 @@ pub fn vault_keeps_already_said(user_id: &str) -> String {
 /// An answer a reader did not ask for, said by its name and no field of it
 /// ([`UserResponse::name`], printed as data by [`crate::note::quoted`]; how an
 /// answer not asked for is said). The one form every reader that names such
-/// an answer prints it in.
-pub fn unasked(answer: &UserResponse) -> String {
-    crate::note::quoted(&answer.name())
+/// an answer prints it in, whichever door answered: any [`crate::Named`]
+/// answer — a [`UserResponse`], a kdeviced [`crate::DeviceResponse`], kuid's
+/// [`crate::KuidResponse`] — is said the same way.
+pub fn unasked(answer: &impl crate::Named) -> String {
+    crate::note::quoted(answer.name())
 }
 
 /// What a reader that hears an operated vault or relay directly says of an
@@ -1574,21 +1576,45 @@ pub fn own_daemon_said(answer: &UserResponse) -> String {
     }
 }
 
-impl UserResponse {
-    /// The variant's name and nothing of its fields: the leading word of its
-    /// derived `Debug`, which is the variant's identifier. Nothing past that
-    /// word is kept, and a secret field prints redacted in `Debug` anyway. A
-    /// reader that did not ask for an answer says it by this and no field of it
-    /// (kottonllc/kotton#597, 76B).
-    pub fn name(&self) -> String {
-        let printed = format!("{self:?}");
-        printed
-            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .next()
-            .unwrap_or_default()
-            .to_string()
-    }
-}
+// `UserResponse::name`: the variant's name and nothing of its fields, without
+// formatting the value to find it. A reader that did not ask for an answer says
+// it by this and no field of it (an answer not asked for is said by its name and
+// no field). Every variant, in declaration order.
+variant_names!(UserResponse {
+    MessageSent, ChannelSent, ChannelKeyGrantCreated, MessageHistory, Decrypted, MessageDeliveries,
+    MessageUnread, MessageRead, WindowList, WindowAck, UserCreated, WeakCredential,
+    RecoveryPhraseAdded, UserLoggedOut, LoginSuccessful, IdentityRotated, Recovered,
+    RecoveryMaterial, DoorsHeld, Deliveries, FrameCarried, UserList, ActiveSession, NoActiveSession,
+    CallerInfoResponse, SessionLocked, CustodyLocked, NotInScope, NotAllowed, UnlockOk,
+    UnlockFailed, UnlockRateLimited, UnlockMethods, UnlockState, DeviceBound, ContactAdded,
+    ContactPaired, ContactListing, LockPolicy, LockPolicySet, MnemonicConfirmed, RecoveryStatus,
+    KeyHealthInfo, FileData, FileList, ModelInstalled, ModelList, ConflictList, PrincipalSession,
+    WebShellPairReady, BrowserDevices, BrowserDeviceRevoked, BrowserFrame, SealedObject,
+    SealedNotFound, SealedDomainMismatch, SealedList, RemoteAdded, RemoteList, Ok, Error,
+    SyncComplete, NodePaired, NodeList, NodeRelayResult, OperatorMinted, OperatorMints,
+    OperatorHeld, OperatorForgotten, OperatorEnrolled, OperatorEnrolledLines, RelayRule,
+    RelayInvite, Introduced, VaultCapacityResult, TenantDrivesResult, DriveHold, DriveHeld, Drives,
+    DriveMoved, Pins, Status, VaultFull, VaultKeepsAlready, NotPairedAs, VaultTenants, InviteDigits,
+    TenantDropped, NodeRevoked, PairingComplete, PairAdvertising, PairConnecting, PairConnected,
+    PairShowCode, PairAwaitingPeer, PairTransferring, PairFailed, PairConfirmAck, DeviceNameInfo,
+    SyncStarted, SyncOutcomeMsg, SyncJobFailed, SyncJobTimeout, SyncConfigured, SyncRuleList,
+    SyncRuleRemoved, Mounted, MountList, MountEvicted, SessionList, SessionEnded, RendezvousSet,
+    RendezvousStatus, TurnSet, LocalDoorResult, QuicGatewayStatusResult, AuthorizedClients,
+    DeviceCert, NodeIdentity, WebShellStatusResult, ConfigStatus, RecordInserted, RecordQueryResult,
+    RecordDeleted, RecordOpenResult, RecordOpenNotFound, Imported, SchemaList, SchemaRegistered,
+    SchemaGetResult, SchemaNotFound, SchemaGrantListResult, SchemaGrantUpdated, SchemaGrantRevoked,
+    SchemaQuotaUpdated, HandlerRegistered, HandlerUnregistered, HandlerInfo, HandlerNotFound,
+    HandlerList, DefaultHandlerSet, AppInstalled, AppInstallPreview, AppGrants, AppUninstalled,
+    ChannelCreated, ExtensionInstalled, ExtensionList, ExtensionRemoved, AppVerifyResult,
+    TrustAdded, TrustRemoved, TrustedIssuers, GrantRevoked, GrantImported, OrgCreated, OrgInfo,
+    OrgList, OrgGrantIssued, OrgGrantList, OrgMemberRemoved, OrgRootCreated, OrgRootInvited,
+    OrgFrostCreated, OrgFrostJoined, OrgFrostSignSession, OrgFrostContributed, OrgFrostSigned,
+    AppList, AppRole, AppRoleSet, AppLaunched, AppNotFound, AppBundlePath, AppBundleRegistered,
+    AppMessageDelivered, EventList, EventStream, EventStreamEnd, EventLogIntegrity,
+    DaemonStatusInfo, SyncAck, FrostSignReply, VfsWatchReady, VfsWatchFailed, VfsChanged,
+    VfsWatchEnd, DaemonSidecarsResult, IpcSessionsResult, SyncStatusResult, NetworkStatusResult,
+    ReachStatusResult, SurfaceOk, SurfaceInputEvent, SurfaceClosed,
+});
 
 /// A handler's error, as the frame a door answers it with
 /// (`kotton_ipc::ChannelAcceptor` requires this of every `Resp` it serves).
@@ -1707,6 +1733,19 @@ mod answer_said_tests {
         assert_eq!(unasked(&UserResponse::VaultFull { held: 17, quota: 9 }), "`VaultFull`");
         assert_eq!(unasked(&UserResponse::Error { message: "no `relay`\nhere".into() }), "`Error`");
         assert_eq!(unasked(&UserResponse::NoActiveSession), "`NoActiveSession`");
+    }
+
+    /// **This device's other daemons' answers are said the same way**: a
+    /// kdeviced answer and a kuid reply by their names, none of their fields.
+    #[test]
+    fn a_kdeviced_or_kuid_answer_not_asked_for_is_said_by_its_name_alone() {
+        let device = crate::DeviceResponse::AuthFailed { reason: "FIELD-a1b2".into() };
+        assert_eq!(device.name(), "AuthFailed");
+        assert_eq!(unasked(&device), "`AuthFailed`");
+        let kuid = crate::KuidResponse::Error { message: "FIELD-c3d4".into() };
+        assert_eq!(kuid.name(), "Error");
+        assert_eq!(unasked(&kuid), "`Error`");
+        assert_eq!(UserResponse::VaultFull { held: 17, quota: 9 }.name(), "VaultFull");
     }
 }
 

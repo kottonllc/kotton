@@ -90,19 +90,20 @@ mod tests {
     /// code `tier-check` walks past.
     #[test]
     fn the_rows_lie_in_the_code_roots() {
-        let rowed = crate::tier_check::row_roots();
+        let rows = crate::tier_check::rows();
+        let rowed = rows.roots();
         for r in &rowed {
             assert!(CODE_ROOTS.contains(r), "a row lies in `{r}`, which is not in CODE_ROOTS");
         }
         for r in CODE_ROOTS {
-            let not = crate::tier_check::NOT_ROWS.contains(r);
+            let not = rows.not_rows.iter().any(|n| n == r);
             assert!(
                 rowed.contains(r) != not,
                 "code root `{r}` must be a row's or named as no row, and not both"
             );
         }
-        for row in crate::tier_check::ROWS {
-            for p in row.paths {
+        for row in &rows.rows {
+            for p in &row.paths {
                 assert!(repo().join(p).is_dir(), "row `{}` names `{p}`, which is not a directory", row.name);
             }
         }

@@ -658,6 +658,19 @@ async fn admitted(
     }))
 }
 
+/// What a verb reader at the vault's door says of an answer it did not ask
+/// for: the door is this device's own daemon, and the answer is said by its
+/// name and no field ([`kotton_wire::ipc::unasked`]; an answer not asked for is
+/// said by its name and no field). The door's `Error` is said as written,
+/// here as at every reader that reads it before this: a reader of this
+/// device's own daemon says the daemon's `Error` as written.
+fn unexpected(other: &UserResponse) -> io::Error {
+    match other {
+        UserResponse::Error { message } => io::Error::other(message.clone()),
+        other => io::Error::other(format!("unexpected answer: {}", kotton_wire::ipc::unasked(other))),
+    }
+}
+
 /// Set the pool's own quota at the door. The verb is the door's alone
 /// (`VaultRequest::SetQuota`): a tenant's device has no way to say it.
 async fn set_quota(user: &str, quota: u64) -> io::Result<(u64, Option<u64>)> {
@@ -671,7 +684,7 @@ async fn set_quota(user: &str, quota: u64) -> io::Result<(u64, Option<u64>)> {
     {
         UserResponse::VaultCapacityResult { held, quota } => Ok((held, quota)),
         UserResponse::Error { message } => Err(io::Error::other(message)),
-        other => Err(io::Error::other(format!("unexpected answer: {other:?}"))),
+        other => Err(unexpected(&other)),
     }
 }
 
@@ -690,7 +703,7 @@ async fn capacity(user: &str, set: Option<u64>) -> io::Result<()> {
             {
                 UserResponse::VaultCapacityResult { held, quota } => (held, quota),
                 UserResponse::Error { message } => return Err(io::Error::other(message)),
-                other => return Err(io::Error::other(format!("unexpected answer: {other:?}"))),
+                other => return Err(unexpected(&other)),
             }
         }
     };
@@ -708,7 +721,7 @@ async fn list_tenants() -> io::Result<Vec<VaultTenant>> {
     match client.send(&VaultRequest::Tenants).await? {
         UserResponse::VaultTenants { tenants } => Ok(tenants),
         UserResponse::Error { message } => Err(io::Error::other(message)),
-        other => Err(io::Error::other(format!("unexpected answer: {other:?}"))),
+        other => Err(unexpected(&other)),
     }
 }
 
@@ -793,7 +806,7 @@ async fn drop_tenant(user: &str, yes: bool) -> io::Result<()> {
             eprintln!("{message}");
             std::process::exit(1);
         }
-        other => Err(io::Error::other(format!("unexpected answer: {other:?}"))),
+        other => Err(unexpected(&other)),
     }
 }
 
@@ -892,14 +905,14 @@ async fn operator_enrol(key: &str) -> io::Result<()> {
             eprintln!("{message}");
             std::process::exit(1);
         }
-        other => return Err(io::Error::other(format!("unexpected answer: {other:?}"))),
+        other => return Err(unexpected(&other)),
     }
     let vault_key: [u8; 32] = match ask_door(&VaultRequest::GetNodeIdentity).await? {
         UserResponse::NodeIdentity { signing_pubkey_hex, .. } => hex::decode(&signing_pubkey_hex)
             .ok()
             .and_then(|b| b.try_into().ok())
             .ok_or_else(|| io::Error::other(format!("the vault named a key that is not 32 bytes: {signing_pubkey_hex}")))?,
-        other => return Err(io::Error::other(format!("unexpected answer: {other:?}"))),
+        other => return Err(unexpected(&other)),
     };
     let public_ip = match std::env::var("KOTTON_PUBLIC_ADDR") {
         Ok(v) if !v.trim().is_empty() => Some(kotton_net::resolve_advertise(&format!("{}:0", v.trim())).await?.ip()),
@@ -945,7 +958,7 @@ async fn operator_revoke(key: Revoke<'_>) -> io::Result<()> {
             eprintln!("{message}");
             std::process::exit(1);
         }
-        other => Err(io::Error::other(format!("unexpected answer: {other:?}"))),
+        other => Err(unexpected(&other)),
     }
 }
 
@@ -1045,6 +1058,25 @@ mod tests {
         assert_eq!(said, kotton_wire::ipc::own_daemon_said(&unnamed));
 
         assert_eq!(ended_on(Vec::new()).await, "the vault closed the ceremony without a result");
+    }
+
+    /// **An answer not asked for is said by its name and no field**: a verb
+    /// reader at the vault's door names the answer it did not ask for, and
+    /// prints nothing it carries.
+    #[test]
+    fn an_answer_the_door_was_not_asked_for_is_said_by_its_name_alone() {
+        let said = unexpected(&UserResponse::VaultFull { held: 7_340_117, quota: 9 }).to_string();
+        assert!(!said.contains("7340117"), "a field of the answer was said: {said}");
+        assert!(said.contains("`VaultFull`"), "the answer was not named: {said}");
+    }
+
+    /// **A reader of this device's own daemon says the daemon's `Error` as
+    /// written**: the door's `Error`, where a verb reader such as
+    /// `operator_enrol`'s `GetNodeIdentity` meets it, is said as the door wrote it.
+    #[test]
+    fn the_doors_own_error_is_said_as_written() {
+        let said = unexpected(&UserResponse::Error { message: "the vault is not serving yet".into() }).to_string();
+        assert_eq!(said, "the vault is not serving yet");
     }
 
     #[test]

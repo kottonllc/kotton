@@ -273,8 +273,16 @@ async fn point_at_the_vault(
     {
         UserResponse::NodePaired { .. } => Ok(VaultNode { label, did, added }),
         UserResponse::Error { message } => Err(anyhow!("{message}; nothing was changed")),
-        other => Err(anyhow!("unexpected reply {other:?}")),
+        // This daemon's own answer, not asked for: by its name and no field (an
+        // answer not asked for is said by its name and no field).
+        other => Err(unexpected_reply(&other)),
     }
+}
+
+/// What a re-pairing says of `peer_add`'s answer when it is not the one asked
+/// for: said by its name and no field ([`kotton_wire::ipc::unasked`]).
+fn unexpected_reply(other: &UserResponse) -> anyhow::Error {
+    anyhow!("unexpected reply {}", kotton_wire::ipc::unasked(other))
 }
 
 /// The label a vault the line names is added under: `vault`, or, when the person
@@ -576,6 +584,16 @@ mod tests {
     use kotton_store::runtime::user::UserStore;
     use kotton_wire::ipc::OperatedService;
     use kotton_wire::line::InstanceLine;
+
+    /// **An answer not asked for is said by its name and no field**: a
+    /// re-pairing answered with something else names the answer, and says
+    /// nothing it carries.
+    #[test]
+    fn a_reply_not_asked_for_is_said_by_its_name_alone() {
+        let said = unexpected_reply(&UserResponse::VaultKeepsAlready { user_id: "FIELD-e4a7".into() }).to_string();
+        assert!(!said.contains("FIELD-e4a7"), "a field of the answer was said: {said}");
+        assert!(said.contains("`VaultKeepsAlready`"), "the answer was not named: {said}");
+    }
 
     /// Five BIP-39 words, above the bar `create_user` holds a credential to.
     const OLD_PASSPHRASE: &str = "canyon-orbit-velvet-fish-hospital";

@@ -261,6 +261,11 @@ pub enum KuidResponse {
     Error { message: String },
 }
 
+// `KuidResponse::name`: the variant's name and nothing of its fields, what
+// kuserd's reader of kuid logs of a reply it did not ask for (an answer not
+// asked for is said by its name and no field; `crate::ipc::unasked`).
+variant_names!(KuidResponse { SurfaceOk, Error });
+
 /// One window in [`CompositorEvent::WindowsChanged`] — the compositor's half of
 /// a [`HostWindow`](crate::HostWindow).
 ///

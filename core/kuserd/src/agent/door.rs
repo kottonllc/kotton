@@ -147,7 +147,12 @@ pub(crate) fn enrolled(answer: UserResponse) -> Result<RunnerEnrolled, String> {
             Ok(RunnerEnrolled { relay: service == OperatedService::Relay, name, not_standing, acts, choose })
         }
         UserResponse::Error { message } => Err(message),
-        other => Err(format!("the line was answered with something the door does not read: {other:?}")),
+        // This daemon's own answer, not asked for: said by its name and no
+        // field (an answer not asked for is said by its name and no field).
+        other => Err(format!(
+            "the line was answered with something the door does not read: {}",
+            kotton_wire::ipc::unasked(&other)
+        )),
     }
 }
 
@@ -172,6 +177,18 @@ mod tests {
     use ed25519_dalek::SigningKey;
 
     const RELAY: &str = "http://203.0.113.9:7700";
+
+    /// **An answer not asked for is said by its name and no field**: a
+    /// completion answered with something else names the answer, and says
+    /// nothing it carries.
+    #[test]
+    fn a_completion_answered_with_something_else_is_said_by_its_name_alone() {
+        let Err(said) = enrolled(UserResponse::VaultKeepsAlready { user_id: "FIELD-5b8e".into() }) else {
+            panic!("a refusal was read as an enrolment");
+        };
+        assert!(!said.contains("FIELD-5b8e"), "a field of the answer was said: {said}");
+        assert!(said.contains("`VaultKeepsAlready`"), "the answer was not named: {said}");
+    }
 
     fn minted(service: OperatedService, name: &str, seed: u8) -> String {
         kotton_peer::operator::minted_text(service, name, &SigningKey::from_bytes(&[seed; 32]), None).unwrap()

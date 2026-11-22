@@ -98,9 +98,7 @@ async fn main() -> io::Result<()> {
             return Err(io::Error::other(format!("auth error: {message}")));
         }
         other => {
-            return Err(io::Error::other(format!(
-                "unexpected auth response: {other:?}"
-            )));
+            return Err(unasked_answer("unexpected auth response", &other));
         }
     }
 
@@ -118,9 +116,7 @@ async fn main() -> io::Result<()> {
     {
         UserResponse::DeviceCert { signing_key_bytes } => signing_key_bytes,
         other => {
-            return Err(io::Error::other(format!(
-                "GetDeviceCert unexpected response: {other:?}"
-            )));
+            return Err(unasked_answer("GetDeviceCert unexpected response", &other));
         }
     };
 
@@ -286,7 +282,7 @@ async fn mint_principal_session(
         .await?
     {
         UserResponse::ActiveSession { .. } => {}
-        other => return Err(io::Error::other(format!("bootstrap auth failed: {other:?}"))),
+        other => return Err(unasked_answer("bootstrap auth failed", &other)),
     }
 
     match ipc
@@ -300,7 +296,7 @@ async fn mint_principal_session(
     {
         UserResponse::PrincipalSession { token } => Ok(token.expose().to_owned()),
         UserResponse::NotAllowed => Err(io::Error::other("peer is not an authorised client")),
-        other => Err(io::Error::other(format!("unexpected mint response: {other:?}"))),
+        other => Err(unasked_answer("unexpected mint response", &other)),
     }
 }
 
@@ -491,9 +487,7 @@ async fn fetch_allowed_keys(
         .await?
     {
         UserResponse::AuthorizedClients { pubkey_hexes, .. } => Ok(keys_of(&pubkey_hexes)),
-        other => Err(io::Error::other(format!(
-            "GetAuthorizedClients unexpected: {other:?}"
-        ))),
+        other => Err(unasked_answer("GetAuthorizedClients unexpected", &other)),
     }
 }
 
@@ -550,10 +544,43 @@ fn build_ipc_endpoint() -> io::Result<IpcEndpoint> {
     }
 }
 
+/// What kquicd says of kuserd's answer to a verb when it is not the one asked
+/// for: kuserd is this device's own daemon, and its answer is said by its name
+/// and no field ([`kotton_wire::ipc::unasked`]; an answer not asked for is
+/// said by its name and no field). kuserd's own `Error` is said as written: a
+/// reader of this device's own daemon says the daemon's `Error` as written.
+fn unasked_answer(said: &str, other: &UserResponse) -> io::Error {
+    match other {
+        UserResponse::Error { message } => io::Error::other(format!("{said}: {message}")),
+        other => io::Error::other(format!("{said}: {}", kotton_wire::ipc::unasked(other))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kotton_ed25519::refused;
+
+    /// **An answer not asked for is said by its name and no field**: kuserd's
+    /// answer to a verb that did not ask for it is named, and nothing it
+    /// carries is said.
+    #[test]
+    fn an_answer_not_asked_for_is_said_by_its_name_alone() {
+        let said = unasked_answer("unexpected mint response", &UserResponse::VaultKeepsAlready { user_id: "FIELD-0b9d".into() })
+            .to_string();
+        assert!(!said.contains("FIELD-0b9d"), "a field of the answer was said: {said}");
+        assert_eq!(said, "unexpected mint response: `VaultKeepsAlready`");
+    }
+
+    /// **A reader of this device's own daemon says the daemon's `Error` as
+    /// written**: kuserd's `Error`, at a verb that did not ask for it, is said
+    /// with its message within the site's own sentence.
+    #[test]
+    fn kuserds_own_error_is_said_as_written() {
+        let said = unasked_answer("bootstrap auth failed", &UserResponse::Error { message: "vault is locked".into() })
+            .to_string();
+        assert_eq!(said, "bootstrap auth failed: vault is locked");
+    }
 
     fn hex_of(seed: u8) -> String {
         hex::encode(ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes())

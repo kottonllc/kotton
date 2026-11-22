@@ -53,6 +53,15 @@ fn refuse(message: impl Into<String>) -> io::Result<UserResponse> {
     Ok(UserResponse::Error { message: message.into() })
 }
 
+/// The refusal of a root whose delegation came back as an answer the call did
+/// not ask for: the org's issuing path is this daemon's own, called in
+/// process, and its answer is said by its name and no field
+/// ([`kotton_wire::ipc::unasked`]; an answer not asked for is said by its name
+/// and no field).
+fn org_answered(other: &UserResponse) -> io::Result<UserResponse> {
+    refuse(format!("the org answered {}", kotton_wire::ipc::unasked(other)))
+}
+
 /// The person's AID and their root set, the way the record verbs read them.
 pub(crate) fn open_roots(
     users: &crate::residency::UserRegistry,
@@ -160,7 +169,7 @@ pub(crate) async fn org_root_create(
                 "root {root} was created and the org did not delegate org.invite on it: {message}"
             ))
         }
-        other => return refuse(format!("the org answered {other:?}")),
+        other => return org_answered(&other),
     };
     tracing::info!(%root, owner = %owner, "org root created");
     Ok(UserResponse::OrgRootCreated { root, owner, delegation })
@@ -234,4 +243,22 @@ pub(crate) async fn org_root_invite(
         .map_err(|e| io::Error::other(format!("serialising the membership grant: {e}")))?;
     tracing::info!(%root, %member, "member admitted to an org root");
     Ok(UserResponse::OrgRootInvited { member, added, grant_json })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **An answer not asked for is said by its name and no field**: a
+    /// delegation answered with something else is refused naming the answer,
+    /// and nothing it carries.
+    #[test]
+    fn an_org_answer_not_asked_for_is_said_by_its_name_alone() {
+        let answer = UserResponse::VaultKeepsAlready { user_id: "FIELD-9e2c".into() };
+        let Ok(UserResponse::Error { message }) = org_answered(&answer) else {
+            panic!("the refusal is not an Error");
+        };
+        assert!(!message.contains("FIELD-9e2c"), "a field of the answer was said: {message}");
+        assert!(message.contains("`VaultKeepsAlready`"), "the answer was not named: {message}");
+    }
 }

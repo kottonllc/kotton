@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# The owed lists of `tier-check`'s rows (xtask/src/tier_check.rs): for each row, every edge a
+# The owed lists of `tier-check`'s rows (xtask/tier-rows.toml): for each row, every edge a
 # crate of it has today that the row may not link, by crate name. A part is cut when its row's
 # list is empty.
 #
 # A list only shrinks. `tier-check` refuses an entry whose edge no list holds at the merge base
 # with origin/main (read by the edge, under any row, so a row renamed keeps its floor), an entry
 # no manifest has (an untangling that lands deletes its entry), an entry for an edge the row may
-# link, and an edge out of its row that no entry names. Every row has a table here, empty when
-# it owes nothing.
+# link, and an edge out of its row that no entry names. An edge a list at the merge base owes is
+# refused while a manifest has it if the rows admit it: an entry leaves only when its crate is
+# untangled, not when the rows change under it. Every row has a table here, empty when it owes
+# nothing.
 #
 # Shape: [row] then `crate = ["crate it path-depends on", ...]`.
 

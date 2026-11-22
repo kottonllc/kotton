@@ -167,10 +167,18 @@ async fn send(
         .map_err(|e| format!("this machine's kdeviced closed the connection: {e}"))
 }
 
+/// What kuserd says of kdeviced's answer to `verb` when it is not the one
+/// asked for: kdeviced is this device's own daemon, so its `Error` is said as
+/// written, and any other answer by its name and no field
+/// ([`kotton_wire::ipc::unasked`]; an answer not asked for is said by its name
+/// and no field).
 fn unread(verb: &str, answer: DeviceResponse) -> String {
     match answer {
         DeviceResponse::Error { message } => message,
-        other => format!("{verb}: kdeviced answered with something this does not read ({other:?})"),
+        other => format!(
+            "{verb}: kdeviced answered with something this does not read ({})",
+            kotton_wire::ipc::unasked(&other)
+        ),
     }
 }
 
@@ -241,5 +249,21 @@ async fn act(
         Ok(Ok(other)) => Err(unread(verb, other)),
         Ok(Err(e)) => Err(e),
         Err(_) => Err("this machine's kdeviced did not answer".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **An answer not asked for is said by its name and no field**: kdeviced's
+    /// answer that kuserd does not read is named, and nothing it carries is
+    /// said; its own `Error` is said as written.
+    #[test]
+    fn a_kdeviced_answer_not_read_is_said_by_its_name_alone() {
+        let said = unread("Authenticate", DeviceResponse::AuthFailed { reason: "FIELD-41d0".into() });
+        assert!(!said.contains("FIELD-41d0"), "a field of the answer was said: {said}");
+        assert!(said.contains("`AuthFailed`"), "the answer was not named: {said}");
+        assert_eq!(unread("Authenticate", DeviceResponse::Error { message: "as `written`".into() }), "as `written`");
     }
 }
