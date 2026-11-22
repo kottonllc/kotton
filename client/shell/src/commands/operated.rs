@@ -57,7 +57,9 @@
 //! tells every vault told nothing yet; `relay rule [<r>] <rule>` tells every vault you
 //! told to stand at that relay again, with its keys — found by the relay's key,
 //! never a URL — and `vault drop` rotates the invited key at each relay you
-//! operate that the vault stands at. When the ceremony a vault's enrol runs
+//! operate that the vault stands at, once the vault no longer lists the pool;
+//! a drop the vault did not answer waits on the desktop until then. When the
+//! ceremony a vault's enrol runs
 //! offers this device the relay the same `enrol` kept, this device stands
 //! there too, held to that relay's key: the line was the person's own, typed
 //! into this `enrol` ([`relays_kept`]).
@@ -515,7 +517,7 @@ fn parse_relay<'a>(args: &[&'a str], held: &'a [String]) -> Option<Parsed<'a>> {
 #[async_trait::async_trait]
 impl Command for VaultCommand {
     fn help_text(&self) -> &'static str {
-        "vault [stand [<v>] | move [<v>] <r> | people [<v>] | invite [<v>] <name> [--space <bytes>] | invite [<v>] --me | digits [<v>] <name> | space [<v>] <name> <bytes> | drop [<v>] <name> --confirm <name> | forget [<v>]] — the landlord's verbs for a vault of your own, and forget [<v>] for one whose host is gone; <v> only when this desktop operates more than one vault. mint and enrol make one; relay and vault operate one: `mint vault`, then `enrol <its line>`, makes one"
+        "vault [stand [<v>] | move [<v>] <r> | people [<v>] | invite [<v>] <name> [--space <bytes>] | invite [<v>] --me | digits [<v>] <name> | space [<v>] <name> <bytes> | drop [<v>] <name> --confirm <name> | forget [<v>]] — the landlord's verbs for a vault of your own, and forget [<v>] for one whose host is gone; <v> only when this desktop operates more than one vault. A drop rotates the invited key at each relay you operate that the vault stands at, once the vault no longer lists the pool; a drop it did not answer waits on this desktop, and rotates when the vault is next reached. mint and enrol make one; relay and vault operate one: `mint vault`, then `enrol <its line>`, makes one"
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
