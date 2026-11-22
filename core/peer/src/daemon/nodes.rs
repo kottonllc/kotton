@@ -771,6 +771,24 @@ fn cosigner_nodes(members: &[Member], rows: Vec<PairedNode>) -> Vec<PairedNode> 
     rows.into_iter().filter(|n| chosen.contains(&n.device_did.to_string())).collect()
 }
 
+/// A co-signer's answer to a signing round: its reply, or why not. The
+/// co-signer's `Error`, and what its reply did not read as, are printed as data
+/// to a bounded length ([`kotton_wire::note::quoted_cut`]; how another node's
+/// text is printed); an answer not asked for by its name and no field of it
+/// ([`kotton_wire::ipc::unasked`]).
+#[cfg(any(test, feature = "test-support"))]
+fn round_reply_in(resp: UserResponse) -> anyhow::Result<kotton_org::frost_signing::FrostRoundReply> {
+    match resp {
+        UserResponse::FrostSignReply { payload } => serde_json::from_str(&payload).map_err(|e| {
+            anyhow::anyhow!("the co-signer's round reply did not read: {}", kotton_wire::note::quoted_cut(&e.to_string()))
+        }),
+        UserResponse::Error { message } => {
+            Err(anyhow::anyhow!("the co-signer answered: {}", kotton_wire::note::quoted_cut(&message)))
+        }
+        other => Err(anyhow::anyhow!("the co-signer answered {}", kotton_wire::ipc::unasked(&other))),
+    }
+}
+
 /// Coordinate a threshold signature over `message` across this node's own
 /// network. This node contributes its own FROST share locally and co-signs with
 /// every **Full** own-device member reached over the authenticated peer channel
@@ -891,16 +909,7 @@ pub async fn threshold_sign(
                         payload,
                     })
                     .await?;
-                match resp {
-                    UserResponse::FrostSignReply { payload } => {
-                        serde_json::from_str::<FrostRoundReply>(&payload)
-                            .map_err(|e| anyhow::anyhow!("parse round reply: {e}"))
-                    }
-                    UserResponse::Error { message } => {
-                        Err(anyhow::anyhow!("co-signer error: {message}"))
-                    }
-                    other => Err(anyhow::anyhow!("unexpected co-signer response: {other:?}")),
-                }
+                round_reply_in(resp)
             })
                 as std::pin::Pin<
                     Box<dyn std::future::Future<Output = anyhow::Result<FrostRoundReply>> + Send>,
@@ -1686,14 +1695,20 @@ pub fn ceremony_failure(err: &anyhow::Error) -> String {
 /// What the admitting device's person is told when the other device did not
 /// keep what it was handed: that this device kept nothing either — no row for
 /// it, and no drive told of it — so there is nothing here to revoke, and, for
-/// a refusal, the other device's own reason. Not
+/// a refusal, the other device's own reason, printed as data and to a
+/// bounded length ([`kotton_wire::note::quoted_cut`]; how another node's text
+/// is printed). The sentence is this device's own: every reader of the
+/// `PairFailed` it becomes prints it as written, so that reason is quoted
+/// once. Not
 /// [`ceremony_failure_copy`]'s *nothing was shared*: the payload crossed, and
 /// the other device threw it away.
 pub fn join_not_kept_copy(not_kept: &JoinNotKept) -> String {
     const NOTHING_KEPT: &str = "Nothing is kept here: this device did not add it, and none of your drives \
                                 was told of it, so there is nothing to revoke.";
     match not_kept {
-        JoinNotKept::Refused(why) => format!("The other device refused the join. {NOTHING_KEPT} It said: {why}"),
+        JoinNotKept::Refused(why) => {
+            format!("The other device refused the join. {NOTHING_KEPT} It said: {}", kotton_wire::note::quoted_cut(why))
+        }
         JoinNotKept::Unanswered(how) => format!(
             "The other device did not say it kept what it was handed ({how}). {NOTHING_KEPT} Pair again when \
              both devices are ready."
@@ -1911,7 +1926,7 @@ mod refusal_copy {
         let said = ceremony_failure(&refused);
         assert!(said.starts_with("The other device refused the join."), "{said}");
         assert!(said.contains("Nothing is kept here") && said.contains("nothing to revoke"), "{said}");
-        assert!(said.ends_with("It said: the drive at 'vault' cannot be recorded here"), "{said}");
+        assert!(said.ends_with("It said: `the drive at 'vault' cannot be recorded here`"), "{said}");
 
         let silent: anyhow::Error = JoinNotKept::Unanswered("no answer within 120s".into()).into();
         let said = ceremony_failure(&silent);
@@ -1922,6 +1937,25 @@ mod refusal_copy {
             assert!(!said.contains("Nothing was shared") && !said.contains("Lost the connection"), "{said}");
             assert!(!said.contains("device revoke"), "a join nobody kept sent the person to revoke it: {said}");
         }
+    }
+
+    /// **A joining device's reason is printed as data and to the bound** (how
+    /// another node's text is printed): a backtick and a line break escaped,
+    /// and one past `MAX_SAID_CHARS` cut, inside this device's own sentence.
+    #[test]
+    fn a_joining_devices_reason_is_printed_as_data_and_to_the_bound() {
+        use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+        let long = "j".repeat(MAX_SAID_CHARS + 3);
+        for why in ["no `room`\nhere", long.as_str()] {
+            let said = join_not_kept_copy(&JoinNotKept::Refused(why.to_string()));
+            assert!(said.starts_with("The other device refused the join."), "{said}");
+            assert!(said.ends_with(&format!("It said: {}", quoted_cut(why))), "{said}");
+            assert!(!said.contains('\n') && !said.contains(why), "{said}");
+        }
+        let said = join_not_kept_copy(&JoinNotKept::Refused("no `room`\nhere".into()));
+        assert!(said.ends_with("It said: `no \\u{60}room\\u{60}\\nhere`"), "{said}");
+        let said = join_not_kept_copy(&JoinNotKept::Refused(long.clone()));
+        assert!(said.ends_with(" (cut: 3 more characters)"), "{said}");
     }
 
     /// Every other failure reads as it did.
@@ -3667,5 +3701,40 @@ mod narrowest_of_a_keys_rows {
             );
             sqlx::query("DELETE FROM paired_nodes").execute(db.as_ref()).await.unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod a_cosigners_answer {
+    use super::*;
+    use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+
+    fn said(resp: UserResponse) -> String {
+        match round_reply_in(resp) {
+            Ok(_) => panic!("a refusal was read as a round reply"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// **A co-signer's `Error`, and a reply that does not read, are printed as
+    /// data and to the bound; an answer not asked for by its name and no
+    /// field** (how another node's text is printed; how an answer not asked
+    /// for is said).
+    #[test]
+    fn a_cosigners_refusal_is_printed_as_data_and_to_the_bound() {
+        let long = "c".repeat(MAX_SAID_CHARS + 4);
+        for text in ["no `round`\nhere", long.as_str()] {
+            let refused = said(UserResponse::Error { message: text.to_string() });
+            assert_eq!(refused, format!("the co-signer answered: {}", quoted_cut(text)));
+            assert!(!refused.contains('\n') && !refused.contains(text), "{refused}");
+        }
+        assert_eq!(
+            said(UserResponse::Error { message: "no `round`\nhere".into() }),
+            "the co-signer answered: `no \\u{60}round\\u{60}\\nhere`"
+        );
+        let unread = said(UserResponse::FrostSignReply { payload: "\"no `round`\\nhere\"".into() });
+        assert!(unread.starts_with("the co-signer's round reply did not read: `"), "{unread}");
+        assert!(!unread.contains('\n') && !unread.contains("no `round`"), "{unread}");
+        assert_eq!(said(UserResponse::VaultFull { held: 17, quota: 9 }), "the co-signer answered `VaultFull`");
     }
 }

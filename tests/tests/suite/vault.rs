@@ -5802,7 +5802,7 @@ async fn a_relays_enrol_takes_the_vaults_word_that_it_keeps_a_person_with_no_dev
     assert!(matches!(named.exit_code, kotton_shell::ExitCode::Code(1)), "{:?}: {:?}", named.exit_code, named.out);
     let why = failed_with(&named);
     assert!(
-        why.starts_with("vault: this vault already keeps for 'lee' — an invite admits someone new"),
+        why.starts_with("vault: this vault already keeps for `lee` — an invite admits someone new"),
         "`vault invite lee` was not refused as kept: {why}"
     );
     assert_eq!(tenants_at_the_door(&vault.ipc).await, left, "the vault's people changed");

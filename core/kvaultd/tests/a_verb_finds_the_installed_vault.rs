@@ -328,6 +328,8 @@ fn a_verb_typed_bare_reaches_the_installed_vault_and_is_refused_in_one_sentence_
     let out = typed_within(Duration::from_secs(60), &b.bin(), &["invite", "sam", "--ttl", "5"]);
     refused_in_one_sentence(&out, "this vault stands at no relay");
     let err = String::from_utf8_lossy(&out.stderr);
+    // The door is this machine's own daemon: its sentence is said as
+    // written, so the command in it prints as typed.
     assert!(err.contains("`enrol <the vault's line>`"), "{}", said(&out));
     assert!(!err.contains("vault.env"), "{}", said(&out));
     assert!(!String::from_utf8_lossy(&out.stdout).contains("invite="), "{}", said(&out));
@@ -350,7 +352,7 @@ fn a_verb_typed_bare_reaches_the_installed_vault_and_is_refused_in_one_sentence_
     );
     kotton_device::registry::save_users(&system, &registry).unwrap();
     let out = typed_within(Duration::from_secs(60), &b.bin(), &["invite", "sam", "--ttl", "5"]);
-    refused_in_one_sentence(&out, "this vault already keeps for 'sam' — an invite admits someone new");
+    refused_in_one_sentence(&out, "this vault already keeps for `sam` — an invite admits someone new");
     assert!(!String::from_utf8_lossy(&out.stdout).contains("invite="), "{}", said(&out));
 
     // `join` reaches it too, and ends by itself on a code that is not one: the
