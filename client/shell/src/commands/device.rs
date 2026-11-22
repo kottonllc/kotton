@@ -118,8 +118,8 @@ pub(crate) const DEVICE_REVOKE: &str = "device revoke";
 /// form is applied where a name is stored and where it is compared, with this
 /// shell's read-back test over the wider set
 /// (`a_notes_name_is_one_word_the_shell_takes_to_its_row`); the first step is
-/// done for a minted name. The same is said for a person in
-/// `docs/cli/reference.md`, under `--json`.
+/// done for a minted name. The same is said for a person in `kotton --help`'s
+/// own text, which `docs/cli/reference.md` renders in `kotton`'s section.
 pub(crate) fn notes_said(notes: &[kotton_wire::note::RowNote]) -> Vec<Out> {
     notes.iter().map(|n| Out::Note(kotton_wire::note::sentence(n, DEVICE_REVOKE))).collect()
 }

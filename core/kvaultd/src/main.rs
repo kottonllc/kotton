@@ -1236,4 +1236,77 @@ mod tests {
             assert_eq!(word, DID, "{label:?}: `enrolled=` does not carry the node's DID");
         }
     }
+
+    /// The characters a person reads as the delimiter, spelled here as the decision on
+    /// which characters the quoted print's rule names spells them, not read from the
+    /// rule's constant: the backtick and each character drawn as it. The shell's test
+    /// spells the same set (`client/shell/src/commands/device.rs`,
+    /// `DRAWN_AS_THE_DELIMITER`), mirrored here because a vault does not link the shell.
+    const DRAWN_AS_THE_DELIMITER: [char; 6] = ['`', '\u{2cb}', '\u{2f4}', '\u{1fef}', '\u{2035}', '\u{ff40}'];
+
+    /// The two marks drawn as the delimiter where what they are drawn on is the space.
+    const DRAWN_AS_THE_DELIMITER_ON_SPACE: [char; 2] = ['\u{300}', '\u{340}'];
+
+    /// How many delimiters a person reads in `line`, as it is written: each character
+    /// drawn as the delimiter, and each of the two marks where what it is drawn on is the
+    /// space. What a mark is drawn on is the character before it, or, past marks written
+    /// as they are, the one those marks are drawn on. The shell's `delimiters_read`,
+    /// mirrored here for the same reason.
+    fn delimiters_read(line: &str) -> usize {
+        use kotton_schemas::petname::is_printed_as_is;
+        let mut drawn_on = None;
+        let mut count = 0;
+        for c in line.chars() {
+            let mark = is_printed_as_is(c, false) && !is_printed_as_is(c, true);
+            if DRAWN_AS_THE_DELIMITER.contains(&c) || (DRAWN_AS_THE_DELIMITER_ON_SPACE.contains(&c) && drawn_on == Some(' ')) {
+                count += 1;
+            }
+            if !mark {
+                drawn_on = Some(c);
+            }
+        }
+        count
+    }
+
+    /// **A person reading the sentence a completed join prints can tell where the
+    /// label's quote ends** (the decision on which characters the quoted print's rule
+    /// names: the delimiter, and what is drawn as it). For a label that holds each
+    /// character drawn as the backtick, a space with each grave mark drawn on it (after
+    /// another mark too), and all of them at once, the sentence `kvaultd join` and
+    /// `kvaultd invite` print holds exactly as many delimiters as a person reads in the
+    /// same sentence for a plain word.
+    #[test]
+    fn a_completed_joins_sentence_holds_no_delimiter_a_person_reads_as_the_labels_end() {
+        const DID: &str = "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX";
+        let node = |label: &str| kotton_wire::peer::PairedNode {
+            id: label.into(),
+            device_did: kotton_wire::did::Did::parse(DID).expect("a DID"),
+            public_key: [0xab; 32],
+            paired_at: 0,
+            addresses: vec![],
+            relay_url: None,
+            posture: None,
+        };
+        let mut labels: Vec<String> = DRAWN_AS_THE_DELIMITER.iter().map(|c| format!("ph{c}one")).collect();
+        for m in DRAWN_AS_THE_DELIMITER_ON_SPACE {
+            labels.push(format!("ph {m}one"));
+            labels.push(format!("ph \u{301}{m}one"));
+        }
+        let mut all: String = DRAWN_AS_THE_DELIMITER.iter().collect();
+        for m in DRAWN_AS_THE_DELIMITER_ON_SPACE {
+            all.push(' ');
+            all.push(m);
+        }
+        labels.push(format!("a{all}b"));
+        for label in &labels {
+            assert!(delimiters_read(label) > 0, "{label:?} holds no character the rule names");
+        }
+
+        let plain = completed("sam", &node("laptop")).said;
+        assert_eq!(delimiters_read(&plain), 2, "{plain:?}");
+        for label in &labels {
+            let said = completed("sam", &node(label)).said;
+            assert_eq!(delimiters_read(&said), delimiters_read(&plain), "the sentence for {label:?}: {said:?}");
+        }
+    }
 }
