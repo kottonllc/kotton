@@ -41,12 +41,23 @@
 //! owed a rotation is kept as waiting ([`DROPS`]) before `DropTenant` is sent,
 //! and a drop whose record cannot be kept is not sent. A waiting drop is
 //! looked at — one `Tenants` ask, bounded by [`WITHIN`] — at the end of a drop
-//! the vault did not answer, after each verb said to that vault, and on the
-//! reach keeper's pass (`reach_keeper`: its start, a reach change, the hour).
-//! The pass dials only a vault a drop waits for, and never says a drop: a
-//! drop is said by the person. One look rotates each relay once for every
-//! waiting drop it finds gone, and a rotation begun is finished with the key
-//! already minted, never begun again.
+//! the vault did not answer, after each verb to that vault the vault has
+//! answered, and on the reach keeper's pass (`reach_keeper`: its start, a
+//! reach change, the hour). The pass dials only a vault a drop waits for, and
+//! never says a drop: a drop is said by the person. The rotation a look
+//! begins tells every vault standing at that relay its keys again and hands
+//! the reach note on. One look rotates each relay once for every waiting drop
+//! it finds gone, and a rotation begun is finished with the key already
+//! minted, never begun again. Looks, and every write to the record, are one
+//! at a time for a person.
+//!
+//! **A drop of a name the vault does not keep rotates nothing**: where no drop
+//! of it waits, the vault is asked `Tenants` first, and a name it does not
+//! list is answered here with nothing sent and nothing kept. **Every waiting
+//! drop ends**: seven days after it was said ([`A_DROP_WAITS`]) it ends
+//! unrotated, before any look dials for it; a drop whose vault no kept
+//! credential names is cleared on the pass; and a relay owed that is not held
+//! at the look is owed nothing more, as when it is forgotten.
 //!
 //! **The desktop introduces the two services, and nobody else does**: it tells
 //! the vault which relays to stand at. A relay is its key: the key its credential recorded when it
@@ -126,9 +137,22 @@ const STANDS: &str = "stands-at";
 /// an invite for the same name at the same vault that the vault answers as the
 /// invite ([`invited_again`]); and with what is kept for a credential when it
 /// is forgotten — a vault's drops with the vault's, a relay's part of each with
-/// the relay's ([`drop_credential`]). Nothing else clears it: a refusal, a
-/// look the vault does not answer and a name still listed each leave it.
+/// the relay's ([`drop_credential`]).
+///
+/// **Every waiting drop ends.** One said [`A_DROP_WAITS`] (seven days) ago
+/// or longer ends unrotated, at the next look or pass, before anything is
+/// dialled; a drop whose vault no credential kept here names is cleared on the
+/// pass; and a relay owed whose credential is not held at the look is removed
+/// from each drop as `forget` of that relay removes it. A refusal, a look the
+/// vault does not answer and a name still listed each leave it, until one of
+/// those ends. Every write to it, and every look, is one at a time for the
+/// person ([`one_at_a_time`]).
 const DROPS: &str = "drops-waiting";
+
+/// How long a drop waits for its rotation: seven days from when it was said
+/// ([`WaitingDrop::said_at`]). Past that the drop ends unrotated, and no look
+/// dials its vault for it again.
+const A_DROP_WAITS: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// One relay's keys, as this person keeps them — by the relay's key, 64 hex.
 /// Keys kept by the relay's URL carry no key; they are not read, and the
@@ -207,8 +231,12 @@ pub(crate) struct OwedAt {
     /// The relay's key, 64 hex.
     pub key: String,
     /// Whether the *invited* key that rotation sets is minted and kept here.
-    /// Written after the key is kept and before any vault or relay is told
-    /// it, so a look that finds it set finishes the rotation with that key.
+    /// The key is kept on this desktop first and marked minted after, and
+    /// only then is any vault or relay told it, so a look that finds it set
+    /// finishes the rotation with that key. Between the keeping and the
+    /// relay's set, a keeper's pass may hold the kept key in this device's
+    /// keyring. Where the mark cannot be written, nothing is told and the
+    /// keys from before the rotation are kept again.
     pub minted: bool,
 }
 
@@ -301,6 +329,84 @@ fn invited_again(store: &UserStore, vault: &str, pool: &str) -> anyhow::Result<(
     }
     let rest: Vec<WaitingDrop> = all.into_iter().filter(|d| !d.is(vault, pool)).collect();
     keep_waiting_drops(store, &rest)
+}
+
+/// `drops` with the relay `relay` owed nothing by any of them, and each drop
+/// then owed nothing more removed: what `forget` of that relay leaves, and
+/// what a relay not held at a look leaves.
+fn without_relay(drops: &mut Vec<WaitingDrop>, relay: &RelayId) {
+    for d in drops.iter_mut() {
+        d.relays.retain(|o| relay_id(Some(&o.key)).as_ref() != Some(relay));
+    }
+    drops.retain(|d| !d.relays.is_empty());
+}
+
+/// The relay `relay` is not held here at a look: no drop is owed a rotation
+/// there any more ([`without_relay`]). Answers how many drops it touched.
+fn relay_not_held(store: &UserStore, relay: &RelayId) -> anyhow::Result<usize> {
+    let all = waiting_drops(store)?;
+    let mut rest = all.clone();
+    without_relay(&mut rest, relay);
+    let touched = all.iter().filter(|d| !rest.contains(d)).count();
+    if touched > 0 {
+        keep_waiting_drops(store, &rest)?;
+    }
+    Ok(touched)
+}
+
+/// Whether a drop said at `said_at` has waited [`A_DROP_WAITS`] by `now`.
+fn has_ended(said_at: u64, now: u64) -> bool {
+    now.saturating_sub(said_at) >= A_DROP_WAITS.as_secs()
+}
+
+/// End every waiting drop whose wait is over ([`A_DROP_WAITS`]) and, when
+/// `kept` is given, every one whose vault no credential in it names; answers
+/// how many of each ended. Nothing is dialled: this is read and written here
+/// alone, before any look dials.
+fn end_what_is_over(store: &UserStore, kept: Option<&[OperatorCredential]>) -> anyhow::Result<(usize, usize)> {
+    let all = waiting_drops(store)?;
+    let now = kotton_peer::rendezvous::unix_now();
+    let (aged, rest): (Vec<WaitingDrop>, Vec<WaitingDrop>) = all.into_iter().partition(|d| has_ended(d.said_at, now));
+    let (unnamed, rest): (Vec<WaitingDrop>, Vec<WaitingDrop>) = match kept {
+        Some(kept) => rest
+            .into_iter()
+            .partition(|d| !kept.iter().any(|c| vault_key(c).map(hex::encode).as_deref() == Some(d.vault.as_str()))),
+        None => (Vec::new(), rest),
+    };
+    if !aged.is_empty() || !unnamed.is_empty() {
+        keep_waiting_drops(store, &rest)?;
+    }
+    if !aged.is_empty() {
+        tracing::info!(
+            user_id = store.user_id(),
+            ended = aged.len(),
+            "a drop waited seven days for its rotation and no longer waits; the invited key it was owed is left as it is"
+        );
+    }
+    if !unnamed.is_empty() {
+        tracing::info!(
+            user_id = store.user_id(),
+            ended = unnamed.len(),
+            "a drop waited at a vault no credential kept here names, and no longer waits"
+        );
+    }
+    Ok((aged.len(), unnamed.len()))
+}
+
+/// **One look at a time for a person.** Held across every write to [`DROPS`]
+/// and across every look and the rotation it decides, so a verb's look and the
+/// keeper's pass never both decide a rotation from the same record, and the
+/// record's read-then-write helpers never write over one another. One lock per
+/// person's store on this device, kept for as long as kuserd runs.
+async fn one_at_a_time(store: &UserStore) -> tokio::sync::OwnedMutexGuard<()> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static LOOKS: OnceLock<Mutex<HashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let lock = {
+        let mut all = LOOKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(all.entry(store.base_dir().to_path_buf()).or_default())
+    };
+    lock.lock_owned().await
 }
 
 /// The relays a drop at the vault `told` describes is owed a rotation at, by
@@ -422,7 +528,7 @@ pub(crate) const WITHIN: Duration = Duration::from_secs(60);
 /// signed by the credential it is said under. [`Live`] says them over the
 /// wire; a test says them to a vault and a relay of its own, so the order a
 /// drop and its rotation keep is held with no service running.
-pub(crate) trait Wire: Sync {
+trait Wire: Sync {
     /// This device: whose keyring the relay keys are held in.
     fn runtime(&self) -> &DeviceRuntime;
     /// Send `requests` to the vault `credential` operates, dial included, at
@@ -444,7 +550,7 @@ pub(crate) trait Wire: Sync {
 }
 
 /// The wire itself, from this device.
-pub(crate) struct Live<'a>(pub(crate) &'a DeviceRuntime);
+struct Live<'a>(&'a DeviceRuntime);
 
 impl Wire for Live<'_> {
     fn runtime(&self) -> &DeviceRuntime {
@@ -994,10 +1100,22 @@ pub(crate) async fn forget(runtime: &DeviceRuntime, users: &UserRegistry, user_i
         Asked::Answered => true,
         Asked::Silent => false,
     };
-    if let Err(e) = drop_credential(runtime, &store, &credential) {
-        return refused(format!("the {word} '{name}' was not forgotten: {e:#}"));
-    }
-    tracing::info!(user_id, service = word, name, answered, "forgot an operator credential whose instance no longer stands its key");
+    let dropped = {
+        let _one = one_at_a_time(&store).await;
+        drop_credential(runtime, &store, &credential)
+    };
+    let drops_no_longer_owed = match dropped {
+        Ok(n) => n,
+        Err(e) => return refused(format!("the {word} '{name}' was not forgotten: {e:#}")),
+    };
+    tracing::info!(
+        user_id,
+        service = word,
+        name,
+        answered,
+        drops_no_longer_owed,
+        "forgot an operator credential whose instance no longer stands its key, and no drop waits for a rotation under it"
+    );
     UserResponse::OperatorForgotten { name: name.to_string(), service, key, answered }
 }
 
@@ -1014,8 +1132,9 @@ pub(crate) async fn forget(runtime: &DeviceRuntime, users: &UserRegistry, user_i
 ///
 /// **Everything is read before anything is written**, and the credential is
 /// written last, so a write that fails leaves the credential kept and the
-/// forget can be said again.
-fn drop_credential(runtime: &DeviceRuntime, store: &UserStore, credential: &OperatorCredential) -> anyhow::Result<()> {
+/// forget can be said again. Answers how many waiting drops it cleared or
+/// owed one relay fewer; the caller holds [`one_at_a_time`].
+fn drop_credential(runtime: &DeviceRuntime, store: &UserStore, credential: &OperatorCredential) -> anyhow::Result<usize> {
     let service = credential.service();
     let name = credential.name.as_str();
     let relay = relay_key(credential);
@@ -1037,11 +1156,9 @@ fn drop_credential(runtime: &DeviceRuntime, store: &UserStore, credential: &Oper
         rest_drops.retain(|d| d.vault != hex::encode(v));
     }
     if let Some(id) = relay {
-        for d in &mut rest_drops {
-            d.relays.retain(|o| relay_id(Some(&o.key)) != Some(id));
-        }
-        rest_drops.retain(|d| !d.relays.is_empty());
+        without_relay(&mut rest_drops, &id);
     }
+    let drops_touched = drops.iter().filter(|d| !rest_drops.contains(d)).count();
     if rest_drops != drops {
         keep_waiting_drops(store, &rest_drops)?;
     }
@@ -1077,7 +1194,7 @@ fn drop_credential(runtime: &DeviceRuntime, store: &UserStore, credential: &Oper
         // The reach note offered this relay's *invited* key; it no longer does.
         runtime.reach_changed().notify_one();
     }
-    Ok(())
+    Ok(drops_touched)
 }
 
 /// One minted text as [`mints`] lists it: `None` for one of the first form, or
@@ -2009,7 +2126,7 @@ pub(crate) fn keep_credentials(store: &UserStore, kept: &[OperatorCredential]) -
 /// taken it. A relay that does not answer leaves it carried, for the next time
 /// this desktop speaks to it. Answers what the set answered, or `None` when
 /// there was nothing to set.
-pub(crate) async fn set_pending_rule(
+async fn set_pending_rule(
     net: &impl Wire,
     users: &UserRegistry,
     record_stores: &RecordStores,
@@ -2363,6 +2480,7 @@ async fn speak_by(
             _ => stand(net, &store, &credential).await,
         };
         if matches!(answer, UserResponse::Ok) {
+            let _one = one_at_a_time(&store).await;
             look(net, users, record_stores, &store, &credential, Seen::default()).await;
         }
         return answer;
@@ -2381,6 +2499,7 @@ async fn speak_by(
         Ok(Err(e)) => return refused(format!("the vault '{name}' could not be reached: {e:#}")),
         Err(_) => return refused(format!("the vault '{name}' did not answer within {}s", WITHIN.as_secs())),
     };
+    let _one = one_at_a_time(&store).await;
     // An invite for a name a drop waits for, answered as the invite: the
     // person keeps that name there again, and the drop is not owed a rotation.
     if let (Some(pool), UserResponse::PairAdvertising { .. }, Some(v)) = (&invited, &answer, vault_key(&credential)) {
@@ -2426,11 +2545,18 @@ enum Looked {
 /// key before the current one, for a device that has not learned the new key
 /// yet), and the rotation tells every vault standing there again.
 ///
-/// The answer is the vault's. A drop the vault did not answer is looked at
-/// once before the person is answered — one `Tenants` ask, bounded by
-/// [`WITHIN`] — and its refusal says the drop was sent and the key rotates
-/// when the vault is next reached; one that failed to connect says the drop
-/// may not have reached it.
+/// **A drop of a name the vault does not keep rotates nothing.** Where a
+/// rotation would be owed and no drop of the name waits, the vault is asked
+/// `Tenants` first, bounded by [`WITHIN`]: a name it does not list is answered
+/// here, with nothing sent and nothing kept, and a vault that cannot be asked
+/// is not sent the drop either.
+///
+/// The answer is the vault's. A drop the vault did not answer — the dial
+/// failed, or no answer came within the bound, which covers the dial too — is
+/// looked at once before the person is answered (one `Tenants` ask, bounded by
+/// [`WITHIN`]), and its refusal says the drop may not have reached the vault
+/// and the key rotates when the vault is next reached. All of it is one at a
+/// time for the person ([`one_at_a_time`]).
 #[allow(clippy::too_many_arguments)]
 async fn drop_pool(
     net: &impl Wire,
@@ -2446,23 +2572,40 @@ async fn drop_pool(
     let Some(vault) = vault_key(credential).map(hex::encode) else {
         return refused(format!("'{name}' is a relay's credential, and a drop is the vault's"));
     };
+    let _one = one_at_a_time(store).await;
     let keys = match kept_keys(store) {
         Ok(k) => k,
-        Err(e) => {
+        // Keys that do not open matter only where the vault stands at a relay
+        // this person operates: anywhere else no rotation is owed.
+        Err(e) if stands_at_an_operated_relay(told, kept) => {
             return refused(format!(
                 "the drop was not sent: the relay keys kept here do not open, so the rotation it is owed could not be kept: {e:#}"
             ))
         }
+        Err(_) => Vec::new(),
     };
     let owed = relays_owed(told, kept, &keys);
+    let reach = told.and_then(|t| t.relays.first()).map(|r| r.hint.as_str());
     if !owed.is_empty() {
+        let waits = match waiting_drops(store) {
+            Ok(all) => all.iter().any(|d| d.is(&vault, pool)),
+            Err(e) => {
+                return refused(format!(
+                    "the drop was not sent: the record that keeps it until the invited key rotates could not be kept: {e:#}"
+                ))
+            }
+        };
+        if !waits {
+            if let Some(not_kept) = kept_there(net, credential, reach, pool).await {
+                return not_kept;
+            }
+        }
         if let Err(e) = wait_for_rotation(store, &vault, pool, &owed) {
             return refused(format!(
                 "the drop was not sent: the record that keeps it until the invited key rotates could not be kept: {e:#}"
             ));
         }
     }
-    let reach = told.and_then(|t| t.relays.first()).map(|r| r.hint.as_str());
     let requests = requests_for(OperatorVerb::Drop { pool: pool.to_string() });
     let (answer, unanswered) = match tokio::time::timeout(WITHIN, net.vault(credential, reach, requests)).await {
         Ok(Ok(answer)) => (from_the_vault(answer), None),
@@ -2476,8 +2619,8 @@ async fn drop_pool(
         Err(_) => (
             refused(format!("the vault '{name}' did not answer within {}s", WITHIN.as_secs())),
             Some(format!(
-                "the vault '{name}' did not answer the drop within {}s — the drop was sent and the invited key rotates \
-                 when the vault is next reached and no longer lists '{pool}'",
+                "the vault '{name}' did not answer the drop within {}s — the drop may not have reached it, and the invited \
+                 key rotates when the vault is next reached and no longer lists '{pool}'",
                 WITHIN.as_secs()
             )),
         ),
@@ -2487,12 +2630,47 @@ async fn drop_pool(
     match unanswered {
         Some(_) if owed.is_empty() => answer,
         Some(_) if matches!(&looked, Looked::Read { gone, finished: true } if gone.iter().any(|g| g == pool)) => refused(format!(
-            "the vault '{name}' did not answer the drop within its bound, and no longer lists '{pool}': the invited key \
-             rotated at each relay it stands at that you operate"
+            "the vault '{name}' gave no answer to the drop, and no longer lists '{pool}': the invited key rotated at each \
+             relay it stands at that you operate"
         )),
         Some(waits) => refused(waits),
         None => answer,
     }
+}
+
+/// Whether the vault `told` describes stands at a relay this person operates
+/// (`kept`), by the relay's key in this desktop's record.
+fn stands_at_an_operated_relay(told: Option<&StandsAt>, kept: &[OperatorCredential]) -> bool {
+    told.iter()
+        .flat_map(|t| &t.relays)
+        .filter_map(|s| relay_id(Some(&s.key)))
+        .any(|id| kept.iter().any(|c| relay_key(c) == Some(id)))
+}
+
+/// Ask the vault `credential` operates whether it keeps `pool`, before a drop
+/// of it is kept or sent: `None` when its `Tenants` lists the name, and
+/// otherwise the person's answer, with nothing sent and nothing kept — a name
+/// it does not list, or a vault that could not be asked within [`WITHIN`].
+async fn kept_there(net: &impl Wire, credential: &OperatorCredential, reach: Option<&str>, pool: &str) -> Option<UserResponse> {
+    let name = credential.name.as_str();
+    let asked = tokio::time::timeout(WITHIN, net.vault(credential, reach, vec![VaultPeerRequest::Tenants])).await;
+    Some(refused(match asked {
+        Ok(Ok(UserResponse::VaultTenants { tenants })) => {
+            if tenants.iter().any(|t| t.user_id == pool) {
+                return None;
+            }
+            format!("the vault '{name}' keeps no pool named '{pool}' — nothing was dropped and nothing is kept, so no key rotates")
+        }
+        Ok(Ok(other)) => format!(
+            "the drop was not sent: the vault '{name}' was asked whether it keeps '{pool}' and answered: {}",
+            kotton_wire::ipc::answer_said(&other)
+        ),
+        Ok(Err(e)) => format!("the drop was not sent: the vault '{name}' could not be asked whether it keeps '{pool}': {e:#}"),
+        Err(_) => format!(
+            "the drop was not sent: the vault '{name}' was asked whether it keeps '{pool}' and did not answer within {}s",
+            WITHIN.as_secs()
+        ),
+    }))
 }
 
 /// Look at the drops waiting at the vault `credential` operates: find which
@@ -2501,8 +2679,11 @@ async fn drop_pool(
 /// when a `Tenants` answer of the vault's — the verb's own (`seen.listed`), or
 /// one asked here, once, bounded by [`WITHIN`] — does not list its name.
 /// Nothing else is read as gone: a refusal says nothing either way, and a
-/// vault that does not answer leaves every drop waiting. With no drop
-/// waiting at this vault nothing is dialled.
+/// vault that does not answer leaves every drop waiting. A drop whose wait is
+/// over ([`A_DROP_WAITS`]) ends first, with nothing dialled for it; with no
+/// drop waiting at this vault nothing is dialled. The caller holds
+/// [`one_at_a_time`], so the record a rotation is decided from is the one
+/// written last.
 async fn look(
     net: &impl Wire,
     users: &UserRegistry,
@@ -2515,6 +2696,11 @@ async fn look(
         return Looked::Nothing;
     };
     let vault = hex::encode(key);
+    // A drop whose wait is over ends here, before anything is dialled.
+    if let Err(e) = end_what_is_over(store, None) {
+        tracing::warn!(vault = %credential.name, error = %e, "the drops waiting for a rotation do not open");
+        return Looked::Unanswered;
+    }
     let waiting: Vec<WaitingDrop> = match waiting_drops(store) {
         Ok(all) => all.into_iter().filter(|d| d.vault == vault).collect(),
         Err(e) => {
@@ -2592,9 +2778,21 @@ async fn rotate(
     let mut finished = true;
     for r in relays {
         let fresh = gone.iter().any(|d| d.relays.iter().any(|o| o.key == r && !o.minted));
-        let Some(relay) = relay_id(Some(&r)).and_then(|id| kept.iter().find(|c| relay_key(c) == Some(id))) else {
-            tracing::warn!(relay = %r, "a pool is gone and the relay it is owed a rotation at is not held here");
-            finished = false;
+        let Some(id) = relay_id(Some(&r)) else { continue };
+        let Some(relay) = kept.iter().find(|c| relay_key(c) == Some(id)) else {
+            // Nothing is held here to rotate there with: no drop is owed a
+            // rotation at that relay any more, as when it is forgotten.
+            match relay_not_held(store, &id) {
+                Ok(n) => tracing::warn!(
+                    relay = %r,
+                    drops_no_longer_owed = n,
+                    "a pool is gone and the relay it is owed a rotation at is not held here, so no drop waits for one there"
+                ),
+                Err(e) => {
+                    tracing::warn!(relay = %r, error = %e, "a pool is gone, the relay it is owed a rotation at is not held here, and the drops still name it");
+                    finished = false;
+                }
+            }
             continue;
         };
         let rule = match read_rule(net, relay).await {
@@ -2624,7 +2822,13 @@ async fn rotate(
 /// The reach keeper's look ([`super::reach_keeper`]): every vault a drop waits
 /// at, looked at once ([`look`]) — and no other, so with no drop waiting
 /// nothing is dialled. It reads `Tenants` and rotates; it never says a drop.
-/// Answers whether a rotation it began is left unfinished.
+/// Each look is an operator's act at the vault, which keeps one row of it under
+/// the operator's key, as it keeps every act said under that key. Before any
+/// dial, a drop whose wait is over ([`A_DROP_WAITS`]) ends, and so does one
+/// whose vault no credential kept here names. The rotation a look begins
+/// tells every vault standing at that relay, not only the one looked at, and
+/// hands the reach note on. Answers whether a rotation it began is left
+/// unfinished.
 pub(crate) async fn look_on_the_pass(
     runtime: &DeviceRuntime,
     users: &UserRegistry,
@@ -2635,6 +2839,18 @@ pub(crate) async fn look_on_the_pass(
 }
 
 async fn look_at_every_vault(net: &impl Wire, users: &UserRegistry, record_stores: &RecordStores, store: &UserStore) -> bool {
+    let _one = one_at_a_time(store).await;
+    let kept = match held(store) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::debug!(error = %e, "the operator credentials are not read this pass, and no drop is looked at");
+            return false;
+        }
+    };
+    if let Err(e) = end_what_is_over(store, Some(&kept)) {
+        tracing::debug!(error = %e, "the drops waiting for a rotation are not read this pass");
+        return false;
+    }
     let waiting = match waiting_drops(store) {
         Ok(w) => w,
         Err(e) => {
@@ -2642,10 +2858,6 @@ async fn look_at_every_vault(net: &impl Wire, users: &UserRegistry, record_store
             return false;
         }
     };
-    if waiting.is_empty() {
-        return false;
-    }
-    let kept = held(store).unwrap_or_default();
     let mut vaults: Vec<&str> = Vec::new();
     for d in &waiting {
         if !vaults.contains(&d.vault.as_str()) {
@@ -2792,7 +3004,7 @@ async fn read_rule(net: &impl Wire, credential: &OperatorCredential) -> UserResp
 /// at that relay is told its reach set again with them — none when there is
 /// none — and they go into this device's keyring; then the rule, at the relay.
 /// Refused for a relay whose credential recorded no key: nothing could name it.
-pub(crate) async fn set_rule(
+async fn set_rule(
     net: &impl Wire,
     users: &UserRegistry,
     record_stores: &RecordStores,
@@ -2801,13 +3013,17 @@ pub(crate) async fn set_rule(
     rule: AdmissionRule,
     rotate_invited: bool,
 ) -> UserResponse {
+    // One at a time with the looks: a rotation's keys are written by the same
+    // read-then-write, and neither is written over by the other.
+    let _one = one_at_a_time(store).await;
     set_rule_minting(net, users, record_stores, store, credential, rule, rotate_invited, || Ok(())).await
 }
 
 /// [`set_rule`], with `minted` run once the keys are kept and before any vault
 /// or relay is told them: a rotation owed to a waiting drop records there that
 /// its key is minted ([`mark_minted`]). Where that cannot be recorded nothing
-/// is told, and the set is refused.
+/// is told, the keys from before are kept again, and the set is refused. The
+/// caller holds [`one_at_a_time`].
 #[allow(clippy::too_many_arguments)]
 async fn set_rule_minting(
     net: &impl Wire,
@@ -2833,6 +3049,7 @@ async fn set_rule_minting(
         Ok(a) => a,
         Err(e) => return refused(format!("the relay keys kept here do not open: {e:#}")),
     };
+    let before = all.clone();
     let existing = all.iter().find(|k| k.relay() == Some(id)).cloned();
     let keys = match existing {
         Some(mut k) => {
@@ -2853,7 +3070,16 @@ async fn set_rule_minting(
         return refused(format!("could not keep the relay's keys: {e:#}"));
     }
     if let Err(e) = minted() {
-        return refused(format!("the relay's keys are kept, and that the invited key is minted could not be: {e:#}"));
+        // Nothing was told: the keys from before are kept again, and the next
+        // look mints its own.
+        let put_back = match keep_keys(store, &before) {
+            Ok(()) => "the keys from before are kept again".to_string(),
+            Err(back) => format!("the new keys stay kept, as the keys from before could not be put back: {back:#}"),
+        };
+        return refused(format!(
+            "the relay's key was not rotated and no vault or relay was told anything: the record that its new invited key \
+             is minted could not be kept ({e:#}); {put_back}"
+        ));
     }
     // 2. To every vault this desktop told to stand at this relay — its whole
     // reach set again, the keys riding with the relay they belong to — and into
@@ -4623,6 +4849,8 @@ mod tests {
         }
 
         async fn answer(&self, request: VaultPeerRequest) -> anyhow::Result<UserResponse> {
+            // Each answer lets another task run first, as a real wire would.
+            tokio::task::yield_now().await;
             self.said.lock().unwrap().push(request.variant_name());
             let now = match &request {
                 VaultPeerRequest::DropTenant { .. } => {
@@ -4667,6 +4895,7 @@ mod tests {
             _key: &ed25519_dalek::SigningKey,
             request: &RelayOperatorRequest,
         ) -> Result<RelayOperatorResponse, kotton_net::rendezvous::RendezvousError> {
+            tokio::task::yield_now().await;
             let rule = RelayOperatorResponse::Rule { rule: AdmissionRule::Anyone, mine_epoch: 0, invited_epoch: 0 };
             match request {
                 RelayOperatorRequest::ReadRule => {
@@ -4769,17 +4998,19 @@ mod tests {
 
     /// **A drop answered `TenantDropped` rotates at once, and the relay's
     /// answer clears its record.** The record waited when the drop was sent;
-    /// no `Tenants` is asked for the drop's own pool; one new key is set.
+    /// no `Tenants` is asked after it for the drop's own pool — only the one
+    /// before, which finds the name kept; one new key is set.
     #[tokio::test]
     async fn a_drop_answered_rotates_and_the_relays_answer_clears_its_record() {
         let temp = tempfile::tempdir().unwrap();
         let (store, runtime, users) = a_desk(&temp).await;
         let fake = Fake::new(&runtime, &store);
+        fake.lists(Some(&["sam"]));
         let answer = speak_by(&fake, &users, &RecordStores::new(), "lee", "home", drop_of("sam")).await;
         assert!(matches!(answer, UserResponse::TenantDropped { .. }), "{answer:?}");
         let at_drop = fake.waiting_at_drop.lock().unwrap().clone().unwrap();
         assert_eq!(at_drop.iter().map(|d| d.pool.as_str()).collect::<Vec<_>>(), ["sam"], "the record was not kept before the drop was sent");
-        assert_eq!(fake.said(), [&["DropTenant"][..], &ROTATION[..]].concat());
+        assert_eq!(fake.said(), [&["Tenants", "DropTenant"][..], &ROTATION[..]].concat());
         let now = invited_kept(&store);
         assert_ne!(now, first_invited(), "the invited key did not rotate");
         assert_eq!(*fake.set_with.lock().unwrap(), [now]);
@@ -4789,25 +5020,42 @@ mod tests {
     /// **A refusal alone rotates nothing, the vault's "keeps nothing" sentence
     /// included, and a drop whose name is still listed waits.** The look after
     /// the refused drop reads `Tenants`; while it lists the name nothing is
-    /// set at the relay and the record stays. Once it does not, the rotation
-    /// follows that read — not the sentence.
-    #[tokio::test]
+    /// set at the relay and the record stays. Where a drop waits from one the
+    /// vault never answered, a refusal of the drop said again rotates only
+    /// once the vault no longer lists the name — the rotation follows that
+    /// read, not the sentence.
+    #[tokio::test(start_paused = true)]
     async fn a_refusals_sentence_rotates_nothing_and_a_listed_name_waits() {
         let temp = tempfile::tempdir().unwrap();
         let (store, runtime, users) = a_desk(&temp).await;
         let fake = Fake::new(&runtime, &store);
-        *fake.drop.lock().unwrap() = Some(UserResponse::Error { message: "this vault keeps nothing under 'sam'".into() });
+        let keeps_nothing = || Some(UserResponse::Error { message: "this vault keeps nothing under 'sam'".into() });
+        *fake.drop.lock().unwrap() = keeps_nothing();
         fake.lists(Some(&["sam"]));
         let stores = RecordStores::new();
         let message = refusal(speak_by(&fake, &users, &stores, "lee", "home", drop_of("sam")).await);
         assert!(message.starts_with("the vault answered: "), "the vault's refusal is not held in kuserd's sentence: {message}");
-        assert_eq!(fake.said(), ["DropTenant", "Tenants"], "a refusal with the name listed rotated the key");
+        assert_eq!(fake.said(), ["Tenants", "DropTenant", "Tenants"], "a refusal with the name listed rotated the key");
         assert_eq!(invited_kept(&store), first_invited());
         assert_eq!(pools_waiting(&store), [("sam".to_string(), vec![false])], "a refusal cleared the record");
 
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let fake = Fake::new(&runtime, &store);
+        *fake.drop.lock().unwrap() = None;
+        fake.lists(Some(&["sam"]));
+        let _ = speak_by(&fake, &users, &stores, "lee", "home", drop_of("sam")).await;
+        assert_eq!(pools_waiting(&store), [("sam".to_string(), vec![false])], "the unanswered drop does not wait");
+        *fake.drop.lock().unwrap() = keeps_nothing();
+        let _ = speak_by(&fake, &users, &stores, "lee", "home", drop_of("sam")).await;
+        assert_eq!(fake.said(), ["Tenants", "DropTenant", "Tenants", "DropTenant", "Tenants"], "a refusal rotated the key");
+        assert_eq!(invited_kept(&store), first_invited());
         fake.lists(Some(&[]));
         let _ = speak_by(&fake, &users, &stores, "lee", "home", drop_of("sam")).await;
-        assert_eq!(fake.said(), [&["DropTenant", "Tenants", "DropTenant", "Tenants"][..], &ROTATION[..]].concat());
+        assert_eq!(
+            fake.said(),
+            [&["Tenants", "DropTenant", "Tenants", "DropTenant", "Tenants", "DropTenant", "Tenants"][..], &ROTATION[..]].concat()
+        );
         assert_ne!(invited_kept(&store), first_invited(), "a name no longer listed did not rotate the key");
         assert!(pools_waiting(&store).is_empty());
     }
@@ -4816,8 +5064,8 @@ mod tests {
     /// vault no longer lists the name.** The drop is kept before it is sent;
     /// the vault does not answer it; the one `Tenants` asked before the
     /// person is answered still lists the name, so the refusal says the drop
-    /// was sent and the key rotates when the vault is next reached, and the
-    /// record is kept. The next look finds the name gone: the key rotates and
+    /// may not have reached the vault and the key rotates when the vault is
+    /// next reached, and the record is kept. The next look finds the name gone: the key rotates and
     /// the record is cleared.
     #[tokio::test(start_paused = true)]
     async fn a_drop_whose_answer_outlasts_within_rotates_once_the_name_is_not_listed() {
@@ -4828,26 +5076,28 @@ mod tests {
         fake.lists(Some(&["sam"]));
         let stores = RecordStores::new();
         let message = refusal(speak_by(&fake, &users, &stores, "lee", "home", drop_of("sam")).await);
-        assert!(message.contains("the drop was sent and the invited key rotates when the vault is next reached"), "{message}");
-        assert_eq!(fake.said(), ["DropTenant", "Tenants"]);
+        assert!(message.contains("the drop may not have reached it, and the invited key rotates when the vault is next reached"), "{message}");
+        assert_eq!(fake.said(), ["Tenants", "DropTenant", "Tenants"]);
         assert_eq!(pools_waiting(&store), [("sam".to_string(), vec![false])], "the unanswered drop is not kept as waiting");
         assert_eq!(invited_kept(&store), first_invited());
 
         fake.lists(Some(&[]));
         assert!(!look_at_every_vault(&fake, &users, &stores, &store).await, "the rotation was not finished");
-        assert_eq!(fake.said(), [&["DropTenant", "Tenants", "Tenants"][..], &ROTATION[..]].concat());
+        assert_eq!(fake.said(), [&["Tenants", "DropTenant", "Tenants", "Tenants"][..], &ROTATION[..]].concat());
         assert_ne!(invited_kept(&store), first_invited(), "the key did not rotate once the name was gone");
         assert!(pools_waiting(&store).is_empty(), "the record outlived its rotation");
     }
 
     /// **An unanswered drop asks `Tenants` once, bounded by [`WITHIN`], before
     /// the person is answered** — one bound for the drop and one for the ask,
-    /// and nothing else is sent. Where the ask finds the name gone, the key
+    /// and nothing else is sent. Said again while its drop waits, the drop is
+    /// not preceded by an ask. Where the ask finds the name gone, the key
     /// rotates and the refusal says so.
     #[tokio::test(start_paused = true)]
     async fn an_unanswered_drop_asks_the_vault_once_within_the_bound() {
         let temp = tempfile::tempdir().unwrap();
         let (store, runtime, users) = a_desk(&temp).await;
+        wait_for_rotation(&store, &hex::encode([2u8; 32]), "sam", &[hex::encode(GATE)]).unwrap();
         let fake = Fake::new(&runtime, &store);
         *fake.drop.lock().unwrap() = None;
         fake.lists(None);
@@ -4855,14 +5105,161 @@ mod tests {
         let message = refusal(speak_by(&fake, &users, &RecordStores::new(), "lee", "home", drop_of("sam")).await);
         assert!(started.elapsed() <= WITHIN * 2 + Duration::from_secs(1), "{:?}", started.elapsed());
         assert_eq!(fake.said(), ["DropTenant", "Tenants"]);
-        assert!(message.contains("the drop was sent and the invited key rotates when the vault is next reached"), "{message}");
+        assert!(message.contains("the drop may not have reached it, and the invited key rotates when the vault is next reached"), "{message}");
         assert_eq!(pools_waiting(&store).len(), 1);
 
         let fake = Fake::new(&runtime, &store);
         *fake.drop.lock().unwrap() = None;
         let message = refusal(speak_by(&fake, &users, &RecordStores::new(), "lee", "home", drop_of("sam")).await);
         assert_eq!(fake.said(), [&["DropTenant", "Tenants"][..], &ROTATION[..]].concat());
-        assert!(message.contains("no longer lists 'sam': the invited key rotated"), "{message}");
+        assert!(message.contains("gave no answer to the drop, and no longer lists 'sam': the invited key rotated"), "{message}");
+        assert!(pools_waiting(&store).is_empty());
+    }
+
+    /// **A drop of a name the vault does not keep rotates nothing.** Where no
+    /// drop of the name waits, `Tenants` is asked first; a name it does not
+    /// list is answered in kuserd's words, with no `DropTenant` sent and no
+    /// record kept.
+    #[tokio::test]
+    async fn a_drop_of_a_name_never_kept_sends_no_drop_and_keeps_no_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let fake = Fake::new(&runtime, &store);
+        fake.lists(Some(&["kim"]));
+        let answer = speak_by(&fake, &users, &RecordStores::new(), "lee", "home", drop_of("sam")).await;
+        assert_eq!(fake.said(), ["Tenants"], "a drop of a name never kept was sent");
+        assert_eq!(
+            refusal(answer),
+            "the vault 'home' keeps no pool named 'sam' — nothing was dropped and nothing is kept, so no key rotates"
+        );
+        assert!(kotton_store::runtime::private::read(&store, DROPS).unwrap().is_none(), "a record was kept for a name never kept");
+        assert_eq!(invited_kept(&store), first_invited());
+    }
+
+    /// **A drop said twice sets the relay once.** The first is answered and
+    /// rotates; said again once the vault no longer lists the name, it is
+    /// answered here and nothing is sent, kept or rotated.
+    #[tokio::test]
+    async fn a_drop_said_twice_sets_the_relay_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let stores = RecordStores::new();
+        let fake = Fake::new(&runtime, &store);
+        fake.lists(Some(&["sam"]));
+        let _ = speak_by(&fake, &users, &stores, "lee", "home", drop_of("sam")).await;
+        let rotated = invited_kept(&store);
+        fake.lists(Some(&[]));
+        let answer = speak_by(&fake, &users, &stores, "lee", "home", drop_of("sam")).await;
+        assert_eq!(*fake.set_with.lock().unwrap(), std::slice::from_ref(&rotated), "a drop said again set the relay again");
+        let message = refusal(answer);
+        assert!(message.contains("keeps no pool named 'sam'"), "{message}");
+        assert_eq!(fake.said(), [&["Tenants", "DropTenant"][..], &ROTATION[..], &["Tenants"][..]].concat());
+        assert_eq!(invited_kept(&store), rotated);
+        assert!(pools_waiting(&store).is_empty());
+    }
+
+    /// **A vault that cannot be asked whether it keeps the name is not sent
+    /// the drop.** The ask is bounded by [`WITHIN`]; nothing is kept.
+    #[tokio::test(start_paused = true)]
+    async fn a_drop_whose_vault_cannot_be_asked_is_not_sent() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let fake = Fake::new(&runtime, &store);
+        fake.lists(None);
+        let started = tokio::time::Instant::now();
+        let message = refusal(speak_by(&fake, &users, &RecordStores::new(), "lee", "home", drop_of("sam")).await);
+        assert!(started.elapsed() <= WITHIN + Duration::from_secs(1), "{:?}", started.elapsed());
+        assert!(message.starts_with("the drop was not sent: the vault 'home' was asked whether it keeps 'sam'"), "{message}");
+        assert_eq!(fake.said(), ["Tenants"]);
+        assert!(kotton_store::runtime::private::read(&store, DROPS).unwrap().is_none());
+    }
+
+    /// **A waiting drop ends seven days after it was said**, unrotated, before
+    /// anything is dialled for it — on the pass and in a verb's look alike.
+    /// The record is dated back: `said_at` is the wall clock, kept across
+    /// restarts, which a paused clock does not move.
+    #[tokio::test]
+    async fn a_drop_that_has_waited_seven_days_ends_unrotated_and_dials_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let stores = RecordStores::new();
+        let now = kotton_peer::rendezvous::unix_now();
+        assert!(has_ended(now - A_DROP_WAITS.as_secs(), now) && !has_ended(now - A_DROP_WAITS.as_secs() + 1, now));
+        let aged = || WaitingDrop {
+            vault: hex::encode([2u8; 32]),
+            pool: "sam".into(),
+            said_at: kotton_peer::rendezvous::unix_now() - A_DROP_WAITS.as_secs(),
+            relays: vec![OwedAt { key: hex::encode(GATE), minted: false }],
+        };
+        keep_waiting_drops(&store, &[aged()]).unwrap();
+        let fake = Fake::new(&runtime, &store);
+        assert!(!look_at_every_vault(&fake, &users, &stores, &store).await);
+        assert!(fake.said().is_empty(), "the pass dialled for a drop whose wait is over: {:?}", fake.said());
+        assert!(pools_waiting(&store).is_empty(), "a drop outlived its wait");
+
+        keep_waiting_drops(&store, &[aged()]).unwrap();
+        let fake = Fake::new(&runtime, &store);
+        let _ = speak_by(&fake, &users, &stores, "lee", "home", OperatorVerb::SetQuota { pool: "kim".into(), quota: 9 }).await;
+        assert_eq!(fake.said(), ["SetQuota"], "a verb's look dialled for a drop whose wait is over");
+        assert!(pools_waiting(&store).is_empty());
+        assert_eq!(invited_kept(&store), first_invited());
+    }
+
+    /// **A drop whose vault no kept credential names is cleared on the pass**,
+    /// with nothing dialled.
+    #[tokio::test]
+    async fn a_drop_at_a_vault_no_credential_names_is_cleared_on_the_pass() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        wait_for_rotation(&store, &hex::encode([9u8; 32]), "sam", &[hex::encode(GATE)]).unwrap();
+        let fake = Fake::new(&runtime, &store);
+        assert!(!look_at_every_vault(&fake, &users, &RecordStores::new(), &store).await);
+        assert!(fake.said().is_empty(), "{:?}", fake.said());
+        assert!(pools_waiting(&store).is_empty(), "a drop at a vault nobody holds still waits");
+    }
+
+    /// **A relay owed whose credential is not held at the look is owed
+    /// nothing more**, as `forget` of it leaves the drop: the relay held is
+    /// rotated, and the drop is then owed nothing and cleared. A drop owed only
+    /// a relay not held is cleared with no set.
+    #[tokio::test]
+    async fn a_relay_owed_that_is_not_held_at_the_look_is_owed_nothing_more() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let stores = RecordStores::new();
+        let (vault, gate, yard) = (hex::encode([2u8; 32]), hex::encode(GATE), hex::encode([6u8; 32]));
+        wait_for_rotation(&store, &vault, "sam", &[gate.clone(), yard.clone()]).unwrap();
+        let fake = Fake::new(&runtime, &store);
+        assert!(!look_at_every_vault(&fake, &users, &stores, &store).await, "a relay not held left the rotation unfinished");
+        assert_eq!(fake.said(), [&["Tenants"][..], &ROTATION[..]].concat());
+        assert!(pools_waiting(&store).is_empty(), "the drop still waits on a relay not held");
+
+        wait_for_rotation(&store, &vault, "kim", std::slice::from_ref(&yard)).unwrap();
+        let fake = Fake::new(&runtime, &store);
+        let _ = look_at_every_vault(&fake, &users, &stores, &store).await;
+        assert_eq!(fake.said(), ["Tenants"]);
+        assert!(pools_waiting(&store).is_empty());
+    }
+
+    /// **Two looks started together mint one key and set the relay once.**
+    /// One look at a time for a person: the second decides from the record
+    /// the first left, which owes nothing more.
+    #[tokio::test]
+    async fn two_looks_started_together_mint_one_key_and_set_the_relay_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let stores = RecordStores::new();
+        wait_for_rotation(&store, &hex::encode([2u8; 32]), "sam", &[hex::encode(GATE)]).unwrap();
+        let fake = Fake::new(&runtime, &store);
+        let quota = || OperatorVerb::SetQuota { pool: "kim".into(), quota: 9 };
+        let _ = tokio::join!(
+            look_at_every_vault(&fake, &users, &stores, &store),
+            speak_by(&fake, &users, &stores, "lee", "home", quota()),
+            look_at_every_vault(&fake, &users, &stores, &store),
+        );
+        let set_with = fake.set_with.lock().unwrap().clone();
+        assert_eq!(set_with.len(), 1, "two looks set the relay {} times", set_with.len());
+        assert_eq!(set_with, [invited_kept(&store)], "the key set is not the one kept");
         assert!(pools_waiting(&store).is_empty());
     }
 
@@ -4900,9 +5297,11 @@ mod tests {
         let stores = RecordStores::new();
         let fake = Fake::new(&runtime, &store);
         fake.refuse_sets.store(1, std::sync::atomic::Ordering::SeqCst);
+        fake.lists(Some(&["sam"]));
         let answer = speak_by(&fake, &users, &stores, "lee", "home", drop_of("sam")).await;
         assert!(matches!(answer, UserResponse::TenantDropped { .. }), "the drop's answer is the vault's: {answer:?}");
-        assert_eq!(fake.said(), [&["DropTenant"][..], &ROTATION[..]].concat(), "the vaults were not told before the set");
+        assert_eq!(fake.said(), [&["Tenants", "DropTenant"][..], &ROTATION[..]].concat(), "the vaults were not told before the set");
+        fake.lists(Some(&[]));
         assert_eq!(pools_waiting(&store), [("sam".to_string(), vec![true])], "a set the relay refused cleared the record");
         let minted = invited_kept(&store);
         assert_ne!(minted, first_invited());
@@ -4978,9 +5377,9 @@ mod tests {
         let (gate, yard) = (hex::encode(GATE), hex::encode([6u8; 32]));
         wait_for_rotation(&store, &hex::encode([2u8; 32]), "sam", std::slice::from_ref(&gate)).unwrap();
         wait_for_rotation(&store, &hex::encode([4u8; 32]), "kim", &[gate.clone(), yard.clone()]).unwrap();
-        drop_credential(&runtime, &store, &home()).unwrap();
+        assert_eq!(drop_credential(&runtime, &store, &home()).unwrap(), 1);
         assert_eq!(pools_waiting(&store), [("kim".to_string(), vec![false, false])], "the forgotten vault's drop stays, or another's went");
-        drop_credential(&runtime, &store, &a_relay("gate", GATE_URL, GATE)).unwrap();
+        assert_eq!(drop_credential(&runtime, &store, &a_relay("gate", GATE_URL, GATE)).unwrap(), 1);
         let left = waiting_drops(&store).unwrap();
         assert_eq!(left.iter().flat_map(|d| d.relays.iter().map(|o| o.key.clone())).collect::<Vec<_>>(), [yard]);
     }

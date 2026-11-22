@@ -30,7 +30,10 @@
 //! a drop of theirs waits at, and no other
 //! ([`super::operator::look_on_the_pass`]): it reads `Tenants`, rotates the
 //! invited key for each pool no longer listed, and never says a drop. With no
-//! drop waiting, it dials no vault. A rotation it began and could not finish
+//! drop waiting, it dials no vault. The rotation that follows a look tells
+//! every vault this desktop told to stand at that relay, not only the one
+//! looked at, and hands the reach note on. A drop that has waited seven days
+//! ends before the pass dials for it. A rotation it began and could not finish
 //! is tried again on the hour, not on the reach change that rotation itself
 //! raises, which would try it again at once.
 
