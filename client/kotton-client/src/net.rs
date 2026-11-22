@@ -424,16 +424,14 @@ pub struct LocalDoor {
     pub network_known: bool,
 }
 
-/// An operated vault's answer to `vault invite --me` that is no invite, as
-/// the caller's error. The vault's `Error` is printed as data, to a bounded
-/// length ([`kotton_wire::note::quoted_cut`]; how another node's text is
-/// printed); any other answer is said as [`crate::protocol::unexpected`] says
-/// it, by its name and no field.
+/// The daemon's answer to `vault invite --me` that is no invite, as the
+/// caller's error, said in [`kotton_wire::ipc::own_daemon_said`]. The answer is
+/// this device's own daemon's (`AsOperator`): its `Error` is kuserd's sentence,
+/// said as written, and holds an operated vault's text already quoted, where
+/// kuserd took it in (another node's text is quoted where it enters this
+/// device); any other answer as that sayer says it, never its fields.
 fn invite_me_refused(got: UserResponse) -> io::Error {
-    match got {
-        UserResponse::Error { message } => io::Error::other(kotton_wire::note::quoted_cut(&message)),
-        got => crate::protocol::unexpected(got),
-    }
+    io::Error::other(kotton_wire::ipc::own_daemon_said(&got))
 }
 
 #[cfg(test)]
@@ -441,20 +439,25 @@ mod an_operated_vaults_answer {
     use super::*;
     use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
 
-    /// **An operated vault's `Error` to `vault invite --me` is printed as data
-    /// and to the bound** (how another node's text is printed), and an answer
-    /// not asked for by its name (how an answer not asked for is said).
+    /// **The daemon's refusal of `vault invite --me` is said as written, and
+    /// an operated vault's text in it quoted once** (another node's text is
+    /// quoted where it enters this device): kuserd's own sentence prints its
+    /// command as typed; its sentence holding a vault's `Error` (kuserd quoted
+    /// it where it came in) is not quoted again; an answer not asked for by
+    /// its name and no field (how an answer not asked for is said).
     #[test]
-    fn an_operated_vaults_refusal_of_the_invite_is_printed_as_data_and_to_the_bound() {
+    fn the_daemons_refusal_of_the_invite_is_said_as_written_and_a_vaults_text_in_it_quoted_once() {
+        let told = "no operator credential for the vault 'attic' — `enrol <its line>`";
+        let said = invite_me_refused(UserResponse::Error { message: told.into() }).to_string();
+        assert_eq!(said, told);
         let long = "o".repeat(MAX_SAID_CHARS + 7);
         for text in ["no `relay`\nhere", long.as_str()] {
-            let said = invite_me_refused(UserResponse::Error { message: text.to_string() }).to_string();
-            assert_eq!(said, quoted_cut(text));
+            let forwarded = format!("the vault answered: {}", quoted_cut(text));
+            let said = invite_me_refused(UserResponse::Error { message: forwarded.clone() }).to_string();
+            assert_eq!(said, forwarded);
             assert!(!said.contains('\n') && !said.contains(text), "{said}");
         }
-        let said = invite_me_refused(UserResponse::Error { message: "no `relay`\nhere".into() }).to_string();
-        assert_eq!(said, "`no \\u{60}relay\\u{60}\\nhere`");
         let said = invite_me_refused(UserResponse::VaultFull { held: 17, quota: 9 }).to_string();
-        assert_eq!(said, "unexpected response: `VaultFull`");
+        assert!(said.starts_with("the answer was `VaultFull`") && !said.contains("17"), "{said}");
     }
 }

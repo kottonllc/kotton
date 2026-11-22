@@ -472,9 +472,11 @@ async fn join(user: &str, code: &str) -> io::Result<()> {
 /// refusal's own words, and the door closes after it; one a later release
 /// adds is answered in its own frame. Neither is named here: the last frame
 /// this reader did not act on is held and, once the door ends the stream,
-/// said in [`kotton_wire::ipc::answer_said`], exit 1 — never dropped, as a
+/// said in [`kotton_wire::ipc::own_daemon_said`], exit 1 — never dropped, as a
 /// catch-all that ignored it dropped it and said only that the ceremony
-/// closed.
+/// closed. The door is this machine's own daemon, so its `Error` is said as
+/// written; a joining device's text reaches this reader only inside the
+/// door's `PairFailed` sentence, already quoted there.
 async fn joined(user: &str, ep: &IpcEndpoint, mut rx: tokio::sync::mpsc::Receiver<UserResponse>) -> io::Result<()> {
     let mut unread = None;
     while let Some(frame) = rx.recv().await {
@@ -513,7 +515,7 @@ async fn joined(user: &str, ep: &IpcEndpoint, mut rx: tokio::sync::mpsc::Receive
         }
     }
     Err(io::Error::other(match unread {
-        Some(answer) => kotton_wire::ipc::answer_said(&answer),
+        Some(answer) => kotton_wire::ipc::own_daemon_said(&answer),
         None => "the vault closed the ceremony without a result".to_string(),
     }))
 }
@@ -589,7 +591,8 @@ async fn invite(user: &str, ttl_seconds: u64, quota: Option<u64>) -> io::Result<
 /// ceremony's — `Error`, `VaultKeepsAlready`, or one a later release adds —
 /// is held, and when the door closes the stream after it
 /// (`kvaultd::control::mint_invite` answers every refusal as a stream that
-/// ends), said in [`kotton_wire::ipc::answer_said`], exit 1. Which frame is
+/// ends), said in [`kotton_wire::ipc::own_daemon_said`] (the door is this
+/// machine's own daemon: its `Error` as written), exit 1. Which frame is
 /// the last is the door's to say by ending the stream, not this reader's to
 /// guess by name: a frame a later vault adds mid-ceremony would otherwise end
 /// a ceremony that was going well.
@@ -636,7 +639,7 @@ async fn admitted(
         }
     }
     Err(io::Error::other(match unread {
-        Some(answer) => kotton_wire::ipc::answer_said(&answer),
+        Some(answer) => kotton_wire::ipc::own_daemon_said(&answer),
         None => "the vault closed the ceremony without a result".to_string(),
     }))
 }
@@ -933,9 +936,11 @@ mod tests {
     /// a typed refusal this reader names nowhere (`VaultFull`, standing in for
     /// one a later release adds) and ends the stream, as `mint_invite` ends
     /// every refusal. The verb returns — it does not wait — with the answer
-    /// said in `answer_said` and no field of it printed. Nothing answers at the
+    /// said in `own_daemon_said` and no field of it printed. Nothing answers at the
     /// door named here, so a number set or a confirm sent after it would have
-    /// failed in other words than these.
+    /// failed in other words than these. The door's own refusal, a command in
+    /// it, is said as written, so the command prints as typed; and a joining
+    /// device's reason, inside the door's `PairFailed`, prints quoted once.
     #[cfg(unix)]
     #[tokio::test]
     async fn an_invite_answered_with_what_the_verb_does_not_read_ends_saying_it() {
@@ -949,8 +954,26 @@ mod tests {
             .await
             .expect("the verb waited on after the door ended the stream")
             .expect_err("an answer other than the ceremony's was taken as one");
-        assert_eq!(ended.to_string(), kotton_wire::ipc::answer_said(&unnamed));
+        assert_eq!(ended.to_string(), kotton_wire::ipc::own_daemon_said(&unnamed));
         assert!(ended.to_string().starts_with("the answer was `VaultFull`"), "{ended}");
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(UserResponse::Error { message: kvaultd::control::NO_RELAY.into() }).await.expect("queued");
+        drop(tx);
+        let ended = admitted("sam", None, &nobody, rx).await.expect_err("a refusal was taken as an invite");
+        assert_eq!(ended.to_string(), kvaultd::control::NO_RELAY);
+        assert!(ended.to_string().contains("`enrol <the vault's line>`"), "{ended}");
+
+        let why = "no `room`\nhere";
+        let reason = kotton_peer::daemon::nodes::join_not_kept_copy(&kotton_peer::pairing::JoinNotKept::Refused(why.into()));
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(UserResponse::PairFailed { reason: reason.clone() }).await.expect("queued");
+        drop(tx);
+        let ended = admitted("sam", None, &nobody, rx).await.expect_err("a failed ceremony was taken as admitted");
+        assert_eq!(ended.to_string(), format!("pairing failed: {reason}"));
+        let quoted = kotton_wire::note::quoted_cut(why);
+        assert_eq!(ended.to_string().matches(&quoted).count(), 1, "{ended}");
+        assert!(!ended.to_string().contains(why) && !ended.to_string().contains(&kotton_wire::note::quoted_cut(&quoted)), "{ended}");
 
         // A stream that ends with nothing in it says so.
         let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -963,10 +986,11 @@ mod tests {
     /// door ends the stream** (#121). It named the vault's `Error` and dropped
     /// anything else (`_ => {}`), saying only that the ceremony closed; now it
     /// names neither. `VaultFull` stands in for a typed answer a later release
-    /// adds: the verb returns with it said in `answer_said`, no field of it
-    /// printed. A refusal in the vault's words is said in those words, as data
-    /// (`answer_said`), though the reader names no `Error`; and a frame of the ceremony after an unread
-    /// one does not lose it.
+    /// adds: the verb returns with it said in `own_daemon_said`, no field of it
+    /// printed. A refusal in the vault's words is said in those words, as
+    /// written (the door is this machine's own daemon), though the reader names
+    /// no `Error`; and a frame of the ceremony after an unread one does not
+    /// lose it.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_join_answered_with_what_the_verb_does_not_read_ends_saying_it() {
@@ -989,14 +1013,14 @@ mod tests {
         };
         let unnamed = UserResponse::VaultFull { held: 3, quota: 2 };
         let said = ended_on(vec![unnamed.clone()]).await;
-        assert_eq!(said, kotton_wire::ipc::answer_said(&unnamed));
+        assert_eq!(said, kotton_wire::ipc::own_daemon_said(&unnamed));
         assert!(said.starts_with("the answer was `VaultFull`") && !said.contains('{'), "{said}");
 
         let refused = UserResponse::Error { message: "invalid connection code: not one".into() };
-        assert_eq!(ended_on(vec![refused]).await, "`invalid connection code: not one`");
+        assert_eq!(ended_on(vec![refused]).await, "invalid connection code: not one");
 
         let said = ended_on(vec![unnamed.clone(), UserResponse::PairConnecting]).await;
-        assert_eq!(said, kotton_wire::ipc::answer_said(&unnamed));
+        assert_eq!(said, kotton_wire::ipc::own_daemon_said(&unnamed));
 
         assert_eq!(ended_on(Vec::new()).await, "the vault closed the ceremony without a result");
     }

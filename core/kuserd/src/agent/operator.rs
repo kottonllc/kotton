@@ -1966,7 +1966,7 @@ fn relay_showed_no_key_for_a_rule(name: &str, relay: &str) -> String {
 
 /// What a verb said to the service's instance `name` is refused with when this
 /// desktop keeps no credential for it: how one is made today.
-fn no_credential_sentence(service: OperatedService, name: &str) -> String {
+pub(crate) fn no_credential_sentence(service: OperatedService, name: &str) -> String {
     let word = service.word();
     format!(
         "this desktop holds no operator credential for the {word} '{name}' — `mint {word} {name}`, \
@@ -2045,9 +2045,26 @@ pub fn commands_the_copy_tells_a_person_to_type(
     out
 }
 
+/// An operated vault's answer as [`speak`] hands it on. Its `Error` is held in
+/// a sentence of kuserd's own, its text printed as data and to a bounded
+/// length ([`kotton_wire::note::quoted_cut`]; another node's text is quoted
+/// where it enters this device), so `speak`'s every `Error` is kuserd's own
+/// sentence and its readers say it as written
+/// ([`kotton_wire::ipc::own_daemon_said`]). Every other answer is handed on as
+/// it came: the fields of each that print are printed by a typed sayer that
+/// quotes them.
+pub(crate) fn from_the_vault(answer: UserResponse) -> UserResponse {
+    match answer {
+        UserResponse::Error { message } => refused(format!("the vault answered: {}", kotton_wire::note::quoted_cut(&message))),
+        other => other,
+    }
+}
+
 /// Say `verb` to the vault or the relay `name` — the verb says which
 /// (`OperatorVerb::service`) — under the credential `user_id` keeps for it,
-/// and answer with what the service answered.
+/// and answer with what the service answered: a vault's `Error` held in
+/// kuserd's sentence ([`from_the_vault`]), a relay's refusal in its
+/// ([`rule_answer`]), and every refusal of kuserd's own as written.
 pub(crate) async fn speak(
     runtime: &DeviceRuntime,
     users: &UserRegistry,
@@ -2103,7 +2120,7 @@ pub(crate) async fn speak(
     let told = vault_key(&credential).and_then(|v| stands_of(&store, &v));
     let reach = told.as_ref().and_then(|t| t.relays.first()).map(|r| r.hint.as_str());
     let answer = match tokio::time::timeout(WITHIN, say(runtime, &credential, reach, requests_for(verb))).await {
-        Ok(Ok(answer)) => answer,
+        Ok(Ok(answer)) => from_the_vault(answer),
         Ok(Err(e)) => return refused(format!("the vault '{name}' could not be reached: {e:#}")),
         Err(_) => return refused(format!("the vault '{name}' did not answer within {}s", WITHIN.as_secs())),
     };
@@ -2193,11 +2210,21 @@ fn set_pending_cleared(store: &UserStore, name: &str) -> anyhow::Result<()> {
     keep_credentials(store, &cleared)
 }
 
-/// The relay's answer, in the desktop's words.
+/// The relay's answer, in the desktop's words. The relay's own text — its
+/// refusal's reason, and the body of an HTTP error it answered — is printed
+/// as data and to a bounded length ([`kotton_wire::note::quoted_cut`];
+/// another node's text is quoted where it enters this device).
 fn rule_answer(said: Result<RelayOperatorResponse, kotton_net::rendezvous::RendezvousError>, name: &str) -> UserResponse {
+    use kotton_net::rendezvous::RendezvousError;
     match said {
         Ok(RelayOperatorResponse::Rule { rule, .. }) => UserResponse::RelayRule { rule },
-        Ok(RelayOperatorResponse::Refused { reason }) => refused(format!("the relay '{name}' refused: {reason}")),
+        Ok(RelayOperatorResponse::Refused { reason }) => {
+            refused(format!("the relay '{name}' refused: {}", kotton_wire::note::quoted_cut(&reason)))
+        }
+        Err(RendezvousError::HttpError { status, body }) => refused(format!(
+            "the relay '{name}' could not be reached: it answered HTTP {status}: {}",
+            kotton_wire::note::quoted_cut(&body)
+        )),
         Err(e) => refused(format!("the relay '{name}' could not be reached: {e}")),
     }
 }
@@ -3758,6 +3785,44 @@ mod tests {
         assert!(matches!(vault_said(Some(Ok(UserResponse::Error { message: "no".into() }))), Asked::Unsure(_)));
         assert!(matches!(vault_said(Some(Ok(UserResponse::Ok))), Asked::Unsure(_)));
         assert!(matches!(vault_said(None), Asked::Unsure(_)));
+    }
+
+    /// **`speak` quotes the text an operated vault or relay sent, where it
+    /// enters, in a sentence of kuserd's own** (another node's text is quoted
+    /// where it enters this device): a vault's `Error` ([`from_the_vault`]), a
+    /// relay's refusal and the body of an HTTP error it answered
+    /// ([`rule_answer`]), each with a backtick and a line break escaped, and
+    /// one past `MAX_SAID_CHARS` cut. Every other answer of a vault is handed
+    /// on as it came.
+    #[test]
+    fn speak_quotes_what_an_operated_service_said_where_it_enters() {
+        use kotton_net::rendezvous::RendezvousError;
+        use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+        let long = "f".repeat(MAX_SAID_CHARS + 4);
+        for text in ["no `key`\nhere", long.as_str()] {
+            let UserResponse::Error { message } = from_the_vault(UserResponse::Error { message: text.to_string() }) else {
+                panic!("a vault's `Error` was handed on as another answer")
+            };
+            assert_eq!(message, format!("the vault answered: {}", quoted_cut(text)));
+            let refusal = Ok(RelayOperatorResponse::Refused { reason: text.to_string() });
+            let UserResponse::Error { message: relay } = rule_answer(refusal, "gate") else { panic!("a relay's refusal was taken") };
+            assert_eq!(relay, format!("the relay 'gate' refused: {}", quoted_cut(text)));
+            let http = Err(RendezvousError::HttpError { status: 403, body: text.to_string() });
+            let UserResponse::Error { message: door } = rule_answer(http, "gate") else { panic!("a relay's HTTP error was taken") };
+            assert_eq!(door, format!("the relay 'gate' could not be reached: it answered HTTP 403: {}", quoted_cut(text)));
+            for said in [&message, &relay, &door] {
+                assert!(!said.contains('\n') && !said.contains(text), "{said}");
+            }
+        }
+        let UserResponse::Error { message } = from_the_vault(UserResponse::Error { message: "no `key`\nhere".into() }) else {
+            panic!()
+        };
+        assert_eq!(message, "the vault answered: `no \\u{60}key\\u{60}\\nhere`");
+        assert!(matches!(
+            from_the_vault(UserResponse::VaultKeepsAlready { user_id: "s`am".into() }),
+            UserResponse::VaultKeepsAlready { ref user_id } if user_id == "s`am"
+        ));
+        assert!(matches!(from_the_vault(UserResponse::VaultFull { held: 17, quota: 9 }), UserResponse::VaultFull { held: 17, quota: 9 }));
     }
 
     /// **A vault's `Error` to the operator's read, and to its reach set, is

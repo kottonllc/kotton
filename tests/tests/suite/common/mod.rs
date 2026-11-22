@@ -967,17 +967,19 @@ async fn joined<F: std::future::Future<Output = ()>>(
 }
 
 /// The frames a ceremony step did not act on, in order, each as
-/// [`kotton_wire::ipc::answer_said`] says it: what the step says when it fails.
+/// [`kotton_wire::ipc::own_daemon_said`] says it — the stream is a local
+/// daemon's, so its `Error` is said as written: what the step says when it
+/// fails.
 #[derive(Default)]
 struct Unread(Vec<String>);
 
 impl Unread {
     fn hold(&mut self, frame: &UserResponse) {
         self.0.push(match frame {
-            // `answer_said` has no sentence for a ceremony's own failure; its
-            // reason is the sentence.
+            // `own_daemon_said` has no sentence for a ceremony's own failure;
+            // its reason is the sentence.
             UserResponse::PairFailed { reason } => format!("PairFailed: {reason}"),
-            other => kotton_wire::ipc::answer_said(other),
+            other => kotton_wire::ipc::own_daemon_said(other),
         });
     }
 }
@@ -1512,7 +1514,7 @@ mod ceremony_reader_tests {
     /// the error, where it once said only that it did not complete.
     #[tokio::test]
     #[should_panic(
-        expected = "the issuer's stream ended before PairAdvertising; it said: [`open device-add listener: bootstrap QUIC bind failed: Address already in use (os error 98)`]"
+        expected = "the issuer's stream ended before PairAdvertising; it said: [open device-add listener: bootstrap QUIC bind failed: Address already in use (os error 98)]"
     )]
     async fn a_stream_that_ends_on_a_refusal_before_its_code_says_the_refusal() {
         issuer_reads(vec![UserResponse::Error {

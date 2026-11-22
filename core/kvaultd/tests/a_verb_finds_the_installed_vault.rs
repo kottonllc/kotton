@@ -328,9 +328,9 @@ fn a_verb_typed_bare_reaches_the_installed_vault_and_is_refused_in_one_sentence_
     let out = typed_within(Duration::from_secs(60), &b.bin(), &["invite", "sam", "--ttl", "5"]);
     refused_in_one_sentence(&out, "this vault stands at no relay");
     let err = String::from_utf8_lossy(&out.stderr);
-    // The door's sentence is said through `answer_said`, which prints every
-    // `Error` as data: its backticks print by their escape.
-    assert!(err.contains("\\u{60}enrol <the vault's line>\\u{60}"), "{}", said(&out));
+    // The door is this machine's own daemon: its sentence is said as
+    // written, so the command in it prints as typed.
+    assert!(err.contains("`enrol <the vault's line>`"), "{}", said(&out));
     assert!(!err.contains("vault.env"), "{}", said(&out));
     assert!(!String::from_utf8_lossy(&out.stdout).contains("invite="), "{}", said(&out));
     // A name the vault keeps is refused before the relay is looked for: the

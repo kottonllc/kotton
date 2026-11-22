@@ -1897,9 +1897,11 @@ mod message_tests {
 }
 
 /// The answer a landlord reader asked for, read; any other, refused in
-/// [`kotton_wire::ipc::answer_said`]'s words — the vault's own where the
-/// answer carries them (`Error`, `VaultKeepsAlready`), and otherwise its name,
-/// never its fields.
+/// [`kotton_wire::ipc::own_daemon_said`]'s words: each answer is
+/// [`super::operator::speak`]'s, this daemon's own, so its `Error` is said as
+/// written (an operated vault's or relay's text in it is already quoted, where
+/// `speak` took it in); `VaultKeepsAlready` in its sentence; and otherwise its
+/// name, never its fields.
 ///
 /// **One expectation per reader, and no list** (#114, #121). Each reader
 /// names the one answer its verb asks the vault for, and nothing else: there
@@ -1915,7 +1917,7 @@ macro_rules! answered {
     ($answer:expr, $asked:pat => $read:expr) => {
         match $answer {
             $asked => Ok($read),
-            unread => Err(kotton_wire::ipc::answer_said(&unread)),
+            unread => Err(kotton_wire::ipc::own_daemon_said(&unread)),
         }
     };
 }
@@ -1978,12 +1980,12 @@ mod a_guests_invite {
             expires_at: 1,
         };
         assert_eq!(invite_answered(minted).as_deref(), Ok("kotton-invite:vault:the-words"));
-        assert_eq!(invite_answered(UserResponse::Error { message: "no relay".into() }), Err("`no relay`".to_string()));
+        assert_eq!(invite_answered(UserResponse::Error { message: "no relay".into() }), Err("no relay".to_string()));
     }
 
     /// **A refusal no reader names is refused to the guest and said, not
     /// printed** (#114). `VaultFull` stands in for a typed refusal a later
-    /// release adds: the guest is told no invite, in `answer_said`'s words,
+    /// release adds: the guest is told no invite, in `own_daemon_said`'s words,
     /// with none of the answer's fields. Nothing follows it at the vault
     /// either: `landlord_invite` speaks through `operator::in_order`, which
     /// sends the number only on the invite
@@ -1992,7 +1994,7 @@ mod a_guests_invite {
     fn a_refusal_nobody_names_is_refused_to_the_guest_and_said() {
         let unnamed = UserResponse::VaultFull { held: 3, quota: 2 };
         let said = invite_answered(unnamed.clone()).expect_err("an answer other than the invite was taken as one");
-        assert_eq!(said, kotton_wire::ipc::answer_said(&unnamed));
+        assert_eq!(said, kotton_wire::ipc::own_daemon_said(&unnamed));
         assert!(said.starts_with("the answer was `VaultFull`"), "{said}");
         assert!(!said.contains('{') && !said.contains("does not read"), "{said}");
     }
@@ -2009,17 +2011,17 @@ mod a_landlords_answer {
         UserResponse::VaultFull { held: 3, quota: 2 }
     }
 
-    /// What every reader says of [`unnamed`]: `answer_said`'s words, with no
+    /// What every reader says of [`unnamed`]: `own_daemon_said`'s words, with no
     /// field of the answer and no debug print.
     fn said_by_name<T: std::fmt::Debug>(read: Result<T, String>) {
         let said = read.expect_err("an answer other than the one asked for was taken as it");
-        assert_eq!(said, kotton_wire::ipc::answer_said(&unnamed()));
+        assert_eq!(said, kotton_wire::ipc::own_daemon_said(&unnamed()));
         assert!(said.starts_with("the answer was `VaultFull`"), "{said}");
         assert!(!said.contains('{') && !said.contains("does not read"), "{said}");
     }
 
-    /// The vault's own words, where its refusal is an `Error`: said as data
-    /// (`answer_said`; how another node's text is printed).
+    /// kuserd's own words, where its refusal is an `Error`: said as written
+    /// (`own_daemon_said`), its command as typed.
     fn refused() -> UserResponse {
         UserResponse::Error { message: "no operator credential is kept for 'home'".into() }
     }
@@ -2033,7 +2035,7 @@ mod a_landlords_answer {
         let people = tenants_answered(UserResponse::VaultTenants { tenants: vec![tenant] }).expect("the tenants");
         assert_eq!(people.len(), 1);
         assert_eq!((people[0].name.as_str(), people[0].held_bytes, people[0].space_bytes), ("sam", 7, Some(9)));
-        assert_eq!(tenants_answered(refused()).err().as_deref(), Some("`no operator credential is kept for 'home'`"));
+        assert_eq!(tenants_answered(refused()).err().as_deref(), Some("no operator credential is kept for 'home'"));
         said_by_name(tenants_answered(unnamed()));
     }
 
@@ -2044,7 +2046,7 @@ mod a_landlords_answer {
     fn landlord_drop_reads_the_drop_and_says_any_other_answer() {
         let tenant = kotton_wire::ipc::VaultTenant { user_id: "sam".into(), held: 7, quota: None, devices: 1 };
         assert_eq!(dropped_answered(UserResponse::TenantDropped { tenant }), Ok(()));
-        assert_eq!(dropped_answered(refused()).err().as_deref(), Some("`no operator credential is kept for 'home'`"));
+        assert_eq!(dropped_answered(refused()).err().as_deref(), Some("no operator credential is kept for 'home'"));
         said_by_name(dropped_answered(unnamed()));
         let readout = dropped_answered(UserResponse::VaultCapacityResult { held: 7, quota: None });
         assert!(readout.is_err_and(|s| s.starts_with("the answer was `VaultCapacityResult`")));
@@ -2055,7 +2057,7 @@ mod a_landlords_answer {
     #[test]
     fn landlord_rule_reads_the_rule_and_says_any_other_answer() {
         assert_eq!(rule_answered(UserResponse::RelayRule { rule: AdmissionRule::Anyone }), Ok(AdmissionRule::Anyone));
-        assert_eq!(rule_answered(refused()).err().as_deref(), Some("`no operator credential is kept for 'home'`"));
+        assert_eq!(rule_answered(refused()).err().as_deref(), Some("no operator credential is kept for 'home'"));
         said_by_name(rule_answered(unnamed()));
     }
 
@@ -2075,8 +2077,38 @@ mod a_landlords_answer {
     #[test]
     fn landlord_move_vault_reads_the_move_and_says_any_other_answer() {
         assert_eq!(moved_answered(UserResponse::Ok), Ok(()));
-        assert_eq!(moved_answered(refused()).err().as_deref(), Some("`no operator credential is kept for 'home'`"));
+        assert_eq!(moved_answered(refused()).err().as_deref(), Some("no operator credential is kept for 'home'"));
         said_by_name(moved_answered(unnamed()));
+    }
+
+    /// **kuserd's own refusal reaches the guest with its command as typed**
+    /// (another node's text is quoted where it enters this device): the
+    /// sentence `speak` refuses a name with no credential with is said as
+    /// written, so `mint relay gate` is a command the guest can type.
+    #[test]
+    fn kuserds_own_refusal_reaches_the_guest_with_its_command_as_typed() {
+        let told = super::super::operator::no_credential_sentence(kotton_wire::ipc::OperatedService::Relay, "gate");
+        let said = rule_answered(UserResponse::Error { message: told.clone() }).expect_err("a refusal was taken as the rule");
+        assert_eq!(said, told);
+        assert!(said.contains("`mint relay gate`") && !said.contains("\\u{60}"), "{said}");
+    }
+
+    /// **A vault's `Error`, forwarded by `speak`, reaches the guest quoted
+    /// once** (another node's text is quoted where it enters this device):
+    /// `speak` holds it in kuserd's sentence through `quoted_cut`, and the
+    /// reader says that sentence as written — never the vault's text bare,
+    /// and never quoted a second time.
+    #[test]
+    fn a_vaults_refusal_forwarded_by_speak_reaches_the_guest_quoted_once() {
+        use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+        let long = "q".repeat(MAX_SAID_CHARS + 5);
+        for text in ["no `room`\nhere", long.as_str()] {
+            let forwarded = super::super::operator::from_the_vault(UserResponse::Error { message: text.to_string() });
+            let said = tenants_answered(forwarded).expect_err("a refusal was taken as the tenants");
+            assert_eq!(said, format!("the vault answered: {}", quoted_cut(text)));
+            assert!(!said.contains('\n') && !said.contains(text), "{said}");
+            assert!(!said.contains(&quoted_cut(&quoted_cut(text))), "quoted twice: {said}");
+        }
     }
 }
 
