@@ -551,20 +551,50 @@ fn named_in(names: &[([u8; 32], String)], did: &str) -> String {
     }
 }
 
+/// What a verb refused by a [`HeldBy`] found held, which says what the person
+/// waits for: the sentence and its tail are chosen together.
+#[derive(Debug, Clone, Copy)]
+enum Held<'a> {
+    /// The drive named `.0`, while the holding device moves it.
+    Moving(&'a str),
+    /// The person's making of a drive.
+    Making,
+    /// An unfinished copy of the drive named `.0` at the vault this device
+    /// moves it to, which another device holds: its own move's, or one an
+    /// earlier move left there.
+    AtDestination(&'a str),
+}
+
 impl HeldBy {
     /// The holding device, under this device's name for it ([`named_in`]).
     async fn named(&self, runtime: &DeviceRuntime, store: &UserStore) -> String {
         named_in(&device_names(runtime, store).await, &self.device_did)
     }
 
-    /// The sentence a verb refused by it says, after `what` (`"'photos' is
-    /// being moved"`, `"a drive is being made"`).
-    async fn said(&self, runtime: &DeviceRuntime, store: &UserStore, what: &str, vault: &str) -> String {
-        format!(
-            "{what} by {} now; try again when it is done (its hold on '{vault}' lasts {}s more unless that device renews it)",
-            self.named(runtime, store).await,
-            self.for_secs
-        )
+    /// The sentence a verb refused by it says, for what it found `held` at
+    /// `vault` ([`Self::sentence`]).
+    async fn said(&self, runtime: &DeviceRuntime, store: &UserStore, held: Held<'_>, vault: &str) -> String {
+        self.sentence(&self.named(runtime, store).await, held, vault)
+    }
+
+    /// The words of [`Self::said`], `holder` the holding device as [`named_in`]
+    /// prints it.
+    fn sentence(&self, holder: &str, held: Held<'_>, vault: &str) -> String {
+        let secs = self.for_secs;
+        match held {
+            Held::Moving(name) => format!(
+                "'{name}' is being moved by {holder} now; try again when it is done (its hold on '{vault}' lasts {secs}s \
+                 more unless that device renews it)"
+            ),
+            Held::Making => format!(
+                "a drive is being made by {holder} now; try again when it is done (its hold on '{vault}' lasts {secs}s \
+                 more unless that device renews it)"
+            ),
+            Held::AtDestination(name) => format!(
+                "an unfinished copy of '{name}' on '{vault}' is held by {holder} now; try again when that device lets \
+                 it go (its hold lasts {secs}s more unless that device renews it)"
+            ),
+        }
     }
 }
 
@@ -714,7 +744,7 @@ async fn take_making(
             holds.keep(&making);
             Ok(Ok(Some(making)))
         }
-        Err(held) => Ok(Err(held.said(runtime, store, "a drive is being made", &vault.node.id).await)),
+        Err(held) => Ok(Err(held.said(runtime, store, Held::Making, &vault.node.id).await)),
     }
 }
 
@@ -1695,7 +1725,7 @@ async fn move_holding(
                 Ok(Err(held)) => {
                     return refused(format!(
                         "drive move: {}",
-                        held.said(runtime, store, &format!("'{name}' is being moved"), &dest.node.id).await
+                        held.said(runtime, store, Held::Moving(name), &dest.node.id).await
                     ))
                 }
                 Err(e) => return refused(format!("drive move: '{name}' could not be held on '{}' to finish its move ({e}); try again", dest.node.id)),
@@ -1747,7 +1777,7 @@ async fn move_holding(
         Ok(Err(held)) => {
             return refused(format!(
                 "drive move: {}",
-                held.said(runtime, store, &format!("'{name}' is being moved"), &source_vault.node.id).await
+                held.said(runtime, store, Held::Moving(name), &source_vault.node.id).await
             ))
         }
         Err(e) => {
@@ -1781,7 +1811,7 @@ async fn move_holding(
             Ok(Err(held)) => {
                 return refused(format!(
                     "drive move: {}",
-                    held.said(runtime, store, &format!("'{name}' is being moved to '{}'", dest.node.id), &dest.node.id).await
+                    held.said(runtime, store, Held::AtDestination(name), &dest.node.id).await
                 ))
             }
             // Gone since it was listed, or the vault did not answer: the
@@ -2062,6 +2092,30 @@ mod tests {
                 "a device the vault names `did:key:z{}` (cut: 9 more characters) (not a did:key)",
                 "x".repeat(kotton_wire::note::MAX_SAID_CHARS - 9)
             )
+        );
+    }
+
+    /// **A held verb's sentence says what is held and what to wait for, as
+    /// one**: a move and a making are waited for until done; at the vault a
+    /// drive is moved to, another device's hold on an unfinished copy of it is
+    /// said as that, and waited for until that device lets it go.
+    #[test]
+    fn a_held_verbs_sentence_says_what_holds_it() {
+        let held = HeldBy { device_did: "did:key:z6MkLaptop".into(), for_secs: 42 };
+        assert_eq!(
+            held.sentence("`laptop`", Held::Moving("photos"), "home"),
+            "'photos' is being moved by `laptop` now; try again when it is done (its hold on 'home' lasts 42s more \
+             unless that device renews it)"
+        );
+        assert_eq!(
+            held.sentence("`laptop`", Held::Making, "home"),
+            "a drive is being made by `laptop` now; try again when it is done (its hold on 'home' lasts 42s more \
+             unless that device renews it)"
+        );
+        assert_eq!(
+            held.sentence("`laptop`", Held::AtDestination("photos"), "office"),
+            "an unfinished copy of 'photos' on 'office' is held by `laptop` now; try again when that device lets it \
+             go (its hold lasts 42s more unless that device renews it)"
         );
     }
 

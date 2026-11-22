@@ -163,14 +163,40 @@ fn escape(c: char) -> String {
     format!("\\u{{{:x}}}", u32::from(c))
 }
 
-/// `name` as prose prints it, between backticks: [`shown`], with each backtick
-/// it holds printed by its escape, `\u{60}` (kottonllc/kotton#597, 43A). So a
-/// backtick in a line is always the line's own, and a printed name never ends
-/// before its closing delimiter. A [`one_plain_word`] is printed as the word
-/// between backticks. A sentence, the join's line and the mint's refusal print
-/// a name through this and nowhere else.
+/// The characters [`quoted`] and [`quoted_cut`] print by their escape where
+/// [`shown`] prints them as they are: the delimiter, the backtick. This is the
+/// rule, and the one place it is stated (the decision on how a name that holds
+/// the delimiter is printed: whatever puts a name between delimiters prints
+/// that delimiter, inside the name, by its escape). Every other character is
+/// printed between the backticks as [`shown`] prints it. No escape holds a
+/// backtick, so no character of a quoted print reads as its closing delimiter,
+/// and what follows the closing backtick is the device's own text.
+const QUOTED_ESCAPES: &[char] = &['`'];
+
+/// One character of the quoted print, `first` when it is the string's first:
+/// by its escape when [`QUOTED_ESCAPES`] names it, else as [`shown`] prints it.
+fn quoted_char(c: char, first: bool, out: &mut String) {
+    if QUOTED_ESCAPES.contains(&c) {
+        out.push_str(&escape(c));
+    } else {
+        shown_char(c, first, out);
+    }
+}
+
+/// `name` as prose prints it, between backticks: each character as
+/// [`quoted_char`] prints it, so each backtick it holds is printed by its
+/// escape, `\u{60}`. So a backtick in a line is always the line's own, and a
+/// printed name never ends before its closing delimiter. A [`one_plain_word`]
+/// is printed as the word between backticks. A sentence, the join's line and
+/// the mint's refusal print a name through this and nowhere else.
 pub fn quoted(name: &str) -> String {
-    format!("`{}`", shown(name).replace('`', &escape('`')))
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push('`');
+    for (i, c) in name.chars().enumerate() {
+        quoted_char(c, i == 0, &mut out);
+    }
+    out.push('`');
+    out
 }
 
 /// The most characters [`quoted_cut`] prints between its backticks
@@ -195,10 +221,7 @@ pub fn quoted_cut(text: &str) -> String {
     let mut piece = String::new();
     for (i, c) in text.chars().enumerate() {
         piece.clear();
-        match c {
-            '`' => piece.push_str(&escape('`')),
-            c => shown_char(c, i == 0, &mut piece),
-        }
+        quoted_char(c, i == 0, &mut piece);
         let len = piece.chars().count();
         if used + len > MAX_SAID_CHARS {
             let left = text.chars().count() - i;
@@ -555,6 +578,61 @@ mod tests {
         assert_ne!(sentence(&RowNote::names_no_key("a b"), "vault forget"), sentence(&RowNote::names_no_key("a` b"), "vault forget"));
         assert_ne!(quoted("a`b"), quoted("a\\u{60}b"), "a backtick and its escape typed out read alike");
         assert_eq!(quoted("attic"), "`attic`");
+    }
+
+    /// **The quoted print escapes what its rule names and prints every other
+    /// character as `shown` does** (how a name that holds the delimiter is
+    /// printed), held per character class `is_printed_as_is` leaves as it is
+    /// (letter, mark, number, punctuation mark, symbol, the space), over every
+    /// code point, after a letter and first, and per character of
+    /// `QUOTED_ESCAPES`: the delimiter is among them, each is printed by its
+    /// escape, and no print holds the delimiter between its backticks.
+    /// `quoted_cut` prints each as `quoted` does.
+    #[test]
+    fn the_quoted_print_escapes_what_its_rule_names_and_no_other_character() {
+        use icu_properties::props::GeneralCategoryGroup as G;
+        use kotton_schemas::petname::is_printed_as_is;
+        let delimiter = quoted("").chars().next().expect("a delimiter");
+        assert_eq!(quoted(""), format!("{delimiter}{delimiter}"));
+        assert!(QUOTED_ESCAPES.contains(&delimiter), "the delimiter is not in the rule");
+        let between = |print: &str| -> String {
+            assert!(print.starts_with(delimiter) && print.ends_with(delimiter), "{print:?}");
+            print[delimiter.len_utf8()..print.len() - delimiter.len_utf8()].to_string()
+        };
+        for &c in QUOTED_ESCAPES {
+            for (name, said) in [(format!("a{c}b"), format!("a{}b", escape(c))), (c.to_string(), escape(c))] {
+                assert_eq!(between(&quoted(&name)), said, "{c:?}");
+                assert_eq!(quoted_cut(&name), quoted(&name), "{c:?}");
+            }
+            assert!(!escape(c).chars().any(|e| QUOTED_ESCAPES.contains(&e)), "{c:?}: its escape holds a character the rule names");
+            assert_ne!(quoted(&format!("a{c}b")), quoted("ab"), "{c:?}");
+            assert_ne!(quoted(&format!("a{c}b")), quoted(&format!("a{}b", escape(c))), "{c:?}: it and its escape typed out read alike");
+        }
+        let classes = [("letter", G::Letter), ("mark", G::Mark), ("number", G::Number), ("punctuation", G::Punctuation), ("symbol", G::Symbol)];
+        let mut held = [0usize; 6];
+        for c in (0..=0x10ffffu32).filter_map(char::from_u32) {
+            let (class, _) = class_of(c);
+            for name in [format!("a{c}b"), c.to_string()] {
+                let print = quoted(&name);
+                let inside = between(&print);
+                assert!(!inside.contains(delimiter), "{c:?}: the delimiter is printed between the backticks: {print:?}");
+                assert_eq!(quoted_cut(&name), print, "{c:?}");
+                if !QUOTED_ESCAPES.contains(&c) {
+                    assert_eq!(inside, shown(&name), "{c:?} ({class:?}) is not printed as `shown` prints it");
+                }
+            }
+            if QUOTED_ESCAPES.contains(&c) || !is_printed_as_is(c, false) {
+                continue;
+            }
+            let at = if c == ' ' { 5 } else { classes.iter().position(|(_, g)| g.contains(class)).expect("a printed class") };
+            held[at] += 1;
+            assert_eq!(between(&quoted(&format!("a{c}b"))), format!("a{c}b"), "{c:?} ({class:?}) was not printed as it is");
+        }
+        for ((word, _), n) in classes.iter().zip(held) {
+            assert!(n > 0, "no {word} was read");
+        }
+        assert_eq!(held[5], 1, "the space was not read");
+        assert!(held.iter().sum::<usize>() > 150_000, "{held:?}: the tables were not read");
     }
 
     /// **The second kind's key is printed through the same print as its names**
