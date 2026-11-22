@@ -70,11 +70,15 @@
 //!
 //! ## What no list may owe
 //!
-//! The regions of [`crate::tree::REGIONS`] are in dependency order: `core/` acts on a
-//! principal's authority, and `client/` only asks. A crate under `core/` that path-depends on
-//! one under `client/` is refused whatever the lists say. Cargo permits that edge and nothing
-//! else here would catch it; it is authority moving somewhere it was not granted, which is not
-//! a debt to be paid later.
+//! The system's and the vault's rows act on a principal's authority, and the protocol's is what
+//! every other row is built from; the CLI's, the client library's and the device-owner tool's
+//! rows only ask. A crate of the first three that path-depends on a crate of the last three is
+//! refused whatever the lists say and whatever directory holds either crate: the rule is each
+//! row's `never_links`, judged by the row of each end before any list is read, so a crate that
+//! leaves `client/` takes it along. Cargo permits that edge and nothing else here would catch
+//! it; it is authority moving somewhere it was not granted, which is not a debt to be paid
+//! later. An exception is written only where the repository plan's table names a caller of the
+//! device-owner tool, and it names none, so none of the first three links it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -94,12 +98,17 @@ pub(crate) struct Row {
     pub(crate) paths: &'static [&'static str],
     /// The rows it may path-depend on. A row's own crates are always admitted.
     pub(crate) may_link: &'static [&'static str],
+    /// The rows it never path-depends on, whatever directory holds either crate and whatever its
+    /// owed list says: [`judge`] refuses such an edge before it reads a list.
+    pub(crate) never_links: &'static [&'static str],
 }
 
 /// The rows. Each `may_link` is the repository plan's: the CLI is built from the protocol and
 /// the client library alone; the client library and the relay from the protocol; the vault from the
 /// protocol and its own crates; the system and the device-owner tool, which the repository plan
-/// makes the system's, from the protocol and the system.
+/// makes the system's, from the protocol and the system. Each `never_links` is what no list may
+/// owe ("What no list may owe", above): the protocol, the vault and the system link none of the
+/// CLI, the client library and the device-owner tool.
 pub(crate) const ROWS: &[Row] = &[
     Row {
         name: "protocol",
@@ -113,42 +122,49 @@ pub(crate) const ROWS: &[Row] = &[
             "core/common",
         ],
         may_link: &["protocol"],
+        never_links: &["cli", "client library", "operator"],
     },
     Row {
         name: "relay",
         becomes: "becomes kotton-relay",
         paths: &["infra/relay"],
         may_link: &["protocol"],
+        never_links: &[],
     },
     Row {
         name: "cli",
         becomes: "becomes kotton-cli",
         paths: &["client/cli", "client/shell"],
         may_link: &["protocol", "client library", "cli"],
+        never_links: &[],
     },
     Row {
         name: "client library",
         becomes: "becomes kotton-protocol's client library",
         paths: &["client/kotton-client", "client/record-file"],
         may_link: &["protocol", "client library"],
+        never_links: &[],
     },
     Row {
         name: "vault",
         becomes: "becomes kotton-vault",
         paths: &["core/kvaultd"],
         may_link: &["protocol", "vault"],
+        never_links: &["cli", "client library", "operator"],
     },
     Row {
         name: "operator",
         becomes: "stays in kotton: the device-owner tool",
         paths: &["client/kotton-operator"],
         may_link: &["protocol", "system", "operator"],
+        never_links: &[],
     },
     Row {
         name: "system",
         becomes: "stays in kotton: the system",
         paths: &["core"],
         may_link: &["protocol", "system"],
+        never_links: &["cli", "client library", "operator"],
     },
 ];
 
@@ -815,20 +831,13 @@ pub(crate) fn read_tree(root: &Path, tracked: &Tracked) -> Tree {
     t
 }
 
-/// The index of the region of [`crate::tree::REGIONS`] a directory is in, if any.
-fn region_index(dir: &str) -> Option<usize> {
-    let top = dir.split('/').next()?;
-    crate::tree::REGIONS.iter().position(|r| *r == top)
-}
-
-/// Whether an edge from `from_dir` to `to_dir` runs against the regions' order, which no list
-/// may owe.
-fn against_regions(from_dir: &str, to_dir: &str) -> bool {
-    matches!((region_index(from_dir), region_index(to_dir)), (Some(f), Some(t)) if f < t)
-}
-
 fn admitted(from: &Row, to: &Row) -> bool {
     from.name == to.name || from.may_link.contains(&to.name)
+}
+
+/// Whether `from` never links `to`, which no list may owe.
+fn never(from: &Row, to: &Row) -> bool {
+    from.never_links.contains(&to.name)
 }
 
 /// Judge the edges against `rows`, the owed lists against the edges, and the lists against the
@@ -871,18 +880,11 @@ pub(crate) fn judge(rows: &[Row], crates: &[Crate], edges: &BTreeSet<Edge>, owed
         let (Some(fr), Some(tr)) = (row_in(rows, &e.from_dir), row_in(rows, &e.to_dir)) else {
             continue;
         };
-        if against_regions(&e.from_dir, &e.to_dir) {
+        if never(fr, tr) {
             j.refused.push(format!(
-                "{} ({}, row `{}`) links {} ({}, row `{}`): a crate under `{}/` never \
-                 path-depends on one under `{}/`, and no owed list may hold it",
-                e.from,
-                e.from_dir,
-                fr.name,
-                e.to,
-                e.to_dir,
-                tr.name,
-                e.from_dir.split('/').next().unwrap_or(""),
-                e.to_dir.split('/').next().unwrap_or("")
+                "{} ({}, row `{}`) links {} ({}, row `{}`): row `{}` never path-depends on row \
+                 `{}`, whatever directory holds either crate, and no owed list may hold it",
+                e.from, e.from_dir, fr.name, e.to, e.to_dir, tr.name, fr.name, tr.name
             ));
             continue;
         }
@@ -1284,6 +1286,7 @@ mod tests {
                 becomes: r.becomes,
                 paths: r.paths,
                 may_link: r.may_link,
+                never_links: r.never_links,
             })
             .collect()
     }
@@ -1337,6 +1340,7 @@ mod tests {
                     _ => r.paths,
                 },
                 may_link: r.may_link,
+                never_links: r.never_links,
             })
             .collect();
         let t = tree();
@@ -1379,7 +1383,7 @@ mod tests {
         assert!(j.refused[0].contains("kotton-shell") && j.refused[0].contains("kotton-crypto"));
     }
 
-    /// No list may owe an edge from `core/` into `client/`.
+    /// No list may owe the system linking the CLI, read from the manifests.
     #[test]
     fn no_list_owes_the_system_linking_a_client() {
         let t = tree();
@@ -1388,6 +1392,67 @@ mod tests {
         let j = run(&t, &owed, &Base::Absent { commit: "0123".into() });
         assert_eq!(j.refused.len(), 1, "{:?}", j.refused);
         assert!(j.refused[0].contains("kotton-fs") && j.refused[0].contains("no owed list may hold it"));
+    }
+
+    /// No list may owe a crate of the protocol's, the vault's or the system's row linking a crate
+    /// of the CLI's, the client library's or the operator's, whatever directory holds it: here
+    /// the CLI's crate and the operator's lie outside `client/`, each edge is on its row's list,
+    /// and the lists may arrive, and every edge is refused all the same.
+    #[test]
+    fn no_list_owes_a_row_that_acts_linking_one_that_only_asks_wherever_it_lies() {
+        let rows: Vec<Row> = ROWS
+            .iter()
+            .map(|r| Row {
+                name: r.name,
+                becomes: r.becomes,
+                paths: match r.name {
+                    "cli" => &["cli"],
+                    "operator" => &["operator"],
+                    _ => r.paths,
+                },
+                may_link: r.may_link,
+                never_links: r.never_links,
+            })
+            .collect();
+        let crate_of = |name: &str, dir: &str| {
+            let row = row_in(&rows, dir).unwrap_or_else(|| panic!("{dir} is in no row")).name;
+            Crate { name: name.into(), dir: dir.into(), row }
+        };
+        let from = [crate_of("kotton-wire", "core/wire"), crate_of("kvaultd", "core/kvaultd"), crate_of("kotton-fs", "core/fs")];
+        let to = [
+            crate_of("kotton-cli", "cli"),
+            crate_of("kotton", "client/kotton-client"),
+            crate_of("kotton-operator", "operator"),
+        ];
+        assert_eq!(from.iter().map(|c| c.row).collect::<Vec<_>>(), ["protocol", "vault", "system"]);
+        assert_eq!(to.iter().map(|c| c.row).collect::<Vec<_>>(), ["cli", "client library", "operator"]);
+
+        let mut edges = BTreeSet::new();
+        let mut owed: Owed = rows.iter().map(|r| (r.name.to_string(), BTreeMap::new())).collect();
+        for f in &from {
+            for t in &to {
+                edges.insert(Edge { from: f.name.clone(), from_dir: f.dir.clone(), to: t.name.clone(), to_dir: t.dir.clone() });
+                owed.get_mut(f.row).unwrap().entry(f.name.clone()).or_default().insert(t.name.clone());
+            }
+        }
+        let crates: Vec<Crate> = from.iter().chain(&to).cloned().collect();
+        for base in [Base::Absent { commit: "0123".into() }, Base::At { commit: "0123".into(), owed: owed.clone() }] {
+            let j = judge(&rows, &crates, &edges, &owed, &base);
+            assert_eq!(j.refused.len(), from.len() * to.len(), "{base:?}: {:?}", j.refused);
+            for f in &from {
+                for t in &to {
+                    let head = format!(
+                        "{} ({}, row `{}`) links {} ({}, row `{}`): row `{}` never path-depends on row `{}`",
+                        f.name, f.dir, f.row, t.name, t.dir, t.row, f.row, t.row
+                    );
+                    assert!(
+                        j.refused.iter().any(|r| r.starts_with(&head) && r.ends_with("no owed list may hold it")),
+                        "{base:?}: {head}: {:?}",
+                        j.refused
+                    );
+                }
+            }
+        }
     }
 
     /// An entry that is not owed, or is filed under the wrong row, or a row with no list, is
@@ -1929,17 +1994,15 @@ mod tests {
         assert!(row_of("tools/workspace-hack").is_none());
     }
 
-    /// Every `may_link` names a row, and none runs against the regions' order.
+    /// Every `may_link` and `never_links` names a row, and no row may link a row it never links.
     #[test]
-    fn what_a_row_may_link_is_rows_in_order() {
+    fn what_a_row_may_link_is_rows_it_does_not_never_link() {
         for row in ROWS {
+            for l in row.may_link.iter().chain(row.never_links) {
+                assert!(row_named_in(ROWS, l).is_some(), "`{}` names `{l}`, which is not a row", row.name);
+            }
             for l in row.may_link {
-                let to = row_named_in(ROWS, l).unwrap_or_else(|| panic!("`{}` may link `{l}`, which is not a row", row.name));
-                for f in row.paths {
-                    for t in to.paths {
-                        assert!(!against_regions(f, t), "`{}` may link `{l}`, against the regions", row.name);
-                    }
-                }
+                assert!(!row.never_links.contains(l), "`{}` may link `{l}`, which it never links", row.name);
             }
         }
     }

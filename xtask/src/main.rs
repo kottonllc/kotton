@@ -1957,8 +1957,9 @@ fn tier_check() {
              this tree holds a part of, each held to the rows its repository may link. An edge \
              it may not link is on its owed list in xtask/tier-owed.toml, by crate name, and \
              a list only shrinks: a part is cut when its list is empty. No list owes an edge \
-             from core/, which acts on a principal's authority, into client/, which only asks: \
-             that is authority moving somewhere it was not granted."
+             from the protocol's, the vault's or the system's row into the CLI's, the client \
+             library's or the operator's, which only ask, whatever directory holds either \
+             crate: that is authority moving somewhere it was not granted."
         );
         std::process::exit(1);
     }
