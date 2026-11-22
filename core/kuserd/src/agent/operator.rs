@@ -2147,12 +2147,18 @@ pub(crate) fn pinned_vault(
     Ok(kotton_device::users::pairing::PinnedVault { vault: name.to_string(), key: vault })
 }
 
-/// Whether the vault's answer to a drop is one *invited* rotates on: any
-/// answer but a refusal. A vault's refusal to keep for this key under the pool
-/// named ([`UserResponse::NotPairedAs`]) is a refusal here too, as its `Error`
-/// was.
+/// Whether the vault's answer to a drop is one *invited* rotates on: the
+/// drop's own answer, [`UserResponse::TenantDropped`], and no other.
+///
+/// **Rotation follows the drop itself, not the absence of a refusal**, the
+/// rule [`in_order`] reads its answers by. A refusal ([`UserResponse::Error`],
+/// or a vault's refusal to keep for this key under the pool named,
+/// [`UserResponse::NotPairedAs`]) is not the drop, and neither is an answer
+/// this desktop did not ask for or does not know: none of them says the person
+/// is no longer kept there, so none rotates the key their devices are
+/// admitted by.
 fn a_drop_rotates_on(answer: &UserResponse) -> bool {
-    !matches!(answer, UserResponse::Error { .. } | UserResponse::NotPairedAs { .. })
+    matches!(answer, UserResponse::TenantDropped { .. })
 }
 
 fn set_pending_cleared(store: &UserStore, name: &str) -> anyhow::Result<()> {
@@ -3821,7 +3827,8 @@ mod tests {
     }
 
     /// **A drop the vault refuses rotates no key**, in either shape of its
-    /// refusal; the drop's own answer does.
+    /// refusal, and neither does an answer the drop did not ask for; the
+    /// drop's own answer does.
     #[test]
     fn a_drop_the_vault_refuses_rotates_no_key() {
         use kotton_wire::ipc::NotPairedAsKind;
@@ -3835,6 +3842,16 @@ mod tests {
         assert!(!a_drop_rotates_on(&UserResponse::Error {
             message: "no such tenant".into()
         }));
+        for unasked in [
+            UserResponse::Ok,
+            UserResponse::VaultKeepsAlready { user_id: "sam".into() },
+            UserResponse::VaultCapacityResult { held: 0, quota: None },
+        ] {
+            assert!(
+                !a_drop_rotates_on(&unasked),
+                "{unasked:?}: an answer the drop did not ask for rotated the invited key"
+            );
+        }
         let dropped = UserResponse::TenantDropped {
             tenant: kotton_wire::ipc::VaultTenant {
                 user_id: "sam".into(),
