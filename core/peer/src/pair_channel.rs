@@ -332,7 +332,7 @@ pub enum PeerName {
     NotShown,
 }
 
-/// Run the joiner (new-device) side of the handshake over a freshly opened
+/// Run the joiner side of the handshake over a freshly opened
 /// bi-stream. `sid` is the offer's session id (from the mDNS advertisement or the
 /// connection code). `confirmer` is asked to compare the SAS once the issuer's
 /// first frame is read, with what `name` makes of its label: the named label on
