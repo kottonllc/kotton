@@ -357,6 +357,7 @@ pub async fn handle(control: &ControlContext, from: &Peer, request: VaultPeerReq
                 relay_url,
                 relay_key,
                 admission,
+                invited_held: false,
             })
         }
         TenantVerb::VaultCapacity { user_id } => Ok(capacity(ctx, &user_id).await),

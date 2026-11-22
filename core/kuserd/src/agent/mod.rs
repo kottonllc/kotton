@@ -2200,6 +2200,7 @@ async fn handle_gateway_request(
             // A gateway is not one of the person's devices, and is
             // handed no relay's key.
             admission: None,
+            invited_held: false,
         },
         other => UserResponse::Error {
             message: format!(

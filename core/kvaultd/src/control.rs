@@ -257,8 +257,11 @@ async fn dispatch(ctx: &ControlContext, request: VaultRequest) -> io::Result<Han
         VaultRequest::NodeRelay { .. } => Ok(HandlerOutput::Single(UserResponse::NodeRelayResult {
             relay_url: Some(peer.runtime.reachability().nat().relay_url).filter(|u| !u.is_empty()),
             relay_key: peer.runtime.reachability().nat().relay_key,
-            // The terminal is told where the vault stands, and no admission key.
+            // The terminal is told where the vault stands, and no admission key:
+            // only whether one is held for the people its operator invites, so
+            // `kvaultd drop` can say what is left to rotate.
             admission: None,
+            invited_held: crate::reach::invited(&peer.runtime).is_some(),
         })),
     }
 }

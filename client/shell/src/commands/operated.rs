@@ -58,7 +58,10 @@
 //! told to stand at that relay again, with its keys — found by the relay's key,
 //! never a URL — and `vault drop` rotates the invited key at each relay you
 //! operate that the vault stands at, once the vault no longer lists the pool;
-//! a drop the vault did not answer waits on the desktop until then. When the
+//! a drop the vault did not answer waits on the desktop until then, for seven
+//! days, and one that ends unrotated is said at the next verb with `relay
+//! rotate [<r>]`, which rotates the invited key on the person's word — the one
+//! act that finishes a drop made at `kvaultd drop`. When the
 //! ceremony a vault's enrol runs
 //! offers this device the relay the same `enrol` kept, this device stands
 //! there too, held to that relay's key: the line was the person's own, typed
@@ -69,6 +72,12 @@
 //! drop` asks for it. The two are one act with two doors, and a door that
 //! asked less would make the desktop's drop a different act from the
 //! terminal's.
+//!
+//! `relay rotate [<r>]` is confirmed the same way, by the relay's name typed
+//! back (`relay rotate [<r>] --confirm <r>`), after it says what a rotation
+//! costs the people still invited: the relay reads the key before the current
+//! one until the next rotation, so a second rotation refuses a device that has
+//! not reconnected to its vault since the first.
 //!
 //! **A verb names its instance only when there are several of its kind**
 //! (decision 0005). The instances held of the verb's kind are read once for
@@ -103,7 +112,7 @@ const VAULT_USAGE: &str = "usage: vault stand [<v>] | vault move [<v>] <r> | vau
                            vault forget [<v>] — <v> only when this desktop operates more than one vault; \
                            mint and enrol make one; relay and vault operate one: `mint vault`, then `enrol <line>`, makes one";
 
-pub(super) const RELAY_OPERATOR_USAGE: &str = "relay rule [<r>] [<rule>] | relay invite [<r>] | relay forget [<r>] \
+pub(super) const RELAY_OPERATOR_USAGE: &str = "relay rule [<r>] [<rule>] | relay invite [<r>] | relay rotate [<r>] | relay forget [<r>] \
                                                — <r> only when this desktop operates more than one relay; \
                                                mint and enrol make one; relay and vault operate one: `mint relay`, then `enrol <line>`, makes one";
 
@@ -354,6 +363,10 @@ enum Act {
     /// `vault drop <name>` with nothing typed back: answered with how to
     /// confirm it, at the instance.
     Confirm(String),
+    /// `relay rotate`, with the relay's name typed back after `--confirm` or
+    /// with nothing: said only when what was typed back is the relay the line
+    /// is said to, which is known once the line's instance is ([`operate`]).
+    Rotate(Option<String>),
     Refuse(String),
 }
 
@@ -413,6 +426,8 @@ fn relay_act(verb: &str, words: &[&str]) -> Option<Act> {
             None => Act::Refuse(format!("relay rule: '{w}' is not a rule — only_my_devices, people_i_invite or anyone")),
         },
         ("invite", []) => Act::Say(OperatorVerb::RelayInvite),
+        ("rotate", []) => Act::Rotate(None),
+        ("rotate", ["--confirm", typed]) => Act::Rotate(Some((*typed).to_string())),
         ("forget", []) => Act::Forget,
         _ => return None,
     })
@@ -485,8 +500,31 @@ fn operate<'a>(
             to.name(),
             to.said()
         )),
+        Act::Rotate(Some(typed)) if typed == to.name() => Parsed::Speak(to, OperatorVerb::RotateInvited),
+        Act::Rotate(Some(typed)) => {
+            Parsed::Refuse(format!("relay rotate: '{typed}' is not '{}' — not rotated", to.name()))
+        }
+        Act::Rotate(None) => Parsed::Refuse(rotate_confirm(to)),
         Act::Refuse(why) => Parsed::Refuse(why),
     })
+}
+
+/// What `relay rotate` with nothing typed back is answered with: what a
+/// rotation costs the pools that remain, and how to confirm it. The relay reads
+/// two invited keys, the current one and the one before (`SetRule`), and a
+/// device learns the new one from its vault at its next connect — so one
+/// rotation refuses nobody who is still invited, and the one after it refuses
+/// every device that has not reconnected to its vault in between.
+fn rotate_confirm(to: To<'_>) -> String {
+    let name = to.name();
+    format!(
+        "relay rotate: this gives the relay '{name}' a new key for the people you invite, and tells every vault \
+         that stands there; your own devices' key is not changed. Each device of the people still invited learns \
+         the new key from its vault when it next connects; until then the relay admits it under the key before, \
+         and only until the next rotation — a second rotation refuses every such device that has not reconnected \
+         to its vault since this one. Type the relay's name back to rotate it: relay rotate{} --confirm {name}",
+        to.said()
+    )
 }
 
 /// A `vault` line. `held` is the vaults this desktop operates, read once for
@@ -508,7 +546,7 @@ fn parse_relay<'a>(args: &[&'a str], held: &'a [String]) -> Option<Parsed<'a>> {
     Some(match args {
         ["mint", ..] => gone(OperatedService::Relay),
         ["enrol", ..] => gone_enrol(OperatedService::Relay),
-        [verb @ ("rule" | "invite" | "forget"), rest @ ..] => operate(OperatedService::Relay, verb, rest, held, relay_act)
+        [verb @ ("rule" | "invite" | "rotate" | "forget"), rest @ ..] => operate(OperatedService::Relay, verb, rest, held, relay_act)
             .unwrap_or_else(|| Parsed::Refuse(format!("usage: {RELAY_OPERATOR_USAGE}"))),
         _ => return None,
     })
@@ -517,7 +555,7 @@ fn parse_relay<'a>(args: &[&'a str], held: &'a [String]) -> Option<Parsed<'a>> {
 #[async_trait::async_trait]
 impl Command for VaultCommand {
     fn help_text(&self) -> &'static str {
-        "vault [stand [<v>] | move [<v>] <r> | people [<v>] | invite [<v>] <name> [--space <bytes>] | invite [<v>] --me | digits [<v>] <name> | space [<v>] <name> <bytes> | drop [<v>] <name> --confirm <name> | forget [<v>]] — the landlord's verbs for a vault of your own, and forget [<v>] for one whose host is gone; <v> only when this desktop operates more than one vault. A drop rotates the invited key at each relay you operate that the vault stands at, once the vault no longer lists the pool; a drop it did not answer waits on this desktop, and rotates when the vault is next reached. mint and enrol make one; relay and vault operate one: `mint vault`, then `enrol <its line>`, makes one"
+        "vault [stand [<v>] | move [<v>] <r> | people [<v>] | invite [<v>] <name> [--space <bytes>] | invite [<v>] --me | digits [<v>] <name> | space [<v>] <name> <bytes> | drop [<v>] <name> --confirm <name> | forget [<v>]] — the landlord's verbs for a vault of your own, and forget [<v>] for one whose host is gone; <v> only when this desktop operates more than one vault. A drop rotates the invited key at each relay you operate that the vault stands at, once the vault no longer lists the pool; a drop it did not answer waits on this desktop, and rotates when the vault is next reached within seven days; one still waiting then ends, and your next verb says so, with `relay rotate`. mint and enrol make one; relay and vault operate one: `mint vault`, then `enrol <its line>`, makes one"
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {
@@ -870,7 +908,7 @@ pub(super) async fn relay_operator(args: &[&str], state: &mut ShellState) -> Opt
 
 /// The words that open a vault's operating verbs, and a relay's.
 const VAULT_VERBS: &[&str] = &["stand", "move", "people", "digits", "invite", "space", "drop", "forget"];
-const RELAY_VERBS: &[&str] = &["rule", "invite", "forget"];
+const RELAY_VERBS: &[&str] = &["rule", "invite", "rotate", "forget"];
 
 /// The names of the instances of `service` this desktop operates, read from
 /// the daemon once for a line that opens with one of that kind's operating
@@ -1033,6 +1071,10 @@ fn spoken(asked: &OperatorVerb, to: To<'_>, answer: UserResponse) -> CommandOutp
         (OperatorVerb::ReadRule | OperatorVerb::SetRule { .. }, UserResponse::RelayRule { rule }) => {
             CommandOutput::shapes(vec![Out::Record(vec![("rule".into(), rule_word(rule).to_string())])])
         }
+        (OperatorVerb::RotateInvited, UserResponse::RelayRule { rule }) => CommandOutput::shapes(vec![Out::Record(vec![
+            ("invited key".into(), format!("rotated at {}", to.name())),
+            ("rule".into(), rule_word(rule).to_string()),
+        ])]),
         // The relay's invite, in the one code grammar: the person pastes it at
         // their Settings door, or names it to `relay set` at a terminal.
         (OperatorVerb::RelayInvite, UserResponse::RelayInvite { invite }) => CommandOutput::shapes(vec![Out::Record(vec![
@@ -1458,6 +1500,39 @@ mod tests {
         let why = refusal(parse_vault(&["drop", "vault", "sam"], &one));
         assert!(why.contains("vault drop vault sam --confirm sam"), "{why}");
         assert_eq!((To::Only("vault").said(), To::Named("home").said()), (String::new(), " home".to_string()));
+    }
+
+    /// **`relay rotate` says what a rotation costs before it is said**, and is
+    /// said only with the relay's name typed back after `--confirm`: the key
+    /// before is read until the next rotation, so a second one refuses a device
+    /// that has not reconnected to its vault since the first. A name typed back
+    /// that is not the relay's rotates nothing. Its relay is named as every
+    /// operating verb's instance is: not at all with one held, and with two the
+    /// nameless line is refused listing both.
+    #[test]
+    fn a_rotation_says_what_it_costs_and_is_said_only_with_the_relays_name_typed_back() {
+        let one = held(&["gate"]);
+        let why = refusal(parse_relay(&["rotate"], &one).unwrap());
+        assert!(why.contains("a new key for the people you invite"), "{why}");
+        assert!(why.contains("the key before, and only until the next rotation"), "{why}");
+        assert!(why.contains("a second rotation refuses every such device that has not reconnected"), "{why}");
+        assert!(why.ends_with("Type the relay's name back to rotate it: relay rotate --confirm gate"), "{why}");
+        assert_eq!(
+            parse_relay(&["rotate", "--confirm", "gate"], &one),
+            Some(Parsed::Speak(To::Only("gate"), OperatorVerb::RotateInvited))
+        );
+        let why = refusal(parse_relay(&["rotate", "--confirm", "attic"], &one).unwrap());
+        assert!(why.contains("'attic' is not 'gate' — not rotated"), "{why}");
+
+        let two = held(&["gate", "attic"]);
+        let why = refusal(parse_relay(&["rotate", "attic"], &two).unwrap());
+        assert!(why.ends_with("relay rotate attic --confirm attic"), "{why}");
+        assert_eq!(
+            parse_relay(&["rotate", "attic", "--confirm", "attic"], &two),
+            Some(Parsed::Speak(To::Named("attic"), OperatorVerb::RotateInvited))
+        );
+        let why = refusal(parse_relay(&["rotate"], &two).unwrap());
+        assert!(why.contains("gate, attic") && why.contains("`relay rotate <r>`"), "{why}");
     }
 
     /// **`relay forget` and `vault forget` name their instance as every

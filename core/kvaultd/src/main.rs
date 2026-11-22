@@ -17,7 +17,9 @@
 //!                               how many of their devices are paired here
 //! kvaultd drop <user> [--yes]   drop exactly one tenant — their pool, chain,
 //!                               sealed recovery copy, pairing and quota —
-//!                               after the tenant's name is typed back
+//!                               after the tenant's name is typed back; where
+//!                               the vault holds an invited key, one more line
+//!                               names the relay and `relay rotate`
 //! kvaultd operator enrol <key>  add an operator credential by its public
 //!                               half, and print where this vault is
 //! kvaultd operator revoke <key>  revoke one (its desktop's standing ends,
@@ -33,6 +35,15 @@
 //! Every start prints the line again. The line carries no secret.
 //!
 //! A pool the landlord gave no `--quota` is held to `KVAULTD_QUOTA_BYTES`.
+//!
+//! **When a dropped pool's invited key rotates**, for a drop made here: when
+//! the person says `relay rotate [<r>]` at the desktop that operates the relay
+//! this vault stands at, and not before. This vault holds no relay's operator
+//! credential and cannot rotate; `drop` says so in one line after `dropped=`,
+//! with the relay's address and that command, only where the vault holds an
+//! invited key for that relay ([`kvaultd::reach::left_to_rotate`]). A drop said
+//! at the desktop rotates the key itself, once the vault no longer lists the
+//! pool.
 //!
 //! `invite` is the way a person at home admits a rented vault: their laptop
 //! cannot be dialled and nothing here listens to be, so both meet at the relay
@@ -765,6 +776,14 @@ async fn drop_tenant(user: &str, yes: bool) -> io::Result<()> {
                 "dropped={}  ({} bytes, {} device(s) unpaired)",
                 tenant.user_id, tenant.held, tenant.devices
             );
+            // When a dropped pool's invited key rotates: at the desktop, by
+            // `relay rotate`, for a drop made here. Said only where this vault
+            // holds an invited key; a door that cannot be asked adds nothing.
+            if let Ok(answer) = ask_door(&VaultRequest::NodeRelay { user_id: String::new() }).await {
+                if let Some(line) = kvaultd::reach::left_to_rotate(&answer) {
+                    println!("{line}");
+                }
+            }
             Ok(())
         }
         UserResponse::Error { message } => {

@@ -237,7 +237,7 @@ async fn learn_where_it_reserves(
         })
         .await
     {
-        Ok(UserResponse::NodeRelayResult { relay_url, relay_key, admission }) => {
+        Ok(UserResponse::NodeRelayResult { relay_url, relay_key, admission, .. }) => {
             let relay_url = relay_url.filter(|u| !u.is_empty());
             // The key to present there, when the peer handed one: a vault to
             // its tenant, one of this person's devices to another. Held in
@@ -666,6 +666,7 @@ mod tests {
                 present: kotton_wire::ipc::SecretText::new(kotton_net::rendezvous::AdmissionKey::from_bytes([9; 32]).to_text()),
                 offer: Some(kotton_wire::ipc::SecretText::new(kotton_net::rendezvous::AdmissionKey::from_bytes([8; 32]).to_text())),
             }),
+            invited_held: false,
         }
     }
 
