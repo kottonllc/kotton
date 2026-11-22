@@ -101,10 +101,7 @@ impl ContactCommand {
                     return Ok(());
                 }
                 for (did, label) in contacts {
-                    match label {
-                        Some(l) => println!("{l}  {did}"),
-                        None => println!("{did}"),
-                    }
+                    println!("{}", list_line(&did, label.as_deref()));
                 }
                 Ok(())
             }
@@ -251,6 +248,16 @@ fn paired_line(label: &str) -> String {
     format!("Paired with {}.", kotton_wire::note::quoted(label))
 }
 
+/// One line of `contact list`: the contact's label, when it has one, as data by
+/// [`kotton_wire::note::quoted`] (text a person reads is printed as data), then
+/// its DID; a contact with no label is its DID alone.
+fn list_line(did: &str, label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!("{}  {did}", kotton_wire::note::quoted(label)),
+        None => did.to_string(),
+    }
+}
+
 /// `"472 913"` — grouped, because it is read aloud.
 fn format_sas(sas: u32) -> String {
     let s = format!("{sas:06}");
@@ -268,7 +275,7 @@ fn ask(prompt: &str) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_line, contact_did, paired_line, Named};
+    use super::{compare_line, contact_did, list_line, paired_line, Named};
 
     /// The shell's labels a join's lines and prompts are held over
     /// (`client/shell/src/commands/device.rs`, `LABELS`), copied here because the
@@ -343,6 +350,33 @@ mod tests {
                 assert!(!line.contains(c), "{label:?}: {c:?} was printed as it is: {line:?}");
             }
         }
+    }
+
+    /// **Each line `contact list` prints gives the label as data**, over
+    /// [`LABELS`]: it is the plain word's line with that word's `quoted` print
+    /// replaced by the label's, so it is one line holding the label's print once,
+    /// no character `shown` escapes, and the DID after the name once. A contact
+    /// with no label is its DID alone.
+    #[test]
+    fn each_listed_line_prints_the_label_as_data() {
+        use kotton_wire::note::{quoted, shown};
+        const PLAIN: &str = "sam";
+        const DID: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+        let plain = list_line(DID, Some(PLAIN));
+        let own = format!("  {DID}");
+        assert_eq!(plain, format!("{}{own}", quoted(PLAIN)), "the plain word is printed by `quoted`, then the DID");
+        for label in LABELS {
+            let line = list_line(DID, Some(label));
+            assert!(!line.contains(['\n', '\r']), "{label:?}: not one line: {line:?}");
+            assert_eq!(line, plain.replace(&quoted(PLAIN), &quoted(label)), "{label:?}: printed outside its quote");
+            assert_eq!(line.matches(&quoted(label)).count(), 1, "{label:?}: {line:?}");
+            assert!(line.ends_with(&format!("{}{own}", quoted(label))), "{label:?}: {line:?}");
+            let printed = shown(label);
+            for c in label.chars().filter(|c| !printed.contains(*c)) {
+                assert!(!line.contains(c), "{label:?}: {c:?} was printed as it is: {line:?}");
+            }
+        }
+        assert_eq!(list_line(DID, None), DID);
     }
 
     fn contacts() -> Vec<(String, Option<String>)> {

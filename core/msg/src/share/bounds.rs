@@ -9,8 +9,10 @@
 //! listing already shows, before it reads the file. The guest has no host
 //! call that answers a bound, and a second copy of the numbers or the words
 //! would be a second answer nothing holds to the first. That is a region
-//! crossing, and it is declared in tier-check's `REGION_EXCEPTIONS` on
-//! DEC-0041's reason: a guest's reach is its WIT import set, and this file
+//! crossing no manifest states: `tier-check` reads the `path` dependencies of
+//! the manifests in this tree, not a `#[path]`, and the guest is not in this
+//! tree, so nothing here checks it. It stands on the reason the guest's
+//! confinement gives: a guest's reach is its WIT import set, and this file
 //! adds nothing to it — a few numbers, a sentence and a comparison, reaching
 //! no key, store or host. So this file names nothing outside `core`'s own
 //! prelude: what is said here must compile in both crates, and the rule
