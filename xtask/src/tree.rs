@@ -23,18 +23,12 @@
 //! resolves, and — the rule that would have caught the whole 2026-08-25 class — that **no
 //! top-level directory containing Rust is missing from [`CODE_ROOTS`]**.
 //!
-//! Three concepts, not eleven. Each gate names the one it means.
-
-/// The trust regions this tree holds, in dependency order.
-///
-/// `core/` acts on a principal's authority; `client/` only asks. `tier-check` refuses an edge
-/// from an earlier region into a later one, whatever its rows' owed lists say. The reference's
-/// other two, `system/` and `guest/`, are not in this tree.
-pub const REGIONS: &[&str] = &["core", "client"];
+//! One list, not eleven. Each gate that walks the tree names it.
 
 /// Every top-level root that holds compilable code.
 ///
-/// The regions plus the roots that are not regions: `infra/` (the relay, which is not a node),
+/// `core/` (the system, the vault and the protocol's crates) and `client/` (the CLI, the client
+/// library and the device-owner tool), plus `infra/` (the relay, which is not a node),
 /// `tools/` (test instruments), `xtask/` (the gates themselves) and `tests/` (the integration
 /// harness). A gate asking *"where is the code"* means this.
 pub const CODE_ROOTS: &[&str] = &["core", "client", "infra", "tools", "xtask", "tests"];
@@ -53,13 +47,11 @@ mod tests {
     /// OK over nothing.
     #[test]
     fn every_named_root_exists() {
-        for list in [REGIONS, CODE_ROOTS] {
-            for r in list {
-                assert!(
-                    repo().join(r).is_dir(),
-                    "`{r}` is named here and is not a directory"
-                );
-            }
+        for r in CODE_ROOTS {
+            assert!(
+                repo().join(r).is_dir(),
+                "`{r}` is named here and is not a directory"
+            );
         }
     }
 
@@ -93,25 +85,14 @@ mod tests {
         );
     }
 
-    /// Every region is a code root, and every region is a real one.
-    #[test]
-    fn the_regions_are_code_roots() {
-        for r in REGIONS {
-            assert!(CODE_ROOTS.contains(r), "region `{r}` is not in CODE_ROOTS");
-        }
-    }
-
-    /// `tier-check`'s rows are held to the roots: every root a row lies in is a code root, every
-    /// region is one, and every code root is a row's or named as no row. A root in neither is
+    /// `tier-check`'s rows are held to the roots: every root a row lies in is a code root, and
+    /// every code root is a row's or named as no row. A root in neither is
     /// code `tier-check` walks past.
     #[test]
     fn the_rows_lie_in_the_code_roots() {
         let rowed = crate::tier_check::row_roots();
         for r in &rowed {
             assert!(CODE_ROOTS.contains(r), "a row lies in `{r}`, which is not in CODE_ROOTS");
-        }
-        for r in REGIONS {
-            assert!(rowed.contains(r), "region `{r}` holds no row");
         }
         for r in CODE_ROOTS {
             let not = crate::tier_check::NOT_ROWS.contains(r);
