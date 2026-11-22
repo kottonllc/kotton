@@ -445,6 +445,22 @@ async fn open_channel(
     Ok((channel, observed_direct_addr))
 }
 
+/// Where the far device's answer to `Introduce` says it is, or why not. What
+/// the answer did not read as, and the far device's `Error`, are printed as
+/// data to a bounded length ([`kotton_wire::note::quoted_cut`]; how another
+/// node's text is printed); an answer not asked for by its name and no field of
+/// it ([`kotton_wire::ipc::unasked`]).
+fn introduced_at(answer: &[u8]) -> anyhow::Result<std::net::SocketAddr> {
+    let answer = serde_json::from_slice::<UserResponse>(answer).map_err(|e| {
+        anyhow::anyhow!("the introduction's answer did not read: {}", kotton_wire::note::quoted_cut(&e.to_string()))
+    })?;
+    match answer {
+        UserResponse::Introduced { addr } => Ok(addr.parse()?),
+        UserResponse::Error { message } => anyhow::bail!("introduction refused: {}", kotton_wire::note::quoted_cut(&message)),
+        other => anyhow::bail!("introduction answered {}", kotton_wire::ipc::unasked(&other)),
+    }
+}
+
 /// Ask the device at the far end of `relayed` for an introduction, and dial it.
 ///
 /// Binds this end's socket first, on this device's own address on the local network
@@ -479,11 +495,7 @@ async fn introduced(
     };
     let attempt = async {
         let answer = relayed.request(&serde_json::to_vec(&ask)?).await?;
-        let there: std::net::SocketAddr = match serde_json::from_slice::<UserResponse>(&answer)? {
-            UserResponse::Introduced { addr } => addr.parse()?,
-            UserResponse::Error { message } => anyhow::bail!("introduction refused: {message}"),
-            _ => anyhow::bail!("introduction answered with something else"),
-        };
+        let there = introduced_at(&answer)?;
         let (conn, _) = dial_introduced(
             &rt.signing_key,
             &rt.offer,
@@ -933,5 +945,36 @@ mod tests {
         assert!(gave_up.is_err());
         assert!(started.elapsed() < crate::introduction::DIRECT_WITHIN + Duration::from_millis(500));
         drop(unanswered);
+    }
+}
+
+#[cfg(test)]
+mod an_introductions_answer {
+    use super::*;
+    use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+
+    fn said(answer: &UserResponse) -> String {
+        introduced_at(&serde_json::to_vec(answer).unwrap()).expect_err("a refusal was read as an address").to_string()
+    }
+
+    /// **The far device's `Error` to `Introduce` is printed as data and to the
+    /// bound, what did not read as an answer too, and an answer not asked for
+    /// by its name and no field** (how another node's text is printed; how an
+    /// answer not asked for is said).
+    #[test]
+    fn a_refused_introduction_is_printed_as_data_and_to_the_bound() {
+        let long = "i".repeat(MAX_SAID_CHARS + 5);
+        for text in ["no `door`\nhere", long.as_str()] {
+            let refused = said(&UserResponse::Error { message: text.to_string() });
+            assert_eq!(refused, format!("introduction refused: {}", quoted_cut(text)));
+            assert!(!refused.contains('\n') && !refused.contains(text), "{refused}");
+        }
+        assert_eq!(said(&UserResponse::Error { message: "no `door`\nhere".into() }), "introduction refused: `no \\u{60}door\\u{60}\\nhere`");
+        assert_eq!(said(&UserResponse::VaultFull { held: 17, quota: 9 }), "introduction answered `VaultFull`");
+        let unread = introduced_at(b"{\"no `door`\": 1}").expect_err("no answer was read").to_string();
+        assert!(unread.starts_with("the introduction's answer did not read: `"), "{unread}");
+        assert!(!unread.contains("no `door`"), "{unread}");
+        let at = introduced_at(&serde_json::to_vec(&UserResponse::Introduced { addr: "127.0.0.1:9".into() }).unwrap());
+        assert_eq!(at.unwrap(), "127.0.0.1:9".parse::<std::net::SocketAddr>().unwrap());
     }
 }

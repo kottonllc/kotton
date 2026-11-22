@@ -256,18 +256,14 @@ async fn deliver_recovery_copy(
         let card = node.clone();
         let outcome = async {
             let client = runtime.dialer().connect(node, user_id).await?;
-            match client
+            let answer = client
                 .send(&kotton_wire::UserRequest::RecoveryStore {
                     user_id: user_id.to_string(),
                     bundle: bundle.clone(),
                     kel: chain.clone(),
                 })
-                .await?
-            {
-                UserResponse::Ok => Ok(()),
-                UserResponse::Error { message } => Err(anyhow::anyhow!(message)),
-                other => Err(anyhow::anyhow!("unexpected reply {other:?}")),
-            }
+                .await?;
+            recovery_copy_taken(answer).map_err(|why| anyhow::anyhow!(why))
         }
         .await;
         match outcome {
@@ -278,6 +274,21 @@ async fn deliver_recovery_copy(
         }
     }
     delivered
+}
+
+/// Whether the blind node took the recovery copy, read from its answer to
+/// `RecoveryStore`. Its `Error` is said as data, to a bounded length
+/// ([`kotton_wire::note::quoted_cut`]; how another node's text is printed),
+/// and any answer but `Ok` by its name and no field of it
+/// ([`kotton_wire::ipc::unasked`]; how an answer not asked for is said): the
+/// log line that says the copy was not delivered prints this and nothing
+/// else of the answer.
+fn recovery_copy_taken(answer: UserResponse) -> Result<(), String> {
+    match answer {
+        UserResponse::Ok => Ok(()),
+        UserResponse::Error { message } => Err(format!("the node answered: {}", kotton_wire::note::quoted_cut(&message))),
+        other => Err(format!("the node answered {}", kotton_wire::ipc::unasked(&other))),
+    }
 }
 
 pub(crate) async fn login_with_recovery_key(
@@ -462,4 +473,29 @@ pub(crate) async fn rotate_identity(
 /// because the registry does not live on it.
 pub(crate) async fn list_users(users: &crate::residency::UserRegistry) -> io::Result<UserResponse> {
     Ok(UserResponse::UserList { users: users.ids() })
+}
+
+#[cfg(test)]
+mod a_blind_nodes_answer_to_the_recovery_copy {
+    use super::*;
+    use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+
+    /// **A blind node's refusal of the recovery copy is said as data and to the
+    /// bound, and an answer not asked for by its name and no field** (how
+    /// another node's text is printed; how an answer not asked for is said):
+    /// what the log line prints of the answer.
+    #[test]
+    fn a_blind_nodes_refusal_of_the_recovery_copy_is_printed_as_data_and_to_the_bound() {
+        assert_eq!(recovery_copy_taken(UserResponse::Ok), Ok(()));
+        let long = "b".repeat(MAX_SAID_CHARS + 2);
+        for text in ["no `room`\nhere", long.as_str()] {
+            let said = recovery_copy_taken(UserResponse::Error { message: text.to_string() }).expect_err("a refusal was taken");
+            assert_eq!(said, format!("the node answered: {}", quoted_cut(text)));
+            assert!(!said.contains('\n') && !said.contains(text), "{said}");
+        }
+        let said = recovery_copy_taken(UserResponse::Error { message: "no `room`\nhere".into() }).unwrap_err();
+        assert_eq!(said, "the node answered: `no \\u{60}room\\u{60}\\nhere`");
+        let said = recovery_copy_taken(UserResponse::VaultFull { held: 17, quota: 9 }).unwrap_err();
+        assert_eq!(said, "the node answered `VaultFull`");
+    }
 }
