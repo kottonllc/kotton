@@ -6,12 +6,14 @@
 # xtask/tier-owed.toml.
 #
 # This is data rather than a table in the source so that `tier-check` reads it at the merge base
-# with origin/main too, as it reads the owed lists, and compares the two: a row's `may_link` does
-# not gain a row, `not_rows` does not gain a root, a row's mark does not change from `acting` or
-# `asking`, and a crate does not change rows where that admits an edge its row at the merge base
-# did not, or takes it out of a refusal no list may waive, unless the merge base's
-# xtask/tier-widenings.toml names that widening. An edge a list at the merge base owes is never
-# admitted while a manifest has it, however the rows change.
+# with origin/main too, as it reads the owed lists, and compares the two: no row arrives (a row
+# here matched with no row there, by name or, for a rename, by the same paths), a row's
+# `may_link` does not gain a row, `not_rows` does not gain a root, a row's mark does not change
+# from `acting` or `asking`, and a crate does not change rows where that admits an edge its row
+# at the merge base did not, or takes it out of a refusal no list may waive, unless the merge
+# base's xtask/tier-widenings.toml names that widening. An edge a list at the merge base owes is
+# never admitted while a manifest has it, however the rows change: a crate re-homed into its
+# dependency's row while that edge is owed has no route but untangling.
 #
 # Each `may_link` is the repository plan's: the CLI is built from the protocol and the client
 # library alone; the client library and the relay from the protocol; the vault from the protocol

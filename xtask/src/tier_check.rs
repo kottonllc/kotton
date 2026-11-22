@@ -89,17 +89,26 @@
 //!   waive, whether or not a manifest has the edge yet. A path that leaves a row, a path a row
 //!   gains from another's, and a row added over another row's paths each change the rows of the
 //!   crates under them;
-//! - a matched row marked `acting` or `asking` there that is marked otherwise here.
+//! - a matched row marked `acting` or `asking` there that is marked otherwise here;
+//! - a row that arrives: a row here matched with no row there. A row added, and a row renamed
+//!   whose paths change with its name, each arrive.
 //!
 //! Each of these is a widening, and is accepted only where [`WIDENINGS_FILE`] at the merge base
 //! names it: so a widening lands in two pull requests, each read and merged through the loop,
 //! the first recording it and the second making it and deleting the record, and an entry whose
-//! widening the tree already has is refused. Nothing accepts the one refusal more: an edge a
-//! list at the merge base owes, which a manifest here has, is refused when the rows here admit
-//! it, however they came to. An entry leaves the lists only when its crate is untangled, which is
-//! when no manifest here has its edge, from that crate to that crate by package name; a crate
-//! moved into its dependency's row, or a row's paths grown over it, or a row added over them,
-//! is not untangled.
+//! widening the tree already has is refused. A pull request has `origin/main` merged into it
+//! before it lands, and then its merge base is main's tip: a record counts only while main's tip
+//! holds it. An entry names rows the tree has, so splitting a row whose crates link each other
+//! takes three: the first records the new row; the second adds it over a placeholder path, a
+//! directory that holds a tracked file and no crate, and records the moves of the crates and the
+//! `may_link` gains the split needs; the third makes them and deletes the records. Nothing
+//! accepts the one refusal more: an edge a list at the merge base owes, which a manifest here
+//! has, is refused when the rows here admit it, however they came to. An entry leaves the lists only when its
+//! crate is untangled, which is when no manifest here has its edge, from that crate to that
+//! crate by package name; a crate moved into its dependency's row, or a row's paths grown over
+//! it, or a row added over them, is not untangled. So a crate re-homed into its dependency's
+//! row while the edge is owed has no route but untangling: no record accepts it, and its
+//! directory and the rows stay as the merge base has them until no manifest has the edge.
 //!
 //! Where the merge base has no [`ROWS_FILE`] (the change that brought it), the rows there are
 //! read from the table that held them in this source at that commit, `ROWS` and `NOT_ROWS` in
@@ -537,6 +546,8 @@ pub(crate) enum Widening {
     Mark { row: String, mark: Mark },
     /// `not_rows` gains `root`.
     NotRow { root: String },
+    /// Row `row` arrives: it is matched with no row at the merge base.
+    Arrives { row: String },
 }
 
 impl std::fmt::Display for Widening {
@@ -546,11 +557,12 @@ impl std::fmt::Display for Widening {
             Widening::Moves { krate, from, to } => write!(f, "crate = \"{krate}\", from = \"{from}\", to = \"{to}\""),
             Widening::Mark { row, mark } => write!(f, "row = \"{row}\", mark = \"{}\"", mark.word()),
             Widening::NotRow { root } => write!(f, "not_row = \"{root}\""),
+            Widening::Arrives { row } => write!(f, "row = \"{row}\""),
         }
     }
 }
 
-/// Parse [`WIDENINGS_FILE`]: a `[[widen]]` per widening, each one of the four shapes of
+/// Parse [`WIDENINGS_FILE`]: a `[[widen]]` per widening, each one of the five shapes of
 /// [`Widening`] with a `why` that is not empty, and nothing else.
 pub(crate) fn parse_widenings(text: &str) -> Result<Vec<Widening>, String> {
     let table: Table = text
@@ -586,10 +598,11 @@ pub(crate) fn parse_widenings(text: &str) -> Result<Vec<Widening>, String> {
                 mark: Mark::from_word(&mark).ok_or_else(|| format!("{at} names the mark `{mark}`"))?,
             },
             (["not_row"], .., Some(root)) => Widening::NotRow { root },
+            (["row"], Some(row), ..) => Widening::Arrives { row },
             _ => {
                 return Err(format!(
                     "{at} has {keys:?}: a widening is `row` and `gains`, `crate`, `from` and `to`, \
-                     `row` and `mark`, or `not_row`, each a string, with `why`"
+                     `row` and `mark`, `not_row`, or `row` alone, each a string, with `why`"
                 ))
             }
         };
@@ -1321,7 +1334,8 @@ pub(crate) fn judge(rows: &Rows, crates: &[Crate], edges: &BTreeSet<Edge>, owed:
                      with {MAIN_REF} ({}) owes, and the rows here admit it: an owed entry leaves \
                      the lists only when its crate is untangled, when no manifest has the edge, \
                      and a row's paths or `may_link` changing under it does not untangle it. \
-                     Untangle {} from {}, or put the rows back as they were there",
+                     Untangle {} from {}, or put the rows, and the directories of both crates, \
+                     back as they were there",
                     e.from,
                     e.from_dir,
                     fr.name,
@@ -1466,8 +1480,10 @@ fn matched<'a>(row: &Row, here: &Rows, there: &'a Rows) -> Option<&'a Row> {
 }
 
 /// Why an entry of [`WIDENINGS_FILE`] here is refused, if it is: each names a widening this tree
-/// has not made yet, of rows and crates it has.
-fn entry_refusal(w: &Widening, here: &Rows, crates: &[Crate]) -> Option<String> {
+/// has not made yet, of rows and crates it has (a row that arrives excepted), and one that can
+/// be made: a `may_link` gain of an acting row names an acting row, or a row `all`, the file's
+/// entries, record becoming `acting`.
+fn entry_refusal(w: &Widening, all: &[Widening], here: &Rows, crates: &[Crate]) -> Option<String> {
     let made = || {
         Some(format!(
             "{WIDENINGS_FILE} records `{w}`, which this tree has made: an entry is consumed by \
@@ -1478,11 +1494,18 @@ fn entry_refusal(w: &Widening, here: &Rows, crates: &[Crate]) -> Option<String> 
     match w {
         Widening::MayLink { row, gains } => {
             let Some(r) = here.named(row) else { return no_row(row) };
-            if here.named(gains).is_none() {
-                return no_row(gains);
-            }
+            let Some(g) = here.named(gains) else { return no_row(gains) };
             if r.may_link.contains(gains) {
                 return made();
+            }
+            let g_acts = g.mark == Mark::Acting || all.contains(&Widening::Mark { row: gains.clone(), mark: Mark::Acting });
+            if r.mark == Mark::Acting && !g_acts {
+                return Some(format!(
+                    "{WIDENINGS_FILE} records `{w}`, and row `{row}` is marked `acting` and row \
+                     `{gains}` `{}`: an acting row may link only acting rows, so it cannot be \
+                     made. Mark `{gains}` `acting` first, or record that with it, or delete it",
+                    g.mark.word()
+                ));
             }
         }
         Widening::Moves { krate, from, to } => {
@@ -1516,12 +1539,18 @@ fn entry_refusal(w: &Widening, here: &Rows, crates: &[Crate]) -> Option<String> 
                 return made();
             }
         }
+        Widening::Arrives { row } => {
+            if here.named(row).is_some() {
+                return made();
+            }
+        }
     }
     None
 }
 
-/// Judge the rows against the rows at the merge base: a `may_link` that gains a row, a root
-/// added to `not_rows`, a mark changed from `acting` or `asking`, and a crate that changes rows
+/// Judge the rows against the rows at the merge base: a row that arrives, a `may_link` that
+/// gains a row, a root added to `not_rows`, a mark changed from `acting` or `asking`, and a crate
+/// that changes rows
 /// where that admits an edge the rows there did not or takes one out of [`never`], each refused
 /// unless [`WIDENINGS_FILE`] at the merge base records it; and every entry of `widenings`, the
 /// file here, held to name a widening not yet made. An edge a list at the merge base owes is
@@ -1534,12 +1563,16 @@ pub(crate) fn judge_rows(
     edges: &BTreeSet<Edge>,
     owed_base: &Base,
 ) -> Vec<String> {
-    let mut refused: Vec<String> = widenings.iter().filter_map(|w| entry_refusal(w, here, crates)).collect();
+    let mut refused: Vec<String> = widenings
+        .iter()
+        .filter_map(|w| entry_refusal(w, widenings, here, crates))
+        .collect();
     let (commit, there, recorded): (&str, &Rows, &[Widening]) = match base {
         BaseRows::Unknown(why) => {
             refused.push(format!(
                 "the rows cannot be compared with the merge base with {MAIN_REF}, so whether they \
-                 widened cannot be judged: {why}"
+                 widened cannot be judged: {why}. Fetch, and merge {MAIN_REF} into the branch, so \
+                 the merge base is main's tip"
             ));
             return refused;
         }
@@ -1558,7 +1591,17 @@ pub(crate) fn judge_rows(
     };
 
     for h in &here.rows {
-        let Some(b) = matched(h, here, there) else { continue };
+        let Some(b) = matched(h, here, there) else {
+            widened(
+                Widening::Arrives { row: h.name.clone() },
+                format!(
+                    "row `{}` arrives: at {at} no row has its name, and none whose name is gone has \
+                     its paths. A row arrives only as a widening",
+                    h.name
+                ),
+            );
+            continue;
+        };
         for l in &h.may_link {
             if *l == h.name {
                 continue;
@@ -3051,18 +3094,23 @@ pub(crate) const NOT_ROWS: &[&str] = &["tools", "xtask", "tests"];
         here.not_rows.push("docs".into());
         let r = judged_rows(&here, &[], &BaseRows::Unknown("no origin/main".into()));
         assert_eq!(r.len(), 1, "{r:?}");
-        assert!(r[0].starts_with("the rows cannot be compared with the merge base") && r[0].ends_with("no origin/main"), "{r:?}");
+        assert!(
+            r[0].starts_with("the rows cannot be compared with the merge base")
+                && r[0].ends_with("no origin/main. Fetch, and merge origin/main into the branch, so the merge base is main's tip"),
+            "{r:?}"
+        );
         assert_eq!(judged_rows(&here, &[], &BaseRows::Absent { commit: "0123".into() }), Vec::<String>::new());
     }
 
-    /// The widenings file: each entry one of four shapes with a `why`, and each held to name a
-    /// widening this tree has not made, of rows and crates it has.
+    /// The widenings file: each entry one of five shapes with a `why`, and each held to name a
+    /// widening this tree has not made, of rows and crates it has, that can be made.
     #[test]
     fn the_widenings_are_read_and_held_pending() {
         let text = "[[widen]]\nrow = \"cli\"\ngains = \"relay\"\nwhy = \"a\"\n\
                     [[widen]]\ncrate = \"kotton-fs\"\nfrom = \"system\"\nto = \"protocol\"\nwhy = \"b\"\n\
                     [[widen]]\nrow = \"cli\"\nmark = \"neither\"\nwhy = \"c\"\n\
-                    [[widen]]\nnot_row = \"docs\"\nwhy = \"d\"\n";
+                    [[widen]]\nnot_row = \"docs\"\nwhy = \"d\"\n\
+                    [[widen]]\nrow = \"wallet\"\nwhy = \"e\"\n";
         let w = parse_widenings(text).unwrap();
         assert_eq!(
             w,
@@ -3071,8 +3119,10 @@ pub(crate) const NOT_ROWS: &[&str] = &["tools", "xtask", "tests"];
                 Widening::Moves { krate: "kotton-fs".into(), from: "system".into(), to: "protocol".into() },
                 Widening::Mark { row: "cli".into(), mark: Mark::Neither },
                 Widening::NotRow { root: "docs".into() },
+                Widening::Arrives { row: "wallet".into() },
             ]
         );
+        assert!(parse_widenings("[[widen]]\nrow = \"wallet\"\n").unwrap_err().contains("has no `why`"));
         assert_eq!(judged_rows(&rows(), &w, &base_at(rows(), vec![])), Vec::<String>::new());
         assert!(parse_widenings("[[widen]]\nnot_row = \"docs\"\n").unwrap_err().contains("has no `why`"));
         assert!(parse_widenings("[[widen]]\nnot_row = \"docs\"\nrow = \"cli\"\nwhy = \"x\"\n").unwrap_err().contains("a widening is"));
@@ -3086,11 +3136,69 @@ pub(crate) const NOT_ROWS: &[&str] = &["tools", "xtask", "tests"];
             (Widening::Moves { krate: "kotton-none".into(), from: "system".into(), to: "protocol".into() }, "`kotton-none` is no crate"),
             (Widening::Mark { row: "cli".into(), mark: Mark::Asking }, "which this tree has made"),
             (Widening::NotRow { root: "tools".into() }, "which this tree has made"),
+            (Widening::Arrives { row: "cli".into() }, "which this tree has made"),
+            (
+                Widening::MayLink { row: "vault".into(), gains: "relay".into() },
+                "row `vault` is marked `acting` and row `relay` `neither`: an acting row may link only acting rows, so it cannot be made",
+            ),
+            (
+                Widening::MayLink { row: "system".into(), gains: "cli".into() },
+                "row `system` is marked `acting` and row `cli` `asking`: an acting row may link only acting rows, so it cannot be made",
+            ),
         ] {
             let r = judged_rows(&rows(), std::slice::from_ref(&entry), &base_at(rows(), vec![]));
             assert_eq!(r.len(), 1, "{entry}: {r:?}");
             assert!(r[0].contains(says), "{entry}: {}", r[0]);
         }
+        // An acting row's gain recorded with the row it names becoming acting can be made.
+        let both = [
+            Widening::MayLink { row: "vault".into(), gains: "relay".into() },
+            Widening::Mark { row: "relay".into(), mark: Mark::Acting },
+        ];
+        assert_eq!(judged_rows(&rows(), &both, &base_at(rows(), vec![])), Vec::<String>::new());
+    }
+
+    /// A row that arrives, matched with no row at the merge base, is refused there and against
+    /// the table in source; recorded at the merge base it is accepted, and the record, kept
+    /// here, is refused as made. A row renamed whose paths change with its name arrives.
+    #[test]
+    fn a_row_that_arrives_is_refused() {
+        let mut here = rows();
+        here.rows.push(Row {
+            name: "wallet".into(),
+            becomes: "becomes nothing".into(),
+            mark: Mark::Asking,
+            paths: vec!["client/wallet".into()],
+            may_link: vec!["protocol".into(), "wallet".into()],
+        });
+        let w = Widening::Arrives { row: "wallet".into() };
+        for base in [base_at(rows(), vec![]), BaseRows::FromSource { commit: "0123456789abcdef".into(), rows: rows() }] {
+            let r = judged_rows(&here, &[], &base);
+            assert_eq!(r.len(), 1, "{r:?}");
+            assert!(
+                r[0].starts_with(&format!(
+                    "row `wallet` arrives: {AT} no row has its name, and none whose name is gone has its paths. A row arrives only as a widening. A widening lands only where xtask/tier-widenings.toml {AT} records it: record `row = \"wallet\"` there"
+                )),
+                "{}",
+                r[0]
+            );
+        }
+        assert_eq!(judged_rows(&here, &[], &base_at(rows(), vec![w.clone()])), Vec::<String>::new());
+        let r = judged_rows(&here, std::slice::from_ref(&w), &base_at(rows(), vec![w.clone()]));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].contains("which this tree has made"), "{r:?}");
+        // Recorded and not yet made: pending.
+        assert_eq!(judged_rows(&rows(), std::slice::from_ref(&w), &base_at(rows(), vec![])), Vec::<String>::new());
+
+        let mut here = renamed("vault", "keep");
+        let keep = row_mut(&mut here, "keep");
+        keep.may_link = vec!["protocol".into(), "keep".into()];
+        keep.paths.push("core/keep".into());
+        let r = judged_rows(&here, &[], &base_at(rows(), vec![]));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].starts_with("row `keep` arrives"), "{}", r[0]);
+        let w = Widening::Arrives { row: "keep".into() };
+        assert_eq!(judged_rows(&here, &[], &base_at(rows(), vec![w])), Vec::<String>::new());
     }
 
     /// The rows at the merge base are read from git objects: the rows file and the widenings
