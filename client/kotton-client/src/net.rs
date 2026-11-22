@@ -362,8 +362,7 @@ impl KottonClient {
         let code = match self.as_operator(user_id, vault, verb).await? {
             UserResponse::PairAdvertising { code, .. } => code.expose().to_string(),
             UserResponse::VaultKeepsAlready { .. } => return Ok(InvitedMe::KeptAlready),
-            UserResponse::Error { message } => return Err(io::Error::other(message)),
-            got => return Err(crate::protocol::unexpected(got)),
+            got => return Err(invite_me_refused(got)),
         };
         self.device_admit_as_operator_stream(user_id, &code, ttl_seconds, vault)
             .await
@@ -423,4 +422,39 @@ pub struct LocalDoor {
     pub listening: Option<String>,
     /// Whether this device can tell which network it is on.
     pub network_known: bool,
+}
+
+/// An operated vault's answer to `vault invite --me` that is no invite, as
+/// the caller's error. The vault's `Error` is printed as data, to a bounded
+/// length ([`kotton_wire::note::quoted_cut`]; how another node's text is
+/// printed); any other answer is said as [`crate::protocol::unexpected`] says
+/// it, by its name and no field.
+fn invite_me_refused(got: UserResponse) -> io::Error {
+    match got {
+        UserResponse::Error { message } => io::Error::other(kotton_wire::note::quoted_cut(&message)),
+        got => crate::protocol::unexpected(got),
+    }
+}
+
+#[cfg(test)]
+mod an_operated_vaults_answer {
+    use super::*;
+    use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+
+    /// **An operated vault's `Error` to `vault invite --me` is printed as data
+    /// and to the bound** (how another node's text is printed), and an answer
+    /// not asked for by its name (how an answer not asked for is said).
+    #[test]
+    fn an_operated_vaults_refusal_of_the_invite_is_printed_as_data_and_to_the_bound() {
+        let long = "o".repeat(MAX_SAID_CHARS + 7);
+        for text in ["no `relay`\nhere", long.as_str()] {
+            let said = invite_me_refused(UserResponse::Error { message: text.to_string() }).to_string();
+            assert_eq!(said, quoted_cut(text));
+            assert!(!said.contains('\n') && !said.contains(text), "{said}");
+        }
+        let said = invite_me_refused(UserResponse::Error { message: "no `relay`\nhere".into() }).to_string();
+        assert_eq!(said, "`no \\u{60}relay\\u{60}\\nhere`");
+        let said = invite_me_refused(UserResponse::VaultFull { held: 17, quota: 9 }).to_string();
+        assert_eq!(said, "unexpected response: `VaultFull`");
+    }
 }

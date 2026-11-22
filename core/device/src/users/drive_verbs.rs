@@ -261,8 +261,8 @@ use kotton_store::runtime::user::UserStore;
 use kotton_store::{NotCanonical, StorageKey};
 use kotton_sys::store::SealedObjectAccess as _;
 use kotton_wire::ipc::{
-    DriveDescriptor, DriveLease, Holding, MadeDrive, TenantDrive, UserResponse, VaultPeerRequest, FIRST_DRIVE_ID, FIRST_DRIVE_NAME,
-    TENANCY_TREE,
+    unasked, DriveDescriptor, DriveLease, Holding, MadeDrive, TenantDrive, UserResponse, VaultPeerRequest, FIRST_DRIVE_ID,
+    FIRST_DRIVE_NAME, TENANCY_TREE,
 };
 use kotton_wire::peer::PairedNode;
 use kotton_wire::note::quoted_cut;
@@ -494,12 +494,6 @@ fn read_listing(
 /// ([`quoted_cut`]; how another node's text is printed).
 fn vault_answered(message: &str) -> String {
     format!("the vault answered: {}", quoted_cut(message))
-}
-
-/// An answer the reader did not ask for, by its name and no field of it
-/// ([`UserResponse::name`]; kottonllc/kotton#597, 76B).
-fn unasked(other: &UserResponse) -> String {
-    kotton_wire::note::quoted(&other.name())
 }
 
 async fn ask(client: &KottonPeerObjectStorage, request: VaultPeerRequest) -> io::Result<UserResponse> {

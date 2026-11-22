@@ -44,7 +44,8 @@ use std::io;
 ///
 /// Names the variant, and for the four refusals says what the caller should do about
 /// it instead. A response with no remedy still gets its own name, which is what
-/// `"unexpected response"` never gave anybody.
+/// `"unexpected response"` never gave anybody, and nothing more: no field of it is
+/// printed.
 pub(crate) fn unexpected(got: UserResponse) -> io::Error {
     let text = match &got {
         // The one that cost ten minutes. The remedy is almost never "log in again";
@@ -74,7 +75,9 @@ pub(crate) fn unexpected(got: UserResponse) -> io::Error {
         UserResponse::SessionLocked => {
             "the session was invalidated — re-authenticate and retry".to_owned()
         }
-        other => format!("unexpected response: {other:?}"),
+        // Any other answer is said by its name and no field of it (how an
+        // answer not asked for is said; `kotton_wire::ipc::unasked`).
+        other => format!("unexpected response: {}", kotton_wire::ipc::unasked(other)),
     };
     io::Error::other(text)
 }
@@ -120,5 +123,16 @@ mod tests {
     fn a_response_with_no_remedy_is_still_named() {
         let msg = unexpected(UserResponse::UserLoggedOut).to_string();
         assert!(msg.contains("UserLoggedOut"), "got: {msg}");
+    }
+
+    /// **An answer not asked for is said by its name and no field** (how an
+    /// answer not asked for is said): neither a vault's text nor a number it
+    /// carries is printed.
+    #[test]
+    fn an_answer_not_asked_for_is_said_by_its_name_and_no_field() {
+        let msg = unexpected(UserResponse::Error { message: "no `vault`\nhere".into() }).to_string();
+        assert_eq!(msg, "unexpected response: `Error`");
+        let msg = unexpected(UserResponse::VaultFull { held: 17, quota: 9 }).to_string();
+        assert_eq!(msg, "unexpected response: `VaultFull`");
     }
 }

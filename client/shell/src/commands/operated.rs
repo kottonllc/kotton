@@ -2483,6 +2483,28 @@ mod tests {
         let kept = failed(spoken(&invite, To::Only("home"), UserResponse::VaultKeepsAlready { user_id: "sam".into() }));
         assert_eq!(kept, format!("vault: {}", kotton_wire::ipc::vault_keeps_already_said("sam")));
         let refused = failed(spoken(&OperatorVerb::Pools, To::Only("home"), UserResponse::Error { message: "no relay".into() }));
-        assert_eq!(refused, "vault: no relay");
+        assert_eq!(refused, "vault: `no relay`");
+    }
+
+    /// **An operated vault's text is printed as data and to the bound** (how
+    /// another node's text is printed): an `Error`'s message and the name a
+    /// `VaultKeepsAlready` carries, with a backtick and a line break escaped,
+    /// and one past `MAX_SAID_CHARS` cut.
+    #[test]
+    fn an_operated_vaults_text_is_printed_as_data_and_to_the_bound() {
+        use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+        let long = "s".repeat(MAX_SAID_CHARS + 8);
+        let invite = OperatorVerb::Invite { pool: "sam".into(), quota: None, ttl_seconds: 5 };
+        for text in ["no `relay`\nhere", long.as_str()] {
+            let refused = failed(spoken(&OperatorVerb::Pools, To::Only("home"), UserResponse::Error { message: text.to_string() }));
+            assert_eq!(refused, format!("vault: {}", quoted_cut(text)));
+            let kept = failed(spoken(&invite, To::Only("home"), UserResponse::VaultKeepsAlready { user_id: text.to_string() }));
+            assert!(kept.starts_with(&format!("vault: this vault already keeps for {} — ", quoted_cut(text))), "{kept}");
+            for said in [&refused, &kept] {
+                assert!(!said.contains('\n') && !said.contains(text), "{said}");
+            }
+        }
+        let refused = failed(spoken(&OperatorVerb::Pools, To::Only("home"), UserResponse::Error { message: "no `relay`\nhere".into() }));
+        assert_eq!(refused, "vault: `no \\u{60}relay\\u{60}\\nhere`");
     }
 }

@@ -726,14 +726,17 @@ fn relay_said(proved: bool, said: Option<Result<RelayOperatorResponse, kotton_ne
 /// is the key not standing there: a vault admits no key it does not hold past
 /// its handshake, so that refusal is its whole answer. A wire that dropped, a
 /// connection cut by whatever stands between, an answer of any other kind or
-/// none says nothing about the key.
+/// none says nothing about the key. The vault's `Error` is said as data, to a
+/// bounded length ([`kotton_wire::note::quoted_cut`]; how another node's text
+/// is printed), and any other answer by its name and no field of it
+/// ([`kotton_wire::ipc::unasked`]).
 fn vault_said(said: Option<anyhow::Result<UserResponse>>) -> Asked {
     match said {
         Some(Ok(UserResponse::VaultTenants { .. })) => Asked::Stands,
         Some(Err(e)) if kotton_peer::refused_at_handshake(&e).is_some() => Asked::Answered,
         Some(Err(e)) => Asked::Unsure(format!("{e:#}")),
-        Some(Ok(UserResponse::Error { message })) => Asked::Unsure(message),
-        Some(Ok(other)) => Asked::Unsure(format!("it answered {other:?}")),
+        Some(Ok(UserResponse::Error { message })) => Asked::Unsure(format!("the vault answered: {}", kotton_wire::note::quoted_cut(&message))),
+        Some(Ok(other)) => Asked::Unsure(format!("the vault answered {}", kotton_wire::ipc::unasked(&other))),
         None => Asked::Unsure(format!("no answer as its operator within {}s", WITHIN.as_secs())),
     }
 }
@@ -1504,6 +1507,26 @@ fn not_told(reason: String) -> Unstood {
     Unstood { why: UnstoodWhy::NotTold, reason, relays: Vec::new() }
 }
 
+/// Whether the vault called `name` took its reach set — `said` is `None` when
+/// it gave no answer within the bound. The vault's `Error` is said as data, to
+/// a bounded length ([`kotton_wire::note::quoted_cut`]; how another node's text
+/// is printed), and any answer but `Ok` by its name and no field of it
+/// ([`kotton_wire::ipc::unasked`]).
+fn reach_taken(name: &str, said: Option<anyhow::Result<UserResponse>>) -> Result<(), Unstood> {
+    match said {
+        Some(Ok(UserResponse::Ok)) => Ok(()),
+        Some(Ok(UserResponse::Error { message })) => {
+            Err(not_told(format!("the vault '{name}' refused: {}", kotton_wire::note::quoted_cut(&message))))
+        }
+        Some(Ok(other)) => Err(not_told(format!(
+            "the vault '{name}' answered {} where it was told its reach set",
+            kotton_wire::ipc::unasked(&other)
+        ))),
+        Some(Err(e)) => Err(not_told(format!("the vault '{name}' could not be reached: {e:#}"))),
+        None => Err(not_told(format!("the vault '{name}' did not answer within {}s", WITHIN.as_secs()))),
+    }
+}
+
 /// Tell the vault `vault` its whole reach set — `relays`, each by its key, as
 /// this desktop operates it: the URL its credential holds as the hint, and the
 /// admission keys kept for it — and record what was told, dated. A relay in
@@ -1604,13 +1627,7 @@ async fn tell(runtime: &DeviceRuntime, store: &UserStore, vault: &OperatorCreden
     let before = stands_of(store, &v);
     let reach = before.as_ref().and_then(|b| b.relays.first()).map(|r| r.hint.as_str());
     let request = vec![VaultPeerRequest::StandAt { relays: set }];
-    match tokio::time::timeout(WITHIN, say(runtime, vault, reach, request)).await {
-        Ok(Ok(UserResponse::Ok)) => {}
-        Ok(Ok(UserResponse::Error { message })) => return Err(not_told(format!("the vault '{}' refused: {message}", vault.name))),
-        Ok(Ok(_)) => return Err(not_told(format!("the vault '{}' answered something other than taking its reach set", vault.name))),
-        Ok(Err(e)) => return Err(not_told(format!("the vault '{}' could not be reached: {e:#}", vault.name))),
-        Err(_) => return Err(not_told(format!("the vault '{}' did not answer within {}s", vault.name, WITHIN.as_secs()))),
-    }
+    reach_taken(&vault.name, tokio::time::timeout(WITHIN, say(runtime, vault, reach, request)).await.ok())?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -3735,6 +3752,33 @@ mod tests {
         assert!(matches!(vault_said(Some(Ok(UserResponse::Error { message: "no".into() }))), Asked::Unsure(_)));
         assert!(matches!(vault_said(Some(Ok(UserResponse::Ok))), Asked::Unsure(_)));
         assert!(matches!(vault_said(None), Asked::Unsure(_)));
+    }
+
+    /// **A vault's `Error` to the operator's read, and to its reach set, is
+    /// said as data and to the bound; an answer not asked for by its name and
+    /// no field** (how another node's text is printed; how an answer not asked
+    /// for is said).
+    #[test]
+    fn a_vaults_refusal_to_its_operator_is_printed_as_data_and_to_the_bound() {
+        use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+        let long = "v".repeat(MAX_SAID_CHARS + 6);
+        for text in ["no `key`\nhere", long.as_str()] {
+            let refused = || Some(Ok(UserResponse::Error { message: text.to_string() }));
+            let Asked::Unsure(read) = vault_said(refused()) else { panic!("an `Error` was said as the key standing or revoked") };
+            assert_eq!(read, format!("the vault answered: {}", quoted_cut(text)));
+            let told = reach_taken("home", refused()).expect_err("an `Error` took the reach set").reason;
+            assert_eq!(told, format!("the vault 'home' refused: {}", quoted_cut(text)));
+            for said in [&read, &told] {
+                assert!(!said.contains('\n') && !said.contains(text), "{said}");
+            }
+        }
+        let Asked::Unsure(read) = vault_said(Some(Ok(UserResponse::Error { message: "no `key`\nhere".into() }))) else { panic!() };
+        assert_eq!(read, "the vault answered: `no \\u{60}key\\u{60}\\nhere`");
+        let unasked = || Some(Ok(UserResponse::VaultFull { held: 17, quota: 9 }));
+        assert_eq!(vault_said(unasked()), Asked::Unsure("the vault answered `VaultFull`".into()));
+        let told = reach_taken("home", unasked()).expect_err("an answer not asked for took the reach set").reason;
+        assert_eq!(told, "the vault 'home' answered `VaultFull` where it was told its reach set");
+        assert!(reach_taken("home", Some(Ok(UserResponse::Ok))).is_ok());
     }
 
     /// **`mint relay` twice is refused the second time, naming the spelling

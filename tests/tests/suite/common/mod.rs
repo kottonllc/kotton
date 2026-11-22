@@ -1512,7 +1512,7 @@ mod ceremony_reader_tests {
     /// the error, where it once said only that it did not complete.
     #[tokio::test]
     #[should_panic(
-        expected = "the issuer's stream ended before PairAdvertising; it said: [open device-add listener: bootstrap QUIC bind failed: Address already in use (os error 98)]"
+        expected = "the issuer's stream ended before PairAdvertising; it said: [`open device-add listener: bootstrap QUIC bind failed: Address already in use (os error 98)`]"
     )]
     async fn a_stream_that_ends_on_a_refusal_before_its_code_says_the_refusal() {
         issuer_reads(vec![UserResponse::Error {

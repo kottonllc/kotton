@@ -771,6 +771,23 @@ fn cosigner_nodes(members: &[Member], rows: Vec<PairedNode>) -> Vec<PairedNode> 
     rows.into_iter().filter(|n| chosen.contains(&n.device_did.to_string())).collect()
 }
 
+/// A co-signer's answer to a signing round: its reply, or why not. The
+/// co-signer's `Error`, and what its reply did not read as, are printed as data
+/// to a bounded length ([`kotton_wire::note::quoted_cut`]; how another node's
+/// text is printed); an answer not asked for by its name and no field of it
+/// ([`kotton_wire::ipc::unasked`]).
+fn round_reply_in(resp: UserResponse) -> anyhow::Result<kotton_org::frost_signing::FrostRoundReply> {
+    match resp {
+        UserResponse::FrostSignReply { payload } => serde_json::from_str(&payload).map_err(|e| {
+            anyhow::anyhow!("the co-signer's round reply did not read: {}", kotton_wire::note::quoted_cut(&e.to_string()))
+        }),
+        UserResponse::Error { message } => {
+            Err(anyhow::anyhow!("the co-signer answered: {}", kotton_wire::note::quoted_cut(&message)))
+        }
+        other => Err(anyhow::anyhow!("the co-signer answered {}", kotton_wire::ipc::unasked(&other))),
+    }
+}
+
 /// Coordinate a threshold signature over `message` across this node's own
 /// network. This node contributes its own FROST share locally and co-signs with
 /// every **Full** own-device member reached over the authenticated peer channel
@@ -891,16 +908,7 @@ pub async fn threshold_sign(
                         payload,
                     })
                     .await?;
-                match resp {
-                    UserResponse::FrostSignReply { payload } => {
-                        serde_json::from_str::<FrostRoundReply>(&payload)
-                            .map_err(|e| anyhow::anyhow!("parse round reply: {e}"))
-                    }
-                    UserResponse::Error { message } => {
-                        Err(anyhow::anyhow!("co-signer error: {message}"))
-                    }
-                    other => Err(anyhow::anyhow!("unexpected co-signer response: {other:?}")),
-                }
+                round_reply_in(resp)
             })
                 as std::pin::Pin<
                     Box<dyn std::future::Future<Output = anyhow::Result<FrostRoundReply>> + Send>,
@@ -3667,5 +3675,40 @@ mod narrowest_of_a_keys_rows {
             );
             sqlx::query("DELETE FROM paired_nodes").execute(db.as_ref()).await.unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod a_cosigners_answer {
+    use super::*;
+    use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+
+    fn said(resp: UserResponse) -> String {
+        match round_reply_in(resp) {
+            Ok(_) => panic!("a refusal was read as a round reply"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// **A co-signer's `Error`, and a reply that does not read, are printed as
+    /// data and to the bound; an answer not asked for by its name and no
+    /// field** (how another node's text is printed; how an answer not asked
+    /// for is said).
+    #[test]
+    fn a_cosigners_refusal_is_printed_as_data_and_to_the_bound() {
+        let long = "c".repeat(MAX_SAID_CHARS + 4);
+        for text in ["no `round`\nhere", long.as_str()] {
+            let refused = said(UserResponse::Error { message: text.to_string() });
+            assert_eq!(refused, format!("the co-signer answered: {}", quoted_cut(text)));
+            assert!(!refused.contains('\n') && !refused.contains(text), "{refused}");
+        }
+        assert_eq!(
+            said(UserResponse::Error { message: "no `round`\nhere".into() }),
+            "the co-signer answered: `no \\u{60}round\\u{60}\\nhere`"
+        );
+        let unread = said(UserResponse::FrostSignReply { payload: "\"no `round`\\nhere\"".into() });
+        assert!(unread.starts_with("the co-signer's round reply did not read: `"), "{unread}");
+        assert!(!unread.contains('\n') && !unread.contains("no `round`"), "{unread}");
+        assert_eq!(said(UserResponse::VaultFull { held: 17, quota: 9 }), "the co-signer answered `VaultFull`");
     }
 }

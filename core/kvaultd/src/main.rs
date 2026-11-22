@@ -964,8 +964,8 @@ mod tests {
     /// anything else (`_ => {}`), saying only that the ceremony closed; now it
     /// names neither. `VaultFull` stands in for a typed answer a later release
     /// adds: the verb returns with it said in `answer_said`, no field of it
-    /// printed. A refusal in the vault's words is said in those words, though
-    /// the reader names no `Error`; and a frame of the ceremony after an unread
+    /// printed. A refusal in the vault's words is said in those words, as data
+    /// (`answer_said`), though the reader names no `Error`; and a frame of the ceremony after an unread
     /// one does not lose it.
     #[cfg(unix)]
     #[tokio::test]
@@ -993,7 +993,7 @@ mod tests {
         assert!(said.starts_with("the answer was `VaultFull`") && !said.contains('{'), "{said}");
 
         let refused = UserResponse::Error { message: "invalid connection code: not one".into() };
-        assert_eq!(ended_on(vec![refused]).await, "invalid connection code: not one");
+        assert_eq!(ended_on(vec![refused]).await, "`invalid connection code: not one`");
 
         let said = ended_on(vec![unnamed.clone(), UserResponse::PairConnecting]).await;
         assert_eq!(said, kotton_wire::ipc::answer_said(&unnamed));
