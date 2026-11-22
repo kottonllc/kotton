@@ -1857,6 +1857,85 @@ mod tests {
         assert_eq!(commands, 4 * (labels.len() + 1), "a vault's two commands, for each of the two vault roles and each label");
     }
 
+    /// The characters a person reads as the delimiter, spelled here as the decision on
+    /// which characters the quoted print's rule names spells them, not read from the
+    /// rule's constant: the backtick and each character drawn as it.
+    const DRAWN_AS_THE_DELIMITER: [char; 6] = ['`', '\u{2cb}', '\u{2f4}', '\u{1fef}', '\u{2035}', '\u{ff40}'];
+
+    /// The two marks drawn as the delimiter where what they are drawn on is the space.
+    const DRAWN_AS_THE_DELIMITER_ON_SPACE: [char; 2] = ['\u{300}', '\u{340}'];
+
+    /// How many delimiters a person reads in `line`, as it is written: each character
+    /// drawn as the delimiter, and each of the two marks where what it is drawn on is the
+    /// space. What a mark is drawn on is the character before it, or, past marks written
+    /// as they are, the one those marks are drawn on.
+    fn delimiters_read(line: &str) -> usize {
+        use kotton_schemas::petname::is_printed_as_is;
+        let mut drawn_on = None;
+        let mut count = 0;
+        for c in line.chars() {
+            let mark = is_printed_as_is(c, false) && !is_printed_as_is(c, true);
+            if DRAWN_AS_THE_DELIMITER.contains(&c) || (DRAWN_AS_THE_DELIMITER_ON_SPACE.contains(&c) && drawn_on == Some(' ')) {
+                count += 1;
+            }
+            if !mark {
+                drawn_on = Some(c);
+            }
+        }
+        count
+    }
+
+    /// **A person reading the join's question and a join's completion lines can tell
+    /// where the label's quote ends** (the decision on which characters the quoted
+    /// print's rule names: the delimiter, and what is drawn as it). For a label that holds
+    /// each character drawn as the backtick, a space with each grave mark drawn on it
+    /// (after another mark too), and all of them at once, the joining side's question and
+    /// every line a join's completion hands the renderer, a vault's among them, hold
+    /// exactly as many delimiters as a person reads in the same line for a plain word.
+    #[test]
+    fn a_quoted_label_holds_no_delimiter_a_person_reads_as_its_end() {
+        let mut labels: Vec<String> = DRAWN_AS_THE_DELIMITER.iter().map(|c| format!("ph{c}one")).collect();
+        for m in DRAWN_AS_THE_DELIMITER_ON_SPACE {
+            labels.push(format!("ph {m}one"));
+            labels.push(format!("ph \u{301}{m}one"));
+        }
+        let mut all: String = DRAWN_AS_THE_DELIMITER.iter().collect();
+        for m in DRAWN_AS_THE_DELIMITER_ON_SPACE {
+            all.push(' ');
+            all.push(m);
+        }
+        labels.push(format!("a{all}b"));
+        for label in &labels {
+            assert!(delimiters_read(label) > 0, "{label:?} holds no character the rule names");
+        }
+
+        let plain = super::join_question(Some(PLAIN));
+        assert_eq!(delimiters_read(&plain), 2, "{plain:?}");
+        for label in &labels {
+            let line = super::join_question(Some(label));
+            assert_eq!(delimiters_read(&line), delimiters_read(&plain), "the join's question for {label:?}: {line:?}");
+        }
+
+        let mut vault_lines = 0;
+        for role in ROLES {
+            let plain = completion_said(role, PLAIN);
+            for label in &labels {
+                let said = completion_said(role, label);
+                assert_eq!(said.len(), plain.len(), "{role:?} {label:?}");
+                for (line, plain) in said.iter().zip(&plain) {
+                    assert_eq!(delimiters_read(line), delimiters_read(plain), "{role:?} for {label:?}: {line:?}");
+                    if matches!(role, Role::Vault)
+                        && plain.starts_with("`drive list` says what")
+                        && plain.contains(&format!("`{PLAIN}`"))
+                    {
+                        vault_lines += 1;
+                    }
+                }
+            }
+        }
+        assert!(vault_lines >= labels.len(), "no vault's completion line printed the label");
+    }
+
     /// **A completion's commands take the joined node's DID, not its label**
     /// (kottonllc/kotton#597, 52C; kottonllc/kotton#643): the lines are made from the
     /// node, and for a node whose label is a plain word that is not its DID, every
