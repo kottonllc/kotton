@@ -668,16 +668,19 @@ pub enum UserResponse {
     /// whose request names a pool, before the verb is read, whatever the verb.
     /// Every other refusal is an [`Self::Error`].
     ///
-    /// Typed rather than an `Error` string because one reader acts on it: the
+    /// Typed rather than an `Error` string because two readers act on it: the
     /// admit on a device (`kotton_device::users::pairing`) records nothing when
     /// it hears it, and `kind` chooses which of two sentences of the device's
-    /// own it prints. Nothing reads `message` to decide anything; every reader
-    /// prints it as data ([`crate::note::quoted_cut`]), as it prints an
-    /// `Error`'s.
+    /// own it prints; an operator's drop (`kuserd::agent::operator`) reads it
+    /// as the vault's refusal and rotates no key. Nothing reads `message` to
+    /// decide anything. Every reader that names this answer and prints its
+    /// sentence prints it as data ([`crate::note::quoted_cut`]), as it prints
+    /// an `Error`'s; the doors' pass (`kuserd::agent::vault_doors`) logs the
+    /// answer by its name and no field of it.
     ///
     /// **No pool's name is a field.** The pool a key is held under is said, to
     /// that key alone, inside `message`, the vault's sentence, which is printed
-    /// and kept nowhere.
+    /// and kept nowhere: no log of the doors' pass holds it.
     NotPairedAs {
         kind: NotPairedAsKind,
         message: String,

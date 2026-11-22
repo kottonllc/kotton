@@ -1451,19 +1451,18 @@ async fn refused_as(runtime: &DeviceRuntime, node: kotton_wire::peer::PairedNode
 /// Which way out is offered is the refusal's kind, and no word of its
 /// sentence: the sentence is printed, and read for nothing.
 fn not_kept_as(user_id: &str, refused: &Refused) -> String {
-    let what_to_do = if refused.kind == kotton_wire::ipc::NotPairedAsKind::AsAnother {
-        format!(
+    let what_to_do = match refused.kind {
+        kotton_wire::ipc::NotPairedAsKind::AsAnother => format!(
             "The vault was given another name for this device than it syncs as. On the host, invite again \
              under this device's user — `kvaultd invite {user_id}` (or `vault invite [<v>] {user_id}` \
              from the desktop that holds its credential) — and admit that invite here first. Once \
              it is admitted, the other tenant can be dropped on the host, if it was only ever this \
              device's."
-        )
-    } else {
-        format!(
+        ),
+        kotton_wire::ipc::NotPairedAsKind::Unsaid => format!(
             "On the host, `kvaultd invite {user_id}` (or `vault invite [<v>] {user_id}` from the desktop \
              that holds its credential), and admit that invite here."
-        )
+        ),
     };
     format!(
         "Not admitted: the vault will not keep for this device as `{user_id}`: {}. Nothing of it was \

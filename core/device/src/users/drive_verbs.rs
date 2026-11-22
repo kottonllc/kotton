@@ -491,7 +491,7 @@ fn read_listing(
 
 /// A vault's `Error` or `NotPairedAs`, where the sentence has no words of the
 /// device's around it: the vault's text printed as data, to a bounded length
-/// ([`quoted_cut`]; kottonllc/kotton#597, 43A, 74A).
+/// ([`quoted_cut`]; how another node's text is printed).
 fn vault_answered(message: &str) -> String {
     format!("the vault answered: {}", quoted_cut(message))
 }

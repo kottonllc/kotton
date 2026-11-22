@@ -1003,9 +1003,21 @@ pub(crate) async fn try_ask_the_vault_as(
     try_ask_the_vault_with(&key, &offer, vault, request).await
 }
 
+/// What [`try_ask_the_vault_with`] puts first on an error that is the vault's
+/// refusal of the key at the handshake: found by its type
+/// ([`kotton_peer::refused_at_handshake`]), never by the error's words.
+const REFUSED_AT_THE_HANDSHAKE: &str = "refused at the handshake";
+
+/// Whether an exchange ended in the vault's refusal of the key at the
+/// handshake, so that no answer of the vault's arrived, in either shape.
+fn refused_at_the_handshake(asked: &Result<UserResponse, String>) -> bool {
+    matches!(asked, Err(e) if e.starts_with(REFUSED_AT_THE_HANDSHAKE))
+}
+
 /// Dial the vault under `key`, offering `offer` in the certificate — a
 /// recovery claim, say, as a phrase-only device does — and send `request`.
-/// `Err` is a refusal at the handshake or on the stream.
+/// `Err` is a refusal at the handshake or on the stream; a refusal at the
+/// handshake starts [`REFUSED_AT_THE_HANDSHAKE`].
 async fn try_ask_the_vault_with(
     key: &ed25519_dalek::SigningKey,
     offer: &kotton_net::transport::quic::tls::CertOffer,
@@ -1023,7 +1035,10 @@ async fn try_ask_the_vault_with(
     let raw = QuicPeerChannel::new(conn)
         .request(&request)
         .await
-        .map_err(|e| format!("no answer: {e}"))?;
+        .map_err(|e| match kotton_peer::refused_at_handshake(&e) {
+            Some(refused) => format!("{REFUSED_AT_THE_HANDSHAKE}: {refused}; {e}"),
+            None => format!("no answer: {e}"),
+        })?;
     serde_json::from_slice::<UserResponse>(&raw).map_err(|e| e.to_string())
 }
 
@@ -2319,9 +2334,13 @@ async fn a_desktop_holding_the_operator_credential_invites_and_sets_a_quota_and_
                     || message.contains("is not this vault's operator"),
                 "{name}: {message}"
             ),
-            // A stranger to the pool the verb names is refused in the vault's
-            // answer for it.
-            UserResponse::NotPairedAs { .. } => {}
+            // A stranger to the pool the verb names (`mallory` for the invite,
+            // `sam` for the drop) is refused in the vault's answer for it: the
+            // key is held here under another pool, alice's.
+            UserResponse::NotPairedAs {
+                kind: kotton_wire::ipc::NotPairedAsKind::AsAnother,
+                ..
+            } => {}
             other => panic!("a tenant's device said {name}: {other:?}"),
         }
     }
@@ -2365,7 +2384,9 @@ async fn a_desktop_holding_the_operator_credential_invites_and_sets_a_quota_and_
             other => panic!("the operator credential read alice's {name}: {other:?}"),
         }
     }
-    // The desktop without it is no one the vault admits.
+    // The desktop without it is no one the vault admits: the exchange ends in
+    // the handshake's refusal of its key, before any rule of the vault's is
+    // read, and no answer of the vault's arrives, in either shape.
     let list = serde_json::to_vec(&UserRequest::ListSealed {
         user_id: "alice".into(),
         mount: "local".into(),
@@ -2378,8 +2399,8 @@ async fn a_desktop_holding_the_operator_credential_invites_and_sets_a_quota_and_
     )
     .await;
     assert!(
-        refused.is_err() || matches!(refused, Ok(UserResponse::Error { .. })),
-        "a desktop with no standing read alice's packs: {refused:?}"
+        refused_at_the_handshake(&refused),
+        "a desktop with no standing was not refused at the handshake: {refused:?}"
     );
 }
 
@@ -4222,14 +4243,15 @@ async fn a_landlord_drops_one_of_two_tenants(
     let (held, quota) = within("alice's capacity", door.vault_capacity("alice")).await.expect("capacity");
     assert_eq!((held, quota), (0, None), "the vault holds nothing for the name");
 
-    // Her device is refused — at the handshake, its key off the allowlist —
-    // and her own push does not land.
+    // Her device is refused — at the handshake, its key off the allowlist,
+    // before any rule of the vault's is read, so no answer of the vault's
+    // arrives, in either shape — and her own push does not land.
     let asked = serde_json::to_vec(&VaultPeerRequest::VaultCapacity { user_id: "alice".into() }).unwrap();
-    match within("alice's device asks", try_ask_the_vault_as(&alice_device, &alice_vault, asked)).await {
-        Err(_) => {}
-        Ok(UserResponse::Error { message }) if message.contains("not paired") => {}
-        Ok(other) => panic!("alice's device still reaches a pool here: {other:?}"),
-    }
+    let refused = within("alice's device asks", try_ask_the_vault_as(&alice_device, &alice_vault, asked)).await;
+    assert!(
+        refused_at_the_handshake(&refused),
+        "alice's device was not refused at the handshake after the drop: {refused:?}"
+    );
     within("alice writes", alice.write_file("alice", "after.txt", b"after the drop"))
         .await
         .expect("write locally");
