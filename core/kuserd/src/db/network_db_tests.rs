@@ -89,9 +89,9 @@ mod tests {
         let (pk, _) = key_and_did(11);
         insert_paired_node(&db, "newer", "alice", &vk(&pk), "[]", 0, Some("steward")).await.unwrap();
         let node = list_paired_nodes(&db, "alice").await.unwrap().pop().unwrap();
-        assert!(!offers_from(node.posture), "an unrecognised posture was read as full");
+        assert!(!offers_from(Some(node.posture.as_deref())), "an unrecognised posture was read as full");
         let one = paired_node_named(&db, "alice", "newer").await.unwrap().unwrap();
-        assert!(!offers_from(one.posture), "an unrecognised posture was read as full, by its label");
+        assert!(!offers_from(Some(one.posture.as_deref())), "an unrecognised posture was read as full, by its label");
     }
 
     #[tokio::test]

@@ -53,9 +53,11 @@ pub struct PairedNode {
     /// recognise — a newer variant read after a downgrade, a corrupted row —
     /// stays distinct from *none recorded* rather than collapsing into it.
     ///
-    /// Read where what the peer *says* is weighed by what it *is*: a relay key
-    /// offered on as one of the person's own devices is learned only from a
-    /// *full* one (`kotton_peer::relay_keys::offers_from`).
+    /// What the peer *is*, where what it *says* is weighed, is read from the
+    /// person's rows for its key, the narrowest of them, and not from this
+    /// field of a node a caller handed in: a relay key offered on as one of the
+    /// person's own devices is learned only from a key those rows say is *full*
+    /// (`kotton_peer::relay_keys::offers_from`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts-types", ts(skip))]
     pub posture: Option<String>,

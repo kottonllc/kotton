@@ -270,7 +270,9 @@ impl OperatorCredential {
             addresses: addr.iter().copied().collect(),
             relay_url: stands_at.map(str::to_string),
             // It holds nothing of the person's, so nothing it answers is learned
-            // as one of their own devices' keys (`RelayKeyring::learn_proven`).
+            // as one of their own devices' keys: the credential's dialler asks
+            // no question of the person's rows and weighs it as a node with no
+            // row ([`Self::dialer`]), whatever posture is written here.
             posture: Some(kotton_schemas::membership::Posture::BlindStorage.as_str().to_string()),
         })
     }
@@ -645,6 +647,18 @@ mod tests {
             hex::encode(key.to_bytes()),
             hex::encode(key.verifying_key().to_bytes()),
         )
+    }
+
+    /// **The operator's dialler asks no question of the person's rows**: it
+    /// dials for no person, so what its vault answers is weighed as from a
+    /// node the person has no row for (`Dialer::new`, which carries none).
+    #[test]
+    fn the_operators_dialler_carries_no_question() {
+        let key = SigningKey::from_bytes(&[5u8; 32]);
+        let c = OperatorCredential::parse(&vault_text(&key)).expect("reads");
+        let reach = std::sync::Arc::new(crate::Reachability::new(Default::default(), key.clone()));
+        let dialer = c.dialer(reach, std::sync::Arc::new(kotton_diag::EventBus::with_default_capacity()));
+        assert!(!dialer.asks(), "the operator's dialler asks what a key is to a person");
     }
 
     /// **The rule asked for at a relay's mint rides in its credential and

@@ -921,3 +921,106 @@ async fn a_served_key_that_is_not_canonical_is_refused_before_any_path_is_built(
         "each refused key, and none the remote does not serve, is counted among those the pass did not move: {result:?}"
     );
 }
+
+/// **A dial learns an `offer` only where the narrowest of the person's rows
+/// for the key says `full`, through the daemon's own dialler.** A, a relay's
+/// operator for alice, answers `NodeRelay` with *mine* and an `offer`. B,
+/// alice's full device, dials A through its runtime's dialler with the row it
+/// keeps for A, which names no posture as a joiner writes the device that
+/// enrolled it, and learns both and the relay. With a second
+/// row of alice's for A's key that says `blind-storage`, the next connect, to
+/// an answer with new keys, learns neither new key and still the relay. For a
+/// person B has no row for A under (carol, whom A pairs B for), the same
+/// answer, with an `offer` in it, teaches no `offer` and no *mine*, and the
+/// relay is learned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dial_learns_an_offer_only_where_the_persons_rows_say_full() {
+    use crate::common::{enroll_streamed_as, init_crypto, peer_port};
+    use crate::vault::spawn_device;
+    use kotton_net::rendezvous::AdmissionKey;
+    use kotton_peer::daemon::db as network_db;
+    use kotton_schemas::membership::Posture;
+    use kotton_wire::ipc::{SealedVerb, UserResponse};
+
+    init_crypto();
+    let (_relay, relay_addr) = crate::common::relay::spawn().await;
+    let relay_url = format!("http://{relay_addr}");
+    let relay_id = crate::common::relay::key_of(&relay_addr).await;
+    let a = spawn_device("device A").await;
+    let b = spawn_device("device B").await;
+    a.daemon.start_peer_listener_background(0).await.expect("start A's peer listener");
+    let mut client_a = connect_when_ready(&a.ipc, "client A").await;
+    let client_b = connect_when_ready(&b.ipc, "client B").await;
+    client_a
+        .create_user("alice", crate::common::TEST_PASSPHRASE)
+        .await
+        .expect("create_user on A");
+    let (mut client_a, _client_b, _node_b) =
+        enroll_streamed_as(client_a, client_b, "alice", "device-a", "device-b", Posture::Full).await;
+    let (_, a_key_hex) = client_a.get_node_identity().await.expect("A's identity");
+    let a_pub: [u8; 32] = hex::decode(a_key_hex).unwrap().try_into().unwrap();
+    let a_addr: std::net::SocketAddr = format!("127.0.0.1:{}", peer_port(&a.daemon.runtime())).parse().unwrap();
+
+    // A stands at the relay and holds alice's keys there, as its operator.
+    let a_rt = a.daemon.runtime();
+    let reach = a_rt.reachability();
+    let mut nat = reach.nat();
+    nat.relay_url = relay_url.clone();
+    nat.relay_key = Some(hex::encode(relay_id));
+    reach.reconfigure(nat).await.expect("A stands at the relay");
+    let key = |n: u8| AdmissionKey::from_bytes([n; 32]);
+    reach.relay_keys().hold_as_operator("alice", &relay_id, Some(&relay_url), key(1), key(2));
+
+    // B's row for A, as B keeps it, dialled at A's address.
+    let b_db = b.daemon.machine_db();
+    let row = network_db::list_paired_nodes(&b_db, "alice")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.public_key == a_pub)
+        .expect("B keeps a row for A");
+    // The joiner writes the device that enrolled it with no posture: one of
+    // the person's own, read as full.
+    assert_eq!(row.posture, None, "{row:?}");
+    let dial = kotton_wire::peer::PairedNode { addresses: vec![a_addr], ..row.clone() };
+    let b_rt = b.daemon.runtime();
+    let keys = b_rt.reachability().relay_keys();
+
+    // One row, one of alice's own: the offer and mine are learned, and the relay.
+    let conn = b_rt.dialer().connect(dial.clone(), "alice").await.expect("B dials A");
+    assert_eq!(keys.present_for("alice", &relay_id), Some(key(1)), "mine from alice's full device");
+    assert_eq!(keys.offer_for("alice", &relay_id), Some(key(2)), "the offer from alice's full device");
+    assert_eq!(keys.relay_of("alice", &a_pub, &relay_url), Some(relay_id));
+    assert_eq!(conn.learned_relay(), Some(relay_url.as_str()));
+
+    // A second row of alice's for A's key, saying blind-storage, as only an
+    // earlier build could have stored it: the narrowest is not full.
+    let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(&a_pub).to_string();
+    network_db::seed_paired_node_as_stored(&b_db, "a-as-storage", "alice", &spelled, &a_pub, "[]", 1, Some("blind-storage"))
+        .await
+        .expect("a second row for A's key");
+    reach.relay_keys().hold_as_operator("alice", &relay_id, Some(&relay_url), key(3), key(4));
+    let conn = b_rt.dialer().connect(dial.clone(), "alice").await.expect("B dials A again");
+    assert_eq!(keys.present_for("alice", &relay_id), Some(key(1)), "mine was learned from a key whose narrowest row is not full");
+    assert_eq!(keys.offer_for("alice", &relay_id), Some(key(2)), "an offer was learned from a key whose narrowest row is not full");
+    assert_eq!(keys.relay_of("alice", &a_pub, &relay_url), Some(relay_id), "the relay is still learned");
+    assert_eq!(conn.learned_relay(), Some(relay_url.as_str()));
+
+    // No row: A pairs B for carol, and B keeps no row for A under carol.
+    let b_pub = b_rt.device_signing_pubkey_bytes();
+    let a_db = a.daemon.machine_db();
+    network_db::insert_paired_node(&a_db, "b-for-carol", "carol", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&b_pub).unwrap(), "[]", 0, Some("full"))
+        .await
+        .expect("A pairs B for carol");
+    reach.relay_keys().hold_as_operator("carol", &relay_id, Some(&relay_url), key(5), key(6));
+    let conn = b_rt.dialer().connect(dial.clone(), "carol").await.expect("B dials A for carol");
+    // The control: A's answer for carol carries the offer.
+    match conn.send_sealed(SealedVerb::NodeRelay { user_id: "carol".into() }).await.expect("A answers") {
+        UserResponse::NodeRelayResult { admission: Some(a), .. } => assert!(a.offer.is_some(), "A handed carol no offer"),
+        other => panic!("A handed carol nothing: {other:?}"),
+    }
+    assert_eq!(keys.present_for("carol", &relay_id), None, "mine was learned from a node carol has no row for");
+    assert_eq!(keys.offer_for("carol", &relay_id), None, "an offer was learned from a node carol has no row for");
+    assert_eq!(keys.relay_of("carol", &a_pub, &relay_url), Some(relay_id), "the relay is learned with no row");
+    assert_eq!(conn.learned_relay(), Some(relay_url.as_str()));
+}
