@@ -671,8 +671,11 @@ fn attest_message(transcript: &kotton_crypto::pair_handshake::Transcript) -> Vec
 /// answers: the issuer has stopped listening and kept nothing.
 pub const JOINER_KEEPS_WITHIN: Duration = Duration::from_secs(120);
 
-/// The longest refusal the issuer repeats to its person, in characters. The
-/// joiner's own copy fits well inside it; a longer one is cut, not refused.
+/// The longest refusal the issuer holds, in characters: a bound on what is
+/// kept of the joiner's text, not on what is printed. The joiner's own copy
+/// fits well inside it; a longer one is cut, not refused. What is printed of
+/// it is cut again, at [`kotton_wire::note::MAX_SAID_CHARS`], where it is
+/// printed ([`kotton_wire::note::quoted_cut`]).
 const REFUSAL_SAID_WITHIN: usize = 1024;
 
 /// The ceremony's last frame, joiner to issuer: whether the joiner kept what it
@@ -707,8 +710,10 @@ enum Reply {
 /// join the joiner did not keep is admitted nowhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JoinNotKept {
-    /// The joiner refused what it was handed, and said why (control
-    /// characters dropped, cut at [`REFUSAL_SAID_WITHIN`]).
+    /// The joiner refused what it was handed, and said why: the joiner's text
+    /// as it came, held to [`REFUSAL_SAID_WITHIN`] characters, and printed
+    /// wherever it is printed as data, to a bounded length
+    /// ([`kotton_wire::note::quoted_cut`]; how another node's text is printed).
     Refused(String),
     /// The joiner said nothing the issuer could read as an answer: it closed,
     /// answered with something else, or was silent for [`JOINER_KEEPS_WITHIN`].
@@ -719,7 +724,11 @@ impl std::fmt::Display for JoinNotKept {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             JoinNotKept::Refused(why) => {
-                write!(f, "the other device refused what it was handed, and nothing is kept here: {why}")
+                write!(
+                    f,
+                    "the other device refused what it was handed, and nothing is kept here: {}",
+                    kotton_wire::note::quoted_cut(why)
+                )
             }
             JoinNotKept::Unanswered(how) => write!(
                 f,
@@ -748,9 +757,7 @@ where
     };
     match serde_json::from_slice::<Answer>(&frame) {
         Ok(Answer::Kept) => Ok(()),
-        Ok(Answer::Refused { why }) => Err(JoinNotKept::Refused(
-            why.chars().filter(|c| !c.is_control()).take(REFUSAL_SAID_WITHIN).collect(),
-        )),
+        Ok(Answer::Refused { why }) => Err(JoinNotKept::Refused(why.chars().take(REFUSAL_SAID_WITHIN).collect())),
         Err(_) => Err(JoinNotKept::Unanswered("it answered with something that is not an answer".into())),
     }
 }
@@ -3199,8 +3206,9 @@ mod relayed_tests {
     }
 
     /// **A joiner that refuses what it was handed leaves the issuer nothing**,
-    /// and the issuer is told why in the joiner's words, with nothing that
-    /// could steer its person's terminal.
+    /// and the issuer is told why in the joiner's words, held as they came and
+    /// printed as data ([`kotton_wire::note::quoted_cut`]; how another node's
+    /// text is printed), so nothing in them can steer its person's terminal.
     #[tokio::test]
     async fn a_refusal_after_the_payload_is_heard_and_nothing_is_enrolled() {
         let code = normalize_code("ripple canyon ember");
@@ -3216,9 +3224,12 @@ mod relayed_tests {
         let err = e.err().expect("the issuer enrolled a node that refused the join");
         assert_eq!(
             err.downcast_ref::<JoinNotKept>(),
-            Some(&JoinNotKept::Refused("this node is a vault[2J and holds no key".into())),
+            Some(&JoinNotKept::Refused("this node is a vault\u{1b}[2J and holds no key".into())),
             "{err}"
         );
+        let printed = err.to_string();
+        assert!(printed.ends_with(&kotton_wire::note::quoted_cut("this node is a vault\u{1b}[2J and holds no key")), "{printed}");
+        assert!(!printed.contains('\u{1b}'), "{printed}");
     }
 
     /// **A joiner that closes without answering leaves the issuer nothing**:

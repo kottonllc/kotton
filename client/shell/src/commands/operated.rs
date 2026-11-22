@@ -979,12 +979,15 @@ async fn run(parsed: Parsed<'_>, state: &mut ShellState) -> Result<CommandOutput
 /// was given: each verb acts on the one answer it asked for, and on no other.
 ///
 /// **No list of refusals, and no answer read as another verb's** (#121). Any
-/// answer that is not the one `asked` asks for — the daemon's or the vault's
-/// `Error`, a name the vault keeps (`VaultKeepsAlready`, refused here as
-/// everywhere but `--me`, #108), an answer meant for another verb, or one a
-/// later release adds — is a failure said in
-/// [`kotton_wire::ipc::answer_said`]: the vault's words where the answer
-/// carries them, its name where not, and never its fields.
+/// answer that is not the one `asked` asks for — the daemon's `Error`, a name
+/// the vault keeps (`VaultKeepsAlready`, refused here as everywhere but
+/// `--me`, where it is said as done), an answer meant for another verb, or one a later release
+/// adds — is a failure said in [`kotton_wire::ipc::own_daemon_said`]. The
+/// answer is this device's own daemon's: its `Error` is kuserd's sentence, said
+/// as written so a command in it prints as typed, and holds an operated vault's
+/// or relay's text already quoted, where kuserd took it in. The vault's words
+/// otherwise where the answer carries them, its name where not, and never its
+/// fields.
 fn spoken(asked: &OperatorVerb, to: To<'_>, answer: UserResponse) -> CommandOutput {
     let word = asked.service().word();
     match (asked, answer) {
@@ -1038,7 +1041,7 @@ fn spoken(asked: &OperatorVerb, to: To<'_>, answer: UserResponse) -> CommandOutp
             action: "told where to stand".into(),
             subject: to.name().to_string(),
         }]),
-        (_, unread) => CommandOutput::fail(format!("{word}: {}", kotton_wire::ipc::answer_said(&unread)), None),
+        (_, unread) => CommandOutput::fail(format!("{word}: {}", kotton_wire::ipc::own_daemon_said(&unread)), None),
     }
 }
 
@@ -2484,5 +2487,38 @@ mod tests {
         assert_eq!(kept, format!("vault: {}", kotton_wire::ipc::vault_keeps_already_said("sam")));
         let refused = failed(spoken(&OperatorVerb::Pools, To::Only("home"), UserResponse::Error { message: "no relay".into() }));
         assert_eq!(refused, "vault: no relay");
+    }
+
+    /// **An operated vault's text is printed as data and to the bound** (how
+    /// another node's text is printed): the name a `VaultKeepsAlready`
+    /// carries, with a backtick and a line break escaped, and one past
+    /// `MAX_SAID_CHARS` cut.
+    #[test]
+    fn an_operated_vaults_text_is_printed_as_data_and_to_the_bound() {
+        use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+        let long = "s".repeat(MAX_SAID_CHARS + 8);
+        let invite = OperatorVerb::Invite { pool: "sam".into(), quota: None, ttl_seconds: 5 };
+        for text in ["no `relay`\nhere", long.as_str()] {
+            let kept = failed(spoken(&invite, To::Only("home"), UserResponse::VaultKeepsAlready { user_id: text.to_string() }));
+            assert!(kept.starts_with(&format!("vault: this vault already keeps for {} — ", quoted_cut(text))), "{kept}");
+            assert!(!kept.contains('\n') && !kept.contains(text), "{kept}");
+        }
+    }
+
+    /// **The daemon's own `Error` is said as written** (another node's text is
+    /// quoted where it enters this device): kuserd's refusal of a name with no
+    /// credential prints its command as typed, and kuserd's sentence holding a
+    /// vault's quoted text prints that text quoted once — `speak` quoted it
+    /// where it came in, and the shell does not quote it again.
+    #[test]
+    fn the_daemons_own_refusal_is_said_as_written_with_its_command_as_typed() {
+        let told = "this desktop holds no operator credential for the vault 'home' — `mint vault home`, \
+                    paste the command it prints at the vault's host, then `enrol <the line its creation printed>`";
+        let refused = failed(spoken(&OperatorVerb::Pools, To::Only("home"), UserResponse::Error { message: told.into() }));
+        assert_eq!(refused, format!("vault: {told}"));
+        assert!(refused.contains("`mint vault home`") && !refused.contains("\\u{60}"), "{refused}");
+        let forwarded = format!("the vault answered: {}", kotton_wire::note::quoted_cut("no `relay`\nhere"));
+        let refused = failed(spoken(&OperatorVerb::Pools, To::Only("home"), UserResponse::Error { message: forwarded }));
+        assert_eq!(refused, "vault: the vault answered: `no \\u{60}relay\\u{60}\\nhere`");
     }
 }

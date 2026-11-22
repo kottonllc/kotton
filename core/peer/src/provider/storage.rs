@@ -216,9 +216,9 @@ impl KottonPeerObjectStorage {
     }
 
     /// An answer this reader did not ask for, said by its name and no field of
-    /// it ([`UserResponse::name`]; kottonllc/kotton#597, 76B).
+    /// it ([`kotton_wire::ipc::unasked`]; how an answer not asked for is said).
     fn unexpected(other: &UserResponse) -> ObjectStorageError {
-        ObjectStorageError::BackendError(format!("unexpected peer response: {}", kotton_wire::note::quoted(&other.name())))
+        ObjectStorageError::BackendError(format!("unexpected peer response: {}", kotton_wire::ipc::unasked(other)))
     }
 
     /// Convert a runtime error into an `ObjectStorageError`.
