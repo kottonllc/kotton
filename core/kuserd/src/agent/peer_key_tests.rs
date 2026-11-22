@@ -7,7 +7,8 @@
 //! `NodeRelay`'s own-device check.
 
 use super::browser_channel::gateway_key;
-use super::{asks_as_own_device, peer_ask, PeerAsk};
+use super::{asks_as_own_device, peer_ask, MachineRows, PeerAsk};
+use kotton_peer::dialer::{RowsSay, WhatKeyIs};
 use kotton_wire::ipc::PeerRequest;
 use kotton_peer::daemon::db as network_db;
 use sqlx::SqlitePool;
@@ -217,4 +218,72 @@ async fn of_two_rows_under_one_key_the_peer_path_reads_the_narrowest() {
             }
         }
     }
+}
+
+/// **Both ends read one answer for a key.** What the daemon hands its dialler
+/// ([`MachineRows`]) says an `offer` is learned from a key exactly where
+/// `NodeRelay`'s own-device check hands one: for no row, for each thing a row
+/// can say alone, and for every pair of them under both arrangements of DID and
+/// of time, the narrowest of the person's rows answers, at both ends.
+#[tokio::test]
+async fn the_dialling_end_and_the_listening_end_read_one_answer_for_a_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = machine_db(dir.path()).await;
+    let asked = MachineRows(Arc::clone(&db));
+    let says = [Some("gateway"), Some("blind-storage"), Some("cosigner"), Some("posture-of-a-later-build"), Some("full"), None];
+    let both = |own: bool| if own { RowsSay::Offer } else { RowsSay::NoOffer };
+
+    // No row.
+    let (nobody, _) = key_and_did(90);
+    assert_eq!(asked.to_person(&nobody, "alice").await, RowsSay::NoOffer, "no row");
+    assert!(!asks_as_own_device(&db, &nobody, "alice").await, "no row");
+
+    // One row, of each.
+    let mut seed = 160u8;
+    for a in says {
+        seed = seed.wrapping_add(1);
+        let (key, did) = key_and_did(seed);
+        network_db::seed_paired_node_as_stored(&db, "a", "alice", &did, &key, "[]", 100, a).await.unwrap();
+        let own = matches!(a, None | Some("full"));
+        assert_eq!(asked.to_person(&key, "alice").await, both(own), "one row {a:?}: the dialling end");
+        assert_eq!(asks_as_own_device(&db, &key, "alice").await, own, "one row {a:?}: the listening end");
+        sqlx::query("DELETE FROM paired_nodes").execute(db.as_ref()).await.unwrap();
+    }
+
+    // Two rows, every pair, both arrangements of DID and of time.
+    for a in says {
+        for b in says {
+            let own = [a, b].iter().all(|p| matches!(p, None | Some("full")));
+            for (a_derived, a_first) in [(true, true), (true, false), (false, true), (false, false)] {
+                seed = seed.wrapping_add(1);
+                let (key, derived) = key_and_did(seed);
+                let spelled = kotton_crypto::DidKeyMethod::spelled_otherwise(&key).to_string();
+                let (a_did, b_did) = if a_derived { (&derived, &spelled) } else { (&spelled, &derived) };
+                let (a_at, b_at) = if a_first { (100, 200) } else { (200, 100) };
+                network_db::seed_paired_node_as_stored(&db, "a", "alice", a_did, &key, "[]", a_at, a).await.unwrap();
+                network_db::seed_paired_node_as_stored(&db, "b", "alice", b_did, &key, "[]", b_at, b).await.unwrap();
+                let case = format!("rows {a:?} and {b:?}, the first under the key's did:key: {a_derived}, paired first: {a_first}");
+                assert_eq!(asked.to_person(&key, "alice").await, both(own), "{case}: the dialling end");
+                assert_eq!(asks_as_own_device(&db, &key, "alice").await, own, "{case}: the listening end");
+                // Another person's rows for the key say nothing of it to alice.
+                assert_eq!(asked.to_person(&key, "bob").await, RowsSay::NoOffer, "{case}: read across persons");
+                sqlx::query("DELETE FROM paired_nodes").execute(db.as_ref()).await.unwrap();
+            }
+        }
+    }
+}
+
+/// **Rows that cannot be read are said so to the dialler**, which then learns
+/// nothing from the answer; the listening end reads the same failure as no.
+#[tokio::test]
+async fn rows_that_cannot_be_read_are_unreadable_to_the_dialler() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = machine_db(dir.path()).await;
+    let (key, _) = key_and_did(91);
+    network_db::insert_paired_node(&db, "desktop", "alice", &vk(&key), "[]", 0, Some("full")).await.unwrap();
+    let asked = MachineRows(Arc::clone(&db));
+    assert_eq!(asked.to_person(&key, "alice").await, RowsSay::Offer);
+    db.close().await;
+    assert_eq!(asked.to_person(&key, "alice").await, RowsSay::Unreadable, "a failed read was answered");
+    assert!(!asks_as_own_device(&db, &key, "alice").await);
 }
