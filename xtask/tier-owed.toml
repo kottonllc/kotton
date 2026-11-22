@@ -4,10 +4,11 @@
 # crate of it has today that the row may not link, by crate name. A part is cut when its row's
 # list is empty.
 #
-# A list only shrinks. `tier-check` refuses an entry that is not on its row's list at the merge
-# base with origin/main, an entry no manifest has (an untangling that lands deletes its entry),
-# an entry for an edge the row may link, and an edge out of its row that no entry names. Every
-# row has a table here, empty when it owes nothing.
+# A list only shrinks. `tier-check` refuses an entry whose edge no list holds at the merge base
+# with origin/main (read by the edge, under any row, so a row renamed keeps its floor), an entry
+# no manifest has (an untangling that lands deletes its entry), an entry for an edge the row may
+# link, and an edge out of its row that no entry names. Every row has a table here, empty when
+# it owes nothing.
 #
 # Shape: [row] then `crate = ["crate it path-depends on", ...]`.
 

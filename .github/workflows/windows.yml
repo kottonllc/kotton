@@ -25,8 +25,8 @@
 #     systemd's parser, through that library or `python3`.
 #   - The integration suite (`tests/`, kotton-integration-tests): it starts kuserd, kvaultd and
 #     the relay as processes, the daemon this job does not run. It compiles above.
-#   - xtask's tests: the gate's own tooling, written for the Linux it runs on; no job runs
-#     them, here or there. They compile above.
+#   - xtask's tests: the gate's own tooling, written for the Linux it runs on. `lint.yml`
+#     runs them on Linux, in `just lint`; here they compile above and do not run.
 #   - kotton-mock-runner (`tests/fixtures/mock-runner`): a fixture binary with no tests.
 #
 # `KOTTON_PAIR_LOCAL_ONLY` declares the run same-machine, as `cargo xtask bind-check` does on

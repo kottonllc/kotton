@@ -1317,7 +1317,7 @@ A vault of your own (people, invite, digits, space, drop, stand, move, forget) �
 **Usage:** `Kotton vault [OPTIONS] [ARGS]...`
 
 ```text
-vault [stand [<v>] | move [<v>] <r> | people [<v>] | invite [<v>] <name> [--space <bytes>] | invite [<v>] --me | digits [<v>] <name> | space [<v>] <name> <bytes> | drop [<v>] <name> --confirm <name> | forget [<v>]] — the landlord's verbs for a vault of your own, and forget [<v>] for one whose host is gone; <v> only when this desktop operates more than one vault. mint and enrol make one; relay and vault operate one: `mint vault`, then `enrol <its line>`, makes one
+vault [stand [<v>] | move [<v>] <r> | people [<v>] | invite [<v>] <name> [--space <bytes>] | invite [<v>] --me | digits [<v>] <name> | space [<v>] <name> <bytes> | drop [<v>] <name> --confirm <name> | forget [<v>]] — the landlord's verbs for a vault of your own, and forget [<v>] for one whose host is gone; <v> only when this desktop operates more than one vault. A drop rotates the invited key at each relay you operate that the vault stands at, once the vault no longer lists the pool; a drop it did not answer waits on this desktop, and rotates when the vault is next reached. mint and enrol make one; relay and vault operate one: `mint vault`, then `enrol <its line>`, makes one
 ```
 
 ###### **Arguments:**

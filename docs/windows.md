@@ -47,8 +47,8 @@ restate its list.
   itself is a workspace of its own, released for Linux alone, and is not built on Windows;
   `cargo xtask windows-check`, a grep for Unix-only calls that runs in `just lint`, is what
   still reads it, and says so in its module doc.
-- **xtask's tests**, the gate's own tooling, written for Linux; no job runs them on either
-  platform, and Windows compiles them.
+- **xtask's tests**, the gate's own tooling, written for Linux; `lint.yml` runs them on
+  Linux, in `just lint`; Windows compiles them and does not run them.
 - **kvaultd's integration tests**: three install the built vault and drive it with a shell and
   Linux tools, and one compares its settings reader with systemd's.
 - **A release archive.** The release workflow produces no Windows archive today; the
