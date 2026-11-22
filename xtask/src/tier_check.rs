@@ -3,6 +3,10 @@
 //! tree holds a part of, each over the paths that part has today, each saying which rows it may
 //! path-depend on, and each with an owed list of the edges that break it today.
 //!
+//! Its tests run with the rest of xtask's in `just lint` (`cargo test -p xtask --locked`), so
+//! `lint.yml` runs them on every pull request, on Linux; `windows.yml` compiles them and does
+//! not run them.
+//!
 //! ## Why rows
 //!
 //! kotton-protocol's repository plan says that until a part is cut, this tree is laid out as
