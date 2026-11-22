@@ -1240,7 +1240,7 @@ mod tests {
         assert!(j.refused[0].contains("in no manifest"));
     }
 
-    /// Item 4: a list cannot grow against the merge base, whatever its row is called there;
+    /// A list cannot grow against the merge base, whatever its row is called there;
     /// lists arrive only when the merge base has none.
     #[test]
     fn a_list_cannot_grow_and_lists_arrive_only_where_the_merge_base_has_none() {
