@@ -79,11 +79,7 @@ impl InferHost for DaemonInferHost<'_> {
         let models = match listed {
             UserResponse::ModelList { models } => models,
             UserResponse::Error { message } => return Err(RunnerInferError::Runtime(message)),
-            other => {
-                return Err(RunnerInferError::Runtime(format!(
-                    "model_list answered with an unrelated response ({other:?})"
-                )))
-            }
+            other => return Err(unrelated(&other)),
         };
 
         // **The active ones only.** A person may have three chat models in their
@@ -174,6 +170,17 @@ pub fn infer_host<'a>(
     }
 }
 
+/// What a guest is told when this daemon's own `model_list` answers with
+/// something it was not asked for: the answer by its name and no field
+/// ([`kotton_wire::ipc::unasked`]; an answer not asked for is said by its name
+/// and no field).
+fn unrelated(other: &UserResponse) -> RunnerInferError {
+    RunnerInferError::Runtime(format!(
+        "model_list answered with an unrelated response ({})",
+        kotton_wire::ipc::unasked(other)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +191,17 @@ mod tests {
     use kotton_schemas::{Licence, ModelFormat, ModelKind, ModelManifest};
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    /// **An answer not asked for is said by its name and no field**: the guest
+    /// is told which answer came, and nothing it carries.
+    #[test]
+    fn an_unrelated_model_list_answer_is_said_by_its_name_alone() {
+        let RunnerInferError::Runtime(said) = unrelated(&UserResponse::MessageUnread { count: 3_870_221 }) else {
+            panic!("an unrelated answer is not a runtime error");
+        };
+        assert!(!said.contains("3870221"), "a field of the answer was said: {said}");
+        assert!(said.contains("`MessageUnread`"), "the answer was not named: {said}");
+    }
 
     /// Five BIP-39 words, as `files_tests.rs` uses; a literal rather than a
     /// shared import because this crate does not depend on the test harness.

@@ -829,7 +829,7 @@ impl DeviceDaemon {
             match kotton_app::daemon::apps::app_get_role(&user_db, "shell".to_string()).await {
                 Ok(kotton_wire::UserResponse::AppRole { app_id, .. }) => app_id,
                 Ok(other) => {
-                    tracing::warn!(?other, %reason, "kuserd: no app is designated `shell`");
+                    no_shell_designated(&other, reason);
                     return None;
                 }
                 Err(e) => {
@@ -923,10 +923,28 @@ fn a_screen_to_replace(
     }
 }
 
+/// The log line for a role lookup answered with something other than a role:
+/// this daemon's own answer, not asked for, said by its name and no field (an
+/// answer not asked for is said by its name and no field).
+fn no_shell_designated(other: &kotton_wire::UserResponse, reason: &str) {
+    tracing::warn!(answer = %other.name(), %reason, "kuserd: no app is designated `shell`");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kotton_app::daemon::apps::InstanceWorld;
+
+    /// **An answer not asked for is said by its name and no field**: a role
+    /// lookup answered with something else is logged by the answer's name, and
+    /// nothing it carries.
+    #[test]
+    fn a_role_answer_not_asked_for_is_logged_by_its_name_alone() {
+        let answer = kotton_wire::UserResponse::VaultKeepsAlready { user_id: "FIELD-c07e".into() };
+        let said = crate::logged(|| no_shell_designated(&answer, "boot"));
+        assert!(!said.contains("FIELD-c07e"), "a field of the answer was logged: {said}");
+        assert!(said.contains("answer=VaultKeepsAlready"), "the answer was not named: {said}");
+    }
 
     fn world(occupant: bool, mounted: bool) -> Option<InstanceWorld> {
         Some(InstanceWorld { occupant, mounted })

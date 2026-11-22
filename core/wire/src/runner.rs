@@ -49,29 +49,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::GrantEnvelope;
 
-/// `impl $ty { pub fn name(&self) -> &'static str }`, naming each variant by
-/// its identifier and nothing else.
-///
-/// The name is the one thing about a frame that can be said to whoever was not
-/// its addressee: which kind of frame it was. Every arm matches `{ .. }` and
-/// answers `stringify!` of the identifier, so no field can reach the string by
-/// construction, and the list cannot drift from the enum because the match has
-/// no wildcard: a variant added without its name here does not compile.
-macro_rules! variant_names {
-    ($ty:ident { $($variant:ident),+ $(,)? }) => {
-        impl $ty {
-            /// Which variant this is, by its identifier, and nothing of its
-            /// fields: what a frame that arrived out of turn may be called in
-            /// an error its reader shows to anyone.
-            pub fn name(&self) -> &'static str {
-                match self {
-                    $(Self::$variant { .. } => stringify!($variant),)+
-                }
-            }
-        }
-    };
-}
-
 /// Input JSON sent to the `kotton-runner` subprocess via stdin on startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerInput {
