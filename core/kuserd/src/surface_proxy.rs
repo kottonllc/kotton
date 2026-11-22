@@ -881,7 +881,9 @@ impl Channel {
         match rx.await {
             Ok(KuidResponse::SurfaceOk) => true,
             Ok(other) => {
-                warn!(?other, "SurfaceProxy: unexpected response from kuid");
+                // kuid's reply, not asked for: by its name and no field (an
+                // answer not asked for is said by its name and no field).
+                warn!(answer = %other.name(), "SurfaceProxy: unexpected response from kuid");
                 true
             }
             // The reader dropped the sender, which it does only when the pair
@@ -932,7 +934,9 @@ async fn read_from_compositor(
                     // to do about a reply nobody is waiting for.
                     let _ = tx.send(resp);
                 }
-                None => warn!(?resp, "SurfaceProxy: reply with no outstanding request"),
+                // A reply nobody asked for: by its name and no field (an
+                // answer not asked for is said by its name and no field).
+                None => warn!(answer = %resp.name(), "SurfaceProxy: reply with no outstanding request"),
             },
             // **Straight to the one waiting, never through the sink** — see
             // [`SurfaceProxy::prompts`] for the deadlock that routing it through
@@ -1012,6 +1016,25 @@ mod tests {
             }
         });
         rx
+    }
+
+    /// **An answer not asked for is said by its name and no field**: a reply
+    /// kuid sends with no request outstanding is logged by its name, and
+    /// nothing it carries.
+    #[test]
+    fn a_reply_nobody_asked_for_is_logged_by_its_name_alone() {
+        let said = crate::logged(|| {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+                let (read, mut write) = tokio::io::duplex(64 * 1024);
+                let stray = FromCompositor::Response(KuidResponse::Error { message: "FIELD-d1e5".into() });
+                write_frame(&mut write, &stray).await.unwrap();
+                drop(write);
+                let pending = std::sync::Arc::new(std::sync::Mutex::new(None));
+                read_from_compositor(Box::new(read), pending, None, Prompts::default()).await;
+            })
+        });
+        assert!(!said.contains("FIELD-d1e5"), "a field of the reply was logged: {said}");
+        assert!(said.contains("answer=Error"), "the reply was not named: {said}");
     }
 
     /// A handle with a value the test can look for in the frame the proxy

@@ -41,7 +41,7 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 
 use kotton_app::daemon::apps::OccupantHost;
-use kotton_wire::ipc::{OperatorVerb, UserResponse};
+use kotton_wire::ipc::{unasked, OperatorVerb, UserResponse};
 use kotton_wire::runner::{
     RunnerAdmittedBrowser, RunnerAuthError, RunnerContact, RunnerIdentity, RunnerOperator, RunnerOperatorBox,
     RunnerPairedDevice, RunnerPerson, RunnerRelay, RunnerSealedMessage, RunnerTenant,
@@ -384,7 +384,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
             .map_err(|e| format!("reading the device roster: {e}"))?
         {
             UserResponse::NodeList { nodes, .. } => nodes,
-            other => return Err(format!("unexpected reply reading devices: {other:?}")),
+            other => return Err(format!("unexpected reply reading devices: {}", unasked(&other))),
         };
 
         // This device's own DID, so the surface can mark the row the person is
@@ -884,7 +884,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
                 delivery.map(|d| d.word().to_string()),
             )),
             UserResponse::Error { message } => Err(message),
-            other => Err(format!("messages.send: unexpected reply {other:?}")),
+            other => Err(format!("messages.send: unexpected reply {}", unasked(&other))),
         }
     }
 
@@ -916,7 +916,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
                 Ok((message_id, delivery.map(|d| d.word().to_string())))
             }
             UserResponse::Error { message } => Err(message),
-            other => Err(format!("messages.share: unexpected reply {other:?}")),
+            other => Err(format!("messages.share: unexpected reply {}", unasked(&other))),
         }
     }
 
@@ -939,7 +939,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
             // at once. The person's own client gets it; a guest does not.
             UserResponse::ChannelSent { message_id, .. } => Ok(message_id),
             UserResponse::Error { message } => Err(message),
-            other => Err(format!("messages.channel-send: unexpected reply {other:?}")),
+            other => Err(format!("messages.channel-send: unexpected reply {}", unasked(&other))),
         }
     }
 
@@ -968,7 +968,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         match resp {
             UserResponse::ChannelSent { message_id, .. } => Ok(message_id),
             UserResponse::Error { message } => Err(message),
-            other => Err(format!("messages.channel-share: unexpected reply {other:?}")),
+            other => Err(format!("messages.channel-share: unexpected reply {}", unasked(&other))),
         }
     }
 
@@ -1025,7 +1025,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         let inbox = match resp {
             UserResponse::MessageHistory { messages } => messages,
             UserResponse::Error { message } => return Err(message),
-            other => return Err(format!("messages.unread-count: unexpected reply {other:?}")),
+            other => return Err(format!("messages.unread-count: unexpected reply {}", unasked(&other))),
         };
         kotton_msg::read_marks::unread_count(&marks, &inbox)
             .await
@@ -1067,7 +1067,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         let inbox = match resp {
             UserResponse::MessageHistory { messages } => messages,
             UserResponse::Error { message } => return Err(message),
-            other => return Err(format!("messages.unread-from: unexpected reply {other:?}")),
+            other => return Err(format!("messages.unread-from: unexpected reply {}", unasked(&other))),
         };
         kotton_msg::read_marks::unread_count_from(&marks, &inbox, peer_did)
             .await
@@ -1182,7 +1182,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         match resp {
             UserResponse::Decrypted { plaintext } => Ok(plaintext),
             UserResponse::Error { message } => Err(message),
-            other => Err(format!("messages.open: unexpected reply {other:?}")),
+            other => Err(format!("messages.open: unexpected reply {}", unasked(&other))),
         }
     }
 
@@ -1216,7 +1216,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         {
             UserResponse::NodeRevoked => Ok(()),
             UserResponse::Error { message } => Err(message),
-            other => Err(format!("revoking the device: unexpected reply {other:?}")),
+            other => Err(format!("revoking the device: unexpected reply {}", unasked(&other))),
         }
     }
 
@@ -1324,7 +1324,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
             }
             UserResponse::Error { message } => Err(RunnerAuthError::Daemon { message }),
             other => Err(RunnerAuthError::Daemon {
-                message: format!("unexpected response from user creation: {other:?}"),
+                message: format!("unexpected response from user creation: {}", unasked(&other)),
             }),
         }
     }
@@ -1538,7 +1538,7 @@ impl DaemonOccupantHost<'_> {
             .map_err(|e| format!("reading the device roster: {e}"))?
         {
             UserResponse::NodeList { nodes, .. } => Ok(nodes),
-            other => Err(format!("unexpected reply reading the roster: {other:?}")),
+            other => Err(format!("unexpected reply reading the roster: {}", unasked(&other))),
         }
     }
 
@@ -1657,7 +1657,7 @@ fn message_list(resp: UserResponse, verb: &str) -> Result<Vec<RunnerSealedMessag
             Ok(messages.iter().filter_map(sealed_from_record).collect())
         }
         UserResponse::Error { message } => Err(message),
-        other => Err(format!("messages.{verb}: unexpected reply {other:?}")),
+        other => Err(format!("messages.{verb}: unexpected reply {}", unasked(&other))),
     }
 }
 
@@ -1715,6 +1715,18 @@ pub fn occupant_host<'a>(
 #[cfg(test)]
 mod message_tests {
     use super::*;
+
+    /// **An answer not asked for is said by its name and no field**: a
+    /// message verb answered with something else names the answer, and says
+    /// nothing it carries.
+    #[test]
+    fn a_reply_not_asked_for_is_said_by_its_name_alone() {
+        let Err(said) = message_list(UserResponse::MessageUnread { count: 6_150_449 }, "list") else {
+            panic!("an unread count was read as a message list");
+        };
+        assert!(!said.contains("6150449"), "a field of the answer was said: {said}");
+        assert!(said.contains("`MessageUnread`"), "the answer was not named: {said}");
+    }
 
     fn record(extra: serde_json::Value) -> serde_json::Value {
         let mut v = serde_json::json!({

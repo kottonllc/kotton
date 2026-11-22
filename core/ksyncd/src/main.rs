@@ -71,7 +71,12 @@ async fn main() -> io::Result<()> {
             return Err(io::Error::other(format!("auth error: {message}")));
         }
         other => {
-            return Err(io::Error::other(format!("unexpected auth response: {other:?}")));
+            // kuserd's answer, not asked for: by its name and no field (an
+            // answer not asked for is said by its name and no field).
+            return Err(io::Error::other(format!(
+                "unexpected auth response: {}",
+                kotton_wire::ipc::unasked(&other)
+            )));
         }
     };
 
@@ -189,7 +194,9 @@ fn on_frame(frame: Option<&UserResponse>) -> FrameAction {
         }
         Some(UserResponse::VfsWatchEnd) | None => FrameAction::Stop,
         Some(other) => {
-            tracing::warn!(?other, "ksyncd: unexpected frame on VfsWatch stream");
+            // kuserd's frame, not asked for: by its name and no field (an
+            // answer not asked for is said by its name and no field).
+            tracing::warn!(answer = %other.name(), "ksyncd: unexpected frame on VfsWatch stream");
             FrameAction::Note
         }
     }
@@ -213,7 +220,7 @@ async fn report_peers(
             tracing::warn!(%message, "ksyncd: VfsReport returned error");
         }
         Ok(other) => {
-            tracing::warn!(?other, "ksyncd: unexpected VfsReport response");
+            tracing::warn!(answer = %other.name(), "ksyncd: unexpected VfsReport response");
         }
         Err(e) => {
             tracing::warn!(error = %e, "ksyncd: VfsReport IPC error");
@@ -235,7 +242,7 @@ async fn trigger_sync_now(client: &mut IpcClient<UserRequest, UserResponse>, use
             tracing::warn!(%message, "ksyncd: SyncDrives returned error");
         }
         Ok(other) => {
-            tracing::warn!(?other, "ksyncd: unexpected SyncDrives response");
+            tracing::warn!(answer = %other.name(), "ksyncd: unexpected SyncDrives response");
         }
         Err(e) => {
             tracing::warn!(error = %e, "ksyncd: SyncDrives IPC error");
@@ -293,6 +300,38 @@ mod frame_action_tests {
             FrameAction::Stop,
             "a dropped stream still ends the sidecar"
         );
+    }
+
+    /// **An answer not asked for is said by its name and no field**: a frame
+    /// the watch stream does not read is logged by its name, and nothing it
+    /// carries.
+    #[test]
+    fn a_frame_not_asked_for_is_logged_by_its_name_alone() {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Caught(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Caught {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let caught = Caught::default();
+        let writer = caught.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let frame = UserResponse::VaultKeepsAlready { user_id: "FIELD-a6f2".into() };
+        let action = tracing::subscriber::with_default(subscriber, || on_frame(Some(&frame)));
+        assert_eq!(action, FrameAction::Note);
+        let said = String::from_utf8(caught.0.lock().unwrap().clone()).unwrap();
+        assert!(!said.contains("FIELD-a6f2"), "a field of the frame was logged: {said}");
+        assert!(said.contains("answer=VaultKeepsAlready"), "the frame was not named: {said}");
     }
 
     /// And the frames either side of it keep their meanings.

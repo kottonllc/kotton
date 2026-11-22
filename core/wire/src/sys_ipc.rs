@@ -385,6 +385,16 @@ pub enum DeviceResponse {
     Error { message: String },
 }
 
+// `DeviceResponse::name`: the variant's name and nothing of its fields, what a
+// reader of kdeviced says of an answer it did not ask for (an answer not asked
+// for is said by its name and no field; `crate::ipc::unasked`).
+variant_names!(DeviceResponse {
+    Pong, ChallengeIssued, DeviceOperationalKey, Authenticated, AuthFailed, OperatorKeyKept,
+    Unauthenticated, DaemonStatus, UserStarted, UserAlreadyRunning, UserStopped, UserNotRunning,
+    SessionList, SudoersList, SudoersModified, DeviceInfo, UserRemovedAndWiped, IpcSessionsResult,
+    Ok, Error,
+});
+
 /// A handler's error, as the frame kdeviced's door answers it with
 /// (`kotton_ipc::ChannelAcceptor` requires this of every `Resp` it serves).
 impl From<std::io::Error> for DeviceResponse {
