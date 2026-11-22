@@ -302,6 +302,12 @@ lint:
     # infra/relay declares its own `[workspace]`, so the `cargo clippy` above never reaches
     # it. It is held to `-D warnings` the same way.
     cargo clippy --manifest-path infra/relay/Cargo.toml --target-dir {{relay_target}} --all-targets -- -D warnings
+    # The tests that hold the checks below (tier-check's refusals, signoff-check's agreement
+    # with signoff.yml, and the rest of xtask's), before those checks are trusted: here, so a
+    # person's `just lint` and `lint.yml` run the same tests. In the gate they run on Linux;
+    # windows.yml compiles them and does not run them. `#[ignore]`d tests stay as their
+    # reasons say (`cargo test -p xtask -- --include-ignored` runs them by hand).
+    cargo test -p xtask --locked
     # The principles it inspects (II, III and IV), against the code.
     cargo xtask constitution-check
     cargo xtask tier-check
