@@ -70,13 +70,16 @@ const MAX_FRAME_BYTES: usize = 10 * 1024 * 1024;
 
 /// The local human's verdict on the six-digit SAS. Implemented by whatever surface
 /// drives the ceremony — a CLI prompt, a shell consent dialog, or (in tests) an
-/// auto-confirmer. The channel calls it exactly once, after deriving the SAS and
-/// (on the joiner) learning the peer's label.
+/// auto-confirmer. The channel calls it exactly once, after deriving the SAS and,
+/// on the joiner, reading the issuer's first frame: a device join's joiner is
+/// given the label named from it, and a contact join's joiner, like every
+/// issuer, is given none ([`PeerName`]).
 #[async_trait]
 pub trait SasConfirmer: Send + Sync {
-    /// Present `sas` (0..1_000_000, render zero-padded and grouped) and, when known,
-    /// the peer's `label` to the human. Return `true` iff the human confirms the
-    /// codes match; `false` cancels the ceremony (nothing is transferred).
+    /// Present `sas` (0..1_000_000, render zero-padded and grouped) and, when the
+    /// ceremony shows one, the peer's `label` to the human. Return `true` iff the
+    /// human confirms the codes match; `false` cancels the ceremony (nothing is
+    /// transferred).
     async fn confirm(&self, sas: u32, peer_label: Option<&str>) -> bool;
 }
 
@@ -282,7 +285,10 @@ where
     let session = derive_session_with(&eph_i, &reveal_j.eph_pub, &transcript, &extra_ikm)?;
     let mut aead = AeadChannel::new(session.k_enc(), EnrollmentSide::Issuer);
 
-    // 6. Send our label as the first encrypted frame (the joiner's dialog needs it).
+    // 6. Send our label as the first encrypted frame. A device join's joiner
+    //    names it, shows that name and records our row under it; a contact
+    //    join's joiner leaves it unused, and a contact ceremony's issuer sends
+    //    it empty.
     send_aead(&mut send, &mut aead, &PairInfo { label: label.to_string() }).await?;
 
     // 7. Ask the human to compare the SAS; abort if they decline.
@@ -320,16 +326,17 @@ pub enum PeerName {
     Shown(fn(&str) -> String),
     /// No label, whatever the frame holds: the confirmer is given `None` and
     /// [`EstablishedChannel::peer_label`] is `None`. The frame is still read, as
-    /// the handshake's order has it, and its label is dropped unread. A contact
+    /// the handshake's order has it, and its label is unused. A contact
     /// join passes this: the other person's name is the one their key signs in
     /// the identity record, read once the pairing completes.
     NotShown,
 }
 
-/// Run the joiner (new-device) side of the handshake over a freshly opened
+/// Run the joiner side of the handshake over a freshly opened
 /// bi-stream. `sid` is the offer's session id (from the mDNS advertisement or the
-/// connection code). `confirmer` is asked to compare the SAS after the joiner
-/// learns the issuer's label.
+/// connection code). `confirmer` is asked to compare the SAS once the issuer's
+/// first frame is read, with what `name` makes of its label: the named label on
+/// a device join, none on a contact join.
 ///
 /// `name` says what the label the issuer announced is to this ceremony
 /// ([`PeerName`]), so wherever a prompt carries a label it is the name recorded
