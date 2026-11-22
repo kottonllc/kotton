@@ -1010,7 +1010,7 @@ const REFUSED_AT_THE_HANDSHAKE: &str = "refused at the handshake";
 
 /// Whether an exchange ended in the vault's refusal of the key at the
 /// handshake, so that no answer of the vault's arrived, in either shape.
-fn refused_at_the_handshake(asked: &Result<UserResponse, String>) -> bool {
+pub(crate) fn refused_at_the_handshake(asked: &Result<UserResponse, String>) -> bool {
     matches!(asked, Err(e) if e.starts_with(REFUSED_AT_THE_HANDSHAKE))
 }
 
