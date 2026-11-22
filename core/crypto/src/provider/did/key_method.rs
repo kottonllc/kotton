@@ -3,6 +3,42 @@ use kotton_ed25519::VerifyingKey;
 use kotton_wire::did::{Did, DidDocument, DidError, Result, VerificationMethod};
 use multibase::Base;
 
+/// Which clause a DID names no key by, as [`DidKeyMethod::read_key`] reads it, so that a
+/// refusal can say what is true of the DID it was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoKey {
+    /// It is not a `did:key`: its method is the one carried.
+    OtherMethod(String),
+    /// A `did:key` whose identifier is not multibase the codec reads.
+    NotMultibase(String),
+    /// A `did:key` that decodes to bytes that are not a key's: too few for a multicodec
+    /// prefix, or the Ed25519 prefix and other than 32 bytes after it.
+    NoKeyBytes(String),
+    /// A `did:key` that is not an Ed25519 key's: its bytes do not begin with Ed25519's
+    /// multicodec prefix. Nothing more of them is read.
+    OtherKind,
+    /// A `did:key` of 32 bytes the Ed25519 rule refuses.
+    Refused(String),
+    /// A `did:key` over a key the rule admits, spelled otherwise than the one string the
+    /// derivation makes of that key.
+    SpelledOtherwise,
+}
+
+impl From<NoKey> for DidError {
+    fn from(no_key: NoKey) -> Self {
+        match no_key {
+            NoKey::OtherMethod(method) => DidError::UnsupportedMethod(method),
+            NoKey::NotMultibase(e) => DidError::InvalidMultibase(e),
+            NoKey::NoKeyBytes(e) | NoKey::Refused(e) => DidError::InvalidKey(e),
+            NoKey::OtherKind => DidError::InvalidKey("Not an Ed25519 key (invalid multicodec prefix)".to_string()),
+            NoKey::SpelledOtherwise => DidError::InvalidKey(
+                "not the did:key of its key: a key's did:key is did:key:z and the base58btc of 0xed 0x01 and the key"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
 /// did:key method implementation for Ed25519 keys
 ///
 /// The did:key method generates a DID from a public key using multibase/multicodec encoding.
@@ -54,44 +90,36 @@ impl DidKeyMethod {
     /// [`DidError::InvalidMultibase`] where the identifier does not decode, and
     /// [`DidError::InvalidKey`] where it is not 32 bytes of Ed25519 key, the rule refuses them,
     /// or the DID is not the one string [`Self::from_public_key`] makes of that key.
+    /// [`Self::read_key`] says which of these it is.
     pub fn to_public_key(did: &Did) -> Result<VerifyingKey> {
+        Self::read_key(did).map_err(DidError::from)
+    }
+
+    /// The key a `did:key` names, or which clause it names none by ([`NoKey`]): the one
+    /// decode, which [`Self::to_public_key`] goes through.
+    ///
+    /// # Errors
+    /// The [`NoKey`] the DID fails first, in the order its variants are listed.
+    pub fn read_key(did: &Did) -> std::result::Result<VerifyingKey, NoKey> {
         if did.method() != "key" {
-            return Err(DidError::UnsupportedMethod(did.method().to_string()));
+            return Err(NoKey::OtherMethod(did.method().to_string()));
         }
-
-        // Decode multibase
-        let (_base, bytes) = multibase::decode(did.identifier())
-            .map_err(|e| DidError::InvalidMultibase(e.to_string()))?;
-
-        // Check multicodec prefix
+        let (_base, bytes) = multibase::decode(did.identifier()).map_err(|e| NoKey::NotMultibase(e.to_string()))?;
+        if bytes.len() < Self::ED25519_MULTICODEC.len() {
+            return Err(NoKey::NoKeyBytes(format!("{} bytes, too few for a multicodec prefix", bytes.len())));
+        }
         if !bytes.starts_with(Self::ED25519_MULTICODEC) {
-            return Err(DidError::InvalidKey(
-                "Not an Ed25519 key (invalid multicodec prefix)".to_string(),
-            ));
+            return Err(NoKey::OtherKind);
         }
-
-        // Extract public key bytes (skip 2-byte multicodec prefix)
-        let key_bytes = &bytes[2..];
-        if key_bytes.len() != 32 {
-            return Err(DidError::InvalidKey(format!(
-                "Invalid Ed25519 key length: expected 32, got {}",
-                key_bytes.len()
-            )));
-        }
-
+        let key_bytes = &bytes[Self::ED25519_MULTICODEC.len()..];
         let key_array: [u8; 32] = key_bytes.try_into().map_err(|_| {
-            DidError::InvalidKey("Failed to convert key bytes to array".to_string())
+            NoKey::NoKeyBytes(format!("Invalid Ed25519 key length: expected 32, got {}", key_bytes.len()))
         })?;
-
-        let key = VerifyingKey::from_bytes(&key_array)
-            .map_err(|e| DidError::InvalidKey(format!("not an Ed25519 key: {e}")))?;
+        let key = VerifyingKey::from_bytes(&key_array).map_err(|e| NoKey::Refused(format!("not an Ed25519 key: {e}")))?;
         // One key has one `did:key`: the string the derivation makes of it, compared as
         // stored. The codec reads other spellings of the same bytes; none of them names it.
         if Self::from_public_key(&key) != *did {
-            return Err(DidError::InvalidKey(
-                "not the did:key of its key: a key's did:key is did:key:z and the base58btc of 0xed 0x01 and the key"
-                    .to_string(),
-            ));
+            return Err(NoKey::SpelledOtherwise);
         }
         Ok(key)
     }
@@ -177,6 +205,57 @@ mod tests {
                 other => panic!("{name}: the decode gave {other:?}"),
             }
         }
+    }
+
+    /// **The decode says which clause a DID names no key by**: another method, an identifier
+    /// that is not multibase, bytes too few for a prefix or other than 32 after Ed25519's, a
+    /// prefix that is not Ed25519's, bytes the rule refuses, and another spelling of a good
+    /// key; through [`DidKeyMethod::to_public_key`], each is the [`DidError`] variant it was
+    /// before `read_key`. The key's own `did:key` reads as the key.
+    #[test]
+    fn the_decode_says_which_clause_a_did_names_no_key_by() {
+        let key = key_of(&SigningKey::from_bytes(&[7u8; 32]));
+        let z = |bytes: &[u8]| Did::new("key", multibase::encode(Base::Base58Btc, bytes));
+        let mut secp256k1 = vec![0xe7, 0x01, 0x02];
+        secp256k1.extend_from_slice(&[7u8; 32]);
+        let (refused_name, refused) = crate::ed25519::refused_keys().into_iter().next().expect("a refused vector");
+        let mut short = DidKeyMethod::ED25519_MULTICODEC.to_vec();
+        short.extend_from_slice(&key.as_bytes()[..31]);
+        // A case: its name, the DID, the clause it is read by, and the `DidError` variant
+        // `to_public_key` gave for it before `read_key`.
+        type Case = (&'static str, Did, fn(&NoKey) -> bool, fn(&DidError) -> bool);
+        let invalid_key: fn(&DidError) -> bool = |e| matches!(e, DidError::InvalidKey(_));
+        let cases: Vec<Case> = vec![
+            (
+                "did:web",
+                Did::new("web", "vault.example"),
+                |n| matches!(n, NoKey::OtherMethod(m) if m == "web"),
+                |e| matches!(e, DidError::UnsupportedMethod(m) if m == "web"),
+            ),
+            (
+                "not base58btc",
+                Did::new("key", "z0OIl"),
+                |n| matches!(n, NoKey::NotMultibase(_)),
+                |e| matches!(e, DidError::InvalidMultibase(_)),
+            ),
+            ("one byte", z(&[0xed]), |n| matches!(n, NoKey::NoKeyBytes(_)), invalid_key),
+            ("31 bytes", z(&short), |n| matches!(n, NoKey::NoKeyBytes(_)), invalid_key),
+            ("secp256k1", z(&secp256k1), |n| matches!(n, NoKey::OtherKind), invalid_key),
+            ("refused", DidKeyMethod::spelled_over(&refused), |n| matches!(n, NoKey::Refused(_)), invalid_key),
+            (
+                "spelled otherwise",
+                DidKeyMethod::spelled_otherwise(key.as_bytes()),
+                |n| matches!(n, NoKey::SpelledOtherwise),
+                invalid_key,
+            ),
+        ];
+        for (name, did, is, was) in cases {
+            let no_key = DidKeyMethod::read_key(&did).expect_err(name);
+            assert!(is(&no_key), "{name} ({refused_name}): read as {no_key:?}");
+            let error = DidKeyMethod::to_public_key(&did).expect_err(name);
+            assert!(was(&error), "{name}: the decode gave another DidError than before: {error:?}");
+        }
+        assert_eq!(DidKeyMethod::read_key(&DidKeyMethod::from_public_key(&key)), Ok(key));
     }
 
     /// The bytes form and the key form make one string for one key, and the decode gives the
