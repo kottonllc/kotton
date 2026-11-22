@@ -426,8 +426,13 @@ pub enum OperatorVerb {
     Move { relay: String },
     /// Drop one pool (`TenantDropped`). The invited key rotates after it at
     /// each relay this person operates that their desktop told the vault to
-    /// stand at, so the pool's devices are refused there from the rotation
-    /// after this one; with no such relay, nothing rotates.
+    /// stand at, once the pool is gone — the vault answered the drop with
+    /// `TenantDropped`, or a `Tenants` answer of the vault's does not list the
+    /// name; never on a refusal's sentence — so the pool's devices are refused
+    /// there from the rotation after this one; with no such relay, nothing
+    /// rotates. Until then the desktop keeps the drop as waiting, and looks
+    /// again when the vault is next reached: at a verb said to it, and on the
+    /// desktop's hourly pass.
     Drop { pool: String },
     /// The rule the relay holds. Asked of the relay under its own
     /// credential's key. Answered with `RelayRule`.
