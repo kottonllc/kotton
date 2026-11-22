@@ -55,11 +55,11 @@ pub struct Cli {
     /// it may grow. What it costs falls by script, and in sentences alone: a reader of
     /// Bopomofo sees its fourth tone mark (U+02CB, also the tone letter of some
     /// romanisations) by its escape, a reader of phonetic transcription U+02F4, a reader
-    /// of polytonic Greek the spacing varia (U+1FEF) where the text is not composed, a
-    /// reader of mathematics the reversed prime (U+2035), a reader of fullwidth text its
-    /// grave (U+FF40), and any reader a grave mark standing alone after a space. A letter
-    /// with a grave written as two characters is printed as it is, and so are quotes,
-    /// apostrophes, acutes and primes.
+    /// of polytonic Greek the spacing varia (U+1FEF, which composed text holds as the
+    /// backtick itself), a reader of mathematics the reversed prime (U+2035), a reader of
+    /// fullwidth text its grave (U+FF40), and any reader a grave mark standing alone after
+    /// a space. A letter with a grave written as two characters is printed as it is, and
+    /// so are quotes, apostrophes, acutes and the other primes (U+2032).
     ///
     /// A note's sentence gives a command to type only with a name that is one plain
     /// word, in ASCII. That is a concession. A device, vault or relay named in another

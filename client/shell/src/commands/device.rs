@@ -1924,7 +1924,10 @@ mod tests {
                 assert_eq!(said.len(), plain.len(), "{role:?} {label:?}");
                 for (line, plain) in said.iter().zip(&plain) {
                     assert_eq!(delimiters_read(line), delimiters_read(plain), "{role:?} for {label:?}: {line:?}");
-                    if matches!(role, Role::Vault) && plain.contains(&format!("`{PLAIN}`")) {
+                    if matches!(role, Role::Vault)
+                        && plain.starts_with("`drive list` says what")
+                        && plain.contains(&format!("`{PLAIN}`"))
+                    {
                         vault_lines += 1;
                     }
                 }
