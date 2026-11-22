@@ -2216,7 +2216,9 @@ where
                 drives: Vec::new(),
             })
         }
-        other => Err(anyhow!("unexpected enrollment payload, got {other:?}")),
+        // A payload no ceremony hands a joiner: said by its name and no field
+        // (an answer not asked for is said by its name and no field).
+        other => Err(anyhow!("unexpected enrollment payload: the issuer handed {}", kotton_wire::ipc::unasked(&other))),
     };
     Ok((joined?, channel))
 }
@@ -3386,5 +3388,67 @@ mod relayed_tests {
             assert!(refused.contains("did not prove it holds"), "{refused}");
         }
     }
-}
 
+    /// **An answer not asked for is said by its name and no field**: a joiner
+    /// handed a payload no ceremony hands it (`FullAccess`, which none issues)
+    /// refuses it, and its error names the payload and nothing it carries. The
+    /// issuer here is run by hand, frame by frame, as `issuer_over` runs it,
+    /// with that payload in place of its own.
+    #[tokio::test]
+    async fn a_payload_no_ceremony_hands_is_said_by_its_name_alone() {
+        let code = normalize_code("ripple canyon ember");
+        let (a, b) = a_relay_between();
+        let issuer_identity = key();
+        let issuer_op = key();
+        let vault_op = key();
+        let warm = key();
+        let rv = rendezvous_in(&code, &ENROL_DOMAIN).unwrap();
+        let (yes_i, yes_j) = (Yes(Mutex::new(None), Mutex::new(None)), Yes(Mutex::new(None), Mutex::new(None)));
+        let issuer_side = async {
+            let (read, write) = tokio::io::split(a);
+            let mut channel =
+                crate::pair_channel::issuer_establish_with(write, read, rv.sid, "laptop", &yes_i, Some(code.as_bytes()))
+                    .await
+                    .expect("the channel is established");
+            let theirs: OpKeyRecord = serde_json::from_slice(&channel.recv_encrypted().await.unwrap()).unwrap();
+            let transcript = channel.transcript().to_bytes();
+            verify_op_key(&transcript, &theirs).expect("the vault proved its key");
+            let me = SelfAnnounce { op_key: &issuer_op, relay_url: "http://laptop-relay:7700".into() };
+            channel.send_encrypted(&serde_json::to_vec(&sign_op_key(&transcript, &me)).unwrap()).await.unwrap();
+            let _warm = channel.recv_encrypted().await.unwrap();
+            let _name = channel.recv_encrypted().await.unwrap();
+            let _announced = channel.recv_encrypted().await.unwrap();
+            channel.send_encrypted(&announce_bytes(None)).await.unwrap();
+            let payload = PairingPayload::FullAccess { seed32: [0x5e; 32] };
+            channel.send_encrypted(&serde_json::to_vec(&payload).unwrap()).await.unwrap();
+            let signature = issuer_identity.sign(&attest_message(channel.transcript()));
+            let attestation = kotton_wire::peer::PairAttestation {
+                identity_pubkey: issuer_identity.verifying_key().to_bytes(),
+                signature: signature.to_bytes().to_vec(),
+            };
+            channel.send_encrypted(&serde_json::to_vec(&attestation).unwrap()).await.unwrap();
+            let _ = channel.recv_encrypted().await;
+        };
+        let joiner_side = async {
+            let (read, write) = tokio::io::split(b);
+            joiner_over(
+                Transport::relayed(write, read, &code),
+                Some(SelfAnnounce { op_key: &vault_op, relay_url: "http://host-relay:7700".into() }),
+                &warm,
+                rv.sid,
+                "vault",
+                None,
+                &yes_j,
+                None,
+            )
+            .await
+            .map(|_| ())
+        };
+        let ((), joined) = tokio::join!(issuer_side, joiner_side);
+        let said = format!("{:#}", joined.expect_err("a payload no ceremony hands is refused"));
+        assert_eq!(said, "unexpected enrollment payload: the issuer handed `FullAccess`");
+        for field in ["seed32", "{", "redacted", "5e", "94"] {
+            assert!(!said.contains(field), "a field of the payload was said ({field:?}): {said}");
+        }
+    }
+}
