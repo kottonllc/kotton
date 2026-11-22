@@ -16,17 +16,21 @@ not rest on one person either.
   maintainer, that maintainer's own written approval is required, and the last maintainer is
   removed only by their own act. The repository's settings follow the merged page.
 - **Driver.** Whoever moves an issue through the loop: a contributor, or an agent working at a
-  contributor's direction. A driver holds no authority of its own; it follows
-  [`CONTRIBUTING.md`](CONTRIBUTING.md) and reports to the person who directed it.
+  contributor's direction. A driver holds no authority of its own: it decides and merges only as
+  this page says, follows [`CONTRIBUTING.md`](CONTRIBUTING.md) and reports to the person who
+  directed it.
 
 ## How a decision is made
 
-- **Lazy consensus.** A `decision` issue, or a proposed change to kotton-protocol's documents
-  made from this repository's work, states the choice and its default, and mentions the person
-  who directed the work and the maintainers. If no maintainer objects within 72 hours of the
-  last change to the choice or its default, the default may be built. Building it is an ordinary
-  pull request, landed only through the loop. Silence never merges anything. An objection says
-  why, in writing, on the proposal.
+- **The driver decides what touches no principle.** A `decision` issue, or a proposed change to
+  kotton-protocol's documents made from this repository's work, states the choice and its
+  default. The driver takes the default the issue argues for, or the one a reviewer argues for
+  in its place, records it on the `decision` issue and builds it. It does not wait for a
+  maintainer, queue the choice for one or ask one to confirm the default. Building it is an
+  ordinary pull request, landed only through the loop. A maintainer may answer any choice in
+  writing at any time, and that answer stands.
+- **What touches a principle is a maintainer's.** The driver brings it to a maintainer with the
+  default it recommends, and that default is not built until a maintainer answers in writing.
 - **When maintainers disagree,** the proposal stays open and its default is not built. It is
   settled by a maintainer's written answer that the others accept; no maintainer merges over
   another's open objection, and a choice that would keep the ownership bar
@@ -43,29 +47,39 @@ not rest on one person either.
 - **What is not decided this way.** What does not bend ([`CONTRIBUTING.md`](CONTRIBUTING.md)),
   and everything [`CLAUDE.md`](CLAUDE.md) says never to do. No decision may weaken the ownership
   bar or capability confinement, carry a key across a process boundary, trust infrastructure the
-  design does not, add an identity authority, or weaken the sign-off. If anyone says in writing
-  that a default might, that default is not built on silence: it waits for a maintainer's
-  written answer.
+  design does not, add an identity authority, or weaken the sign-off. These, and kotton-protocol's
+  [Principles](https://github.com/kottonllc/kotton-protocol/blob/main/design/principles.md), are
+  the principles. A choice touches one when it would change what one says, weaken one or a check
+  that holds it, or make an exception to one. If anyone says in writing that a default might
+  touch one, the driver does not take it: it waits for a maintainer's written answer.
 
 ## Merging into `main`
 
-A pull request lands only after its assessor, its reviewer and the gate have passed it; no one,
-maintainer or driver, merges around them. It is merged by a maintainer, or by a driver acting
-under a maintainer's standing direction, given in writing and withdrawn the same way, once all
-three have passed. A change to [`CLAUDE.md`](CLAUDE.md), [`CONTRIBUTING.md`](CONTRIBUTING.md) or
-this page also needs a maintainer's written approval on the pull request; its own rules do not
-ratify it.
+A pull request lands only after its assessor, its reviewer and the gate have passed it, on a
+head that contains `main`; no one, maintainer or driver, merges around them. It is merged by a
+maintainer, or by a driver acting under a maintainer's standing direction, given in writing and
+withdrawn the same way, once all three have passed. That direction reaches a change to
+[`CLAUDE.md`](CLAUDE.md), [`CONTRIBUTING.md`](CONTRIBUTING.md) or this page, but not one that
+touches a principle: that change also needs a maintainer's written approval on the pull request,
+and its own rules do not ratify it. A change to kotton-protocol's principles is a maintainer's
+to merge.
+
+The reading is kept in proportion. A fix round that changes only prose or comments is not read
+a second time, and a `hygiene` change needs one reader, not two.
+
+A standing direction is in force: a maintainer has given it, in writing, to the driver working
+at that maintainer's direction. The commit that added this sentence gives the day.
 
 ## Reserved to a maintainer
 
-Only a maintainer may: give or withdraw a driver's standing direction to merge; approve in
-writing a change to [`CLAUDE.md`](CLAUDE.md), [`CONTRIBUTING.md`](CONTRIBUTING.md) or this page;
-tag or publish a release; change a repository setting, a required check, a branch rule or a
-milestone's order; hold or rotate a signing or release key; add or remove a maintainer. A driver
-asks for these and does not do them.
+Only a maintainer may: give or withdraw a driver's standing direction to merge; answer what
+touches a principle; shorten this list; tag or publish a release; change a repository setting, a
+required check, a branch rule or a milestone's order; hold or rotate a signing or release key;
+add or remove a maintainer. A driver asks for these and does not do them.
 
 ## Changing this page
 
-By a pull request with a maintainer's written approval. This page is meant to grow when there
-are more maintainers: elected roles, areas with their own leads, or votes for what consensus
-cannot settle. It does not have them yet, because there is no one yet to hold them.
+By a pull request, landed as any other; a change that touches a principle, or shortens what is
+reserved to a maintainer, needs a maintainer's written approval. This page is meant to grow when
+there are more maintainers: elected roles, areas with their own leads, or votes for what
+consensus cannot settle. It does not have them yet, because there is no one yet to hold them.
