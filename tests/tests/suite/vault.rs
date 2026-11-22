@@ -1135,7 +1135,7 @@ async fn two_tenants_are_each_held_to_the_quota_set_aside_for_them() {
         // Refused, naming bob's own pool and the one he asked as — what a
         // key paired here learns, and nothing about alice's but the name he
         // sent (`TASK-a-vault-invite-names-a-tenant-the-device-does-not-sync-as`).
-        UserResponse::Error { message } => assert!(
+        UserResponse::NotPairedAs { kind: kotton_wire::ipc::NotPairedAsKind::AsAnother, message } => assert!(
             message.contains("not paired")
                 && message.contains("this device is paired here as tenant `bob`, and asked as `alice`"),
             "{message}"
@@ -2316,10 +2316,12 @@ async fn a_desktop_holding_the_operator_credential_invites_and_sets_a_quota_and_
             // verb is on the vault's peer wire, and this key does not reach it.
             UserResponse::Error { message } => assert!(
                 message.contains("a tenant's device does not say it")
-                    || message.contains("is not paired with user")
                     || message.contains("is not this vault's operator"),
                 "{name}: {message}"
             ),
+            // A stranger to the pool the verb names is refused in the vault's
+            // answer for it.
+            UserResponse::NotPairedAs { .. } => {}
             other => panic!("a tenant's device said {name}: {other:?}"),
         }
     }
@@ -5155,7 +5157,7 @@ async fn an_admit_under_an_invite_for_another_name_says_so_and_a_matching_one_sy
     match said {
         UserResponse::PairFailed { reason } => {
             assert!(
-                reason.contains("tenant \\u{60}sam\\u{60}") && reason.contains("as `alice`"),
+                reason.contains("tenant \\u{60}sam\\u{60}") && reason.contains("and asked as \\u{60}alice\\u{60}"),
                 "the admit names the pool the vault holds and the name this device asked as: {reason}"
             );
             assert!(

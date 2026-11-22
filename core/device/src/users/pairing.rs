@@ -1295,7 +1295,7 @@ async fn first_drive_at(runtime: &DeviceRuntime, store: &kotton_store::runtime::
 /// transaction, which is its own work.
 #[allow(clippy::too_many_arguments)]
 async fn keep_the_admitted(
-    the_vaults_rule: impl std::future::Future<Output = Option<String>>,
+    the_vaults_rule: impl std::future::Future<Output = Option<Refused>>,
     secrets: &dyn kotton_sys::secret::SecretsStore,
     member_store: &dyn kotton_peer::membership::MemberStore,
     db: &Arc<SqlitePool>,
@@ -1304,8 +1304,8 @@ async fn keep_the_admitted(
     posture: Posture,
     enrolled: kotton_peer::pairing::EnrolledNode,
 ) -> Result<kotton_wire::peer::PairedNode, String> {
-    if let Some(message) = the_vaults_rule.await {
-        return Err(not_kept_as(user_id, &message));
+    if let Some(refused) = the_vaults_rule.await {
+        return Err(not_kept_as(user_id, &refused));
     }
     finalize_enrolled_node(secrets, member_store, db, paired_keys, user_id, posture, enrolled)
         .await
@@ -1359,12 +1359,36 @@ const STANDING_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 /// lag; an answer in between clears it.
 const REFUSAL_HOLDS: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// A vault's refusal to keep for this device under the name it asked as:
+/// which of two kinds the vault said it is, and the vault's sentence, which is
+/// printed as data and read for nothing ([`not_kept_as`]). Held only until
+/// the admit has said it; nothing of it is stored or logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Refused {
+    kind: kotton_wire::ipc::NotPairedAsKind,
+    sentence: String,
+}
+
+/// Whether `answer` is a vault's refusal to keep for this device: its own
+/// answer ([`UserResponse::NotPairedAs`]) and nothing else. An `Error` is not,
+/// whatever its words — a node that is not a vault answers a vault's verb with
+/// an error that says nothing of this device's standing there, and a vault of
+/// an earlier build that refuses in an `Error` leaves the admit unchecked, as
+/// one that cannot be reached does. The decision is the answer's name; no
+/// word of the sentence is read.
+fn refusal_in(answer: UserResponse) -> Option<Refused> {
+    match answer {
+        UserResponse::NotPairedAs { kind, message } => Some(Refused { kind, sentence: message }),
+        _ => None,
+    }
+}
+
 /// Ask the vault an admit's ceremony just enrolled — before this device
 /// records it ([`keep_the_admitted`]) — under this device's own user, whether
 /// it keeps for this device — `VaultCapacity`, a tenant's verb, which the vault answers
-/// only to a key paired to the pool the request names. The vault's refusal,
-/// when it holds for [`REFUSAL_HOLDS`]; `None` when it answers anything else,
-/// or cannot be reached within [`STANDING_WAIT`].
+/// only to a key paired to the pool the request names. The vault's refusal
+/// ([`refusal_in`]), when it holds for [`REFUSAL_HOLDS`]; `None` when it
+/// answers anything else, or cannot be reached within [`STANDING_WAIT`].
 ///
 /// This is the whole of the check that the name the vault was given
 /// (`kvaultd invite <name>`) is the name this device syncs as: the pairing says
@@ -1372,9 +1396,9 @@ const REFUSAL_HOLDS: std::time::Duration = std::time::Duration::from_secs(5);
 /// device's user, so the one question that compares them is a request. It adds
 /// nothing to the enrolment and nothing to the wire — a verb the device would
 /// say at its first sync anyway, said before the person has anything to sync.
-async fn refused_as(runtime: &DeviceRuntime, node: kotton_wire::peer::PairedNode, user_id: &str) -> Option<String> {
+async fn refused_as(runtime: &DeviceRuntime, node: kotton_wire::peer::PairedNode, user_id: &str) -> Option<Refused> {
     let started = tokio::time::Instant::now();
-    let mut refused: Option<(tokio::time::Instant, String)> = None;
+    let mut refused: Option<(tokio::time::Instant, Refused)> = None;
     loop {
         // One attempt, bounded: a dial down the whole NAT ladder can outlast
         // the wait on its own.
@@ -1388,25 +1412,23 @@ async fn refused_as(runtime: &DeviceRuntime, node: kotton_wire::peer::PairedNode
                 .ok()
         };
         let answer = tokio::time::timeout(REFUSAL_HOLDS, attempt).await.ok().flatten();
-        match answer {
-            // The vault's refusal of a stranger, and nothing else: a node that
-            // is not a vault answers a vault's verb with an error that says
-            // nothing about this device's standing there.
-            Some(UserResponse::Error { message }) if message.contains(crate::users::admission::NOT_PAIRED_WITH) => {
+        match answer.map(refusal_in) {
+            // The vault's refusal of a stranger, and nothing else.
+            Some(Some(now)) => {
                 let since = refused.as_ref().map_or_else(tokio::time::Instant::now, |(t, _)| *t);
                 if since.elapsed() >= REFUSAL_HOLDS {
-                    return Some(message);
+                    return Some(now);
                 }
-                refused = Some((since, message));
+                refused = Some((since, now));
             }
-            Some(_) => return None,
+            Some(None) => return None,
             None => {}
         }
         if started.elapsed() >= STANDING_WAIT + REFUSAL_HOLDS {
             if refused.is_none() {
                 tracing::warn!(node = %node.id, "the admitted vault did not answer in time; its standing is unchecked");
             }
-            return refused.map(|(_, message)| message);
+            return refused.map(|(_, refused)| refused);
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
@@ -1417,18 +1439,19 @@ async fn refused_as(runtime: &DeviceRuntime, node: kotton_wire::peer::PairedNode
 /// length ([`kotton_wire::note::quoted_cut`]) after this device's own words,
 /// that this device kept nothing of it
 /// ([`keep_the_admitted`] reads the refusal before it writes), and what to
-/// type. When the vault holds this device's key under another pool, it has
-/// said which ([`crate::users::admission::paired_as_another`]), and the way out
+/// type. When the vault says it holds this device's key under another pool
+/// ([`kotton_wire::ipc::NotPairedAsKind::AsAnother`]; its sentence names
+/// which), the way out
 /// is the operator's: invite again under this device's user. Dropping the
 /// tenant the key was paired to is not a way out — `tenancy::drop_tenant`
 /// sweeps the key's row, which leaves the device paired nowhere and still
 /// refused — so it is named only as the cleanup after the new invite is
 /// admitted.
 ///
-/// Which way out is offered is read from `message` as it came: the cut and the
-/// escapes are made where it is printed, and nowhere it is compared.
-fn not_kept_as(user_id: &str, message: &str) -> String {
-    let what_to_do = if message.contains(crate::users::admission::PAIRED_AS_ANOTHER) {
+/// Which way out is offered is the refusal's kind, and no word of its
+/// sentence: the sentence is printed, and read for nothing.
+fn not_kept_as(user_id: &str, refused: &Refused) -> String {
+    let what_to_do = if refused.kind == kotton_wire::ipc::NotPairedAsKind::AsAnother {
         format!(
             "The vault was given another name for this device than it syncs as. On the host, invite again \
              under this device's user — `kvaultd invite {user_id}` (or `vault invite [<v>] {user_id}` \
@@ -1445,7 +1468,7 @@ fn not_kept_as(user_id: &str, message: &str) -> String {
     format!(
         "Not admitted: the vault will not keep for this device as `{user_id}`: {}. Nothing of it was \
          recorded here, so there is nothing to revoke. {what_to_do}",
-        kotton_wire::note::quoted_cut(message)
+        kotton_wire::note::quoted_cut(&refused.sentence)
     )
 }
 
@@ -2489,9 +2512,43 @@ mod handed_drive_tests {
 
 #[cfg(test)]
 mod admit_tests {
-    use super::{admits_by_code, not_kept_as, adds_instead, not_minted};
+    use super::{admits_by_code, not_kept_as, adds_instead, not_minted, refusal_in, Refused};
     use crate::users::admission::{paired_as_another, NOT_PAIRED_WITH};
     use kotton_schemas::membership::Posture;
+    use kotton_wire::ipc::{NotPairedAsKind, UserResponse};
+
+    /// A vault's refusal of `kind`, in `sentence`.
+    fn refused(kind: NotPairedAsKind, sentence: impl Into<String>) -> Refused {
+        Refused { kind, sentence: sentence.into() }
+    }
+
+    /// The sentence a vault sends a key it holds under `sam`, asked as `alice`.
+    fn held_as_sam() -> String {
+        format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice': {}", paired_as_another("sam", "alice"))
+    }
+
+    /// The sentence a vault sends a key it says no more of, asked as `alice`.
+    fn no_more_said() -> String {
+        format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice'")
+    }
+
+    /// **Whether the vault refused is the answer's name, and no word of it**
+    /// (how a device reads a vault's refusal to keep for it): its own answer
+    /// is the refusal, of either kind, and keeps its sentence; an `Error`
+    /// holding the refusal's very words is not, so the admit goes on
+    /// unchecked, as against a vault of an earlier build.
+    #[test]
+    fn a_refusal_is_the_vaults_answer_of_its_own_and_an_error_in_its_words_is_not() {
+        for (kind, sentence) in [(NotPairedAsKind::AsAnother, held_as_sam()), (NotPairedAsKind::Unsaid, no_more_said())] {
+            let answer = UserResponse::NotPairedAs { kind, message: sentence.clone() };
+            assert_eq!(refusal_in(answer), Some(refused(kind, sentence)), "{kind:?}");
+        }
+        for message in [held_as_sam(), no_more_said()] {
+            let older = UserResponse::Error { message: message.clone() };
+            assert_eq!(refusal_in(older), None, "an `Error` in the refusal's words was read as it: {message}");
+        }
+        assert_eq!(refusal_in(UserResponse::Ok), None);
+    }
 
     /// **An invite that was not minted says which cause stopped it**:
     /// only a relay that answered and refused names its rule; one that was not
@@ -2519,8 +2576,7 @@ mod admit_tests {
     /// tenant only after it — a drop alone leaves the device paired nowhere.
     #[test]
     fn a_device_paired_as_another_tenant_is_told_to_invite_first_and_drop_after() {
-        let vault = format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice': {}", paired_as_another("sam", "alice"));
-        let said = not_kept_as("alice", &vault);
+        let said = not_kept_as("alice", &refused(NotPairedAsKind::AsAnother, held_as_sam()));
         // The vault's sentence is printed as data: its backticks by their escape.
         assert!(said.contains("tenant \\u{60}sam\\u{60}, and asked as \\u{60}alice\\u{60}"), "{said}");
         assert!(said.ends_with(&remedy_on_main("alice", true)), "the remedy is not main's: {said}");
@@ -2686,12 +2742,34 @@ mod admit_tests {
     /// told of a tenant to drop, since the vault named none.
     #[test]
     fn a_device_paired_nowhere_is_told_to_be_invited_and_of_no_tenant() {
-        let said = not_kept_as("alice", &format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice'"));
+        let said = not_kept_as("alice", &refused(NotPairedAsKind::Unsaid, no_more_said()));
         assert!(said.contains("kvaultd invite alice"), "{said}");
         // From the desktop, the vault is named only where it operates several.
         assert!(said.contains("`vault invite [<v>] alice`"), "{said}");
         assert!(!said.contains("drop"), "{said}");
         assert!(said.ends_with(&remedy_on_main("alice", false)), "the remedy is not main's: {said}");
+    }
+
+    /// **The way out follows the kind, whatever the sentence says**: held as
+    /// another beside the sentence for a key the vault says no more of is told
+    /// to invite first and drop after.
+    #[test]
+    fn held_as_another_is_told_to_invite_first_whatever_its_sentence_says() {
+        let said = not_kept_as("alice", &refused(NotPairedAsKind::AsAnother, no_more_said()));
+        assert!(said.contains(&kotton_wire::note::quoted_cut(&no_more_said())), "{said}");
+        assert!(said.ends_with(&remedy_on_main("alice", true)), "the remedy is not the kind's: {said}");
+    }
+
+    /// **And the other way**: no more said, beside a sentence that holds the
+    /// words of a key held under another pool, is the plain invite, and no
+    /// word of a drop outside the vault's own sentence.
+    #[test]
+    fn no_more_said_is_the_plain_invite_whatever_its_sentence_says() {
+        let said = not_kept_as("alice", &refused(NotPairedAsKind::Unsaid, held_as_sam()));
+        assert!(said.contains(&kotton_wire::note::quoted_cut(&held_as_sam())), "{said}");
+        assert!(said.ends_with(&remedy_on_main("alice", false)), "the remedy is not the kind's: {said}");
+        assert!(!said.contains("drop"), "a drop was offered: {said}");
+        assert!(!said.contains("another name for this device"), "{said}");
     }
 
     /// The way out each of today's refusals is offered, word for word as
@@ -2733,7 +2811,7 @@ mod admit_tests {
         use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
         let tail = "y".repeat(600);
         let vault = format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice': `ok`\nNot admitted: {tail}");
-        let said = not_kept_as("alice", &vault);
+        let said = not_kept_as("alice", &refused(NotPairedAsKind::Unsaid, vault.clone()));
         assert!(said.starts_with("Not admitted: the vault will not keep for this device as `alice`: `"), "{said}");
         assert!(said.contains(&quoted_cut(&vault)), "{said}");
         assert!(!said.contains('\n'), "a line break the vault sent was printed as one: {said}");
@@ -2748,16 +2826,16 @@ mod admit_tests {
         assert!(said.ends_with(&remedy_on_main("alice", false)), "the remedy is not main's: {said}");
     }
 
-    /// The way out is chosen from the vault's sentence as it came, not as it is
-    /// printed: a refusal for a key held under another tenant whose words past
-    /// the bound are cut from the print is still offered that remedy.
+    /// The way out is the refusal's kind, not what of its sentence is printed:
+    /// a refusal for a key held under another tenant whose words past the
+    /// bound are cut from the print is still offered that remedy.
     #[test]
-    fn the_remedy_is_read_from_the_refusal_as_it_came_not_as_it_is_cut() {
+    fn the_remedy_is_the_kinds_however_much_of_the_sentence_is_printed() {
         let did = format!("did:key:z{}", "D".repeat(600));
         let vault = format!("peer {did} {NOT_PAIRED_WITH} 'alice': {}", paired_as_another("sam", "alice"));
-        let said = not_kept_as("alice", &vault);
+        let said = not_kept_as("alice", &refused(NotPairedAsKind::AsAnother, vault));
         assert!(said.contains(" more characters). Nothing of it was recorded here"), "{said}");
-        assert!(!said.contains(crate::users::admission::PAIRED_AS_ANOTHER), "{said}");
+        assert!(!said.contains("paired here as tenant"), "{said}");
         assert!(said.ends_with(&remedy_on_main("alice", true)), "the remedy is not main's: {said}");
     }
 
@@ -2841,12 +2919,12 @@ mod admit_tests {
         let paired_keys = Arc::new(RwLock::new(HashSet::new()));
         let members = Members::default();
         let secrets = kotton_secret::MemorySecrets::new();
-        let refusal = format!("peer did:key:zD {NOT_PAIRED_WITH} 'alice': {}", paired_as_another("sam", "alice"));
+        let refusal = held_as_sam();
 
         let the_vaults_rule = async {
             let at_the_read = recorded(&db, &paired_keys, &members).await;
             assert!(!at_the_read.row && at_the_read.drives == 0, "the admit wrote before it read the vault's rule");
-            Some(refusal.clone())
+            Some(refused(NotPairedAsKind::AsAnother, refusal.clone()))
         };
         let said = super::keep_the_admitted(
             the_vaults_rule,

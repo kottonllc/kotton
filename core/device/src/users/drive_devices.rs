@@ -157,11 +157,7 @@ async fn tell(
         };
         let outcome = tokio::time::timeout(EACH_DRIVE, async {
             let client = runtime.dialer().connect(drive, user_id).await.map_err(|e| e.to_string())?;
-            match client.send_to_vault(&request).await.map_err(|e| e.to_string())? {
-                UserResponse::Ok => Ok(()),
-                UserResponse::Error { message } => Err(message),
-                other => Err(format!("unexpected reply {other:?}")),
-            }
+            drive_took(client.send_to_vault(&request).await.map_err(|e| e.to_string())?)
         })
         .await
         .unwrap_or_else(|_| Err("the drive did not answer in time".to_string()));
@@ -174,6 +170,20 @@ async fn tell(
         }
     }
     told
+}
+
+/// What a drive's answer to a device change says: taken, or why not. A
+/// vault's refusal to keep for this device under the person's name
+/// ([`UserResponse::NotPairedAs`]) is said in its sentence, printed as data and
+/// to the bound ([`kotton_wire::note::quoted_cut`]), and decides nothing more
+/// than any other refusal here.
+fn drive_took(answer: UserResponse) -> Result<(), String> {
+    match answer {
+        UserResponse::Ok => Ok(()),
+        UserResponse::Error { message } => Err(message),
+        UserResponse::NotPairedAs { message, .. } => Err(format!("the vault answered: {}", kotton_wire::note::quoted_cut(&message))),
+        other => Err(format!("unexpected reply {other:?}")),
+    }
 }
 
 /// `device revoke`: withdraw the node from the person's drives, then revoke it
@@ -327,6 +337,23 @@ fn missed_answer(node_id: &str, missed: &[(String, String)], still_listed: &[Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A drive's refusal to keep for this device is said in its sentence,
+    /// as data and to the bound** (how a device reads a vault's refusal to
+    /// keep for it), whichever its kind.
+    #[test]
+    fn a_drives_refusal_of_a_device_change_is_printed_as_data_and_to_the_bound() {
+        use kotton_wire::ipc::NotPairedAsKind;
+        let long = "x".repeat(kotton_wire::note::MAX_SAID_CHARS + 2);
+        for kind in [NotPairedAsKind::AsAnother, NotPairedAsKind::Unsaid] {
+            let said = drive_took(UserResponse::NotPairedAs { kind, message: "no `drive`\nhere".into() });
+            assert_eq!(said, Err("the vault answered: `no \\u{60}drive\\u{60}\\nhere`".to_string()), "{kind:?}");
+            let said = drive_took(UserResponse::NotPairedAs { kind, message: long.clone() });
+            let want = format!("the vault answered: `{}` (cut: 2 more characters)", "x".repeat(kotton_wire::note::MAX_SAID_CHARS));
+            assert_eq!(said, Err(want), "{kind:?}");
+        }
+        assert_eq!(drive_took(UserResponse::Ok), Ok(()));
+    }
 
     /// **The missed-drive answer is as it was where no other row holds the
     /// key**, word for word, for one drive and for two.

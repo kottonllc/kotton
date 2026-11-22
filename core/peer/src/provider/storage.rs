@@ -207,10 +207,10 @@ impl KottonPeerObjectStorage {
         })
     }
 
-    /// A peer's `Error`, as a person reads it: the peer's text printed as data,
-    /// to a bounded length, after the device's own words
-    /// ([`kotton_wire::note::quoted_cut`]; kottonllc/kotton#597, 43A, 74A). The
-    /// answerer may be a paired peer of any kind.
+    /// A peer's `Error`, or a vault's `NotPairedAs`, as a person reads it: the
+    /// peer's text printed as data, to a bounded length, after the device's own
+    /// words ([`kotton_wire::note::quoted_cut`]; how another node's text is
+    /// printed). The answerer may be a paired peer of any kind.
     fn answered(message: &str) -> ObjectStorageError {
         ObjectStorageError::BackendError(format!("the peer answered: {}", kotton_wire::note::quoted_cut(message)))
     }
@@ -317,7 +317,7 @@ impl ObjectStorage for KottonPeerObjectStorage {
                 }
                 // An error is the peer failing, whatever its words: absence is
                 // never read from an error's text (kotton #412).
-                UserResponse::Error { message } => return Err(Self::answered(&message)),
+                UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => return Err(Self::answered(&message)),
                 other => return Err(Self::unexpected(&other)),
             }
         }
@@ -348,7 +348,7 @@ impl ObjectStorage for KottonPeerObjectStorage {
                 UserResponse::DriveHeld { device_did, for_secs } => {
                     return Err(ObjectStorageError::BackendError(held_write(&path, &device_did, for_secs)));
                 }
-                UserResponse::Error { message } => return Err(Self::answered(&message)),
+                UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => return Err(Self::answered(&message)),
                 other => return Err(Self::unexpected(&other)),
             }
             offset = end;
@@ -366,7 +366,7 @@ impl ObjectStorage for KottonPeerObjectStorage {
         match self.send(&req).await.map_err(Self::io_err)? {
             UserResponse::Ok => Ok(()),
             // As `get`: an error is a failure, never absence (kotton #412).
-            UserResponse::Error { message } => Err(Self::answered(&message)),
+            UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => Err(Self::answered(&message)),
             other => Err(Self::unexpected(&other)),
         }
     }
@@ -386,7 +386,7 @@ impl ObjectStorage for KottonPeerObjectStorage {
                     modified: None,
                 })
                 .collect()),
-            UserResponse::Error { message } => Err(Self::answered(&message)),
+            UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => Err(Self::answered(&message)),
             other => Err(Self::unexpected(&other)),
         }
     }
@@ -486,7 +486,7 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                 // compaction delete what only a held generation names
                 // (kotton #412).
                 UserResponse::SealedNotFound => return Err(ObjectStorageError::NotFound(path)),
-                UserResponse::Error { message } => return Err(Self::answered(&message)),
+                UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => return Err(Self::answered(&message)),
                 other => return Err(Self::unexpected(&other)),
             }
         }
@@ -512,7 +512,7 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                     modified: e.modified,
                 })
                 .collect()),
-            UserResponse::Error { message } => Err(Self::answered(&message)),
+            UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => Err(Self::answered(&message)),
             other => Err(Self::unexpected(&other)),
         }
     }
@@ -558,7 +558,7 @@ impl SealedObjectAccess for KottonPeerObjectStorage {
                 UserResponse::DriveHeld { device_did, for_secs } => {
                     return Err(ObjectStorageError::BackendError(held_write(&path, &device_did, for_secs)));
                 }
-                UserResponse::Error { message } => return Err(Self::answered(&message)),
+                UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => return Err(Self::answered(&message)),
                 other => return Err(Self::unexpected(&other)),
             }
             offset = end;
@@ -791,6 +791,27 @@ mod tests {
         let want = format!("the peer answered: `{}` (cut: 88 more characters)", "x".repeat(kotton_wire::note::MAX_SAID_CHARS));
         for (read, said) in each_read(&answer).await {
             assert_eq!(said, want, "{read}");
+        }
+    }
+
+    /// **A vault's refusal to keep for this device is printed as an `Error`'s
+    /// text is, at every read** (how a device reads a vault's refusal to keep
+    /// for it): its sentence as data, to the bound, after
+    /// the device's own words, whichever its kind.
+    #[tokio::test]
+    async fn a_vaults_refusal_is_printed_as_data_and_to_the_bound_at_every_read() {
+        use kotton_wire::ipc::NotPairedAsKind;
+        let long = "x".repeat(kotton_wire::note::MAX_SAID_CHARS + 88);
+        let cut = format!("the peer answered: `{}` (cut: 88 more characters)", "x".repeat(kotton_wire::note::MAX_SAID_CHARS));
+        for kind in [NotPairedAsKind::AsAnother, NotPairedAsKind::Unsaid] {
+            let answer = mock_response(&UserResponse::NotPairedAs { kind, message: "no `drive`\nhere".to_string() });
+            for (read, said) in each_read(&answer).await {
+                assert_eq!(said, "the peer answered: `no \\u{60}drive\\u{60}\\nhere`", "{kind:?} {read}");
+            }
+            let answer = mock_response(&UserResponse::NotPairedAs { kind, message: long.clone() });
+            for (read, said) in each_read(&answer).await {
+                assert_eq!(said, cut, "{kind:?} {read}");
+            }
         }
     }
 

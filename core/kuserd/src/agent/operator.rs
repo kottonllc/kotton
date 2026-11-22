@@ -2098,7 +2098,9 @@ pub(crate) async fn speak(
     // learned the new key yet). Only where keys are kept for it: a relay nobody
     // set a rule on reads no key, and one run by someone else is not this
     // person's to rotate. The rotation tells every vault standing there again.
-    if drop && !matches!(answer, UserResponse::Error { .. }) {
+    // A vault's refusal to keep for this key under the pool named is a
+    // refusal here too, as its `Error` was.
+    if drop && !matches!(answer, UserResponse::Error { .. } | UserResponse::NotPairedAs { .. }) {
         let keys = kept_keys(&store).unwrap_or_default();
         for stood in told.iter().flat_map(|t| &t.relays) {
             let Some(id) = relay_id(Some(&stood.key)) else { continue };

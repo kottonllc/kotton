@@ -70,7 +70,7 @@ use kotton_device::users::residency::Residency as _;
 use kotton_device::users::DeviceUsers as _;
 use kotton_device::DeviceRuntime;
 use kotton_sys::store::SyncableStore;
-use kotton_wire::ipc::{TenantVerb, UserResponse, VaultPeerRequest, VaultVerb};
+use kotton_wire::ipc::{NotPairedAsKind, TenantVerb, UserResponse, VaultPeerRequest, VaultVerb};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
@@ -487,8 +487,12 @@ async fn handle_claim(ctx: &PeerContext, from: &Peer, request: VaultPeerRequest)
 /// What a peer admitted on a recovery claim reads, whatever it was refused.
 const CLAIM_REFUSAL: &str = "a device admitted on a recovery claim may only fetch the identity it claimed";
 
-/// The sentence a refused caller reads. `held` is the pool a stranger's key
-/// is paired to at this vault ([`held_by`]), `None` for a key paired nowhere.
+/// The answer a refused caller reads. `held` is the pool a stranger's key
+/// is paired to at this vault ([`held_by`]), `None` for a key paired nowhere,
+/// to more than one pool, or whose pools could not be read. A stranger whose
+/// request names a pool reads [`UserResponse::NotPairedAs`], its kind
+/// `AsAnother` exactly where `held` is a pool; every other refusal is an
+/// `Error` with the sentence for its standing.
 fn refusal(
     standing: &PeerStanding,
     peer_did: &str,
@@ -506,12 +510,23 @@ fn refusal(
             "the operator credential says the landlord's six verbs and nothing else; {verb} is a \
              tenant's"
         ),
+        // A stranger whose request names a pool is told so in an answer of
+        // its own, which says which of two refusals it is: held under one
+        // other pool (`held_by` gave one), or no more said. The name stays in
+        // the sentence; no field carries it.
         PeerStanding::Stranger => match (pool, held) {
-            (Some(user_id), Some(held)) => format!(
-                "peer {peer_did} {NOT_PAIRED_WITH} '{user_id}': {}",
-                paired_as_another(held, user_id)
-            ),
-            (Some(user_id), None) => format!("peer {peer_did} {NOT_PAIRED_WITH} '{user_id}'"),
+            (Some(user_id), Some(held)) => {
+                return UserResponse::NotPairedAs {
+                    kind: NotPairedAsKind::AsAnother,
+                    message: format!("peer {peer_did} {NOT_PAIRED_WITH} '{user_id}': {}", paired_as_another(held, user_id)),
+                }
+            }
+            (Some(user_id), None) => {
+                return UserResponse::NotPairedAs {
+                    kind: NotPairedAsKind::Unsaid,
+                    message: format!("peer {peer_did} {NOT_PAIRED_WITH} '{user_id}'"),
+                }
+            }
             (None, _) => format!("peer {peer_did} is not this vault's operator"),
         },
     };
@@ -750,7 +765,7 @@ mod tests {
         assert_eq!(did.chars().count(), 56, "{did}");
         let (asked, held) = ("a".repeat(64), "h".repeat(64));
         let message = match refusal(&PeerStanding::Stranger, &did, Some(&asked), Some(&held), "TenantDrives") {
-            UserResponse::Error { message } => message,
+            UserResponse::NotPairedAs { kind: NotPairedAsKind::AsAnother, message } => message,
             other => panic!("a stranger is refused: {other:?}"),
         };
         let printed = kotton_wire::note::quoted_cut(&message);
@@ -769,15 +784,15 @@ mod tests {
     async fn a_refused_key_learns_its_own_pool_and_a_key_paired_nowhere_learns_none() {
         let sams = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes();
         let db = a_vault_with_sams_device(sams).await;
-        let said = |held: Option<String>| match refusal(&PeerStanding::Stranger, "did:key:zPeer", Some("alice"), held.as_deref(), "VaultCapacity") {
-            UserResponse::Error { message } => message,
-            other => panic!("a stranger is refused: {other:?}"),
+        let said = |held: Option<String>, want: NotPairedAsKind| match refusal(&PeerStanding::Stranger, "did:key:zPeer", Some("alice"), held.as_deref(), "VaultCapacity") {
+            UserResponse::NotPairedAs { kind, message } if kind == want => message,
+            other => panic!("a stranger is refused as {want:?}: {other:?}"),
         };
 
         // Sam's device, asking as alice: both names, its own pool first.
         let held = held_by(&db, &PeerStanding::Stranger, Some(sams), Some("alice")).await;
         assert_eq!(held.as_deref(), Some("sam"));
-        let message = said(held);
+        let message = said(held, NotPairedAsKind::AsAnother);
         assert!(
             message.contains("this device is paired here as tenant `sam`, and asked as `alice`"),
             "{message}"
@@ -786,7 +801,7 @@ mod tests {
         // A key paired nowhere: today's sentence, and no pool it did not name.
         let nowhere = held_by(&db, &PeerStanding::Stranger, Some([9u8; 32]), Some("alice")).await;
         assert_eq!(nowhere, None);
-        let message = said(nowhere);
+        let message = said(nowhere, NotPairedAsKind::Unsaid);
         assert_eq!(message, "peer did:key:zPeer is not paired with user 'alice'");
         assert!(!message.contains("sam"), "a key paired nowhere learned a pool: {message}");
 
@@ -802,6 +817,58 @@ mod tests {
             .await
             .expect("a second pool's row for sam's key");
         assert_eq!(held_by(&db, &PeerStanding::Stranger, Some(sams), Some("alice")).await, None);
+    }
+
+    /// **The kind is `AsAnother` exactly where `held_by` gives a pool, and the
+    /// answer is the same whether the pool the request names exists or not**
+    /// (how a device reads a vault's refusal to keep for it).
+    /// Every other refusal stays an `Error`: a stranger whose request names no
+    /// pool, a tenant's device asking a landlord's verb, an operator asking a
+    /// tenant's, and a claim.
+    #[tokio::test]
+    async fn a_strangers_refusal_is_an_answer_of_its_own_whose_kind_is_held_by() {
+        let sams = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes();
+        let pats = ed25519_dalek::SigningKey::from_bytes(&[8u8; 32]).verifying_key().to_bytes();
+        let db = a_vault_with_sams_device(sams).await;
+        // `pat` is a pool here, by its own device; `alice` is no pool at all.
+        kotton_peer::daemon::db::insert_paired_node(&db, "pats-laptop", "pat", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&pats).unwrap(), "[]", 0, Some("full"))
+            .await
+            .expect("pat's device paired");
+        let answer = |held: Option<String>, pool: &str| refusal(&PeerStanding::Stranger, "did:key:zPeer", Some(pool), held.as_deref(), "VaultCapacity");
+        let as_alice = |answer: UserResponse, pool: &str| match answer {
+            UserResponse::NotPairedAs { kind, message } => (kind, message.replace(&format!("'{pool}'"), "'alice'").replace(&format!("`{pool}`"), "`alice`")),
+            other => panic!("a stranger naming a pool is refused in its own answer: {other:?}"),
+        };
+
+        for (key, want) in [(sams, NotPairedAsKind::AsAnother), ([9u8; 32], NotPairedAsKind::Unsaid)] {
+            let mut each = Vec::new();
+            for pool in ["pat", "alice"] {
+                let held = held_by(&db, &PeerStanding::Stranger, Some(key), Some(pool)).await;
+                let (kind, message) = as_alice(answer(held.clone(), pool), pool);
+                assert_eq!(kind == NotPairedAsKind::AsAnother, held.is_some(), "{pool}: {kind:?} beside {held:?}");
+                assert_eq!(kind, want, "{pool}");
+                each.push((kind, message));
+            }
+            assert_eq!(each[0], each[1], "the answer said whether the pool named exists");
+        }
+
+        // A key two pools pair: `held_by` gives none, and so no more is said.
+        kotton_peer::daemon::db::insert_paired_node(&db, "sams-laptop", "lee", &kotton_crypto::ed25519::VerifyingKey::from_bytes(&sams).unwrap(), "[]", 0, Some("full"))
+            .await
+            .expect("a second pool's row for sam's key");
+        let held = held_by(&db, &PeerStanding::Stranger, Some(sams), Some("alice")).await;
+        assert!(matches!(answer(held, "alice"), UserResponse::NotPairedAs { kind: NotPairedAsKind::Unsaid, .. }));
+
+        // Every other refusal keeps its `Error`.
+        for (standing, pool) in [
+            (PeerStanding::Stranger, None),
+            (PeerStanding::Paired, Some("alice")),
+            (PeerStanding::Operator, Some("alice")),
+            (PeerStanding::Claim { aid: "did:kel:x".into() }, Some("alice")),
+        ] {
+            let refused = refusal(&standing, "did:key:zPeer", pool, None, "VaultCapacity");
+            assert!(matches!(refused, UserResponse::Error { .. }), "{standing:?}: {refused:?}");
+        }
     }
 
     /// A claimant has no name (#511). A claim made from `key(2)`, whose key's sign bit is
