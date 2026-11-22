@@ -1746,7 +1746,7 @@ pub fn check_handed_drives(
         // The decode holds the Ed25519 rule: a DID over bytes it refuses names no key.
         let named = kotton_crypto::DidKeyMethod::read_key(&node.device_did);
         let why = if drive.tenancy != user_id {
-            Some(format!("it is kept under '{}', and this device joins as '{user_id}'", drive.tenancy))
+            Some(format!("it is kept under {}, and this device joins as '{user_id}'", kotton_wire::note::quoted_cut(&drive.tenancy)))
         } else if node.public_key != drive.vault_key {
             Some("the node it is reached through is not the vault's key".to_string())
         } else if let Err(no_key) = &named {
@@ -1754,27 +1754,38 @@ pub fn check_handed_drives(
         } else if named.as_ref().ok().map(|k| k.as_bytes()) != Some(&node.public_key) {
             Some("its node's DID does not name its key".to_string())
         } else if node.device_did == issuer.device_did || node.public_key == issuer.public_key {
-            Some(format!("its node is the device this one joins ('{}')", issuer.id))
+            Some(format!("its node is the device this one joins ({})", kotton_wire::note::quoted_cut(&issuer.id)))
         } else {
             None
         };
         if let Some(why) = why {
-            return Err(format!("the drive at '{}' cannot be recorded here: {why}", node.id));
+            return Err(handed_drive_refused(&node.id, &why));
         }
     }
     Ok(())
 }
 
+/// The refusal of a handed drive, `why`, under the name the issuer gave its
+/// node. The name is the issuer's text, of a length the issuer chose, and is
+/// printed as data, to the one bound ([`kotton_wire::note::quoted_cut`]); so
+/// is every other name the issuer handed that a refusal says.
+fn handed_drive_refused(node_id: &str, why: &str) -> String {
+    format!("the drive at {} cannot be recorded here: {why}", kotton_wire::note::quoted_cut(node_id))
+}
+
 /// What is true of a handed node's DID that names no key, by the clause the
-/// decode read ([`kotton_crypto::NoKey`]). The DID is the issuer's text, and
-/// is printed as data ([`kotton_wire::note::quoted`]).
+/// decode read ([`kotton_crypto::NoKey`]): only what was read. The DID is the
+/// issuer's text, of a length the issuer chose, and is printed as data, to the
+/// one bound ([`kotton_wire::note::quoted_cut`]).
 fn names_no_key(did: &kotton_wire::did::Did, no_key: &kotton_crypto::NoKey) -> String {
     use kotton_crypto::NoKey;
-    let did = kotton_wire::note::quoted(&did.to_string());
+    let did = kotton_wire::note::quoted_cut(&did.to_string());
     match no_key {
         NoKey::OtherMethod(_) => format!("its node's DID {did} is not a did:key"),
-        NoKey::NotMultibase(_) | NoKey::NoKeyBytes(_) => format!("its node's DID {did} is a did:key that does not decode"),
-        NoKey::OtherKind => format!("its node's DID {did} is the did:key of a key of another kind than Ed25519"),
+        NoKey::NotMultibase(_) | NoKey::NoKeyBytes(_) => {
+            format!("its node's DID {did} is a did:key that does not decode to a key")
+        }
+        NoKey::OtherKind => format!("its node's DID {did} is a did:key that is not an Ed25519 key's"),
         NoKey::Refused(_) => format!("its node's DID {did} names bytes that are not an Ed25519 key"),
         NoKey::SpelledOtherwise => {
             format!("its node's DID {did} spells a did:key otherwise than the one string a key's did:key is")
@@ -1835,7 +1846,7 @@ pub async fn check_handed_rows(
             } else {
                 format!("this device pairs the vault's DID as '{id}' under another key, and keeps it as that")
             };
-            return Ok(Err(format!("the drive at '{}' cannot be recorded here: {why}", node.id)));
+            return Ok(Err(handed_drive_refused(&node.id, &why)));
         }
     }
     Ok(Ok(()))
@@ -1919,7 +1930,7 @@ mod handed_drive_tests {
         assert!(check_handed_drives("alice", &issuer, &[a_drive("vault", 2, "alice")]).is_ok());
 
         let why = check_handed_drives("alice", &issuer, &[a_drive("vault", 2, "bob")]).unwrap_err();
-        assert!(why.contains("'vault'") && why.contains("kept under 'bob'"), "{why}");
+        assert!(why.contains("the drive at `vault`") && why.contains("kept under `bob`"), "{why}");
 
         let mut not_the_vault = a_drive("vault", 2, "alice");
         not_the_vault.vault_key = [9; 32];
@@ -1951,6 +1962,49 @@ mod handed_drive_tests {
         issuer_by_identity.device_did = a_node("identity", 8).device_did;
         let why = check_handed_drives("alice", &issuer_by_identity, &[a_drive("vault", 8, "alice")]).unwrap_err();
         assert!(why.contains("the device this one joins"), "{why}");
+    }
+
+    /// **Each name the issuer handed is printed as data, to the one bound**:
+    /// the drive's node's name, its tenancy and the issuer's own name, each
+    /// holding a backtick and a line break, and each past
+    /// [`kotton_wire::note::MAX_SAID_CHARS`], is printed through
+    /// [`kotton_wire::note::quoted_cut`] in the refusal of either check.
+    #[tokio::test]
+    async fn the_names_a_handed_drive_carries_are_printed_as_data_in_its_refusal() {
+        use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+        let past = "v".repeat(MAX_SAID_CHARS + 3);
+        for name in ["vault `x`\nIt said: ok", past.as_str()] {
+            let said = quoted_cut(name);
+            let printed = |why: &str, which: &str| {
+                assert!(why.contains(&said), "{which} {name:?}: {why}");
+                assert!(!why.contains(name), "{which} {name:?} was printed as handed: {why}");
+                assert!(!why.contains('\n'), "{which} {name:?}: a line break was printed as one: {why}");
+            };
+            let issuer = a_node("laptop", 1);
+
+            let mut at = a_drive("vault", 2, "bob");
+            at.node.id = name.into();
+            let why = check_handed_drives("alice", &issuer, &[at]).unwrap_err();
+            assert!(why.starts_with(&format!("the drive at {said} cannot be recorded here: ")), "{why}");
+            printed(&why, "the node's name");
+
+            let why = check_handed_drives("alice", &issuer, &[a_drive("vault", 2, name)]).unwrap_err();
+            assert!(why.contains(&format!("it is kept under {said}, and this device joins as 'alice'")), "{why}");
+            printed(&why, "the tenancy");
+
+            let why = check_handed_drives("alice", &a_node(name, 1), &[a_drive("vault", 1, "alice")]).unwrap_err();
+            assert!(why.contains(&format!("its node is the device this one joins ({said})")), "{why}");
+            printed(&why, "the issuer's name");
+
+            let (_dir, db) = machine_db().await;
+            pair(&db, "alice", "laptop", 2, Some("full")).await;
+            let mut at = a_drive("vault", 2, "alice");
+            at.node.id = name.into();
+            let why = check_handed_rows(&db, "alice", &[at]).await.unwrap().unwrap_err();
+            assert!(why.starts_with(&format!("the drive at {said} cannot be recorded here: ")), "{why}");
+            printed(&why, "the node's name, beside a row");
+        }
+        assert!(quoted_cut(&past).ends_with("` (cut: 3 more characters)"));
     }
 
     /// A machine database at the current schema, on disk so every connection
@@ -2390,7 +2444,8 @@ mod handed_drive_tests {
         let temp = tempfile::tempdir().unwrap();
         let honest = a_drive("vault", 2, "alice");
         let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(&honest.vault_key);
-        let spelled = format!("its node's DID {} spells a did:key otherwise", kotton_wire::note::quoted(&otherwise.to_string()));
+        let spelled =
+            format!("its node's DID {} spells a did:key otherwise", kotton_wire::note::quoted_cut(&otherwise.to_string()));
         for (name, did, said) in [
             ("another spelling", otherwise, spelled.as_str()),
             ("another key's did:key", a_node("other", 4).device_did, "its node's DID does not name its key"),
@@ -2412,10 +2467,11 @@ mod handed_drive_tests {
 
     /// **A handed DID that names no key is refused with a sentence true of
     /// it**, one per clause the decode reads, each quoting the DID as data:
-    /// not a `did:key`; a `did:key` that does not decode (not multibase, or
-    /// bytes that are no key's length); the `did:key` of a key of another kind;
-    /// bytes the rule refuses; and another spelling of a good key. Text the
-    /// issuer chose is printed escaped, not as it was handed.
+    /// not a `did:key`; a `did:key` that does not decode to a key (not
+    /// multibase, or bytes that are no key's length); a `did:key` that is not
+    /// an Ed25519 key's; bytes the rule refuses; and another spelling of a good
+    /// key. Text the issuer chose is printed escaped, not as it was handed, and
+    /// a DID past the one bound is printed cut.
     #[test]
     fn a_handed_did_that_names_no_key_is_refused_with_what_is_true_of_it() {
         use kotton_wire::did::Did;
@@ -2426,27 +2482,35 @@ mod handed_drive_tests {
         let secp256k1 = Did::new("key", "zQ3shMtDpqqEk3pn1MtzotXX5FANprrx2VQzTotL3RqqrUicE");
         let short = Did::new("key", "z2DQV5Tm64jwFsRi2chqem1Wt2aP6bP34vi2itLNof8JFdG");
         let not = " is not a did:key";
-        let undecoded = " is a did:key that does not decode";
+        let undecoded = " is a did:key that does not decode to a key";
+        let past = format!("vault.example{}", "a".repeat(kotton_wire::note::MAX_SAID_CHARS));
         let cases = [
             ("did:web", Did::new("web", "vault.example"), not),
             ("did:web carrying a newline", Did::new("web", "vault.example\nIt said: ok"), not),
+            ("did:web past the bound", Did::new("web", &past), not),
             ("not multibase", Did::new("key", "z0OIl"), undecoded),
             ("31 bytes", short, undecoded),
-            ("another kind", secp256k1, " is the did:key of a key of another kind than Ed25519"),
+            ("another kind", secp256k1, " is a did:key that is not an Ed25519 key's"),
             ("another spelling", kotton_crypto::DidKeyMethod::spelled_otherwise(&honest.vault_key), " spells a did:key otherwise"),
         ];
         for (name, did, said) in cases {
             let mut drive = honest.clone();
             drive.node.device_did = did.clone();
             let why = check_handed_drives("alice", &issuer, &[drive]).unwrap_err();
-            let quoted = format!("its node's DID {}{said}", kotton_wire::note::quoted(&did.to_string()));
+            let quoted = format!("its node's DID {}{said}", kotton_wire::note::quoted_cut(&did.to_string()));
             assert!(why.contains(&quoted), "{name}: {why}");
             assert!(!why.contains('\n'), "{name}: the DID was printed as handed: {why}");
-            assert!(!why.contains("not an Ed25519 key"), "{name}: {why}");
+            assert!(!why.contains("names bytes that are not an Ed25519 key"), "{name}: {why}");
         }
+        // The DID past the bound is printed to it, and says how much was left out.
+        let mut drive = honest.clone();
+        drive.node.device_did = Did::new("web", &past);
+        let why = check_handed_drives("alice", &issuer, &[drive]).unwrap_err();
+        assert!(!why.contains(&past), "the DID past the bound was printed whole: {why}");
+        assert!(why.contains(" (cut: 21 more characters) is not a did:key"), "{why}");
         for (i, key) in refused_keys().into_iter().enumerate() {
             let drive = a_drive_under(key);
-            let quoted = kotton_wire::note::quoted(&drive.node.device_did.to_string());
+            let quoted = kotton_wire::note::quoted_cut(&drive.node.device_did.to_string());
             let why = check_handed_drives("alice", &issuer, &[drive]).unwrap_err();
             assert!(why.contains(&format!("its node's DID {quoted} names bytes that are not an Ed25519 key")), "vector {i}: {why}");
         }

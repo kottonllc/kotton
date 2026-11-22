@@ -14,7 +14,8 @@ pub enum NoKey {
     /// A `did:key` that decodes to bytes that are not a key's: too few for a multicodec
     /// prefix, or the Ed25519 prefix and other than 32 bytes after it.
     NoKeyBytes(String),
-    /// A `did:key` of a key of another kind: its multicodec prefix is not Ed25519's.
+    /// A `did:key` that is not an Ed25519 key's: its bytes do not begin with Ed25519's
+    /// multicodec prefix. Nothing more of them is read.
     OtherKind,
     /// A `did:key` of 32 bytes the Ed25519 rule refuses.
     Refused(String),
@@ -208,8 +209,9 @@ mod tests {
 
     /// **The decode says which clause a DID names no key by**: another method, an identifier
     /// that is not multibase, bytes too few for a prefix or other than 32 after Ed25519's, a
-    /// key of another kind, bytes the rule refuses, and another spelling of a good key. The
-    /// key's own `did:key` reads as the key.
+    /// prefix that is not Ed25519's, bytes the rule refuses, and another spelling of a good
+    /// key; through [`DidKeyMethod::to_public_key`], each is the [`DidError`] variant it was
+    /// before `read_key`. The key's own `did:key` reads as the key.
     #[test]
     fn the_decode_says_which_clause_a_did_names_no_key_by() {
         let key = key_of(&SigningKey::from_bytes(&[7u8; 32]));
@@ -219,21 +221,39 @@ mod tests {
         let (refused_name, refused) = crate::ed25519::refused_keys().into_iter().next().expect("a refused vector");
         let mut short = DidKeyMethod::ED25519_MULTICODEC.to_vec();
         short.extend_from_slice(&key.as_bytes()[..31]);
-        // A case: its name, the DID, and the clause it is read by.
-        type Case = (&'static str, Did, fn(&NoKey) -> bool);
+        // A case: its name, the DID, the clause it is read by, and the `DidError` variant
+        // `to_public_key` gave for it before `read_key`.
+        type Case = (&'static str, Did, fn(&NoKey) -> bool, fn(&DidError) -> bool);
+        let invalid_key: fn(&DidError) -> bool = |e| matches!(e, DidError::InvalidKey(_));
         let cases: Vec<Case> = vec![
-            ("did:web", Did::new("web", "vault.example"), |n| matches!(n, NoKey::OtherMethod(m) if m == "web")),
-            ("not base58btc", Did::new("key", "z0OIl"), |n| matches!(n, NoKey::NotMultibase(_))),
-            ("one byte", z(&[0xed]), |n| matches!(n, NoKey::NoKeyBytes(_))),
-            ("31 bytes", z(&short), |n| matches!(n, NoKey::NoKeyBytes(_))),
-            ("secp256k1", z(&secp256k1), |n| matches!(n, NoKey::OtherKind)),
-            ("refused", DidKeyMethod::spelled_over(&refused), |n| matches!(n, NoKey::Refused(_))),
-            ("spelled otherwise", DidKeyMethod::spelled_otherwise(key.as_bytes()), |n| matches!(n, NoKey::SpelledOtherwise)),
+            (
+                "did:web",
+                Did::new("web", "vault.example"),
+                |n| matches!(n, NoKey::OtherMethod(m) if m == "web"),
+                |e| matches!(e, DidError::UnsupportedMethod(m) if m == "web"),
+            ),
+            (
+                "not base58btc",
+                Did::new("key", "z0OIl"),
+                |n| matches!(n, NoKey::NotMultibase(_)),
+                |e| matches!(e, DidError::InvalidMultibase(_)),
+            ),
+            ("one byte", z(&[0xed]), |n| matches!(n, NoKey::NoKeyBytes(_)), invalid_key),
+            ("31 bytes", z(&short), |n| matches!(n, NoKey::NoKeyBytes(_)), invalid_key),
+            ("secp256k1", z(&secp256k1), |n| matches!(n, NoKey::OtherKind), invalid_key),
+            ("refused", DidKeyMethod::spelled_over(&refused), |n| matches!(n, NoKey::Refused(_)), invalid_key),
+            (
+                "spelled otherwise",
+                DidKeyMethod::spelled_otherwise(key.as_bytes()),
+                |n| matches!(n, NoKey::SpelledOtherwise),
+                invalid_key,
+            ),
         ];
-        for (name, did, is) in cases {
+        for (name, did, is, was) in cases {
             let no_key = DidKeyMethod::read_key(&did).expect_err(name);
             assert!(is(&no_key), "{name} ({refused_name}): read as {no_key:?}");
-            assert!(DidKeyMethod::to_public_key(&did).is_err(), "{name}: the decode gave a key");
+            let error = DidKeyMethod::to_public_key(&did).expect_err(name);
+            assert!(was(&error), "{name}: the decode gave another DidError than before: {error:?}");
         }
         assert_eq!(DidKeyMethod::read_key(&DidKeyMethod::from_public_key(&key)), Ok(key));
     }
