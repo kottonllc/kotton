@@ -101,6 +101,8 @@ mod user_database_check;
 mod wx_check;
 mod ship_check;
 mod tier_check;
+#[cfg(test)]
+mod tier_check_cargo_tests;
 #[cfg_attr(not(feature = "cli-docs"), allow(dead_code))]
 mod verb_check;
 #[cfg_attr(not(feature = "cli-docs"), allow(dead_code))]
