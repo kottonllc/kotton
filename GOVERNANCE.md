@@ -52,7 +52,7 @@ not rest on one person either.
   bar or capability confinement, carry a key across a process boundary, trust infrastructure the
   design does not, add an identity authority, or weaken the sign-off. These, what does not bend,
   and kotton-protocol's
-  [Principles](https://github.com/kottonllc/kotton-protocol/blob/main/design/principles.md), are
+  [Principles](https://github.com/kottonllc/kotton-protocol/blob/main/design/principles.md) are
   the principles. A choice touches one when it would change what one says, weaken one or a check
   that holds it, or make an exception to one. A change to this paragraph, to what a pull request
   must pass before it lands, to what is reserved to a maintainer, to how a maintainer is added or
