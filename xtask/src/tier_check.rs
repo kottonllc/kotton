@@ -54,9 +54,12 @@
 //!
 //! The lists are [`OWED_FILE`], a data file rather than a table in this source, because the
 //! check reads the same file at the merge base with `origin/main` and compares the two: an
-//! entry that is not on its row's list there is refused, so a list only shrinks and the gate,
-//! not review, holds that. A row absent at the merge base arrives with its list, and the run
-//! says which rows arrive. An entry is also refused when no manifest has its edge (an
+//! entry whose edge no list there holds is refused, so a list only shrinks and the gate, not
+//! review, holds that. The comparison is by the edge an entry holds, not by the name of the row
+//! it is filed under: a row renamed reads at the merge base as the edges its crates owed there,
+//! and an entry that follows its crate into another row keeps its floor. Lists arrive only
+//! when the merge base has no [`OWED_FILE`], and the run then says so. An entry is also
+//! refused when no manifest has its edge (an
 //! untangling that lands deletes its entry), when the edge is one its row may link, or when it
 //! is filed under a row its crate is not in.
 //!
@@ -195,19 +198,24 @@ pub(crate) enum Base {
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Judged {
     pub(crate) refused: Vec<String>,
-    /// The rows absent at the merge base, which arrive with their lists.
+    /// The rows whose lists arrive because the merge base has no [`OWED_FILE`].
     pub(crate) arriving: Vec<&'static str>,
 }
 
-fn row_named(name: &str) -> Option<&'static Row> {
-    ROWS.iter().find(|r| r.name == name)
+fn row_named_in<'a>(rows: &'a [Row], name: &str) -> Option<&'a Row> {
+    rows.iter().find(|r| r.name == name)
 }
 
 /// The row a repo-relative directory is in: the row whose path is its longest prefix.
 pub(crate) fn row_of(dir: &str) -> Option<&'static Row> {
+    row_in(ROWS, dir)
+}
+
+/// [`row_of`] over `rows`.
+fn row_in<'a>(rows: &'a [Row], dir: &str) -> Option<&'a Row> {
     let parts: Vec<&str> = dir.split('/').collect();
-    let mut best: Option<(&'static Row, usize)> = None;
-    for row in ROWS {
+    let mut best: Option<(&'a Row, usize)> = None;
+    for row in rows {
         for p in row.paths {
             let pp: Vec<&str> = p.split('/').collect();
             if parts.len() >= pp.len()
@@ -818,13 +826,22 @@ fn admitted(from: &Row, to: &Row) -> bool {
     from.name == to.name || from.may_link.contains(&to.name)
 }
 
-/// Judge the edges against the rows, the owed lists against the edges, and the lists against
-/// the merge base.
-pub(crate) fn judge(crates: &[Crate], edges: &BTreeSet<Edge>, owed: &Owed, base: &Base) -> Judged {
+/// Judge the edges against `rows`, the owed lists against the edges, and the lists against the
+/// merge base. The merge base's lists are read by the edges they hold, not by the rows they are
+/// filed under: an entry is compared with every list there, so a row renamed, or a crate moved
+/// from one row to another, keeps the floor its edges had.
+pub(crate) fn judge(rows: &[Row], crates: &[Crate], edges: &BTreeSet<Edge>, owed: &Owed, base: &Base) -> Judged {
     let mut j = Judged::default();
     let row_of_crate: BTreeMap<&str, &Crate> = crates.iter().map(|c| (c.name.as_str(), c)).collect();
+    // Whether a list at the merge base holds the edge, under any row.
+    let owed_at_base = |from: &str, to: &str| match base {
+        Base::At { owed: at, .. } => at
+            .values()
+            .any(|l| l.get(from).is_some_and(|tos| tos.contains(to))),
+        _ => false,
+    };
 
-    for row in ROWS {
+    for row in rows {
         if !owed.contains_key(row.name) {
             j.refused.push(format!(
                 "row `{}` has no list in {OWED_FILE}: give it one, empty if it owes nothing",
@@ -833,7 +850,7 @@ pub(crate) fn judge(crates: &[Crate], edges: &BTreeSet<Edge>, owed: &Owed, base:
         }
     }
     for name in owed.keys() {
-        if row_named(name).is_none() {
+        if row_named_in(rows, name).is_none() {
             j.refused.push(format!("{OWED_FILE} lists `[{name}]`, which is not a row"));
         }
     }
@@ -846,7 +863,7 @@ pub(crate) fn judge(crates: &[Crate], edges: &BTreeSet<Edge>, owed: &Owed, base:
 
     // Every edge.
     for e in edges {
-        let (Some(fr), Some(tr)) = (row_of(&e.from_dir), row_of(&e.to_dir)) else {
+        let (Some(fr), Some(tr)) = (row_in(rows, &e.from_dir), row_in(rows, &e.to_dir)) else {
             continue;
         };
         if against_regions(&e.from_dir, &e.to_dir) {
@@ -867,9 +884,25 @@ pub(crate) fn judge(crates: &[Crate], edges: &BTreeSet<Edge>, owed: &Owed, base:
         if admitted(fr, tr) || is_owed(fr.name, &e.from, &e.to) {
             continue;
         }
+        let remedy = match base {
+            Base::At { .. } if owed_at_base(&e.from, &e.to) => format!(
+                "a list at the merge base with {MAIN_REF} holds it, so file it under `{}`",
+                fr.name
+            ),
+            Base::At { .. } => format!(
+                "no list at the merge base with {MAIN_REF} holds it, and an owed list only \
+                 shrinks, so remove it"
+            ),
+            Base::Absent { .. } => format!(
+                "remove it, or list it under `{}`: the merge base with {MAIN_REF} has no lists, \
+                 so every list arrives",
+                fr.name
+            ),
+            Base::Unknown(_) => "remove it".to_string(),
+        };
         j.refused.push(format!(
             "{} ({}, row `{}`) links {} ({}, row `{}`), and `{}` may link: {}. The edge is on \
-             no owed list: remove it, or, if it is in a row absent at the merge base, list it there",
+             no owed list: {remedy}",
             e.from,
             e.from_dir,
             fr.name,
@@ -883,7 +916,7 @@ pub(crate) fn judge(crates: &[Crate], edges: &BTreeSet<Edge>, owed: &Owed, base:
 
     // Every entry.
     for (row_name, list) in owed {
-        let Some(row) = row_named(row_name) else { continue };
+        let Some(row) = row_named_in(rows, row_name) else { continue };
         for (from, tos) in list {
             for to in tos {
                 let entry = format!("{from} -> {to} (row `{row_name}`)");
@@ -891,10 +924,10 @@ pub(crate) fn judge(crates: &[Crate], edges: &BTreeSet<Edge>, owed: &Owed, base:
                     j.refused.push(format!("the owed entry {entry} names {from}, which is no crate of any row"));
                     continue;
                 };
-                if fc.row != row.name {
+                let from_row = row_in(rows, &fc.dir).map_or("no row", |r| r.name);
+                if from_row != row.name {
                     j.refused.push(format!(
-                        "the owed entry {entry} is filed under `{row_name}`, and {from} is in row `{}`",
-                        fc.row
+                        "the owed entry {entry} is filed under `{row_name}`, and {from} is in row `{from_row}`"
                     ));
                     continue;
                 }
@@ -910,7 +943,7 @@ pub(crate) fn judge(crates: &[Crate], edges: &BTreeSet<Edge>, owed: &Owed, base:
                     ));
                     continue;
                 }
-                if let Some(tr) = row_named(tc.row) {
+                if let Some(tr) = row_in(rows, &tc.dir) {
                     if admitted(row, tr) {
                         j.refused.push(format!(
                             "the owed entry {entry} is not owed: `{row_name}` may link `{}`, so \
@@ -931,23 +964,22 @@ pub(crate) fn judge(crates: &[Crate], edges: &BTreeSet<Edge>, owed: &Owed, base:
              one grew cannot be judged: {why}"
         )),
         Base::Absent { .. } => {
-            j.arriving = ROWS.iter().map(|r| r.name).filter(|n| owed.contains_key(*n)).collect();
+            j.arriving = rows.iter().map(|r| r.name).filter(|n| owed.contains_key(*n)).collect();
         }
-        Base::At { commit, owed: at } => {
+        Base::At { commit, .. } => {
             for (row_name, list) in owed {
-                let Some(row) = row_named(row_name) else { continue };
-                let Some(at_list) = at.get(row_name) else {
-                    j.arriving.push(row.name);
+                if row_named_in(rows, row_name).is_none() {
                     continue;
-                };
+                }
                 for (from, tos) in list {
                     for to in tos {
-                        let was = at_list.get(from).is_some_and(|t| t.contains(to));
-                        if !was {
+                        if !owed_at_base(from, to) {
                             j.refused.push(format!(
-                                "the owed entry {from} -> {to} (row `{row_name}`) is not on the \
-                                 list at the merge base with {MAIN_REF} ({}): an owed list only \
-                                 shrinks",
+                                "the owed entry {from} -> {to} (row `{row_name}`) is on no list \
+                                 at the merge base with {MAIN_REF} ({}): an owed list only \
+                                 shrinks, and is read there by the edges it holds, not by its \
+                                 row's name, so a row renamed or added owes no edge the lists \
+                                 there did not",
                                 short(commit)
                             ));
                         }
@@ -1037,7 +1069,7 @@ pub(crate) fn rows_check(root: &Path) -> Vec<String> {
     let tree = read_tree(root, &tracked_manifests(root));
     refused.extend(tree.refused.iter().cloned());
     let base = base_owed(root);
-    let judged = judge(&tree.crates, &tree.edges, &owed, &base);
+    let judged = judge(ROWS, &tree.crates, &tree.edges, &owed, &base);
 
     println!("tier-check: one row for each repository of kotton-protocol's repository plan this tree holds a part of, over today's paths");
     for row in ROWS {
@@ -1072,14 +1104,15 @@ pub(crate) fn rows_check(root: &Path) -> Vec<String> {
         }
     }
     match &base {
-        Base::At { commit, .. } | Base::Absent { commit } if !judged.arriving.is_empty() => println!(
-            "\ntier-check: rows absent at the merge base with {MAIN_REF} ({}), arriving with their \
-             lists: {}",
+        Base::Absent { commit } => println!(
+            "\ntier-check: the merge base with {MAIN_REF} ({}) has no {OWED_FILE}, so every list \
+             arrives: {}",
             short(commit),
             judged.arriving.join(", ")
         ),
         Base::At { commit, .. } => println!(
-            "\ntier-check: every list is compared with the merge base with {MAIN_REF} ({})",
+            "\ntier-check: every list is compared with the merge base with {MAIN_REF} ({}) by \
+             the edges it holds, under any row",
             short(commit)
         ),
         _ => {}
@@ -1150,7 +1183,7 @@ mod tests {
     fn run(t: &tempfile::TempDir, owed: &str, base: &Base) -> Judged {
         let tree = read(t);
         assert!(tree.refused.is_empty(), "{:?}", tree.refused);
-        judge(&tree.crates, &tree.edges, &parse_owed(owed).unwrap(), base)
+        judge(ROWS, &tree.crates, &tree.edges, &parse_owed(owed).unwrap(), base)
     }
 
     fn at(owed: &str) -> Base {
@@ -1207,23 +1240,25 @@ mod tests {
         assert!(j.refused[0].contains("in no manifest"));
     }
 
-    /// Item 4: a list cannot grow against the merge base; a row absent there arrives with its
-    /// list.
+    /// Item 4: a list cannot grow against the merge base, whatever its row is called there;
+    /// lists arrive only when the merge base has none.
     #[test]
-    fn a_list_cannot_grow_and_an_absent_row_arrives() {
+    fn a_list_cannot_grow_and_lists_arrive_only_where_the_merge_base_has_none() {
         let t = tree();
         add_dep(&t, "infra/relay", "kotton-crypto = { path = \"../../core/crypto\" }\n");
         let grown = OWED.replace("[relay]\n", "[relay]\nkotton-relay = [\"kotton-crypto\"]\n");
         let j = run(&t, &grown, &at(OWED));
         assert_eq!(j.refused.len(), 1, "{:?}", j.refused);
         assert!(j.refused[0].contains("kotton-relay -> kotton-crypto"));
-        assert!(j.refused[0].contains("not on the list at the merge base with origin/main"));
+        assert!(j.refused[0].contains("on no list at the merge base with origin/main"));
 
-        // The same list, with the relay's row absent at the merge base: it arrives.
+        // The same list, with the relay's row absent at the merge base: the edge is still on
+        // no list there, so it is refused, and nothing arrives.
         let without_relay = OWED.replace("[relay]\n", "");
         let j = run(&t, &grown, &at(&without_relay));
-        assert_eq!(j.refused, Vec::<String>::new());
-        assert_eq!(j.arriving, vec!["relay"]);
+        assert_eq!(j.refused.len(), 1, "{:?}", j.refused);
+        assert!(j.refused[0].contains("kotton-relay -> kotton-crypto"));
+        assert!(j.arriving.is_empty(), "{:?}", j.arriving);
 
         // No list at the merge base: every row arrives.
         let j = run(&t, &grown, &Base::Absent { commit: "0123".into() });
@@ -1234,6 +1269,100 @@ mod tests {
         let j = run(&t, &grown, &Base::Unknown("no origin/main".into()));
         assert_eq!(j.refused.len(), 1, "{:?}", j.refused);
         assert!(j.refused[0].contains("cannot be judged"));
+    }
+
+    /// The rows, with `old` called `new`. No `may_link` names the rows renamed here.
+    fn renamed(old: &str, new: &'static str) -> Vec<Row> {
+        ROWS.iter()
+            .map(|r| Row {
+                name: if r.name == old { new } else { r.name },
+                becomes: r.becomes,
+                paths: r.paths,
+                may_link: r.may_link,
+            })
+            .collect()
+    }
+
+    /// A row renamed is compared with the merge base by the edges its list holds, not by its
+    /// name: renamed alone it passes, and renamed with its list grown by one it is refused.
+    #[test]
+    fn a_renamed_row_keeps_the_floor_its_edges_had() {
+        let rows = renamed("relay", "relay server");
+        assert!(rows.iter().all(|r| !r.may_link.contains(&"relay")));
+        let renamed_list = OWED.replace("[relay]\n", "[\"relay server\"]\n");
+
+        let t = tree();
+        let tree = read(&t);
+        let j = judge(&rows, &tree.crates, &tree.edges, &parse_owed(&renamed_list).unwrap(), &at(OWED));
+        assert_eq!(j, Judged::default());
+
+        add_dep(&t, "infra/relay", "kotton-crypto = { path = \"../../core/crypto\" }\n");
+        let tree = read(&t);
+        assert!(tree.refused.is_empty(), "{:?}", tree.refused);
+        let grown = renamed_list.replace(
+            "[\"relay server\"]\n",
+            "[\"relay server\"]\nkotton-relay = [\"kotton-crypto\"]\n",
+        );
+        let j = judge(&rows, &tree.crates, &tree.edges, &parse_owed(&grown).unwrap(), &at(OWED));
+        assert_eq!(j.refused.len(), 1, "{:?}", j.refused);
+        assert!(
+            j.refused[0].starts_with(
+                "the owed entry kotton-relay -> kotton-crypto (row `relay server`) is on no list at \
+                 the merge base with origin/main (0123456789ab)"
+            ),
+            "{}",
+            j.refused[0]
+        );
+        assert!(j.arriving.is_empty(), "{:?}", j.arriving);
+    }
+
+    /// An entry follows its crate into another row and keeps its floor there; left behind, it
+    /// is refused as filed under the wrong row, and dropped, the refusal of its edge says which
+    /// row to file it under.
+    #[test]
+    fn an_entry_keeps_its_floor_when_its_crate_changes_rows() {
+        let rows: Vec<Row> = ROWS
+            .iter()
+            .map(|r| Row {
+                name: r.name,
+                becomes: r.becomes,
+                paths: match r.name {
+                    "cli" => &["client/cli"],
+                    "client library" => &["client/kotton-client", "client/record-file", "client/shell"],
+                    _ => r.paths,
+                },
+                may_link: r.may_link,
+            })
+            .collect();
+        let t = tree();
+        let tree = read(&t);
+        let judged = |owed: &str| judge(&rows, &tree.crates, &tree.edges, &parse_owed(owed).unwrap(), &at(OWED));
+
+        let followed = OWED
+            .replace("kotton-shell = [\"kotton-crypto\"]\n", "")
+            .replace("[\"client library\"]\n", "[\"client library\"]\nkotton-shell = [\"kotton-crypto\"]\n");
+        assert_eq!(judged(&followed), Judged::default());
+
+        let j = judged(OWED);
+        assert_eq!(j.refused.len(), 2, "{:?}", j.refused);
+        assert!(j.refused.iter().any(|r| r.contains("filed under `cli`, and kotton-shell is in row `client library`")), "{:?}", j.refused);
+        assert!(
+            j.refused.iter().any(|r| r.ends_with(
+                "a list at the merge base with origin/main holds it, so file it under `client library`"
+            )),
+            "{:?}",
+            j.refused
+        );
+
+        // An edge no list at the merge base holds is not to be filed anywhere.
+        let none = OWED.replace("kotton-shell = [\"kotton-crypto\"]\n", "");
+        let j = judge(&rows, &tree.crates, &tree.edges, &parse_owed(&none).unwrap(), &at(&none));
+        assert_eq!(j.refused.len(), 1, "{:?}", j.refused);
+        assert!(
+            j.refused[0].ends_with("no list at the merge base with origin/main holds it, and an owed list only shrinks, so remove it"),
+            "{}",
+            j.refused[0]
+        );
     }
 
     /// Item 5: removing an entry whose edge remains is refused.
@@ -1800,7 +1929,7 @@ mod tests {
     fn what_a_row_may_link_is_rows_in_order() {
         for row in ROWS {
             for l in row.may_link {
-                let to = row_named(l).unwrap_or_else(|| panic!("`{}` may link `{l}`, which is not a row", row.name));
+                let to = row_named_in(ROWS, l).unwrap_or_else(|| panic!("`{}` may link `{l}`, which is not a row", row.name));
                 for f in row.paths {
                     for t in to.paths {
                         assert!(!against_regions(f, t), "`{}` may link `{l}`, against the regions", row.name);
@@ -1818,7 +1947,7 @@ mod tests {
         let tree = read_tree(&root, &tracked_manifests(&root));
         assert!(tree.refused.is_empty(), "{:?}", tree.refused);
         let owed = parse_owed(&std::fs::read_to_string(root.join(OWED_FILE)).unwrap()).unwrap();
-        let j = judge(&tree.crates, &tree.edges, &owed, &Base::Absent { commit: String::new() });
+        let j = judge(ROWS, &tree.crates, &tree.edges, &owed, &Base::Absent { commit: String::new() });
         assert!(j.refused.is_empty(), "{:?}", j.refused);
     }
 }
