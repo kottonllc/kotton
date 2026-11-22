@@ -21,3 +21,33 @@ pub mod surface_proxy;
 
 pub use agent::DeviceDaemon;
 pub use error::{DaemonError, Result};
+
+/// What a closure logged, as the lines a log prints them in: for the tests
+/// that hold what a log line may say.
+#[cfg(test)]
+pub(crate) fn logged(f: impl FnOnce()) -> String {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Caught(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Caught {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let caught = Caught::default();
+    let writer = caught.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = caught.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}

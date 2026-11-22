@@ -86,14 +86,18 @@ impl DeviceClient {
 }
 
 /// Map the two responses every verb can answer with into an error, so each
-/// method matches only the shapes it actually expects.
+/// method matches only the shapes it actually expects. Any other answer is
+/// this device's own daemon's, not asked for, and is said by its name and no
+/// field ([`kotton_wire::ipc::unasked`]; an answer not asked for is said by
+/// its name and no field); kdeviced's `Error` is its own sentence, said as
+/// written.
 fn unexpected(resp: DeviceResponse) -> io::Error {
     match resp {
         DeviceResponse::Error { message } => io::Error::other(message),
         DeviceResponse::Unauthenticated => {
             io::Error::other("not authenticated to kdeviced — run the challenge handshake first")
         }
-        other => io::Error::other(format!("unexpected response: {other:?}")),
+        other => io::Error::other(format!("unexpected response: {}", kotton_wire::ipc::unasked(&other))),
     }
 }
 
@@ -310,5 +314,27 @@ impl Diag<'_> {
             DeviceResponse::IpcSessionsResult { sessions } => Ok(sessions),
             other => Err(unexpected(other)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **An answer not asked for is said by its name and no field**: kdeviced's
+    /// answer to a verb that did not ask for it is named, and nothing it
+    /// carries is printed.
+    #[test]
+    fn a_kdeviced_answer_not_asked_for_is_said_by_its_name_alone() {
+        let said = unexpected(DeviceResponse::AuthFailed { reason: "FIELD-7f3a".into() }).to_string();
+        assert!(!said.contains("FIELD-7f3a"), "a field of the answer was said: {said}");
+        assert!(said.contains("`AuthFailed`"), "the answer was not named: {said}");
+    }
+
+    /// kdeviced's own `Error` is its own sentence, said as written.
+    #[test]
+    fn kdeviceds_own_error_is_said_as_written() {
+        let said = unexpected(DeviceResponse::Error { message: "the machine said `this`".into() }).to_string();
+        assert_eq!(said, "the machine said `this`");
     }
 }

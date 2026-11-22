@@ -9,6 +9,46 @@
 //! This crate must never depend on `05_runtime` or higher. It sits below the
 //! runtime in the dependency graph and is imported by everything above it.
 
+/// A frame or an answer that can be said by its variant's name and nothing of
+/// its fields: what a reader says of one it did not ask for (an answer not
+/// asked for is said by its name and no field; [`ipc::unasked`]). Implemented
+/// by `variant_names!`, the one way this crate gives a type a name.
+pub trait Named {
+    /// Which variant this is, by its identifier, and nothing of its fields.
+    fn name(&self) -> &'static str;
+}
+
+/// `impl $ty { pub fn name(&self) -> &'static str }` and [`Named`] for `$ty`,
+/// naming each variant by its identifier and nothing else.
+///
+/// The name is the one thing about a frame that can be said to whoever was not
+/// its addressee: which kind of frame it was. Every arm matches `{ .. }` and
+/// answers `stringify!` of the identifier, so no field can reach the string by
+/// construction, and nothing of the value is formatted to find it. The list
+/// cannot drift from the enum because the match has no wildcard: a variant
+/// added without its name here does not compile, and a name listed for no
+/// variant does not compile either.
+macro_rules! variant_names {
+    ($ty:ident { $($variant:ident),+ $(,)? }) => {
+        impl $ty {
+            /// Which variant this is, by its identifier, and nothing of its
+            /// fields: what a frame or an answer that arrived out of turn may
+            /// be called in an error or a log its reader writes.
+            pub fn name(&self) -> &'static str {
+                match self {
+                    $(Self::$variant { .. } => stringify!($variant),)+
+                }
+            }
+        }
+
+        impl $crate::Named for $ty {
+            fn name(&self) -> &'static str {
+                <$ty>::name(self)
+            }
+        }
+    };
+}
+
 pub mod base64_bytes;
 pub mod did;
 pub mod grant;
