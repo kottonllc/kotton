@@ -6,7 +6,7 @@
 //! it names nothing. [`DidKeyMethod::from_public_key`] takes the rule's key,
 //! [`DidKeyMethod::from_public_key_bytes`] constructs it or refuses, and
 //! [`DidKeyMethod::to_public_key`] returns it or refuses, with [`DidError::InvalidKey`] and not
-//! the clause.
+//! the clause; [`DidKeyMethod::read_key`] is the same decode, and says the clause ([`NoKey`]).
 //!
 //! **One key has one `did:key`:** `did:key:z` followed by the base58btc of `0xed 0x01` and the
 //! key's 32 bytes, the string [`DidKeyMethod::from_public_key`] makes. The decode returns a key
@@ -41,5 +41,5 @@
 pub mod key_method;
 pub mod resolver;
 
-pub use key_method::DidKeyMethod;
+pub use key_method::{DidKeyMethod, NoKey};
 pub use resolver::{CompositeDidResolver, DidKeyResolver, DidResolver, DidWebResolver};

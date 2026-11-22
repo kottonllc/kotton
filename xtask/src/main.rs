@@ -1930,7 +1930,7 @@ fn tier_check() {
                 continue;
             }
             violations.push(format!(
-                "core/{crate_name} depends on core/{target} — the platform seam must not                  reach upward. Allowed: {allowed:?}"
+                "core/{crate_name} depends on core/{target} — the platform seam must not reach upward. Allowed: {allowed:?}"
             ));
         }
     }
