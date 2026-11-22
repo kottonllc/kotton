@@ -69,10 +69,16 @@
 //! **`relay rotate [<r>]` rotates *invited* on the person's word**
 //! ([`rotate_invited`]): the rule the relay holds is set again with a new
 //! *invited* key, by the path a drop's rotation takes, one at a time with the
-//! looks. It answers, at that relay, every drop waiting there — none rotates it
-//! again — and the note of drops ended there. It is the one act a door's drop
-//! is finished by: the vault holds no relay's credential, and `kvaultd drop`
-//! says what to type here. *Mine* is not rotated by it.
+//! looks. Before it mints, it asks `Tenants` at each vault with a drop waiting
+//! at that relay, as a look does, and answers only the drops whose pool is no
+//! longer listed — none rotates it again for them — and the note of drops
+//! ended there; a drop still listed, or whose vault did not answer, waits on
+//! for its own rotation. A rotation it began and did not finish is finished by
+//! the verb said again, with the key already kept, not begun again: the
+//! relay's kept keys carry that mark until the relay answers a set. It is the
+//! one act a door's drop is finished by: the vault holds no relay's
+//! credential, and `kvaultd drop` says what to type here. *Mine* is not
+//! rotated by it.
 //!
 //! **The desktop introduces the two services, and nobody else does**: it tells
 //! the vault which relays to stand at. A relay is its key: the key its credential recorded when it
@@ -182,7 +188,10 @@ const A_DROP_WAITS: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// ([`ended_said`]); a relay at a time when `relay rotate` at that relay is
 /// answered by the relay ([`rotate_invited`]) and when that relay's credential
 /// is forgotten ([`drop_credential`]). Every write to it is one at a time for
-/// the person ([`one_at_a_time`]).
+/// the person ([`one_at_a_time`]). Because the note is written before the
+/// drops are removed, a failure between the two writes leaves the drops to end
+/// again at the next look, and the count may then run over the drops that
+/// ended.
 const ENDED: &str = "drops-ended";
 
 /// One relay's keys, as this person keeps them — by the relay's key, 64 hex.
@@ -194,6 +203,13 @@ pub(crate) struct RelayKeys {
     pub key: String,
     pub mine: String,
     pub invited: String,
+    /// Whether `relay rotate` minted `invited` and the relay has not yet
+    /// answered a set with it ([`rotate_invited`]): the verb said again then
+    /// sets the key kept here, and mints none. Kept with the relay's keys, by
+    /// the relay's key alone — no pool's name and no vault's — and cleared by
+    /// the relay's answer to any set of its rule ([`set_rule_minting`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rotation_begun: bool,
 }
 
 impl std::fmt::Debug for RelayKeys {
@@ -3165,14 +3181,26 @@ async fn relay_invite(net: &impl Wire, store: &UserStore, credential: &OperatorC
 /// set. *Mine* is not rotated. One at a time with the looks
 /// ([`one_at_a_time`]).
 ///
-/// **It answers what waits for a rotation there.** Each drop waiting with that
-/// relay owed is marked minted with the key before any vault is told, so a
-/// look that finds the rotation unfinished finishes it with that key; once the
-/// relay answers the set, those drops are owed nothing there — no look rotates
-/// it again for them — and the note of drops ended there ([`ENDED`]) is
-/// cleared. Refused, with the act that mends it and nothing sent, for a relay
-/// whose credential recorded no key, and for one this desktop keeps no keys
-/// for yet.
+/// **A rotation begun is finished, not begun again.** Once the new key is
+/// kept, and before any vault or relay is told it, the relay's kept keys are
+/// marked ([`RelayKeys::rotation_begun`]); the verb said again while the mark
+/// stands — a vault did not take the key, or the relay's answer did not
+/// arrive — sets the key already kept and mints none. The relay's answer to
+/// any set of its rule clears the mark.
+///
+/// **It answers only the drops found gone.** Before a new key is minted, each
+/// vault with a drop waiting at that relay is asked `Tenants`, once, bounded by
+/// [`WITHIN`], as a look asks; a drop whose pool it no longer lists is marked
+/// minted with the key before any vault is told, and is owed nothing more
+/// there once the relay answers the set. A drop whose pool is still listed, or
+/// whose vault did not answer, stays waiting and unminted, and gets its own
+/// rotation when it is found gone: a key minted before a pool was found gone
+/// is not that pool's rotation. A drop already marked minted there was found
+/// gone before, and is answered without asking; a rotation being finished
+/// asks nothing, and answers only those. Once the relay
+/// answers, the note of drops ended there ([`ENDED`]) is cleared. Refused,
+/// with the act that mends it and nothing sent, for a relay whose credential
+/// recorded no key, and for one this desktop keeps no keys for yet.
 async fn rotate_invited(
     net: &impl Wire,
     users: &UserRegistry,
@@ -3188,31 +3216,49 @@ async fn rotate_invited(
         return refused(relay_showed_no_key_for_a_rotation(name));
     };
     let _one = one_at_a_time(store).await;
-    match kept_keys(store) {
-        Ok(k) if k.iter().any(|k| k.relay() == Some(id)) => {}
-        Ok(_) => return refused(relay_has_no_key_to_rotate(name)),
+    let begun = match kept_keys(store) {
+        Ok(k) => match k.iter().find(|k| k.relay() == Some(id)) {
+            Some(k) => k.rotation_begun,
+            None => return refused(relay_has_no_key_to_rotate(name)),
+        },
         Err(e) => return refused(format!("the relay keys kept here do not open: {e:#}")),
-    }
+    };
     let r = hex::encode(id);
-    let owed: Vec<(String, String)> = match waiting_drops(store) {
+    let (minted_here, unminted): (Vec<WaitingDrop>, Vec<WaitingDrop>) = match waiting_drops(store) {
         Ok(all) => all
-            .iter()
+            .into_iter()
             .filter(|d| d.relays.iter().any(|o| o.key == r))
-            .map(|d| (d.vault.clone(), d.pool.clone()))
-            .collect(),
+            .partition(|d| d.relays.iter().any(|o| o.key == r && o.minted)),
         Err(e) => {
             return refused(format!(
                 "the relay's key was not rotated: the drops waiting for a rotation do not open, and a rotation here \
-                 answers those waiting at this relay: {e:#}"
+                 answers those waiting at this relay that are gone: {e:#}"
             ))
         }
     };
+    let mut owed: Vec<(String, String)> = minted_here.iter().map(|d| (d.vault.clone(), d.pool.clone())).collect();
+    if !begun && !unminted.is_empty() {
+        let kept = match held(store) {
+            Ok(k) => k,
+            Err(e) => return refused(format!("the operator credentials kept here do not open: {e:#}")),
+        };
+        owed.extend(found_gone(net, store, &kept, &unminted).await);
+    }
     let rule = match read_rule(net, credential).await {
         UserResponse::RelayRule { rule } => rule,
         other => return other,
     };
-    let minted = || if owed.is_empty() { Ok(()) } else { mark_minted(store, &owed, &r) };
-    let answer = set_rule_minting(net, users, record_stores, store, credential, rule, true, minted).await;
+    let minted = || {
+        if !begun {
+            rotation_begun_at(store, &id)?;
+        }
+        if owed.is_empty() {
+            Ok(())
+        } else {
+            mark_minted(store, &owed, &r)
+        }
+    };
+    let answer = set_rule_minting(net, users, record_stores, store, credential, rule, !begun, minted).await;
     if matches!(answer, UserResponse::RelayRule { .. }) {
         if !owed.is_empty() {
             if let Err(e) = rotated_at(store, &owed, &r) {
@@ -3224,6 +3270,43 @@ async fn rotate_invited(
         }
     }
     answer
+}
+
+/// Of the drops `waiting`, each (vault, pool) whose vault no longer lists the
+/// pool: every vault among them asked `Tenants` once, bounded by [`WITHIN`],
+/// as a look asks. A drop whose vault no credential in `kept` names, or whose
+/// vault gives no `VaultTenants`, is not among them, and waits on.
+async fn found_gone(
+    net: &impl Wire,
+    store: &UserStore,
+    kept: &[OperatorCredential],
+    waiting: &[WaitingDrop],
+) -> Vec<(String, String)> {
+    let mut gone = Vec::new();
+    let mut asked: Vec<&str> = Vec::new();
+    for d in waiting {
+        if asked.contains(&d.vault.as_str()) {
+            continue;
+        }
+        asked.push(&d.vault);
+        let Some(credential) = kept.iter().find(|c| vault_key(c).map(hex::encode).as_deref() == Some(d.vault.as_str())) else {
+            continue;
+        };
+        let reach = vault_key(credential).and_then(|k| stands_of(store, &k)).and_then(|t| t.relays.first().map(|r| r.hint.clone()));
+        let listed = tokio::time::timeout(WITHIN, net.vault(credential, reach.as_deref(), vec![VaultPeerRequest::Tenants])).await;
+        match listed {
+            Ok(Ok(UserResponse::VaultTenants { tenants })) => gone.extend(
+                waiting
+                    .iter()
+                    .filter(|w| w.vault == d.vault && !tenants.iter().any(|t| t.user_id == w.pool))
+                    .map(|w| (w.vault.clone(), w.pool.clone())),
+            ),
+            Ok(Ok(other)) => tracing::info!(vault = %credential.name, answer = %kotton_wire::ipc::unasked(&other), "the vault was not read, and its drops wait for their own rotation"),
+            Ok(Err(e)) => tracing::info!(vault = %credential.name, error = %e, "the vault was not read, and its drops wait for their own rotation"),
+            Err(_) => tracing::info!(vault = %credential.name, "the vault did not answer within the bound, and its drops wait for their own rotation"),
+        }
+    }
+    gone
 }
 
 /// Ask the relay a relay's credential names which rule it holds.
@@ -3306,6 +3389,7 @@ async fn set_rule_minting(
             key: hex::encode(id),
             mine: AdmissionKey::generate().to_text(),
             invited: AdmissionKey::generate().to_text(),
+            rotation_begun: false,
         },
     };
     all.retain(|k| k.relay() != Some(id));
@@ -3378,7 +3462,38 @@ async fn set_rule_minting(
             WITHIN.as_secs()
         )))
     });
-    rule_answer(said, name)
+    let answer = rule_answer(said, name);
+    // The relay answered a set: a rotation `relay rotate` began here is
+    // finished, and the verb said again mints anew.
+    if matches!(answer, UserResponse::RelayRule { .. }) {
+        if let Err(e) = rotation_answered(store, &id) {
+            tracing::warn!(relay = %name, error = %e, "the relay answered the set, and its keys still say a rotation was begun");
+        }
+    }
+    answer
+}
+
+/// The relay `relay` answered a set of its rule: the mark that `relay rotate`
+/// began a rotation there ([`RelayKeys::rotation_begun`]) is cleared.
+fn rotation_answered(store: &UserStore, relay: &RelayId) -> anyhow::Result<()> {
+    let mut all = kept_keys(store)?;
+    let Some(k) = all.iter_mut().find(|k| k.relay() == Some(*relay) && k.rotation_begun) else {
+        return Ok(());
+    };
+    k.rotation_begun = false;
+    keep_keys(store, &all)
+}
+
+/// Mark that `relay rotate` minted the *invited* key kept for `relay`
+/// ([`RelayKeys::rotation_begun`]), after it is kept and before any vault or
+/// relay is told it.
+fn rotation_begun_at(store: &UserStore, relay: &RelayId) -> anyhow::Result<()> {
+    let mut all = kept_keys(store)?;
+    let Some(k) = all.iter_mut().find(|k| k.relay() == Some(*relay)) else {
+        anyhow::bail!("no keys are kept for the relay");
+    };
+    k.rotation_begun = true;
+    keep_keys(store, &all)
 }
 
 /// Send `requests` one after another, each only once the one before it was
@@ -4440,6 +4555,7 @@ mod tests {
             key: hex::encode(relay),
             mine: AdmissionKey::from_bytes([b; 32]).to_text(),
             invited: AdmissionKey::from_bytes([b + 1; 32]).to_text(),
+            rotation_begun: false,
         };
         keep_keys(&store, &[keys(gate, 10), keys(yard, 20)]).unwrap();
         let stood = |vault: u8| StandsAt { vault: hex::encode([vault; 32]), relays: vec![Stood { key: hex::encode(gate), hint: "http://203.0.113.9:7700".into() }], told_at: 1 };
@@ -5063,6 +5179,10 @@ mod tests {
         lists: std::sync::Mutex<Option<Vec<&'static str>>>,
         /// How many sets the relay refuses before it takes one.
         refuse_sets: std::sync::atomic::AtomicUsize,
+        /// How many sets the relay takes whose answer is then lost.
+        lose_sets: std::sync::atomic::AtomicUsize,
+        /// How many `StandAt` the vault refuses before it takes one.
+        refuse_stands: std::sync::atomic::AtomicUsize,
         /// The invited key each set at the relay named.
         set_with: std::sync::Mutex<Vec<String>>,
         /// The drops that waited when `DropTenant` was sent.
@@ -5079,6 +5199,8 @@ mod tests {
                 invite: std::sync::Mutex::new(UserResponse::VaultKeepsAlready { user_id: "sam".into() }),
                 lists: std::sync::Mutex::new(Some(Vec::new())),
                 refuse_sets: Default::default(),
+                lose_sets: Default::default(),
+                refuse_stands: Default::default(),
                 set_with: Default::default(),
                 waiting_at_drop: Default::default(),
             }
@@ -5106,7 +5228,11 @@ mod tests {
                 }),
                 VaultPeerRequest::DeviceInvite { .. } => Some(self.invite.lock().unwrap().clone()),
                 VaultPeerRequest::SetQuota { quota, .. } => Some(UserResponse::VaultCapacityResult { held: 0, quota: Some(*quota) }),
-                VaultPeerRequest::StandAt { .. } => Some(UserResponse::Ok),
+                VaultPeerRequest::StandAt { .. } => Some(if take_one(&self.refuse_stands) {
+                    UserResponse::Error { message: "not now".into() }
+                } else {
+                    UserResponse::Ok
+                }),
                 other => panic!("the vault was sent {}", other.variant_name()),
             };
             match now {
@@ -5149,15 +5275,23 @@ mod tests {
                 RelayOperatorRequest::SetRule { invited, .. } => {
                     self.said.lock().unwrap().push("SetRule");
                     self.set_with.lock().unwrap().push(invited.clone().unwrap_or_default());
-                    let refuse = self.refuse_sets.load(std::sync::atomic::Ordering::SeqCst);
-                    if refuse > 0 {
-                        self.refuse_sets.store(refuse - 1, std::sync::atomic::Ordering::SeqCst);
+                    if take_one(&self.refuse_sets) {
                         return Ok(RelayOperatorResponse::Refused { reason: "not now".into() });
+                    }
+                    if take_one(&self.lose_sets) {
+                        // The relay took it; its answer never arrives.
+                        return Err(kotton_net::rendezvous::RendezvousError::Clock("the answer was lost".into()));
                     }
                     Ok(rule)
                 }
             }
         }
+    }
+
+    /// Whether `left` had one more to spend, spending it.
+    fn take_one(left: &std::sync::atomic::AtomicUsize) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        left.fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok()
     }
 
     fn tenant(name: &str) -> kotton_wire::ipc::VaultTenant {
@@ -5188,7 +5322,12 @@ mod tests {
         let store = Arc::new(a_store(temp));
         let runtime = a_runtime(temp).await;
         keep_credentials(&store, &[home(), a_relay("gate", GATE_URL, GATE)]).unwrap();
-        let keys = RelayKeys { key: hex::encode(GATE), mine: AdmissionKey::from_bytes([10u8; 32]).to_text(), invited: first_invited() };
+        let keys = RelayKeys {
+            key: hex::encode(GATE),
+            mine: AdmissionKey::from_bytes([10u8; 32]).to_text(),
+            invited: first_invited(),
+            rotation_begun: false,
+        };
         keep_keys(&store, &[keys]).unwrap();
         let stood = Stood { key: hex::encode(GATE), hint: GATE_URL.into() };
         keep_stands(&store, &[StandsAt { vault: hex::encode([2u8; 32]), relays: vec![stood], told_at: 1 }]).unwrap();
@@ -5693,11 +5832,12 @@ mod tests {
     }
 
     /// **`relay rotate` rotates *invited* by the rotation's own path and answers
-    /// what waits there.** The rule the relay holds is read and set again with a
-    /// new key, the vaults told first; a drop waiting at that relay is owed
-    /// nothing more, so a later look finding its pool gone does not rotate the
-    /// relay again; and the note of drops ended there is cleared. It is not held
-    /// up by that note.
+    /// what waits there and is gone.** The vault is asked `Tenants` first; the
+    /// rule the relay holds is read and set again with a new key, the vaults
+    /// told first; a drop waiting at that relay whose pool is no longer listed
+    /// is owed nothing more, so a later look does not rotate the relay again;
+    /// and the note of drops ended there is cleared. It is not held up by that
+    /// note.
     #[tokio::test]
     async fn relay_rotate_rotates_invited_and_answers_what_waits_at_that_relay() {
         let temp = tempfile::tempdir().unwrap();
@@ -5708,7 +5848,8 @@ mod tests {
         let fake = Fake::new(&runtime, &store);
         let answer = speak_by(&fake, &users, &stores, "lee", "gate", OperatorVerb::RotateInvited).await;
         assert!(matches!(answer, UserResponse::RelayRule { rule: AdmissionRule::Anyone }), "{answer:?}");
-        assert_eq!(fake.said(), ROTATION, "the rotation took another path");
+        let path = [&["Tenants"][..], &ROTATION[..]].concat();
+        assert_eq!(fake.said(), path, "the rotation took another path");
         let rotated = invited_kept(&store);
         assert_ne!(rotated, first_invited(), "the invited key did not rotate");
         assert_eq!(fake.set_with.lock().unwrap().clone(), std::slice::from_ref(&rotated));
@@ -5717,8 +5858,117 @@ mod tests {
 
         fake.lists(Some(&[]));
         assert!(!look_at_every_vault(&fake, &users, &stores, &store).await);
-        assert_eq!(fake.said(), ROTATION, "a look rotated the relay again");
+        assert_eq!(fake.said(), path, "a look rotated the relay again");
         assert_eq!(invited_kept(&store), rotated);
+    }
+
+    /// Whether the relay's kept keys say `relay rotate` began a rotation there.
+    fn rotation_begun(store: &UserStore) -> bool {
+        kept_keys(store).unwrap().into_iter().find(|k| k.key == hex::encode(GATE)).expect("the relay's keys").rotation_begun
+    }
+
+    /// **`relay rotate` said again after a stop finishes the rotation begun,
+    /// and begins no other** (when a dropped pool's invited key rotates: a
+    /// rotation begun is finished, not begun again). Stopped after the key is
+    /// kept, by `stop`, the verb said again sets the key already kept: the
+    /// relay is handed one new key, not two, and the drop found gone at the
+    /// first saying is answered. The relay's answer clears the mark, so the
+    /// verb said after that mints anew.
+    async fn said_again_after(stop: &str, counter: for<'f, 'r> fn(&'f Fake<'r>) -> &'f std::sync::atomic::AtomicUsize) {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let stores = RecordStores::new();
+        wait_for_rotation(&store, &hex::encode([2u8; 32]), "sam", &[hex::encode(GATE)]).unwrap();
+        let fake = Fake::new(&runtime, &store);
+        counter(&fake).store(1, std::sync::atomic::Ordering::SeqCst);
+        let answer = speak_by(&fake, &users, &stores, "lee", "gate", OperatorVerb::RotateInvited).await;
+        assert!(!matches!(answer, UserResponse::RelayRule { .. }), "{stop}: the stop was answered as a rotation");
+        let minted = invited_kept(&store);
+        assert_ne!(minted, first_invited(), "{stop}: no key was kept");
+        assert!(rotation_begun(&store), "{stop}: the rotation begun is not marked");
+        assert_eq!(pools_waiting(&store), [("sam".to_string(), vec![true])], "{stop}: the drop found gone is not marked minted");
+
+        let answer = speak_by(&fake, &users, &stores, "lee", "gate", OperatorVerb::RotateInvited).await;
+        assert!(matches!(answer, UserResponse::RelayRule { .. }), "{stop}: {answer:?}");
+        assert_eq!(invited_kept(&store), minted, "{stop}: the verb said again minted a second key");
+        let set_with = fake.set_with.lock().unwrap().clone();
+        assert!(!set_with.is_empty() && set_with.iter().all(|k| *k == minted), "{stop}: the relay was handed {set_with:?}");
+        assert!(!rotation_begun(&store), "{stop}: the relay answered and the mark stays");
+        assert!(pools_waiting(&store).is_empty(), "{stop}: the drop found gone still waits");
+
+        let answer = speak_by(&fake, &users, &stores, "lee", "gate", OperatorVerb::RotateInvited).await;
+        assert!(matches!(answer, UserResponse::RelayRule { .. }), "{stop}: {answer:?}");
+        assert_ne!(invited_kept(&store), minted, "{stop}: a finished rotation was finished again");
+    }
+
+    /// [`said_again_after`] the relay refused the set, after the vaults were
+    /// told the key.
+    #[tokio::test]
+    async fn relay_rotate_said_again_after_the_vaults_are_told_finishes_the_rotation_begun() {
+        said_again_after("the relay refused the set after the vaults were told", |f| &f.refuse_sets).await;
+    }
+
+    /// [`said_again_after`] the relay took the set and its answer was lost.
+    #[tokio::test]
+    async fn relay_rotate_said_again_after_the_relays_answer_is_lost_finishes_the_rotation_begun() {
+        said_again_after("the relay's answer to the set was lost", |f| &f.lose_sets).await;
+    }
+
+    /// [`said_again_after`] a vault did not take the key.
+    #[tokio::test]
+    async fn relay_rotate_said_again_after_a_vault_did_not_take_the_key_finishes_the_rotation_begun() {
+        said_again_after("a vault did not take the key", |f| &f.refuse_stands).await;
+    }
+
+    /// **`relay rotate` answers only the drops whose pool is no longer listed**
+    /// (when a dropped pool's invited key rotates: a record for a name the
+    /// vault still lists stays, and a key minted before a pool was found gone
+    /// is not that pool's rotation). Two drops wait at the relay and the vault
+    /// lists one: after the verb the listed one still waits, unminted, and a
+    /// later look that finds it gone rotates the relay once more. A drop whose
+    /// vault does not answer waits the same way.
+    #[tokio::test(start_paused = true)]
+    async fn relay_rotate_answers_only_the_drops_whose_pool_is_no_longer_listed() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let stores = RecordStores::new();
+        let (vault, gate) = (hex::encode([2u8; 32]), hex::encode(GATE));
+        for pool in ["sam", "kim"] {
+            wait_for_rotation(&store, &vault, pool, std::slice::from_ref(&gate)).unwrap();
+        }
+        let fake = Fake::new(&runtime, &store);
+        fake.lists(Some(&["kim"]));
+        let answer = speak_by(&fake, &users, &stores, "lee", "gate", OperatorVerb::RotateInvited).await;
+        assert!(matches!(answer, UserResponse::RelayRule { .. }), "{answer:?}");
+        assert_eq!(fake.said(), [&["Tenants"][..], &ROTATION[..]].concat());
+        assert_eq!(pools_waiting(&store), [("kim".to_string(), vec![false])], "a drop still listed was answered");
+        let rotated = invited_kept(&store);
+        assert_ne!(rotated, first_invited());
+
+        fake.lists(Some(&[]));
+        assert!(!look_at_every_vault(&fake, &users, &stores, &store).await);
+        assert_eq!(fake.said(), [&["Tenants"][..], &ROTATION[..], &["Tenants"][..], &ROTATION[..]].concat());
+        assert_ne!(invited_kept(&store), rotated, "the drop found gone later was finished with the verb's key");
+        assert!(pools_waiting(&store).is_empty());
+
+        wait_for_rotation(&store, &vault, "sam", std::slice::from_ref(&gate)).unwrap();
+        fake.lists(None);
+        let answer = speak_by(&fake, &users, &stores, "lee", "gate", OperatorVerb::RotateInvited).await;
+        assert!(matches!(answer, UserResponse::RelayRule { .. }), "{answer:?}");
+        assert_eq!(pools_waiting(&store), [("sam".to_string(), vec![false])], "a drop whose vault did not answer was answered");
+    }
+
+    /// **Forgetting a relay's credential clears what is noted of drops ended
+    /// there**, and nothing noted of another relay: nothing here could rotate
+    /// it.
+    #[tokio::test]
+    async fn forgetting_a_relay_clears_the_drops_ended_there() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, _users) = a_desk(&temp).await;
+        let other = EndedAt { key: hex::encode([6u8; 32]), drops: 2 };
+        keep_ended(&store, &[EndedAt { key: hex::encode(GATE), drops: 1 }, other.clone()]).unwrap();
+        drop_credential(&runtime, &store, &a_relay("gate", GATE_URL, GATE)).unwrap();
+        assert_eq!(ended_unrotated(&store).unwrap(), [other], "the relay forgotten is still noted, or another relay is not");
     }
 
     /// **`relay rotate` at a relay with no keys kept, or one whose credential

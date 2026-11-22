@@ -816,6 +816,76 @@ pub(crate) mod tests {
         door.abort();
     }
 
+    /// A vault of the test's own, told to stand at one relay with its two
+    /// admission keys (`keys`) or with none.
+    async fn a_vault_standing_at_a_relay(base: &std::path::Path, door: IpcEndpoint, keys: bool) -> crate::Vault {
+        let secrets: Arc<dyn kotton_sys::secret::SecretsStore + Send + Sync> = Arc::new(kotton_secret::MemorySecrets::new());
+        crate::instance::tests::created(base, secrets.as_ref()).await;
+        let vault = crate::Vault::new_with_base_and_secrets(base.to_owned(), door, secrets)
+        .await
+        .expect("a vault");
+        let key = |b: u8| kotton_wire::ipc::SecretText::new(kotton_net::rendezvous::AdmissionKey::from_bytes([b; 32]).to_text());
+        let stand = kotton_wire::rendezvous::Stand {
+            key: hex::encode([5u8; 32]),
+            hint: "http://203.0.113.9:7700".into(),
+            mine: keys.then(|| key(10)),
+            invited: keys.then(|| key(11)),
+        };
+        let runtime = vault.runtime();
+        crate::reach::apply(runtime, &[stand], Some(runtime.reachability().nat())).await;
+        vault
+    }
+
+    async fn the_doors_node_relay(ctx: &ControlContext) -> UserResponse {
+        match dispatch(ctx, VaultRequest::NodeRelay { user_id: String::new() }).await {
+            Ok(HandlerOutput::Single(answer)) => answer,
+            Ok(HandlerOutput::Stream(_)) => panic!("the door answered `NodeRelay` with a stream"),
+            Err(e) => panic!("the door failed `NodeRelay`: {e}"),
+        }
+    }
+
+    /// **The door says `invited_held` from what the vault holds**: `true`
+    /// where its operator's desktop kept and told it an invited key for the
+    /// relay it stands at, `false` where it was told none — so `kvaultd drop`
+    /// names the rotation only where one is left. Asked at the door, as the
+    /// terminal asks it; no key is in the answer either way.
+    #[tokio::test]
+    async fn the_door_says_an_invited_key_is_held_only_where_one_is() {
+        for keys in [true, false] {
+            let base = crate::instance::tests::a_state_dir();
+            let (_door_dir, door) = a_door();
+            let vault = a_vault_standing_at_a_relay(base.path(), door, keys).await;
+            match the_doors_node_relay(&vault.control).await {
+                UserResponse::NodeRelayResult { relay_url, admission, invited_held, .. } => {
+                    assert_eq!(relay_url.as_deref(), Some("http://203.0.113.9:7700"));
+                    assert_eq!(invited_held, keys, "the door said invited_held {invited_held} where keys were told: {keys}");
+                    assert!(admission.is_none(), "the door handed its terminal a key");
+                }
+                other => panic!("the door answered `NodeRelay` with {other:?}"),
+            }
+        }
+    }
+
+    /// **Only the door says `true`**: a tenant asking the same vault where it
+    /// reserves is handed the invited key, and told `invited_held` `false`.
+    #[tokio::test]
+    async fn a_tenant_is_told_no_invited_key_is_held_where_the_door_says_one_is() {
+        let base = crate::instance::tests::a_state_dir();
+        let (_door_dir, door) = a_door();
+        let vault = a_vault_standing_at_a_relay(base.path(), door, true).await;
+        assert!(
+            matches!(the_doors_node_relay(&vault.control).await, UserResponse::NodeRelayResult { invited_held: true, .. }),
+            "the door does not say the key it holds"
+        );
+        match crate::peer::where_a_tenant_reserves(vault.runtime()) {
+            UserResponse::NodeRelayResult { admission, invited_held, .. } => {
+                assert!(!invited_held, "a tenant was told invited_held");
+                assert!(admission.is_some(), "the tenant was not handed the invited key");
+            }
+            other => panic!("a tenant's `NodeRelay` answered {other:?}"),
+        }
+    }
+
     /// **An invite over the wire waits at most a day**, and a window whose
     /// expiry would overflow is refused rather than wrapped
     /// (`TASK-the-landlords-verbs-reach-the-desktop-over-the-wire`).

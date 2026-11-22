@@ -511,10 +511,16 @@ fn operate<'a>(
 
 /// What `relay rotate` with nothing typed back is answered with: what a
 /// rotation costs the pools that remain, and how to confirm it. The relay reads
-/// two invited keys, the current one and the one before (`SetRule`), and a
-/// device learns the new one from its vault at its next connect — so one
-/// rotation refuses nobody who is still invited, and the one after it refuses
-/// every device that has not reconnected to its vault in between.
+/// two invited keys, the current one and the one before (`SetRule`). A device
+/// of a tenant of one of this operator's vaults learns the new one from its
+/// vault at its next connect, so one rotation refuses nobody who is still
+/// invited, and the one after it refuses every such device that has not
+/// reconnected to its vault in between. A device stood at the relay by
+/// `relay invite`, with no vault of this operator, holds only the key its
+/// invite carried (kept sealed, and held again from there): nothing hands it
+/// another — a contact's key in a reach note is read at delivery and not
+/// held for its own reach — so it is admitted under the key before until the
+/// second rotation, and then needs a new invite.
 fn rotate_confirm(to: To<'_>) -> String {
     let name = to.name();
     format!(
@@ -522,7 +528,10 @@ fn rotate_confirm(to: To<'_>) -> String {
          that stands there; your own devices' key is not changed. Each device of the people still invited learns \
          the new key from its vault when it next connects; until then the relay admits it under the key before, \
          and only until the next rotation — a second rotation refuses every such device that has not reconnected \
-         to its vault since this one. Type the relay's name back to rotate it: relay rotate{} --confirm {name}",
+         to its vault since this one. A device stood at the relay by an invite of yours alone, with no vault of \
+         yours, learns no new key: it is admitted under the key before until the second rotation, and then needs a new \
+         invite from `relay invite{}`. Type the relay's name back to rotate it: relay rotate{} --confirm {name}",
+        to.said(),
         to.said()
     )
 }
@@ -1516,6 +1525,8 @@ mod tests {
         assert!(why.contains("a new key for the people you invite"), "{why}");
         assert!(why.contains("the key before, and only until the next rotation"), "{why}");
         assert!(why.contains("a second rotation refuses every such device that has not reconnected"), "{why}");
+        assert!(why.contains("by an invite of yours alone, with no vault of yours, learns no new key"), "{why}");
+        assert!(why.contains("then needs a new invite from `relay invite`"), "{why}");
         assert!(why.ends_with("Type the relay's name back to rotate it: relay rotate --confirm gate"), "{why}");
         assert_eq!(
             parse_relay(&["rotate", "--confirm", "gate"], &one),

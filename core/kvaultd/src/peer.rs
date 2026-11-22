@@ -348,18 +348,7 @@ pub async fn handle(control: &ControlContext, from: &Peer, request: VaultPeerReq
                 }),
             }
         }
-        TenantVerb::NodeRelay { .. } => {
-            // The first relay of the reach set, by its key and address. A
-            // tenant is one of *the people I invite*: handed the invited key for
-            // it, and never *mine*.
-            let (relay_url, relay_key, admission) = crate::reach::for_tenant(&ctx.runtime);
-            Ok(UserResponse::NodeRelayResult {
-                relay_url,
-                relay_key,
-                admission,
-                invited_held: false,
-            })
-        }
+        TenantVerb::NodeRelay { .. } => Ok(where_a_tenant_reserves(&ctx.runtime)),
         TenantVerb::VaultCapacity { user_id } => Ok(capacity(ctx, &user_id).await),
         // The doors held for a person (`DEC-0056`): a device of theirs hands
         // them over and takes what arrived. Paired standing was checked above.
@@ -570,6 +559,20 @@ pub async fn capacity(ctx: &PeerContext, user_id: &str) -> UserResponse {
     UserResponse::VaultCapacityResult {
         held,
         quota: ctx.meter.quota(user_id),
+    }
+}
+
+/// A tenant's answer to `NodeRelay`: the first relay of the reach set, by its
+/// key and address. A tenant is one of *the people I invite*: handed the
+/// invited key for it, and never *mine*. `invited_held` is the vault's own
+/// terminal's to be told, and is `false` here whatever the vault holds.
+pub(crate) fn where_a_tenant_reserves(runtime: &DeviceRuntime) -> UserResponse {
+    let (relay_url, relay_key, admission) = crate::reach::for_tenant(runtime);
+    UserResponse::NodeRelayResult {
+        relay_url,
+        relay_key,
+        admission,
+        invited_held: false,
     }
 }
 

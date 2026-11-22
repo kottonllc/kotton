@@ -366,11 +366,15 @@ pub fn invited(runtime: &DeviceRuntime) -> Option<AdmissionKey> {
 }
 
 /// The one line `kvaultd drop` prints after `dropped=`, read from the door's
-/// answer to `NodeRelay`: where this vault holds an *invited* key for the
-/// relay it reserves at, that this drop does not rotate it, the relay's
-/// address, and what to type at the desktop that operates that relay. `None`
-/// where it holds none, or stands at no relay: then there is nothing to
-/// rotate, and nothing more is printed.
+/// answer to `NodeRelay` (`None` where the door could not be asked): where
+/// this vault holds an *invited* key for the relay it reserves at — its
+/// operator's desktop kept one and told it here — that this drop does not
+/// rotate it, the relay's address, and what to type at the desktop that
+/// operates that relay. `None` where it holds none, or stands at no relay:
+/// then there is nothing to rotate, and nothing more is printed. Where the
+/// door could not be asked, or answered with anything but `NodeRelayResult`,
+/// the line says so ([`DOOR_NOT_ASKED`]), since printing nothing says the
+/// vault holds none.
 ///
 /// **When a dropped pool's invited key rotates**, for a drop made here: only
 /// when the person says `relay rotate` at their desktop. The vault cannot
@@ -378,18 +382,25 @@ pub fn invited(runtime: &DeviceRuntime) -> Option<AdmissionKey> {
 /// the desktop's and is never given here — so the line says what to type, and
 /// does nothing. The address is the one the desktop told this vault, printed
 /// as another node's text ([`kotton_wire::note::quoted_cut`]).
-pub fn left_to_rotate(answer: &kotton_wire::ipc::UserResponse) -> Option<String> {
+pub fn left_to_rotate(answer: Option<&kotton_wire::ipc::UserResponse>) -> Option<String> {
     match answer {
-        kotton_wire::ipc::UserResponse::NodeRelayResult { relay_url: Some(url), invited_held: true, .. } if !url.is_empty() => {
+        Some(kotton_wire::ipc::UserResponse::NodeRelayResult { relay_url: Some(url), invited_held: true, .. }) if !url.is_empty() => {
             Some(format!(
                 "the invited key at the relay {} is not rotated by this drop — to rotate it, type `relay rotate` \
                  at the desktop that operates that relay (`relay rotate <r>` where it operates more than one)",
                 kotton_wire::note::quoted_cut(url)
             ))
         }
-        _ => None,
+        Some(kotton_wire::ipc::UserResponse::NodeRelayResult { .. }) => None,
+        _ => Some(DOOR_NOT_ASKED.to_string()),
     }
 }
+
+/// What `kvaultd drop` prints after `dropped=` where the door could not be
+/// asked whether this vault holds an invited key ([`left_to_rotate`]).
+pub const DOOR_NOT_ASKED: &str = "the vault could not be asked whether an invited key is left to rotate at the relay \
+                                  it stands at — if one is, `relay rotate` at the desktop that operates that relay \
+                                  rotates it (`relay rotate <r>` where it operates more than one)";
 
 #[cfg(test)]
 mod tests {
@@ -460,19 +471,33 @@ mod tests {
     /// command its operator types at the desktop.
     #[test]
     fn a_drop_at_the_door_names_the_rotation_where_an_invited_key_is_held() {
-        let line = left_to_rotate(&told(Some("http://203.0.113.9:7700"), true)).expect("a line where one is held");
+        let line = left_to_rotate(Some(&told(Some("http://203.0.113.9:7700"), true))).expect("a line where one is held");
         assert!(line.contains("`http://203.0.113.9:7700`"), "{line}");
         assert!(line.contains("`relay rotate`") && line.contains("`relay rotate <r>`"), "{line}");
         assert!(line.contains("not rotated by this drop"), "{line}");
     }
 
-    /// **And prints nothing more where it holds none**: standing at a relay
-    /// whose rule reads no key, or standing nowhere.
+    /// **And prints nothing more where it holds none**: the door says no
+    /// invited key is kept and told for the relay it stands at, or it stands
+    /// nowhere.
     #[test]
     fn a_drop_at_the_door_prints_nothing_more_where_no_invited_key_is_held() {
-        assert_eq!(left_to_rotate(&told(Some("http://203.0.113.9:7700"), false)), None);
-        assert_eq!(left_to_rotate(&told(None, false)), None);
-        assert_eq!(left_to_rotate(&told(Some(""), true)), None);
-        assert_eq!(left_to_rotate(&kotton_wire::ipc::UserResponse::Ok), None);
+        assert_eq!(left_to_rotate(Some(&told(Some("http://203.0.113.9:7700"), false))), None);
+        assert_eq!(left_to_rotate(Some(&told(None, false))), None);
+        assert_eq!(left_to_rotate(Some(&told(Some(""), true))), None);
+    }
+
+    /// **A door that could not be asked says so**, in one sentence of
+    /// kvaultd's own with `relay rotate`, rather than printing nothing — which
+    /// says the vault holds no invited key: where the ask failed, and where it
+    /// was answered with anything but `NodeRelayResult`.
+    #[test]
+    fn a_drop_at_a_door_that_could_not_be_asked_says_so() {
+        for answer in [None, Some(&kotton_wire::ipc::UserResponse::Ok)] {
+            let line = left_to_rotate(answer).expect("a line where the door could not be asked");
+            assert_eq!(line, DOOR_NOT_ASKED);
+            assert!(line.contains("could not be asked whether an invited key is left to rotate"), "{line}");
+            assert!(line.contains("`relay rotate`") && line.contains("`relay rotate <r>`"), "{line}");
+        }
     }
 }

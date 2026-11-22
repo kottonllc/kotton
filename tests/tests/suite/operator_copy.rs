@@ -179,10 +179,14 @@ fn every_command_the_daemons_operator_copy_tells_a_person_to_type_is_one_the_she
         admission: None,
         invited_held: true,
     };
-    let door = kvaultd::reach::left_to_rotate(&held).expect("the door's line where an invited key is held");
-    let lacks = commands_the_shell_lacks_for(&verbs, &door, Some(url));
-    assert!(lacks.is_empty(), "`kvaultd drop` tells a person to type {lacks:?}, which the shell does not have:\n{door}");
-    seen.extend(backticked(&door).into_iter().map(str::to_string));
+    let door = kvaultd::reach::left_to_rotate(Some(&held)).expect("the door's line where an invited key is held");
+    // And the line it prints where the door could not be asked.
+    let unasked = kvaultd::reach::left_to_rotate(None).expect("the door's line where it could not be asked");
+    for door in [&door, &unasked] {
+        let lacks = commands_the_shell_lacks_for(&verbs, door, Some(url));
+        assert!(lacks.is_empty(), "`kvaultd drop` tells a person to type {lacks:?}, which the shell does not have:\n{door}");
+        seen.extend(backticked(door).into_iter().map(str::to_string));
+    }
     for verb in ["mint vault attic", "mint relay attic", "relay rule attic people_i_invite", "relay rotate attic", "relay rotate"] {
         assert!(seen.iter().any(|s| s == verb), "the copy no longer says `{verb}`: {seen:?}");
     }
