@@ -256,12 +256,53 @@ mod add_only {
 /// already the DID of `user_id`'s row `label` beside another key. The label is
 /// printed as prose prints a name ([`kotton_wire::note::quoted`],
 /// kottonllc/kotton#597, 43A); `did` is the derivation, one plain word.
-fn under_another_key(label: &str, did: &str) -> io::Error {
-    io::Error::other(format!(
+fn under_another_key(label: &str, did: &str) -> String {
+    format!(
         "this person pairs {} under {did}, this key's did:key, beside another key, and \
          keeps it as that; nothing was written (`device revoke {did}` removes that row)",
         kotton_wire::note::quoted(label)
-    ))
+    )
+}
+
+/// The DID [`write_row`] writes `user_id`'s row for `key` under, read on the
+/// caller's connection or inside its transaction: the DID the key's row is
+/// stored under, or the derivation's string where the key has no row and no
+/// row is under that string. `Ok(Err)` is the sentence the write is refused
+/// with where that string is a row's DID beside another key.
+async fn row_name(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: &str,
+    key: &VerifyingKey,
+) -> io::Result<Result<String, String>> {
+    if let Some(row) = row_for_key(&mut *conn, user_id, key.as_bytes()).await? {
+        return Ok(Ok(row.device_did.to_string()));
+    }
+    let derived = kotton_crypto::DidKeyMethod::from_public_key(key).to_string();
+    let beside: Option<String> = sqlx::query_scalar("SELECT id FROM paired_nodes WHERE user_id = ? AND device_did = ?")
+        .bind(user_id)
+        .bind(&derived)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    Ok(match beside {
+        Some(label) => Err(under_another_key(&label, &derived)),
+        None => Ok(derived),
+    })
+}
+
+/// **Whether [`insert_paired_node`] would refuse `user_id`'s row for `key`,
+/// read and nothing written**: `Some` with the sentence the write is refused
+/// with, `None` where the write takes the key's row or writes a new one.
+///
+/// The rule is the writer's own: [`write_row`] names the row through the same
+/// read. So a ceremony that asks this before it keeps anything
+/// (`super::nodes::finalize_enrolled_node`, and the joiner's completion in
+/// `kotton_device::users::pairing`) keeps nothing the store refuses: no key, no
+/// key log, no row. The write makes the read again inside its transaction, so
+/// a row written between the two is refused there as well.
+pub async fn row_refused_for(db: &SqlitePool, user_id: &str, key: &VerifyingKey) -> io::Result<Option<String>> {
+    let mut conn = db.acquire().await.map_err(db_err)?;
+    Ok(row_name(&mut conn, user_id, key).await?.err())
 }
 
 /// The write [`insert_paired_node`] and [`add_paired_node_if_absent`] make,
@@ -279,23 +320,7 @@ async fn write_row(
     let public_key = key.as_bytes().as_slice();
     // The row's name: the DID the key's row is stored under, or the derivation's
     // string where the key has no row and no row is under that string.
-    let device_did = match row_for_key(&mut *conn, user_id, key.as_bytes()).await? {
-        Some(row) => row.device_did.to_string(),
-        None => {
-            let derived = kotton_crypto::DidKeyMethod::from_public_key(key).to_string();
-            let beside: Option<String> =
-                sqlx::query_scalar("SELECT id FROM paired_nodes WHERE user_id = ? AND device_did = ?")
-                    .bind(user_id)
-                    .bind(&derived)
-                    .fetch_optional(&mut *conn)
-                    .await
-                    .map_err(db_err)?;
-            if let Some(label) = beside {
-                return Err(under_another_key(&label, &derived));
-            }
-            derived
-        }
-    };
+    let device_did = row_name(&mut *conn, user_id, key).await?.map_err(io::Error::other)?;
     // `INSERT OR REPLACE` rewrites the whole row, and callers that only know an
     // address (`peer_add`) know no posture. A posture already projected for
     // this node is kept rather than erased: erasing it turned a blind node into
