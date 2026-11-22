@@ -2098,7 +2098,7 @@ pub(crate) async fn speak(
     // learned the new key yet). Only where keys are kept for it: a relay nobody
     // set a rule on reads no key, and one run by someone else is not this
     // person's to rotate. The rotation tells every vault standing there again.
-    if drop && !matches!(answer, UserResponse::Error { .. }) {
+    if drop && a_drop_rotates_on(&answer) {
         let keys = kept_keys(&store).unwrap_or_default();
         for stood in told.iter().flat_map(|t| &t.relays) {
             let Some(id) = relay_id(Some(&stood.key)) else { continue };
@@ -2145,6 +2145,14 @@ pub(crate) fn pinned_vault(
         unreachable!("found as a vault's credential");
     };
     Ok(kotton_device::users::pairing::PinnedVault { vault: name.to_string(), key: vault })
+}
+
+/// Whether the vault's answer to a drop is one *invited* rotates on: any
+/// answer but a refusal. A vault's refusal to keep for this key under the pool
+/// named ([`UserResponse::NotPairedAs`]) is a refusal here too, as its `Error`
+/// was.
+fn a_drop_rotates_on(answer: &UserResponse) -> bool {
+    !matches!(answer, UserResponse::Error { .. } | UserResponse::NotPairedAs { .. })
 }
 
 fn set_pending_cleared(store: &UserStore, name: &str) -> anyhow::Result<()> {
@@ -3810,6 +3818,32 @@ mod tests {
             requests_for(OperatorVerb::Drop { pool: "sam".into() }).as_slice(),
             [VaultPeerRequest::DropTenant { .. }]
         ));
+    }
+
+    /// **A drop the vault refuses rotates no key**, in either shape of its
+    /// refusal; the drop's own answer does.
+    #[test]
+    fn a_drop_the_vault_refuses_rotates_no_key() {
+        use kotton_wire::ipc::NotPairedAsKind;
+        for kind in [NotPairedAsKind::AsAnother, NotPairedAsKind::Unsaid] {
+            let refused = UserResponse::NotPairedAs {
+                kind,
+                message: "this device is not paired with this vault".into(),
+            };
+            assert!(!a_drop_rotates_on(&refused), "{kind:?}: a refused drop rotated the invited key");
+        }
+        assert!(!a_drop_rotates_on(&UserResponse::Error {
+            message: "no such tenant".into()
+        }));
+        let dropped = UserResponse::TenantDropped {
+            tenant: kotton_wire::ipc::VaultTenant {
+                user_id: "sam".into(),
+                held: 0,
+                quota: None,
+                devices: 1,
+            },
+        };
+        assert!(a_drop_rotates_on(&dropped), "the drop's own answer rotates the invited key");
     }
 
     /// Drive an invite with a number through [`in_order`] against a vault that

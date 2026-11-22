@@ -228,7 +228,7 @@ pub async fn sync_once(
                     tracing::debug!(user_id, vault = %label, held, through_epoch, "vault holds the doors");
                 }
                 Ok(other) => {
-                    tracing::warn!(user_id, vault = %label, ?other, "vault refused the doors")
+                    tracing::warn!(user_id, vault = %label, answer = %other.name(), "vault refused the doors")
                 }
                 Err(e) => {
                     tracing::warn!(user_id, vault = %label, error = %e, "handing doors over failed")
@@ -248,7 +248,7 @@ pub async fn sync_once(
                 {
                     Ok(UserResponse::Deliveries { items }) => items,
                     Ok(other) => {
-                        tracing::warn!(user_id, vault = %label, ?other, "vault answered the pickup oddly");
+                        tracing::warn!(user_id, vault = %label, answer = %other.name(), "vault answered the pickup oddly");
                         break;
                     }
                     Err(e) => {
@@ -313,7 +313,7 @@ pub async fn sync_once(
             {
                 Ok(UserResponse::FrameCarried { carrying, room, .. }) => (carrying, room as usize),
                 Ok(other) => {
-                    tracing::warn!(user_id, vault = %label, ?other, "vault would not say what it carries; the outbox is not handed this pass");
+                    tracing::warn!(user_id, vault = %label, answer = %other.name(), "vault would not say what it carries; the outbox is not handed this pass");
                     continue;
                 }
                 Err(e) => {
@@ -362,7 +362,7 @@ pub async fn sync_once(
                     // message the vault will not take never keeps the rest
                     // from it. Either way the next pass tries it again.
                     Ok(other) => {
-                        tracing::warn!(user_id, vault = %label, handed, ?other, "vault refused to carry a frame of the outbox");
+                        tracing::warn!(user_id, vault = %label, handed, answer = %other.name(), "vault refused to carry a frame of the outbox");
                         match conn
                             .send_to_vault(&VaultPeerRequest::CarryFrame { user_id: user_id.clone(), messages: vec![], drop: vec![] })
                             .await
