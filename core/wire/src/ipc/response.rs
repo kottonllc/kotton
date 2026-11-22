@@ -663,6 +663,28 @@ pub enum UserResponse {
     VaultKeepsAlready {
         user_id: String,
     },
+    /// A vault's refusal of a key it does not keep for the person under the
+    /// pool a request named: sent by `kvaultd::peer::refusal` to a stranger
+    /// whose request names a pool, before the verb is read, whatever the verb.
+    /// Every other refusal is an [`Self::Error`].
+    ///
+    /// Typed rather than an `Error` string because two readers act on it: the
+    /// admit on a device (`kotton_device::users::pairing`) records nothing when
+    /// it hears it, and `kind` chooses which of two sentences of the device's
+    /// own it prints; an operator's drop (`kuserd::agent::operator`) reads it
+    /// as the vault's refusal and rotates no key. Nothing reads `message` to
+    /// decide anything. Every reader that names this answer and prints its
+    /// sentence prints it as data ([`crate::note::quoted_cut`]), as it prints
+    /// an `Error`'s; the doors' pass (`kuserd::agent::vault_doors`) logs the
+    /// answer by its name and no field of it.
+    ///
+    /// **No pool's name is a field.** The pool a key is held under is said, to
+    /// that key alone, inside `message`, the vault's sentence, which is printed
+    /// and kept nowhere: no log of the doors' pass holds it.
+    NotPairedAs {
+        kind: NotPairedAsKind,
+        message: String,
+    },
     /// Answer to the door's `VaultRequest::Tenants` and
     /// `UserRequest::Tenants`: every tenant the vault
     /// keeps anything for, by name, with bytes held, quota and a device count.
@@ -1473,7 +1495,8 @@ pub fn vault_keeps_already_said(user_id: &str) -> String {
 /// it does not act on: anything but the one its verb asked for (and, for an
 /// invite or a join at the vault's door, the ceremony's own frames). The
 /// vault's own words where the answer carries them — an `Error`'s message,
-/// [`vault_keeps_already_said`] — and otherwise the answer's name, never its
+/// a [`UserResponse::NotPairedAs`]'s sentence printed as data
+/// ([`crate::note::quoted_cut`]), [`vault_keeps_already_said`] — and otherwise the answer's name, never its
 /// fields. The name is said without naming who answered: the same words
 /// serve a relay's answer and a vault's, and the reader's own word (`relay:`,
 /// `vault:`) says which.
@@ -1492,6 +1515,9 @@ pub fn vault_keeps_already_said(user_id: &str) -> String {
 pub fn answer_said(answer: &UserResponse) -> String {
     match answer {
         UserResponse::Error { message } => message.clone(),
+        // The vault's own sentence, printed as data and to the bound: the
+        // kind decides nothing here.
+        UserResponse::NotPairedAs { message, .. } => crate::note::quoted_cut(message),
         UserResponse::VaultKeepsAlready { user_id } => vault_keeps_already_said(user_id),
         unsaid => format!(
             "the answer was `{}`, which this release has no sentence for; nothing more was asked of it",
@@ -1527,6 +1553,19 @@ impl From<std::io::Error> for UserResponse {
     }
 }
 
+/// Which of two refusals a [`UserResponse::NotPairedAs`] is, in the vault's
+/// word. It names no one. Two values and no third: an answer with a kind this
+/// build does not know does not read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NotPairedAsKind {
+    /// The vault holds this key under exactly one other pool, and its
+    /// sentence names it.
+    AsAnother,
+    /// The vault says no more: the key is paired to no pool here, to more than
+    /// one, or the vault could not read which.
+    Unsaid,
+}
+
 /// The kind of filesystem change delivered by a [`crate::UserRequest::VfsWatch`] stream.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1538,7 +1577,7 @@ pub enum VfsChangeKind {
 
 #[cfg(test)]
 mod answer_said_tests {
-    use super::{answer_said, vault_keeps_already_said, UserResponse};
+    use super::{answer_said, vault_keeps_already_said, NotPairedAsKind, UserResponse};
     use crate::ipc::SecretText;
 
     /// **An answer a reader does not act on is said in the vault's words where
@@ -1552,6 +1591,10 @@ mod answer_said_tests {
             answer_said(&UserResponse::VaultKeepsAlready { user_id: "sam".into() }),
             vault_keeps_already_said("sam")
         );
+        for kind in [NotPairedAsKind::AsAnother, NotPairedAsKind::Unsaid] {
+            let refused = UserResponse::NotPairedAs { kind, message: "not `sam`\nhere".into() };
+            assert_eq!(answer_said(&refused), "`not \\u{60}sam\\u{60}\\nhere`", "{kind:?}");
+        }
         let full = answer_said(&UserResponse::VaultFull { held: 17, quota: 9 });
         assert!(full.starts_with("the answer was `VaultFull`,"), "{full}");
         assert!(!full.contains("17") && !full.contains('{'), "fields were printed: {full}");

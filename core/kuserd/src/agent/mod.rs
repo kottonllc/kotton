@@ -631,7 +631,10 @@ impl DeviceDaemon {
         // â”€â”€ Step 4: create DeviceRuntime â”€â”€
         // Loading users is a daemon startup step, not part of building the
         // machine — see DeviceRuntime::load_users.
-        let runtime = DeviceRuntime::new(base.clone(), config)
+        // The runtime is handed what a key is to a person, asked of this
+        // daemon's rows, and not the store it is read from.
+        let db = Arc::new(db);
+        let runtime = DeviceRuntime::new_asking(base.clone(), config, Arc::new(MachineRows(Arc::clone(&db))))
             .await
             .map_err(|e| io::Error::other(e.to_string()))?;
         // The daemon's registry of who is resident. It is created here, by the
@@ -653,8 +656,6 @@ impl DeviceDaemon {
         {
             users.insert(user_id, user_rt);
         }
-
-        let db = Arc::new(db);
 
         // â”€â”€ Step 6: per-user databases; bundled apps + roles per user â”€â”€â”€â”€â”€â”€â”€â”€
         // One loaded principal under supervision, every
@@ -969,7 +970,8 @@ impl DeviceDaemon {
             ..RuntimeConfig::default()
         };
 
-        let runtime = DeviceRuntime::new_with_secrets(base.clone(), config, secrets)
+        let db = Arc::new(db);
+        let runtime = DeviceRuntime::new_with_secrets_asking(base.clone(), config, secrets, Arc::new(MachineRows(Arc::clone(&db))))
             .await
             .map_err(|e| io::Error::other(e.to_string()))?;
         // The daemon's registry of who is resident. It is created here, by the
@@ -991,8 +993,6 @@ impl DeviceDaemon {
         {
             users.insert(user_id, user_rt);
         }
-
-        let db = Arc::new(db);
 
         // Per-user databases; bundled apps + roles per user.
         let user_dbs: crate::db::user_db::UserDbMap = Arc::new(RwLock::new(HashMap::new()));
@@ -2308,10 +2308,37 @@ async fn peer_ask(
 /// person's (`kotton_peer::daemon::db`), and another person's row for the same
 /// key says nothing of what it is to this one. Unreadable reads as no.
 async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) -> bool {
-    match kotton_peer::daemon::db::paired_posture_for_user(db, pk, user_id).await {
-        Ok(Some(None)) => true,
-        Ok(Some(Some(p))) => p == kotton_schemas::membership::Posture::Full.as_str(),
-        _ => false,
+    offers_learned(db, pk, user_id).await.unwrap_or(false)
+}
+
+/// Whether `user_id`'s rows say `pk` is one of their own devices that holds
+/// their keys, by the narrowest of those rows: one answer for a key, read by
+/// both ends. The listening end hands such a key what it presents at its relay
+/// ([`asks_as_own_device`]); the dialling end learns an `offer` only from such
+/// a key ([`MachineRows`]).
+async fn offers_learned(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) -> io::Result<bool> {
+    let answer = kotton_peer::daemon::db::paired_posture_for_user(db, pk, user_id).await?;
+    Ok(kotton_peer::relay_keys::offers_from(answer.as_ref().map(Option::as_deref)))
+}
+
+/// What a key is to a person, asked of this daemon's own rows: the one answer
+/// the machine's runtime is handed for its dialler
+/// ([`kotton_peer::dialer::WhatKeyIs`]). It holds the machine store and answers
+/// one question of it; the runtime holds the question, not the store.
+pub(crate) struct MachineRows(pub(crate) Arc<SqlitePool>);
+
+#[async_trait::async_trait]
+impl kotton_peer::dialer::WhatKeyIs for MachineRows {
+    async fn to_person(&self, key: &[u8; 32], user: &str) -> kotton_peer::dialer::RowsSay {
+        use kotton_peer::dialer::RowsSay;
+        match offers_learned(&self.0, key, user).await {
+            Ok(true) => RowsSay::Offer,
+            Ok(false) => RowsSay::NoOffer,
+            Err(e) => {
+                tracing::warn!(error = %e, "the rows for a paired node's key could not be read");
+                RowsSay::Unreadable
+            }
+        }
     }
 }
 

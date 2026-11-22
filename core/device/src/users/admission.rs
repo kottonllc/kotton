@@ -226,19 +226,21 @@ pub enum PeerStanding {
 
 /// What a vault says to a key that is paired at it, but to another pool than
 /// the one its request named: `held` is the pool the key is paired to, `asked`
-/// the one it named. One home for the sentence, because two readers depend on
-/// its words — the vault that says it (`kvaultd::peer::refusal`) and the admit
-/// that tells a person what to type when it hears it (`handle_device_admit`).
+/// the one it named. The sentence has one maker, the vault
+/// (`kvaultd::peer::refusal`), and no reader of its words: it rides in
+/// `UserResponse::NotPairedAs`, whose kind says which refusal it is, and every
+/// reader prints it as data and decides nothing by it.
 pub fn paired_as_another(held: &str, asked: &str) -> String {
     format!("{PAIRED_AS_ANOTHER} `{held}`, and asked as `{asked}`")
 }
 
-/// The words [`paired_as_another`] opens with, for the reader that looks for them.
+/// The words [`paired_as_another`] opens with. Made into a sentence, never
+/// looked for in one.
 pub const PAIRED_AS_ANOTHER: &str = "this device is paired here as tenant";
 
 /// What a vault's refusal of a stranger says, between the peer's DID and the
-/// pool it named: the words the admit reads as *this vault does not keep for
-/// me under that name*, as opposed to any other error a node might answer.
+/// pool it named. Made into the vault's sentence, never looked for in one:
+/// whether a vault refused is the answer it sent (`UserResponse::NotPairedAs`).
 pub const NOT_PAIRED_WITH: &str = "is not paired with user";
 
 /// Classify a peer the handshake admitted, for one user.

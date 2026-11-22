@@ -14,7 +14,7 @@
 //! daemons paired through the streamed ceremony. Nothing is mocked.
 
 use crate::common::{connect_when_ready, enroll_streamed_as, init_crypto};
-use crate::vault::{enrol_vault_from, recover_from, spawn_device, spawn_vault, tenants_at_the_door, try_ask_the_vault_as, RunningDevice, RunningVault, VaultIdentity};
+use crate::vault::{enrol_vault_from, recover_from, refused_at_the_handshake, spawn_device, spawn_vault, tenants_at_the_door, try_ask_the_vault_as, RunningDevice, RunningVault, VaultIdentity};
 use kotton::SyncDirection;
 use kotton_schemas::membership::Posture;
 use kotton_wire::ipc::{TenantDeviceAct, TenantDeviceChange, UserRequest, UserResponse, VaultPeerRequest};
@@ -112,8 +112,18 @@ async fn a_key_not_introduced_under_the_identity_is_refused_at_the_drive() {
 
     let refused = capacity_as(&c, &drive).await;
     assert!(!admitted(&refused), "a key nobody introduced was admitted: {refused:?}");
-    if let Ok(UserResponse::Error { message }) = &refused {
-        assert!(message.contains(kotton_device::users::admission::NOT_PAIRED_WITH), "{message}");
+    // Refused at the handshake, before any rule of the vault's is read: C's
+    // key is on no allowlist and offers no key events, so the exchange ends at
+    // the handshake, which `refused_at_the_handshake` reports by the error's
+    // type, and no answer of the vault's is read. The vault's refusal to keep
+    // for a key (`NotPairedAs`) is held where a request reaches the rule
+    // (`vault.rs`, bob asking for alice's numbers).
+    match &refused {
+        Err(_) => assert!(
+            refused_at_the_handshake(&refused),
+            "a key nobody introduced was refused otherwise than at the handshake: {refused:?}"
+        ),
+        Ok(answer) => panic!("the vault answered a key nobody introduced: {answer:?}"),
     }
 
     let change = TenantDeviceChange {
