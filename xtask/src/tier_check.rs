@@ -29,6 +29,11 @@
 //! table of its own); `[project]`, which cargo reads as `[package]` before the 2024 edition, is
 //! refused wherever it is.
 //!
+//! The reader is held to cargo: every path edge `cargo metadata --no-deps` reports between
+//! crates of rows, in the root workspace and the relay's, is one it finds, and every crate it
+//! reads is a member of one of the two (`tier_check_cargo_tests`), so a form of dependency it
+//! does not know is a red test the day it is written.
+//!
 //! What it cannot place it refuses, naming the crate and the path. Every dependency `path` ends
 //! at a directory whose manifest this run read as a row's crate, or is a dev-dependency into a
 //! root that is no row; anything else is refused: a path that leaves the repository, even to
