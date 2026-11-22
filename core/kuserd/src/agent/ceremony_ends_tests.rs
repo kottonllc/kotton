@@ -464,3 +464,8 @@ async fn a_ceremony_nobody_joined_withdraws_its_reservation_when_its_stream_clos
     }
     assert!(ctx.pending_confirms.lock().await.is_empty(), "nothing was ever shown, and something is parked");
 }
+
+/// What the shell is told when both sides meet, through this file's daemon and
+/// relay.
+#[path = "ceremony_compare_tests.rs"]
+mod compare;
