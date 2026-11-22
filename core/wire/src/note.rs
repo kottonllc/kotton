@@ -164,36 +164,77 @@ fn escape(c: char) -> String {
 }
 
 /// The characters [`quoted`] and [`quoted_cut`] print by their escape where
-/// [`shown`] prints them as they are: the delimiter, the backtick. This is the
-/// rule, and the one place it is stated (the decision on how a name that holds
-/// the delimiter is printed: whatever puts a name between delimiters prints
-/// that delimiter, inside the name, by its escape). Every other character is
-/// printed between the backticks as [`shown`] prints it. No escape holds a
-/// backtick, so no character of a quoted print reads as its closing delimiter,
-/// and what follows the closing backtick is the device's own text.
-const QUOTED_ESCAPES: &[char] = &['`'];
+/// [`shown`] prints them as they are: the delimiter, the backtick, and by name
+/// each character drawn as it is, a grave accent standing at its height
+/// (U+02CB, U+02F4, U+1FEF, U+2035, U+FF40). This is the rule, and the one
+/// place it is stated (the decision on which characters the quoted print's
+/// rule names: the delimiter, and what is drawn as it), with
+/// [`QUOTED_ESCAPES_ON_SPACE`] for the marks drawn as it on the space. Every
+/// other character is printed between the backticks as [`shown`] prints it.
+/// No escape holds a character the rule names, so a person reading a quoted
+/// print can tell where the quoted text ends, as a parser can, and what
+/// follows the closing backtick is the device's own text.
+///
+/// The list is by name, as [`kotton_schemas::petname::is_printed_as_is`]
+/// takes `\` and U+2800 out by name: no property in Unicode's tables says what
+/// a character is drawn as, so the list may grow and no test over the tables
+/// shows it complete. A cell, a listing and `--json` print each of these as it
+/// is; the rule is the quote's alone.
+const QUOTED_ESCAPES: &[char] = &['`', '\u{2cb}', '\u{2f4}', '\u{1fef}', '\u{2035}', '\u{ff40}'];
 
-/// One character of the quoted print, `first` when it is the string's first:
-/// by its escape when [`QUOTED_ESCAPES`] names it, else as [`shown`] prints it.
-fn quoted_char(c: char, first: bool, out: &mut String) {
-    if QUOTED_ESCAPES.contains(&c) {
+/// The marks the quoted print's rule names where they are drawn on the space:
+/// U+0300 and U+0340, each drawn there as a grave accent standing alone. Each
+/// is printed between the backticks by its escape where what it is drawn on is
+/// the space, and as [`shown`] prints it after any other character, so a letter
+/// with a grave in decomposed form is printed as it is. What a mark is drawn on
+/// is the character before it, or, past marks printed as they are, the one
+/// those marks are drawn on. A mark first in the text has nothing to sit on and
+/// is already printed by its escape by [`shown`].
+const QUOTED_ESCAPES_ON_SPACE: &[char] = &['\u{300}', '\u{340}'];
+
+/// What the next character of a quoted print is drawn after: nothing (it is the
+/// first), the space, or any other character or escape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Before {
+    Nothing,
+    Space,
+    Other,
+}
+
+/// One character of the quoted print, drawn after `before`: by its escape when
+/// [`QUOTED_ESCAPES`] names it, or [`QUOTED_ESCAPES_ON_SPACE`] names it and
+/// `before` is the space; else as [`shown`] prints it. Returns what the next
+/// character is drawn after. Each character is printed by itself and by what
+/// comes before it, so the print of a prefix is a prefix of the print.
+fn quoted_char(c: char, before: Before, out: &mut String) -> Before {
+    if QUOTED_ESCAPES.contains(&c) || (before == Before::Space && QUOTED_ESCAPES_ON_SPACE.contains(&c)) {
         out.push_str(&escape(c));
-    } else {
-        shown_char(c, first, out);
+        return Before::Other;
+    }
+    let first = before == Before::Nothing;
+    shown_char(c, first, out);
+    // A mark `shown` prints as it is after something, and by its escape first,
+    // is drawn on what came before it, which the next character is drawn after too.
+    let mark = kotton_schemas::petname::is_printed_as_is(c, false) && !kotton_schemas::petname::is_printed_as_is(c, true);
+    match c {
+        ' ' => Before::Space,
+        _ if mark && !first => before,
+        _ => Before::Other,
     }
 }
 
 /// `name` as prose prints it, between backticks: each character as
-/// [`quoted_char`] prints it, so each backtick it holds is printed by its
-/// escape, `\u{60}`. So a backtick in a line is always the line's own, and a
-/// printed name never ends before its closing delimiter. A [`one_plain_word`]
-/// is printed as the word between backticks. A sentence, the join's line and
-/// the mint's refusal print a name through this and nowhere else.
+/// [`quoted_char`] prints it, so each character the rule names is printed by
+/// its escape, the backtick as `\u{60}`. So a backtick in a line is always the
+/// line's own, and a printed name never ends before its closing delimiter. A
+/// [`one_plain_word`] is printed as the word between backticks. A sentence, the
+/// join's line and the mint's refusal print a name through this and nowhere else.
 pub fn quoted(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 2);
     out.push('`');
-    for (i, c) in name.chars().enumerate() {
-        quoted_char(c, i == 0, &mut out);
+    let mut before = Before::Nothing;
+    for c in name.chars() {
+        before = quoted_char(c, before, &mut out);
     }
     out.push('`');
     out
@@ -219,9 +260,10 @@ pub fn quoted_cut(text: &str) -> String {
     let mut inside = String::with_capacity(text.len().min(MAX_SAID_CHARS));
     let mut used = 0;
     let mut piece = String::new();
+    let mut before = Before::Nothing;
     for (i, c) in text.chars().enumerate() {
         piece.clear();
-        quoted_char(c, i == 0, &mut piece);
+        before = quoted_char(c, before, &mut piece);
         let len = piece.chars().count();
         if used + len > MAX_SAID_CHARS {
             let left = text.chars().count() - i;
@@ -581,13 +623,18 @@ mod tests {
     }
 
     /// **The quoted print escapes what its rule names and prints every other
-    /// character as `shown` does** (how a name that holds the delimiter is
-    /// printed), held per character class `is_printed_as_is` leaves as it is
+    /// character as `shown` does** (which characters the quoted print's rule
+    /// names), held per character class `is_printed_as_is` leaves as it is
     /// (letter, mark, number, punctuation mark, symbol, the space), over every
-    /// code point, after a letter and first, and per character of
-    /// `QUOTED_ESCAPES`: the delimiter is among them, each is printed by its
-    /// escape, and no print holds the delimiter between its backticks.
-    /// `quoted_cut` prints each as `quoted` does.
+    /// code point, after a letter, first and after the space, and per character
+    /// of `QUOTED_ESCAPES`: the delimiter is among them, each is printed by its
+    /// escape, and no print holds a character the rule names between its
+    /// backticks. Every character but those `QUOTED_ESCAPES_ON_SPACE` names is
+    /// printed after the space as `shown` prints it, and those are printed there
+    /// by their escape. Over every code point as the character before, a mark
+    /// the rule names on the space is printed by its escape where what it is
+    /// drawn on is the space, read from the class of the character before, and
+    /// as it is otherwise. `quoted_cut` prints each as `quoted` does.
     #[test]
     fn the_quoted_print_escapes_what_its_rule_names_and_no_other_character() {
         use icu_properties::props::GeneralCategoryGroup as G;
@@ -599,8 +646,13 @@ mod tests {
             assert!(print.starts_with(delimiter) && print.ends_with(delimiter), "{print:?}");
             print[delimiter.len_utf8()..print.len() - delimiter.len_utf8()].to_string()
         };
+        let named = |print: &str| print.chars().any(|e| QUOTED_ESCAPES.contains(&e));
         for &c in QUOTED_ESCAPES {
-            for (name, said) in [(format!("a{c}b"), format!("a{}b", escape(c))), (c.to_string(), escape(c))] {
+            for (name, said) in [
+                (format!("a{c}b"), format!("a{}b", escape(c))),
+                (c.to_string(), escape(c)),
+                (format!(" {c}b"), format!(" {}b", escape(c))),
+            ] {
                 assert_eq!(between(&quoted(&name)), said, "{c:?}");
                 assert_eq!(quoted_cut(&name), quoted(&name), "{c:?}");
             }
@@ -609,16 +661,44 @@ mod tests {
             assert_ne!(quoted(&format!("a{c}b")), quoted(&format!("a{}b", escape(c))), "{c:?}: it and its escape typed out read alike");
         }
         let classes = [("letter", G::Letter), ("mark", G::Mark), ("number", G::Number), ("punctuation", G::Punctuation), ("symbol", G::Symbol)];
+        for &m in QUOTED_ESCAPES_ON_SPACE {
+            assert!(!escape(m).chars().any(|e| QUOTED_ESCAPES.contains(&e)), "{m:?}: its escape holds a character the rule names");
+        }
         let mut held = [0usize; 6];
+        let mut marks = 0usize;
         for c in (0..=0x10ffffu32).filter_map(char::from_u32) {
-            let (class, _) = class_of(c);
-            for name in [format!("a{c}b"), c.to_string()] {
+            let (class, ignorable) = class_of(c);
+            for name in [format!("a{c}b"), c.to_string(), format!(" {c}b")] {
                 let print = quoted(&name);
                 let inside = between(&print);
                 assert!(!inside.contains(delimiter), "{c:?}: the delimiter is printed between the backticks: {print:?}");
+                assert!(!named(&inside), "{c:?}: a character the rule names is printed between the backticks: {print:?}");
                 assert_eq!(quoted_cut(&name), print, "{c:?}");
-                if !QUOTED_ESCAPES.contains(&c) {
+                if QUOTED_ESCAPES_ON_SPACE.contains(&c) && name.starts_with(' ') {
+                    assert_eq!(inside, format!(" {}b", escape(c)), "{c:?} on the space is not printed by its escape");
+                } else if !QUOTED_ESCAPES.contains(&c) {
                     assert_eq!(inside, shown(&name), "{c:?} ({class:?}) is not printed as `shown` prints it");
+                }
+            }
+            // `c` as the character before each mark the rule names on the space,
+            // after a letter and after the space: the mark is drawn on `c`, or,
+            // where `c` is a mark printed as it is, on what `c` is drawn on.
+            let stacks = G::Mark.contains(class) && !ignorable;
+            marks += usize::from(stacks);
+            for &m in QUOTED_ESCAPES_ON_SPACE {
+                for (lead, on_space) in [("a", c == ' '), (" ", c == ' ' || stacks)] {
+                    let name = format!("{lead}{c}{m}");
+                    let print = quoted(&name);
+                    let shown_c = shown(&format!("{lead}{c}"));
+                    let said = if QUOTED_ESCAPES.contains(&c) || (lead == " " && QUOTED_ESCAPES_ON_SPACE.contains(&c)) {
+                        format!("{lead}{}{m}", escape(c))
+                    } else if on_space {
+                        format!("{shown_c}{}", escape(m))
+                    } else {
+                        format!("{shown_c}{m}")
+                    };
+                    assert_eq!(between(&print), said, "{c:?} ({class:?}) then {m:?}, after {lead:?}");
+                    assert_eq!(quoted_cut(&name), print, "{c:?} then {m:?}");
                 }
             }
             if QUOTED_ESCAPES.contains(&c) || !is_printed_as_is(c, false) {
@@ -633,6 +713,61 @@ mod tests {
         }
         assert_eq!(held[5], 1, "the space was not read");
         assert!(held.iter().sum::<usize>() > 150_000, "{held:?}: the tables were not read");
+        assert!(marks > 2_000, "{marks}: the marks were not read");
+    }
+
+    /// **The quoted print names the delimiter and each character drawn as it**
+    /// (which characters the quoted print's rule names), spelled here by code
+    /// point and not read from the rule: U+0060, U+02CB, U+02F4, U+1FEF, U+2035
+    /// and U+FF40 are printed between the backticks by their escapes, in
+    /// `quoted` and `quoted_cut` alike, and U+0300 and U+0340 by their escapes
+    /// where they are drawn on the space, and as they are after a letter. `shown`
+    /// prints each of them, and each sequence, as it is, so a cell and a listing
+    /// print a name as before: the rule is the quote's alone.
+    #[test]
+    fn the_quoted_print_names_the_delimiter_and_what_is_drawn_as_it() {
+        for (c, said) in [
+            ('`', "\\u{60}"),
+            ('\u{2cb}', "\\u{2cb}"),
+            ('\u{2f4}', "\\u{2f4}"),
+            ('\u{1fef}', "\\u{1fef}"),
+            ('\u{2035}', "\\u{2035}"),
+            ('\u{ff40}', "\\u{ff40}"),
+        ] {
+            for (name, inside) in [
+                (format!("a{c}b"), format!("a{said}b")),
+                (c.to_string(), said.to_string()),
+                (format!("my {c}phone{c}"), format!("my {said}phone{said}")),
+            ] {
+                assert_eq!(quoted(&name), format!("`{inside}`"), "{c:?}");
+                assert_eq!(quoted_cut(&name), quoted(&name), "{c:?}");
+            }
+            assert!(said.len() <= 8, "{c:?} prints in more than 8");
+            assert_eq!(shown(&format!("a{c}b")), format!("a{c}b"), "{c:?}: `shown` does not print it as it is");
+        }
+        for (m, said) in [('\u{300}', "\\u{300}"), ('\u{340}', "\\u{340}")] {
+            for (name, inside) in [
+                (format!(" {m}"), format!(" {said}")),
+                (format!("a {m}b"), format!("a {said}b")),
+                (format!("a \u{301}{m}"), format!("a \u{301}{said}")),
+                (format!("a{m}"), format!("a{m}")),
+                (format!("e{m} x"), format!("e{m} x")),
+                (format!("a\u{301}{m}"), format!("a\u{301}{m}")),
+                (format!("1{m}"), format!("1{m}")),
+                (format!("-{m}"), format!("-{m}")),
+                (m.to_string(), said.to_string()),
+            ] {
+                assert_eq!(quoted(&name), format!("`{inside}`"), "{name:?}");
+                assert_eq!(quoted_cut(&name), quoted(&name), "{name:?}");
+            }
+            for as_is in [format!(" {m}"), format!("a {m}b"), format!("a{m}")] {
+                assert_eq!(shown(&as_is), as_is, "{as_is:?}: `shown` does not print it as it is");
+            }
+            assert_eq!(shown(&m.to_string()), said, "a mark first is printed by `shown`'s escape");
+        }
+        for as_drawn in ["it's", "a\u{2019}s", "\u{2bb}okina", "caf\u{e9}", "\u{b4}", "\u{55d}", "\u{2032}", "\u{2ce}", "\u{2f5}"] {
+            assert_eq!(quoted(as_drawn), format!("`{as_drawn}`"), "{as_drawn:?} is not printed as it is");
+        }
     }
 
     /// **The second kind's key is printed through the same print as its names**
@@ -692,20 +827,24 @@ mod tests {
     /// string's, not the print's** (74A).
     #[test]
     fn a_cut_never_ends_inside_an_escape() {
-        // `\u{7}` prints in 6, a backtick in 6, `\u{10ffff}` in 10, `\n` in 2.
-        for unit in ["\u{7}", "`", "\u{10ffff}", "\n", "x\u{7}"] {
+        // `\u{7}` prints in 6, a backtick in 6, `\u{10ffff}` in 10, `\n` in 2,
+        // U+02CB in 7, U+FF40 in 8, the space and U+0300 on it in 1 and 7.
+        let inside_of = |text: &str| {
+            let print = quoted(text);
+            print[1..print.len() - 1].to_string()
+        };
+        for unit in ["\u{7}", "`", "\u{10ffff}", "\n", "x\u{7}", "\u{2cb}", "\u{ff40}", " \u{300}", " \u{340}"] {
             let text = unit.repeat(MAX_SAID_CHARS);
             let said = quoted_cut(&text);
             let (inside, after) = cut_parts(&said);
             let printed = inside.chars().count();
             assert!(printed <= MAX_SAID_CHARS, "{unit:?}: {printed}");
-            let whole = quoted(&text);
-            let whole = &whole[1..whole.len() - 1];
+            let whole = inside_of(&text);
             assert!(whole.starts_with(inside), "{unit:?}: the cut is not a prefix of the print");
             // The longest prefix: one more character of the string would not fit.
             let kept = (0..=text.chars().count())
                 .rev()
-                .find(|n| shown(&text.chars().take(*n).collect::<String>()).replace('`', "\\u{60}") == inside)
+                .find(|n| inside_of(&text.chars().take(*n).collect::<String>()) == inside)
                 .expect("the cut is the print of a prefix");
             let next: String = text.chars().take(kept + 1).collect();
             assert!(quoted(&next).chars().count() - 2 > MAX_SAID_CHARS, "{unit:?}: a longer prefix fits");
