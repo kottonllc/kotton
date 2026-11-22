@@ -398,7 +398,7 @@ pub async fn follow(
 ) -> io::Result<Vec<Copy>> {
     let listed = match ask(client, VaultPeerRequest::TenantDrives { user_id: user_id.to_string() }).await? {
         UserResponse::TenantDrivesResult { drives } => drives,
-        UserResponse::Error { message } => return Err(io::Error::other(vault_answered(&message))),
+        UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => return Err(io::Error::other(vault_answered(&message))),
         other => return Err(io::Error::other(format!("the vault answered {} to TenantDrives", unasked(&other)))),
     };
     let recorded: Vec<(String, String, Option<String>)> = record::all(db, user_id)
@@ -440,7 +440,7 @@ async fn seal_with_id(store: &UserStore, user_id: &str, client: &KottonPeerObjec
             tracing::debug!(user_id, tree = %copy.tree, "a drive's name was not sealed again: another device holds it");
             Ok(())
         }
-        UserResponse::Error { message } => Err(io::Error::other(vault_answered(&message))),
+        UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => Err(io::Error::other(vault_answered(&message))),
         other => Err(io::Error::other(format!("the vault answered {} to TenantDriveName", unasked(&other)))),
     }
 }
@@ -489,9 +489,9 @@ fn read_listing(
     copies
 }
 
-/// A vault's `Error`, where the sentence has no words of the device's around
-/// it: the vault's text printed as data, to a bounded length
-/// ([`quoted_cut`]; kottonllc/kotton#597, 43A, 74A).
+/// A vault's `Error` or `NotPairedAs`, where the sentence has no words of the
+/// device's around it: the vault's text printed as data, to a bounded length
+/// ([`quoted_cut`]; how another node's text is printed).
 fn vault_answered(message: &str) -> String {
     format!("the vault answered: {}", quoted_cut(message))
 }
@@ -583,7 +583,7 @@ async fn renew_lease(client: &KottonPeerObjectStorage, user_id: &str, holding: H
         UserResponse::DriveHeld { device_did, for_secs } => {
             Err(format!("{} holds it now, for {for_secs}s more", named_in(names, &device_did)))
         }
-        UserResponse::Error { message } => Err(vault_answered(&message)),
+        UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => Err(vault_answered(&message)),
         other => Err(format!("the vault answered {}", unasked(&other))),
     }
 }
@@ -624,7 +624,7 @@ impl Leased {
         match ask(&client, asked).await? {
             UserResponse::DriveHold { lease, .. } => Ok(Ok(Self::holding(client, names, user_id, holding, lease))),
             UserResponse::DriveHeld { device_did, for_secs } => Ok(Err(HeldBy { device_did, for_secs })),
-            UserResponse::Error { message } => Err(io::Error::other(format!("the vault '{}' gave no lease: {}", node.id, quoted_cut(&message)))),
+            UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => Err(io::Error::other(format!("the vault '{}' gave no lease: {}", node.id, quoted_cut(&message)))),
             other => Err(io::Error::other(format!("the vault '{}' answered {} to TenantDriveHold", node.id, unasked(&other)))),
         }
     }
@@ -934,7 +934,7 @@ async fn create_holding(
     match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
         // The new tree's lease, which nothing here holds it under: let go.
         UserResponse::DriveHold { lease, .. } => holds.keep(&Leased::holding(client.clone(), &device_names(runtime, store).await, user_id, Holding::Drive(drive), lease)),
-        UserResponse::Error { message } => return refused(format!("drive create: the vault '{}' refused: {}", vault.node.id, quoted_cut(&message))),
+        UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => return refused(format!("drive create: the vault '{}' refused: {}", vault.node.id, quoted_cut(&message))),
         other => return refused(format!("drive create: the vault answered {}", unasked(&other))),
     }
     let copies = follow(store, db, user_id, &vault.vault_key, &client).await?;
@@ -1028,7 +1028,7 @@ async fn make_first_holding(
     let sealed_name = SealedName { name: FIRST_DRIVE_NAME.to_string(), id: FIRST_DRIVE_ID.to_string() }.seal(store, &tree, true)?;
     match ask(&client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive, sealed_name }).await? {
         UserResponse::DriveHold { lease, .. } => holds.keep(&Leased::holding(client.clone(), &device_names(runtime, store).await, user_id, Holding::Drive(drive), lease)),
-        UserResponse::Error { message } => return Err(io::Error::other(format!("the vault '{}' refused it: {}", vault.node.id, quoted_cut(&message)))),
+        UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => return Err(io::Error::other(format!("the vault '{}' refused it: {}", vault.node.id, quoted_cut(&message)))),
         other => return Err(io::Error::other(format!("the vault '{}' answered {}", vault.node.id, unasked(&other)))),
     }
     follow(store, db, user_id, vault_key, &client).await?;
@@ -1188,7 +1188,7 @@ impl VaultEnd for PeerEnd {
                 };
                 Err(format!("{holder} holds the drive there, for {for_secs}s more"))
             }
-            UserResponse::Error { message } => Err(vault_answered(&message)),
+            UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => Err(vault_answered(&message)),
             other => Err(format!("the vault answered {}", unasked(&other))),
         }
     }
@@ -1814,7 +1814,7 @@ async fn move_holding(
     let renews_copy = dial(runtime, &dest.node, user_id).await?;
     let dest_held = match ask(&dest_client, VaultPeerRequest::TenantDriveMake { user_id: user_id.to_string(), drive: to_id, sealed_name: unfinished_name }).await? {
         UserResponse::DriveHold { lease, .. } => Leased::holding(renews_copy, &names, user_id, Holding::Drive(to_id), lease),
-        UserResponse::Error { message } => return refused(format!("drive move: '{}' refused the drive: {}", dest.node.id, quoted_cut(&message))),
+        UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => return refused(format!("drive move: '{}' refused the drive: {}", dest.node.id, quoted_cut(&message))),
         other => return refused(format!("drive move: '{}' answered {}", dest.node.id, unasked(&other))),
     };
     holds.keep(&dest_held);
@@ -2122,6 +2122,24 @@ mod tests {
         let want = format!("the vault answered: `{}` (cut: 5 more characters)", "x".repeat(kotton_wire::note::MAX_SAID_CHARS));
         for (verb, said) in each_said(UserResponse::Error { message: long }).await {
             assert_eq!(said, want, "{verb}");
+        }
+    }
+
+    /// **A vault's refusal to keep for this device is printed as its `Error` is**
+    /// (how a device reads a vault's refusal to keep for it): its sentence as
+    /// data, to the bound, after the device's own words, whichever its kind.
+    #[tokio::test]
+    async fn a_vaults_refusal_is_printed_as_data_and_to_the_bound() {
+        use kotton_wire::ipc::NotPairedAsKind;
+        let long = "x".repeat(kotton_wire::note::MAX_SAID_CHARS + 5);
+        let cut = format!("the vault answered: `{}` (cut: 5 more characters)", "x".repeat(kotton_wire::note::MAX_SAID_CHARS));
+        for kind in [NotPairedAsKind::AsAnother, NotPairedAsKind::Unsaid] {
+            for (verb, said) in each_said(UserResponse::NotPairedAs { kind, message: "no `drive`\nhere".to_string() }).await {
+                assert_eq!(said, "the vault answered: `no \\u{60}drive\\u{60}\\nhere`", "{kind:?} {verb}");
+            }
+            for (verb, said) in each_said(UserResponse::NotPairedAs { kind, message: long.clone() }).await {
+                assert_eq!(said, cut, "{kind:?} {verb}");
+            }
         }
     }
 
