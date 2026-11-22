@@ -880,10 +880,17 @@ impl Channel {
 
         match rx.await {
             Ok(KuidResponse::SurfaceOk) => true,
-            Ok(other) => {
-                // kuid's reply, not asked for: by its name and no field (an
-                // answer not asked for is said by its name and no field).
-                warn!(answer = %other.name(), "SurfaceProxy: unexpected response from kuid");
+            // The answer has two variants, so this is kuid's `Error`, in answer
+            // to the request. kuid is this device's own daemon, and its `Error`
+            // is said (a reader of this device's own daemon says the daemon's
+            // `Error` as written); but its text may carry an app's words, and a
+            // guest's text is another party's, so it is quoted within this
+            // sentence.
+            Ok(KuidResponse::Error { message }) => {
+                warn!(
+                    "SurfaceProxy: kuid could not act on the request: {}",
+                    kotton_wire::note::quoted_cut(&message)
+                );
                 true
             }
             // The reader dropped the sender, which it does only when the pair
@@ -984,8 +991,17 @@ mod tests {
     /// bytes, reports it verbatim, and answers `SurfaceOk`. What the test then
     /// asserts on is the wire, which is the only place the order is real.
     fn fake_compositor(
+        read: DuplexStream,
+        write: DuplexStream,
+    ) -> mpsc::UnboundedReceiver<String> {
+        compositor_answering(read, write, KuidResponse::SurfaceOk)
+    }
+
+    /// [`fake_compositor`], answering every frame with `answer`.
+    fn compositor_answering(
         mut read: DuplexStream,
         mut write: DuplexStream,
+        answer: KuidResponse,
     ) -> mpsc::UnboundedReceiver<String> {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
@@ -1006,7 +1022,7 @@ mod tests {
                 }
                 if write_frame(
                     &mut write,
-                    &FromCompositor::Response(KuidResponse::SurfaceOk),
+                    &FromCompositor::Response(answer.clone()),
                 )
                 .await
                 .is_err()
@@ -1035,6 +1051,47 @@ mod tests {
         });
         assert!(!said.contains("FIELD-d1e5"), "a field of the reply was logged: {said}");
         assert!(said.contains("answer=Error"), "the reply was not named: {said}");
+    }
+
+    /// **A reader of this device's own daemon says the daemon's `Error` as
+    /// written**, and a guest's text is another party's: kuid's `Error` in
+    /// answer to a request is logged with its message, quoted within the
+    /// proxy's own sentence, since the message may carry an app's words.
+    #[test]
+    fn kuids_error_in_answer_to_a_request_is_logged_quoted() {
+        let message = "the app said: no room\nFORGED-e7a0 line";
+        let said = crate::logged(|| {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+                let proxy = SurfaceProxy::new();
+                let (kuid_read, daemon_write) = tokio::io::duplex(64 * 1024);
+                let (daemon_read, kuid_write) = tokio::io::duplex(64 * 1024);
+                let mut seen =
+                    compositor_answering(kuid_read, kuid_write, KuidResponse::Error { message: message.into() });
+                proxy.attach(daemon_write, daemon_read).await;
+                let (_, h) = handle();
+                proxy
+                    .open(
+                        h,
+                        "com.example.notes",
+                        kotton_wire::SurfaceSpec {
+                            role: SurfaceRole::Window,
+                            edge: None,
+                            title: "Notes".into(),
+                            width: 400,
+                            height: 300,
+                        },
+                    )
+                    .await
+                    .expect("an open kuid refuses does not fail the launch");
+                seen.recv().await.expect("the open crossed");
+            })
+        });
+        let quoted = kotton_wire::note::quoted_cut(message);
+        assert!(
+            said.contains(&format!("kuid could not act on the request: {quoted}")),
+            "kuid's message was not said, quoted: {said}"
+        );
+        assert!(!said.contains("no room\nFORGED-e7a0"), "kuid's message was printed unquoted: {said}");
     }
 
     /// A handle with a value the test can look for in the frame the proxy

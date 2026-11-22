@@ -70,14 +70,7 @@ async fn main() -> io::Result<()> {
         UserResponse::Error { message } => {
             return Err(io::Error::other(format!("auth error: {message}")));
         }
-        other => {
-            // kuserd's answer, not asked for: by its name and no field (an
-            // answer not asked for is said by its name and no field).
-            return Err(io::Error::other(format!(
-                "unexpected auth response: {}",
-                kotton_wire::ipc::unasked(&other)
-            )));
-        }
+        other => return Err(unasked_auth(&other)),
     };
 
     // -- VfsWatch subscription connection ------------------------------------
@@ -193,10 +186,14 @@ fn on_frame(frame: Option<&UserResponse>) -> FrameAction {
             FrameAction::PollOnly
         }
         Some(UserResponse::VfsWatchEnd) | None => FrameAction::Stop,
+        // kuserd's own `Error`, said as written (a reader of this device's own
+        // daemon says the daemon's `Error` as written); the stream continues.
+        Some(UserResponse::Error { message }) => {
+            tracing::warn!(%message, "ksyncd: error frame on VfsWatch stream");
+            FrameAction::Note
+        }
         Some(other) => {
-            // kuserd's frame, not asked for: by its name and no field (an
-            // answer not asked for is said by its name and no field).
-            tracing::warn!(answer = %other.name(), "ksyncd: unexpected frame on VfsWatch stream");
+            log_unasked("unexpected frame on VfsWatch stream", other);
             FrameAction::Note
         }
     }
@@ -220,7 +217,7 @@ async fn report_peers(
             tracing::warn!(%message, "ksyncd: VfsReport returned error");
         }
         Ok(other) => {
-            tracing::warn!(answer = %other.name(), "ksyncd: unexpected VfsReport response");
+            log_unasked("unexpected VfsReport response", &other);
         }
         Err(e) => {
             tracing::warn!(error = %e, "ksyncd: VfsReport IPC error");
@@ -242,12 +239,27 @@ async fn trigger_sync_now(client: &mut IpcClient<UserRequest, UserResponse>, use
             tracing::warn!(%message, "ksyncd: SyncDrives returned error");
         }
         Ok(other) => {
-            tracing::warn!(answer = %other.name(), "ksyncd: unexpected SyncDrives response");
+            log_unasked("unexpected SyncDrives response", &other);
         }
         Err(e) => {
             tracing::warn!(error = %e, "ksyncd: SyncDrives IPC error");
         }
     }
+}
+
+/// What ksyncd says of kuserd's answer to `Authenticate` when it is not one
+/// the reader reads: by its name and no field (an answer not asked for is said
+/// by its name and no field). kuserd's `Error` is read before this, and said as
+/// written.
+fn unasked_auth(other: &UserResponse) -> io::Error {
+    io::Error::other(format!("unexpected auth response: {}", kotton_wire::ipc::unasked(other)))
+}
+
+/// Log kuserd's answer, not asked for, by its name and no field (an answer not
+/// asked for is said by its name and no field), in the words `said` of the
+/// verb it answered.
+fn log_unasked(said: &str, other: &UserResponse) {
+    tracing::warn!(answer = %other.name(), "ksyncd: {said}");
 }
 
 /// Build the IPC endpoint for the local kuserd instance.
@@ -272,7 +284,7 @@ fn build_endpoint() -> io::Result<IpcEndpoint> {
 
 #[cfg(test)]
 mod frame_action_tests {
-    use super::{on_frame, FrameAction};
+    use super::{log_unasked, on_frame, unasked_auth, FrameAction};
     use kotton_wire::ipc::VfsChangeKind;
     use kotton_wire::UserResponse;
 
@@ -302,11 +314,8 @@ mod frame_action_tests {
         );
     }
 
-    /// **An answer not asked for is said by its name and no field**: a frame
-    /// the watch stream does not read is logged by its name, and nothing it
-    /// carries.
-    #[test]
-    fn a_frame_not_asked_for_is_logged_by_its_name_alone() {
+    /// What a closure logged, and what it returned.
+    fn logged<R>(f: impl FnOnce() -> R) -> (R, String) {
         use std::sync::{Arc, Mutex};
         #[derive(Clone, Default)]
         struct Caught(Arc<Mutex<Vec<u8>>>);
@@ -326,12 +335,48 @@ mod frame_action_tests {
             .with_ansi(false)
             .with_max_level(tracing::Level::TRACE)
             .finish();
-        let frame = UserResponse::VaultKeepsAlready { user_id: "FIELD-a6f2".into() };
-        let action = tracing::subscriber::with_default(subscriber, || on_frame(Some(&frame)));
-        assert_eq!(action, FrameAction::Note);
+        let out = tracing::subscriber::with_default(subscriber, f);
         let said = String::from_utf8(caught.0.lock().unwrap().clone()).unwrap();
+        (out, said)
+    }
+
+    /// **An answer not asked for is said by its name and no field**: a frame
+    /// the watch stream does not read is logged by its name, and nothing it
+    /// carries.
+    #[test]
+    fn a_frame_not_asked_for_is_logged_by_its_name_alone() {
+        let frame = UserResponse::VaultKeepsAlready { user_id: "FIELD-a6f2".into() };
+        let (action, said) = logged(|| on_frame(Some(&frame)));
+        assert_eq!(action, FrameAction::Note);
         assert!(!said.contains("FIELD-a6f2"), "a field of the frame was logged: {said}");
         assert!(said.contains("answer=VaultKeepsAlready"), "the frame was not named: {said}");
+    }
+
+    /// **A reader of this device's own daemon says the daemon's `Error` as
+    /// written**: kuserd's `Error` on the watch stream is logged with its
+    /// message, and the stream continues.
+    #[test]
+    fn kuserds_own_error_frame_is_logged_as_written() {
+        let frame = UserResponse::Error { message: "the watch table is full".into() };
+        let (action, said) = logged(|| on_frame(Some(&frame)));
+        assert_eq!(action, FrameAction::Note);
+        assert!(said.contains("the watch table is full"), "kuserd's message was not logged: {said}");
+    }
+
+    /// The other readers of kuserd that build their own words (`Authenticate`,
+    /// `VfsReport`, `SyncDrives`) name an answer not asked for and say nothing
+    /// it carries.
+    #[test]
+    fn every_other_reader_names_an_answer_not_asked_for() {
+        let answer = UserResponse::VaultKeepsAlready { user_id: "FIELD-3c71".into() };
+        let said = unasked_auth(&answer).to_string();
+        assert_eq!(said, "unexpected auth response: `VaultKeepsAlready`");
+        for verb in ["unexpected VfsReport response", "unexpected SyncDrives response"] {
+            let ((), said) = logged(|| log_unasked(verb, &answer));
+            assert!(!said.contains("FIELD-3c71"), "a field of the answer was logged: {said}");
+            assert!(said.contains(verb), "the verb's words were not said: {said}");
+            assert!(said.contains("answer=VaultKeepsAlready"), "the answer was not named: {said}");
+        }
     }
 
     /// And the frames either side of it keep their meanings.

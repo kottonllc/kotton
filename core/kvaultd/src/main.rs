@@ -647,10 +647,14 @@ async fn admitted(
 /// What a verb reader at the vault's door says of an answer it did not ask
 /// for: the door is this device's own daemon, and the answer is said by its
 /// name and no field ([`kotton_wire::ipc::unasked`]; an answer not asked for is
-/// said by its name and no field). The door's `Error` is read before this, and
-/// said as written.
+/// said by its name and no field). The door's `Error` is said as written,
+/// here as at every reader that reads it before this: a reader of this
+/// device's own daemon says the daemon's `Error` as written.
 fn unexpected(other: &UserResponse) -> io::Error {
-    io::Error::other(format!("unexpected answer: {}", kotton_wire::ipc::unasked(other)))
+    match other {
+        UserResponse::Error { message } => io::Error::other(message.clone()),
+        other => io::Error::other(format!("unexpected answer: {}", kotton_wire::ipc::unasked(other))),
+    }
 }
 
 /// Set the pool's own quota at the door. The verb is the door's alone
@@ -1042,6 +1046,15 @@ mod tests {
         let said = unexpected(&UserResponse::VaultFull { held: 7_340_117, quota: 9 }).to_string();
         assert!(!said.contains("7340117"), "a field of the answer was said: {said}");
         assert!(said.contains("`VaultFull`"), "the answer was not named: {said}");
+    }
+
+    /// **A reader of this device's own daemon says the daemon's `Error` as
+    /// written**: the door's `Error`, where a verb reader such as
+    /// `operator_enrol`'s `GetNodeIdentity` meets it, is said as the door wrote it.
+    #[test]
+    fn the_doors_own_error_is_said_as_written() {
+        let said = unexpected(&UserResponse::Error { message: "the vault is not serving yet".into() }).to_string();
+        assert_eq!(said, "the vault is not serving yet");
     }
 
     #[test]

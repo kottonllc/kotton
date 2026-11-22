@@ -384,7 +384,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
             .map_err(|e| format!("reading the device roster: {e}"))?
         {
             UserResponse::NodeList { nodes, .. } => nodes,
-            other => return Err(format!("unexpected reply reading devices: {}", unasked(&other))),
+            other => return Err(roster_unasked("unexpected reply reading devices", &other)),
         };
 
         // This device's own DID, so the surface can mark the row the person is
@@ -870,22 +870,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         )
         .await
         .map_err(|e| format!("sending: {e}"))?;
-        match resp {
-            UserResponse::MessageSent {
-                message_id,
-                delivery,
-            } => Ok((
-                message_id,
-                // The one word, as a word. `Delivery` is the wire's enum and
-                // the guest is owed the vocabulary rather than the type. The
-                // mapping lives on the enum (`Delivery::word`, pinned there)
-                // rather than here, so the four delivery words have one copy
-                // and the CLI reads the same one.
-                delivery.map(|d| d.word().to_string()),
-            )),
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("messages.send: unexpected reply {}", unasked(&other))),
-        }
+        message_sent(resp, "send")
     }
 
     /// `kotton_msg`'s `message_share`, answered as [`Self::message_send`] is:
@@ -911,13 +896,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         )
         .await
         .map_err(|e| format!("sharing: {e}"))?;
-        match resp {
-            UserResponse::MessageSent { message_id, delivery } => {
-                Ok((message_id, delivery.map(|d| d.word().to_string())))
-            }
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("messages.share: unexpected reply {}", unasked(&other))),
-        }
+        message_sent(resp, "share")
     }
 
     async fn message_channel_send(&self, channel_did: &str, body: &str) -> Result<String, String> {
@@ -930,17 +909,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         )
         .await
         .map_err(|e| format!("sending to the channel: {e}"))?;
-        match resp {
-            // The occupant is handed the message id and not the fan-out. Where
-            // each member's copy went is a readout of who in a group had
-            // something awake, and a confined app has no business holding one —
-            // that is refused even to the person's own surfaces for a
-            // direct message's *route*, and this is the same fact about N people
-            // at once. The person's own client gets it; a guest does not.
-            UserResponse::ChannelSent { message_id, .. } => Ok(message_id),
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("messages.channel-send: unexpected reply {}", unasked(&other))),
-        }
+        channel_sent(resp, "channel-send")
     }
 
     /// `kotton_msg`'s `message_channel_share`, answered as
@@ -965,11 +934,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         )
         .await
         .map_err(|e| format!("sharing with the group: {e}"))?;
-        match resp {
-            UserResponse::ChannelSent { message_id, .. } => Ok(message_id),
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("messages.channel-share: unexpected reply {}", unasked(&other))),
-        }
+        channel_sent(resp, "channel-share")
     }
 
     /// `kotton_msg`'s `message_groups`: the channels this person holds a key
@@ -1022,11 +987,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         let resp = kotton_msg::daemon::messages::message_poll_inbox(&self.msg(), user)
             .await
             .map_err(|e| format!("reading the inbox: {e}"))?;
-        let inbox = match resp {
-            UserResponse::MessageHistory { messages } => messages,
-            UserResponse::Error { message } => return Err(message),
-            other => return Err(format!("messages.unread-count: unexpected reply {}", unasked(&other))),
-        };
+        let inbox = inbox_of(resp, "unread-count")?;
         kotton_msg::read_marks::unread_count(&marks, &inbox)
             .await
             .map_err(|e| format!("counting what is unread: {e}"))
@@ -1064,11 +1025,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         let resp = kotton_msg::daemon::messages::message_poll_inbox(&self.msg(), user)
             .await
             .map_err(|e| format!("reading the inbox: {e}"))?;
-        let inbox = match resp {
-            UserResponse::MessageHistory { messages } => messages,
-            UserResponse::Error { message } => return Err(message),
-            other => return Err(format!("messages.unread-from: unexpected reply {}", unasked(&other))),
-        };
+        let inbox = inbox_of(resp, "unread-from")?;
         kotton_msg::read_marks::unread_count_from(&marks, &inbox, peer_did)
             .await
             .map_err(|e| format!("counting what is unread: {e}"))
@@ -1179,11 +1136,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         let resp = kotton_msg::daemon::messages::message_open(&self.msg(), user, message.into())
             .await
         .map_err(|e| format!("opening: {e}"))?;
-        match resp {
-            UserResponse::Decrypted { plaintext } => Ok(plaintext),
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("messages.open: unexpected reply {}", unasked(&other))),
-        }
+        opened(resp)
     }
 
     async fn revoke_device(&self, did: &str) -> Result<(), String> {
@@ -1203,7 +1156,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
         // person, never a success.
         // The occupant is an app in the runner, not the terminal: it reaches the
         // person's rows, and no member with no row, which its roster never lists.
-        match kotton_device::users::drive_devices::revoke(
+        let resp = kotton_device::users::drive_devices::revoke(
             self.runtime,
             user_rt.as_ref(),
             self.db,
@@ -1211,13 +1164,9 @@ impl OccupantHost for DaemonOccupantHost<'_> {
             did.to_owned(),
             kotton_peer::daemon::nodes::Asked::Remotely,
         )
-            .await
-            .map_err(|e| format!("revoking the device: {e}"))?
-        {
-            UserResponse::NodeRevoked => Ok(()),
-            UserResponse::Error { message } => Err(message),
-            other => Err(format!("revoking the device: unexpected reply {}", unasked(&other))),
-        }
+        .await
+        .map_err(|e| format!("revoking the device: {e}"))?;
+        revoked(resp)
     }
 
     /// The browsers admitted for this person — the read `BrowserDeviceList`
@@ -1317,16 +1266,7 @@ impl OccupantHost for DaemonOccupantHost<'_> {
             message: e.to_string(),
         })?;
 
-        match created {
-            UserResponse::UserCreated { did, .. } => Ok(did),
-            UserResponse::WeakCredential { message } => {
-                Err(RunnerAuthError::WeakCredential { message })
-            }
-            UserResponse::Error { message } => Err(RunnerAuthError::Daemon { message }),
-            other => Err(RunnerAuthError::Daemon {
-                message: format!("unexpected response from user creation: {}", unasked(&other)),
-            }),
-        }
+        user_created(created)
     }
 
     async fn suggest_credential(&self) -> String {
@@ -1538,7 +1478,7 @@ impl DaemonOccupantHost<'_> {
             .map_err(|e| format!("reading the device roster: {e}"))?
         {
             UserResponse::NodeList { nodes, .. } => Ok(nodes),
-            other => Err(format!("unexpected reply reading the roster: {}", unasked(&other))),
+            other => Err(roster_unasked("unexpected reply reading the roster", &other)),
         }
     }
 
@@ -1651,6 +1591,89 @@ fn sealed_from_record(v: &serde_json::Value) -> Option<RunnerSealedMessage> {
     })
 }
 
+// The readers below each say an answer of this device's own daemon that they
+// did not ask for by its name and no field (an answer not asked for is said by
+// its name and no field), and its `Error` as written, each in its own words.
+// They stand apart from the calls that make the answer so a test can hold the
+// words each one says.
+
+/// What a reader of the paired-node roster says of an answer other than
+/// `NodeList`: `node_list` answers nothing else, so this is named.
+fn roster_unasked(said: &str, other: &UserResponse) -> String {
+    format!("{said}: {}", unasked(other))
+}
+
+/// A direct send's or share's answer: the message id and its one delivery word.
+fn message_sent(resp: UserResponse, verb: &str) -> Result<(String, Option<String>), String> {
+    match resp {
+        UserResponse::MessageSent { message_id, delivery } => Ok((
+            message_id,
+            // The one word, as a word. `Delivery` is the wire's enum and
+            // the guest is owed the vocabulary rather than the type. The
+            // mapping lives on the enum (`Delivery::word`, pinned there)
+            // rather than here, so the four delivery words have one copy
+            // and the CLI reads the same one.
+            delivery.map(|d| d.word().to_string()),
+        )),
+        UserResponse::Error { message } => Err(message),
+        other => Err(format!("messages.{verb}: unexpected reply {}", unasked(&other))),
+    }
+}
+
+/// A channel send's or share's answer: the message id alone.
+fn channel_sent(resp: UserResponse, verb: &str) -> Result<String, String> {
+    match resp {
+        // The occupant is handed the message id and not the fan-out. Where
+        // each member's copy went is a readout of who in a group had
+        // something awake, and a confined app has no business holding one —
+        // that is refused even to the person's own surfaces for a
+        // direct message's *route*, and this is the same fact about N people
+        // at once. The person's own client gets it; a guest does not.
+        UserResponse::ChannelSent { message_id, .. } => Ok(message_id),
+        UserResponse::Error { message } => Err(message),
+        other => Err(format!("messages.{verb}: unexpected reply {}", unasked(&other))),
+    }
+}
+
+/// The inbox an unread count is counted over.
+fn inbox_of(resp: UserResponse, verb: &str) -> Result<Vec<serde_json::Value>, String> {
+    match resp {
+        UserResponse::MessageHistory { messages } => Ok(messages),
+        UserResponse::Error { message } => Err(message),
+        other => Err(format!("messages.{verb}: unexpected reply {}", unasked(&other))),
+    }
+}
+
+/// An opened message's plaintext.
+fn opened(resp: UserResponse) -> Result<String, String> {
+    match resp {
+        UserResponse::Decrypted { plaintext } => Ok(plaintext),
+        UserResponse::Error { message } => Err(message),
+        other => Err(format!("messages.open: unexpected reply {}", unasked(&other))),
+    }
+}
+
+/// A revocation's answer.
+fn revoked(resp: UserResponse) -> Result<(), String> {
+    match resp {
+        UserResponse::NodeRevoked => Ok(()),
+        UserResponse::Error { message } => Err(message),
+        other => Err(format!("revoking the device: unexpected reply {}", unasked(&other))),
+    }
+}
+
+/// A created user's DID.
+fn user_created(created: UserResponse) -> Result<String, RunnerAuthError> {
+    match created {
+        UserResponse::UserCreated { did, .. } => Ok(did),
+        UserResponse::WeakCredential { message } => Err(RunnerAuthError::WeakCredential { message }),
+        UserResponse::Error { message } => Err(RunnerAuthError::Daemon { message }),
+        other => Err(RunnerAuthError::Daemon {
+            message: format!("unexpected response from user creation: {}", unasked(&other)),
+        }),
+    }
+}
+
 fn message_list(resp: UserResponse, verb: &str) -> Result<Vec<RunnerSealedMessage>, String> {
     match resp {
         UserResponse::MessageHistory { messages } => {
@@ -1726,6 +1749,47 @@ mod message_tests {
         };
         assert!(!said.contains("6150449"), "a field of the answer was said: {said}");
         assert!(said.contains("`MessageUnread`"), "the answer was not named: {said}");
+    }
+
+    /// Every reader here that builds its own words, in one table: an answer it
+    /// did not ask for is said by its name and no field, in that reader's
+    /// words; and where it reads the daemon's `Error`, the message is said as
+    /// written.
+    #[test]
+    fn every_reader_names_an_answer_not_asked_for_and_says_an_error_as_written() {
+        type Reader = fn(UserResponse) -> Result<(), String>;
+        let readers: Vec<(Reader, &str, bool)> = vec![
+            (|r| Err(roster_unasked("unexpected reply reading devices", &r)), "unexpected reply reading devices: ", false),
+            (|r| Err(roster_unasked("unexpected reply reading the roster", &r)), "unexpected reply reading the roster: ", false),
+            (|r| message_sent(r, "send").map(drop), "messages.send: unexpected reply ", true),
+            (|r| message_sent(r, "share").map(drop), "messages.share: unexpected reply ", true),
+            (|r| channel_sent(r, "channel-send").map(drop), "messages.channel-send: unexpected reply ", true),
+            (|r| channel_sent(r, "channel-share").map(drop), "messages.channel-share: unexpected reply ", true),
+            (|r| inbox_of(r, "unread-count").map(drop), "messages.unread-count: unexpected reply ", true),
+            (|r| inbox_of(r, "unread-from").map(drop), "messages.unread-from: unexpected reply ", true),
+            (|r| opened(r).map(drop), "messages.open: unexpected reply ", true),
+            (|r| revoked(r), "revoking the device: unexpected reply ", true),
+            (|r| message_list(r, "poll-inbox").map(drop), "messages.poll-inbox: unexpected reply ", true),
+            (
+                |r| match user_created(r) {
+                    Ok(_) => Ok(()),
+                    Err(RunnerAuthError::Daemon { message }) => Err(message),
+                    Err(_) => Err("another refusal".into()),
+                },
+                "unexpected response from user creation: ",
+                true,
+            ),
+        ];
+        for (read, words, reads_error) in readers {
+            let said = read(UserResponse::VaultKeepsAlready { user_id: "FIELD-91c4".into() })
+                .expect_err("an answer not asked for was taken");
+            assert_eq!(said, format!("{words}`VaultKeepsAlready`"));
+            if reads_error {
+                let said = read(UserResponse::Error { message: "the inbox is locked".into() })
+                    .expect_err("the daemon's error was taken");
+                assert_eq!(said, "the inbox is locked", "the daemon's error was not said as written");
+            }
+        }
     }
 
     fn record(extra: serde_json::Value) -> serde_json::Value {

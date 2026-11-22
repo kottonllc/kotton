@@ -547,9 +547,13 @@ fn build_ipc_endpoint() -> io::Result<IpcEndpoint> {
 /// What kquicd says of kuserd's answer to a verb when it is not the one asked
 /// for: kuserd is this device's own daemon, and its answer is said by its name
 /// and no field ([`kotton_wire::ipc::unasked`]; an answer not asked for is
-/// said by its name and no field).
+/// said by its name and no field). kuserd's own `Error` is said as written: a
+/// reader of this device's own daemon says the daemon's `Error` as written.
 fn unasked_answer(said: &str, other: &UserResponse) -> io::Error {
-    io::Error::other(format!("{said}: {}", kotton_wire::ipc::unasked(other)))
+    match other {
+        UserResponse::Error { message } => io::Error::other(format!("{said}: {message}")),
+        other => io::Error::other(format!("{said}: {}", kotton_wire::ipc::unasked(other))),
+    }
 }
 
 #[cfg(test)]
@@ -566,6 +570,16 @@ mod tests {
             .to_string();
         assert!(!said.contains("FIELD-0b9d"), "a field of the answer was said: {said}");
         assert_eq!(said, "unexpected mint response: `VaultKeepsAlready`");
+    }
+
+    /// **A reader of this device's own daemon says the daemon's `Error` as
+    /// written**: kuserd's `Error`, at a verb that did not ask for it, is said
+    /// with its message within the site's own sentence.
+    #[test]
+    fn kuserds_own_error_is_said_as_written() {
+        let said = unasked_answer("bootstrap auth failed", &UserResponse::Error { message: "vault is locked".into() })
+            .to_string();
+        assert_eq!(said, "bootstrap auth failed: vault is locked");
     }
 
     fn hex_of(seed: u8) -> String {
