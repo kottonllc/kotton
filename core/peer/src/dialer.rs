@@ -256,7 +256,10 @@ async fn learn_where_it_reserves(
                 // held under the relay the peer named, no relay is recorded for
                 // the node, and the connect records no relay for it.
                 let offers = match &rt.what_key_is {
-                    None => false,
+                    None => {
+                        tracing::debug!("this dialler holds no question what a paired node's key is to the person; no offer learned from its answer");
+                        false
+                    }
                     Some(asked) => match asked.to_person(key, user_id).await {
                         RowsSay::Offer => true,
                         RowsSay::NoOffer => false,

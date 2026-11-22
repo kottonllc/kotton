@@ -634,9 +634,7 @@ impl DeviceDaemon {
         // The runtime is handed what a key is to a person, asked of this
         // daemon's rows, and not the store it is read from.
         let db = Arc::new(db);
-        let runtime = DeviceRuntime::new_asking(base.clone(), config, Arc::new(MachineRows(Arc::clone(&db))))
-            .await
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let runtime = machine_runtime(base.clone(), config, None, &db).await?;
         // The daemon's registry of who is resident. It is created here, by the
         // daemon, rather than found on the machine: residency is the daemon's
         // bookkeeping, not the machine's.
@@ -971,9 +969,7 @@ impl DeviceDaemon {
         };
 
         let db = Arc::new(db);
-        let runtime = DeviceRuntime::new_with_secrets_asking(base.clone(), config, secrets, Arc::new(MachineRows(Arc::clone(&db))))
-            .await
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        let runtime = machine_runtime(base.clone(), config, Some(secrets), &db).await?;
         // The daemon's registry of who is resident. It is created here, by the
         // daemon, rather than found on the machine: residency is the daemon's
         // bookkeeping, not the machine's.
@@ -2319,6 +2315,28 @@ async fn asks_as_own_device(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) 
 async fn offers_learned(db: &Arc<SqlitePool>, pk: &[u8; 32], user_id: &str) -> io::Result<bool> {
     let answer = kotton_peer::daemon::db::paired_posture_for_user(db, pk, user_id).await?;
     Ok(kotton_peer::relay_keys::offers_from(answer.as_ref().map(Option::as_deref)))
+}
+
+/// The machine's runtime, as every [`DeviceDaemon`] builds it: handed what a
+/// key is to a person, asked of this daemon's rows ([`MachineRows`]), so every
+/// dialler it hands out asks it before it learns an `offer`. The daemon's
+/// constructors build their runtime here and nowhere else; a runtime built
+/// without the question learns no `offer` from any key.
+///
+/// `secrets` is the store the caller hands in, or, when `None`, the one this
+/// install's base dir scopes ([`DeviceRuntime::new_asking`]).
+async fn machine_runtime(
+    base: PathBuf,
+    config: RuntimeConfig,
+    secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    db: &Arc<SqlitePool>,
+) -> io::Result<DeviceRuntime> {
+    let asks = Arc::new(MachineRows(Arc::clone(db)));
+    let runtime = match secrets {
+        Some(secrets) => DeviceRuntime::new_with_secrets_asking(base, config, secrets, asks).await,
+        None => DeviceRuntime::new_asking(base, config, asks).await,
+    };
+    runtime.map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// What a key is to a person, asked of this daemon's own rows: the one answer
