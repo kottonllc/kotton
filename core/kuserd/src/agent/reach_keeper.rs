@@ -24,6 +24,15 @@
 //! held and one that refused it refuses again. Holding a note until one of the
 //! contact's *devices* signs for it, rather than their door, is the outbox's
 //! work — the parent record's second unit.
+//!
+//! **The pass also looks at the drops that wait for their rotation**: when a
+//! dropped pool's invited key rotates. Each person's pass looks at every vault
+//! a drop of theirs waits at, and no other
+//! ([`super::operator::look_on_the_pass`]): it reads `Tenants`, rotates the
+//! invited key for each pool no longer listed, and never says a drop. With no
+//! drop waiting, it dials no vault. A rotation it began and could not finish
+//! is tried again on the hour, not on the reach change that rotation itself
+//! raises, which would try it again at once.
 
 use crate::agent::message_host::DaemonMessageHost;
 use crate::residency::{RecordStores, UserRegistry};
@@ -45,32 +54,44 @@ pub fn spawn(runtime: Arc<DeviceRuntime>, users: UserRegistry, record_stores: Re
     tokio::spawn(async move {
         let changed = runtime.reach_changed();
         let mut settled = NotesSettled::new();
+        let mut look = true;
         loop {
-            pass(&runtime, &users, &record_stores, &mut settled).await;
-            tokio::select! {
-                _ = changed.notified() => {}
-                _ = tokio::time::sleep(RECHECK) => {}
-            }
+            let unfinished = pass(&runtime, &users, &record_stores, &mut settled, look).await;
+            let reach_changed = tokio::select! {
+                _ = changed.notified() => true,
+                _ = tokio::time::sleep(RECHECK) => false,
+            };
+            // A rotation tells this device its keys again, which is a reach
+            // change of its own: one left unfinished waits for the hour.
+            look = !(reach_changed && unfinished);
         }
     });
 }
 
-/// One pass over every resident person.
+/// One pass over every resident person: their note, and — when `look` — the
+/// drops of theirs that wait for a rotation. Answers whether a rotation the
+/// pass began is left unfinished.
 pub async fn pass(
     runtime: &Arc<DeviceRuntime>,
     users: &UserRegistry,
     record_stores: &RecordStores,
     settled: &mut NotesSettled,
-) {
+    look: bool,
+) -> bool {
     let now = kotton_peer::rendezvous::unix_now();
     let host = DaemonMessageHost {
         runtime: runtime.as_ref(),
         users,
         record_stores,
     };
+    let mut unfinished = false;
     for (user_id, store) in users.all() {
         hand_note(runtime, &host, &user_id, store.as_ref(), now, settled).await;
+        if look {
+            unfinished |= super::operator::look_on_the_pass(runtime, users, record_stores, store.as_ref()).await;
+        }
     }
+    unfinished
 }
 
 /// Hand `user_id`'s current note to every contact **now**, and return once each
