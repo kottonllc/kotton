@@ -52,8 +52,9 @@ reorder it at any time, and nothing waits for one to.
 - **Severity is the finder's to propose and a maintainer's or the next reviewer's to settle.**
   `blocker`, `defect` or `hygiene` is set at filing by whoever found it, with the clause it
   meets. When the driver is the finder, a `blocker` it files is confirmed by the next reviewer
-  before it goes next, and a `hygiene` it files is not closed as not taken without a
-  maintainer's look. Otherwise the driver records severity and neither raises nor lowers it.
+  before it goes next, and a `hygiene` it files is not closed as not taken until a reviewer has
+  confirmed it is `hygiene`. The milestone's order stays a maintainer's. Otherwise the driver
+  records severity and neither raises nor lowers it.
 - **A choice an issue leaves open is a `decision`, not a wait.** The issue states the choice and
   a default. The driver takes the default, records it there, or in the pull request's
   description when the choice came up in the work, and builds it through the loop; nothing
@@ -71,10 +72,10 @@ reorder it at any time, and nothing waits for one to.
 - **When a pull request lands, its issue closes**, once its assessor has confirmed the
   done-when was met, naming the pull request; or it says what is left and under which issue.
 - **Report, do not ask, within the queue.** Before a blocker, name its clause and go. Work off
-  the queue is a `decision` under the rule above, not something a driver starts on its own
-  word. A driver does not close, relabel or delete what another person opened, delete a branch
-  it did not make, or reorder the milestone; it asks for these, as it asks for what
-  [`GOVERNANCE.md`](GOVERNANCE.md) reserves to a maintainer.
+  the queue is a `decision` under the rule above, not something a driver starts without
+  recording the choice. A driver does not close, relabel or delete what another person opened,
+  delete a branch it did not make, or reorder the milestone; it asks for these, as it asks for
+  what [`GOVERNANCE.md`](GOVERNANCE.md) reserves to a maintainer.
 
 ## Every commit is signed off
 
