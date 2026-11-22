@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
-use crate::tier_check::{read_tree, rows, tracked_manifests, Rows};
+use crate::tier_check::{live_rows, read_tree, tracked_manifests, Rows};
 
 /// The workspaces cargo is asked about, by manifest, repo-relative: the root's and the relay's.
 const WORKSPACES: &[&str] = &["Cargo.toml", "infra/relay/Cargo.toml"];
@@ -75,7 +75,7 @@ fn cargo_edges(root: &Path, rows: &Rows, manifest: &str, target: &Path) -> (BTre
 #[test]
 fn every_path_edge_cargo_reports_is_one_tier_check_reads() {
     let root = crate::out::root();
-    let rows = rows();
+    let rows = live_rows();
     let tree = read_tree(&root, &rows, &tracked_manifests(&root, &rows));
     let read: BTreeSet<PathEdge> = tree
         .edges
