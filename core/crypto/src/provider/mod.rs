@@ -45,7 +45,7 @@ pub use aes_gcm::{AesGcmDecryptor, AesGcmEncryptor};
 pub use cek_recovery::{generate_cek, unwrap_cek_recovery, wrap_cek_recovery, CekRecovery};
 pub use chacha20::{ChaCha20Decryptor, ChaCha20Encryptor};
 pub use did::resolver::{CompositeDidResolver, DidKeyResolver, DidResolver, DidWebResolver};
-pub use did::DidKeyMethod;
+pub use did::{DidKeyMethod, NoKey};
 pub use ed25519::{Ed25519Keypair, Ed25519Signer, Ed25519Verifier};
 pub use kdf::{
     derive_cek, derive_cek_recovery_kek, derive_db_key, derive_identity_key,

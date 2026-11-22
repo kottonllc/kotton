@@ -1744,14 +1744,14 @@ pub fn check_handed_drives(
     for drive in drives {
         let node = &drive.node;
         // The decode holds the Ed25519 rule: a DID over bytes it refuses names no key.
-        let named = kotton_crypto::DidKeyMethod::to_public_key(&node.device_did).ok();
+        let named = kotton_crypto::DidKeyMethod::read_key(&node.device_did);
         let why = if drive.tenancy != user_id {
             Some(format!("it is kept under '{}', and this device joins as '{user_id}'", drive.tenancy))
         } else if node.public_key != drive.vault_key {
             Some("the node it is reached through is not the vault's key".to_string())
-        } else if named.is_none() {
-            Some("its node's DID names bytes that are not an Ed25519 key".to_string())
-        } else if named.as_ref().map(|k| k.as_bytes()) != Some(&node.public_key) {
+        } else if let Err(no_key) = &named {
+            Some(names_no_key(&node.device_did, no_key))
+        } else if named.as_ref().ok().map(|k| k.as_bytes()) != Some(&node.public_key) {
             Some("its node's DID does not name its key".to_string())
         } else if node.device_did == issuer.device_did || node.public_key == issuer.public_key {
             Some(format!("its node is the device this one joins ('{}')", issuer.id))
@@ -1763,6 +1763,23 @@ pub fn check_handed_drives(
         }
     }
     Ok(())
+}
+
+/// What is true of a handed node's DID that names no key, by the clause the
+/// decode read ([`kotton_crypto::NoKey`]). The DID is the issuer's text, and
+/// is printed as data ([`kotton_wire::note::quoted`]).
+fn names_no_key(did: &kotton_wire::did::Did, no_key: &kotton_crypto::NoKey) -> String {
+    use kotton_crypto::NoKey;
+    let did = kotton_wire::note::quoted(&did.to_string());
+    match no_key {
+        NoKey::OtherMethod(_) => format!("its node's DID {did} is not a did:key"),
+        NoKey::NotMultibase(_) | NoKey::NoKeyBytes(_) => format!("its node's DID {did} is a did:key that does not decode"),
+        NoKey::OtherKind => format!("its node's DID {did} is the did:key of a key of another kind than Ed25519"),
+        NoKey::Refused(_) => format!("its node's DID {did} names bytes that are not an Ed25519 key"),
+        NoKey::SpelledOtherwise => {
+            format!("its node's DID {did} spells a did:key otherwise than the one string a key's did:key is")
+        }
+    }
 }
 
 /// Whether this device can record every drive handed at the join without
@@ -2362,28 +2379,76 @@ mod handed_drive_tests {
     }
 
     /// **A drive handed under a string that is not its key's derivation is
-    /// refused, and the join writes nothing** (28A): another spelling of its
-    /// key's `did:key`, another key's `did:key`, and a DID of another method,
-    /// each beside a key from a seed.
+    /// refused, and the join writes nothing**, as a handed drive's DID is its
+    /// key's derivation, with a sentence true of that string, which it quotes:
+    /// another spelling of its key's `did:key`,
+    /// another key's `did:key`, and a DID of another method, each beside a key
+    /// from a seed.
     #[tokio::test]
     async fn a_join_handed_a_drive_under_a_string_that_is_not_its_derivation_writes_nothing() {
         let (_dir, db) = machine_db().await;
         let temp = tempfile::tempdir().unwrap();
         let honest = a_drive("vault", 2, "alice");
-        // The decode gives a key only for the derivation's string (4A), so a
-        // string that decodes to none is refused as naming no key.
-        let (names_none, names_another) = ("its node's DID names bytes that are not an Ed25519 key", "its node's DID does not name its key");
+        let otherwise = kotton_crypto::DidKeyMethod::spelled_otherwise(&honest.vault_key);
+        let spelled = format!("its node's DID {} spells a did:key otherwise", kotton_wire::note::quoted(&otherwise.to_string()));
         for (name, did, said) in [
-            ("another spelling", kotton_crypto::DidKeyMethod::spelled_otherwise(&honest.vault_key), names_none),
-            ("another key's did:key", a_node("other", 4).device_did, names_another),
-            ("another method", kotton_wire::did::Did::parse("did:web:vault.example").unwrap(), names_none),
+            ("another spelling", otherwise, spelled.as_str()),
+            ("another key's did:key", a_node("other", 4).device_did, "its node's DID does not name its key"),
+            (
+                "another method",
+                kotton_wire::did::Did::parse("did:web:vault.example").unwrap(),
+                "its node's DID `did:web:vault.example` is not a did:key",
+            ),
         ] {
             let mut drive = honest.clone();
             drive.node.device_did = did;
             let why = refusal(join_handing_at(temp.path(), &db, vec![drive]).await);
             assert!(why.contains(said) && why.contains("This device was not joined"), "{name}: {why}");
+            assert!(!why.contains("not an Ed25519 key"), "{name}: {why}");
             assert!(network_db::list_paired_nodes(&db, "alice").await.unwrap().is_empty(), "{name}: a row was written");
             assert_eq!(drive_records(&db).await, 0, "{name}: a drive was recorded");
+        }
+    }
+
+    /// **A handed DID that names no key is refused with a sentence true of
+    /// it**, one per clause the decode reads, each quoting the DID as data:
+    /// not a `did:key`; a `did:key` that does not decode (not multibase, or
+    /// bytes that are no key's length); the `did:key` of a key of another kind;
+    /// bytes the rule refuses; and another spelling of a good key. Text the
+    /// issuer chose is printed escaped, not as it was handed.
+    #[test]
+    fn a_handed_did_that_names_no_key_is_refused_with_what_is_true_of_it() {
+        use kotton_wire::did::Did;
+        let issuer = a_node("laptop", 1);
+        let honest = a_drive("vault", 2, "alice");
+        // base58btc of `0xe7 0x01` (secp256k1), `0x02` and 32 bytes of 7; and of
+        // `0xed 0x01` (Ed25519) and 31 bytes of 7.
+        let secp256k1 = Did::new("key", "zQ3shMtDpqqEk3pn1MtzotXX5FANprrx2VQzTotL3RqqrUicE");
+        let short = Did::new("key", "z2DQV5Tm64jwFsRi2chqem1Wt2aP6bP34vi2itLNof8JFdG");
+        let not = " is not a did:key";
+        let undecoded = " is a did:key that does not decode";
+        let cases = [
+            ("did:web", Did::new("web", "vault.example"), not),
+            ("did:web carrying a newline", Did::new("web", "vault.example\nIt said: ok"), not),
+            ("not multibase", Did::new("key", "z0OIl"), undecoded),
+            ("31 bytes", short, undecoded),
+            ("another kind", secp256k1, " is the did:key of a key of another kind than Ed25519"),
+            ("another spelling", kotton_crypto::DidKeyMethod::spelled_otherwise(&honest.vault_key), " spells a did:key otherwise"),
+        ];
+        for (name, did, said) in cases {
+            let mut drive = honest.clone();
+            drive.node.device_did = did.clone();
+            let why = check_handed_drives("alice", &issuer, &[drive]).unwrap_err();
+            let quoted = format!("its node's DID {}{said}", kotton_wire::note::quoted(&did.to_string()));
+            assert!(why.contains(&quoted), "{name}: {why}");
+            assert!(!why.contains('\n'), "{name}: the DID was printed as handed: {why}");
+            assert!(!why.contains("not an Ed25519 key"), "{name}: {why}");
+        }
+        for (i, key) in refused_keys().into_iter().enumerate() {
+            let drive = a_drive_under(key);
+            let quoted = kotton_wire::note::quoted(&drive.node.device_did.to_string());
+            let why = check_handed_drives("alice", &issuer, &[drive]).unwrap_err();
+            assert!(why.contains(&format!("its node's DID {quoted} names bytes that are not an Ed25519 key")), "vector {i}: {why}");
         }
     }
 
