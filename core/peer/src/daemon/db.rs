@@ -299,7 +299,10 @@ async fn row_name(
 /// (`super::nodes::finalize_enrolled_node`, and the joiner's completion in
 /// `kotton_device::users::pairing`) keeps nothing the store refuses: no key, no
 /// key log, no row. The write makes the read again inside its transaction, so
-/// a row written between the two is refused there as well.
+/// a row written between the two is refused there as well. No writer of this
+/// build stores the refused shape — every writer names a new row by its own
+/// key's derivation or keeps the key's row — so between the read and the write
+/// the offending row can only be removed.
 pub async fn row_refused_for(db: &SqlitePool, user_id: &str, key: &VerifyingKey) -> io::Result<Option<String>> {
     let mut conn = db.acquire().await.map_err(db_err)?;
     Ok(row_name(&mut conn, user_id, key).await?.err())

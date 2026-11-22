@@ -48,10 +48,10 @@
 //!   as something other than a vault, or its DID paired here beside another
 //!   key ([`check_handed_rows`]). The issuer's own row is read the same way
 //!   before anything is written ([`finalize_joined_node`]), and a row of it the
-//!   store would refuse refuses the join; so, on the issuer's side, does the
-//!   joiner's row ([`finalize_enrolled_node`]), before the issuer keeps its
-//!   share. A row is the person's and the node's DID's,
-//!   and its label keys nothing (`kotton_peer::daemon::db`), so a drive's
+//!   store would refuse refuses the join. The issuer reads the joiner's row the
+//!   same way before it keeps its share ([`finalize_enrolled_node`]), but that
+//!   read comes later, as the next paragraph says. A row is the person's and
+//!   the node's DID's, and its label keys nothing (`kotton_peer::daemon::db`), so a drive's
 //!   label that this device already shows on another row, the issuer's
 //!   included, or that another person here uses, is no reason to refuse: the
 //!   drive's row sits beside the other. The issuer's word replaces none of this
@@ -67,6 +67,12 @@
 //!   [`kotton_peer::pairing::JOINER_KEEPS_WITHIN`] leaves the issuer with no
 //!   row and no introduction, and the issuer's person is told so
 //!   ([`kotton_peer::pairing::JoinNotKept`]). There is nothing to revoke.
+//!   A refusal of the joiner's row on the issuer's side is not one of these:
+//!   [`finalize_enrolled_node`] runs after the issuer has replied `heard`, so
+//!   the issuer keeps nothing, while the joiner has kept its half, calls the
+//!   join complete, and is not told. The issuer's person is told the store's
+//!   refusal, which names the row; the mend is `device revoke` of that row,
+//!   then the ceremony again.
 //!   The joiner calls the join complete only on the issuer's sealed reply
 //!   that it heard `kept`. Without it the joiner cannot tell an issuer that
 //!   gave up from a reply that was lost, so its person is told the other

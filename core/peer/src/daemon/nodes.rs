@@ -1816,7 +1816,9 @@ pub fn ceremony_failure_copy(err: &str) -> String {
 /// store's refusal with nothing kept: no FROST share or group key, no row, no
 /// drive, no key on the allowlist, no member. It is not one transaction: a
 /// write that fails for another reason after the first leaves what was kept
-/// before it.
+/// before it. No writer of this build stores the refused shape — every writer
+/// names a new row by its own key's derivation or keeps the key's row — so
+/// between the read and the write the offending row can only be removed.
 pub async fn finalize_enrolled_node(
     secrets: &dyn SecretsStore,
     member_store: &dyn crate::membership::MemberStore,
