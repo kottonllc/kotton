@@ -249,11 +249,15 @@ fn paired_line(label: &str) -> String {
 }
 
 /// One line of `contact list`: the contact's label, when it has one, as data by
-/// [`kotton_wire::note::quoted`] (text a person reads is printed as data), then
-/// its DID; a contact with no label is its DID alone.
+/// [`kotton_wire::note::shown`], then two spaces and its DID; a contact with no
+/// label is its DID alone. A list line is a listing, not prose: it prints the
+/// name by `shown`, as a cell does, with no delimiter of its own, as the decision
+/// on which characters the quoted print's rule names holds (a cell, a listing and
+/// `--json` print by `shown`; [`kotton_wire::note::quoted`] is for a name between
+/// delimiters in a sentence). So a name `shown` prints unchanged is typed as listed.
 fn list_line(did: &str, label: Option<&str>) -> String {
     match label {
-        Some(label) => format!("{}  {did}", kotton_wire::note::quoted(label)),
+        Some(label) => format!("{}  {did}", kotton_wire::note::shown(label)),
         None => did.to_string(),
     }
 }
@@ -353,24 +357,22 @@ mod tests {
     }
 
     /// **Each line `contact list` prints gives the label as data**, over
-    /// [`LABELS`]: it is the plain word's line with that word's `quoted` print
-    /// replaced by the label's, so it is one line holding the label's print once,
-    /// no character `shown` escapes, and the DID after the name once. A contact
-    /// with no label is its DID alone.
+    /// [`LABELS`]: the plain word's line is its `shown` print, two spaces and the
+    /// DID, and a label's line is that line with only the name swapped for the
+    /// label's `shown` print, so it is one line and no character `shown` escapes
+    /// is printed as it is. A contact with no label is its DID alone.
     #[test]
     fn each_listed_line_prints_the_label_as_data() {
-        use kotton_wire::note::{quoted, shown};
+        use kotton_wire::note::shown;
         const PLAIN: &str = "sam";
         const DID: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
-        let plain = list_line(DID, Some(PLAIN));
         let own = format!("  {DID}");
-        assert_eq!(plain, format!("{}{own}", quoted(PLAIN)), "the plain word is printed by `quoted`, then the DID");
+        let plain = list_line(DID, Some(PLAIN));
+        assert_eq!(plain, format!("{}{own}", shown(PLAIN)), "the plain word is printed by `shown`, then the DID");
         for label in LABELS {
             let line = list_line(DID, Some(label));
+            assert_eq!(line, plain.replacen(&shown(PLAIN), &shown(label), 1), "{label:?}: not the plain line with only the name swapped");
             assert!(!line.contains(['\n', '\r']), "{label:?}: not one line: {line:?}");
-            assert_eq!(line, plain.replace(&quoted(PLAIN), &quoted(label)), "{label:?}: printed outside its quote");
-            assert_eq!(line.matches(&quoted(label)).count(), 1, "{label:?}: {line:?}");
-            assert!(line.ends_with(&format!("{}{own}", quoted(label))), "{label:?}: {line:?}");
             let printed = shown(label);
             for c in label.chars().filter(|c| !printed.contains(*c)) {
                 assert!(!line.contains(c), "{label:?}: {c:?} was printed as it is: {line:?}");
