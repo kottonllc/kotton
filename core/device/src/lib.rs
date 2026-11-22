@@ -21,6 +21,12 @@
 //! names the machine's authority and offers a data path would be exactly the
 //! shape this invariant exists to prevent, and the machine is the layer an
 //! operator principal sits nearest to.
+//!
+//! The one thing the runtime is handed about a person's rows is a question:
+//! what a key is to that person, yes, no or unreadable
+//! (`kotton_peer::dialer::WhatKeyIs`), which its dialler asks before it learns
+//! from a peer's answer. The daemon that holds the store makes it; the runtime
+//! holds no store and names no pool.
 
 pub mod users;
 pub mod config;

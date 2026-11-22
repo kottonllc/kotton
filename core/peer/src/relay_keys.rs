@@ -14,8 +14,8 @@
 //! - the operator's own desktop, which minted them and keeps them sealed
 //!   beside the operator credential (`kuserd`'s `agent::operator`);
 //! - another of the operator's own devices, in its answer to `NodeRelay`
-//!   ([`RelayAdmission`] with an `offer`) — and only one whose paired row this
-//!   device recorded as *full* ([`offers_from`]);
+//!   ([`RelayAdmission`] with an `offer`) — and only one the narrowest of the
+//!   person's rows for its key says is *full* ([`offers_from`]);
 //! - a vault, to its tenant, in its answer to `NodeRelay` (the *invited* key,
 //!   no `offer`);
 //! - a relay's invite, which the person stood this device there with — kept
@@ -46,7 +46,6 @@
 use kotton_net::rendezvous::AdmissionKey;
 use kotton_schemas::membership::Posture;
 use kotton_wire::ipc::SecretText;
-use kotton_wire::peer::PairedNode;
 use kotton_wire::rendezvous::RelayAdmission;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -283,19 +282,22 @@ fn supplied(
     }
 }
 
-/// Whether a paired node whose row records `posture` (its text,
-/// [`PairedNode::posture`]) is one an `offer` is learned from: one of the
-/// person's own devices that holds their keys — *full*, or a row recorded
-/// before postures were, which is one (the issuer of the device it enrolled is
-/// written so). Any other text is not, a posture this build does not recognise
-/// included. The same rule `kuserd`'s `NodeRelay` arm answers by, read from the
-/// other end: it hands an `offer` only to an asker whose row says `full` or
-/// nothing, and a vault hands none to anyone, so an `offer` from a cosigner or a
-/// blind storage is a false answer — and either may be a host's machine.
-pub fn offers_from(posture: Option<impl AsRef<str>>) -> bool {
-    match posture {
-        None => true,
-        Some(p) => p.as_ref() == Posture::Full.as_str(),
+/// Whether an `offer` is learned from a key, by what a person's rows say of it:
+/// `answer` is [`crate::daemon::db::paired_posture_for_user`]'s, the narrowest
+/// of the person's rows for the key. One of the person's own devices that holds
+/// their keys — *full*, or a row recorded before postures were, which is one
+/// (the issuer of the device it enrolled is written so) — is; no row is not,
+/// and any other text is not, a posture this build does not recognise
+/// included. Both ends read it: `kuserd`'s `NodeRelay` arm hands an `offer`
+/// only to an asker of whom this says yes, and the dialling end learns one only
+/// from a node of whom it says yes ([`crate::dialer::WhatKeyIs`]). A vault
+/// hands none to anyone, so an `offer` from a cosigner or a blind storage is a
+/// false answer — and either may be a host's machine.
+pub fn offers_from(answer: Option<Option<&str>>) -> bool {
+    match answer {
+        None => false,
+        Some(None) => true,
+        Some(Some(p)) => p == Posture::Full.as_str(),
     }
 }
 
@@ -410,9 +412,10 @@ impl RelayKeyring {
     /// `NodeRelay` — the relay it reserves at, by that relay's key `relay` and
     /// the address `url` — **once the relay at `url` has proved `relay`**
     /// ([`crate::relay_key::prove_relay`], with `relay` expected). Answers
-    /// whether it was learned. What the node *is* is read from the node the
-    /// connect dialled, its key and its recorded posture together, so nothing
-    /// between the dial and the fold can weigh one node's answer as another's.
+    /// whether it was learned. `node` is the key the connect dialled, and
+    /// `offers` what that key is to `user` by `user`'s rows
+    /// ([`offers_from`], asked by the dialler at the answer): whether an
+    /// `offer` is learned from it.
     ///
     /// The proof is what makes the answer safe to act on. A paired node — a
     /// vault someone else runs, say — could otherwise name *this device's own*
@@ -424,14 +427,15 @@ impl RelayKeyring {
     pub async fn learn_proven(
         &self,
         user: &str,
-        node: &PairedNode,
+        node: &[u8; 32],
+        offers: bool,
         url: &str,
         relay: &RelayId,
         admission: Option<&RelayAdmission>,
     ) -> bool {
         match crate::relay_key::prove_relay(url, Some(relay)).await {
             Ok(Some(proved)) if proved == *relay => {
-                self.learn(user, &node.public_key, node.posture.as_deref(), url, relay, admission);
+                self.learn(user, node, offers, url, relay, admission);
                 true
             }
             other => {
@@ -447,8 +451,8 @@ impl RelayKeyring {
     /// this device keeps itself, so a peer that answers falsely cannot take its
     /// place. A key that does not parse teaches nothing.
     ///
-    /// **An `offer` is learned only from a node of `posture` that holds the
-    /// person's keys** ([`offers_from`]). From a cosigner or a blind storage an
+    /// **An `offer` is learned only from a node that `offers`: one the
+    /// person's rows say holds their keys** ([`offers_from`]). From a cosigner or a blind storage an
     /// answer carrying one is a false answer, and its admission teaches nothing
     /// at all — not *mine*, not the offer, not even *invited* in their place,
     /// and no key for a relayed dial to it — so it changes nothing this device
@@ -459,15 +463,15 @@ impl RelayKeyring {
         &self,
         user: &str,
         node: &[u8; 32],
-        posture: Option<&str>,
+        offers: bool,
         url: &str,
         relay: &RelayId,
         admission: Option<&RelayAdmission>,
     ) {
         let admission = admission.filter(|a| {
-            let honest = a.offer.is_none() || offers_from(posture);
+            let honest = a.offer.is_none() || offers;
             if !honest {
-                tracing::warn!(?posture, "a paired node that is no full device of this person's offered a relay key; nothing learned");
+                tracing::warn!("a paired node that is no full device of this person's offered a relay key; nothing learned");
             }
             honest
         });
@@ -616,7 +620,7 @@ impl RelayKeyring {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn k(b: u8) -> AdmissionKey {
@@ -627,21 +631,10 @@ mod tests {
     const NODE: [u8; 32] = [9u8; 32];
     const URL: &str = "http://r:7700";
 
-    const FULL: Option<&str> = Some("full");
-    const VAULT: Option<&str> = Some("blind-storage");
-
-    /// The paired node `NODE`, recorded as `posture`.
-    fn node(posture: Option<&str>) -> PairedNode {
-        PairedNode {
-            id: "node".into(),
-            device_did: kotton_wire::did::Did::new("peer", "node"),
-            public_key: NODE,
-            paired_at: 0,
-            addresses: vec![],
-            relay_url: None,
-            posture: posture.map(str::to_string),
-        }
-    }
+    /// What a node's key is to the person, as [`offers_from`] answers it: one
+    /// an `offer` is learned from, and one it is not.
+    const FULL: bool = true;
+    const VAULT: bool = false;
 
     fn answer(present: u8, offer: Option<u8>) -> RelayAdmission {
         RelayAdmission { present: SecretText::new(k(present).to_text()), offer: offer.map(|o| SecretText::new(k(o).to_text())) }
@@ -748,7 +741,7 @@ mod tests {
     }
 
     /// A relay at a loopback address that proves `key` to whoever asks.
-    async fn proving(key: ed25519_dalek::SigningKey) -> String {
+    pub(crate) async fn proving(key: ed25519_dalek::SigningKey) -> String {
         use ed25519_dalek::Signer as _;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -799,21 +792,22 @@ mod tests {
 
         // The lie: this device's relay's key, at a relay the node runs.
         let theirs = proving(ed25519_dalek::SigningKey::from_bytes(&[12u8; 32])).await;
-        assert!(!ring.learn_proven("lee", &node(VAULT), &theirs, &own_id, None).await, "a key the address did not prove was learned");
+        assert!(!ring.learn_proven("lee", &NODE, VAULT, &theirs, &own_id, None).await, "a key the address did not prove was learned");
         assert_eq!(ring.present_for_peer("lee", &NODE, &theirs), None, "a relayed dial to the node's address would present a key");
 
         // The truth: the named key, proved at the named address.
         let at_own = proving(own.clone()).await;
-        assert!(ring.learn_proven("lee", &node(VAULT), &at_own, &own_id, None).await);
+        assert!(ring.learn_proven("lee", &NODE, VAULT, &at_own, &own_id, None).await);
         assert_eq!(ring.relay_of("lee", &NODE, &at_own), Some(own_id));
         assert_eq!(ring.relay_of("lee", &NODE, &theirs), None, "proved at one address, handed to no other");
     }
 
-    /// **A relay key offered on is learned only from a paired node recorded as
-    /// *full*.**
+    /// **A relay key offered on is learned only from a node the person's rows
+    /// say is *full*.**
     /// A cosigner and a blind storage are paired to this person and may be a
     /// host's machine; a row whose posture this build does not recognise is
-    /// read as neither *full* nor as none recorded. Each answers `NodeRelay` at this device's own relay,
+    /// read as neither *full* nor as none recorded; and a node the person has
+    /// no row for is none of their devices. Each answers `NodeRelay` at this device's own relay,
     /// proved there, with a *mine* and an `offer` of its own choosing — after
     /// this device learned its keys from its desktop, when it holds only the
     /// *invited* key an invite gave it, and when it holds nothing. Each time
@@ -823,58 +817,84 @@ mod tests {
     /// postures, is learned.
     #[tokio::test]
     async fn an_offer_is_learned_only_from_a_full_paired_node() {
+        /// A node's key, and what the person's rows say of it
+        /// (`paired_posture_for_user`'s answer).
+        type Paired = ([u8; 32], Option<Option<&'static str>>);
         let own = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
         let own_id: RelayId = own.verifying_key().to_bytes();
         let url = proving(own).await;
-        let desktop = PairedNode { public_key: [3u8; 32], ..node(FULL) };
-        let hosts = [
-            PairedNode { public_key: [4u8; 32], ..node(Some("cosigner")) },
-            PairedNode { public_key: [5u8; 32], ..node(VAULT) },
+        let desktop: Paired = ([3u8; 32], Some(Some("full")));
+        let hosts: [Paired; 4] = [
+            ([4u8; 32], Some(Some("cosigner"))),
+            ([5u8; 32], Some(Some("blind-storage"))),
             // A posture this build does not recognise: not full.
-            PairedNode { public_key: [6u8; 32], ..node(Some("steward")) },
+            ([6u8; 32], Some(Some("steward"))),
+            // No row: none of the person's devices.
+            ([7u8; 32], None),
         ];
         let lie = answer(9, Some(8));
 
         // Mine learned from the desktop: a host's offer replaces nothing.
         let ring = RelayKeyring::default();
-        assert!(ring.learn_proven("lee", &desktop, &url, &own_id, Some(&answer(1, Some(2)))).await);
+        assert!(ring.learn_proven("lee", &desktop.0, offers_from(desktop.1), &url, &own_id, Some(&answer(1, Some(2)))).await);
         assert_eq!((ring.present_for("lee", &own_id), ring.offer_for("lee", &own_id)), (Some(k(1)), Some(k(2))), "the desktop's offer");
-        for host in &hosts {
-            assert!(ring.learn_proven("lee", host, &url, &own_id, Some(&lie)).await, "the relay is still learned");
-            assert_eq!(ring.present_for("lee", &own_id), Some(k(1)), "{:?} replaced mine", host.posture);
-            assert_eq!(ring.offer_for("lee", &own_id), Some(k(2)), "{:?} replaced the offer", host.posture);
+        for (host, says) in &hosts {
+            assert!(ring.learn_proven("lee", host, offers_from(*says), &url, &own_id, Some(&lie)).await, "the relay is still learned");
+            assert_eq!(ring.present_for("lee", &own_id), Some(k(1)), "{says:?} replaced mine");
+            assert_eq!(ring.offer_for("lee", &own_id), Some(k(2)), "{says:?} replaced the offer");
             assert_eq!(ring.present_at(&own_id), Some(k(1)));
-            assert_eq!(ring.present_for_peer("lee", &host.public_key, &url), None, "{:?} was presented its own key", host.posture);
-            assert_eq!(ring.relay_of("lee", &host.public_key, &url), Some(own_id));
+            assert_eq!(ring.present_for_peer("lee", host, &url), None, "{says:?} was presented its own key");
+            assert_eq!(ring.relay_of("lee", host, &url), Some(own_id));
         }
 
         // Only invited, from an invite: still only invited, and nothing offered.
         let invitee = RelayKeyring::default();
         invitee.hold_invited("lee", &own_id, k(5));
-        for host in &hosts {
-            invitee.learn_proven("lee", host, &url, &own_id, Some(&lie)).await;
-            assert_eq!(invitee.present_for("lee", &own_id), Some(k(5)), "{:?} replaced invited", host.posture);
-            assert_eq!(invitee.offer_for("lee", &own_id), None, "{:?} set an offer", host.posture);
+        for (host, says) in &hosts {
+            invitee.learn_proven("lee", host, offers_from(*says), &url, &own_id, Some(&lie)).await;
+            assert_eq!(invitee.present_for("lee", &own_id), Some(k(5)), "{says:?} replaced invited");
+            assert_eq!(invitee.offer_for("lee", &own_id), None, "{says:?} set an offer");
         }
 
         // Nothing held: nothing held after, not even invited in its place.
         let bare = RelayKeyring::default();
-        for host in &hosts {
-            bare.learn_proven("lee", host, &url, &own_id, Some(&lie)).await;
-            assert_eq!(bare.at("lee", &own_id).present.map(|(k, _)| k), None, "{:?} set a key to present", host.posture);
-            assert_eq!(bare.offer_for("lee", &own_id), None, "{:?} set an offer", host.posture);
+        for (host, says) in &hosts {
+            bare.learn_proven("lee", host, offers_from(*says), &url, &own_id, Some(&lie)).await;
+            assert_eq!(bare.at("lee", &own_id).present.map(|(k, _)| k), None, "{says:?} set a key to present");
+            assert_eq!(bare.offer_for("lee", &own_id), None, "{says:?} set an offer");
             assert_eq!(bare.present_at(&own_id), None);
         }
 
         // The full desktop's answer, and a row from before postures, are learned.
-        for (from, ring) in [(desktop.clone(), RelayKeyring::default()), (node(None), RelayKeyring::default())] {
-            assert!(ring.learn_proven("lee", &from, &url, &own_id, Some(&lie)).await);
-            assert_eq!(ring.at("lee", &own_id).present, Some((k(9), Tier::LearnedMine)), "{:?}", from.posture);
-            assert_eq!(ring.offer_for("lee", &own_id), Some(k(8)), "{:?}", from.posture);
+        for (from, says) in [desktop, ([8u8; 32], Some(None))] {
+            let ring = RelayKeyring::default();
+            assert!(ring.learn_proven("lee", &from, offers_from(says), &url, &own_id, Some(&lie)).await);
+            assert_eq!(ring.at("lee", &own_id).present, Some((k(9), Tier::LearnedMine)), "{says:?}");
+            assert_eq!(ring.offer_for("lee", &own_id), Some(k(8)), "{says:?}");
         }
-        assert!(offers_from(None::<&str>) && offers_from(FULL));
-        assert!(![Posture::Cosigner, Posture::BlindStorage, Posture::Gateway].into_iter().any(|p| offers_from(Some(p.as_str()))));
-        assert!(!offers_from(Some("steward")) && !offers_from(Some("")) && !offers_from(Some("Full")), "text that is not `full` is not full");
+        assert!(offers_from(Some(None)) && offers_from(Some(Some("full"))));
+        assert!(!offers_from(None), "no row is not full");
+        assert!(![Posture::Cosigner, Posture::BlindStorage, Posture::Gateway].into_iter().any(|p| offers_from(Some(Some(p.as_str())))));
+        assert!(!offers_from(Some(Some("steward"))) && !offers_from(Some(Some(""))) && !offers_from(Some(Some("Full"))), "text that is not `full` is not full");
+    }
+
+    /// **The answer the dialler is handed decides whether an `offer` is
+    /// learned, and the relay is learned either way.** One node's answer
+    /// carrying an `offer`, proved at its relay: where the person's rows say
+    /// the node offers, the `offer` and *mine* are held; where they say it does
+    /// not, neither is, and the relay it named is still recorded for it.
+    #[tokio::test]
+    async fn the_answer_handed_in_decides_the_offer_and_the_relay_is_learned_either_way() {
+        let own = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
+        let own_id: RelayId = own.verifying_key().to_bytes();
+        let url = proving(own).await;
+        for offers in [true, false] {
+            let ring = RelayKeyring::default();
+            assert!(ring.learn_proven("lee", &NODE, offers, &url, &own_id, Some(&answer(9, Some(8)))).await);
+            assert_eq!(ring.offer_for("lee", &own_id), offers.then(|| k(8)), "offers: {offers}");
+            assert_eq!(ring.present_for("lee", &own_id), offers.then(|| k(9)), "offers: {offers}");
+            assert_eq!(ring.relay_of("lee", &NODE, &url), Some(own_id), "offers: {offers}: the relay was not learned");
+        }
     }
 
     /// A TCP forwarder at a loopback address of its own, in front of `to`.
@@ -912,12 +932,12 @@ mod tests {
         let relay = proving(own).await;
         let front = forwarder(&relay).await;
 
-        assert!(ring.learn_proven("lee", &node(VAULT), &front, &own_id, None).await, "the forwarder proves the relay's key");
+        assert!(ring.learn_proven("lee", &NODE, VAULT, &front, &own_id, None).await, "the forwarder proves the relay's key");
         assert_eq!(ring.present_for_peer("lee", &NODE, &front), None, "mine was presented at the forwarder");
 
         // A node that hands a key of its own is presented that key, not mine.
         let handed = RelayAdmission { present: SecretText::new(k(7).to_text()), offer: None };
-        assert!(ring.learn_proven("lee", &node(VAULT), &front, &own_id, Some(&handed)).await);
+        assert!(ring.learn_proven("lee", &NODE, VAULT, &front, &own_id, Some(&handed)).await);
         assert_eq!(ring.present_for_peer("lee", &NODE, &front), Some(k(7)));
         assert_ne!(ring.present_for_peer("lee", &NODE, &front), Some(k(1)));
         // And the keyring's own key for its own relay is untouched.

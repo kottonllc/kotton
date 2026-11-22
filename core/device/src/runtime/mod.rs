@@ -135,6 +135,13 @@ pub struct DeviceRuntime {
     /// never named below this type.
     pub(crate) shelves: Arc<dyn kotton_sys::store::Shelves>,
 
+    /// What a key is to a person, which every dialler this runtime hands out
+    /// asks before it learns from a peer's answer ([`Self::dialer`]). One
+    /// question, made by the daemon that holds the person's rows and handed in
+    /// when the runtime is built; the runtime holds no store to read it from.
+    /// `None` reads as no row.
+    what_key_is: Option<Arc<dyn kotton_peer::dialer::WhatKeyIs>>,
+
     /// Pauses a test sets, to order two devices' verbs (under the
     /// `test-support` feature;
     /// [`test_hooks`]).
@@ -241,6 +248,19 @@ impl DeviceRuntime {
         Self::new_with_secrets(base_dir, config, secrets).await
     }
 
+    /// [`Self::new`], handed what a key is to a person (`what_key_is`), which
+    /// every dialler this runtime hands out asks ([`Self::dialer`]). The daemon
+    /// that holds the person's rows makes it; the runtime holds the question
+    /// and nothing it is read from.
+    pub async fn new_asking(
+        base_dir: PathBuf,
+        config: RuntimeConfig,
+        what_key_is: Arc<dyn kotton_peer::dialer::WhatKeyIs>,
+    ) -> Result<Self> {
+        let secrets = kotton_secret::secrets_for_base_dir(&base_dir)?;
+        Self::new_with_secrets_asking(base_dir, config, secrets, what_key_is).await
+    }
+
     /// The shelves a device has unless told otherwise: directories, through
     /// the host filesystem. Named here, in the layer that knows there is one.
     fn local_shelves() -> Arc<dyn kotton_sys::store::Shelves> {
@@ -252,6 +272,7 @@ impl DeviceRuntime {
         config: RuntimeConfig,
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         shelves: Arc<dyn kotton_sys::store::Shelves>,
+        what_key_is: Option<Arc<dyn kotton_peer::dialer::WhatKeyIs>>,
     ) -> Result<Self> {
         // Validate config
         config
@@ -313,6 +334,7 @@ impl DeviceRuntime {
             started: Arc::new(RwLock::new(false)),
             secrets,
             shelves,
+            what_key_is,
             #[cfg(feature = "test-support")]
             test_hooks: Default::default(),
             custody,
@@ -404,12 +426,19 @@ impl DeviceRuntime {
     /// Built on demand: the three parts are cheap (`Arc` clones and a key copy),
     /// and naming them is what lets dialing live in `peer`, where its return
     /// type lives.
+    /// It asks what a key is to the person a connect names of the question
+    /// this runtime was built with; a runtime built with none hands out a
+    /// dialler that reads every node as one the person has no row for.
     pub fn dialer(&self) -> kotton_peer::dialer::Dialer {
-        kotton_peer::dialer::Dialer::new(
+        let dialer = kotton_peer::dialer::Dialer::new(
             self.device_signing_key.clone(),
             Arc::clone(&self.reachability),
             Arc::clone(&self.event_bus),
-        )
+        );
+        match &self.what_key_is {
+            Some(asked) => dialer.asking(Arc::clone(asked)),
+            None => dialer,
+        }
     }
 
 
@@ -514,7 +543,18 @@ impl DeviceRuntime {
         config: RuntimeConfig,
         secrets: Arc<dyn SecretsStore + Send + Sync>,
     ) -> Result<Self> {
-        Self::build(base_dir, config, secrets, Self::local_shelves()).await
+        Self::build(base_dir, config, secrets, Self::local_shelves(), None).await
+    }
+
+    /// [`Self::new_with_secrets`], handed what a key is to a person, as
+    /// [`Self::new_asking`].
+    pub async fn new_with_secrets_asking(
+        base_dir: PathBuf,
+        config: RuntimeConfig,
+        secrets: Arc<dyn SecretsStore + Send + Sync>,
+        what_key_is: Arc<dyn kotton_peer::dialer::WhatKeyIs>,
+    ) -> Result<Self> {
+        Self::build(base_dir, config, secrets, Self::local_shelves(), Some(what_key_is)).await
     }
 
     /// Create a runtime whose mounts rest on `shelves` rather than on the host
@@ -525,7 +565,7 @@ impl DeviceRuntime {
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         shelves: Arc<dyn kotton_sys::store::Shelves>,
     ) -> Result<Self> {
-        Self::build(base_dir, config, secrets, shelves).await
+        Self::build(base_dir, config, secrets, shelves, None).await
     }
 
     /// Where this node's mounts rest.

@@ -32,6 +32,36 @@ use crate::channel::PeerChannel;
 use crate::{KottonPeerObjectStorage, QuicPeerChannel};
 use std::sync::{Arc, RwLock};
 
+/// What a key is to a person, by that person's rows: whether an `offer` is
+/// learned from the node holding it, or that the rows could not be read. The
+/// question the dialling end asks, answered by the daemon that holds the rows
+/// from the store it holds, which is never handed here: the dialler is handed
+/// the question and nothing it is read from, as it is handed [`MakesClaim`]
+/// and not the authority behind it.
+///
+/// The answer is the narrowest of the person's rows for the key, the rule the
+/// listening end answers `NodeRelay` by ([`crate::relay_keys::offers_from`]
+/// over [`crate::daemon::db::paired_posture_for_user`]), so both ends read one
+/// answer for a key.
+#[async_trait::async_trait]
+pub trait WhatKeyIs: Send + Sync {
+    /// What `key` is to `user`, by `user`'s rows alone.
+    async fn to_person(&self, key: &[u8; 32], user: &str) -> RowsSay;
+}
+
+/// What a person's rows say of a key, as [`WhatKeyIs`] answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowsSay {
+    /// An `offer` is learned from it: the narrowest row says `full`, or names
+    /// no posture.
+    Offer,
+    /// No `offer` is learned from it: no row, or a narrowest row that is not
+    /// `full`. Its relay, and a key handed with no `offer`, still are.
+    NoOffer,
+    /// The rows could not be read. Nothing is learned from the answer.
+    Unreadable,
+}
+
 /// Open a live [`KottonPeerObjectStorage`] to a paired peer.
 ///
 /// Steps performed:
@@ -56,6 +86,10 @@ pub struct Dialer {
     /// claim, inside the handshake's channel, for that one connection; the certificate carries
     /// the signed claim in `offer`.
     claim: Option<Arc<dyn MakesClaim>>,
+    /// What a key is to the person a connect names, asked once a peer's answer
+    /// names where it reserves. `None` reads as no row: no `offer` is learned
+    /// from any node, and its relay, and a key handed with no `offer`, are.
+    what_key_is: Option<Arc<dyn WhatKeyIs>>,
 }
 
 impl Dialer {
@@ -74,7 +108,24 @@ impl Dialer {
             events,
             offer: tls::CertOffer::default(),
             claim: None,
+            what_key_is: None,
         }
+    }
+
+    /// Weigh what a peer answers by what its key is to the person, asked of
+    /// `what_key_is`. A dialer built without it ([`Self::new`] alone, the
+    /// operator's) reads every node as one the person has no row for.
+    #[must_use]
+    pub fn asking(mut self, what_key_is: Arc<dyn WhatKeyIs>) -> Self {
+        self.what_key_is = Some(what_key_is);
+        self
+    }
+
+    /// Whether this dialer asks what a key is to the person, for a test that
+    /// holds a dialer some caller built.
+    #[cfg(test)]
+    pub(crate) fn asks(&self) -> bool {
+        self.what_key_is.is_some()
     }
 
     /// Carry `offer` in this dialer's certificate — the events since the peer's
@@ -143,19 +194,44 @@ async fn connect_peer(
     };
     let channel: Arc<dyn crate::channel::PeerChannel> =
         Arc::new(crate::channel::RedialingChannel::new(link, redial));
+    Ok(connected(rt, channel, observed_direct_addr, node, user_id).await)
+}
 
-    // The node the answer is weighed by: its key and the posture this device
-    // recorded for it, together.
-    let answering = node.clone();
+/// The storage over `channel`, a connection to `node` for `user_id`, once the
+/// peer has been asked where it reserves and its answer weighed.
+async fn connected(
+    rt: &Dialer,
+    channel: Arc<dyn crate::channel::PeerChannel>,
+    observed_direct_addr: Option<std::net::SocketAddr>,
+    node: PairedNode,
+    user_id: &str,
+) -> KottonPeerObjectStorage {
+    // The key the answer is weighed by. What the key is to the person is read
+    // from the person's rows when the answer comes, never from the node the
+    // caller handed in.
+    let key = node.public_key;
     let storage =
         KottonPeerObjectStorage::new(channel, node, user_id.to_owned(), kotton_common::LOCAL_MOUNT)
             .with_observed_direct_addr(observed_direct_addr);
 
-    // The pair is the resolver. Every connect asks the peer where it
-    // reserves, so a relay change follows the pair without a re-pairing and
-    // without any public identity→relay record. A peer that does not answer
-    // (older, or refusing) teaches nothing, and the row keeps what it had.
-    let learned = match storage
+    let learned = learn_where_it_reserves(rt, &storage, &key, user_id).await;
+    storage.with_learned_relay(learned)
+}
+
+/// Ask the peer behind `storage`, whose key is `key`, where it reserves, and
+/// learn what it answers for `user_id`. Returns the relay to record for it.
+///
+/// The pair is the resolver. Every connect asks the peer where it reserves, so
+/// a relay change follows the pair without a re-pairing and without any public
+/// identity→relay record. A peer that does not answer (older, or refusing)
+/// teaches nothing, and the row keeps what it had.
+async fn learn_where_it_reserves(
+    rt: &Dialer,
+    storage: &KottonPeerObjectStorage,
+    key: &[u8; 32],
+    user_id: &str,
+) -> Option<String> {
+    match storage
         .send_sealed(SealedVerb::NodeRelay {
             user_id: user_id.to_owned(),
         })
@@ -170,17 +246,32 @@ async fn connect_peer(
             // the address the peer named proves that key: a peer's word alone
             // would let it name this device's own relay beside an address it
             // runs, and be sent *mine* (`RelayKeyring::learn_proven`). A peer
-            // that names no key teaches no key, and one this device did not
-            // record as *full* teaches no key it offers on
-            // (`relay_keys::offers_from`).
+            // that names no key teaches no key.
             if let (Some(url), Some(relay)) = (&relay_url, crate::relay_keys::relay_id(relay_key.as_deref())) {
-                rt.reachability.relay_keys().learn_proven(user_id, &answering, url, &relay, admission.as_ref()).await;
+                // Whether an `offer` is learned from it is what the key is to
+                // this person by the narrowest of their rows, asked once, here,
+                // before the relay is asked to prove its key: the same answer
+                // the listening end gives. No row, or no question to ask, is no
+                // `offer`. Rows that cannot be read teach nothing: no key is
+                // held under the relay the peer named, no relay is recorded for
+                // the node, and the connect records no relay for it.
+                let offers = match &rt.what_key_is {
+                    None => false,
+                    Some(asked) => match asked.to_person(key, user_id).await {
+                        RowsSay::Offer => true,
+                        RowsSay::NoOffer => false,
+                        RowsSay::Unreadable => {
+                            tracing::warn!("what a paired node's key is to the person could not be read; nothing learned from its answer");
+                            return None;
+                        }
+                    },
+                };
+                rt.reachability.relay_keys().learn_proven(user_id, key, offers, url, &relay, admission.as_ref()).await;
             }
             relay_url
         }
         _ => None,
-    };
-    Ok(storage.with_learned_relay(learned))
+    }
 }
 
 /// One connection to `node` down the NAT ladder — direct, punched, TURN, then
@@ -511,6 +602,137 @@ mod tests {
             Arc::new(crate::Reachability::new(Default::default(), k.clone())),
             Arc::new(kotton_diag::EventBus::with_default_capacity()),
         )
+    }
+
+    /// A peer that answers every request with `answer`, as a device asked
+    /// `NodeRelay` over a connection already open.
+    struct Answers(UserResponse);
+
+    #[async_trait::async_trait]
+    impl crate::channel::PeerChannel for Answers {
+        async fn request(&self, _: &[u8]) -> anyhow::Result<Vec<u8>> {
+            Ok(serde_json::to_vec(&self.0)?)
+        }
+    }
+
+    /// The person's rows for one key, each what a row says of its posture,
+    /// answered by the rule the listening end answers by: the narrowest of
+    /// them ([`crate::daemon::db::narrowest`]), read by
+    /// [`crate::relay_keys::offers_from`].
+    struct Rows(Vec<Option<&'static str>>);
+
+    #[async_trait::async_trait]
+    impl WhatKeyIs for Rows {
+        async fn to_person(&self, _: &[u8; 32], _: &str) -> RowsSay {
+            match crate::relay_keys::offers_from(crate::daemon::db::narrowest(self.0.iter().copied())) {
+                true => RowsSay::Offer,
+                false => RowsSay::NoOffer,
+            }
+        }
+    }
+
+    /// Rows that cannot be read.
+    struct Unread;
+
+    #[async_trait::async_trait]
+    impl WhatKeyIs for Unread {
+        async fn to_person(&self, _: &[u8; 32], _: &str) -> RowsSay {
+            RowsSay::Unreadable
+        }
+    }
+
+    /// A full device's answer to `NodeRelay`: the relay at `url`, by its key
+    /// `relay`, and *mine* with an `offer`.
+    fn full_answer(url: &str, relay: &[u8; 32]) -> UserResponse {
+        UserResponse::NodeRelayResult {
+            relay_url: Some(url.to_owned()),
+            relay_key: Some(hex::encode(relay)),
+            admission: Some(kotton_wire::rendezvous::RelayAdmission {
+                present: kotton_wire::ipc::SecretText::new(kotton_net::rendezvous::AdmissionKey::from_bytes([9; 32]).to_text()),
+                offer: Some(kotton_wire::ipc::SecretText::new(kotton_net::rendezvous::AdmissionKey::from_bytes([8; 32]).to_text())),
+            }),
+        }
+    }
+
+    /// The peer the connect dialled, handed in as the caller read it: a row
+    /// that says `full`.
+    fn dialled_as_full() -> PairedNode {
+        PairedNode {
+            id: "desktop".into(),
+            device_did: kotton_wire::did::Did::new("key", "desktop"),
+            public_key: key(1).verifying_key().to_bytes(),
+            paired_at: 0,
+            addresses: vec![],
+            relay_url: None,
+            posture: Some("full".into()),
+        }
+    }
+
+    /// A relay proving its key at a loopback address, and the two.
+    async fn a_relay() -> (String, [u8; 32]) {
+        let relay = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
+        let id = relay.verifying_key().to_bytes();
+        (crate::relay_keys::tests::proving(relay).await, id)
+    }
+
+    /// **The dialling end reads the narrowest of the person's rows for the
+    /// key, not the node it was handed.** A node answers `NodeRelay` with an
+    /// `offer`. Dialled through a row that says `full` while another of the
+    /// person's rows for the same key says `blind-storage`, no `offer` and no
+    /// *mine* is held, and its relay is still learned. Where every row says
+    /// `full` or nothing, both are held.
+    #[tokio::test]
+    async fn the_dialling_end_weighs_an_answer_by_the_narrowest_of_the_persons_rows() {
+        let (url, relay) = a_relay().await;
+        for (rows, offers) in [
+            (vec![Some("full"), Some("blind-storage")], false),
+            (vec![Some("blind-storage"), Some("full")], false),
+            (vec![Some("full"), None], true),
+        ] {
+            let what = format!("rows {rows:?}");
+            let dialer = dialer(&key(2)).asking(Arc::new(Rows(rows)));
+            let storage = connected(&dialer, Arc::new(Answers(full_answer(&url, &relay))), None, dialled_as_full(), "alice").await;
+            let keys = dialer.reachability.relay_keys();
+            let node = key(1).verifying_key().to_bytes();
+            assert_eq!(keys.offer_for("alice", &relay).is_some(), offers, "{what}: the offer");
+            assert_eq!(keys.present_for("alice", &relay).is_some(), offers, "{what}: mine");
+            assert_eq!(keys.relay_of("alice", &node, &url), Some(relay), "{what}: the relay was not learned");
+            assert_eq!(storage.learned_relay(), Some(url.as_str()), "{what}");
+        }
+    }
+
+    /// **Rows that cannot be read teach nothing.** The same answer, and the
+    /// question fails: no key is held under the relay the node named, no relay
+    /// is recorded for the node, and the connect records no relay for it.
+    #[tokio::test]
+    async fn rows_that_cannot_be_read_learn_nothing_from_the_answer() {
+        let (url, relay) = a_relay().await;
+        let dialer = dialer(&key(2)).asking(Arc::new(Unread));
+        let storage = connected(&dialer, Arc::new(Answers(full_answer(&url, &relay))), None, dialled_as_full(), "alice").await;
+        let keys = dialer.reachability.relay_keys();
+        let node = key(1).verifying_key().to_bytes();
+        assert_eq!(keys.present_for("alice", &relay), None, "a key was held");
+        assert_eq!(keys.offer_for("alice", &relay), None, "an offer was held");
+        assert_eq!(keys.relay_of("alice", &node, &url), None, "a relay was recorded for the node");
+        assert_eq!(keys.told_relay("alice", &node), None, "a relay was recorded for the node");
+        assert_eq!(storage.learned_relay(), None, "the connect recorded a relay");
+    }
+
+    /// **A dialler built with no question reads every node as one the person
+    /// has no row for** — `Dialer::new` alone, which the operator's dialler
+    /// is. The same answer teaches no `offer` and no *mine*, and the relay it
+    /// named, as from an answer with no `offer`, is learned.
+    #[tokio::test]
+    async fn a_dialler_with_no_question_learns_no_offer_and_learns_the_relay() {
+        let (url, relay) = a_relay().await;
+        let dialer = dialer(&key(2));
+        let storage = connected(&dialer, Arc::new(Answers(full_answer(&url, &relay))), None, dialled_as_full(), "alice").await;
+        let keys = dialer.reachability.relay_keys();
+        let node = key(1).verifying_key().to_bytes();
+        assert_eq!(keys.offer_for("alice", &relay), None, "an offer was learned with no question");
+        assert_eq!(keys.present_for("alice", &relay), None, "mine was learned with no question");
+        assert_eq!(keys.relay_of("alice", &node, &url), Some(relay), "the relay was not learned");
+        assert_eq!(storage.learned_relay(), Some(url.as_str()));
     }
 
     /// A relay that forwards both ways and keeps a copy of everything.

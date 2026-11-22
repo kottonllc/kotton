@@ -602,7 +602,7 @@ mod tests {
             relay_url: Some(third.clone()),
             posture: Some("full".into()),
         };
-        assert!(laptop.reachability().relay_keys().learn_proven(USER, &desktop_node, &third, &third_id, None).await);
+        assert!(laptop.reachability().relay_keys().learn_proven(USER, &desktop_node.public_key, kotton_peer::relay_keys::offers_from(Some(desktop_node.posture.as_deref())), &third, &third_id, None).await);
 
         // Past half the note's life: the laptop renews.
         let renew = moved.expires_at - reach_note::REACH_NOTE_TTL_SECS / 2 + 1;
