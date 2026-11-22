@@ -480,18 +480,10 @@ async fn fetch_material(
                 user_id: user_id.to_string(),
             };
             match client.send_sealed(req).await {
-                Ok(UserResponse::RecoveryMaterial { kel, bundle }) if !kel.is_empty() => {
-                    return Ok((kel, bundle, node.id.clone()));
-                }
-                Ok(UserResponse::RecoveryMaterial { .. }) => {
-                    last_err = Some(anyhow!("{}: holds no key history for '{user_id}'", node.id));
-                }
-                Ok(UserResponse::Error { message }) => {
-                    last_err = Some(anyhow!("{}: {message}", node.id));
-                }
-                Ok(other) => {
-                    last_err = Some(anyhow!("{}: unexpected reply {other:?}", node.id));
-                }
+                Ok(answer) => match material_in(&node.id, user_id, answer) {
+                    Ok((kel, bundle)) => return Ok((kel, bundle, node.id.clone())),
+                    Err(e) => last_err = Some(e),
+                },
                 Err(e) => last_err = Some(anyhow!("{}: {e}", node.id)),
             }
             // The connection was admitted; a refusal now is the node's answer, not
@@ -500,6 +492,20 @@ async fn fetch_material(
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow!("no paired node served the recovery material")))
+}
+
+/// What a node's answer to the recovery fetch gives: the key history and the
+/// sealed copy, or why not. The node's `Error` is printed as data, to a
+/// bounded length ([`kotton_wire::note::quoted_cut`]; how another node's text
+/// is printed), and an answer not asked for by its name and no field of it
+/// ([`kotton_wire::ipc::unasked`]).
+fn material_in(node_id: &str, user_id: &str, answer: UserResponse) -> Result<(Vec<KelEvent>, Option<String>)> {
+    match answer {
+        UserResponse::RecoveryMaterial { kel, bundle } if !kel.is_empty() => Ok((kel, bundle)),
+        UserResponse::RecoveryMaterial { .. } => Err(anyhow!("{node_id}: holds no key history for '{user_id}'")),
+        UserResponse::Error { message } => Err(anyhow!("{node_id}: the node answered: {}", kotton_wire::note::quoted_cut(&message))),
+        other => Err(anyhow!("{node_id}: the node answered {}", kotton_wire::ipc::unasked(&other))),
+    }
 }
 
 /// Step 5, at one node: present the rotation, and confirm the node now stands on it.
@@ -516,7 +522,16 @@ async fn admit_at(
     let req = SealedVerb::RecoveryFetch {
         user_id: user_id.to_string(),
     };
-    match client.send_sealed(req).await? {
+    rotation_recorded(client.send_sealed(req).await?, rotation)
+}
+
+/// Whether a node's answer to the fetch after the rotation stands on it. The
+/// node's `Error` is printed as data, to a bounded length
+/// ([`kotton_wire::note::quoted_cut`]; how another node's text is printed), and
+/// an answer not asked for by its name and no field of it
+/// ([`kotton_wire::ipc::unasked`]).
+fn rotation_recorded(answer: UserResponse, rotation: &KelEvent) -> Result<()> {
+    match answer {
         UserResponse::RecoveryMaterial { kel, .. } => {
             if kel.last() != Some(rotation) {
                 return Err(anyhow!(
@@ -525,8 +540,8 @@ async fn admit_at(
             }
             Ok(())
         }
-        UserResponse::Error { message } => Err(anyhow!(message)),
-        other => Err(anyhow!("unexpected reply {other:?}")),
+        UserResponse::Error { message } => Err(anyhow!("the node answered: {}", kotton_wire::note::quoted_cut(&message))),
+        other => Err(anyhow!("the node answered {}", kotton_wire::ipc::unasked(&other))),
     }
 }
 
@@ -847,6 +862,45 @@ mod tests {
         let other = kotton_peer::daemon::db::get_paired_node(&pool, "alice", &low).await.unwrap().unwrap();
         assert_eq!(format!("{other:?}"), format!("{other_before:?}"), "the other row changed");
         assert_eq!(rows(&pool).await.len(), 2, "a row was added or removed");
+    }
+
+    /// **A node's `Error` to the recovery fetch, before and after the
+    /// rotation, is printed as data and to the bound, and an answer not asked
+    /// for by its name and no field** (how another node's text is printed; how
+    /// an answer not asked for is said).
+    #[test]
+    fn a_nodes_refusal_of_the_recovery_fetch_is_printed_as_data_and_to_the_bound() {
+        use kotton_wire::kel::{Aid, Authorization, EventKind, KeyState};
+        use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+        let rotation = KelEvent {
+            aid: Aid("aid".into()),
+            seq: 1,
+            prev_event_digest: None,
+            kind: EventKind::RotationMnemonic,
+            key_state: KeyState { group_key: [1; 32], threshold: 1, participants: 1 },
+            recovery_commitment: [2; 32],
+            recovery_set: Vec::new(),
+            authorization: Authorization::Quorum { sig: Vec::new() },
+            contest_window: None,
+        };
+        let long = "n".repeat(MAX_SAID_CHARS + 3);
+        for text in ["no `history`\nhere", long.as_str()] {
+            let refused = || UserResponse::Error { message: text.to_string() };
+            let fetched = material_in("vault", "alice", refused()).expect_err("an `Error` gave material").to_string();
+            assert_eq!(fetched, format!("vault: the node answered: {}", quoted_cut(text)));
+            let admitted = rotation_recorded(refused(), &rotation).expect_err("an `Error` admitted").to_string();
+            assert_eq!(admitted, format!("the node answered: {}", quoted_cut(text)));
+            for said in [&fetched, &admitted] {
+                assert!(!said.contains('\n') && !said.contains(text), "{said}");
+            }
+        }
+        let fetched = material_in("vault", "alice", UserResponse::Error { message: "no `history`\nhere".into() }).unwrap_err();
+        assert_eq!(fetched.to_string(), "vault: the node answered: `no \\u{60}history\\u{60}\\nhere`");
+        let unasked = || UserResponse::VaultFull { held: 17, quota: 9 };
+        assert_eq!(material_in("vault", "alice", unasked()).unwrap_err().to_string(), "vault: the node answered `VaultFull`");
+        assert_eq!(rotation_recorded(unasked(), &rotation).unwrap_err().to_string(), "the node answered `VaultFull`");
+        let stands = UserResponse::RecoveryMaterial { kel: vec![rotation.clone()], bundle: None };
+        assert!(rotation_recorded(stands, &rotation).is_ok());
     }
 
     /// The vault is added as `vault`, or beside a `vault` already there under its key.

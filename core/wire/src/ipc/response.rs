@@ -653,7 +653,7 @@ pub enum UserResponse {
     /// not refused: `vault invite --me` asks the vault to keep this person's
     /// things, and a vault that keeps them already has (#108). Every other
     /// reader of an invite's answer says it as a refusal, in
-    /// [`vault_keeps_already_said`] through [`answer_said`], as each says any
+    /// [`vault_keeps_already_said`] through [`own_daemon_said`], as each says any
     /// answer but the invite: `kvaultd invite` at the vault's own door, a
     /// guest's `landlord.invite`, and on the operator's desktop
     /// `vault invite <v> <name>`. No reader but `--me` names it, and no reader
@@ -1483,21 +1483,32 @@ pub enum UserResponse {
 
 /// The vault's refusal of an invite naming `user_id`, a pool it keeps
 /// ([`UserResponse::VaultKeepsAlready`]), in the one sentence every reader
-/// that refuses on it says.
+/// that refuses on it says. The name is the vault's text, so it is printed as
+/// data, to a bounded length ([`crate::note::quoted_cut`]; how another node's
+/// text is printed).
 pub fn vault_keeps_already_said(user_id: &str) -> String {
     format!(
-        "this vault already keeps for '{user_id}' — an invite admits someone new, so it takes a name nobody holds \
-         here; their own devices need none"
+        "this vault already keeps for {} — an invite admits someone new, so it takes a name nobody holds \
+         here; their own devices need none",
+        crate::note::quoted_cut(user_id)
     )
 }
 
-/// What a reader of an operated vault's or relay's answer says of an answer
-/// it does not act on: anything but the one its verb asked for (and, for an
-/// invite or a join at the vault's door, the ceremony's own frames). The
-/// vault's own words where the answer carries them — an `Error`'s message,
-/// a [`UserResponse::NotPairedAs`]'s sentence printed as data
-/// ([`crate::note::quoted_cut`]), [`vault_keeps_already_said`] — and otherwise the answer's name, never its
-/// fields. The name is said without naming who answered: the same words
+/// An answer a reader did not ask for, said by its name and no field of it
+/// ([`UserResponse::name`], printed as data by [`crate::note::quoted`]; how an
+/// answer not asked for is said). The one form every reader that names such
+/// an answer prints it in.
+pub fn unasked(answer: &UserResponse) -> String {
+    crate::note::quoted(&answer.name())
+}
+
+/// What a reader that hears an operated vault or relay directly says of an
+/// answer it does not act on: anything but the one its verb asked for. The
+/// vault's own words where the answer carries them — an `Error`'s message and
+/// a [`UserResponse::NotPairedAs`]'s sentence, each printed as data and to a
+/// bounded length ([`crate::note::quoted_cut`]; how another node's text is
+/// printed), [`vault_keeps_already_said`] — and otherwise the answer's name
+/// ([`unasked`]), never its fields. The name is said without naming who answered: the same words
 /// serve a relay's answer and a vault's, and the reader's own word (`relay:`,
 /// `vault:`) says which.
 ///
@@ -1505,24 +1516,53 @@ pub fn vault_keeps_already_said(user_id: &str) -> String {
 /// the answer it asked for and stops on anything else, so an answer a release
 /// adds is never misread as leave to go on: it is said here by its name
 /// until it is given a sentence, and then said in it by every reader at once.
+///
+/// **Which reader says through which** (another node's text is quoted where
+/// it enters this device). No reader of an `Error` from another node calls
+/// this directly today: every one reads this device's own daemon, and says
+/// through [`own_daemon_said`], which says every answer but an `Error` here.
+/// It stays the sayer for a reader that hears another node directly, and the
+/// one place an answer's sentence is written.
+pub fn answer_said(answer: &UserResponse) -> String {
+    match answer {
+        // The vault's own sentence, printed as data and to the bound: for a
+        // `NotPairedAs` the kind decides nothing here.
+        UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => crate::note::quoted_cut(message),
+        UserResponse::VaultKeepsAlready { user_id } => vault_keeps_already_said(user_id),
+        unsaid => format!(
+            "the answer was {}, which this release has no sentence for; nothing more was asked of it",
+            unasked(unsaid)
+        ),
+    }
+}
+
+/// What a reader of **this device's own daemon** says of an answer it does
+/// not act on: anything but the one its verb asked for (and, for an invite or
+/// a join at the vault's door, the ceremony's own frames). An `Error` is the
+/// daemon's own sentence, said as it is written, so a command it tells the
+/// person to type prints as typed; every other answer is said as
+/// [`answer_said`] says it.
+///
+/// **Another node's text is quoted where it enters this device.** The daemon
+/// does that before it answers: kuserd's `operator::speak` holds an operated
+/// vault's or relay's `Error` in a sentence of its own, through
+/// [`crate::note::quoted_cut`]; the vault's door sends no `Error` built from a
+/// far end's text, and a joining device's reason reaches it only inside
+/// `PairFailed`. Saying the daemon's `Error` here as data again would print
+/// that text quoted twice, and the daemon's own commands escaped.
+///
 /// The readers that say through this: `kvaultd invite` and `kvaultd join` at
 /// the vault's door; six of a guest's landlord verbs, through `kuserd`'s
 /// `occupant_host::answered!` — `landlord.invite`, `landlord.people`,
 /// `landlord.drop-pool`, `landlord.rule`, `landlord.set-rule` and
 /// `landlord.move-vault` (not `landlord.enrol`, which reads through
-/// `door::enrolled`, #139; `landlord.resolve` reads no answer); and the shell's
-/// verbs said to an operated vault or relay (`operated::spoken`).
-pub fn answer_said(answer: &UserResponse) -> String {
+/// `door::enrolled`; `landlord.resolve` reads no answer); the shell's
+/// verbs said to an operated vault or relay (`operated::spoken`); and
+/// `vault invite --me` (`kotton-client`'s `net::invite_me_refused`).
+pub fn own_daemon_said(answer: &UserResponse) -> String {
     match answer {
         UserResponse::Error { message } => message.clone(),
-        // The vault's own sentence, printed as data and to the bound: the
-        // kind decides nothing here.
-        UserResponse::NotPairedAs { message, .. } => crate::note::quoted_cut(message),
-        UserResponse::VaultKeepsAlready { user_id } => vault_keeps_already_said(user_id),
-        unsaid => format!(
-            "the answer was `{}`, which this release has no sentence for; nothing more was asked of it",
-            unsaid.name()
-        ),
+        other => answer_said(other),
     }
 }
 
@@ -1577,8 +1617,9 @@ pub enum VfsChangeKind {
 
 #[cfg(test)]
 mod answer_said_tests {
-    use super::{answer_said, vault_keeps_already_said, NotPairedAsKind, UserResponse};
+    use super::{answer_said, own_daemon_said, unasked, vault_keeps_already_said, NotPairedAsKind, UserResponse};
     use crate::ipc::SecretText;
+    use crate::note::{quoted_cut, MAX_SAID_CHARS};
 
     /// **An answer a reader does not act on is said in the vault's words where
     /// it carries them, and otherwise by its name alone** (#114): never a
@@ -1586,7 +1627,7 @@ mod answer_said_tests {
     /// what is not to be printed.
     #[test]
     fn an_answer_is_said_in_the_vaults_words_or_by_its_name_alone() {
-        assert_eq!(answer_said(&UserResponse::Error { message: "no relay".into() }), "no relay");
+        assert_eq!(answer_said(&UserResponse::Error { message: "no relay".into() }), "`no relay`");
         assert_eq!(
             answer_said(&UserResponse::VaultKeepsAlready { user_id: "sam".into() }),
             vault_keeps_already_said("sam")
@@ -1605,6 +1646,59 @@ mod answer_said_tests {
             expires_at: 1,
         });
         assert!(secret.starts_with("the answer was `PairAdvertising`,") && !secret.contains("the-words"), "{secret}");
+    }
+
+    /// **A vault's text in its answer is printed as data and to the bound**
+    /// (how another node's text is printed): an `Error`'s message, a
+    /// `NotPairedAs`'s sentence and a `VaultKeepsAlready`'s name each print
+    /// between backticks, with a backtick and a line break escaped, and one
+    /// past `MAX_SAID_CHARS` is cut and says so.
+    #[test]
+    fn a_vaults_text_in_its_answer_is_printed_as_data_and_to_the_bound() {
+        let text = "no `relay`\nhere";
+        let long = "r".repeat(MAX_SAID_CHARS + 9);
+        for said in [text.to_string(), long.clone()] {
+            let error = answer_said(&UserResponse::Error { message: said.clone() });
+            assert_eq!(error, quoted_cut(&said));
+            let refused = answer_said(&UserResponse::NotPairedAs { kind: NotPairedAsKind::Unsaid, message: said.clone() });
+            assert_eq!(refused, quoted_cut(&said));
+            let kept = answer_said(&UserResponse::VaultKeepsAlready { user_id: said.clone() });
+            assert!(kept.starts_with(&format!("this vault already keeps for {} — ", quoted_cut(&said))), "{kept}");
+            for printed in [&error, &refused, &kept] {
+                assert!(!printed.contains('\n') && !printed.contains(&said), "{printed}");
+            }
+        }
+        assert_eq!(answer_said(&UserResponse::Error { message: text.into() }), "`no \\u{60}relay\\u{60}\\nhere`");
+        assert!(answer_said(&UserResponse::Error { message: long }).ends_with(" (cut: 9 more characters)"));
+    }
+
+    /// **This device's own daemon's `Error` is said in its words, and every
+    /// other answer as `answer_said` says it** (another node's text is quoted
+    /// where it enters this device): a command the daemon tells the person to
+    /// type prints as typed, line breaks and all, and is not cut.
+    #[test]
+    fn the_own_daemons_error_is_said_as_written_and_every_other_answer_as_answer_said() {
+        let told = "this desktop holds no operator credential for the vault 'home' — `mint vault home`\nthen `enrol <the line>`";
+        assert_eq!(own_daemon_said(&UserResponse::Error { message: told.into() }), told);
+        let long = "d".repeat(MAX_SAID_CHARS + 9);
+        assert_eq!(own_daemon_said(&UserResponse::Error { message: long.clone() }), long);
+        for answer in [
+            UserResponse::NotPairedAs { kind: NotPairedAsKind::Unsaid, message: "not `sam`\nhere".into() },
+            UserResponse::VaultKeepsAlready { user_id: "s`am".into() },
+            UserResponse::VaultFull { held: 17, quota: 9 },
+            UserResponse::NoActiveSession,
+        ] {
+            assert_eq!(own_daemon_said(&answer), answer_said(&answer), "{}", answer.name());
+        }
+    }
+
+    /// **An answer not asked for is said by its name and no field** (how an
+    /// answer not asked for is said).
+    #[test]
+    fn an_answer_not_asked_for_is_said_by_its_name_alone() {
+        assert_eq!(unasked(&UserResponse::VaultFull { held: 17, quota: 9 }), "`VaultFull`");
+        assert_eq!(unasked(&UserResponse::Error { message: "no `relay`\nhere".into() }), "`Error`");
+        assert_eq!(unasked(&UserResponse::NoActiveSession), "`NoActiveSession`");
     }
 }
 

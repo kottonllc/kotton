@@ -967,17 +967,19 @@ async fn joined<F: std::future::Future<Output = ()>>(
 }
 
 /// The frames a ceremony step did not act on, in order, each as
-/// [`kotton_wire::ipc::answer_said`] says it: what the step says when it fails.
+/// [`kotton_wire::ipc::own_daemon_said`] says it — the stream is a local
+/// daemon's, so its `Error` is said as written: what the step says when it
+/// fails.
 #[derive(Default)]
 struct Unread(Vec<String>);
 
 impl Unread {
     fn hold(&mut self, frame: &UserResponse) {
         self.0.push(match frame {
-            // `answer_said` has no sentence for a ceremony's own failure; its
-            // reason is the sentence.
+            // `own_daemon_said` has no sentence for a ceremony's own failure;
+            // its reason is the sentence.
             UserResponse::PairFailed { reason } => format!("PairFailed: {reason}"),
-            other => kotton_wire::ipc::answer_said(other),
+            other => kotton_wire::ipc::own_daemon_said(other),
         });
     }
 }

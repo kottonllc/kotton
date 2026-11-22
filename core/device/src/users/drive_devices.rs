@@ -173,16 +173,19 @@ async fn tell(
 }
 
 /// What a drive's answer to a device change says: taken, or why not. A
-/// vault's refusal to keep for this device under the person's name
-/// ([`UserResponse::NotPairedAs`]) is said in its sentence, printed as data and
-/// to the bound ([`kotton_wire::note::quoted_cut`]), and decides nothing more
-/// than any other refusal here.
+/// vault's refusal, an `Error` or a refusal to keep for this device under the
+/// person's name ([`UserResponse::NotPairedAs`]), is said in its sentence,
+/// printed as data and to the bound ([`kotton_wire::note::quoted_cut`]; how
+/// another node's text is printed), and the kind decides nothing here. An
+/// answer not asked for is said by its name and no field of it
+/// ([`kotton_wire::ipc::unasked`]).
 fn drive_took(answer: UserResponse) -> Result<(), String> {
     match answer {
         UserResponse::Ok => Ok(()),
-        UserResponse::Error { message } => Err(message),
-        UserResponse::NotPairedAs { message, .. } => Err(format!("the vault answered: {}", kotton_wire::note::quoted_cut(&message))),
-        other => Err(format!("unexpected reply {other:?}")),
+        UserResponse::Error { message } | UserResponse::NotPairedAs { message, .. } => {
+            Err(format!("the vault answered: {}", kotton_wire::note::quoted_cut(&message)))
+        }
+        other => Err(format!("the vault answered {}", kotton_wire::ipc::unasked(&other))),
     }
 }
 
@@ -353,6 +356,20 @@ mod tests {
             assert_eq!(said, Err(want), "{kind:?}");
         }
         assert_eq!(drive_took(UserResponse::Ok), Ok(()));
+    }
+
+    /// **A drive's `Error` is said as data and to the bound, and an answer not
+    /// asked for by its name and no field** (how another node's text is
+    /// printed; how an answer not asked for is said).
+    #[test]
+    fn a_drives_error_is_printed_as_data_and_an_unasked_answer_by_its_name() {
+        let said = drive_took(UserResponse::Error { message: "no `drive`\nhere".into() });
+        assert_eq!(said, Err("the vault answered: `no \\u{60}drive\\u{60}\\nhere`".to_string()));
+        let long = "x".repeat(kotton_wire::note::MAX_SAID_CHARS + 2);
+        let want = format!("the vault answered: `{}` (cut: 2 more characters)", "x".repeat(kotton_wire::note::MAX_SAID_CHARS));
+        assert_eq!(drive_took(UserResponse::Error { message: long }), Err(want));
+        let said = drive_took(UserResponse::VaultFull { held: 17, quota: 9 });
+        assert_eq!(said, Err("the vault answered `VaultFull`".to_string()));
     }
 
     /// **The missed-drive answer is as it was where no other row holds the
