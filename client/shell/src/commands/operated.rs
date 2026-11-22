@@ -981,7 +981,7 @@ async fn run(parsed: Parsed<'_>, state: &mut ShellState) -> Result<CommandOutput
 /// **No list of refusals, and no answer read as another verb's** (#121). Any
 /// answer that is not the one `asked` asks for — the daemon's `Error`, a name
 /// the vault keeps (`VaultKeepsAlready`, refused here as everywhere but
-/// `--me`, #108), an answer meant for another verb, or one a later release
+/// `--me`, where it is said as done), an answer meant for another verb, or one a later release
 /// adds — is a failure said in [`kotton_wire::ipc::own_daemon_said`]. The
 /// answer is this device's own daemon's: its `Error` is kuserd's sentence, said
 /// as written so a command in it prints as typed, and holds an operated vault's
