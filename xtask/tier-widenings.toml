@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# The widenings of `tier-check`'s rows (xtask/tier-rows.toml) that are recorded and not yet made.
+# `tier-check` compares the rows with the rows at the merge base with origin/main, and refuses a
+# widening unless this file AT THE MERGE BASE names it: so a widening lands in two pull requests,
+# each read and merged through the loop. The first adds its entry here and changes nothing it
+# names; the second makes the widening and deletes the entry. An entry whose widening the tree
+# already has is refused, so an entry is consumed by the change it names and does not stay.
+#
+# What no entry here can accept: an edge a list at the merge base owes being admitted while a
+# manifest has it. An owed entry leaves its list only when no manifest has its edge.
+#
+# Each [[widen]] is one of these, with `why`, the reason a reader holds it to:
+#
+#   row = "cli", gains = "relay"            a row's `may_link` gains a row
+#   crate = "kotton-shell", from = "cli", to = "client library"
+#                                           a crate changes rows where that admits an edge its
+#                                           row did not, or takes it out of an acting row's
+#                                           refusal of asking rows
+#   row = "relay", mark = "acting"          a row marked `acting` or `asking` takes another mark
+#   not_row = "tools"                       `not_rows` gains a root
+#
+# Shape: [[widen]] tables as above. None is recorded.
