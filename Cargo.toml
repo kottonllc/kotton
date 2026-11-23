@@ -108,31 +108,6 @@ exclude = [
     # says why it has this shape; `cargo xtask workspace-hack` writes it and
     # `workspace-hack-check` in `just lint` holds it.
     "tools/workspace-hack",
-    # tools/floor-bench — benchmarks a *backend candidate* (llama-cpp-2) and must not
-    # be built by `cargo build --workspace`. The backend is chosen by
-    # measurement and that choice is unmade; a tool that measures a candidate must not
-    # quietly make it a dependency of the tree. Nothing in core/ or client/ may
-    # path-depend on it.
-    "tools/floor-bench",
-    # guest/ — confined. Targets wasm32-wasip2, built via `cargo xtask build-apps`.
-    # Cargo enforces the build separation; the region rule enforces the source one,
-    # which cargo does not: nothing here may path-depend on core/ or client/.
-    "guest/sdk/kotton-app",    # lib dependency of the app crates (path dep)
-    "guest/apps/kotton-shell",  # WASM component — build via `cargo xtask build-apps`
-    "guest/apps/kotton-editor", # WASM component — build via `cargo xtask build-apps`
-    "guest/apps/kotton-records", # WASM component — build via `cargo xtask build-apps`
-    # Confined extensions — WASM components targeting the `fetcher`
-    # world rather than `app`, so they bind WIT directly instead of via the SDK.
-    "guest/extensions/feed-reader",
-    # The worked example an app author copies. In-tree so the same gate compiles it;
-    # an out-of-tree author swaps its path dependency for a git URL and rev.
-    "guest/examples/notes",
-    # What `kotton app new` writes, kept here so `cargo xtask build-apps` compiles it.
-    "guest/examples/hello",
-    # Test instrument, not part of the node: an LD_PRELOAD cdylib that watches the suite
-    # for non-loopback binds. Excluded so nothing can depend on it and so a normal build
-    # never pays for it; `cargo xtask bind-check` builds it on demand.
-    "tools/bindwatch",
 ]
 
 [workspace.package]
