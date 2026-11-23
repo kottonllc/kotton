@@ -1687,8 +1687,19 @@ async fn enrol_one(
             let stood = now_told(store, untold);
             readout(true, Some(true), Some(true), LineCame::Kept { name, only, unstood, stood })
         }
-        UserResponse::Error { message } => readout(true, Some(true), Some(true), LineCame::Refused { why: message }),
-        other => readout(true, Some(true), Some(true), LineCame::Refused { why: format!("kept, and answered {other:?}") }),
+        other => readout(true, Some(true), Some(true), LineCame::Refused { why: kept_and_answered(&other) }),
+    }
+}
+
+/// Why a line [`keep`] answered with anything but the credential kept is
+/// refused: `keep`'s `Error` as written, for every refusal it gives is this
+/// daemon's own sentence, and any other answer by its name and no field of it
+/// ([`kotton_wire::ipc::unasked`]; an answer not asked for is said by its
+/// name, never by its fields).
+fn kept_and_answered(answer: &UserResponse) -> String {
+    match answer {
+        UserResponse::Error { message } => message.clone(),
+        other => format!("kept, and answered {}", kotton_wire::ipc::unasked(other)),
     }
 }
 
@@ -2298,9 +2309,39 @@ async fn set_pending_rule(
         }
         tracing::info!(name, rule = ?rule, "set the relay's rule asked for at the mint");
     } else {
-        tracing::warn!(name, answer = ?answer, "the relay's rule asked for at the mint is not set yet");
+        rule_not_set_at_the_mint(name, &answer);
     }
     Some(answer)
+}
+
+/// This daemon's own answer as a log line says it: an `Error` as written —
+/// every one [`read_rule`] and [`set_rule`] give is this daemon's sentence,
+/// with the relay's text in it already quoted where it entered
+/// ([`rule_answer`]) — and any other answer by its name and no field of it
+/// ([`kotton_wire::ipc::unasked`]; an answer is never logged by its fields).
+fn own_answer_logged(answer: &UserResponse) -> String {
+    match answer {
+        UserResponse::Error { message } => message.clone(),
+        other => kotton_wire::ipc::unasked(other),
+    }
+}
+
+/// The log line for a rule asked for at the mint that the relay has not
+/// taken yet ([`own_answer_logged`]).
+fn rule_not_set_at_the_mint(name: &str, answer: &UserResponse) {
+    tracing::warn!(name, answer = %own_answer_logged(answer), "the relay's rule asked for at the mint is not set yet");
+}
+
+/// The log line for a relay whose rule could not be read to rotate a gone
+/// pool's key ([`own_answer_logged`]).
+fn rule_not_read_to_rotate(relay: &str, answer: &UserResponse) {
+    tracing::warn!(relay, answer = %own_answer_logged(answer), "a pool is gone and the relay's rule could not be read to rotate its key");
+}
+
+/// The log line for a gone pool's invited key not rotated yet
+/// ([`own_answer_logged`]).
+fn invited_not_rotated_yet(relay: &str, answer: &UserResponse) {
+    tracing::warn!(relay, answer = %own_answer_logged(answer), "a pool is gone and the invited key did not rotate yet");
 }
 
 /// The vault's requests an [`OperatorVerb`] is, in the order they are sent;
@@ -2989,7 +3030,7 @@ async fn rotate(
         let rule = match read_rule(net, relay).await {
             UserResponse::RelayRule { rule } => rule,
             other => {
-                tracing::warn!(relay = %relay.name, answer = ?other, "a pool is gone and the relay's rule could not be read to rotate its key");
+                rule_not_read_to_rotate(&relay.name, &other);
                 finished = false;
                 continue;
             }
@@ -3002,7 +3043,7 @@ async fn rotate(
                 }
             }
             other => {
-                tracing::warn!(relay = %relay.name, answer = ?other, "a pool is gone and the invited key did not rotate yet");
+                invited_not_rotated_yet(&relay.name, &other);
                 finished = false;
             }
         }
@@ -3124,7 +3165,9 @@ fn set_pending_cleared(store: &UserStore, name: &str) -> anyhow::Result<()> {
 /// The relay's answer, in the desktop's words. The relay's own text — its
 /// refusal's reason, and the body of an HTTP error it answered — is printed
 /// as data and to a bounded length ([`kotton_wire::note::quoted_cut`];
-/// another node's text is quoted where it enters this device).
+/// another node's text is quoted where it enters this device). Where the
+/// relay gave no text, this desktop says so in its own words and quotes
+/// nothing ([`relay_answered_http`]).
 fn rule_answer(said: Result<RelayOperatorResponse, kotton_net::rendezvous::RendezvousError>, name: &str) -> UserResponse {
     use kotton_net::rendezvous::RendezvousError;
     match said {
@@ -3132,11 +3175,25 @@ fn rule_answer(said: Result<RelayOperatorResponse, kotton_net::rendezvous::Rende
         Ok(RelayOperatorResponse::Refused { reason }) => {
             refused(format!("the relay '{name}' refused: {}", kotton_wire::note::quoted_cut(&reason)))
         }
-        Err(RendezvousError::HttpError { status, body }) => refused(format!(
-            "the relay '{name}' could not be reached: it answered HTTP {status}: {}",
-            kotton_wire::note::quoted_cut(&body)
-        )),
+        Err(RendezvousError::HttpError { status, body }) => {
+            refused(relay_answered_http(name, status, Some(body.as_str()).filter(|b| !b.is_empty())))
+        }
         Err(e) => refused(format!("the relay '{name}' could not be reached: {e}")),
+    }
+}
+
+/// An HTTP error the relay `name` answered, in the desktop's words: the
+/// relay's text, when it gave some, quoted as data and to a bounded length
+/// ([`kotton_wire::note::quoted_cut`]), and its absence said in this
+/// desktop's own words, with nothing between backticks, so only what the
+/// relay sent is printed as the relay's.
+fn relay_answered_http(name: &str, status: u16, body: Option<&str>) -> String {
+    match body {
+        Some(body) => format!(
+            "the relay '{name}' could not be reached: it answered HTTP {status}: {}",
+            kotton_wire::note::quoted_cut(body)
+        ),
+        None => format!("the relay '{name}' could not be reached: it answered HTTP {status} and gave no reason"),
     }
 }
 
@@ -4941,6 +4998,60 @@ mod tests {
         let told = reach_taken("home", unasked()).expect_err("an answer not asked for took the reach set").reason;
         assert_eq!(told, "the vault 'home' answered `VaultFull` where it was told its reach set");
         assert!(reach_taken("home", Some(Ok(UserResponse::Ok))).is_ok());
+    }
+
+    /// **A line kept and answered with anything but the credential kept is
+    /// said by the answer's name and no field; `keep`'s own `Error` as
+    /// written** (an answer not asked for is said by its name; this daemon's
+    /// own `Error` is said as written).
+    #[test]
+    fn a_line_kept_and_answered_otherwise_says_the_answer_by_its_name() {
+        let said = kept_and_answered(&UserResponse::VaultKeepsAlready { user_id: "FIELD-6a1c`\nx".into() });
+        assert_eq!(said, "kept, and answered `VaultKeepsAlready`");
+        let own = "could not keep the operator credential: the store is `full`\nnow";
+        assert_eq!(kept_and_answered(&UserResponse::Error { message: own.into() }), own);
+    }
+
+    /// **The relay's rule's log lines say this daemon's answer by its name, or
+    /// its own `Error` as written, and never a field of it** (an answer not
+    /// asked for is said by its name and no field; this daemon's own `Error`
+    /// is said as written, the relay's text in it quoted once where it
+    /// entered).
+    #[test]
+    fn a_relays_rule_not_set_is_logged_by_the_answers_name_or_its_own_words() {
+        use kotton_wire::note::quoted_cut;
+        let lines: [fn(&str, &UserResponse); 3] = [rule_not_set_at_the_mint, rule_not_read_to_rotate, invited_not_rotated_yet];
+        for line in lines {
+            let unasked = UserResponse::VaultKeepsAlready { user_id: "FIELD-9e2d".into() };
+            let said = crate::logged(|| line("gate", &unasked));
+            assert!(!said.contains("FIELD-9e2d") && !said.contains("user_id"), "a field of the answer was logged: {said}");
+            assert!(said.contains("answer=`VaultKeepsAlready`"), "the answer was not named: {said}");
+            let relays = "no `key`\nhere";
+            let own = rule_answer(Ok(RelayOperatorResponse::Refused { reason: relays.into() }), "gate");
+            let said = crate::logged(|| line("gate", &own));
+            assert!(said.contains(&format!("answer=the relay 'gate' refused: {}", quoted_cut(relays))), "{said}");
+            assert_eq!(said.matches(&quoted_cut(relays)).count(), 1, "the relay's text was quoted more than once: {said}");
+            assert!(!said.contains("Error {") && !said.contains("message:"), "the answer was logged by its fields: {said}");
+        }
+    }
+
+    /// **A relay's HTTP error with no text of its own is said in this
+    /// desktop's words, and nothing is quoted as the relay's**; text it did
+    /// send is quoted once.
+    #[test]
+    fn a_relays_http_error_with_no_text_is_said_in_the_desktops_words() {
+        use kotton_net::rendezvous::RendezvousError;
+        let UserResponse::Error { message } = rule_answer(Err(RendezvousError::HttpError { status: 502, body: String::new() }), "gate")
+        else {
+            panic!("a relay's HTTP error was taken")
+        };
+        assert_eq!(message, "the relay 'gate' could not be reached: it answered HTTP 502 and gave no reason");
+        assert!(!message.contains('`'), "nothing the relay sent is quoted: {message}");
+        assert_eq!(relay_answered_http("gate", 502, None), message);
+        assert_eq!(
+            relay_answered_http("gate", 403, Some("not `yours`")),
+            "the relay 'gate' could not be reached: it answered HTTP 403: `not \\u{60}yours\\u{60}`"
+        );
     }
 
     /// **`mint relay` twice is refused the second time, naming the spelling
