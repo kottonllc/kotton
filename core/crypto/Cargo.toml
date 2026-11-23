@@ -46,6 +46,9 @@ workspace-hack = { path = "../../tools/workspace-hack" }
 # This crate's own tests read the refused keys and signatures through `ed25519::refused`.
 kotton-ed25519 = { path = "../ed25519", features = ["test-utils"] }
 tokio = { version = "1.41", features = ["full"] }
+# `threshold_surface` reads this crate's modules to hold that no public item names a type of the
+# threshold library. Test builds compile it already, through `workspace-hack`.
+syn = { version = "2.0.119", features = ["full", "visit"] }
 
 [features]
 default = []

@@ -431,7 +431,7 @@ pub(crate) fn parse_widenings(text: &str) -> Result<Vec<Widening>, String> {
 }
 
 /// The branch the lists may only shrink against.
-const MAIN_REF: &str = "origin/main";
+pub(crate) const MAIN_REF: &str = "origin/main";
 
 /// The one feature set every test build shares: most crates dev-depend on it, and it is no row.
 const WORKSPACE_HACK: &str = "tools/workspace-hack";
@@ -538,7 +538,7 @@ pub(crate) fn parse_owed(text: &str) -> Result<Owed, String> {
 
 /// Every `Cargo.toml` under `dir`, depth-first, skipping hidden, `target` and `target-*`
 /// directories. [`read_tree`] refuses a manifest git tracks that this passed over.
-fn manifests_under(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn manifests_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -635,7 +635,7 @@ pub(crate) struct Tree {
     pub(crate) refused: Vec<String>,
 }
 
-fn package_name(manifest: &Table) -> Option<String> {
+pub(crate) fn package_name(manifest: &Table) -> Option<String> {
     manifest
         .get("package")?
         .as_table()?
@@ -690,7 +690,7 @@ fn shape_refusals(manifest: &Table, at: &str) -> Vec<String> {
     )]
 }
 
-fn parse_manifest(path: &Path) -> Result<Table, String> {
+pub(crate) fn parse_manifest(path: &Path) -> Result<Table, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     text.parse::<Table>()
         .map_err(|e| format!("{}: not TOML: {e}", path.display()))
@@ -700,7 +700,7 @@ fn parse_manifest(path: &Path) -> Result<Table, String> {
 /// repo-relative directory it names. `None` when it is absolute or climbs above the repository
 /// at any point, even to come back: where it lands then depends on what the checkout is named,
 /// which nothing here reads.
-fn resolve(dir: &str, path: &str) -> Option<String> {
+pub(crate) fn resolve(dir: &str, path: &str) -> Option<String> {
     let path = path.replace('\\', "/");
     if path.starts_with('/') || path.as_bytes().get(1) == Some(&b':') {
         return None;
@@ -873,7 +873,7 @@ pub(crate) fn tracked_manifests(root: &Path, rows: &Rows) -> Tracked {
         .collect())
 }
 
-fn declares_workspace(manifest: &Table) -> bool {
+pub(crate) fn declares_workspace(manifest: &Table) -> bool {
     matches!(manifest.get("workspace"), Some(Value::Table(_)))
 }
 
@@ -1494,11 +1494,11 @@ pub(crate) fn judge_rows(
     refused
 }
 
-fn short(commit: &str) -> &str {
+pub(crate) fn short(commit: &str) -> &str {
     &commit[..commit.len().min(12)]
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
         .current_dir(root)
         .args(args)
@@ -1515,12 +1515,12 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// The merge base of `HEAD` with `origin/main`.
-fn merge_base(root: &Path) -> Result<String, String> {
+pub(crate) fn merge_base(root: &Path) -> Result<String, String> {
     git(root, &["merge-base", MAIN_REF, "HEAD"]).map(|c| c.trim().to_string())
 }
 
 /// `file` at `commit`, read from git objects, or `None` when that commit has no such file.
-fn file_at(root: &Path, commit: &str, file: &str) -> Result<Option<String>, String> {
+pub(crate) fn file_at(root: &Path, commit: &str, file: &str) -> Result<Option<String>, String> {
     if git(root, &["ls-tree", "--name-only", commit, "--", file])?.trim().is_empty() {
         return Ok(None);
     }

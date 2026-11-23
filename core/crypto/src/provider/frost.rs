@@ -28,10 +28,17 @@ use crate::ed25519::{Signature, VerifyingKey};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
+/// A failure of this module. Its surface names no type of the threshold library: a dependent of
+/// this crate names the tree's own types only, and the library stays a dependency of this crate
+/// alone. `threshold_surface` holds that for every public item of the crate.
 #[derive(Debug, thiserror::Error)]
 pub enum FrostError {
+    /// A failure the threshold library reported, as the library's own text for it. Each of the
+    /// library's failures has its own text, so two of them are told apart by it. The text is the
+    /// library's fixed words for the failure (no message of `frost-core` 2.2.0 interpolates a
+    /// field), so it quotes no input and holds no key or share.
     #[error("FROST: {0}")]
-    Frost(#[from] frost_ed25519::Error),
+    Frost(String),
     #[error("serialise: {0}")]
     Serialise(String),
     #[error("deserialise: {0}")]
@@ -50,6 +57,12 @@ pub type FrostResult<T> = Result<T, FrostError>;
 pub type KeyShares = FrostResult<(Vec<(u16, String)>, String, String)>;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// The library's failure as [`FrostError::Frost`]. A function and not a `From` impl, because an
+/// impl of a public trait for a public type is public and would name the library's type.
+fn library(e: frost::Error) -> FrostError {
+    FrostError::Frost(e.to_string())
+}
 
 fn id_from_index(idx: u16) -> FrostResult<Identifier> {
     Identifier::try_from(idx).map_err(|_| FrostError::InvalidIndex(idx))
@@ -105,7 +118,8 @@ pub fn generate_key_shares(
         threshold,
         frost::keys::IdentifierList::Default,
         rng,
-    )?;
+    )
+    .map_err(library)?;
 
     let vk_bytes = *group_key(pubkey_package.verifying_key())?.as_bytes();
 
@@ -121,7 +135,7 @@ pub fn generate_key_shares(
         let secret_share = shares_map.get(&id).ok_or_else(|| {
             FrostError::Deserialise(format!("missing share for participant {idx}"))
         })?;
-        let key_package = KeyPackage::try_from(secret_share.clone())?;
+        let key_package = KeyPackage::try_from(secret_share.clone()).map_err(library)?;
         let kp_hex = serialise(&key_package)?;
         out.push((idx, kp_hex));
     }
@@ -171,7 +185,8 @@ pub fn split_existing_identity(
         threshold,
         frost::keys::IdentifierList::Default,
         &mut rng,
-    )?;
+    )
+    .map_err(library)?;
 
     let vk_bytes = *group_key(pubkey_package.verifying_key())?.as_bytes();
     let did = DidKeyMethod::from_public_key_bytes(&vk_bytes)
@@ -181,7 +196,7 @@ pub fn split_existing_identity(
 
     let mut out = Vec::with_capacity(total as usize);
     for (idx, (_id, secret_share)) in shares_map.iter().enumerate() {
-        let key_package = KeyPackage::try_from(secret_share.clone())?;
+        let key_package = KeyPackage::try_from(secret_share.clone()).map_err(library)?;
         out.push(((idx + 1) as u16, serialise(&key_package)?));
     }
     Ok((out, pubkey_hex, did))
@@ -266,7 +281,7 @@ pub fn signing_sign(
     let nonces: round1::SigningNonces = deserialise(nonces_hex)?;
     let pkg: SigningPackage = deserialise(signing_package_hex)?;
 
-    let share = frost::round2::sign(&pkg, &nonces, &kp)?;
+    let share = frost::round2::sign(&pkg, &nonces, &kp).map_err(library)?;
     serialise(&share)
 }
 
@@ -296,7 +311,7 @@ pub fn aggregate(
     }
 
     let key = group_key(pubkey.verifying_key())?;
-    let sig = frost::aggregate(&pkg, &map, &pubkey)?;
+    let sig = frost::aggregate(&pkg, &map, &pubkey).map_err(library)?;
     let bytes: [u8; 64] = sig
         .serialize()
         .map_err(|e| FrostError::Serialise(format!("serialize signature: {e}")))?[..]
@@ -328,7 +343,7 @@ fn released(key: &VerifyingKey, message: &[u8], signature: [u8; 64]) -> FrostRes
 /// - `participant_id_hex` — this participant's serialised `Identifier`.
 pub fn dkg_part1(index: u16, threshold: u16, total: u16) -> FrostResult<(String, String, String)> {
     let id = id_from_index(index)?;
-    let (secret, package) = dkg::part1(id, total, threshold, rand::rngs::OsRng)?;
+    let (secret, package) = dkg::part1(id, total, threshold, rand::rngs::OsRng).map_err(library)?;
     Ok((serialise(&secret)?, serialise(&package)?, serialise(&id)?))
 }
 
@@ -348,7 +363,7 @@ pub fn dkg_part2(
     for (id_hex, pkg_hex) in round1_packages {
         r1.insert(deserialise::<Identifier>(id_hex)?, deserialise(pkg_hex)?);
     }
-    let (round2_secret, round2_map) = dkg::part2(secret, &r1)?;
+    let (round2_secret, round2_map) = dkg::part2(secret, &r1).map_err(library)?;
     let mut out = Vec::with_capacity(round2_map.len());
     for (id, pkg) in &round2_map {
         out.push((serialise(id)?, serialise(pkg)?));
@@ -377,7 +392,7 @@ pub fn dkg_part3(
     for (id_hex, pkg_hex) in round2_packages {
         r2.insert(deserialise::<Identifier>(id_hex)?, deserialise(pkg_hex)?);
     }
-    let (key_package, pubkey_package) = dkg::part3(&round2_secret, &r1, &r2)?;
+    let (key_package, pubkey_package) = dkg::part3(&round2_secret, &r1, &r2).map_err(library)?;
 
     let vk_bytes = *group_key(pubkey_package.verifying_key())?.as_bytes();
     let org_did = DidKeyMethod::from_public_key_bytes(&vk_bytes)
@@ -882,5 +897,22 @@ mod tests {
         let msg = b"split-existing-identity threshold signs";
         let sig = sign_with_shares(&shares, &pubkey_hex, 2, msg).unwrap();
         verify_group_sig(&sig, &pubkey_hex, msg);
+    }
+
+    /// A failure of the threshold library comes back as [`FrostError::Frost`] saying the
+    /// library's own text for it, and two different failures come back told apart: a threshold
+    /// under two and a group under two are not the same error.
+    #[test]
+    fn a_library_failure_keeps_the_library_text_that_tells_it_apart() {
+        let said = |r: KeyShares| match r {
+            Err(e @ FrostError::Frost(_)) => e.to_string(),
+            other => panic!("expected the library's failure, got {other:?}"),
+        };
+        let threshold = said(generate_key_shares(1, 3));
+        let group = said(generate_key_shares(2, 1));
+        assert_eq!(threshold, format!("FROST: {}", frost::Error::InvalidMinSigners));
+        assert_eq!(group, format!("FROST: {}", frost::Error::InvalidMaxSigners));
+        assert_ne!(threshold, group);
+        assert_eq!(said(split_existing_identity(&[7; 32], 1, 3)), threshold);
     }
 }
