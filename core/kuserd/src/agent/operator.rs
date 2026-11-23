@@ -3165,9 +3165,11 @@ fn set_pending_cleared(store: &UserStore, name: &str) -> anyhow::Result<()> {
 /// The relay's answer, in the desktop's words. The relay's own text — its
 /// refusal's reason, and the body of an HTTP error it answered — is printed
 /// as data and to a bounded length ([`kotton_wire::note::quoted_cut`];
-/// another node's text is quoted where it enters this device). Where the
-/// relay gave no text, this desktop says so in its own words and quotes
-/// nothing ([`relay_answered_http`]).
+/// another node's text is quoted where it enters this device). An empty
+/// error text is said in this desktop's own words and nothing is quoted
+/// ([`relay_answered_http`]); the relay client's placeholder for a body it
+/// could not read still arrives as text and is quoted like a body, until the
+/// body's absence is a type of its own.
 fn rule_answer(said: Result<RelayOperatorResponse, kotton_net::rendezvous::RendezvousError>, name: &str) -> UserResponse {
     use kotton_net::rendezvous::RendezvousError;
     match said {
@@ -3184,9 +3186,11 @@ fn rule_answer(said: Result<RelayOperatorResponse, kotton_net::rendezvous::Rende
 
 /// An HTTP error the relay `name` answered, in the desktop's words: the
 /// relay's text, when it gave some, quoted as data and to a bounded length
-/// ([`kotton_wire::note::quoted_cut`]), and its absence said in this
-/// desktop's own words, with nothing between backticks, so only what the
-/// relay sent is printed as the relay's.
+/// ([`kotton_wire::note::quoted_cut`]); an empty text is said in this
+/// desktop's own words, with nothing between backticks, and nothing is
+/// quoted. The relay client's placeholder for a body it could not read still
+/// arrives as text and is quoted like a body, until the body's absence is a
+/// type of its own.
 fn relay_answered_http(name: &str, status: u16, body: Option<&str>) -> String {
     match body {
         Some(body) => format!(
