@@ -42,9 +42,12 @@
 //!   `#[cfg]` or `#[cfg_attr]` on it. A `use` may bind a value or a macro only, beside which
 //!   rustc keeps the glob's type, so a name a `use` binds reads as both its own targets and the
 //!   glob's; and an item under a `#[cfg]` may not be built, so it shadows nothing. Neither ends
-//!   the walk out to the scopes around a body. A name's targets only grow from round to round,
-//!   so the reading reaches the same end whatever order the modules are read in. A crate whose
-//!   bindings are still growing after [`ROUNDS`] rounds is refused, not read.
+//!   the walk out to the scopes around a body. Nor does anything a body holds: a body is read
+//!   as one scope of the items of every block under its item, which rustc scopes each to its
+//!   own block, so a body declares nothing and its names join the scopes' around it. A name's
+//!   targets only grow from round to round, so the reading reaches the same end whatever order
+//!   the modules are read in. A crate whose bindings are still growing after [`ROUNDS`] rounds
+//!   is refused, not read.
 //! - **A public item** is one written `pub`, in whatever module: a function's signature
 //!   (parameters, return, generics and their bounds), a constant's or static's type, a pub
 //!   item of an `extern` block, a struct's or union's generics and `pub` fields, every field
@@ -498,7 +501,9 @@ struct Module<'a> {
     /// modules, type aliases, structs, unions, enums, traits, trait aliases and `extern crate`s,
     /// each without a `#[cfg]` or `#[cfg_attr]`. These shadow a glob's names, and a name declared
     /// here is not looked up around. A `use` is not among them: it may bind a value or a macro
-    /// only, beside which the glob's type stands, so its targets join the glob's.
+    /// only, beside which the glob's type stands, so its targets join the glob's. A body declares
+    /// nothing, since it holds the items of every block under its item, each scoped by rustc to
+    /// its own block.
     declared: BTreeSet<String>,
     bindings: BTreeMap<String, Targets>,
 }
@@ -674,9 +679,12 @@ impl<'a> Crate<'a> {
                 self.build(inner, file, format!("{name}::{{body of {what}}}"), Within::Body(idx), None, stack);
             }
         }
+        // A body scope gathers the items of every block under an item into one scope, where
+        // rustc scopes each to its own block, so it declares nothing.
+        let body = matches!(within, Within::Body(_));
         let mut declared = BTreeSet::new();
         for item in &items {
-            if conditional(item_attrs(item)) {
+            if body || conditional(item_attrs(item)) {
                 continue;
             }
             let name = match item {
@@ -1532,11 +1540,7 @@ mod tests {
     /// shadow the glob's name.
     #[test]
     fn an_item_under_a_cfg_does_not_shadow_a_glob_s_name() {
-        let base = [
-            (LIB, "mod a;\nmod util;\n"),
-            ("src/util.rs", "pub fn frost() {}\n"),
-            ("src/a.rs", "use frost_ed25519 as frost;\nmod child;\n"),
-        ];
+        let base = [(LIB, "mod a;\n"), ("src/a.rs", "use frost_ed25519 as frost;\nmod child;\n")];
         let module = settled(
             &[
                 &base[..],
@@ -1575,6 +1579,22 @@ mod tests {
                 "src/lib.rs:10: impl S (its pub items) names the threshold library (`frost::Identifier`)",
             ]
         );
+    }
+
+    /// A body is read as one scope of every block under its item, so a struct in one block does
+    /// not shadow, for an impl beside the block, the module's name that leads to the library.
+    #[test]
+    fn a_name_in_one_block_of_a_body_does_not_hide_the_module_s_name_from_another() {
+        let found = settled(&[
+            (LIB, "mod a;\n"),
+            ("src/a.rs", "use frost_ed25519 as frost;\nmod b;\n"),
+            (
+                "src/a/b.rs",
+                "use crate::a as up;\npub struct S;\npub fn h() {\n    { struct up; }\n    \
+                 impl S { pub fn i(_: up::frost::Identifier) {} }\n}\n",
+            ),
+        ]);
+        assert_eq!(found, ["src/a/b.rs:5: impl S (its pub items) names the threshold library (`up::frost::Identifier`)"]);
     }
 
     /// A chain of globs takes a round per link, read in the order the modules are declared; a
