@@ -145,7 +145,7 @@ A note's sentence gives a command to type only with a name that is one plain wor
 * `cat` — Print a file in your tree — shares the REPL's `cat` verb
 * `mint` — Make the key a relay or a vault of your own is created for, and print the command its host runs — shares the REPL's `mint` verb
 * `enrol` — Complete a key `mint` made, from the line its relay or vault printed when it was created — shares the REPL's `enrol` verb
-* `relay` — This device's relay (set, clear, status), and a relay of your own (rule, invite, forget) — shares the REPL's `relay` verb
+* `relay` — This device's relay (set, clear, status), and a relay of your own (rule, invite, rotate, forget) — shares the REPL's `relay` verb
 * `vault` — A vault of your own (people, invite, digits, space, drop, stand, move, forget) — shares the REPL's `vault` verb
 * `grant` — Grant management (revoke, import)
 * `extension` — Confined extensions (install, list, remove)
@@ -1292,17 +1292,17 @@ enrol <line> [<line>…] — paste the line each relay or vault of your own prin
 
 ## `Kotton relay`
 
-This device's relay (set, clear, status), and a relay of your own (rule, invite, forget) — shares the REPL's `relay` verb
+This device's relay (set, clear, status), and a relay of your own (rule, invite, rotate, forget) — shares the REPL's `relay` verb
 
 **Usage:** `Kotton relay [OPTIONS] [ARGS]...`
 
 ```text
-relay [set <url> | set <line or invite> | clear | status | rule [<r>] [<rule>] | invite [<r>] | forget [<r>]] — configure the rendezvous relay, and operate a relay of your own, or forget one whose host is gone; <r> only when this desktop operates more than one relay. mint and enrol make one; relay and vault operate one: `mint relay`, then `enrol <its line>`, makes one
+relay [set <url> | set <line or invite> | clear | status | rule [<r>] [<rule>] | invite [<r>] | rotate [<r>] | forget [<r>]] — configure the rendezvous relay, and operate a relay of your own, or forget one whose host is gone; <r> only when this desktop operates more than one relay. rotate gives the relay a new key for the people you invite, after you type its name back: the key before is read until the next rotation, so a second one refuses a device that has not reconnected to its vault since the first; it finishes a drop made at `kvaultd drop`, which names it. mint and enrol make one; relay and vault operate one: `mint relay`, then `enrol <its line>`, makes one
 ```
 
 ###### **Arguments:**
 
-* `<ARGS>` — Arguments: `status` | `set <line or invite>` | `clear` | `rule [<r>] [<rule>]` | `invite [<r>]` | `forget [<r>]`
+* `<ARGS>` — Arguments: `status` | `set <line or invite>` | `clear` | `rule [<r>] [<rule>]` | `invite [<r>]` | `rotate [<r>]` | `forget [<r>]`
 
 ###### **Options:**
 
@@ -1317,7 +1317,7 @@ A vault of your own (people, invite, digits, space, drop, stand, move, forget) �
 **Usage:** `Kotton vault [OPTIONS] [ARGS]...`
 
 ```text
-vault [stand [<v>] | move [<v>] <r> | people [<v>] | invite [<v>] <name> [--space <bytes>] | invite [<v>] --me | digits [<v>] <name> | space [<v>] <name> <bytes> | drop [<v>] <name> --confirm <name> | forget [<v>]] — the landlord's verbs for a vault of your own, and forget [<v>] for one whose host is gone; <v> only when this desktop operates more than one vault. A drop rotates the invited key at each relay you operate that the vault stands at, once the vault no longer lists the pool; a drop it did not answer waits on this desktop, and rotates when the vault is next reached. mint and enrol make one; relay and vault operate one: `mint vault`, then `enrol <its line>`, makes one
+vault [stand [<v>] | move [<v>] <r> | people [<v>] | invite [<v>] <name> [--space <bytes>] | invite [<v>] --me | digits [<v>] <name> | space [<v>] <name> <bytes> | drop [<v>] <name> --confirm <name> | forget [<v>]] — the landlord's verbs for a vault of your own, and forget [<v>] for one whose host is gone; <v> only when this desktop operates more than one vault. A drop rotates the invited key at each relay you operate that the vault stands at, once the vault no longer lists the pool; a drop it did not answer waits on this desktop, and rotates when the vault is next reached within seven days; one still waiting then ends, and your next verb says so, with `relay rotate`. mint and enrol make one; relay and vault operate one: `mint vault`, then `enrol <its line>`, makes one
 ```
 
 ###### **Arguments:**

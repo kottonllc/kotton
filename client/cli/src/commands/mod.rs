@@ -304,13 +304,13 @@ pub enum Commands {
         args: Vec<String>,
     },
     /// This device's relay (set, clear, status), and a relay of your own (rule, invite,
-    /// forget) — shares the REPL's `relay` verb
+    /// rotate, forget) — shares the REPL's `relay` verb
     #[command(after_help = shell_help("relay"))]
     Relay {
         /// Identity to act as, before the verb's words (defaults to the active identity / KOTTON_USER)
         #[arg(long)]
         user: Option<String>,
-        /// Arguments: `status` | `set <line or invite>` | `clear` | `rule [<r>] [<rule>]` | `invite [<r>]` | `forget [<r>]`
+        /// Arguments: `status` | `set <line or invite>` | `clear` | `rule [<r>] [<rule>]` | `invite [<r>]` | `rotate [<r>]` | `forget [<r>]`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_parser = verb_word)]
         args: Vec<String>,
     },

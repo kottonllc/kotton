@@ -432,7 +432,9 @@ pub enum OperatorVerb {
     /// there from the rotation after this one; with no such relay, nothing
     /// rotates. Until then the desktop keeps the drop as waiting, and looks
     /// again when the vault is next reached: at a verb said to it, and on the
-    /// desktop's hourly pass.
+    /// desktop's hourly pass. A drop waits seven days from when it was said;
+    /// one still waiting then ends unrotated, and the person's next verb says
+    /// so, with `relay rotate` (`RotateInvited`).
     Drop { pool: String },
     /// The rule the relay holds. Asked of the relay under its own
     /// credential's key. Answered with `RelayRule`.
@@ -451,12 +453,29 @@ pub enum OperatorVerb {
     /// and refused for a relay whose rule admits only its operator's devices,
     /// where an invite would admit nobody.
     RelayInvite,
+    /// Rotate the relay's *invited* admission key (answered with `RelayRule`):
+    /// the rule the relay holds is set again with a new *invited* key, the way
+    /// a dropped pool's rotation sets it — every vault this desktop told to
+    /// stand at that relay is told its reach set again first, and the reach
+    /// note is handed on. *Mine* is not rotated. The relay reads the current
+    /// key and the one before, so a device that has not reconnected to its
+    /// vault since the rotation before this one is refused there. Before the
+    /// new key is minted, each vault with a drop waiting at that relay is asked
+    /// `Tenants`; only the drops whose pool it no longer lists are answered by
+    /// this rotation, and a drop still listed, or whose vault did not answer,
+    /// waits for its own. A rotation this verb began and did not finish is
+    /// finished by the verb said again, with the key already kept, until the
+    /// relay answers a set. Refused for a relay whose credential recorded no
+    /// key, and for one this desktop keeps no keys for yet, each with the act
+    /// that mends it.
+    RotateInvited,
 }
 
 impl OperatorVerb {
     /// The service this verb is said to (DEC-0087): the seven the vault's
-    /// credential speaks under, and the relay's three — two the relay answers,
-    /// and its invite, which the desktop mints from what it keeps. The name in
+    /// credential speaks under, and the relay's four — two the relay answers,
+    /// its invite, which the desktop mints from what it keeps, and the
+    /// rotation of its invited key, which is a set. The name in
     /// `AsOperator` is looked up among the credentials for this service alone.
     pub fn service(&self) -> OperatedService {
         match self {
@@ -469,7 +488,7 @@ impl OperatorVerb {
             | Self::Drop { .. } => {
                 OperatedService::Vault
             }
-            Self::ReadRule | Self::SetRule { .. } | Self::RelayInvite => OperatedService::Relay,
+            Self::ReadRule | Self::SetRule { .. } | Self::RelayInvite | Self::RotateInvited => OperatedService::Relay,
         }
     }
 }
