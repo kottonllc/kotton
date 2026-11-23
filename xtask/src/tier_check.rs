@@ -538,7 +538,7 @@ pub(crate) fn parse_owed(text: &str) -> Result<Owed, String> {
 
 /// Every `Cargo.toml` under `dir`, depth-first, skipping hidden, `target` and `target-*`
 /// directories. [`read_tree`] refuses a manifest git tracks that this passed over.
-fn manifests_under(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn manifests_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -690,7 +690,7 @@ fn shape_refusals(manifest: &Table, at: &str) -> Vec<String> {
     )]
 }
 
-fn parse_manifest(path: &Path) -> Result<Table, String> {
+pub(crate) fn parse_manifest(path: &Path) -> Result<Table, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     text.parse::<Table>()
         .map_err(|e| format!("{}: not TOML: {e}", path.display()))
@@ -700,7 +700,7 @@ fn parse_manifest(path: &Path) -> Result<Table, String> {
 /// repo-relative directory it names. `None` when it is absolute or climbs above the repository
 /// at any point, even to come back: where it lands then depends on what the checkout is named,
 /// which nothing here reads.
-fn resolve(dir: &str, path: &str) -> Option<String> {
+pub(crate) fn resolve(dir: &str, path: &str) -> Option<String> {
     let path = path.replace('\\', "/");
     if path.starts_with('/') || path.as_bytes().get(1) == Some(&b':') {
         return None;
@@ -1498,7 +1498,7 @@ fn short(commit: &str) -> &str {
     &commit[..commit.len().min(12)]
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
         .current_dir(root)
         .args(args)

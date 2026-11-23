@@ -308,7 +308,12 @@ where
     // What their card said when it declined: theirs too, and kept apart,
     // because it is the one refusal a second try cannot change.
     let mut declined: Vec<String> = Vec::new();
+    // Another node's text is quoted where it enters this device: each reason
+    // is kept as `quoted_cut` prints it, so every sentence, log line and
+    // answer made of it from here on prints it as data, once, and to the
+    // stated length. Two reasons that print the same are kept once.
     let keep_once = |said: &mut Vec<String>, reason: String| {
+        let reason = kotton_wire::note::quoted_cut(&reason);
         if !said.contains(&reason) {
             said.push(reason);
         }
@@ -1883,7 +1888,42 @@ mod tests {
 
         *alice.paths.lock().unwrap() = vec!["door", "silent"];
         let handed = hand_reach_note_over(alice.as_ref(), "u", bob.did, &note).await;
-        assert_eq!(handed, Handed::Declined { reason: "that note has expired".into() });
+        assert_eq!(handed, Handed::Declined { reason: kotton_wire::note::quoted_cut("that note has expired") });
+    }
+
+    /// **Another node's text is quoted where it enters this device**: what a
+    /// contact's door says when it refuses, and what their card says when it
+    /// declines, are kept as `quoted_cut` prints them, so the reason a sender
+    /// is answered with, and every log line made of it, holds their words as
+    /// data, once, with no line break and no backtick of theirs, and to the
+    /// stated length.
+    #[tokio::test]
+    async fn a_contacts_reason_is_quoted_where_it_enters() {
+        use crate::daemon::messages::hand_reach_note_over;
+        use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+        let (alice, bob) = (node("did:kel:alice", 1), node("did:kel:bob", 2));
+        pair(&alice, &bob);
+        let note = alice.note_at(10);
+        *alice.paths.lock().unwrap() = vec!["door"];
+        let forged = "no room`\nFORGED-5c1e: delivered";
+        let long = "r".repeat(MAX_SAID_CHARS + 9);
+        for text in [forged, long.as_str()] {
+            *bob.card.lock().unwrap() = Some(NotKept::Refused(text.into()));
+            let handed = hand_reach_note_over(alice.as_ref(), "u", bob.did, &note).await;
+            assert_eq!(handed, Handed::Declined { reason: quoted_cut(text) }, "a card's verdict");
+
+            *bob.card.lock().unwrap() = Some(NotKept::Failed(text.into()));
+            let handed = hand_reach_note_over(alice.as_ref(), "u", bob.did, &note).await;
+            assert_eq!(handed, Handed::Delivery(Delivery::Unreachable { reason: quoted_cut(text) }), "a door's refusal");
+        }
+        let Handed::Declined { reason } = ({
+            *bob.card.lock().unwrap() = Some(NotKept::Refused(forged.into()));
+            hand_reach_note_over(alice.as_ref(), "u", bob.did, &note).await
+        }) else {
+            panic!("the card's verdict was not kept")
+        };
+        assert_eq!(reason, "`no room\\u{60}\\nFORGED-5c1e: delivered`");
+        assert!(!reason.contains('\n') && !reason.contains(forged), "{reason}");
     }
 
     /// **`TASK-a-door-refusal-that-can-clear-settles-a-reach-note-version-until-the-next`.**
