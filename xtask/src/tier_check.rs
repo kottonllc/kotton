@@ -635,7 +635,7 @@ pub(crate) struct Tree {
     pub(crate) refused: Vec<String>,
 }
 
-fn package_name(manifest: &Table) -> Option<String> {
+pub(crate) fn package_name(manifest: &Table) -> Option<String> {
     manifest
         .get("package")?
         .as_table()?
@@ -873,7 +873,7 @@ pub(crate) fn tracked_manifests(root: &Path, rows: &Rows) -> Tracked {
         .collect())
 }
 
-fn declares_workspace(manifest: &Table) -> bool {
+pub(crate) fn declares_workspace(manifest: &Table) -> bool {
     matches!(manifest.get("workspace"), Some(Value::Table(_)))
 }
 
