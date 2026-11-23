@@ -768,9 +768,10 @@ pub trait JoinerRow: Send + Sync {
 /// Why an admitting device ended a ceremony before it handed anything: it
 /// would not record the joiner. The sentence is this device's own, said to
 /// its person; the joiner was sent this device's refusal in the payload's
-/// place, which names nothing of this device's records, and was handed
-/// nothing. The issuer's ceremony returns this before its caller writes
-/// anything, so nothing is kept on either side.
+/// place, which says only that this device will not record it and that this
+/// device's person is told why, naming nothing in this device's records, and
+/// was handed nothing. The issuer's ceremony returns this before its caller
+/// writes anything, so nothing is kept on either side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefusedBeforeHanding(pub String);
 
@@ -805,24 +806,30 @@ impl std::fmt::Display for NotHanded {
 impl std::error::Error for NotHanded {}
 
 /// What the admitting device tells the joiner when it will not record it:
-/// this device's own words, naming nothing of its records, sent in the
-/// payload's place. `None` where the store would record the joiner's row.
-/// The second sentence is what this device's person is told.
+/// one sentence saying that, and that this device's person is told why,
+/// sent in the payload's place. It names nothing in this device's records;
+/// where the joiner's key is one this device cannot record, or this device
+/// could not read its own records, it says that one fact as well. `None`
+/// where the store would record the joiner's row. The second sentence is what
+/// this device's person is told.
 async fn refusal_of(rows: &dyn JoinerRow, joiner_key: &[u8; 32]) -> Option<(&'static str, String)> {
     let key = match kotton_crypto::ed25519::VerifyingKey::from_bytes(joiner_key) {
         Ok(key) => key,
         Err(e) => {
             return Some((
-                "its key is not an Ed25519 key the admitting device can record",
+                "the admitting device will not record the joining device, whose key is not one the admitting device can record, and the admitting device's person is told why",
                 format!("the other device's key is not an Ed25519 key: {e}"),
             ))
         }
     };
     match rows.refused_for(&key).await {
         Ok(None) => None,
-        Ok(Some(why)) => Some(("the admitting device already pairs another key under this device's did:key", why)),
+        Ok(Some(why)) => Some((
+            "the admitting device will not record the joining device, and the admitting device's person is told why",
+            why,
+        )),
         Err(e) => Some((
-            "the admitting device could not read its own records of the person's devices",
+            "the admitting device will not record the joining device, because it could not read its own records, and the admitting device's person is told why",
             format!("this device could not read its records of your devices: {e}"),
         )),
     }
@@ -2611,8 +2618,10 @@ mod tests {
     /// the joiner's key before it builds anything, and the store refuses. The
     /// issuer returns [`RefusedBeforeHanding`] with the store's sentence; the
     /// joiner is handed no payload — it returns [`NotHanded`], with this
-    /// side's refusal, which names nothing of the issuer's records and is
-    /// printed as data — so neither side has anything to keep.
+    /// side's refusal, which says only that the issuer will not record it
+    /// and that the issuer's person is told why, names nothing in the
+    /// issuer's records, and is printed as data — so neither side has
+    /// anything to keep.
     #[tokio::test]
     async fn committed_enrol_the_store_would_refuse_ends_before_the_payload_and_both_sides_are_told() {
         let issuer_identity = SigningKey::from_bytes(&[11u8; 32]);
@@ -2656,12 +2665,63 @@ mod tests {
         );
         let err = j.err().expect("the joiner was handed a payload the issuer's store refuses");
         let not_handed = err.downcast_ref::<NotHanded>().unwrap_or_else(|| panic!("the joiner was not told: {err:#}"));
-        assert_eq!(not_handed.0, "the admitting device already pairs another key under this device's did:key");
+        assert_eq!(not_handed.0, "the admitting device will not record the joining device, and the admitting device's person is told why");
         assert!(!not_handed.0.contains("attic"), "the joiner was told the issuer's records: {not_handed}");
         assert!(
             err.to_string().ends_with(&kotton_wire::note::quoted_cut(&not_handed.0)),
             "the issuer's words were not printed as data: {err}"
         );
+    }
+
+    /// **The payload's frame has two readings, and neither is the other.** The
+    /// issuer's refusal never parses as a [`PairingPayload`], and no payload,
+    /// of any variant, parses as an [`Answer`], so the joiner reads a frame in
+    /// the payload's slot as exactly one of them. The match names every
+    /// variant, so one added without a case here does not compile.
+    #[test]
+    fn the_refusal_and_the_payload_never_parse_as_each_other() {
+        let refused =
+            serde_json::to_vec(&Answer::Refused { why: "the admitting device will not record the joining device".into() })
+                .unwrap();
+        assert!(serde_json::from_slice::<PairingPayload>(&refused).is_err(), "the refusal parses as a payload");
+
+        let did = did_key(&SigningKey::from_bytes(&[1u8; 32]).verifying_key().to_bytes()).unwrap();
+        let payloads = [
+            PairingPayload::FullAccess { seed32: [0xAB; 32] },
+            PairingPayload::FrostShare {
+                share: FrostSharePayload("share".to_string()),
+                warm_key_delegation: WarmKeyDelegation {
+                    warm_did: did.clone(),
+                    warm_pubkey: [9u8; 32],
+                    expires_at: 1_800_000_000,
+                    root_did: did,
+                    quorum_signature: "c2ln".to_string(),
+                },
+                quorum_certificate: "cert".to_string(),
+                data_keys: Some(full_keys([3u8; 32])),
+                pubkey_package: "pubkeypkg".to_string(),
+                kel: vec![],
+                drives: vec![],
+            },
+            PairingPayload::Gateway(kotton_wire::peer::GatewayHandout {
+                user_id: "alice".to_string(),
+                relay_url: "https://relay.example".to_string(),
+                node_label: "laptop".to_string(),
+            }),
+            PairingPayload::BlindRelay { kel: vec![], recovery_bundle: None },
+            PairingPayload::BlindRelay { kel: vec![], recovery_bundle: Some("{}".to_string()) },
+        ];
+        for payload in &payloads {
+            let name = match payload {
+                PairingPayload::FullAccess { .. } => "FullAccess",
+                PairingPayload::FrostShare { .. } => "FrostShare",
+                PairingPayload::Gateway(_) => "Gateway",
+                PairingPayload::BlindRelay { .. } => "BlindRelay",
+            };
+            let bytes = serde_json::to_vec(payload).unwrap();
+            assert!(serde_json::from_slice::<PairingPayload>(&bytes).is_ok(), "{name} does not parse as a payload");
+            assert!(serde_json::from_slice::<Answer>(&bytes).is_err(), "{name} parses as an answer");
+        }
     }
 
     /// Full committed-handshake enrollment over loopback QUIC: the issuer splits
@@ -3513,7 +3573,7 @@ mod relayed_tests {
         );
         let err = j.err().expect("the vault was handed a payload the issuer's store refuses");
         let not_handed = err.downcast_ref::<NotHanded>().unwrap_or_else(|| panic!("the vault was not told: {err:#}"));
-        assert_eq!(not_handed.0, "the admitting device already pairs another key under this device's did:key");
+        assert_eq!(not_handed.0, "the admitting device will not record the joining device, and the admitting device's person is told why");
     }
 
     /// **A joiner that closes without answering leaves the issuer nothing**:

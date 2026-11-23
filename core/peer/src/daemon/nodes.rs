@@ -1851,8 +1851,9 @@ pub enum NotRecorded {
     /// The store refuses the node's row, or its key, read before the first
     /// write: nothing was kept. The store's sentence.
     Refused(String),
-    /// A write failed. What was kept before it stays: the finalizer is not
-    /// one transaction.
+    /// A read or a write failed. A failed read, before the first write, keeps
+    /// nothing; what a failed write's earlier writes kept stays: the finalizer
+    /// is not one transaction.
     Failed(io::Error),
 }
 
@@ -1892,9 +1893,10 @@ impl std::fmt::Display for NotRecorded {
 /// derivation is already a row's DID beside another key — it answers
 /// [`NotRecorded::Refused`] with nothing kept: no FROST share or group key, no
 /// row, no drive, no key on the allowlist, no member. Its callers say that as
-/// a refusal, never as a write that failed. It is not one transaction: a
+/// a refusal, never as a write that failed. A read that fails is
+/// [`NotRecorded::Failed`] with nothing kept. It is not one transaction: a
 /// write that fails for another reason after the first is
-/// [`NotRecorded::Failed`], and leaves what was kept before it. No writer of
+/// [`NotRecorded::Failed`] too, and leaves what was kept before it. No writer of
 /// this build stores the refused shape — every writer names a new row by its
 /// own key's derivation or keeps the key's row — so between the ceremony's
 /// read and this one, and between this read and the write, the offending row

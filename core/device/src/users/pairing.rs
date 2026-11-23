@@ -616,7 +616,7 @@ pub async fn handle_device_add(
                         reason: recorded_nothing_of("the device", &why),
                     },
                     Err(NotRecorded::Failed(e)) => UserResponse::PairFailed {
-                        reason: format!("Added the device, but saving it failed: {e}"),
+                        reason: format!("Added the device, but recording it here failed: {e}"),
                     },
                 }
             }
@@ -733,7 +733,7 @@ pub async fn handle_gateway_enroll(
                         reason: recorded_nothing_of("the gateway", &why),
                     },
                     Err(NotRecorded::Failed(e)) => UserResponse::PairFailed {
-                        reason: format!("Admitted the gateway, but saving it failed: {e}"),
+                        reason: format!("Admitted the gateway, but recording it here failed: {e}"),
                     },
                 }
             }
@@ -3715,7 +3715,7 @@ mod refused_before_handing_tests {
             "{there}"
         );
         assert!(
-            there.ends_with(&kotton_wire::note::quoted_cut("the admitting device already pairs another key under this device's did:key")),
+            there.ends_with(&kotton_wire::note::quoted_cut("the admitting device will not record the joining device, and the admitting device's person is told why")),
             "{there}"
         );
         assert!(!there.contains("attic"), "the joiner was told the issuer's records: {there}");
@@ -3792,7 +3792,7 @@ mod refused_before_handing_tests {
         let not_handed = err
             .downcast_ref::<kotton_peer::pairing::NotHanded>()
             .unwrap_or_else(|| panic!("the vault was not told: {err:#}"));
-        assert_eq!(not_handed.0, "the admitting device already pairs another key under this device's did:key");
+        assert_eq!(not_handed.0, "the admitting device will not record the joining device, and the admitting device's person is told why");
 
         assert_eq!(rows(&issuer).await, issuer_rows, "the admit changed a row");
         let drives: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(issuer.db.as_ref()).await.unwrap();
