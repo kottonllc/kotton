@@ -635,7 +635,7 @@ pub(crate) struct Tree {
     pub(crate) refused: Vec<String>,
 }
 
-fn package_name(manifest: &Table) -> Option<String> {
+pub(crate) fn package_name(manifest: &Table) -> Option<String> {
     manifest
         .get("package")?
         .as_table()?

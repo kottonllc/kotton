@@ -49,10 +49,23 @@
 //!     `[patch]` copy of the library is such a package, so its own edge is a finding too;
 //!   - no manifest under the code roots but [`THRESHOLD_HOME`] lists a package of the library,
 //!     in any dependency table, renamed or not, or inherited from an enclosing workspace's
-//!     `[workspace.dependencies]` under any key; that table's own entry declares a version and
-//!     is not a dependency. This pass names the file and the table, and it is what would hold a
-//!     manifest no lockfile records (`UNLOCKED`, in its tests). So no crate but `kotton-crypto` can name
-//!     the library, and its signatures reach the rest of the tree only through the provider;
+//!     `[workspace.dependencies]` under any key. The root manifest's own
+//!     `[workspace.dependencies]` entry declares the version a member inherits and is not read
+//!     as a dependency; any other manifest's, the relay's included, is read like its other
+//!     tables. This pass names the file and the table. It reads which workspace encloses a
+//!     member by path (the member's directory is the workspace's or under it), not by cargo's
+//!     `members` and `exclude`, so it may read a workspace for a member cargo does not; the
+//!     lockfile pass above, which reads what cargo resolved, is the hold, and this pass names
+//!     where a finding is spelled. So no crate but `kotton-crypto` can name the library, and
+//!     its signatures reach the rest of the tree only through the provider;
+//!   - every manifest under the code roots is one a lockfile read records: a package of the
+//!     tree under the name its `[package]` declares, or, with no `[package]`, a workspace's
+//!     root with a lockfile read beside it (`record_findings`), so the lockfile pass reads its
+//!     edges;
+//!   - no two manifests under the code roots declare the same package name, [`THRESHOLD_HOME`]
+//!     declares `kotton-crypto`, and each lockfile read records one package of the tree by
+//!     that name at most (`declaration_findings`, `home_record_findings`): a lockfile records a
+//!     package of the tree by its name alone;
 //!   - the seam: `verify_strict` is called in [`SEAM`] and in no other file under the code
 //!     roots, the relay's included; every other check is `kotton_ed25519::VerifyingKey::verify`
 //!     or reaches it.
@@ -96,9 +109,6 @@
 //!   package is in the library only where a lockfile records it as depending on `frost-core`
 //!   by name, directly or through another package of the library, so a copy of the core's
 //!   code published under another name is not;
-//! - the resolution of a manifest no lockfile it reads records (`UNLOCKED`, none today):
-//!   there it would read only the names the manifest spells, its own and its enclosing
-//!   workspaces', and no edge;
 //! - a lockfile outside the root and the code roots, and a package of the tree it records:
 //!   an edge is read only from the lockfiles it reads, though from every package they record,
 //!   wherever its manifest is.
@@ -125,9 +135,10 @@ const REFUSED: &[&str] = &["ed25519_dalek::Verifier::verify", "ed25519_dalek::Si
 const LIBRARY: &str = "ed25519-dalek";
 
 /// The core of the threshold-signing library, by its package name. The library is this package
-/// and every package from outside the tree that depends on it, directly or through another
-/// such package (`threshold_packages`): each of them reaches the core's own checks, as
-/// `frost-ed25519` and `frost-rerandomized` re-export it.
+/// and every package a lockfile read records as depending on it, directly or through another
+/// such package, with or without a `source` and [`THRESHOLD_HOME_PACKAGE`] alone left out
+/// (`threshold_packages`): each of them reaches the core's own checks, as `frost-ed25519` and
+/// `frost-rerandomized` re-export it.
 const THRESHOLD_CORE: &str = "frost-core";
 
 /// The one manifest that lists the threshold library: `kotton-crypto`'s, whose provider hands
@@ -207,7 +218,8 @@ fn ok_line(count: usize) -> String {
          refuses the unstrict check and the threshold library's own checks; the threshold library \
          ({THRESHOLD_CORE} and the packages the lockfiles record as depending on it) is a dependency edge of \
          {THRESHOLD_HOME_PACKAGE} alone in each lockfile read, and {THRESHOLD_HOME} alone of the manifests \
-         under the code roots lists it; both clippy runs are --all-targets with -D warnings, nothing lowers that but one named exemption, no manifest turns on \
+         under the code roots lists it; every manifest under the code roots is recorded by a lockfile read, \
+         and {THRESHOLD_HOME} alone declares {THRESHOLD_HOME_PACKAGE}; both clippy runs are --all-targets with -D warnings, nothing lowers that but one named exemption, no manifest turns on \
          a feature that adds another check, and verify_strict is called in one file in the tree, the relay \
          included ({SEAM})."
     )
@@ -303,9 +315,12 @@ fn findings(root: &Path) -> (usize, Vec<String>) {
             let threshold = threshold_packages(&packages);
             found.extend(edge_findings(&packages, &threshold));
             found.extend(threshold_findings(manifests.iter().chain(&root_manifest), &threshold));
+            found.extend(record_findings(&manifests, &lockfiles, &packages));
+            found.extend(home_record_findings(&packages));
         }
         Err(e) => found.push(e),
     }
+    found.extend(declaration_findings(&manifests));
     found.extend(seam_findings(&sources));
     (sources.len(), found)
 }
@@ -670,7 +685,9 @@ fn edge_findings(packages: &[(String, LockPackage)], threshold: &BTreeSet<String
 /// No manifest but [`THRESHOLD_HOME`] lists a package of the threshold library (`threshold`,
 /// from `threshold_packages`), in any dependency table, inline or table form, renamed or not,
 /// or inherited (`workspace = true`) from the `[workspace.dependencies]` of an enclosing
-/// manifest with a `[workspace]` under a key that names one. The root manifest's
+/// manifest with a `[workspace]` under a key that names one. A workspace encloses a manifest
+/// here by path, its directory being the workspace's or under it, not by cargo's `members` and
+/// `exclude`; `edge_findings`, over what cargo resolved, is the hold. The root manifest's
 /// `[workspace.dependencies]` entry declares the version a member inherits and is not a
 /// dependency, so it is not a finding. A manifest that does not parse is `feature_findings`'
 /// finding.
@@ -727,6 +744,98 @@ fn threshold_findings<'a>(
                 ));
             }
         }
+    }
+    out
+}
+
+/// The directory of a file, by its relative path with `/` separators: `""` at the root.
+fn dir_of(file: &str) -> &str {
+    file.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// Every manifest under the code roots is one a lockfile read records: a package of the tree
+/// (no `source`) under the name its `[package]` declares, in any lockfile read, or, with no
+/// `[package]`, a workspace's root with a lockfile read beside it. The lockfile pass is what
+/// holds the threshold rule, so a manifest no lockfile read records is a finding: of it, the
+/// rule would read only the names the manifest spells, and no edge. A manifest that does not
+/// parse is `feature_findings`' finding.
+fn record_findings(
+    manifests: &[(String, String)],
+    lockfiles: &[(String, String)],
+    packages: &[(String, LockPackage)],
+) -> Vec<String> {
+    let recorded: BTreeSet<&str> = packages.iter().filter(|(_, p)| p.in_tree).map(|(_, p)| p.name.as_str()).collect();
+    let beside: BTreeSet<&str> = lockfiles.iter().map(|(f, _)| dir_of(f)).collect();
+    let read = lockfiles.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>().join(", ");
+    let mut out = Vec::new();
+    for (file, text) in manifests {
+        let Ok(m) = Manifest::read(text) else { continue };
+        let why = match (&m.package, m.workspace) {
+            (Some(name), _) if recorded.contains(name.as_str()) => continue,
+            (None, true) if beside.contains(dir_of(file)) => continue,
+            (Some(name), _) => format!("no lockfile this check reads ({read}) records the package {name} as a package of the tree"),
+            (None, true) => format!("a workspace's root with no [package] and no lockfile this check reads ({read}) beside it"),
+            (None, false) => "declares no [package] name and no [workspace], so no lockfile this check reads records it".to_string(),
+        };
+        out.push(format!(
+            "{file}: {why}: the threshold rule is held by each lockfile's edges, and of a manifest no lockfile \
+             records it reads only the names the manifest spells; make it a member or path dependency of a \
+             workspace whose Cargo.lock is at the root or under the code roots"
+        ));
+    }
+    out
+}
+
+/// Each lockfile read records at most one package of the tree named [`THRESHOLD_HOME_PACKAGE`]:
+/// the threshold rule leaves out every package by that name, so a second would be left out too.
+fn home_record_findings(packages: &[(String, LockPackage)]) -> Vec<String> {
+    let mut count: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (file, p) in packages {
+        if p.in_tree && p.name == THRESHOLD_HOME_PACKAGE {
+            *count.entry(file.as_str()).or_default() += 1;
+        }
+    }
+    count
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(file, n)| {
+            format!(
+                "{file}: records {n} packages of the tree named {THRESHOLD_HOME_PACKAGE}, which the threshold rule \
+                 leaves out by name; {THRESHOLD_HOME} alone declares that package"
+            )
+        })
+        .collect()
+}
+
+/// No two manifests under the code roots declare the same package name, and [`THRESHOLD_HOME`]
+/// declares [`THRESHOLD_HOME_PACKAGE`]: a lockfile records a package of the tree by its name
+/// alone, so `record_findings` and the threshold rule read a name as one manifest. A manifest
+/// that does not parse is `feature_findings`' finding.
+fn declaration_findings(manifests: &[(String, String)]) -> Vec<String> {
+    let mut by_name: std::collections::BTreeMap<String, Vec<&str>> = std::collections::BTreeMap::new();
+    for (file, text) in manifests {
+        if let Some(name) = Manifest::read(text).ok().and_then(|m| m.package) {
+            by_name.entry(name).or_default().push(file.as_str());
+        }
+    }
+    let mut out = Vec::new();
+    if !by_name.get(THRESHOLD_HOME_PACKAGE).is_some_and(|files| files.contains(&THRESHOLD_HOME)) {
+        out.push(format!(
+            "{THRESHOLD_HOME}: does not declare the package name {THRESHOLD_HOME_PACKAGE}, the one package the \
+             threshold rule leaves out in every lockfile read"
+        ));
+    }
+    for (name, files) in by_name.iter().filter(|(_, files)| files.len() > 1) {
+        let also = if name == THRESHOLD_HOME_PACKAGE {
+            format!(", and the threshold rule leaves out every package named {name}, which {THRESHOLD_HOME} alone declares")
+        } else {
+            String::new()
+        };
+        out.push(format!(
+            "{}: each declares the package name {name}: a lockfile records a package of the tree by its name alone, \
+             so it cannot tell them apart{also}",
+            files.join(", ")
+        ));
     }
     out
 }
@@ -789,6 +898,8 @@ struct Dep {
 /// What this check reads of a parsed `Cargo.toml`: its dependencies in
 /// every dependency table, the values of its `[features]`, and its lint levels.
 struct Manifest {
+    /// The name its `[package]` declares, read as `tier-check` reads it.
+    package: Option<String>,
     /// It has a `[workspace]` table: a workspace's root.
     workspace: bool,
     deps: Vec<Dep>,
@@ -812,7 +923,8 @@ impl Manifest {
             v.and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
         };
         let mut m = Manifest {
-            workspace: t.get("workspace").is_some_and(Value::is_table),
+            package: crate::tier_check::package_name(&t),
+            workspace: crate::tier_check::declares_workspace(&t),
             deps: Vec::new(),
             feature_values: Vec::new(),
             lints: Vec::new(),
@@ -1044,6 +1156,7 @@ mod tests {
         write(CLIPPY_TOML, GOOD_CONFIG);
         write(SEAM, &format!("pub fn verify() {{ key.verify_strict(m, s) }}\n{EXEMPT_SRC}"));
         write("core/ed25519/Cargo.toml", "[package]\nname = \"kotton-ed25519\"\n");
+        write(THRESHOLD_HOME, HOME_MANIFEST);
         write("Cargo.toml", "[workspace.dependencies]\ned25519-dalek = { version = \"2.1\", features = [\"rand_core\"] }\n");
         write("Justfile", GOOD_JUSTFILE);
         write("Cargo.lock", FIXTURE_LOCK);
@@ -1095,12 +1208,23 @@ dependencies = [
 ]
 
 [[package]]
+name = \"kotton-ed25519\"
+version = \"0.1.0\"
+
+[[package]]
+name = \"kotton-msg\"
+version = \"0.1.0\"
+
+[[package]]
 name = \"kotton-org\"
 version = \"0.1.0\"
 dependencies = [
  \"kotton-crypto\",
 ]
 ";
+
+    /// [`THRESHOLD_HOME`] as the fixture has it: `kotton-crypto`, listing the library.
+    const HOME_MANIFEST: &str = "[package]\nname = \"kotton-crypto\"\n\n[dependencies]\nfrost-ed25519 = \"2.2\"\n";
 
     /// [`FIXTURE_LOCK`] with `extra` appended: packages a lockfile gains.
     fn lock_with(extra: &str) -> String {
@@ -1331,7 +1455,8 @@ dependencies = [
                     assert!(found[0].starts_with(&format!("{file}: [")), "{found:#?}");
                     assert!(found[0].contains(&format!("lists {package}")), "{found:#?}");
                 }
-                assert!(findings_with(THRESHOLD_HOME, &member(&deps)).is_empty(), "{deps}");
+                let home = member(&deps).replace("kotton-org", THRESHOLD_HOME_PACKAGE);
+                assert!(findings_with(THRESHOLD_HOME, &home).is_empty(), "{deps}");
             }
             // The root's version declaration is not a dependency; a dependency of the root is.
             let declared = format!("[workspace.dependencies]\ned25519-dalek = {{ version = \"2.1\", features = [\"rand_core\"] }}\n{package} = {{ version = \"2.2\", features = [\"serde\"] }}\n");
@@ -1352,7 +1477,7 @@ dependencies = [
         let found = findings_with("core/org/Cargo.toml", manifest);
         assert_eq!(found.len(), 1, "{found:#?}");
         assert!(found[0].starts_with("core/org/Cargo.toml: [dependencies] frost-rerandomized lists frost-rerandomized"), "{found:#?}");
-        assert!(findings_with(THRESHOLD_HOME, manifest).is_empty());
+        assert!(findings_with(THRESHOLD_HOME, &manifest.replace("kotton-org", THRESHOLD_HOME_PACKAGE)).is_empty());
 
         let root = crate::out::root();
         let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
@@ -1450,14 +1575,16 @@ dependencies = [
         );
         // Both together are both findings; kotton-crypto inheriting it is neither.
         assert_eq!(findings_with_all(&[("Cargo.lock", &edge), ("Cargo.toml", root), ("core/org/Cargo.toml", member)]).len(), 2);
-        assert!(findings_with_all(&[("Cargo.toml", root), (THRESHOLD_HOME, member)]).is_empty());
+        let home = member.replace("kotton-org", THRESHOLD_HOME_PACKAGE);
+        assert!(findings_with_all(&[("Cargo.toml", root), (THRESHOLD_HOME, &home)]).is_empty());
         // A workspace that does not enclose the member is not read for it. (The relay's own
-        // `[workspace.dependencies]` entry is a finding of itself, as before.)
+        // `[workspace.dependencies]` entry is a finding of itself, as before; its lockfile is
+        // beside it, so its root is recorded.)
         let elsewhere = "[workspace]\n\n[workspace.dependencies]\nthr = { package = \"frost-ed25519\", version = \"2.2\" }\n";
-        let found = findings_with_all(&[("infra/relay/Cargo.toml", elsewhere), ("core/org/Cargo.toml", member)]);
+        let found = findings_with_all(&[("infra/relay/Cargo.toml", elsewhere), ("infra/relay/Cargo.lock", "version = 4\n"), ("core/org/Cargo.toml", member)]);
         assert_eq!(found.len(), 1, "{found:#?}");
         assert!(found[0].starts_with("infra/relay/Cargo.toml: [workspace.dependencies] thr"), "{found:#?}");
-        let found = findings_with_all(&[("infra/relay/Cargo.toml", elsewhere), ("infra/relay/x/Cargo.toml", member)]);
+        let found = findings_with_all(&[("infra/relay/Cargo.toml", elsewhere), ("infra/relay/Cargo.lock", "version = 4\n"), ("infra/relay/x/Cargo.toml", member)]);
         assert_eq!(found.len(), 2, "{found:#?}");
         assert!(
             found.iter().any(|f| f.starts_with(
@@ -1512,53 +1639,70 @@ dependencies = [
         assert_eq!(t["package"]["name"].as_str(), Some(THRESHOLD_HOME_PACKAGE));
     }
 
-    /// The manifests under the code roots that no lockfile this check reads records: for these
-    /// the threshold rule would read the names the manifest spells and no edge. There are none:
-    /// `tools/workspace-hack`, excluded from the workspace, is a path dependency of its members,
-    /// so the root's `Cargo.lock` records it and its edges.
-    const UNLOCKED: &[&str] = &[];
-
-    /// Every `Cargo.toml` under the code roots is a package one of the lockfiles this check
-    /// reads records, a workspace root beside one of them, or named in [`UNLOCKED`], which the
-    /// module doc's "What it does not read" refers to.
+    /// A manifest under the code roots that no lockfile read records fails the whole check: a
+    /// package the lockfiles do not record as a package of the tree, a workspace's root with no
+    /// lockfile read beside it, and a manifest declaring neither; recorded, each holds.
     #[test]
-    fn every_manifest_under_the_code_roots_is_in_a_lockfile_read_or_named_unlocked() {
-        let root = crate::out::root();
-        let mut files = Vec::new();
-        for r in crate::tree::CODE_ROOTS {
-            walk(&root.join(r), &mut files);
+    fn a_manifest_no_lockfile_read_records_is_a_finding() {
+        let bench = "[package]\nname = \"floor-bench\"\n";
+        let found = findings_with_all(&[("tools/bench/Cargo.toml", bench)]);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(
+            found[0].starts_with("tools/bench/Cargo.toml: no lockfile this check reads (Cargo.lock) records the package floor-bench"),
+            "{found:#?}"
+        );
+        // Recorded with a `source`, it is a package from outside the tree, not this manifest.
+        let registry = lock_with(&lock_entry("floor-bench", "registry+https://github.com/rust-lang/crates.io-index", &[]));
+        assert_eq!(findings_with_all(&[("tools/bench/Cargo.toml", bench), ("Cargo.lock", &registry)]).len(), 1);
+        let recorded = lock_with(&lock_entry("floor-bench", "", &[]));
+        assert!(findings_with_all(&[("tools/bench/Cargo.toml", bench), ("Cargo.lock", &recorded)]).is_empty());
+        // In the relay's lockfile as in the root's.
+        let relay = lock_entry("floor-bench", "", &[]);
+        assert!(findings_with_all(&[("tools/bench/Cargo.toml", bench), ("infra/relay/Cargo.lock", &relay)]).is_empty());
+
+        // A workspace's root is recorded by a lockfile read beside it.
+        let found = findings_with_all(&[("infra/other/Cargo.toml", "[workspace]\n")]);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].starts_with("infra/other/Cargo.toml: a workspace's root with no [package] and no lockfile"), "{found:#?}");
+        assert!(findings_with_all(&[("infra/other/Cargo.toml", "[workspace]\n"), ("infra/other/Cargo.lock", "version = 4\n")]).is_empty());
+
+        // A package under `[project]` is read as no package, as `tier-check` reads it.
+        let found = findings_with_all(&[("core/org/Cargo.toml", "[project]\nname = \"kotton-org\"\n")]);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].starts_with("core/org/Cargo.toml: declares no [package] name and no [workspace]"), "{found:#?}");
+    }
+
+    /// A second manifest under the code roots declaring `kotton-crypto` fails the whole check,
+    /// and so does any name two manifests declare, `THRESHOLD_HOME` declaring another name, and a
+    /// lockfile recording two packages of the tree named `kotton-crypto`.
+    #[test]
+    fn a_second_manifest_declaring_kotton_crypto_is_a_finding() {
+        for file in ["core/crypto2/Cargo.toml", "infra/relay/crypto/Cargo.toml", "tools/x/Cargo.toml"] {
+            let found = findings_with(file, "[package]\nname = \"kotton-crypto\"\n");
+            assert_eq!(found.len(), 1, "{file}: {found:#?}");
+            assert!(found[0].contains(&format!("{THRESHOLD_HOME}, ")) || found[0].contains(&format!(", {THRESHOLD_HOME}:")), "{found:#?}");
+            assert!(found[0].contains(file), "{found:#?}");
+            assert!(found[0].contains(": each declares the package name kotton-crypto"), "{found:#?}");
+            assert!(found[0].contains("the threshold rule leaves out every package named kotton-crypto"), "{found:#?}");
         }
-        let mut lockfiles = vec![("Cargo.lock".to_string(), std::fs::read_to_string(root.join("Cargo.lock")).unwrap())];
-        let mut lock_dirs = vec![String::new()];
-        for f in files.iter().filter(|f| f.file_name().is_some_and(|n| n == "Cargo.lock")) {
-            let r = rel(&root, f);
-            lock_dirs.push(r.trim_end_matches("Cargo.lock").trim_end_matches('/').to_string());
-            lockfiles.push((r, std::fs::read_to_string(f).unwrap()));
-        }
-        let recorded: BTreeSet<String> =
-            read_lockfiles(&lockfiles).unwrap().into_iter().filter(|(_, p)| p.in_tree).map(|(_, p)| p.name).collect();
-        let mut unlocked = Vec::new();
-        for f in files.iter().filter(|f| f.file_name().is_some_and(|n| n == "Cargo.toml")) {
-            let r = rel(&root, f);
-            let t = parse(&std::fs::read_to_string(f).unwrap()).unwrap();
-            let dir = r.trim_end_matches("Cargo.toml").trim_end_matches('/');
-            let name = t.get("package").and_then(|p| p.get("name")).and_then(Value::as_str);
-            let covered = match name {
-                Some(n) => recorded.contains(n),
-                None => t.get("workspace").is_some() && lock_dirs.iter().any(|d| d == dir),
-            };
-            if !covered {
-                unlocked.push(r);
-            }
-        }
-        unlocked.sort();
-        assert_eq!(unlocked, UNLOCKED, "a manifest under the code roots that no lockfile read records");
-        let doc = std::fs::read_to_string(root.join(THIS)).unwrap();
-        assert!(doc.contains("a manifest no lockfile it reads records (`UNLOCKED`"));
-        assert_eq!(doc.contains("(`UNLOCKED`, none today)"), UNLOCKED.is_empty());
-        for m in UNLOCKED {
-            assert!(doc.lines().filter(|l| l.starts_with("//!")).any(|l| l.contains(m)), "{m} is not named in the module doc");
-        }
+        // The home declaring another name.
+        let renamed = HOME_MANIFEST.replace("kotton-crypto", "kotton-crypto-next");
+        let found = findings_with(THRESHOLD_HOME, &renamed);
+        assert!(
+            found.iter().any(|f| f.starts_with(&format!("{THRESHOLD_HOME}: does not declare the package name kotton-crypto"))),
+            "{found:#?}"
+        );
+        // Any other name two manifests declare.
+        let org = "[package]\nname = \"kotton-org\"\n";
+        let found = findings_with_all(&[("core/org/Cargo.toml", org), ("client/org/Cargo.toml", org)]);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].contains(": each declares the package name kotton-org"), "{found:#?}");
+        assert!(!found[0].contains("threshold"), "{found:#?}");
+        // A lockfile recording a second package of the tree by that name.
+        let lock = lock_with(&lock_entry("kotton-crypto", "", &["frost-ed25519"]));
+        let found = findings_with_all(&[("Cargo.lock", &lock)]);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].starts_with("Cargo.lock: records 2 packages of the tree named kotton-crypto"), "{found:#?}");
     }
 
     /// The tree as it is: every hold above holds.
