@@ -54,7 +54,7 @@ pub(super) fn read<'a>(words: &[&'a str]) -> Option<Line<'a>> {
 #[async_trait]
 impl Command for RelayCommand {
     fn help_text(&self) -> &'static str {
-        "relay [set <url> | set <line or invite> | clear | status | rule [<r>] [<rule>] | invite [<r>] | forget [<r>]] — configure the rendezvous relay, and operate a relay of your own, or forget one whose host is gone; <r> only when this desktop operates more than one relay. mint and enrol make one; relay and vault operate one: `mint relay`, then `enrol <its line>`, makes one"
+        "relay [set <url> | set <line or invite> | clear | status | rule [<r>] [<rule>] | invite [<r>] | rotate [<r>] | forget [<r>]] — configure the rendezvous relay, and operate a relay of your own, or forget one whose host is gone; <r> only when this desktop operates more than one relay. rotate gives the relay a new key for the people you invite, after you type its name back: the key before is read until the next rotation, so a second one refuses a device that has not reconnected to its vault since the first; it finishes a drop made at `kvaultd drop`, which names it. mint and enrol make one; relay and vault operate one: `mint relay`, then `enrol <its line>`, makes one"
     }
 
     async fn execute(&self, args: &[String], state: &mut ShellState) -> Result<CommandOutput> {

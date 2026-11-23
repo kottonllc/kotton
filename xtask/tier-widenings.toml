@@ -32,4 +32,7 @@
 #   row = "wallet"                          a row arrives: no row at the merge base has its name,
 #                                           or, its name gone, its paths
 #
+# The `why` of a row that arrives states the row's `may_link` and its mark: the record accepts
+# the row whole, so the pull request that records it decides what the one that makes it holds.
+#
 # Shape: [[widen]] tables as above. None is recorded.

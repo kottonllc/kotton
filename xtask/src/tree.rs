@@ -90,7 +90,7 @@ mod tests {
     /// code `tier-check` walks past.
     #[test]
     fn the_rows_lie_in_the_code_roots() {
-        let rows = crate::tier_check::rows();
+        let rows = crate::tier_check::live_rows();
         let rowed = rows.roots();
         for r in &rowed {
             assert!(CODE_ROOTS.contains(r), "a row lies in `{r}`, which is not in CODE_ROOTS");
