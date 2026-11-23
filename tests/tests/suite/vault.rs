@@ -482,6 +482,70 @@ async fn recovering_on_a_fresh_device_seals_under_the_passphrase_chosen_there() 
     only_the_chosen_passphrase_unlocks(&cold, "alice", &recovered.new_key_hex).await;
 }
 
+/// **A chain fetched for a recovery is kept as it was served, and a set one of its events
+/// carries without committing it teaches the device's index nothing.** The vault serves
+/// alice's chain with her inception, which commits nothing, carrying a set that does not
+/// make its commitment: the set is outside what the digest covers, so the chain replays
+/// and the phrase still proves. A device that never held the identity recovers from it;
+/// the chain it stores is the one served and its rotation, and its index of recovery
+/// authorities holds every member of a set the chain committed and none of the one the
+/// inception carried.
+#[tokio::test]
+async fn a_fetched_chain_is_kept_as_served_and_a_set_it_does_not_commit_teaches_nothing() {
+    use kotton_crypto::kel_verify::committed_set;
+    init_crypto();
+    let vault = spawn_vault("vault").await;
+    let (phrase, identity) = {
+        let device = spawn_device("device E").await;
+        let mut client = connect_when_ready(&device.ipc, "client E").await;
+        let phrase = a_person_with_things(&mut client, "alice", NOTE).await;
+        let (_client, identity) = enrol_vault(client, &vault, "alice", "vault").await;
+        (phrase, identity)
+        // Every device is lost here.
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // What the vault serves: alice's chain, its inception carrying a set it does not commit.
+    let vault_base = vault.vault.runtime().base_dir().to_path_buf();
+    let mut served = kotton_identity::kel_store::load_chain(&vault_base, "alice").expect("the vault's copy of alice's chain");
+    assert!(served.len() >= 2, "the premise: the vault holds alice's inception and the event adding her phrase");
+    let x = ed25519_dalek::SigningKey::from_bytes(&[33u8; 32]).verifying_key().to_bytes();
+    served[0].recovery_set = vec![x];
+    assert_eq!(committed_set(&served[0]), None, "the premise: the inception's carried set makes no commitment");
+    kotton_identity::kel_store::save_chain(&vault_base, "alice", &served).expect("the vault's copy, as served");
+    let committed: Vec<[u8; 32]> = served.iter().filter_map(committed_set).flatten().copied().collect();
+    assert!(!committed.is_empty(), "the premise: the served chain commits the phrase");
+    assert!(!committed.contains(&x), "the premise: no event commits the carried set");
+
+    let cold = spawn_device("cold device").await;
+    let mut client = connect_when_ready(&cold.ipc, "cold client").await;
+    client
+        .login_with_recovery_key(&phrase, Some("alice".to_string()), None)
+        .await
+        .expect("the phrase alone claims the identity on a cold device");
+    let runtime = cold.daemon.runtime();
+    assert!(
+        kotton_identity::kel_store::load_chain(runtime.base_dir(), "alice").unwrap().is_empty(),
+        "the premise: the cold device holds no chain, so the recovery fetches one"
+    );
+    let recovered =
+        client.recover("alice", &phrase, NEW_PASSPHRASE, &identity.line()).await.expect("recover from the chain served");
+    assert_eq!(recovered.did, served[0].aid.to_string(), "the identity recovered is not the one served");
+
+    let kept = kotton_identity::kel_store::load_chain(runtime.base_dir(), "alice").expect("the chain the device keeps");
+    assert_eq!(kept.len(), served.len() + 1, "the device keeps the chain served and its rotation");
+    assert!(kept[..served.len()] == served[..], "the chain the device keeps is not the one served");
+    let admission = runtime.admission();
+    for member in &committed {
+        assert_eq!(
+            admission.authority(member).as_deref(),
+            Some(recovered.did.as_str()),
+            "a committed authority is not indexed for the identity"
+        );
+    }
+    assert_eq!(admission.authority(&x), None, "the set the inception carried taught the index");
+}
+
 /// The same demonstration with the vault's pools on an S3-compatible bucket
 /// (RFC-0084 V5): the shelf is beneath, the device never sees it, and the
 /// landlord's bucket holds sealed packs and nothing readable. The server is a
