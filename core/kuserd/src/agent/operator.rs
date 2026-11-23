@@ -43,14 +43,14 @@
 //! looked at — one `Tenants` ask, bounded by [`WITHIN`] — at the end of a drop
 //! the vault did not answer, after each verb to that vault the vault has
 //! answered, and on the reach keeper's pass (`reach_keeper`: its start, a
-//! reach change, the hour). The pass dials only a vault a drop waits for, and
-//! a relay where a rotation `relay rotate` began waits for the relay's answer,
-//! and never says a drop: a drop is said by the person. The rotation a look
-//! begins tells every vault standing at that relay its keys again and hands
-//! the reach note on. One look rotates each relay once for every waiting drop
-//! it finds gone, and a rotation begun is finished with the key already
-//! minted, never begun again. Looks, and every write to the record, are one
-//! at a time for a person.
+//! reach change, the hour). The pass looks only at a vault a drop waits for;
+//! it also dials a relay, and the vaults told to stand there, where a rotation
+//! `relay rotate` began still stands, to finish it. It never says a drop: a
+//! drop is said by the person. The rotation a look begins tells every vault
+//! standing at that relay its keys again and hands the reach note on. One look
+//! rotates each relay once for every waiting drop it finds gone, and a
+//! rotation begun is finished with the key already minted, never begun again.
+//! Looks, and every write to the record, are one at a time for a person.
 //!
 //! **A drop of a name the vault does not keep rotates nothing**: where no drop
 //! of it waits, the vault is asked `Tenants` first, and a name it does not
@@ -3066,8 +3066,11 @@ async fn rotate(
 }
 
 /// The reach keeper's look ([`super::reach_keeper`]): every vault a drop waits
-/// at, looked at once ([`look`]) — and no other, so with no drop waiting
-/// nothing is dialled. It reads `Tenants` and rotates; it never says a drop.
+/// at, looked at once ([`look`]) — and no other vault is asked `Tenants`. With
+/// no drop waiting and no rotation `relay rotate` began still standing, nothing
+/// is dialled; where such a rotation stands, its relay, and the vaults told to
+/// stand there, are dialled to finish it. It reads `Tenants` and rotates; it
+/// never says a drop.
 /// Each look is an operator's act at the vault, which keeps one row of it under
 /// the operator's key, as it keeps every act said under that key. Before any
 /// dial, a drop whose wait is over ([`A_DROP_WAITS`]) ends, and so does one
@@ -3423,13 +3426,16 @@ async fn finish_begun(
 
 /// What `relay rotate` said while a rotation it began waits for the relay's
 /// answer is answered with, once the relay has answered: it finished that
-/// rotation with the key already kept, minted none, and said again it rotates
-/// anew. The verb did not do what it is said for, a new key, so this is its
-/// whole answer, as the note of drops ended is.
+/// rotation with the key kept here since — the verb's, or a look's newer one —
+/// and minted none; and when to say it again, and what that costs. The verb
+/// did not do what it is said for, a new key, so this is its whole answer, as
+/// the note of drops ended is.
 fn rotation_finished_sentence(name: &str) -> String {
     format!(
-        "the relay '{name}' now holds the invited key an earlier `relay rotate` kept and did not finish setting: \
-         this finished that rotation, and no new key was minted — `relay rotate {name}` said again rotates anew"
+        "the relay '{name}' now holds the invited key kept here since an earlier `relay rotate` the relay had not \
+         answered: this saying finished that rotation and minted no new key — say `relay rotate {name}` again only \
+         to rotate anew, for a pool dropped since, and a rotation that follows this one refuses a device still \
+         invited that has not reconnected to its vault"
     )
 }
 
@@ -6319,8 +6325,8 @@ mod tests {
         let answer = speak_by(&fake, &users, &stores, "lee", "gate", OperatorVerb::RotateInvited).await;
         let message = refusal(answer);
         assert_eq!(message, rotation_finished_sentence("gate"));
-        assert!(message.contains("finished that rotation") && message.contains("no new key was minted"), "{message}");
-        assert!(message.contains("`relay rotate gate` said again rotates anew"), "{message}");
+        assert!(message.contains("finished that rotation") && message.contains("minted no new key"), "{message}");
+        assert!(message.contains("say `relay rotate gate` again only to rotate anew"), "{message}");
         assert_eq!(fake.said()[at_the_verb..], ROTATION, "the finishing saying asked a vault or took another path");
         assert_eq!(*fake.took.lock().unwrap(), std::slice::from_ref(&minted));
         assert_eq!(invited_kept(&store), minted, "the finishing saying minted a key");
@@ -6366,6 +6372,32 @@ mod tests {
         assert_eq!(*fake.took.lock().unwrap(), std::slice::from_ref(&newer), "the relay was handed a key not kept");
         assert!(!rotation_begun(&store));
         assert!(pools_waiting(&store).is_empty(), "the drop marked minted with the key kept still waits");
+    }
+
+    /// **The pass looks before it finishes** (when a dropped pool's invited
+    /// key rotates: a relay is not handed the verb's key and then a look's in
+    /// one pass). The mark stands, a drop is found gone on the pass and the
+    /// relay is reached: the look mints anew for that drop and the relay's
+    /// answer clears the mark, so there is nothing left to finish. The relay
+    /// takes one key, the look's newer one, never the verb's first.
+    #[tokio::test]
+    async fn the_pass_looks_before_it_finishes_and_the_relay_takes_the_newer_key_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let stores = RecordStores::new();
+        let fake = Fake::new(&runtime, &store);
+        let first = begun_and_unreached(&fake, &users, &stores, &store).await;
+        wait_for_rotation(&store, &hex::encode([2u8; 32]), "sam", &[hex::encode(GATE)]).unwrap();
+        fake.lists(Some(&[]));
+        let at_the_verb = fake.said().len();
+
+        assert!(!look_at_every_vault(&fake, &users, &stores, &store).await, "the pass left a rotation unfinished");
+        let newer = invited_kept(&store);
+        assert_ne!(newer, first, "the drop found gone was finished with a key minted before it was found gone");
+        assert_eq!(*fake.took.lock().unwrap(), std::slice::from_ref(&newer), "the relay took another key, or two");
+        assert_eq!(fake.said()[at_the_verb..], [&["Tenants"][..], &ROTATION[..]].concat(), "the pass took another path");
+        assert!(!rotation_begun(&store), "the relay answered and the mark stays");
+        assert!(pools_waiting(&store).is_empty(), "the drop found gone still waits");
     }
 
     /// **A rule set clears the mark.** The relay's answer to any set of its
