@@ -2577,6 +2577,27 @@ mod tests {
         assert_eq!(refused, "vault: no relay");
     }
 
+    /// **`relay rotate` prints "rotated" only for a rotation of its own.**
+    /// The relay's rule answers a rotation minted on this saying; a saying
+    /// that only finished an earlier rotation is answered in the daemon's own
+    /// words, which say so and when to say it again, and is
+    /// printed as written, with no "rotated" drawn beside it.
+    #[test]
+    fn relay_rotate_prints_rotated_only_for_a_rotation_of_its_own() {
+        let rotated = spoken(&OperatorVerb::RotateInvited, To::Only("gate"), UserResponse::RelayRule { rule: AdmissionRule::Anyone });
+        assert!(
+            matches!(rotated.out.as_slice(), [Out::Record(rows)] if rows.iter().any(|(k, v)| k == "invited key" && v == "rotated at gate")),
+            "{:?}",
+            rotated.out
+        );
+        let finished = "the relay 'gate' now holds the invited key kept here since an earlier `relay rotate` the relay \
+                        had not answered: this saying finished that rotation and minted no new key — say `relay rotate \
+                        gate` again only to rotate anew, for a pool dropped since, and a rotation that follows this one \
+                        refuses a device still invited that has not reconnected to its vault";
+        let said = failed(spoken(&OperatorVerb::RotateInvited, To::Only("gate"), UserResponse::Error { message: finished.into() }));
+        assert_eq!(said, format!("relay: {finished}"));
+    }
+
     /// **An operated vault's text is printed as data and to the bound** (how
     /// another node's text is printed): the name a `VaultKeepsAlready`
     /// carries, with a backtick and a line break escaped, and one past

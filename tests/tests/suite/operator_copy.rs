@@ -152,11 +152,11 @@ fn every_command_the_daemons_operator_copy_tells_a_person_to_type_is_one_the_she
         let (kept, line) = kept_and_line(service);
         let name = "attic";
         let sentences = kuserd::agent::commands_the_copy_tells_a_person_to_type(name, &kept, &line);
-        // Sixteen for a vault, twenty-six for a relay: a sentence that stopped
+        // Sixteen for a vault, twenty-seven for a relay: a sentence that stopped
         // being rendered is a sentence no longer held to the shell.
         let rendered = match service {
             OperatedService::Vault => 16,
-            OperatedService::Relay => 26,
+            OperatedService::Relay => 27,
         };
         assert_eq!(sentences.len(), rendered, "the copy rendered for the {} changed in number", service.word());
         for (which, said) in &sentences {
