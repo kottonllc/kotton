@@ -431,7 +431,7 @@ pub(crate) fn parse_widenings(text: &str) -> Result<Vec<Widening>, String> {
 }
 
 /// The branch the lists may only shrink against.
-const MAIN_REF: &str = "origin/main";
+pub(crate) const MAIN_REF: &str = "origin/main";
 
 /// The one feature set every test build shares: most crates dev-depend on it, and it is no row.
 const WORKSPACE_HACK: &str = "tools/workspace-hack";
@@ -1494,7 +1494,7 @@ pub(crate) fn judge_rows(
     refused
 }
 
-fn short(commit: &str) -> &str {
+pub(crate) fn short(commit: &str) -> &str {
     &commit[..commit.len().min(12)]
 }
 
@@ -1515,12 +1515,12 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// The merge base of `HEAD` with `origin/main`.
-fn merge_base(root: &Path) -> Result<String, String> {
+pub(crate) fn merge_base(root: &Path) -> Result<String, String> {
     git(root, &["merge-base", MAIN_REF, "HEAD"]).map(|c| c.trim().to_string())
 }
 
 /// `file` at `commit`, read from git objects, or `None` when that commit has no such file.
-fn file_at(root: &Path, commit: &str, file: &str) -> Result<Option<String>, String> {
+pub(crate) fn file_at(root: &Path, commit: &str, file: &str) -> Result<Option<String>, String> {
     if git(root, &["ls-tree", "--name-only", commit, "--", file])?.trim().is_empty() {
         return Ok(None);
     }
