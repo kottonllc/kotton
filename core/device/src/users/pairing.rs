@@ -49,9 +49,9 @@
 //!   key ([`check_handed_rows`]). The issuer's own row is read the same way
 //!   before anything is written ([`finalize_joined_node`]), and a row of it the
 //!   store would refuse refuses the join. The issuer reads the joiner's row the
-//!   same way before it keeps its share ([`finalize_enrolled_node`]), but that
-//!   read comes later, as the next paragraph says. A row is the person's and
-//!   the node's DID's, and its label keys nothing (`kotton_peer::daemon::db`), so a drive's
+//!   same way before it hands anything, as the second paragraph below says. A
+//!   row is the person's and the node's DID's, and its label keys nothing
+//!   (`kotton_peer::daemon::db`), so a drive's
 //!   label that this device already shows on another row, the issuer's
 //!   included, or that another person here uses, is no reason to refuse: the
 //!   drive's row sits beside the other. The issuer's word replaces none of this
@@ -67,17 +67,30 @@
 //!   [`kotton_peer::pairing::JOINER_KEEPS_WITHIN`] leaves the issuer with no
 //!   row and no introduction, and the issuer's person is told so
 //!   ([`kotton_peer::pairing::JoinNotKept`]). There is nothing to revoke.
-//!   A refusal of the joiner's row on the issuer's side is not one of these:
-//!   [`finalize_enrolled_node`] runs after the issuer has replied `heard`, so
-//!   the issuer keeps nothing, while the joiner has kept its half, calls the
-//!   join complete, and is not told. The issuer's person is told the store's
-//!   refusal, which names the row; the mend is `device revoke` of that row,
-//!   then the ceremony again.
 //!   The joiner calls the join complete only on the issuer's sealed reply
 //!   that it heard `kept`. Without it the joiner cannot tell an issuer that
 //!   gave up from a reply that was lost, so its person is told the other
 //!   device may not have kept this one and to check there — never that it
 //!   is joined when the issuer may have kept nothing.
+//!
+//!   **A row the issuer's store would refuse ends the ceremony before the
+//!   payload, and both sides are told.** The issuer learns the joiner's key
+//!   before it builds the payload, and every issuing ceremony here reads the
+//!   joiner's row in the person's rows then
+//!   ([`kotton_peer::daemon::nodes::PersonsRows`]), the store's own rule. Where
+//!   the store would refuse it, the issuer splits no share and hands nothing:
+//!   it sends its refusal in the payload's place and ends
+//!   ([`kotton_peer::pairing::RefusedBeforeHanding`]), and its person is told
+//!   the store's sentence, which names the row; the joiner, handed nothing,
+//!   keeps nothing, and its person is told so in this device's words, with
+//!   the issuer's reason printed as another node's text
+//!   ([`kotton_peer::pairing::NotHanded`]). Nothing is kept on either side,
+//!   so no row of the joiner's is there to revoke: the mend is `device revoke`
+//!   of the row the sentence names, then the ceremony again. [`finalize_enrolled_node`]
+//!   reads the row again before it keeps anything, and the store's write
+//!   reads it again inside its transaction; a refusal there is said as a
+//!   refusal ([`kotton_peer::daemon::nodes::NotRecorded`]), never as a write
+//!   that failed, and no writer of this build stores the shape it refuses.
 //! - *The drives learn the device.* When the joiner has answered that it kept
 //!   what it was handed, the issuer — which holds the identity — records it
 //!   and tells each drive about it, under the identity's signature, before it
@@ -100,6 +113,8 @@ use kotton_peer::daemon::nodes::{
     ceremony_failure,
     finalize_enrolled_node,
     json_err,
+    NotRecorded,
+    PersonsRows,
     load_device_operational_key,
     load_signing_key,
     record_own_device_member,
@@ -531,6 +546,9 @@ pub async fn handle_device_add(
             return;
         }
         let confirmer = StreamingConfirmer::new(tx.clone(), pending, std::time::Duration::from_secs(ttl_seconds));
+        // The joiner's row is read in the person's rows before anything is
+        // handed (`kotton_peer::pairing::JoinerRow`).
+        let rows = PersonsRows { db: &db, user_id: &user_id };
         // Ended with its stream until the person's yes (#436); see
         // `StreamingConfirmer::unless_abandoned`.
         let Some(result) = confirmer.unless_abandoned(run_enroll_issuer_committed(
@@ -547,6 +565,7 @@ pub async fn handle_device_add(
             issuer_recovery_bundle,
             handed_drives,
             &confirmer,
+            &rows,
         )).await else {
             tracing::info!("device add ended with the stream that started it");
             return;
@@ -593,7 +612,10 @@ pub async fn handle_device_add(
                             not_handed,
                         }
                     }
-                    Err(e) => UserResponse::PairFailed {
+                    Err(NotRecorded::Refused(why)) => UserResponse::PairFailed {
+                        reason: recorded_nothing_of("the device", &why),
+                    },
+                    Err(NotRecorded::Failed(e)) => UserResponse::PairFailed {
                         reason: format!("Added the device, but saving it failed: {e}"),
                     },
                 }
@@ -655,6 +677,7 @@ pub async fn handle_gateway_enroll(
             return;
         }
         let confirmer = StreamingConfirmer::new(tx.clone(), pending, std::time::Duration::from_secs(ttl_seconds));
+        let rows = PersonsRows { db: &db, user_id: &user_id };
         // Ended with its stream until the person's yes (#436); see
         // `StreamingConfirmer::unless_abandoned`.
         let Some(result) = confirmer.unless_abandoned(run_enroll_issuer_dialing(
@@ -670,6 +693,7 @@ pub async fn handle_gateway_enroll(
             Vec::new(),
             Some(handout),
             &confirmer,
+            &rows,
         )).await else {
             tracing::info!("gateway enrolment ended with the stream that started it");
             return;
@@ -705,7 +729,10 @@ pub async fn handle_gateway_enroll(
                         relay_offer: None,
                         not_handed: Vec::new(),
                     },
-                    Err(e) => UserResponse::PairFailed {
+                    Err(NotRecorded::Refused(why)) => UserResponse::PairFailed {
+                        reason: recorded_nothing_of("the gateway", &why),
+                    },
+                    Err(NotRecorded::Failed(e)) => UserResponse::PairFailed {
                         reason: format!("Admitted the gateway, but saving it failed: {e}"),
                     },
                 }
@@ -1154,6 +1181,7 @@ pub async fn handle_device_admit(
             Some(_) => &by_key,
             None => &streaming,
         };
+        let rows = PersonsRows { db: &db, user_id: &user_id };
         // Ended with its stream until the comparison is answered yes, by the
         // person or by the pinned key (#436); see
         // `StreamingConfirmer::unless_abandoned`.
@@ -1190,6 +1218,7 @@ pub async fn handle_device_admit(
                     handed_drives,
                     confirmer,
                     Some(inv.vault_key),
+                    &rows,
                 )
                 .await
             }
@@ -1207,6 +1236,7 @@ pub async fn handle_device_admit(
                     handed_drives,
                     None,
                     confirmer,
+                    &rows,
                 )
                 .await
             }
@@ -1318,10 +1348,12 @@ async fn first_drive_at(runtime: &DeviceRuntime, store: &kotton_store::runtime::
 /// it records), and a dial reads no row: [`kotton_peer::dialer::Dialer::connect`] takes the node
 /// it is handed.
 ///
-/// `Err` is the `PairFailed` reason. A row the store refuses is read by
-/// [`finalize_enrolled_node`] before it keeps anything, so that refusal keeps
-/// nothing here either. A write that fails part-way through it for another
-/// reason is said as such; that function is not one transaction.
+/// `Err` is the `PairFailed` reason. A row the store refuses ended the
+/// ceremony before anything was handed (see the module's header), and
+/// [`finalize_enrolled_node`] reads it again before it keeps anything, so that
+/// refusal keeps nothing here either and is said as a refusal. A write that
+/// fails part-way through it for another reason is said as such; that
+/// function is not one transaction.
 #[allow(clippy::too_many_arguments)]
 async fn keep_the_admitted(
     the_vaults_rule: impl std::future::Future<Output = Option<Refused>>,
@@ -1338,7 +1370,24 @@ async fn keep_the_admitted(
     }
     finalize_enrolled_node(secrets, member_store, db, paired_keys, user_id, posture, enrolled)
         .await
-        .map_err(|e| format!("Admitted, but recording the node failed: {e}"))
+        .map_err(|not| match not {
+            NotRecorded::Refused(why) => recorded_nothing_of("the vault", &why),
+            NotRecorded::Failed(e) => format!("Admitted, but recording the node failed: {e}"),
+        })
+}
+
+/// What the admitting device's person is told when its store refused the
+/// row of a node `what` names after the ceremony ended: the node kept what it
+/// was handed, and this device kept nothing ([`NotRecorded::Refused`]). The
+/// ceremony read the same row before it handed anything, and no writer of this
+/// build stores the shape the store refuses, so this build's own writers do
+/// not bring it about; where it is said, it is said as a refusal and never as
+/// a write that failed.
+fn recorded_nothing_of(what: &str, why: &str) -> String {
+    format!(
+        "This device recorded nothing of {what}, which kept what it was handed and calls the join complete: \
+         {why}. Pair again once that is resolved."
+    )
 }
 
 /// The one posture an admit by code takes, refused before anything else runs.
@@ -3329,6 +3378,57 @@ mod admit_tests {
         let why = refused.expect_err("an enrolment the store refuses was kept").to_string();
         assert!(why.contains("beside another key") && why.contains("nothing was written"), "{why}");
     }
+
+    /// **A refusal at the finalizer is said as a refusal, never as a write
+    /// that failed.** The store refuses the vault's row at the finalizer's
+    /// read: the finalizer answers [`kotton_peer::daemon::nodes::NotRecorded::Refused`],
+    /// and the admit says that nothing was recorded and why, not that
+    /// recording failed. The same match is the `device add` and gateway
+    /// callers' copy ([`super::recorded_nothing_of`]).
+    #[tokio::test]
+    async fn a_refusal_at_the_finalizer_is_said_as_a_refusal_not_as_a_failed_write() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, RwLock};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::open_machine_db(dir.path().join("agent.db")).await.unwrap());
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let members = Members::default();
+        let secrets = kotton_secret::MemorySecrets::new();
+        let derived = an_enrolled_vault().node.device_did.to_string();
+        let other = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[6; 32]));
+        kotton_peer::daemon::db::seed_paired_node_as_stored(&db, "attic", "alice", &derived, other.as_bytes(), "[]", 0, Some("full"))
+            .await
+            .unwrap();
+
+        let not = kotton_peer::daemon::nodes::finalize_enrolled_node(
+            &secrets,
+            &members,
+            &db,
+            &paired_keys,
+            "alice",
+            Posture::BlindStorage,
+            an_enrolled_vault(),
+        )
+        .await
+        .expect_err("an enrolment the store refuses was kept");
+        assert!(matches!(not, kotton_peer::daemon::nodes::NotRecorded::Refused(_)), "the refusal is not typed as one: {not:?}");
+
+        let said = super::keep_the_admitted(
+            std::future::ready(None),
+            &secrets,
+            &members,
+            &db,
+            &paired_keys,
+            "alice",
+            Posture::BlindStorage,
+            an_enrolled_vault(),
+        )
+        .await
+        .expect_err("an admit the store refuses was recorded");
+        assert!(said.starts_with("This device recorded nothing of the vault, which kept what it was handed"), "{said}");
+        assert!(said.contains("beside another key"), "{said}");
+        assert!(!said.contains("failed"), "a refusal was said as a failed write: {said}");
+    }
 }
 
 #[cfg(test)]
@@ -3422,5 +3522,281 @@ mod ends_with_its_stream_tests {
         }
         assert!(pending.lock().await.is_empty(), "nothing was ever shown, and something is parked");
         assert_eq!(Arc::strong_count(&pending), 1, "the ended ceremony still holds the confirmation table");
+    }
+}
+
+/// A ceremony whose joiner's row the admitting device's store would refuse,
+/// run whole on both sides: each side through its own entry point and its own
+/// store, the two meeting over loopback.
+#[cfg(test)]
+mod refused_before_handing_tests {
+    use super::{handle_device_add, handle_device_admit, handle_device_join, JoinPolicy, PendingConfirms};
+    use kotton_common::crypto::kdf_labels;
+    use kotton_peer::daemon::db as network_db;
+    use kotton_schemas::membership::Posture;
+    use kotton_sys::secret::SecretsStore as _;
+    use kotton_wire::ipc::UserResponse;
+    use sqlx::SqlitePool;
+    use std::collections::HashSet;
+    use std::sync::{Arc, RwLock};
+    use std::time::Duration;
+
+    struct NobodyResident;
+    impl crate::users::residency::Residency for NobodyResident {
+        fn insert(&self, _: String, _: Arc<kotton_store::runtime::user::UserStore>) {}
+        fn get(&self, _: &str) -> Option<Arc<kotton_store::runtime::user::UserStore>> {
+            None
+        }
+    }
+
+    /// One side of a ceremony: its state under a directory of its own.
+    struct Side {
+        base: tempfile::TempDir,
+        secrets: Arc<kotton_secret::MemorySecrets>,
+        runtime: Arc<crate::runtime::DeviceRuntime>,
+        db: Arc<SqlitePool>,
+        paired_keys: Arc<RwLock<HashSet<kotton_crypto::ed25519::VerifyingKey>>>,
+        pending: PendingConfirms,
+    }
+
+    /// A device holding operational key `op`, and alice's identity and data
+    /// keys where `identity` is `Some`.
+    async fn a_side(op: u8, identity: Option<u8>) -> Side {
+        let base = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(kotton_secret::MemorySecrets::new());
+        secrets.set_secret(&kdf_labels::device_operational_key(), &hex::encode([op; 32])).unwrap();
+        if let Some(seed) = identity {
+            let identity = kotton_crypto::derive_identity_key(&[seed; 32]);
+            secrets.set_secret(&kdf_labels::identity_signing_key("alice"), &hex::encode(identity)).unwrap();
+            secrets.set_secret(&kdf_labels::operational_cek("alice"), &hex::encode([seed ^ 1; 32])).unwrap();
+            secrets.set_secret(&kdf_labels::master_secret_keychain_key("alice"), &hex::encode([seed ^ 2; 32])).unwrap();
+        }
+        let runtime = Arc::new(
+            crate::runtime::DeviceRuntime::new_with_secrets(
+                base.path().to_path_buf(),
+                crate::config::RuntimeConfig::default(),
+                Arc::clone(&secrets) as Arc<dyn kotton_sys::secret::SecretsStore>,
+            )
+            .await
+            .unwrap(),
+        );
+        let db = Arc::new(crate::db::open_machine_db(base.path().join("agent.db")).await.unwrap());
+        Side { base, secrets, runtime, db, paired_keys: Default::default(), pending: Default::default() }
+    }
+
+    /// The key a device holding operational key `op` proves in a ceremony.
+    fn op_key(op: u8) -> kotton_crypto::ed25519::VerifyingKey {
+        kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[op; 32]))
+    }
+
+    /// Make `side`'s store refuse the row for `key`: its derivation is the DID
+    /// of the row `attic`, beside another key.
+    async fn refusing(side: &Side, key: &kotton_crypto::ed25519::VerifyingKey) {
+        let derived = kotton_crypto::DidKeyMethod::from_public_key(key).to_string();
+        network_db::seed_paired_node_as_stored(&side.db, "attic", "alice", &derived, op_key(99).as_bytes(), "[]", 0, Some("full"))
+            .await
+            .unwrap();
+        assert!(network_db::row_refused_for(&side.db, "alice", key).await.unwrap().is_some(), "the store does not refuse the row");
+    }
+
+    async fn rows(side: &Side) -> String {
+        format!("{:?}", network_db::list_paired_nodes(&side.db, "alice").await.unwrap())
+    }
+
+    fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(files_under(&path));
+            }
+            out.push(path);
+        }
+        out.sort();
+        out
+    }
+
+    /// What a ceremony's stream said, to its end, with every six digits it
+    /// shows answered yes; the connection code it advertised is sent on `code`.
+    async fn said(
+        mut stream: tokio::sync::mpsc::Receiver<UserResponse>,
+        pending: PendingConfirms,
+        code: Option<tokio::sync::oneshot::Sender<String>>,
+    ) -> Vec<UserResponse> {
+        let mut code = code;
+        let mut frames = Vec::new();
+        while let Some(frame) = tokio::time::timeout(Duration::from_secs(60), stream.recv()).await.expect("the ceremony stalled") {
+            match &frame {
+                UserResponse::PairAdvertising { code: advertised, .. } => {
+                    if let Some(tx) = code.take() {
+                        let _ = tx.send(advertised.expose().to_string());
+                    }
+                }
+                UserResponse::PairShowCode { token, .. } => {
+                    kotton_peer::daemon::nodes::confirm_code(&pending, token.expose().to_string(), true).await.unwrap();
+                }
+                _ => {}
+            }
+            frames.push(frame);
+        }
+        frames
+    }
+
+    fn failed(frames: &[UserResponse]) -> &str {
+        assert!(
+            !frames.iter().any(|f| matches!(f, UserResponse::PairTransferring)),
+            "the ceremony went on to keep what it was handed: {frames:?}"
+        );
+        match frames.last() {
+            Some(UserResponse::PairFailed { reason }) => reason,
+            other => panic!("the ceremony did not end refused: {other:?}"),
+        }
+    }
+
+    /// **A `device add` whose joiner's row the issuer's store would refuse
+    /// ends before the payload is sent: both sides are told, and both keep
+    /// nothing.** The issuer's person is told the store's sentence, which
+    /// names the row, and the issuer keeps no share, no group key, no row and
+    /// no key on its allowlist. The joiner's person is told, in its own words,
+    /// that the other device refused it before handing anything, with the
+    /// issuer's reason printed as data; the joiner keeps no key, no key log,
+    /// no user, no row and no session.
+    #[tokio::test]
+    async fn a_device_add_the_store_would_refuse_ends_before_the_payload_and_both_keep_nothing() {
+        let issuer = a_side(5, Some(4)).await;
+        let joiner = a_side(8, None).await;
+        refusing(&issuer, &op_key(8)).await;
+        let issuer_rows = rows(&issuer).await;
+        let joiner_files = files_under(joiner.base.path());
+
+        let add = handle_device_add(
+            Arc::clone(&issuer.runtime),
+            Arc::new(NobodyResident),
+            Arc::clone(&issuer.db),
+            Arc::clone(&issuer.db),
+            Arc::clone(&issuer.paired_keys),
+            Arc::clone(&issuer.pending),
+            "alice".into(),
+            Some("laptop".into()),
+            60,
+            0,
+            Posture::Full,
+        )
+        .await
+        .expect("the add starts");
+        let (code_tx, code_rx) = tokio::sync::oneshot::channel();
+        let issuer_side = tokio::spawn(said(add, Arc::clone(&issuer.pending), Some(code_tx)));
+        let code = code_rx.await.expect("the add advertised a code");
+        let sessions: kotton_session::service::tokens::SessionMap = Default::default();
+        let join = handle_device_join(
+            Arc::clone(&joiner.runtime),
+            Arc::new(NobodyResident),
+            Arc::clone(&joiner.db),
+            Arc::clone(&joiner.db),
+            sessions.clone(),
+            Arc::clone(&joiner.paired_keys),
+            Arc::clone(&joiner.pending),
+            "alice".into(),
+            code,
+            Some("phone".into()),
+            JoinPolicy::Any,
+        )
+        .await
+        .expect("the join starts");
+        let joiner_said = said(join, Arc::clone(&joiner.pending), None).await;
+        let issuer_said = issuer_side.await.unwrap();
+
+        let here = failed(&issuer_said);
+        assert!(here.starts_with("This device did not add the other device: this person pairs `attic`"), "{here}");
+        assert!(here.contains("beside another key") && here.contains("Nothing was handed over"), "{here}");
+        let there = failed(&joiner_said);
+        assert!(
+            there.starts_with("This device was not joined: the device that would have admitted it refused it before handing anything over."),
+            "{there}"
+        );
+        assert!(
+            there.ends_with(&kotton_wire::note::quoted_cut("the admitting device already pairs another key under this device's did:key")),
+            "{there}"
+        );
+        assert!(!there.contains("attic"), "the joiner was told the issuer's records: {there}");
+
+        assert_eq!(issuer.secrets.get_secret(&kdf_labels::frost_share("alice")).unwrap(), None, "the issuer kept a share");
+        assert_eq!(issuer.secrets.get_secret(&kdf_labels::frost_pubkey_package("alice")).unwrap(), None, "the issuer kept a group key");
+        assert_eq!(rows(&issuer).await, issuer_rows, "the issuer changed a row");
+        assert!(issuer.paired_keys.read().unwrap().is_empty(), "the issuer allowed the joiner");
+
+        for label in [
+            kdf_labels::frost_share("alice"),
+            kdf_labels::frost_pubkey_package("alice"),
+            kdf_labels::warm_signing_key("alice"),
+            kdf_labels::warm_key_delegation("alice"),
+            kdf_labels::operational_cek("alice"),
+            kdf_labels::master_secret_keychain_key("alice"),
+        ] {
+            assert_eq!(joiner.secrets.get_secret(&label).unwrap(), None, "the joiner kept {label}");
+        }
+        assert_eq!(files_under(joiner.base.path()), joiner_files, "the joiner wrote a file");
+        assert_eq!(rows(&joiner).await, "[]", "the joiner wrote a row");
+        assert!(joiner.paired_keys.read().unwrap().is_empty(), "the joiner allowed the issuer");
+        assert!(sessions.read().unwrap().is_empty(), "the joiner minted a session");
+    }
+
+    /// **An admit whose vault's row the admitting device's store would refuse
+    /// ends before the payload is sent: both sides are told, and the admitting
+    /// device keeps nothing.** The admit dials the vault by its connection
+    /// code; the vault's side is the ceremony a listening vault runs, which is
+    /// handed no chain and no recovery copy and returns the admitting device's
+    /// refusal. The admitting device's person is told the store's sentence,
+    /// and it records no row, no drive and no key on its allowlist.
+    #[tokio::test]
+    async fn an_admit_the_store_would_refuse_ends_before_the_payload_and_both_sides_are_told() {
+        let issuer = a_side(5, Some(4)).await;
+        refusing(&issuer, &op_key(8)).await;
+        let issuer_rows = rows(&issuer).await;
+        let vault_op = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
+        let (_, listen_addr, _, listener) = kotton_peer::pairing::open_pair_listener(&vault_op, 0, 60).await.unwrap();
+        let dial = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), listen_addr.port());
+        let sid = [3u8; 16];
+
+        struct Yes;
+        #[async_trait::async_trait]
+        impl kotton_peer::pair_channel::SasConfirmer for Yes {
+            async fn confirm(&self, _: u32, _: Option<&str>) -> bool {
+                true
+            }
+        }
+        let warm = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let vault_side = async {
+            kotton_peer::pairing::run_enroll_join_listening(&warm, sid, listener, 60, "vault", None, &Yes).await
+        };
+        let admit = handle_device_admit(
+            Arc::clone(&issuer.runtime),
+            Arc::new(NobodyResident),
+            Arc::clone(&issuer.db),
+            Arc::clone(&issuer.db),
+            Arc::clone(&issuer.paired_keys),
+            Arc::clone(&issuer.pending),
+            "alice".into(),
+            kotton_peer::pairing::encode_connection_code(&sid, dial),
+            60,
+            Posture::BlindStorage,
+            None,
+        )
+        .await
+        .expect("the admit starts");
+        let (vault_said, issuer_said) = tokio::join!(vault_side, said(admit, Arc::clone(&issuer.pending), None));
+
+        let here = failed(&issuer_said);
+        assert!(here.starts_with("This device did not add the other device: this person pairs `attic`"), "{here}");
+        let err = vault_said.err().expect("the vault was handed a payload the issuer's store refuses");
+        let not_handed = err
+            .downcast_ref::<kotton_peer::pairing::NotHanded>()
+            .unwrap_or_else(|| panic!("the vault was not told: {err:#}"));
+        assert_eq!(not_handed.0, "the admitting device already pairs another key under this device's did:key");
+
+        assert_eq!(rows(&issuer).await, issuer_rows, "the admit changed a row");
+        let drives: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drives").fetch_one(issuer.db.as_ref()).await.unwrap();
+        assert_eq!(drives, 0, "the admit recorded a drive");
+        assert!(issuer.paired_keys.read().unwrap().is_empty(), "the admit allowed the vault");
     }
 }

@@ -24,6 +24,20 @@
 //! it leaves a joiner told to check a device that did keep it, never the
 //! reverse.
 //!
+//! **The issuer reads the joiner's row before it hands anything.** Once it
+//! knows the joiner's key, and before it builds the payload, every issuing
+//! ceremony asks its own store whether it would refuse the joiner's row
+//! ([`JoinerRow`]). Where it would, the issuer sends, in the payload's place,
+//! the joiner's own refusal frame (`refused`, with this side's reason) and
+//! then the attestation as on every ceremony, and ends: no share is split and
+//! nothing that opens anything crosses. The joiner reads the refusal only once
+//! the attestation verifies, keeps nothing, since it was handed nothing, and
+//! says the issuer's reason as another node's text
+//! ([`kotton_wire::note::quoted_cut`]; how another node's text is printed).
+//! The frames and their order are the ceremony's as they were; only what the
+//! payload's frame holds differs. The issuer returns [`RefusedBeforeHanding`],
+//! the joiner [`NotHanded`].
+//!
 //! This module also holds:
 //! * `open_pair_listener` — bind the bootstrap QUIC listener.
 //! * `encode/parse_connection_code` (sid + addr, base32) — the hand-carried fallback
@@ -680,7 +694,9 @@ const REFUSAL_SAID_WITHIN: usize = 1024;
 
 /// The ceremony's last frame, joiner to issuer: whether the joiner kept what it
 /// was handed. Sealed under the channel's key like every frame after the six
-/// digits, so it is the confirmed joiner's word and nobody else's.
+/// digits, so it is the confirmed joiner's word and nobody else's. Its
+/// `refused` is also what an issuer sends in the payload's place when it will
+/// not record the joiner (see the module's header).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Answer {
@@ -739,6 +755,78 @@ impl std::fmt::Display for JoinNotKept {
 }
 
 impl std::error::Error for JoinNotKept {}
+
+/// The admitting device's store, asked of the joiner's row before anything is
+/// handed (see the module's header). Every issuing ceremony takes one.
+#[async_trait::async_trait]
+pub trait JoinerRow: Send + Sync {
+    /// `Some` with the store's sentence where it would refuse the row for
+    /// `key`; `None` where it would write or keep it. Reads and writes nothing.
+    async fn refused_for(&self, key: &kotton_crypto::ed25519::VerifyingKey) -> std::io::Result<Option<String>>;
+}
+
+/// Why an admitting device ended a ceremony before it handed anything: it
+/// would not record the joiner. The sentence is this device's own, said to
+/// its person; the joiner was sent this device's refusal in the payload's
+/// place, which names nothing of this device's records, and was handed
+/// nothing. The issuer's ceremony returns this before its caller writes
+/// anything, so nothing is kept on either side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedBeforeHanding(pub String);
+
+impl std::fmt::Display for RefusedBeforeHanding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "this device will not record the other device, and handed it nothing: {}", self.0)
+    }
+}
+
+impl std::error::Error for RefusedBeforeHanding {}
+
+/// Why a joining device holds nothing of a ceremony: the admitting device
+/// refused it before it handed anything, and said why. The text is the
+/// admitting device's as it came, held to [`REFUSAL_SAID_WITHIN`] characters,
+/// and printed wherever it is printed as data, to a bounded length
+/// ([`kotton_wire::note::quoted_cut`]; how another node's text is printed).
+/// Returned only once the attestation verified, so it is the confirmed
+/// issuer's word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotHanded(pub String);
+
+impl std::fmt::Display for NotHanded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the admitting device refused this device before it handed anything over, and nothing is kept here: {}",
+            kotton_wire::note::quoted_cut(&self.0)
+        )
+    }
+}
+
+impl std::error::Error for NotHanded {}
+
+/// What the admitting device tells the joiner when it will not record it:
+/// this device's own words, naming nothing of its records, sent in the
+/// payload's place. `None` where the store would record the joiner's row.
+/// The second sentence is what this device's person is told.
+async fn refusal_of(rows: &dyn JoinerRow, joiner_key: &[u8; 32]) -> Option<(&'static str, String)> {
+    let key = match kotton_crypto::ed25519::VerifyingKey::from_bytes(joiner_key) {
+        Ok(key) => key,
+        Err(e) => {
+            return Some((
+                "its key is not an Ed25519 key the admitting device can record",
+                format!("the other device's key is not an Ed25519 key: {e}"),
+            ))
+        }
+    };
+    match rows.refused_for(&key).await {
+        Ok(None) => None,
+        Ok(Some(why)) => Some(("the admitting device already pairs another key under this device's did:key", why)),
+        Err(e) => Some((
+            "the admitting device could not read its own records of the person's devices",
+            format!("this device could not read its records of your devices: {e}"),
+        )),
+    }
+}
 
 /// Read the joiner's answer, waiting at most `within`. `Ok` only for
 /// [`Answer::Kept`]; everything else is the [`JoinNotKept`] that says what came.
@@ -854,6 +942,8 @@ impl JoinAnswer {
 /// the joiner over the encrypted channel (so the joiner's screen names the device
 /// it is joining), never typed by the joiner. The joiner symmetrically announces
 /// its own name, which the issuer records as the joiner's `PairedNode.id`.
+/// `rows` is this device's store, read for the joiner's row before anything is
+/// handed ([`JoinerRow`]; [`RefusedBeforeHanding`] where it would refuse it).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_enroll_issuer_committed(
     issuer_identity_key: &SigningKey,
@@ -869,6 +959,7 @@ pub async fn run_enroll_issuer_committed(
     issuer_recovery_bundle: Option<String>,
     drives: Vec<kotton_wire::peer::DriveHandout>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
+    rows: &dyn JoinerRow,
 ) -> Result<EnrolledNode> {
     let timeout = tokio::time::Duration::from_secs(ttl_seconds);
     let incoming = tokio::time::timeout(timeout, listener.accept())
@@ -899,6 +990,7 @@ pub async fn run_enroll_issuer_committed(
         drives,
         None,
         confirmer,
+        rows,
         JOINER_KEEPS_WITHIN,
     )
     .await;
@@ -915,7 +1007,8 @@ pub async fn run_enroll_issuer_committed(
 /// at home that cannot be: the code the listening node
 /// prints carries its address and the session id, and the six digits are the
 /// same six. The ceremony does not care who dialed; the payload is chosen by
-/// `posture` exactly as when the issuer listens.
+/// `posture` exactly as when the issuer listens, and the joiner's row is read in
+/// `rows` before anything is handed, as there.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_enroll_issuer_dialing(
     issuer_identity_key: &SigningKey,
@@ -930,6 +1023,7 @@ pub async fn run_enroll_issuer_dialing(
     drives: Vec<kotton_wire::peer::DriveHandout>,
     gateway: Option<kotton_wire::peer::GatewayHandout>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
+    rows: &dyn JoinerRow,
 ) -> Result<EnrolledNode> {
     let client_config = {
         use kotton_net::build_bootstrap_client_config;
@@ -963,6 +1057,7 @@ pub async fn run_enroll_issuer_dialing(
         drives,
         gateway,
         confirmer,
+        rows,
         JOINER_KEEPS_WITHIN,
     )
     .await;
@@ -1356,6 +1451,9 @@ impl<W, R> Transport<W, R> {
 /// --me` confirm the six digits without a person: the vault signs its key
 /// over this channel's transcript, so a node between the two could present
 /// only its own.
+///
+/// `rows` is this device's store, read for the vault's row before anything is
+/// handed, as on every issuing ceremony ([`JoinerRow`]).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_enroll_issuer_relayed(
     invite: &Invite,
@@ -1372,6 +1470,7 @@ pub async fn run_enroll_issuer_relayed(
     drives: Vec<kotton_wire::peer::DriveHandout>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
     pinned: Option<[u8; 32]>,
+    rows: &dyn JoinerRow,
 ) -> Result<EnrolledNode> {
     // The relay is held to the key the code names before anything is said to
     // it: a stand-in at the address is refused here, and learns not even the
@@ -1435,6 +1534,7 @@ pub async fn run_enroll_issuer_relayed(
         drives,
         None,
         confirmer,
+        rows,
         JOINER_KEEPS_WITHIN,
     )
     .await
@@ -1613,6 +1713,12 @@ fn dialable_addr(announced: Option<SocketAddr>, observed: Option<SocketAddr>) ->
 /// [`Reply::Heard`], finishes, and reads until the joiner lets go (at most
 /// [`JOINER_KEEPS_WITHIN`]), so the transport may be dropped as soon as this
 /// returns without cutting the reply short.
+///
+/// **It reads the joiner's row in `rows` before it builds the payload.** A row
+/// the store would refuse ends the ceremony there: the refusal goes in the
+/// payload's frame, the attestation follows it, and this returns
+/// [`RefusedBeforeHanding`] once the joiner lets go, having split no share and
+/// handed nothing (see the module's header).
 #[allow(clippy::too_many_arguments)]
 async fn issuer_over<W, R>(
     transport: Transport<W, R>,
@@ -1629,6 +1735,7 @@ async fn issuer_over<W, R>(
     drives: Vec<kotton_wire::peer::DriveHandout>,
     gateway: Option<kotton_wire::peer::GatewayHandout>,
     confirmer: &dyn crate::pair_channel::SasConfirmer,
+    rows: &dyn JoinerRow,
     kept_within: Duration,
 ) -> Result<EnrolledNode>
 where
@@ -1698,6 +1805,37 @@ where
     // `announce_bytes`.
     let joiner_announced = parse_announced(&channel.recv_encrypted().await?);
     channel.send_encrypted(&announce_bytes(peer_listen_addr)).await?;
+
+    // The joiner's row, read before anything is built or handed: a row this
+    // device's store would refuse ends the ceremony here. The refusal takes
+    // the payload's frame and the attestation follows, so the frames are the
+    // ceremony's own and the joiner can tell this side's word from a stranger's;
+    // then this side finishes and reads until the joiner lets go, so its close
+    // does not cut the refusal short.
+    if let Some((said_there, said_here)) = refusal_of(rows, &joiner_node_pubkey).await {
+        let refused = serde_json::to_vec(&Answer::Refused { why: said_there.to_string() })
+            .context("serialize the refusal")?;
+        let signature = issuer_identity_key.sign(&attest_message(channel.transcript()));
+        let attestation = kotton_wire::peer::PairAttestation {
+            identity_pubkey: issuer_identity_key.verifying_key().to_bytes(),
+            signature: signature.to_bytes().to_vec(),
+        };
+        let attest_bytes = serde_json::to_vec(&attestation).context("serialize attestation")?;
+        // A refusal that could not be sent is still this side's: the joiner,
+        // handed nothing, holds nothing either way.
+        let told = match channel.send_encrypted(&refused).await {
+            Ok(()) => channel.send_encrypted(&attest_bytes).await,
+            Err(e) => Err(e),
+        };
+        match told {
+            Ok(()) => {
+                let _ = channel.finish().await;
+                let _ = tokio::time::timeout(JOINER_KEEPS_WITHIN, channel.recv_encrypted()).await;
+            }
+            Err(e) => tracing::warn!(error = %e, "the other device was not sent this side's refusal; it was handed nothing"),
+        }
+        return Err(RefusedBeforeHanding(said_here).into());
+    }
 
     // Build the posture-appropriate payload (identical to the seal path).
     let issuer_seed = issuer_identity_key.to_bytes();
@@ -2063,8 +2201,17 @@ where
     channel.send_encrypted(&announce_bytes(peer_listen_addr)).await?;
     let issuer_announced = parse_announced(&channel.recv_encrypted().await?);
     let payload_bytes = channel.recv_encrypted().await?;
-    let payload: PairingPayload =
-        serde_json::from_slice(&payload_bytes).context("deserialize enrollment payload")?;
+    // The payload, or in its place the admitting device's refusal: the
+    // joiner's own refusal frame, which the admitting device sends where it
+    // will not record this one (see the module's header). It is read as the
+    // issuer's word only once the attestation below verifies.
+    let handed: Result<PairingPayload, String> = match serde_json::from_slice(&payload_bytes) {
+        Ok(payload) => Ok(payload),
+        Err(e) => match serde_json::from_slice::<Answer>(&payload_bytes) {
+            Ok(Answer::Refused { why }) => Err(why.chars().take(REFUSAL_SAID_WITHIN).collect()),
+            _ => return Err(anyhow::Error::new(e).context("deserialize enrollment payload")),
+        },
+    };
     let attest_bytes = channel.recv_encrypted().await?;
     let attestation: kotton_wire::peer::PairAttestation =
         serde_json::from_slice(&attest_bytes).context("deserialize attestation")?;
@@ -2093,6 +2240,9 @@ where
             ));
         }
     }
+    // The confirmed issuer refused this device before handing anything:
+    // there is nothing to keep, and nothing to answer.
+    let payload = handed.map_err(NotHanded)?;
 
     let root_did =
         kotton_crypto::DidKeyMethod::from_public_key_bytes(&attestation.identity_pubkey)
@@ -2427,6 +2577,93 @@ mod tests {
         }
     }
 
+    /// An admitting device's store that would record any joiner's row.
+    pub(super) struct RecordsAny;
+    #[async_trait::async_trait]
+    impl JoinerRow for RecordsAny {
+        async fn refused_for(&self, _key: &kotton_crypto::ed25519::VerifyingKey) -> std::io::Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    /// An admitting device's store that would refuse every joiner's row with
+    /// its sentence, holding the key it was asked about.
+    pub(super) struct RefusesEvery(pub(super) &'static str, pub(super) std::sync::Mutex<Option<[u8; 32]>>);
+    impl RefusesEvery {
+        pub(super) fn new(why: &'static str) -> Self {
+            RefusesEvery(why, std::sync::Mutex::new(None))
+        }
+        pub(super) fn asked(&self) -> Option<[u8; 32]> {
+            *self.1.lock().unwrap()
+        }
+    }
+    #[async_trait::async_trait]
+    impl JoinerRow for RefusesEvery {
+        async fn refused_for(&self, key: &kotton_crypto::ed25519::VerifyingKey) -> std::io::Result<Option<String>> {
+            *self.1.lock().unwrap() = Some(*key.as_bytes());
+            Ok(Some(self.0.to_string()))
+        }
+    }
+
+    /// **An enrolment whose joiner's row the admitting device's store would
+    /// refuse ends before the payload is sent, and both sides are told.** Over
+    /// loopback QUIC, the `device add` ceremony: the issuer asks its store of
+    /// the joiner's key before it builds anything, and the store refuses. The
+    /// issuer returns [`RefusedBeforeHanding`] with the store's sentence; the
+    /// joiner is handed no payload — it returns [`NotHanded`], with this
+    /// side's refusal, which names nothing of the issuer's records and is
+    /// printed as data — so neither side has anything to keep.
+    #[tokio::test]
+    async fn committed_enrol_the_store_would_refuse_ends_before_the_payload_and_both_sides_are_told() {
+        let issuer_identity = SigningKey::from_bytes(&[11u8; 32]);
+        let op_key = SigningKey::from_bytes(&[42u8; 32]);
+        let n_node = SigningKey::from_bytes(&[20u8; 32]);
+        let n_warm = SigningKey::from_bytes(&[2u8; 32]);
+        let sid = [9u8; 16];
+        let store = RefusesEvery::new("this person pairs 'attic' under did:key:zJ beside another key");
+
+        let (_code, listen_addr, _expires, endpoint) = open_pair_listener(&op_key, 0, 30).await.unwrap();
+        let dial = [SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen_addr.port())];
+
+        let issuer = async {
+            run_enroll_issuer_committed(
+                &issuer_identity,
+                sid,
+                Some(full_keys([3u8; 32])),
+                kotton_schemas::membership::Posture::Full,
+                "laptop",
+                None,
+                endpoint,
+                30,
+                9_999_999_999,
+                vec![],
+                None,
+                Vec::new(),
+                &AutoConfirm,
+                &store,
+            )
+            .await
+        };
+        let joiner = run_enroll_join_committed(&n_node, &n_warm, sid, &dial, "phone", None, &AutoConfirm, None);
+        let (e, j) = tokio::join!(issuer, joiner);
+
+        assert_eq!(store.asked(), Some(n_node.verifying_key().to_bytes()), "the store was not asked of the joiner's key");
+        let err = e.err().expect("the issuer enrolled a node its store refuses");
+        assert_eq!(
+            err.downcast_ref::<RefusedBeforeHanding>(),
+            Some(&RefusedBeforeHanding("this person pairs 'attic' under did:key:zJ beside another key".into())),
+            "{err:#}"
+        );
+        let err = j.err().expect("the joiner was handed a payload the issuer's store refuses");
+        let not_handed = err.downcast_ref::<NotHanded>().unwrap_or_else(|| panic!("the joiner was not told: {err:#}"));
+        assert_eq!(not_handed.0, "the admitting device already pairs another key under this device's did:key");
+        assert!(!not_handed.0.contains("attic"), "the joiner was told the issuer's records: {not_handed}");
+        assert!(
+            err.to_string().ends_with(&kotton_wire::note::quoted_cut(&not_handed.0)),
+            "the issuer's words were not printed as data: {err}"
+        );
+    }
+
     /// Full committed-handshake enrollment over loopback QUIC: the issuer splits
     /// its identity and transfers the FrostShare over the forward-secret channel,
     /// signing the transcript with its identity key; the joiner verifies the
@@ -2461,6 +2698,7 @@ mod tests {
                 None,
                 Vec::new(),
                 &AutoConfirm,
+                &RecordsAny,
             )
             .await
         });
@@ -2538,6 +2776,7 @@ mod tests {
                 None,
                 Vec::new(),
                 &AutoConfirm,
+                &RecordsAny,
             )
             .await
         });
@@ -2581,6 +2820,7 @@ mod tests {
                 None,
                 Vec::new(),
                 &AutoConfirm,
+                &RecordsAny,
             )
             .await
         });
@@ -2640,6 +2880,7 @@ mod tests {
                 None,
                 Vec::new(),
                 &AutoConfirm,
+                &RecordsAny,
             )
             .await
         });
@@ -2691,6 +2932,7 @@ mod tests {
                 Vec::new(),
                 None,
                 &AutoConfirm,
+                &RecordsAny,
                 bound,
             )
             .await;
@@ -2746,6 +2988,7 @@ mod tests {
                 None,
                 Vec::new(),
                 &AutoConfirm, // issuer would confirm; the joiner rejects
+                &RecordsAny,
             )
             .await
         });
@@ -3039,6 +3282,19 @@ mod relayed_tests {
         answering: Answering,
         kept_within: Duration,
     ) -> (Result<EnrolledNode>, Result<JoinedNode>, u32, u32, Option<String>) {
+        run_over_rows(issuer_label, code_issuer, code_joiner, pin, answering, kept_within, &super::tests::RecordsAny).await
+    }
+
+    /// [`run_labelled`], with the issuer's store as `rows`.
+    async fn run_over_rows(
+        issuer_label: &str,
+        code_issuer: &str,
+        code_joiner: &str,
+        pin: impl FnOnce([u8; 32]) -> Option<[u8; 32]>,
+        answering: Answering,
+        kept_within: Duration,
+        rows: &dyn JoinerRow,
+    ) -> (Result<EnrolledNode>, Result<JoinedNode>, u32, u32, Option<String>) {
         let (a, b) = a_relay_between();
         let issuer_identity = key();
         let issuer_op = key();
@@ -3066,6 +3322,7 @@ mod relayed_tests {
                 Vec::new(),
                 None,
                 &yes_i,
+                rows,
                 kept_within,
             )
             .await
@@ -3230,6 +3487,33 @@ mod relayed_tests {
         let printed = err.to_string();
         assert!(printed.ends_with(&kotton_wire::note::quoted_cut("this node is a vault\u{1b}[2J and holds no key")), "{printed}");
         assert!(!printed.contains('\u{1b}'), "{printed}");
+    }
+
+    /// **An admit whose vault's row the admitting device's store would refuse
+    /// ends before the payload is sent, and both sides are told.** Over the
+    /// relayed transport an invite meets on: the issuer asks its store of the
+    /// key the vault proved inside the channel, before it builds anything. The
+    /// issuer returns [`RefusedBeforeHanding`]; the vault is handed no chain
+    /// and no recovery copy — it returns [`NotHanded`] with the issuer's
+    /// refusal, read as the issuer's word only once the attestation verified —
+    /// so neither side has anything to keep.
+    #[tokio::test]
+    async fn an_admit_the_store_would_refuse_ends_before_the_payload_and_both_sides_are_told() {
+        let code = normalize_code("ripple canyon ember");
+        let store = super::tests::RefusesEvery::new("this person pairs 'attic' under did:key:zV beside another key");
+        let (e, j, _, _, _) =
+            run_over_rows("laptop", &code, &code, |_| None, Answering::Kept, JOINER_KEEPS_WITHIN, &store).await;
+
+        assert!(store.asked().is_some(), "the store was not asked of the vault's key");
+        let err = e.err().expect("the issuer admitted a vault its store refuses");
+        assert_eq!(
+            err.downcast_ref::<RefusedBeforeHanding>(),
+            Some(&RefusedBeforeHanding("this person pairs 'attic' under did:key:zV beside another key".into())),
+            "{err:#}"
+        );
+        let err = j.err().expect("the vault was handed a payload the issuer's store refuses");
+        let not_handed = err.downcast_ref::<NotHanded>().unwrap_or_else(|| panic!("the vault was not told: {err:#}"));
+        assert_eq!(not_handed.0, "the admitting device already pairs another key under this device's did:key");
     }
 
     /// **A joiner that closes without answering leaves the issuer nothing**:
