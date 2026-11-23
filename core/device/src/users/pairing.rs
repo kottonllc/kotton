@@ -175,7 +175,9 @@ fn not_joined(why: &str) -> UserResponse {
 /// ([`network_db::row_refused_for`]). Where the store refuses one, the join is
 /// refused with the reason and nothing is kept here: no user, no key log, no
 /// key, no row, no drive. So is a join whose issuer's key the Ed25519 rule
-/// refuses, before the user is provisioned.
+/// refuses, before the user is provisioned, and a join under a local name
+/// another identity holds here ([`crate::users::name_taken_by_another`]),
+/// which says only that the name is taken here.
 // Allowed: the daemon state a join's completion writes, as `handle_device_add` below takes it.
 #[allow(clippy::too_many_arguments)]
 pub async fn finalize_joined_node(
@@ -226,10 +228,22 @@ pub async fn finalize_joined_node(
         tracing::warn!(user_id, %why, "refused a join whose issuer's row cannot be recorded");
         return Ok(not_joined(&format!("the device admitting it cannot be recorded here: {why}")));
     }
-    // Provision BEFORE writing anything: this validates that `user_id` is either
-    // free or already this same identity (a name colliding with a *different*
-    // local identity is rejected), and creates the user directory. Doing it first
-    // means a collision fails clean — no half-written KEL over another user's.
+    // The name the identity would be kept under, read before anything is
+    // written: a name another identity holds here refuses the join, and the
+    // person and the issuer are told that the name is taken here and nothing
+    // of whom it is taken by.
+    let taken = crate::users::name_taken_by_another(runtime.base_dir(), user_id, &user_did)
+        .map_err(|e| io::Error::other(format!("read whom this device keeps: {e:#}")))?;
+    if taken {
+        tracing::warn!(user_id, "refused a join under a name another identity holds here");
+        return Ok(not_joined(&format!(
+            "the name {} is already taken on this device; join under a name not taken here",
+            kotton_wire::note::quoted(user_id)
+        )));
+    }
+    // Provision BEFORE writing anything else: this creates the user directory,
+    // and refuses a name another identity took since the read above. Doing it
+    // first means a collision fails clean — no half-written KEL over another user's.
     // `None` is the idempotent re-join: nothing new was provisioned, so there is
     // nothing new to make resident. The `reload_user_runtime` below swaps in a
     // CEK-refreshed handle either way.
@@ -1978,6 +1992,7 @@ pub async fn record_handed_drives(
 #[cfg(test)]
 mod handed_drive_tests {
     use super::{check_handed_drives, check_handed_rows, drives_to_hand, record_handed_drives};
+    use kotton_crypto::ed25519::refused_keys;
     use kotton_peer::daemon::db as network_db;
     use kotton_store::runtime::user::UserStore;
     use kotton_wire::ipc::UserResponse;
@@ -2171,18 +2186,6 @@ mod handed_drive_tests {
         .unwrap()
     }
 
-    /// Every key vector the rule refuses.
-    fn refused_keys() -> Vec<[u8; 32]> {
-        use kotton_crypto::ed25519::refused;
-        let keys: Vec<[u8; 32]> = refused::SMALL_ORDER_KEYS
-            .into_iter()
-            .chain(refused::IDENTITY_OTHER_ENCODINGS)
-            .chain([refused::mixed_order_key(), refused::NON_CANONICAL_KEY, refused::NOT_A_POINT])
-            .collect();
-        assert_eq!(keys.len(), 14, "one per refused key vector");
-        keys
-    }
-
     /// A drive at a vault under `key`, its DID naming those bytes as did:key does.
     fn a_drive_under(key: [u8; 32]) -> DriveHandout {
         let mut node = a_node("vault", 2);
@@ -2217,7 +2220,7 @@ mod handed_drive_tests {
             .await
             .unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &honest.vault_key).await.unwrap();
-        for (i, key) in refused_keys().into_iter().enumerate() {
+        for (i, (_, key)) in refused_keys().into_iter().enumerate() {
             let did = kotton_crypto::DidKeyMethod::spelled_over(&key).to_string();
             network_db::seed_paired_node_as_stored(&db, &format!("old-{i}"), "alice", &did, &key, "[]", 0, Some("blind-storage"))
                 .await
@@ -2274,22 +2277,22 @@ mod handed_drive_tests {
             .unwrap();
         kotton_peer::daemon::drives::record(&db, "alice", &spelled.vault_key).await.unwrap();
         let keys = Arc::new(RwLock::new(HashSet::new()));
-        for (i, key) in refused_keys().into_iter().enumerate() {
+        for (vector, key) in refused_keys() {
             let did = kotton_crypto::DidKeyMethod::spelled_over(&key).to_string();
             network_db::seed_paired_node_as_stored(&db, "old", "alice", &did, &key, "[]", 0, Some("blind-storage")).await.unwrap();
             kotton_peer::daemon::drives::record(&db, "alice", &key).await.unwrap();
 
             let notes = crate::users::drive_verbs::vaults_noted(&db, "alice").await.unwrap();
-            assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key("old")], "vector {i}");
+            assert_eq!(notes, vec![kotton_wire::note::RowNote::names_no_key("old")], "{vector}");
             let cards = Cards::default();
             let named = kotton_peer::daemon::nodes::node_named(&db, "alice", &notes[0].name, kotton_peer::daemon::nodes::Asked::Locally.reach(&cards))
                 .await
                 .unwrap()
                 .expect("the note's name names its row");
             let said = kotton_peer::daemon::nodes::revoke_named(&cards, &db, "alice", &named, &keys).await.unwrap();
-            assert!(matches!(said, UserResponse::NodeRevoked), "vector {i}: {said:?}");
-            assert!(crate::users::drive_verbs::vaults_noted(&db, "alice").await.unwrap().is_empty(), "vector {i}");
-            assert_eq!(kotton_peer::daemon::drives::list(&db, "alice").await.unwrap().len(), 2, "vector {i}: an honest vault went");
+            assert!(matches!(said, UserResponse::NodeRevoked), "{vector}: {said:?}");
+            assert!(crate::users::drive_verbs::vaults_noted(&db, "alice").await.unwrap().is_empty(), "{vector}");
+            assert_eq!(kotton_peer::daemon::drives::list(&db, "alice").await.unwrap().len(), 2, "{vector}: an honest vault went");
         }
     }
 
@@ -2384,9 +2387,9 @@ mod handed_drive_tests {
     #[test]
     fn a_handed_drive_under_a_key_the_rule_refuses_is_refused() {
         let issuer = a_node("laptop", 1);
-        for (i, key) in refused_keys().into_iter().enumerate() {
+        for (vector, key) in refused_keys() {
             let why = check_handed_drives("alice", &issuer, &[a_drive_under(key)]).unwrap_err();
-            assert!(why.contains("not an Ed25519 key"), "refused key vector {i}: {why}");
+            assert!(why.contains("not an Ed25519 key"), "refused key {vector}: {why}");
         }
     }
 
@@ -2400,7 +2403,7 @@ mod handed_drive_tests {
         let (_dir, db) = machine_db().await;
         let temp = tempfile::tempdir().unwrap();
         let named_alice = |dir: &std::path::Path| files_under(dir).iter().any(|p| p.to_string_lossy().contains("alice"));
-        for key in refused_keys() {
+        for (_, key) in refused_keys() {
             let why = refusal(join_handing_at(temp.path(), &db, vec![a_drive("other", 3, "alice"), a_drive_under(key)]).await);
             assert!(why.contains("not an Ed25519 key") && why.contains("This device was not joined"), "{why}");
         }
@@ -2499,16 +2502,16 @@ mod handed_drive_tests {
     async fn a_join_under_an_issuers_key_the_rule_refuses_keeps_nothing() {
         let (_dir, db) = machine_db().await;
         let temp = tempfile::tempdir().unwrap();
-        for (i, key) in refused_keys().into_iter().enumerate() {
+        for (vector, key) in refused_keys() {
             let mut issuer = a_node("issuer", 1);
             issuer.device_did = kotton_crypto::DidKeyMethod::spelled_over(&key);
             issuer.public_key = key;
             let why = a_join_carrying_keys_keeps_nothing(temp.path(), &db, issuer).await;
             assert!(
                 why.starts_with("This device was not joined: the admitting device's key is not an Ed25519 key"),
-                "refused key vector {i}: {why}"
+                "refused key {vector}: {why}"
             );
-            assert!(why.contains("Nothing was kept here") && !why.contains("saving"), "refused key vector {i}: {why}");
+            assert!(why.contains("Nothing was kept here") && !why.contains("saving"), "refused key {vector}: {why}");
         }
 
         let answer = join_handing_at(temp.path(), &db, Vec::new()).await;
@@ -2525,7 +2528,6 @@ mod handed_drive_tests {
     /// secrets are not kept, no file is written under `base`, and the rows,
     /// the drives, the allowlist and the sessions are as they were.
     async fn a_join_carrying_keys_keeps_nothing(base: &std::path::Path, db: &Arc<SqlitePool>, issuer: PairedNode) -> String {
-        use kotton_common::crypto::kdf_labels;
         let rows_before = stored_rows(db, "alice").await;
         let drives_before = drive_records(db).await;
         let runtime = crate::runtime::DeviceRuntime::new_with_secrets(
@@ -2536,9 +2538,38 @@ mod handed_drive_tests {
         .await
         .unwrap();
         let files_before = files_under(base);
-        let warm = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let sessions: kotton_session::service::tokens::SessionMap = Default::default();
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let answer = super::finalize_joined_node(
+            &runtime,
+            &NobodyResident,
+            db,
+            &sessions,
+            &paired_keys,
+            "alice",
+            &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            a_join_carrying_keys(&issuer),
+        )
+        .await;
+
+        for label in delivered_secrets() {
+            assert_eq!(runtime.secrets().get_secret(&label).unwrap(), None, "a refused join kept {label}");
+        }
+        assert_eq!(files_under(base), files_before, "a refused join wrote its key log or its user");
+        assert_eq!(stored_rows(db, "alice").await, rows_before, "a refused join changed a row");
+        assert_eq!(drive_records(db).await, drives_before, "a refused join recorded a drive");
+        assert!(paired_keys.read().unwrap().is_empty(), "a refused join allowed the issuer's key");
+        assert!(sessions.read().unwrap().is_empty(), "a refused join minted a session");
+        let failed = answer.as_ref().err().map(ToString::to_string);
+        assert!(failed.is_none(), "a refused join was said as a failure, not a refusal: {failed:?}");
+        refusal(answer.unwrap())
+    }
+
+    /// The join [`a_join_carrying_keys_keeps_nothing`] runs, from `issuer`: a
+    /// key log, a share, a group key, a delegation and data keys.
+    fn a_join_carrying_keys(issuer: &PairedNode) -> kotton_peer::pairing::JoinedNode {
         let inception = kotton_crypto::kel_verify::build_fresh_inception(&ed25519_dalek::SigningKey::from_bytes(&[9; 32]));
-        let joined = kotton_peer::pairing::JoinedNode {
+        kotton_peer::pairing::JoinedNode {
             root_did: issuer.device_did.clone(),
             peer: issuer.clone(),
             frost_share: Some(kotton_wire::peer::FrostSharePayload("a share".into())),
@@ -2555,13 +2586,13 @@ mod handed_drive_tests {
             recovery_bundle: None,
             gateway: None,
             drives: Vec::new(),
-        };
-        let sessions: kotton_session::service::tokens::SessionMap = Default::default();
-        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
-        let answer =
-            super::finalize_joined_node(&runtime, &NobodyResident, db, &sessions, &paired_keys, "alice", &warm, joined).await;
+        }
+    }
 
-        for label in [
+    /// The labels of the secrets [`a_join_carrying_keys`] delivers for alice.
+    fn delivered_secrets() -> [String; 7] {
+        use kotton_common::crypto::kdf_labels;
+        [
             kdf_labels::frost_share("alice"),
             kdf_labels::frost_pubkey_package("alice"),
             kdf_labels::warm_signing_key("alice"),
@@ -2569,15 +2600,72 @@ mod handed_drive_tests {
             kdf_labels::operational_cek("alice"),
             kdf_labels::operational_cek_epoch("alice"),
             kdf_labels::master_secret_keychain_key("alice"),
-        ] {
-            assert_eq!(runtime.secrets().get_secret(&label).unwrap(), None, "a refused join kept {label}");
+        ]
+    }
+
+    /// **A join under a local name another identity holds here keeps
+    /// nothing**: the join is refused before anything is written, and the
+    /// person is told that the name is taken here, not that saving failed, and
+    /// nothing of the identity that holds it. The same join on a device where
+    /// the name is free provisions the user and keeps what it was handed, so
+    /// the first is no accident of where the user would be written.
+    #[tokio::test]
+    async fn a_join_under_a_name_another_identity_holds_here_keeps_nothing() {
+        use crate::users::DeviceUsers as _;
+        let held = "did:kel:held-here";
+        let (_dir, db) = machine_db().await;
+        let temp = tempfile::tempdir().unwrap();
+        crate::runtime::DeviceRuntime::new_with_secrets(
+            temp.path().to_path_buf(),
+            crate::config::RuntimeConfig::default(),
+            Arc::new(kotton_secret::MemorySecrets::new()),
+        )
+        .await
+        .unwrap()
+        .provision_joined_user("alice", held)
+        .unwrap()
+        .expect("alice is provisioned here for another identity");
+
+        let why = a_join_carrying_keys_keeps_nothing(temp.path(), &db, a_node("issuer", 1)).await;
+        assert!(
+            why.starts_with("This device was not joined: the name `alice` is already taken on this device; "),
+            "{why}"
+        );
+        assert!(why.contains("Nothing was kept here") && !why.contains("saving"), "{why}");
+        assert!(!why.contains(held), "the refusal named the identity that holds the name: {why}");
+        let kept = crate::registry::load_users(&temp.path().join("system")).unwrap();
+        let kept: Vec<(&str, &str)> = kept.users.iter().map(|u| (u.user_id.as_str(), u.did.as_str())).collect();
+        assert_eq!(kept, vec![("alice", held)], "the name changed hands");
+
+        let free = tempfile::tempdir().unwrap();
+        let (_free_dir, free_db) = machine_db().await;
+        let runtime = crate::runtime::DeviceRuntime::new_with_secrets(
+            free.path().to_path_buf(),
+            crate::config::RuntimeConfig::default(),
+            Arc::new(kotton_secret::MemorySecrets::new()),
+        )
+        .await
+        .unwrap();
+        let answer = super::finalize_joined_node(
+            &runtime,
+            &NobodyResident,
+            &free_db,
+            &Default::default(),
+            &Arc::new(RwLock::new(HashSet::new())),
+            "alice",
+            &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            a_join_carrying_keys(&a_node("issuer", 1)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(answer, UserResponse::PairingComplete { .. }), "the join under a free name was refused: {answer:?}");
+        for label in delivered_secrets() {
+            assert!(runtime.secrets().get_secret(&label).unwrap().is_some(), "the join under a free name did not keep {label}");
         }
-        assert_eq!(files_under(base), files_before, "a refused join wrote its key log or its user");
-        assert_eq!(stored_rows(db, "alice").await, rows_before, "a refused join changed a row");
-        assert_eq!(drive_records(db).await, drives_before, "a refused join recorded a drive");
-        assert!(paired_keys.read().unwrap().is_empty(), "a refused join allowed the issuer's key");
-        assert!(sessions.read().unwrap().is_empty(), "a refused join minted a session");
-        refusal(answer.expect("a refused join is a PairFailed"))
+        assert!(
+            files_under(free.path()).iter().any(|p| p.to_string_lossy().contains("alice")),
+            "the join under a free name provisioned no user where this test looks"
+        );
     }
 
     /// **A handed drive is written under its key's derivation**, with the
@@ -2706,11 +2794,11 @@ mod handed_drive_tests {
         let why = check_handed_drives("alice", &issuer, &[drive]).unwrap_err();
         assert!(!why.contains(&past), "the DID past the bound was printed whole: {why}");
         assert!(why.contains(" (cut: 21 more characters) is not a did:key"), "{why}");
-        for (i, key) in refused_keys().into_iter().enumerate() {
+        for (vector, key) in refused_keys() {
             let drive = a_drive_under(key);
             let quoted = kotton_wire::note::quoted_cut(&drive.node.device_did.to_string());
             let why = check_handed_drives("alice", &issuer, &[drive]).unwrap_err();
-            assert!(why.contains(&format!("its node's DID {quoted} names bytes that are not an Ed25519 key")), "vector {i}: {why}");
+            assert!(why.contains(&format!("its node's DID {quoted} names bytes that are not an Ed25519 key")), "{vector}: {why}");
         }
     }
 
@@ -3769,6 +3857,100 @@ mod refused_before_handing_tests {
 
         assert_eq!(issuer.secrets.get_secret(&kdf_labels::frost_share("alice")).unwrap(), None, "the issuer kept a share");
         assert_eq!(issuer.secrets.get_secret(&kdf_labels::frost_pubkey_package("alice")).unwrap(), None, "the issuer kept a group key");
+        assert_eq!(rows(&issuer).await, issuer_rows, "the issuer changed a row");
+        assert!(issuer.paired_keys.read().unwrap().is_empty(), "the issuer allowed the joiner");
+
+        for label in [
+            kdf_labels::frost_share("alice"),
+            kdf_labels::frost_pubkey_package("alice"),
+            kdf_labels::warm_signing_key("alice"),
+            kdf_labels::warm_key_delegation("alice"),
+            kdf_labels::operational_cek("alice"),
+            kdf_labels::master_secret_keychain_key("alice"),
+        ] {
+            assert_eq!(joiner.secrets.get_secret(&label).unwrap(), None, "the joiner kept {label}");
+        }
+        assert_eq!(files_under(joiner.base.path()), joiner_files, "the joiner wrote a file");
+        assert_eq!(rows(&joiner).await, "[]", "the joiner wrote a row");
+        assert!(joiner.paired_keys.read().unwrap().is_empty(), "the joiner allowed the issuer");
+        assert!(sessions.read().unwrap().is_empty(), "the joiner minted a session");
+    }
+
+    /// The sentence a ceremony's stream ended refused with.
+    fn ended_refused(frames: &[UserResponse]) -> &str {
+        match frames.last() {
+            Some(UserResponse::PairFailed { reason }) => reason,
+            other => panic!("the ceremony did not end refused: {other:?}"),
+        }
+    }
+
+    /// **A `device join` under a local name another identity holds on the
+    /// joining device keeps nothing there, and the admitting device is told.**
+    /// The joiner's person is told that the name is taken here and that
+    /// nothing was kept, not that saving failed, and nothing of the identity
+    /// that holds the name; the issuer hears that sentence, printed as data,
+    /// and keeps no row and no key on its allowlist.
+    #[tokio::test]
+    async fn a_device_join_under_a_name_another_identity_holds_keeps_nothing_and_the_issuer_is_told() {
+        use crate::users::DeviceUsers as _;
+        let held = "did:kel:held-here";
+        let issuer = a_side(5, Some(4)).await;
+        let joiner = a_side(8, None).await;
+        joiner.runtime.provision_joined_user("alice", held).unwrap().expect("alice is provisioned for another identity");
+        let issuer_rows = rows(&issuer).await;
+        let joiner_files = files_under(joiner.base.path());
+
+        let add = handle_device_add(
+            Arc::clone(&issuer.runtime),
+            Arc::new(NobodyResident),
+            Arc::clone(&issuer.db),
+            Arc::clone(&issuer.db),
+            Arc::clone(&issuer.paired_keys),
+            Arc::clone(&issuer.pending),
+            "alice".into(),
+            Some("laptop".into()),
+            60,
+            0,
+            Posture::Full,
+        )
+        .await
+        .expect("the add starts");
+        let (code_tx, code_rx) = tokio::sync::oneshot::channel();
+        let issuer_side = tokio::spawn(said(add, Arc::clone(&issuer.pending), Some(code_tx)));
+        let code = code_rx.await.expect("the add advertised a code");
+        let sessions: kotton_session::service::tokens::SessionMap = Default::default();
+        let join = handle_device_join(
+            Arc::clone(&joiner.runtime),
+            Arc::new(NobodyResident),
+            Arc::clone(&joiner.db),
+            Arc::clone(&joiner.db),
+            sessions.clone(),
+            Arc::clone(&joiner.paired_keys),
+            Arc::clone(&joiner.pending),
+            "alice".into(),
+            code,
+            Some("phone".into()),
+            JoinPolicy::Any,
+        )
+        .await
+        .expect("the join starts");
+        let joiner_said = said(join, Arc::clone(&joiner.pending), None).await;
+        let issuer_said = issuer_side.await.unwrap();
+
+        let there = ended_refused(&joiner_said);
+        assert!(
+            there.starts_with("This device was not joined: the name `alice` is already taken on this device; "),
+            "{there}"
+        );
+        assert!(there.contains("Nothing was kept here") && !there.contains("saving"), "{there}");
+        assert!(!there.contains(held), "the joiner named the identity that holds the name: {there}");
+        let here = ended_refused(&issuer_said);
+        assert!(
+            here.starts_with("The other device refused the join. Nothing is kept here")
+                && here.ends_with(&format!("It said: {}", kotton_wire::note::quoted_cut(there))),
+            "the admitting device was not told the joiner's refusal: {here}"
+        );
+        assert!(!here.contains(held), "the admitting device was told the identity that holds the name: {here}");
         assert_eq!(rows(&issuer).await, issuer_rows, "the issuer changed a row");
         assert!(issuer.paired_keys.read().unwrap().is_empty(), "the issuer allowed the joiner");
 
