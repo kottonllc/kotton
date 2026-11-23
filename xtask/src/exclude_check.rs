@@ -27,6 +27,10 @@
 //!   so `crates/*` names a directory called `*`, which is no crate's;
 //! - an absolute entry, or one that climbs out of the repository, whose meaning depends on
 //!   where the checkout is;
+//! - an entry that resolves to its own manifest's directory (`.`, or an empty string): a
+//!   workspace does not exclude itself, so the entry names no excluded crate;
+//! - an entry holding a backslash, which cargo on Unix reads as part of one path component,
+//!   not as a separator, so it names a directory other than the one it seems to;
 //! - an `exclude` that is not a list of strings, and a workspace manifest that cannot be read.
 //!
 //! The run itself is refused when git cannot list what it tracks: a check that cannot tell
@@ -110,6 +114,13 @@ fn entry_refusal(root: &Path, tracked: &BTreeSet<String>, at: &str, dir: &str, e
              crate's directory instead"
         ));
     }
+    if entry.contains('\\') {
+        return Some(format!(
+            "{head}, which holds a backslash: cargo on Unix reads it as part of one path \
+             component, not a separator, so the entry names a directory other than the one it \
+             seems to. Write it with `/` between its parts"
+        ));
+    }
     let Some(target) = resolve(dir, entry) else {
         return Some(format!(
             "{head}, which is absolute or climbs out of the repository, so what it names \
@@ -117,12 +128,15 @@ fn entry_refusal(root: &Path, tracked: &BTreeSet<String>, at: &str, dir: &str, e
              {at}, inside the repository"
         ));
     };
+    if target == dir {
+        return Some(format!(
+            "{head}, which resolves to {at}'s own directory: a workspace does not exclude \
+             itself, so the entry names no excluded crate. Name the excluded crate's directory, \
+             or delete the entry"
+        ));
+    }
     let on_disk = root.join(&target);
-    let manifest = if target.is_empty() {
-        "Cargo.toml".to_string()
-    } else {
-        format!("{target}/Cargo.toml")
-    };
+    let manifest = format!("{target}/Cargo.toml");
     if !on_disk.exists() {
         return Some(format!(
             "{head}, which names nothing in the tree: cargo accepts an exclude entry that names \
@@ -291,7 +305,9 @@ mod tests {
         let r = repo(&["tools/parent"]);
         let got = refused(&r);
         assert_eq!(got.len(), 1, "{got:?}");
-        assert!(got[0].contains("exclude names `tools/parent`, a directory that holds no Cargo.toml"), "{}", got[0]);
+        let m = &got[0];
+        assert!(m.starts_with("Cargo.toml: [workspace] exclude names `tools/parent`, a directory that holds no Cargo.toml"), "{m}");
+        assert!(m.contains("Name the directory that holds the excluded crate's Cargo.toml, or delete the entry"), "{m}");
     }
 
     #[test]
@@ -326,7 +342,9 @@ mod tests {
             let r = repo(&[entry]);
             let got = refused(&r);
             assert_eq!(got.len(), 1, "{entry}: {got:?}");
-            assert!(got[0].contains("absolute or climbs out of the repository"), "{}", got[0]);
+            let m = &got[0];
+            assert!(m.starts_with(&format!("Cargo.toml: [workspace] exclude names `{entry}`, which is absolute or climbs out of the repository")), "{m}");
+            assert!(m.contains("Name the excluded crate's directory relative to Cargo.toml, inside the repository"), "{m}");
         }
     }
 
@@ -351,12 +369,16 @@ mod tests {
         r.commit("tree");
         let got = refused(&r);
         assert_eq!(got.len(), 1, "{got:?}");
-        assert!(got[0].contains("[workspace] exclude is not a list"), "{}", got[0]);
+        let m = &got[0];
+        assert!(m.starts_with("Cargo.toml: [workspace] exclude is not a list"), "{m}");
+        assert!(m.ends_with("Write it as one"), "{m}");
 
         r.write("Cargo.toml", "[workspace]\nexclude = [\"tools/kept\", 7]\n");
         let got = refused(&r);
         assert_eq!(got.len(), 1, "{got:?}");
-        assert!(got[0].contains("[workspace] exclude holds a value of type integer, not a path"), "{}", got[0]);
+        let m = &got[0];
+        assert!(m.starts_with("Cargo.toml: [workspace] exclude holds a value of type integer, not a path"), "{m}");
+        assert!(m.contains("Write it as the excluded crate's directory, or delete it"), "{m}");
     }
 
     /// Every workspace root under the code roots is read, and its entries resolve from its own
@@ -406,6 +428,87 @@ mod tests {
         r.commit("tree");
         let got = refused(&r);
         assert_eq!(got.len(), 1, "{got:?}");
-        assert!(got[0].starts_with("Cargo.toml declares no [workspace]"), "{}", got[0]);
+        let m = &got[0];
+        assert!(m.starts_with("Cargo.toml declares no [workspace]"), "{m}");
+        assert!(m.contains("Run it from the repository's root"), "{m}");
+    }
+
+    /// A root manifest that cannot be read (here a directory where the file would be) is
+    /// refused, not taken as a tree with nothing to check.
+    #[test]
+    fn a_root_manifest_that_cannot_be_read_is_refused() {
+        let r = Repo::new();
+        r.write("Cargo.toml/README.md", "a directory, not a manifest\n");
+        r.commit("tree");
+        let report = check(r.path());
+        assert!(report.manifests.is_empty(), "{:?}", report.manifests);
+        assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
+        let m = &report.refused[0];
+        assert!(m.contains("Cargo.toml"), "{m}");
+        assert!(m.ends_with(": exclude-check cannot read the root manifest"), "{m}");
+    }
+
+    /// A manifest under a code root that is not TOML might declare a workspace; it is refused,
+    /// not skipped.
+    #[test]
+    fn a_manifest_under_a_code_root_that_is_not_toml_is_refused() {
+        let r = repo(&["tools/kept"]);
+        r.write("tools/broken/Cargo.toml", "[workspace\nexclude = [\n");
+        r.commit("broken");
+        let got = refused(&r);
+        assert_eq!(got.len(), 1, "{got:?}");
+        let m = &got[0];
+        assert!(m.contains("Cargo.toml: not TOML"), "{m}");
+        assert!(m.contains("broken"), "{m}");
+        assert!(m.ends_with("exclude-check cannot tell whether it declares a [workspace]"), "{m}");
+    }
+
+    /// Outside a git repository nothing says which manifests are tracked, and the run is
+    /// refused rather than reported OK.
+    #[test]
+    fn a_tree_git_cannot_list_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\nexclude = []\n").unwrap();
+        let report = check(dir.path());
+        assert!(report.manifests.is_empty(), "{:?}", report.manifests);
+        assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
+        let m = &report.refused[0];
+        assert!(m.starts_with("git ls-files -z --cached"), "{m}");
+        assert!(m.ends_with(": exclude-check cannot tell which manifests the tree holds"), "{m}");
+    }
+
+    /// An entry that resolves to its own manifest's directory names no excluded crate, from the
+    /// root and from a workspace root further down.
+    #[test]
+    fn an_entry_naming_its_own_manifests_directory_is_refused() {
+        for entry in [".", "", "tools/.."] {
+            let r = repo(&[entry]);
+            let got = refused(&r);
+            assert_eq!(got.len(), 1, "{entry:?}: {got:?}");
+            let m = &got[0];
+            assert!(m.starts_with(&format!("Cargo.toml: [workspace] exclude names `{entry}`, which resolves to Cargo.toml's own directory")), "{m}");
+            assert!(m.contains("Name the excluded crate's directory, or delete the entry"), "{m}");
+        }
+        let r = repo(&["tools/kept"]);
+        r.write(
+            "infra/relay/Cargo.toml",
+            "[package]\nname = \"relay\"\nversion = \"0.1.0\"\n\n[workspace]\nexclude = [\".\"]\n",
+        );
+        r.commit("relay");
+        let got = refused(&r);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].starts_with("infra/relay/Cargo.toml: [workspace] exclude names `.`, which resolves to infra/relay/Cargo.toml's own directory"), "{}", got[0]);
+    }
+
+    /// Cargo on Unix reads a backslash as part of one component, so `tools\kept` is not
+    /// `tools/kept`, even where `tools/kept` is a crate.
+    #[test]
+    fn an_entry_holding_a_backslash_is_refused() {
+        let r = repo(&["tools\\kept"]);
+        let got = refused(&r);
+        assert_eq!(got.len(), 1, "{got:?}");
+        let m = &got[0];
+        assert!(m.starts_with("Cargo.toml: [workspace] exclude names `tools\\kept`, which holds a backslash"), "{m}");
+        assert!(m.ends_with("Write it with `/` between its parts"), "{m}");
     }
 }
