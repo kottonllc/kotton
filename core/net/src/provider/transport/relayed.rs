@@ -1092,6 +1092,288 @@ mod tests {
         }
     }
 
+    /// One dial: who dials, under which door key, offering what, and whether every admitting
+    /// place at the door is already held.
+    struct Dial {
+        dialer: SigningKey,
+        towards: SigningKey,
+        offer: CircuitOffer,
+        bound_held: bool,
+    }
+
+    fn dial(dialer: &SigningKey, towards: &SigningKey, offer: CircuitOffer) -> Dial {
+        Dial {
+            dialer: dialer.clone(),
+            towards: towards.clone(),
+            offer,
+            bound_held: false,
+        }
+    }
+
+    /// What each side reads of `d` at a door under `door_key` admitting `admitted` by key and
+    /// whom `admission` admits: the dialer's reading first, then the door's.
+    async fn readings(
+        door_key: &SigningKey,
+        admitted: &[[u8; 32]],
+        admission: &Admission,
+        d: &Dial,
+    ) -> (Result<(), String>, Result<(), String>) {
+        let door = door_admitting(door_key, admitted, admission.clone());
+        let openings = Openings::default();
+        let place = openings.admit().unwrap();
+        let _bound = d.bound_held.then(|| {
+            let all = u32::try_from(MAX_ADMITTING).unwrap();
+            openings.admitting.clone().try_acquire_many_owned(all).unwrap()
+        });
+        let (s_io, c_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            RelayedConnection::accept(s_io, &door, place)
+                .await
+                .map(drop)
+                .map_err(|e| format!("{e:?}"))
+        });
+        let dialled = RelayedConnection::connect(c_io, &d.dialer, &pub_of(&d.towards), &d.offer)
+            .await
+            .map(drop)
+            .map_err(|e| format!("{e:?}"));
+        (dialled, server.await.unwrap())
+    }
+
+    /// A claim-maker that names one authority's key and holds another: its tag answers no
+    /// claim by the key it names.
+    struct Misnamed {
+        holds: SigningKey,
+        names: [u8; 32],
+    }
+
+    impl MakesClaim for Misnamed {
+        fn claim(&self, awaiting: &AwaitingAnswer) -> Option<RecoveryClaim> {
+            awaiting.claim(&kotton_crypto::x25519::ed25519_priv_to_x25519(&self.holds), self.names)
+        }
+    }
+
+    /// Every refusal a dialer can meet at a relayed door reads the same to it, whatever the
+    /// reason (kotton-protocol's *One handshake admits a device, by the identity's log*: a
+    /// refusal is the circuit closing, and no frame says why); and the door's side reads each
+    /// the same, so its log says nothing of why either. Each refused dial is set beside one
+    /// the same door admits, so each refusal is met where it is made and not at the setup.
+    ///
+    /// The dials through `connect` cover every refusal `connect` can produce: under another
+    /// key, past the admitting bound, a key not held offering nothing, events for an identity
+    /// the door does not host, events naming another key, events naming the dialer's key that
+    /// the replay from the hosted tip does not admit, a claim by an authority no hosted
+    /// identity holds, a claim whose tag the authority it names did not make, a claim whose
+    /// named key is not an Ed25519 point, and a claim by a key the hosted chain carries and
+    /// does not commit. One refusal `connect` cannot produce is driven by hand: an ask answered
+    /// with a reply that does not decode, which the door reads as it reads the others and
+    /// answers by writing nothing. The other refusals only raw bytes reach are not driven: a
+    /// wrong version byte or an incomplete opening, a third message that does not decode, and
+    /// offered events that are not JSON.
+    #[tokio::test]
+    async fn every_refusal_reads_the_same() {
+        use kotton_crypto::kdf::derive_kel_recovery_key;
+        use kotton_crypto::kel_verify::{build_inception, build_mnemonic_rotation, committed_set, kel_recovery_pubkey};
+        let door_key = key(40);
+        let (held, stranger, claimant) = (key(41), key(42), key(2));
+
+        // A tip the door hosts, and the rotation that names a recovered device's key.
+        let seed = [42u8; 32];
+        let rung = |i| kel_recovery_pubkey(&derive_kel_recovery_key(&seed, i));
+        let tip = build_inception(&key(30), &[rung(0)]);
+        let recovered = key(31);
+        let rotation = build_mnemonic_rotation(&tip, &seed, 0, &recovered, 0, &[rung(0)]);
+        let hosting_tip = Admission::default();
+        hosting_tip.tips.write().unwrap().insert(tip.aid.to_string(), tip.clone());
+        let offering = |events: Vec<kotton_wire::kel::KelEvent>| CircuitOffer { events, claim: None };
+        // A rotation of the hosted tip naming `stranger`, by a phrase the tip does not commit.
+        let other_seed = [77u8; 32];
+        let unadmitted = build_mnemonic_rotation(
+            &tip,
+            &other_seed,
+            0,
+            &stranger,
+            0,
+            &[kel_recovery_pubkey(&derive_kel_recovery_key(&other_seed, 0))],
+        );
+
+        // A hosted identity whose inception commits `authority`.
+        let authority = key(11);
+        let hosting_authority = Admission::default();
+        hosting_authority.learn_chain(&[build_inception(&key(10), &[pub_of(&authority)])]);
+        // Thirty-two bytes that are not an Ed25519 point.
+        let not_a_point = (0u8..=u8::MAX)
+            .map(|n| [n; 32])
+            .find(|b| VerifyingKey::from_bytes(b).is_err())
+            .unwrap();
+
+        // A hosted chain whose inception carries `outside` beyond what it commits.
+        let mut chain = crate::provider::transport::quic::tls::a_hosted_chain_of_every_kind(&seed);
+        let outside = key(33);
+        let mut carried = committed_set(&chain[0]).unwrap_or_default().to_vec();
+        carried.push(pub_of(&outside));
+        chain[0].recovery_set = carried;
+        let hosting_uncommitted = Admission::default();
+        hosting_uncommitted.learn_chain(&chain);
+        let phrase = SigningKey::from_bytes(&derive_kel_recovery_key(&seed, 0));
+
+        let by_key = [pub_of(&held)];
+        // What is refused; whom the door admits by key, and whom by its admission; the dial it
+        // refuses, and the dial it admits.
+        type Case<'a> = (&'a str, &'a [[u8; 32]], &'a Admission, Dial, Dial);
+        let cases: [Case; 10] = [
+            (
+                "a door dialled under another key",
+                &by_key,
+                &Admission::default(),
+                dial(&held, &key(44), CircuitOffer::default()),
+                dial(&held, &door_key, CircuitOffer::default()),
+            ),
+            (
+                "a circuit past the bound of circuits being admitted",
+                &by_key,
+                &Admission::default(),
+                Dial {
+                    bound_held: true,
+                    ..dial(&held, &door_key, CircuitOffer::default())
+                },
+                dial(&held, &door_key, CircuitOffer::default()),
+            ),
+            (
+                "a key the door does not hold, offering nothing",
+                &by_key,
+                &Admission::default(),
+                dial(&stranger, &door_key, CircuitOffer::default()),
+                dial(&held, &door_key, CircuitOffer::default()),
+            ),
+            (
+                "a key the door does not hold, offering events for an identity it does not host",
+                &by_key,
+                &Admission::default(),
+                dial(&recovered, &door_key, offering(vec![rotation.clone()])),
+                dial(&held, &door_key, CircuitOffer::default()),
+            ),
+            (
+                "a key the door does not hold, offering events that name another key",
+                &[],
+                &hosting_tip,
+                dial(&stranger, &door_key, offering(vec![rotation.clone()])),
+                dial(&recovered, &door_key, offering(vec![rotation.clone()])),
+            ),
+            (
+                "a key the door does not hold, offering events naming it that the hosted tip does not admit",
+                &[],
+                &hosting_tip,
+                dial(&stranger, &door_key, offering(vec![unadmitted])),
+                dial(&recovered, &door_key, offering(vec![rotation.clone()])),
+            ),
+            (
+                "a claim by an authority no hosted identity holds",
+                &[],
+                &hosting_authority,
+                dial(&claimant, &door_key, claiming(key(12))),
+                dial(&claimant, &door_key, claiming(authority.clone())),
+            ),
+            (
+                "a claim whose tag was not made by the authority it names",
+                &[],
+                &hosting_authority,
+                dial(
+                    &claimant,
+                    &door_key,
+                    CircuitOffer {
+                        events: Vec::new(),
+                        claim: Some(Arc::new(Misnamed {
+                            holds: key(12),
+                            names: pub_of(&authority),
+                        })),
+                    },
+                ),
+                dial(&claimant, &door_key, claiming(authority.clone())),
+            ),
+            (
+                "a claim whose named key is not an Ed25519 point",
+                &[],
+                &hosting_authority,
+                dial(
+                    &claimant,
+                    &door_key,
+                    CircuitOffer {
+                        events: Vec::new(),
+                        claim: Some(Arc::new(Misnamed {
+                            holds: key(12),
+                            names: not_a_point,
+                        })),
+                    },
+                ),
+                dial(&claimant, &door_key, claiming(authority.clone())),
+            ),
+            (
+                "a claim by a key the hosted chain carries and does not commit",
+                &[],
+                &hosting_uncommitted,
+                dial(&claimant, &door_key, claiming(outside)),
+                dial(&claimant, &door_key, claiming(phrase)),
+            ),
+        ];
+
+        let one = format!("{:?}", closed());
+        for (what, admitted, admission, refused, admits) in &cases {
+            let (dialer, door) = readings(&door_key, admitted, admission, admits).await;
+            assert!(dialer.is_ok() && door.is_ok(), "{what}: the same door admits its counterpart");
+            let (dialer, door) = readings(&door_key, admitted, admission, refused).await;
+            assert_eq!(dialer.as_ref(), Err(&one), "{what}: refusals must not be distinguishable");
+            assert_eq!(door.as_ref(), Err(&one), "{what}: nor read apart at the door");
+        }
+
+        // An ask answered with a reply that does not decode, beside one that offers the events
+        // the hosted tip admits: the door reads it as it reads every refusal, and writes nothing.
+        let events = vec![serde_json::to_vec(&rotation).unwrap()];
+        let admits_reply = AskReply::latest_of(&events).encode().unwrap();
+        let (door, answered) = replying(&door_key, &hosting_tip, &recovered, &admits_reply).await;
+        assert!(door.is_ok() && answered, "a malformed reply: the same door admits its counterpart");
+        let (door, answered) = replying(&door_key, &hosting_tip, &recovered, b"not a reply").await;
+        assert_eq!(door.as_ref(), Err(&one), "a malformed reply: read apart at the door");
+        assert!(!answered, "a malformed reply: the door writes nothing to it");
+    }
+
+    /// A dialer that answers the door's ask with `reply`, sealed and sent as `connect` sends
+    /// one, at a door under `door_key` admitting no key by itself and whom `admission` admits:
+    /// the door's reading, and whether it then wrote the dialer anything.
+    async fn replying(
+        door_key: &SigningKey,
+        admission: &Admission,
+        dialer: &SigningKey,
+        reply: &[u8],
+    ) -> (Result<(), String>, bool) {
+        let door = door_admitting(door_key, &[], admission.clone());
+        let (s_io, mut c_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            RelayedConnection::accept(s_io, &door, place())
+                .await
+                .map(drop)
+                .map_err(|e| format!("{e:?}"))
+        });
+        let (initiator, opening) = Initiator::open(
+            &kotton_crypto::x25519::ed25519_priv_to_x25519(dialer),
+            &kotton_crypto::x25519::ed25519_pub_to_x25519(&kotton_crypto::ed25519::verifying_key(door_key)),
+            None,
+            None,
+        )
+        .unwrap();
+        send(&mut c_io, &opening).await.unwrap();
+        let second = read_body(&mut c_io).await.unwrap().unwrap();
+        let (awaiting, third) = initiator.read_second(&second).unwrap();
+        send(&mut c_io, &third).await.unwrap();
+        let first = read_body(&mut c_io).await.unwrap().unwrap();
+        let (mut channel, answer) = awaiting.read_first(&first).unwrap();
+        assert_eq!(answer, Answer::AskForEvents);
+        send(&mut c_io, &channel.seal(reply).unwrap()).await.unwrap();
+        let door = server.await.unwrap();
+        let mut rest = Vec::new();
+        c_io.read_to_end(&mut rest).await.unwrap();
+        (door, !rest.is_empty())
+    }
+
     /// A recovered device offers, inside the channel, the rotation that names its key, and
     /// is admitted by it; the same rotation offered from another key admits nobody.
     #[tokio::test]
