@@ -508,6 +508,13 @@ pub enum UserResponse {
         /// nobody narrowed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         admission: Option<crate::rendezvous::RelayAdmission>,
+        /// Whether the answering vault holds an *invited* key for the relay at
+        /// `relay_url`: said to the vault's own terminal, which is handed no
+        /// key (`kvaultd drop` names the rotation its operator's desktop makes
+        /// only where one is held). `false` from every other answerer, and
+        /// absent from the wire then; an older reader ignores it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        invited_held: bool,
     },
     /// Answer to [`crate::UserRequest::OperatorMint`]: the public half of the
     /// key just minted, 64 hex characters, for the vault's or the relay's
@@ -557,8 +564,9 @@ pub enum UserResponse {
     OperatorEnrolledLines {
         lines: Vec<crate::ipc::vault_request::LineEnrolled>,
     },
-    /// Answer to `OperatorVerb::ReadRule` and `OperatorVerb::SetRule`: the rule
-    /// the relay reports it holds now. Never a key.
+    /// Answer to `OperatorVerb::ReadRule`, `OperatorVerb::SetRule` and
+    /// `OperatorVerb::RotateInvited`: the rule the relay reports it holds now.
+    /// Never a key.
     RelayRule {
         rule: crate::rendezvous::AdmissionRule,
     },

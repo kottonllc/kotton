@@ -1421,6 +1421,7 @@ async fn answer_request(
             relay_key: runtime.reachability().nat().relay_key,
             // Asked on this machine, by a process that presents at no relay.
             admission: None,
+            invited_held: false,
         }),
         // A device keeps for itself and meters nothing; the verb is a vault's,
         // asked of the node that is paid by the byte.
