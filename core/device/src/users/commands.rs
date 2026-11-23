@@ -1537,6 +1537,79 @@ mod tests {
         assert!(stored(rt.base_dir()) == before, "the log or the copy changed");
     }
 
+    /// A tip whose commitment is the empty set's root commits nothing, whatever it carries:
+    /// adding a phrase there grows from the empty set, and what it appends is what `validate`
+    /// accepts under its growth rule. Held on three such tips: a fresh inception, an inception
+    /// carrying a set that does not make its commitment, and an interaction after it carrying
+    /// one too. The add-recovery installs the phrase's first rung and nothing the tip carried,
+    /// the stored log replays, and the phrase is an authority over it.
+    #[tokio::test]
+    async fn adding_a_phrase_on_a_tip_that_commits_nothing_appends_what_validation_accepts() {
+        use kotton_crypto::kel_verify::{committed_set, empty_recovery_root, validate, Verdict};
+        use kotton_wire::kel::{Authorization, EventKind, KelEvent};
+        let x = ed25519_dalek::SigningKey::from_bytes(&[33u8; 32]).verifying_key().to_bytes();
+
+        for (case, carried, interaction) in [
+            ("a fresh inception", Vec::new(), false),
+            ("an inception carrying a set it does not commit", vec![x], false),
+            ("an interaction carrying a set it does not commit", vec![x], true),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let rt = make_runtime(&temp).await;
+            create_user(&rt, "alice", TEST_PASSPHRASE).await.unwrap();
+            let mut chain = kotton_identity::kel_store::load_chain(rt.base_dir(), "alice").unwrap();
+            assert_eq!(chain.len(), 1, "{case}: the premise, an identity minted with no phrase");
+            if interaction {
+                let inception = chain[0].clone();
+                let sk = kotton_identity::identity_signing_key_for("alice", rt.secrets()).expect("the operational key");
+                let mut e = KelEvent {
+                    aid: inception.aid.clone(),
+                    seq: inception.seq + 1,
+                    prev_event_digest: Some(kotton_crypto::kel_verify::digest(&inception)),
+                    kind: EventKind::Interaction,
+                    key_state: inception.key_state.clone(),
+                    recovery_commitment: inception.recovery_commitment,
+                    recovery_set: carried.clone(),
+                    authorization: Authorization::Quorum { sig: vec![0u8; 64] },
+                    contest_window: None,
+                };
+                use ed25519_dalek::Signer;
+                e.authorization = Authorization::Quorum { sig: sk.sign(e.canonical().as_bytes()).to_bytes().to_vec() };
+                chain.push(e);
+            } else {
+                chain[0].recovery_set = carried.clone();
+            }
+            kotton_identity::kel_store::save_chain(rt.base_dir(), "alice", &chain).unwrap();
+            let prev = chain.last().unwrap().clone();
+            assert_eq!(prev.recovery_commitment, empty_recovery_root(), "{case}: the premise, a tip that commits nothing");
+            assert_eq!(prev.recovery_set, carried, "{case}: the premise, the tip carries what the case says");
+            kotton_identity::kel_store::resolve_current_key_for(rt.base_dir(), "alice", false)
+                .unwrap_or_else(|e| panic!("{case}: the premise, the log before the phrase replays: {e}"));
+
+            let phrase = add_recovery_phrase(rt.base_dir(), rt.secrets(), "alice")
+                .await
+                .unwrap_or_else(|e| panic!("{case}: a phrase was not added: {e}"));
+
+            let after = kotton_identity::kel_store::load_chain(rt.base_dir(), "alice").unwrap();
+            assert_eq!(after.len(), chain.len() + 1, "{case}: one event appended");
+            assert!(after[..chain.len()] == chain[..], "{case}: the log before the phrase changed");
+            let added = after.last().unwrap();
+            assert_eq!(added.kind, EventKind::RotationAddRecovery, "{case}: the event appended is no add-recovery");
+            let seed = try_mnemonic_to_seed32(&phrase).unwrap();
+            let rung0 = kotton_crypto::kel_verify::kel_recovery_pubkey(
+                &kotton_crypto::kdf::derive_kel_recovery_key(&seed, 0),
+            );
+            assert!(
+                committed_set(added) == Some(&[rung0][..]),
+                "{case}: the add-recovery does not commit the phrase's first rung alone"
+            );
+            assert_eq!(validate(&prev, added), Verdict::Valid, "{case}: validation refuses the add-recovery");
+            kotton_identity::kel_store::resolve_current_key_for(rt.base_dir(), "alice", false)
+                .unwrap_or_else(|e| panic!("{case}: the stored log does not replay: {e}"));
+            assert!(phrase_holds_authority(&after, &seed), "{case}: the phrase is no authority over the log");
+        }
+    }
+
     /// **No door reaches a created identity without a credential.**
     ///
     /// This is the regression test for the defect that moved the check here:
