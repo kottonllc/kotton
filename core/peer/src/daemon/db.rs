@@ -298,7 +298,9 @@ async fn row_name(
 /// read. So a ceremony that asks this before it keeps anything
 /// (`super::nodes::finalize_enrolled_node`, and the joiner's completion in
 /// `kotton_device::users::pairing`) keeps nothing the store refuses: no key, no
-/// key log, no row. The write makes the read again inside its transaction, so
+/// key log, no row. Every issuing ceremony asks it of the joiner's row before
+/// it hands anything (`super::nodes::PersonsRows`), so a refused enrolment or
+/// admit ends before its payload, on both sides. The write makes the read again inside its transaction, so
 /// a row written between the two is refused there as well. No writer of this
 /// build stores the refused shape — every writer names a new row by its own
 /// key's derivation or keeps the key's row — so between the read and the write
