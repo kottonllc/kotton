@@ -32,6 +32,8 @@
 //!
 //! [`ExtensionNetPolicy`]: kotton_outbound::ExtensionNetPolicy
 
+use kotton_wire::ipc::unasked;
+use kotton_wire::note::quoted_cut;
 use kotton_wire::runner::{RunnerMessage, RunnerOp, RunnerOutput};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -47,7 +49,11 @@ pub const MAX_HOST_CALLS_PER_CYCLE: usize = 10_000;
 
 #[derive(Debug, Error)]
 pub enum FetchSessionError {
-    #[error("the extension reported: {0}")]
+    /// The extension's own words, as its `Error` frame carried them. They are
+    /// written by the extension's code, so they are printed as data and to a
+    /// bounded length ([`quoted_cut`]); a reader that compares reads them as
+    /// they came.
+    #[error("the extension reported: {}", quoted_cut(.0))]
     Extension(String),
     #[error("protocol violation: {0}")]
     Protocol(String),
@@ -122,7 +128,8 @@ where
             RunnerOutput::Error { message } => return Err(FetchSessionError::Extension(message)),
             other => {
                 return Err(FetchSessionError::Protocol(format!(
-                    "expected a host call or a result during a fetch, got {other:?}"
+                    "expected a host call or a result during a fetch, got {}",
+                    unasked(&other)
                 )))
             }
         }
@@ -379,6 +386,69 @@ mod tests {
             .await
             .expect_err("an extension error is not success");
         assert!(matches!(err, FetchSessionError::Extension(ref m) if m.contains("feed parse")));
+    }
+
+    /// Runs one cycle against a runner that writes `frames` and returns how
+    /// the cycle failed.
+    async fn failed_with(frames: Vec<RunnerOutput>) -> FetchSessionError {
+        let (host, _store) = host();
+        let (daemon_side, runner_side) = tokio::io::duplex(64 * 1024);
+        let (d_rx, d_tx) = tokio::io::split(daemon_side);
+        tokio::spawn(scripted_runner(frames, runner_side));
+        run_fetch_cycle(&host, d_rx, d_tx, vec![])
+            .await
+            .expect_err("the cycle does not succeed")
+    }
+
+    /// **An extension's `Error` is printed as data, to the stated length**: its
+    /// words are written by the extension's code, so a backtick and a line
+    /// break in them are printed by their escapes, and words past the bound
+    /// are cut and say so. The error keeps the words as they came.
+    #[tokio::test]
+    async fn an_extensions_words_are_printed_as_data_and_to_the_bound() {
+        let forged = "no `feed`\nFORGED: the cycle wrote nothing";
+        let err = failed_with(vec![RunnerOutput::Error {
+            message: forged.into(),
+        }])
+        .await;
+        assert_eq!(
+            err.to_string(),
+            "the extension reported: `no \\u{60}feed\\u{60}\\nFORGED: the cycle wrote nothing`"
+        );
+        assert!(
+            matches!(err, FetchSessionError::Extension(ref m) if m == forged),
+            "kept as it came"
+        );
+
+        let long = "x".repeat(kotton_wire::note::MAX_SAID_CHARS + 88);
+        let err = failed_with(vec![RunnerOutput::Error { message: long }]).await;
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "the extension reported: `{}` (cut: 88 more characters)",
+                "x".repeat(kotton_wire::note::MAX_SAID_CHARS)
+            )
+        );
+    }
+
+    /// **A frame a fetch did not ask for is said by its name, and no field of
+    /// it.**
+    #[tokio::test]
+    async fn a_frame_a_fetch_did_not_ask_for_is_said_by_its_name_alone() {
+        let err = failed_with(vec![RunnerOutput::MessageHandled {
+            patches: vec![],
+            launches: vec![kotton_wire::runner::LaunchRequest {
+                app_nsid: "sh.kotton.FIELD".into(),
+                name: Some("FIELD`\nFORGED".into()),
+                args: vec![("path".into(), "FIELD".into())],
+            }],
+            raises: vec![],
+        }])
+        .await;
+        assert_eq!(
+            err.to_string(),
+            "protocol violation: expected a host call or a result during a fetch, got `MessageHandled`"
+        );
     }
 
     /// A guest that dies mid-cycle is a failed cycle, not a hang.
