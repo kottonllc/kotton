@@ -36,10 +36,14 @@
 //!   brought in. A bare name that any module of the same file binds to the library is read as
 //!   the library in that whole file, beside whatever else it names there. A name a block binds
 //!   is read inside that block's items.
-//! - **Resolution settles.** Bindings are read to a fixed point across every module. A scope's
-//!   own child modules, the items it declares and the names its `use`s bind shadow what a glob
-//!   brings in, as rustc has it, and a name's targets only grow from round to round, so the
-//!   reading reaches the same end whatever order the modules are read in. A crate whose
+//! - **Resolution settles.** Bindings are read to a fixed point across every module. Only a
+//!   name a scope certainly holds in the type namespace shadows what a glob brings in: a child
+//!   module, type alias, struct, union, enum, trait, trait alias or `extern crate` with no
+//!   `#[cfg]` or `#[cfg_attr]` on it. A `use` may bind a value or a macro only, beside which
+//!   rustc keeps the glob's type, so a name a `use` binds reads as both its own targets and the
+//!   glob's; and an item under a `#[cfg]` may not be built, so it shadows nothing. Neither ends
+//!   the walk out to the scopes around a body. A name's targets only grow from round to round,
+//!   so the reading reaches the same end whatever order the modules are read in. A crate whose
 //!   bindings are still growing after [`ROUNDS`] rounds is refused, not read.
 //! - **A public item** is one written `pub`, in whatever module: a function's signature
 //!   (parameters, return, generics and their bounds), a constant's or static's type, a pub
@@ -62,7 +66,7 @@
 //!   derive's impl, whether it writes a `From` (a derive other than `thiserror`'s `#[from]`)
 //!   or any other trait. A path inside a macro's arguments is not read either.
 //! - A `#[cfg]` is not evaluated: every module but a `#[cfg(test)]` one is read, whatever else
-//!   its attributes say.
+//!   its attributes say, and an item under a `#[cfg]` or `#[cfg_attr]` shadows no name.
 //! - A library crate whose `[lib]` names it other than its package's name, unless
 //!   `kotton-crypto`'s manifest gives it a key by that name.
 //! - Types only inferred: an `impl Trait` return names what it names, and nothing it hides.
@@ -95,8 +99,9 @@ const STARTS: &[&str] =
     &["pub", "fn", "struct", "enum", "union", "type", "trait", "impl", "use", "extern", "mod", "const", "static", "unsafe", "async"];
 
 /// The most rounds name resolution takes before the crate is refused. A name's targets only
-/// grow, so a crate settles in about as many rounds as its longest chain of imports; the tree's
-/// crate settles in a handful.
+/// grow, and each round reads the modules in the order they are declared, so a crate settles in
+/// about as many rounds as its longest chain of imports read against that order, plus one that
+/// finds nothing new; the tree's crate settles in a handful.
 const ROUNDS: usize = 64;
 
 pub fn run(root: &Path) {
@@ -431,6 +436,12 @@ fn is_cfg_test(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("cfg") && matches!(&a.meta, syn::Meta::List(l) if l.tokens.to_string() == "test"))
 }
 
+/// Whether an item may be compiled out: it carries a `#[cfg]` or a `#[cfg_attr]`, which this
+/// check does not evaluate.
+fn conditional(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr"))
+}
+
 fn cfg_attr_path(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path().is_ident("cfg_attr")
@@ -467,27 +478,6 @@ fn one(t: Target) -> Targets {
     Targets::from([t])
 }
 
-/// The names a `use` tree binds, as it is written: each leaf's name or rename, and a `self`'s
-/// prefix.
-fn use_names(tree: &UseTree, prefix: Option<&Ident>, out: &mut BTreeSet<String>) {
-    match tree {
-        UseTree::Path(p) => use_names(&p.tree, Some(&p.ident), out),
-        UseTree::Name(n) if n.ident == "self" => out.extend(prefix.map(Ident::to_string)),
-        UseTree::Name(n) => {
-            out.insert(n.ident.to_string());
-        }
-        UseTree::Rename(r) => {
-            out.insert(r.rename.to_string());
-        }
-        UseTree::Glob(_) => {}
-        UseTree::Group(g) => {
-            for t in &g.items {
-                use_names(t, prefix, out);
-            }
-        }
-    }
-}
-
 /// A scope: a module of the crate, or the items of a body (a function's, a constant's, an
 /// impl's or a trait's functions'), which sees its enclosing scope's names.
 struct Module<'a> {
@@ -504,9 +494,11 @@ struct Module<'a> {
     in_body: bool,
     items: Vec<&'a Item>,
     children: BTreeMap<String, usize>,
-    /// The names the scope declares itself, read off its items: its child modules, the names
-    /// its `use`s and `extern crate`s bind, and its type aliases, structs, unions, enums and
-    /// traits. These shadow a glob's names, and a name declared here is not looked up around.
+    /// The names the scope certainly holds in the type namespace, read off its items: its child
+    /// modules, type aliases, structs, unions, enums, traits, trait aliases and `extern crate`s,
+    /// each without a `#[cfg]` or `#[cfg_attr]`. These shadow a glob's names, and a name declared
+    /// here is not looked up around. A `use` is not among them: it may bind a value or a macro
+    /// only, beside which the glob's type stands, so its targets join the glob's.
     declared: BTreeSet<String>,
     bindings: BTreeMap<String, Targets>,
 }
@@ -682,13 +674,13 @@ impl<'a> Crate<'a> {
                 self.build(inner, file, format!("{name}::{{body of {what}}}"), Within::Body(idx), None, stack);
             }
         }
-        let mut declared: BTreeSet<String> = self.modules[idx].children.keys().cloned().collect();
+        let mut declared = BTreeSet::new();
         for item in &items {
+            if conditional(item_attrs(item)) {
+                continue;
+            }
             let name = match item {
-                Item::Use(u) => {
-                    use_names(&u.tree, None, &mut declared);
-                    continue;
-                }
+                Item::Mod(m) if self.modules[idx].children.contains_key(&m.ident.to_string()) => &m.ident,
                 Item::ExternCrate(e) => e.rename.as_ref().map_or(&e.ident, |(_, a)| a),
                 Item::Type(x) => &x.ident,
                 Item::Struct(x) => &x.ident,
@@ -722,8 +714,9 @@ impl<'a> Crate<'a> {
     }
 
     /// What `name` names in scope `m`: its bindings and child module there and, until a scope
-    /// that declares the name itself, in the scopes around it as well. A name only a glob brought
-    /// in does not end the walk, so an outer scope's reading of it is kept beside the glob's.
+    /// that declares the name itself, in the scopes around it as well. A name only a glob or a
+    /// `use` brought in, or only an item under a `#[cfg]`, does not end the walk, so an outer
+    /// scope's reading of it is kept beside the scope's own.
     fn lookup(&self, m: usize, name: &str) -> Targets {
         let mut out = Targets::new();
         let mut at = Some(m);
@@ -912,10 +905,12 @@ impl<'a> Crate<'a> {
 
     /// Every scope's bindings, to a fixed point: a binding may lead to another, in any module.
     /// Each round adds what the scopes' items bind, read with the bindings as they stand, to
-    /// what they already bind, and nothing is taken away; every step of the reading only gains
-    /// targets as the bindings gain them, so the end is the same whatever order the scopes are
-    /// read in. The rounds it took, or `Err(limit)` if the bindings still grew in the last of
-    /// `limit` rounds.
+    /// what they already bind, and nothing is taken away. That merge is what makes the reading
+    /// terminate whether or not each step of it is monotone: the bindings only grow, within a
+    /// finite set of scopes, names and targets, so they stop growing. Every step of the reading
+    /// does in fact only gain targets as the bindings gain them, so the end is the same whatever
+    /// order the scopes are read in. The rounds it took, or `Err(limit)` if the bindings still
+    /// grew in the last of `limit` rounds.
     fn bind(&mut self, limit: usize) -> Result<usize, usize> {
         for round in 1..=limit {
             let mut changed = false;
@@ -1518,6 +1513,68 @@ mod tests {
     fn a_glob_that_brings_in_its_own_path_s_name_settles_and_passes() {
         let found = settled(&[(LIB, "mod a {\n    pub mod g {\n        pub use std::fmt as a;\n    }\n}\npub use a::g::*;\n")]);
         assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// A glob's name beside a `use` of a fn by that name: the `use` binds the value only, so the
+    /// glob's type-namespace name still stands, and a path through it names the library.
+    #[test]
+    fn a_use_beside_a_glob_does_not_shadow_the_glob_s_name() {
+        let found = settled(&[
+            (LIB, "mod a;\nmod util;\n"),
+            ("src/util.rs", "pub fn frost() {}\n"),
+            ("src/a.rs", "use frost_ed25519 as frost;\nmod child;\n"),
+            ("src/a/child.rs", "use super::*;\nuse crate::util::frost;\npub fn f(_: frost::Identifier) {}\n"),
+        ]);
+        assert_eq!(found, ["src/a/child.rs:3: pub fn f names the threshold library (`frost::Identifier`)"]);
+    }
+
+    /// A module or a struct under a `#[cfg]` beside a glob may not be built, so it does not
+    /// shadow the glob's name.
+    #[test]
+    fn an_item_under_a_cfg_does_not_shadow_a_glob_s_name() {
+        let base = [
+            (LIB, "mod a;\nmod util;\n"),
+            ("src/util.rs", "pub fn frost() {}\n"),
+            ("src/a.rs", "use frost_ed25519 as frost;\nmod child;\n"),
+        ];
+        let module = settled(
+            &[
+                &base[..],
+                &[
+                    ("src/a/child.rs", "use super::*;\n#[cfg(feature = \"x\")]\nmod frost;\npub fn f(_: frost::Identifier) {}\n"),
+                    ("src/a/child/frost.rs", "pub struct Identifier;\n"),
+                ],
+            ]
+            .concat(),
+        );
+        assert_eq!(module, ["src/a/child.rs:4: pub fn f names the threshold library (`frost::Identifier`)"]);
+        let structure = settled(
+            &[
+                &base[..],
+                &[("src/a/child.rs", "use super::*;\n#[cfg(feature = \"x\")]\nstruct frost;\npub fn f(_: frost::Identifier) {}\n")],
+            ]
+            .concat(),
+        );
+        assert_eq!(structure, ["src/a/child.rs:4: pub fn f names the threshold library (`frost::Identifier`)"]);
+    }
+
+    /// A `use` in a body does not end the walk out of it: the body's impl names the library
+    /// through the enclosing module's `frost`, which the body's `use` of a fn leaves standing.
+    #[test]
+    fn a_use_in_a_body_leaves_an_outer_path_to_the_library_standing() {
+        let found = settled(&[(
+            LIB,
+            "mod util {\n    pub fn frost() {}\n}\npub mod frost {\n    pub use frost_ed25519::Identifier;\n}\npub fn h() {\n    \
+             use crate::util::frost;\n    pub struct S;\n    impl S {\n        pub fn i(_: frost::Identifier) {}\n    }\n    frost();\n}\n",
+        )]);
+        assert_eq!(
+            found,
+            [
+                "src/lib.rs:5: `use frost_ed25519::Identifier`, not private, names the threshold library \
+                 (`frost_ed25519::Identifier`)",
+                "src/lib.rs:10: impl S (its pub items) names the threshold library (`frost::Identifier`)",
+            ]
+        );
     }
 
     /// A chain of globs takes a round per link, read in the order the modules are declared; a
