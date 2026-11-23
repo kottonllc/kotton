@@ -28,26 +28,96 @@ use crate::ed25519::{Signature, VerifyingKey};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
-/// A failure of this module. Its surface names no type of the threshold library: a dependent of
-/// this crate names the tree's own types only, and the library stays a dependency of this crate
-/// alone. `threshold_surface` holds that for every public item of the crate.
+/// A failure of this module, in this crate's own fixed words. Its surface names no type of the
+/// threshold library: a dependent of this crate names the tree's own types only, and the library
+/// stays a dependency of this crate alone. `threshold_surface` holds that for every public item of
+/// the crate.
+///
+/// No variant's `Display` or `Debug` holds a byte of the input it failed on: an error's text holds
+/// nothing that is not this device's own to say. A reader's or writer's own error (the hex
+/// decoder's, the JSON reader's) is not kept, because its text echoes the input; the variant
+/// names the kind of thing that could not be read or written instead.
 #[derive(Debug, thiserror::Error)]
 pub enum FrostError {
-    /// A failure the threshold library reported, as the library's own text for it. Each of the
-    /// library's failures has its own text, so two of them are told apart by it. The text is the
-    /// library's fixed words for the failure (no message of `frost-core` 2.2.0 interpolates a
-    /// field), so it quotes no input and holds no key or share.
+    /// A failure the threshold library reported, as this crate's fixed words for it (see
+    /// `library`). Each of the library's failures has its own words, so two of them are told
+    /// apart by it; the words are the same as the library's own message for it, which the tests
+    /// hold, and no value the failure carries (a participant's identifier) is part of them.
     #[error("FROST: {0}")]
-    Frost(String),
-    #[error("serialise: {0}")]
-    Serialise(String),
-    #[error("deserialise: {0}")]
-    Deserialise(String),
-    #[error("invalid participant index {0}")]
-    InvalidIndex(u16),
+    Frost(&'static str),
+    /// A value of this module that could not be written.
+    #[error("could not write {0}")]
+    Serialise(FrostPart),
+    /// A serialised value that could not be read as the kind of thing it was given as.
+    #[error("could not read {0}")]
+    Deserialise(FrostPart),
+    /// A participant index that names no participant. The index is not part of the text.
+    #[error("invalid participant index")]
+    InvalidIndex,
     /// A group key, or an aggregated signature under it, that the Ed25519 rule refuses.
     #[error("FROST: {0}")]
     Refused(#[from] crate::ed25519::Refused),
+}
+
+/// The kind of thing a [`FrostError::Serialise`] or [`FrostError::Deserialise`] could not write
+/// or read. Its text is this crate's fixed words for the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrostPart {
+    /// A participant's key package: its secret share and the group key.
+    KeyPackage,
+    /// The group's public key package.
+    PublicKeyPackage,
+    /// A participant's identifier.
+    Identifier,
+    /// A participant's round-one signing nonces.
+    Nonces,
+    /// A participant's round-one signing commitments.
+    Commitments,
+    /// A signing package: the message and every participant's commitments.
+    SigningPackage,
+    /// A participant's signature share.
+    SignatureShare,
+    /// The aggregated signature.
+    Signature,
+    /// The group's verifying key.
+    GroupKey,
+    /// The group's DID, derived from its verifying key.
+    GroupDid,
+    /// The secret share the dealer made for a participant.
+    SecretShare,
+    /// An existing identity's key, taken as a threshold signing key.
+    SigningKey,
+    /// A participant's key-generation round-one secret package.
+    Round1Secret,
+    /// A participant's key-generation round-one package.
+    Round1Package,
+    /// A participant's key-generation round-two secret package.
+    Round2Secret,
+    /// A key-generation round-two package.
+    Round2Package,
+}
+
+impl std::fmt::Display for FrostPart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::KeyPackage => "a key package",
+            Self::PublicKeyPackage => "a public key package",
+            Self::Identifier => "a participant identifier",
+            Self::Nonces => "round-one signing nonces",
+            Self::Commitments => "round-one signing commitments",
+            Self::SigningPackage => "a signing package",
+            Self::SignatureShare => "a signature share",
+            Self::Signature => "a signature",
+            Self::GroupKey => "the group verifying key",
+            Self::GroupDid => "the group DID",
+            Self::SecretShare => "a secret share",
+            Self::SigningKey => "a signing key",
+            Self::Round1Secret => "a key-generation round-one secret package",
+            Self::Round1Package => "a key-generation round-one package",
+            Self::Round2Secret => "a key-generation round-two secret package",
+            Self::Round2Package => "a key-generation round-two package",
+        })
+    }
 }
 
 pub type FrostResult<T> = Result<T, FrostError>;
@@ -58,32 +128,80 @@ pub type KeyShares = FrostResult<(Vec<(u16, String)>, String, String)>;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// The library's failure as [`FrostError::Frost`]. A function and not a `From` impl, because an
-/// impl of a public trait for a public type is public and would name the library's type.
+/// The library's failure as [`FrostError::Frost`], in this crate's fixed words for it. A function
+/// and not a `From` impl, because an impl of a public trait for a public type is public and would
+/// name the library's type.
+///
+/// The words are this crate's own, chosen by the variant and never taken from the error, so no
+/// value a failure carries reaches the text, nor would one a later version of the library added
+/// to its message. They equal the library's own message for every variant this crate names,
+/// which `every_library_failure_says_the_fixed_words_the_library_gives_it` holds; a variant this
+/// crate does not name says so in fixed words.
 fn library(e: frost::Error) -> FrostError {
-    FrostError::Frost(e.to_string())
+    use frost::Error as E;
+    FrostError::Frost(match e {
+        E::InvalidMinSigners => "min_signers must be at least 2 and not larger than max_signers",
+        E::InvalidMaxSigners => "max_signers must be at least 2",
+        E::InvalidCoefficients => "coefficients must have min_signers-1 elements",
+        E::MalformedIdentifier => "Malformed identifier is unserializable.",
+        E::DuplicatedIdentifier => "Duplicated identifier.",
+        E::UnknownIdentifier => "Unknown identifier.",
+        E::IncorrectNumberOfIdentifiers => "Incorrect number of identifiers.",
+        E::MalformedSigningKey => "Malformed signing key encoding.",
+        E::MalformedVerifyingKey => "Malformed verifying key encoding.",
+        E::MalformedSignature => "Malformed signature encoding.",
+        E::InvalidSignature => "Invalid signature.",
+        E::DuplicatedShares => "Duplicated shares provided.",
+        E::IncorrectNumberOfShares => "Incorrect number of shares.",
+        E::IdentityCommitment => "Commitment equals the identity.",
+        E::MissingCommitment => "The Signing Package must contain the participant's Commitment.",
+        E::IncorrectCommitment => "The participant's commitment is incorrect.",
+        E::IncorrectNumberOfCommitments => "Incorrect number of commitments.",
+        E::InvalidSignatureShare { .. } => "Invalid signature share.",
+        E::InvalidSecretShare { .. } => "Invalid secret share.",
+        E::PackageNotFound => "Round 1 package not found for Round 2 participant.",
+        E::IncorrectNumberOfPackages => "Incorrect number of packages.",
+        E::IncorrectPackage => "The incorrect package was specified.",
+        E::DKGNotSupported => "The ciphersuite does not support DKG.",
+        E::InvalidProofOfKnowledge { .. } => "The proof of knowledge is not valid.",
+        E::FieldError(_) => "Error in scalar Field.",
+        E::GroupError(_) => "Error in elliptic curve Group.",
+        E::InvalidCoefficient => "Invalid coefficient",
+        E::IdentifierDerivationNotSupported => {
+            "The ciphersuite does not support deriving identifiers from strings."
+        }
+        E::SerializationError => "Error serializing value.",
+        E::DeserializationError => "Error deserializing value.",
+        _ => "a failure this crate has no words for",
+    })
 }
 
 fn id_from_index(idx: u16) -> FrostResult<Identifier> {
-    Identifier::try_from(idx).map_err(|_| FrostError::InvalidIndex(idx))
+    Identifier::try_from(idx).map_err(|_| FrostError::InvalidIndex)
 }
 
 fn hex_enc(b: &[u8]) -> String {
     hex::encode(b)
 }
 
-fn hex_dec(s: &str) -> FrostResult<Vec<u8>> {
-    hex::decode(s).map_err(|e| FrostError::Deserialise(e.to_string()))
+/// `s` as bytes, or [`FrostError::Deserialise`] naming `part`. The decoder's own error names the
+/// character it stopped at, so it is not kept.
+fn hex_dec(s: &str, part: FrostPart) -> FrostResult<Vec<u8>> {
+    hex::decode(s).map_err(|_| FrostError::Deserialise(part))
 }
 
-fn serialise<T: serde::Serialize>(v: &T) -> FrostResult<String> {
-    let bytes = serde_json::to_vec(v).map_err(|e| FrostError::Serialise(e.to_string()))?;
+/// `v` as hex of its JSON, or [`FrostError::Serialise`] naming `part`. The writer's own error is
+/// not kept.
+fn serialise<T: serde::Serialize>(v: &T, part: FrostPart) -> FrostResult<String> {
+    let bytes = serde_json::to_vec(v).map_err(|_| FrostError::Serialise(part))?;
     Ok(hex_enc(&bytes))
 }
 
-fn deserialise<T: serde::de::DeserializeOwned>(hex: &str) -> FrostResult<T> {
-    let bytes = hex_dec(hex)?;
-    serde_json::from_slice(&bytes).map_err(|e| FrostError::Deserialise(e.to_string()))
+/// `hex` read as hex of a `T`'s JSON, or [`FrostError::Deserialise`] naming `part`. The JSON
+/// reader's own error quotes the input it stopped at, so it is not kept.
+fn deserialise<T: serde::de::DeserializeOwned>(hex: &str, part: FrostPart) -> FrostResult<T> {
+    let bytes = hex_dec(hex, part)?;
+    serde_json::from_slice(&bytes).map_err(|_| FrostError::Deserialise(part))
 }
 
 /// The group's verifying key as a key that passed the Ed25519 rule: its 32 bytes constructed as
@@ -91,9 +209,9 @@ fn deserialise<T: serde::de::DeserializeOwned>(hex: &str) -> FrostResult<T> {
 fn group_key(key: &frost::VerifyingKey) -> FrostResult<VerifyingKey> {
     let bytes: [u8; 32] = key
         .serialize()
-        .map_err(|e| FrostError::Serialise(format!("serialize verifying key: {e}")))?[..]
+        .map_err(|_| FrostError::Serialise(FrostPart::GroupKey))?[..]
         .try_into()
-        .map_err(|_| FrostError::Serialise("verifying key must be 32 bytes".into()))?;
+        .map_err(|_| FrostError::Serialise(FrostPart::GroupKey))?;
     Ok(VerifyingKey::from_bytes(&bytes)?)
 }
 
@@ -124,19 +242,18 @@ pub fn generate_key_shares(
     let vk_bytes = *group_key(pubkey_package.verifying_key())?.as_bytes();
 
     let org_did = DidKeyMethod::from_public_key_bytes(&vk_bytes)
-        .map_err(|e| FrostError::Serialise(format!("did derivation: {e}")))?
+        .map_err(|_| FrostError::Serialise(FrostPart::GroupDid))?
         .to_string();
 
-    let pubkey_hex = serialise(&pubkey_package)?;
+    let pubkey_hex = serialise(&pubkey_package, FrostPart::PublicKeyPackage)?;
 
     let mut out = Vec::with_capacity(total as usize);
     for idx in 1..=total {
         let id = id_from_index(idx)?;
-        let secret_share = shares_map.get(&id).ok_or_else(|| {
-            FrostError::Deserialise(format!("missing share for participant {idx}"))
-        })?;
+        let secret_share =
+            shares_map.get(&id).ok_or(FrostError::Deserialise(FrostPart::SecretShare))?;
         let key_package = KeyPackage::try_from(secret_share.clone()).map_err(library)?;
-        let kp_hex = serialise(&key_package)?;
+        let kp_hex = serialise(&key_package, FrostPart::KeyPackage)?;
         out.push((idx, kp_hex));
     }
 
@@ -176,7 +293,7 @@ pub fn split_existing_identity(
     let scalar_bytes = curve25519_dalek::Scalar::from_bytes_mod_order(s).to_bytes();
 
     let signing_key = frost::SigningKey::deserialize(&scalar_bytes)
-        .map_err(|e| FrostError::Deserialise(format!("ed25519→frost scalar: {e}")))?;
+        .map_err(|_| FrostError::Deserialise(FrostPart::SigningKey))?;
 
     let mut rng = rand::rngs::OsRng;
     let (shares_map, pubkey_package) = frost::keys::split(
@@ -190,14 +307,14 @@ pub fn split_existing_identity(
 
     let vk_bytes = *group_key(pubkey_package.verifying_key())?.as_bytes();
     let did = DidKeyMethod::from_public_key_bytes(&vk_bytes)
-        .map_err(|e| FrostError::Serialise(format!("did derivation: {e}")))?
+        .map_err(|_| FrostError::Serialise(FrostPart::GroupDid))?
         .to_string();
-    let pubkey_hex = serialise(&pubkey_package)?;
+    let pubkey_hex = serialise(&pubkey_package, FrostPart::PublicKeyPackage)?;
 
     let mut out = Vec::with_capacity(total as usize);
     for (idx, (_id, secret_share)) in shares_map.iter().enumerate() {
         let key_package = KeyPackage::try_from(secret_share.clone()).map_err(library)?;
-        out.push(((idx + 1) as u16, serialise(&key_package)?));
+        out.push(((idx + 1) as u16, serialise(&key_package, FrostPart::KeyPackage)?));
     }
     Ok((out, pubkey_hex, did))
 }
@@ -207,7 +324,7 @@ pub fn split_existing_identity(
 /// Returns the same hex if valid (noop from the perspective of the caller; the
 /// point is the validation step).
 pub fn validate_key_package(key_package_hex: &str) -> FrostResult<String> {
-    let _kp: KeyPackage = deserialise(key_package_hex)?;
+    let _kp: KeyPackage = deserialise(key_package_hex, FrostPart::KeyPackage)?;
     Ok(key_package_hex.to_string())
 }
 
@@ -224,7 +341,7 @@ pub fn validate_key_package(key_package_hex: &str) -> FrostResult<String> {
 /// The group key is constructed as [`VerifyingKey`], so it is a key that passed the Ed25519 rule;
 /// a package whose group key the rule refuses yields [`FrostError::Refused`].
 pub fn key_package_verifying_key(key_package_hex: &str) -> FrostResult<VerifyingKey> {
-    let kp: KeyPackage = deserialise(key_package_hex)?;
+    let kp: KeyPackage = deserialise(key_package_hex, FrostPart::KeyPackage)?;
     group_key(kp.verifying_key())
 }
 
@@ -237,14 +354,14 @@ pub fn key_package_verifying_key(key_package_hex: &str) -> FrostResult<Verifying
 /// - `commitment_hex` — broadcast to the coordinator.
 /// - `participant_id_hex` — the participant's FROST `Identifier` (serialised).
 pub fn signing_commit(key_package_hex: &str) -> FrostResult<(String, String, String)> {
-    let kp: KeyPackage = deserialise(key_package_hex)?;
+    let kp: KeyPackage = deserialise(key_package_hex, FrostPart::KeyPackage)?;
     let mut rng = rand::rngs::OsRng;
 
     let (nonces, commitment) = frost::round1::commit(kp.signing_share(), &mut rng);
 
-    let nonces_hex = serialise(&nonces)?;
-    let commitment_hex = serialise(&commitment)?;
-    let participant_id_hex = serialise(kp.identifier())?;
+    let nonces_hex = serialise(&nonces, FrostPart::Nonces)?;
+    let commitment_hex = serialise(&commitment, FrostPart::Commitments)?;
+    let participant_id_hex = serialise(kp.identifier(), FrostPart::Identifier)?;
 
     Ok((nonces_hex, commitment_hex, participant_id_hex))
 }
@@ -260,12 +377,12 @@ pub fn create_signing_package(
 ) -> FrostResult<String> {
     let mut map = BTreeMap::new();
     for (id_hex, comm_hex) in commitments {
-        let id: Identifier = deserialise(id_hex)?;
-        let comm: round1::SigningCommitments = deserialise(comm_hex)?;
+        let id: Identifier = deserialise(id_hex, FrostPart::Identifier)?;
+        let comm: round1::SigningCommitments = deserialise(comm_hex, FrostPart::Commitments)?;
         map.insert(id, comm);
     }
     let pkg = SigningPackage::new(map, message);
-    serialise(&pkg)
+    serialise(&pkg, FrostPart::SigningPackage)
 }
 
 /// Produce a signature share for one participant.
@@ -277,12 +394,12 @@ pub fn signing_sign(
     nonces_hex: &str,
     signing_package_hex: &str,
 ) -> FrostResult<String> {
-    let kp: KeyPackage = deserialise(key_package_hex)?;
-    let nonces: round1::SigningNonces = deserialise(nonces_hex)?;
-    let pkg: SigningPackage = deserialise(signing_package_hex)?;
+    let kp: KeyPackage = deserialise(key_package_hex, FrostPart::KeyPackage)?;
+    let nonces: round1::SigningNonces = deserialise(nonces_hex, FrostPart::Nonces)?;
+    let pkg: SigningPackage = deserialise(signing_package_hex, FrostPart::SigningPackage)?;
 
     let share = frost::round2::sign(&pkg, &nonces, &kp).map_err(library)?;
-    serialise(&share)
+    serialise(&share, FrostPart::SignatureShare)
 }
 
 /// Aggregate signature shares into a final Ed25519 signature.
@@ -300,13 +417,13 @@ pub fn aggregate(
     pubkey_package_hex: &str,
     shares: &[(String, String)],
 ) -> FrostResult<Vec<u8>> {
-    let pkg: SigningPackage = deserialise(signing_package_hex)?;
-    let pubkey: PublicKeyPackage = deserialise(pubkey_package_hex)?;
+    let pkg: SigningPackage = deserialise(signing_package_hex, FrostPart::SigningPackage)?;
+    let pubkey: PublicKeyPackage = deserialise(pubkey_package_hex, FrostPart::PublicKeyPackage)?;
 
     let mut map = BTreeMap::new();
     for (id_hex, share_hex) in shares {
-        let id: Identifier = deserialise(id_hex)?;
-        let share: round2::SignatureShare = deserialise(share_hex)?;
+        let id: Identifier = deserialise(id_hex, FrostPart::Identifier)?;
+        let share: round2::SignatureShare = deserialise(share_hex, FrostPart::SignatureShare)?;
         map.insert(id, share);
     }
 
@@ -314,9 +431,9 @@ pub fn aggregate(
     let sig = frost::aggregate(&pkg, &map, &pubkey).map_err(library)?;
     let bytes: [u8; 64] = sig
         .serialize()
-        .map_err(|e| FrostError::Serialise(format!("serialize signature: {e}")))?[..]
+        .map_err(|_| FrostError::Serialise(FrostPart::Signature))?[..]
         .try_into()
-        .map_err(|_| FrostError::Serialise("signature must be 64 bytes".into()))?;
+        .map_err(|_| FrostError::Serialise(FrostPart::Signature))?;
     released(&key, pkg.message(), bytes)
 }
 
@@ -344,7 +461,11 @@ fn released(key: &VerifyingKey, message: &[u8], signature: [u8; 64]) -> FrostRes
 pub fn dkg_part1(index: u16, threshold: u16, total: u16) -> FrostResult<(String, String, String)> {
     let id = id_from_index(index)?;
     let (secret, package) = dkg::part1(id, total, threshold, rand::rngs::OsRng).map_err(library)?;
-    Ok((serialise(&secret)?, serialise(&package)?, serialise(&id)?))
+    Ok((
+        serialise(&secret, FrostPart::Round1Secret)?,
+        serialise(&package, FrostPart::Round1Package)?,
+        serialise(&id, FrostPart::Identifier)?,
+    ))
 }
 
 /// DKG round 2. `round1_packages` is `&[(participant_id_hex, round1_package_hex)]`
@@ -358,17 +479,22 @@ pub fn dkg_part2(
     secret_package_hex: &str,
     round1_packages: &[(String, String)],
 ) -> FrostResult<(String, Vec<(String, String)>)> {
-    let secret: dkg::round1::SecretPackage = deserialise(secret_package_hex)?;
+    let secret: dkg::round1::SecretPackage =
+        deserialise(secret_package_hex, FrostPart::Round1Secret)?;
     let mut r1 = BTreeMap::new();
     for (id_hex, pkg_hex) in round1_packages {
-        r1.insert(deserialise::<Identifier>(id_hex)?, deserialise(pkg_hex)?);
+        r1.insert(
+            deserialise::<Identifier>(id_hex, FrostPart::Identifier)?,
+            deserialise(pkg_hex, FrostPart::Round1Package)?,
+        );
     }
     let (round2_secret, round2_map) = dkg::part2(secret, &r1).map_err(library)?;
     let mut out = Vec::with_capacity(round2_map.len());
     for (id, pkg) in &round2_map {
-        out.push((serialise(id)?, serialise(pkg)?));
+        let id_hex = serialise(id, FrostPart::Identifier)?;
+        out.push((id_hex, serialise(pkg, FrostPart::Round2Package)?));
     }
-    Ok((serialise(&round2_secret)?, out))
+    Ok((serialise(&round2_secret, FrostPart::Round2Secret)?, out))
 }
 
 /// DKG round 3 (finalise). `round1_packages` is every other participant's round-1
@@ -383,23 +509,34 @@ pub fn dkg_part3(
     round1_packages: &[(String, String)],
     round2_packages: &[(String, String)],
 ) -> FrostResult<(String, String, String)> {
-    let round2_secret: dkg::round2::SecretPackage = deserialise(round2_secret_hex)?;
+    let round2_secret: dkg::round2::SecretPackage =
+        deserialise(round2_secret_hex, FrostPart::Round2Secret)?;
     let mut r1 = BTreeMap::new();
     for (id_hex, pkg_hex) in round1_packages {
-        r1.insert(deserialise::<Identifier>(id_hex)?, deserialise(pkg_hex)?);
+        r1.insert(
+            deserialise::<Identifier>(id_hex, FrostPart::Identifier)?,
+            deserialise(pkg_hex, FrostPart::Round1Package)?,
+        );
     }
     let mut r2 = BTreeMap::new();
     for (id_hex, pkg_hex) in round2_packages {
-        r2.insert(deserialise::<Identifier>(id_hex)?, deserialise(pkg_hex)?);
+        r2.insert(
+            deserialise::<Identifier>(id_hex, FrostPart::Identifier)?,
+            deserialise(pkg_hex, FrostPart::Round2Package)?,
+        );
     }
     let (key_package, pubkey_package) = dkg::part3(&round2_secret, &r1, &r2).map_err(library)?;
 
     let vk_bytes = *group_key(pubkey_package.verifying_key())?.as_bytes();
     let org_did = DidKeyMethod::from_public_key_bytes(&vk_bytes)
-        .map_err(|e| FrostError::Serialise(format!("did derivation: {e}")))?
+        .map_err(|_| FrostError::Serialise(FrostPart::GroupDid))?
         .to_string();
 
-    Ok((serialise(&key_package)?, serialise(&pubkey_package)?, org_did))
+    Ok((
+        serialise(&key_package, FrostPart::KeyPackage)?,
+        serialise(&pubkey_package, FrostPart::PublicKeyPackage)?,
+        org_did,
+    ))
 }
 
 #[cfg(test)]
@@ -457,7 +594,7 @@ mod tests {
     /// rule: the group key constructed as [`VerifyingKey`] and the signature checked by its
     /// `verify`.
     fn verify_group_sig(sig_bytes: &[u8], pubkey_hex: &str, message: &[u8]) {
-        let pubkey: PublicKeyPackage = deserialise(pubkey_hex).unwrap();
+        let pubkey: PublicKeyPackage = deserialise(pubkey_hex, FrostPart::PublicKeyPackage).unwrap();
         let key = group_key(pubkey.verifying_key()).expect("the group key passes the rule");
         let arr: [u8; 64] = sig_bytes.try_into().expect("64-byte signature");
         key.verify(message, &Signature::from_bytes(&arr))
@@ -497,11 +634,11 @@ mod tests {
 
     /// `serialised` (a hex blob of this module's) with its `verifying_key` field set to `key`.
     fn with_group_key(serialised: &str, key: &[u8; 32]) -> String {
-        let mut value: serde_json::Value = deserialise(serialised).unwrap();
+        let mut value: serde_json::Value = deserialise(serialised, FrostPart::KeyPackage).unwrap();
         let field = value.get_mut("verifying_key").expect("the package names its group key");
         assert!(field.is_string(), "the group key is serialised as hex");
         *field = serde_json::Value::String(hex::encode(key));
-        serialise(&value).unwrap()
+        serialise(&value, FrostPart::KeyPackage).unwrap()
     }
 
     /// The pieces of one 2-of-2 ceremony up to aggregation, by the trusted dealer:
@@ -542,7 +679,7 @@ mod tests {
 
     /// The group key a ceremony's public key package names, by the rule.
     fn ceremony_key(pubkey_hex: &str) -> VerifyingKey {
-        let pubkey: PublicKeyPackage = deserialise(pubkey_hex).unwrap();
+        let pubkey: PublicKeyPackage = deserialise(pubkey_hex, FrostPart::PublicKeyPackage).unwrap();
         group_key(pubkey.verifying_key()).unwrap()
     }
 
@@ -866,10 +1003,10 @@ mod tests {
             .enumerate()
             .map(|(i, (_id, ss))| {
                 let kp = KeyPackage::try_from(ss.clone()).unwrap();
-                ((i + 1) as u16, serialise(&kp).unwrap())
+                ((i + 1) as u16, serialise(&kp, FrostPart::KeyPackage).unwrap())
             })
             .collect();
-        let pubkey_hex = serialise(&pubkeys).unwrap();
+        let pubkey_hex = serialise(&pubkeys, FrostPart::PublicKeyPackage).unwrap();
         let msg = b"enroll: split identity threshold-signs under the original DID";
         let sig = sign_with_shares(&shares, &pubkey_hex, 2, msg).unwrap();
 
@@ -914,5 +1051,312 @@ mod tests {
         assert_eq!(group, format!("FROST: {}", frost::Error::InvalidMaxSigners));
         assert_ne!(threshold, group);
         assert_eq!(said(split_existing_identity(&[7; 32], 1, 3)), threshold);
+    }
+
+    /// What each [`FrostError`] says, and that none says the input it failed on. Every input
+    /// here carries a marker placed where a reader's own error would echo it; the assertion
+    /// messages name what was read and never the text, which could hold the input.
+    mod error_text {
+        use super::*;
+
+        /// Not hex, and not a word any of this module's texts holds.
+        const MARKER: &str = "M4RK3R-QX";
+
+        /// Every kind of thing, with this crate's words for it.
+        const PARTS: [(FrostPart, &str); 16] = [
+            (FrostPart::KeyPackage, "a key package"),
+            (FrostPart::PublicKeyPackage, "a public key package"),
+            (FrostPart::Identifier, "a participant identifier"),
+            (FrostPart::Nonces, "round-one signing nonces"),
+            (FrostPart::Commitments, "round-one signing commitments"),
+            (FrostPart::SigningPackage, "a signing package"),
+            (FrostPart::SignatureShare, "a signature share"),
+            (FrostPart::Signature, "a signature"),
+            (FrostPart::GroupKey, "the group verifying key"),
+            (FrostPart::GroupDid, "the group DID"),
+            (FrostPart::SecretShare, "a secret share"),
+            (FrostPart::SigningKey, "a signing key"),
+            (FrostPart::Round1Secret, "a key-generation round-one secret package"),
+            (FrostPart::Round1Package, "a key-generation round-one package"),
+            (FrostPart::Round2Secret, "a key-generation round-two secret package"),
+            (FrostPart::Round2Package, "a key-generation round-two package"),
+        ];
+
+        /// `e` says exactly `display` and `debug`, and neither holds any of `markers`.
+        fn says(what: &str, e: &FrostError, display: &str, debug: &str, markers: &[String]) {
+            let shown = e.to_string();
+            let dbg = format!("{e:?}");
+            for m in markers {
+                assert!(!shown.contains(m.as_str()), "the Display of the failure to read {what} holds the input's marker");
+                assert!(!dbg.contains(m.as_str()), "the Debug of the failure to read {what} holds the input's marker");
+            }
+            assert!(shown == display, "the failure to read {what} does not say {display:?}");
+            assert!(dbg == debug, "the failure to read {what} does not debug as {debug:?}");
+        }
+
+        /// The failure of `r`, without printing what it would have returned.
+        fn failure<T>(what: &str, r: FrostResult<T>) -> FrostError {
+            match r {
+                Err(e) => e,
+                Ok(_) => panic!("reading a marked {what} did not fail"),
+            }
+        }
+
+        /// Inputs that cannot be read, each carrying the marker where a reader would echo it:
+        /// a character that is not hex; hex of a JSON string where another type belongs; and,
+        /// for each top-level field of `valid` (hex of a JSON object), that field as an over-long
+        /// string that is not hex where it was a string, and as the marker where it was not.
+        fn marked(valid: Option<&str>) -> Vec<(String, Vec<String>)> {
+            let mut out = vec![
+                (format!("00~{MARKER}"), vec![MARKER.to_string(), "~".to_string()]),
+                (hex::encode(format!("\"{MARKER}\"")), vec![MARKER.to_string()]),
+            ];
+            let Some(valid) = valid else { return out };
+            let value: serde_json::Value = serde_json::from_slice(&hex::decode(valid).unwrap()).unwrap();
+            let fields = value.as_object().expect("a package is a JSON object");
+            assert!(!fields.is_empty());
+            for (name, field) in fields {
+                let mut changed = value.clone();
+                changed[name] = serde_json::Value::String(if field.is_string() {
+                    MARKER.repeat(16)
+                } else {
+                    MARKER.to_string()
+                });
+                out.push((hex::encode(serde_json::to_vec(&changed).unwrap()), vec![MARKER.to_string()]));
+            }
+            out
+        }
+
+        /// Every marked input to `read` fails as [`FrostError::Deserialise`] of `part`, saying so in
+        /// this crate's words and nothing of the input.
+        fn reads_marked<T>(part: FrostPart, valid: Option<&str>, read: impl Fn(&str) -> FrostResult<T>) {
+            let words = PARTS.iter().find(|(p, _)| *p == part).unwrap().1;
+            let inputs = marked(valid);
+            assert!(inputs.len() >= 2);
+            for (input, markers) in &inputs {
+                let e = failure(words, read(input));
+                says(words, &e, &format!("could not read {words}"), &format!("Deserialise({part:?})"), markers);
+            }
+        }
+
+        /// A value whose writer fails with the marker as its error.
+        struct Unwritable;
+
+        impl serde::Serialize for Unwritable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom(MARKER))
+            }
+        }
+
+        #[test]
+        fn each_kind_of_thing_has_its_own_words() {
+            let words: std::collections::BTreeSet<_> = PARTS.iter().map(|(p, _)| p.to_string()).collect();
+            assert_eq!(words.len(), PARTS.len(), "two kinds of thing share their words");
+            for (part, said) in PARTS {
+                assert_eq!(part.to_string(), said);
+            }
+        }
+
+        /// A writer's own error is not part of [`FrostError::Serialise`]: the text names the
+        /// kind of thing and holds nothing the writer said.
+        #[test]
+        fn a_failure_to_write_names_the_thing_and_not_the_writers_text() {
+            assert!(serde_json::to_vec(&Unwritable).unwrap_err().to_string().contains(MARKER));
+            for (part, words) in PARTS {
+                let e = failure(words, serialise(&Unwritable, part));
+                let shown = e.to_string();
+                let dbg = format!("{e:?}");
+                assert!(!shown.contains(MARKER), "the Display of the failure to write {words} holds the writer's text");
+                assert!(!dbg.contains(MARKER), "the Debug of the failure to write {words} holds the writer's text");
+                assert_eq!(shown, format!("could not write {words}"));
+                assert_eq!(dbg, format!("Serialise({part:?})"));
+            }
+        }
+
+        /// The secret material a participant holds (its key package, its signing nonces) and
+        /// what it reads from others in a signing ceremony each fail to read as the kind of
+        /// thing it is, with none of the input in the text.
+        #[test]
+        fn a_failure_to_read_a_signing_piece_names_it_and_holds_none_of_the_input() {
+            let message = b"marked inputs";
+            let (shares, pk, _did) = generate_key_shares(2, 2).unwrap();
+            let (kp1, kp2) = (&shares[0].1, &shares[1].1);
+            let (n1, c1, id1) = signing_commit(kp1).unwrap();
+            let (n2, c2, id2) = signing_commit(kp2).unwrap();
+            let commitments = [(id1.clone(), c1.clone()), (id2.clone(), c2.clone())];
+            let pkg = create_signing_package(message, &commitments).unwrap();
+            let s1 = signing_sign(kp1, &n1, &pkg).unwrap();
+            let s2 = signing_sign(kp2, &n2, &pkg).unwrap();
+            let sig_shares = [(id1.clone(), s1.clone()), (id2.clone(), s2.clone())];
+            assert!(aggregate(&pkg, &pk, &sig_shares).is_ok());
+
+            reads_marked(FrostPart::KeyPackage, Some(kp1), validate_key_package);
+            reads_marked(FrostPart::KeyPackage, Some(kp1), key_package_verifying_key);
+            reads_marked(FrostPart::KeyPackage, Some(kp1), signing_commit);
+            reads_marked(FrostPart::Nonces, Some(&n1), |x| signing_sign(kp1, x, &pkg));
+            reads_marked(FrostPart::SigningPackage, Some(&pkg), |x| signing_sign(kp1, &n1, x));
+            reads_marked(FrostPart::SigningPackage, Some(&pkg), |x| aggregate(x, &pk, &sig_shares));
+            reads_marked(FrostPart::Identifier, None, |x| {
+                create_signing_package(message, &[(x.to_string(), c1.clone()), (id2.clone(), c2.clone())])
+            });
+            reads_marked(FrostPart::Commitments, Some(&c1), |x| {
+                create_signing_package(message, &[(id1.clone(), x.to_string()), (id2.clone(), c2.clone())])
+            });
+            reads_marked(FrostPart::PublicKeyPackage, Some(&pk), |x| aggregate(&pkg, x, &sig_shares));
+            reads_marked(FrostPart::Identifier, None, |x| {
+                aggregate(&pkg, &pk, &[(x.to_string(), s1.clone()), (id2.clone(), s2.clone())])
+            });
+            reads_marked(FrostPart::SignatureShare, None, |x| {
+                aggregate(&pkg, &pk, &[(id1.clone(), x.to_string()), (id2.clone(), s2.clone())])
+            });
+        }
+
+        /// The round secrets of key generation, and the packages a participant reads from the
+        /// others, each fail to read as the kind of thing it is, with none of the input in the
+        /// text.
+        #[test]
+        fn a_failure_to_read_a_key_generation_piece_names_it_and_holds_none_of_the_input() {
+            let (sec1, p1, id1) = dkg_part1(1, 2, 2).unwrap();
+            let (sec2, p2, id2) = dkg_part1(2, 2, 2).unwrap();
+            let from_2 = [(id2.clone(), p2.clone())];
+            let from_1 = [(id1.clone(), p1.clone())];
+            let (r2sec1, _to_others_1) = dkg_part2(&sec1, &from_2).unwrap();
+            let (_r2sec2, to_others_2) = dkg_part2(&sec2, &from_1).unwrap();
+            let to_1: Vec<(String, String)> =
+                to_others_2.into_iter().map(|(_to, pkg)| (id2.clone(), pkg)).collect();
+            assert!(dkg_part3(&r2sec1, &from_2, &to_1).is_ok());
+
+            reads_marked(FrostPart::Round1Secret, Some(&sec1), |x| dkg_part2(x, &from_2));
+            reads_marked(FrostPart::Identifier, None, |x| dkg_part2(&sec1, &[(x.to_string(), p2.clone())]));
+            reads_marked(FrostPart::Round1Package, Some(&p2), |x| dkg_part2(&sec1, &[(id2.clone(), x.to_string())]));
+            reads_marked(FrostPart::Round2Secret, Some(&r2sec1), |x| dkg_part3(x, &from_2, &to_1));
+            reads_marked(FrostPart::Round1Package, Some(&p2), |x| {
+                dkg_part3(&r2sec1, &[(id2.clone(), x.to_string())], &to_1)
+            });
+            reads_marked(FrostPart::Round2Package, Some(&to_1[0].1), |x| {
+                dkg_part3(&r2sec1, &from_2, &[(id2.clone(), x.to_string())])
+            });
+        }
+
+        /// An index that names no participant says so without the index.
+        #[test]
+        fn an_invalid_index_does_not_say_the_index() {
+            let e = failure("a participant index", dkg_part1(0, 2, 2));
+            assert!(matches!(e, FrostError::InvalidIndex));
+            for text in [e.to_string(), format!("{e:?}")] {
+                assert!(!text.chars().any(|c| c.is_ascii_digit()), "the failure for an index holds a digit");
+            }
+            assert_eq!(e.to_string(), "invalid participant index");
+        }
+
+        /// A key package naming a group key the Ed25519 rule refuses fails without the key in
+        /// its text, whether the library refuses to read the key (the package could not be
+        /// read) or the rule refuses it; and a signature the rule refuses fails without the
+        /// signature in its text.
+        #[test]
+        fn a_refused_key_or_signature_is_not_in_the_text() {
+            let not_in = |what: &str, e: &FrostError, bytes: &[u8]| {
+                let markers = [hex::encode(bytes), hex::encode(&bytes[..4]), format!("{:?}", &bytes[..4])];
+                for text in [e.to_string(), format!("{e:?}")] {
+                    for m in &markers {
+                        assert!(!text.contains(m.as_str()), "{what}: the failure holds the bytes refused");
+                    }
+                }
+            };
+            let (shares, _pk, _did) = generate_key_shares(2, 2).unwrap();
+            for (name, key) in refused_keys() {
+                let e = failure(&name, key_package_verifying_key(&with_group_key(&shares[0].1, &key)));
+                not_in(&name, &e, &key);
+                match e {
+                    FrostError::Refused(_) => assert_eq!(e.to_string(), "FROST: refused by the Ed25519 rule"),
+                    FrostError::Deserialise(FrostPart::KeyPackage) => {
+                        assert_eq!(e.to_string(), "could not read a key package")
+                    }
+                    _ => panic!("{name}: neither refused by the rule nor unread as a key package"),
+                }
+            }
+
+            let message = b"a quorum signs";
+            let (pkg_hex, pubkey_hex, sig_shares, _kp) = ceremony(message);
+            let key = ceremony_key(&pubkey_hex);
+            let sig = aggregate(&pkg_hex, &pubkey_hex, &sig_shares).unwrap();
+            let refused = with_order_added_to_s(&sig);
+            let e = failure("a signature", released(&key, message, refused));
+            assert!(matches!(e, FrostError::Refused(_)));
+            not_in("a signature", &e, &refused[32..]);
+            assert_eq!(e.to_string(), "FROST: refused by the Ed25519 rule");
+            assert_eq!(format!("{e:?}"), "Refused(Refused)");
+        }
+
+        /// Every failure of the threshold library this crate names comes back in fixed words that
+        /// equal the library's own message for it, so a message of the library that carried a
+        /// value would differ and fail here; and no value a failure carries (a participant's
+        /// identifier, here a marked one) is in the `Display` or `Debug`. This holds the variants
+        /// the library has at the version in the lockfile; a variant a later version adds is not
+        /// listed here, and `library` gives it fixed words of its own.
+        #[test]
+        fn every_library_failure_says_the_fixed_words_the_library_gives_it() {
+            use frost::{Error as E, FieldError, GroupError};
+            let culprit = Identifier::try_from(0xbeef_u16).unwrap();
+            let markers = [
+                hex::encode(culprit.serialize()),
+                "efbe".to_string(),
+                "beef".to_string(),
+                0xbeef_u16.to_string(),
+                format!("{culprit:?}"),
+            ];
+            let failures = [
+                E::InvalidMinSigners,
+                E::InvalidMaxSigners,
+                E::InvalidCoefficients,
+                E::MalformedIdentifier,
+                E::DuplicatedIdentifier,
+                E::UnknownIdentifier,
+                E::IncorrectNumberOfIdentifiers,
+                E::MalformedSigningKey,
+                E::MalformedVerifyingKey,
+                E::MalformedSignature,
+                E::InvalidSignature,
+                E::DuplicatedShares,
+                E::IncorrectNumberOfShares,
+                E::IdentityCommitment,
+                E::MissingCommitment,
+                E::IncorrectCommitment,
+                E::IncorrectNumberOfCommitments,
+                E::InvalidSignatureShare { culprit },
+                E::InvalidSecretShare { culprit: Some(culprit) },
+                E::InvalidSecretShare { culprit: None },
+                E::PackageNotFound,
+                E::IncorrectNumberOfPackages,
+                E::IncorrectPackage,
+                E::DKGNotSupported,
+                E::InvalidProofOfKnowledge { culprit },
+                E::FieldError(FieldError::MalformedScalar),
+                E::FieldError(FieldError::InvalidZeroScalar),
+                E::GroupError(GroupError::MalformedElement),
+                E::GroupError(GroupError::InvalidIdentityElement),
+                E::GroupError(GroupError::InvalidNonPrimeOrderElement),
+                E::InvalidCoefficient,
+                E::IdentifierDerivationNotSupported,
+                E::SerializationError,
+                E::DeserializationError,
+            ];
+            let mut distinct = std::collections::BTreeSet::new();
+            for e in failures {
+                let theirs = e.to_string();
+                let ours = library(e);
+                assert!(matches!(ours, FrostError::Frost(_)));
+                assert_eq!(ours.to_string(), format!("FROST: {theirs}"), "the words for a library failure differ from the library's");
+                for text in [ours.to_string(), format!("{ours:?}")] {
+                    for m in &markers {
+                        assert!(!text.contains(m.as_str()), "a library failure's text holds the identifier it carries");
+                    }
+                }
+                distinct.insert(ours.to_string());
+            }
+            // Variants that carry a different value, or a different inner error, share their words;
+            // every other pair is told apart.
+            assert_eq!(distinct.len(), failures.len() - 1 - 1 - 2);
+        }
     }
 }
