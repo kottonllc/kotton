@@ -348,6 +348,11 @@ pub enum PairingPayload {
     },
 }
 
+// `PairingPayload::name`: the variant's name and nothing of its fields, what a
+// joiner says of a payload it did not ask for (an answer not asked for is said
+// by its name and no field; `crate::ipc::unasked`).
+variant_names!(PairingPayload { FullAccess, FrostShare, Gateway, BlindRelay });
+
 /// The two operational key-domain roots a `data`-posture node receives at
 /// enrollment (RFC-0036 "Payload: share and data keys travel independently").
 ///

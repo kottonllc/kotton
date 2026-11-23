@@ -24,7 +24,7 @@ use kotton_wire::peer::DataKeys;
 use kotton_crypto::{derive_cek, derive_master_secret};
 use crate::pair_channel::SasConfirmer;
 use crate::relay_keys::{FirstContact, Presented, RefusedAtTheRelay, Tier};
-use crate::pairing::JoinNotKept;
+use crate::pairing::{JoinNotKept, NotHanded, RefusedBeforeHanding};
 use kotton_crypto::x25519::ed25519_priv_to_x25519;
 use kotton_crypto::ed25519::VerifyingKey;
 use kotton_schemas::membership::{Ceremony, Member, Posture, Role};
@@ -1681,10 +1681,18 @@ pub async fn confirm_code(
 /// What a person is told when a ceremony fails: a relay's refusal at its door
 /// ([`RefusedAtTheRelay`]) as what this device presented there, a join the
 /// other device did not keep ([`JoinNotKept`]) as what is kept here — nothing —
-/// and every other failure as [`ceremony_failure_copy`] reads it.
+/// a ceremony one side refused before anything was handed
+/// ([`RefusedBeforeHanding`], [`NotHanded`]) as that refusal, and every other
+/// failure as [`ceremony_failure_copy`] reads it.
 pub fn ceremony_failure(err: &anyhow::Error) -> String {
     if let Some(not_kept) = err.downcast_ref::<JoinNotKept>() {
         return join_not_kept_copy(not_kept);
+    }
+    if let Some(RefusedBeforeHanding(why)) = err.downcast_ref::<RefusedBeforeHanding>() {
+        return refused_before_handing_copy(why);
+    }
+    if let Some(not_handed) = err.downcast_ref::<NotHanded>() {
+        return not_handed_copy(not_handed);
     }
     match err.downcast_ref::<RefusedAtTheRelay>() {
         Some(refused) => refused_at_the_relay_copy(refused),
@@ -1714,6 +1722,29 @@ pub fn join_not_kept_copy(not_kept: &JoinNotKept) -> String {
              both devices are ready."
         ),
     }
+}
+
+/// What the admitting device's person is told when it would not record the
+/// other device and so handed it nothing ([`RefusedBeforeHanding`]): `why`,
+/// this device's own sentence, and that nothing is kept on either side. The
+/// other device was sent this device's refusal in the payload's place.
+pub fn refused_before_handing_copy(why: &str) -> String {
+    format!(
+        "This device did not add the other device: {why}. Nothing was handed over, so nothing is kept on either \
+         device; pair again once that is resolved."
+    )
+}
+
+/// What the joining device's person is told when the admitting device refused
+/// it before handing anything ([`NotHanded`]): this device's own sentence, and
+/// the admitting device's reason printed as data and to a bounded length
+/// ([`kotton_wire::note::quoted_cut`]; how another node's text is printed).
+pub fn not_handed_copy(not_handed: &NotHanded) -> String {
+    format!(
+        "This device was not joined: the device that would have admitted it refused it before handing anything \
+         over. Nothing was kept here, and that device keeps nothing of it either. It said: {}",
+        kotton_wire::note::quoted_cut(&not_handed.0)
+    )
 }
 
 /// What a person is told when a relay refused, at its door, what this device
@@ -1798,6 +1829,49 @@ pub fn ceremony_failure_copy(err: &str) -> String {
     }
 }
 
+/// The person's rows on this device, as an issuing ceremony asks of the
+/// joiner's row before it hands anything
+/// ([`crate::pairing::JoinerRow`]): the store's own rule,
+/// [`network_db::row_refused_for`], which reads and writes nothing.
+pub struct PersonsRows<'a> {
+    pub db: &'a SqlitePool,
+    pub user_id: &'a str,
+}
+
+#[async_trait::async_trait]
+impl crate::pairing::JoinerRow for PersonsRows<'_> {
+    async fn refused_for(&self, key: &VerifyingKey) -> io::Result<Option<String>> {
+        network_db::row_refused_for(self.db, self.user_id, key).await
+    }
+}
+
+/// Why [`finalize_enrolled_node`] did not record a node the ceremony enrolled.
+#[derive(Debug)]
+pub enum NotRecorded {
+    /// The store refuses the node's row, or its key, read before the first
+    /// write: nothing was kept. The store's sentence.
+    Refused(String),
+    /// A read or a write failed. A failed read, before the first write, keeps
+    /// nothing; what a failed write's earlier writes kept stays: the finalizer
+    /// is not one transaction.
+    Failed(io::Error),
+}
+
+impl From<io::Error> for NotRecorded {
+    fn from(e: io::Error) -> Self {
+        NotRecorded::Failed(e)
+    }
+}
+
+impl std::fmt::Display for NotRecorded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NotRecorded::Refused(why) => f.write_str(why),
+            NotRecorded::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// Persist an issuer-side enrollment outcome (the `device add` completion): the
 /// retained FROST share + group key, the paired-node record + live allowlist, and
 /// the own-device membership + sync wiring.
@@ -1809,6 +1883,24 @@ pub fn ceremony_failure_copy(err: &str) -> String {
 /// stored under another spelling, the node returned carries the key's
 /// derivation and the row keeps its DID as stored. The label names the row
 /// either way.
+///
+/// **The ceremony has read the row for its node before it handed anything**
+/// ([`PersonsRows`]), so a row the store would refuse ended the ceremony
+/// before the payload, with both sides told and nothing kept on either.
+///
+/// **It reads that row again before it keeps anything**
+/// ([`network_db::row_refused_for`]). Where the store refuses it — its key's
+/// derivation is already a row's DID beside another key — it answers
+/// [`NotRecorded::Refused`] with nothing kept: no FROST share or group key, no
+/// row, no drive, no key on the allowlist, no member. Its callers say that as
+/// a refusal, never as a write that failed. A read that fails is
+/// [`NotRecorded::Failed`] with nothing kept. It is not one transaction: a
+/// write that fails for another reason after the first is
+/// [`NotRecorded::Failed`] too, and leaves what was kept before it. No writer of
+/// this build stores the refused shape — every writer names a new row by its
+/// own key's derivation or keeps the key's row — so between the ceremony's
+/// read and this one, and between this read and the write, the offending row
+/// can only be removed.
 pub async fn finalize_enrolled_node(
     secrets: &dyn SecretsStore,
     member_store: &dyn crate::membership::MemberStore,
@@ -1817,11 +1909,16 @@ pub async fn finalize_enrolled_node(
     user_id: &str,
     posture: Posture,
     enrolled: crate::pairing::EnrolledNode,
-) -> io::Result<PairedNode> {
+) -> Result<PairedNode, NotRecorded> {
     // The node's key enters the allowlist below; bytes the Ed25519 rule refuses are
     // refused here, before anything is recorded.
     let key = VerifyingKey::from_bytes(&enrolled.node.public_key)
-        .map_err(|e| io::Error::other(format!("the enrolled node's key is not an Ed25519 key: {e}")))?;
+        .map_err(|e| NotRecorded::Refused(format!("the enrolled node's key is not an Ed25519 key: {e}")))?;
+    // The row the store would refuse is refused here, before the first write:
+    // a ceremony the store refuses keeps nothing.
+    if let Some(why) = network_db::row_refused_for(db, user_id, &key).await? {
+        return Err(NotRecorded::Refused(why));
+    }
     // Full/Cosigner: persist the issuer's retained 2-of-2 share + group key. Blind
     // retains nothing.
     if let Some((issuer_share, _root_did)) = &enrolled.issuer_share {

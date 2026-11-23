@@ -161,6 +161,7 @@ impl NodeRelay {
             relay_url: Some(relay_url).filter(|u| !u.is_empty()),
             relay_key,
             admission,
+            invited_held: false,
         }
     }
 }
