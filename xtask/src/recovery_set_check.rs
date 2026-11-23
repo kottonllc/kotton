@@ -92,7 +92,7 @@ pub fn run(root: &Path) {
 }
 
 /// Whether `path` is a test or bench target's file rather than a crate's own source.
-fn is_test_file(path: &str) -> bool {
+pub(crate) fn is_test_file(path: &str) -> bool {
     path.split('/').any(|c| c == "tests" || c == "benches")
 }
 

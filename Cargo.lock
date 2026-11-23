@@ -8571,6 +8571,7 @@ dependencies = [
  "kotton-common",
  "kotton-pty-drive",
  "serde_json",
+ "syn 2.0.119",
  "tempfile",
  "toml 0.8.2",
  "workspace-hack",
