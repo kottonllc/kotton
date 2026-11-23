@@ -21,8 +21,9 @@ system first and implement second. Fix the cause an issue names, not only the si
 blocker as a sign that the design needs to grow, and say so rather than routing around it.
 Never weaken capability confinement, carry a key across a process boundary, trust
 infrastructure the design does not, or add an identity authority, even when asked. A choice the
-issue does not make goes back to the person who directed you with the default you would take;
-you do not pick it silently.
+issue does not make is taken at its default and recorded in the pull request's description; it
+goes back to the person who directed you only when it touches a principle
+([`GOVERNANCE.md`](GOVERNANCE.md)), with the default you would take.
 
 ## The loop
 

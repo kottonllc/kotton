@@ -52,15 +52,16 @@ reorder it at any time, and nothing waits for one to.
 - **Severity is the finder's to propose and a maintainer's or the next reviewer's to settle.**
   `blocker`, `defect` or `hygiene` is set at filing by whoever found it, with the clause it
   meets. When the driver is the finder, a `blocker` it files is confirmed by the next reviewer
-  before it goes next, and a `hygiene` it files is not closed as not taken without a
-  maintainer's look. Otherwise the driver records severity and neither raises nor lowers it.
+  before it goes next, and a `hygiene` it files is not closed as not taken until a reviewer has
+  confirmed it is `hygiene`. The milestone's order stays a maintainer's. Otherwise the driver
+  records severity and neither raises nor lowers it.
 - **A choice an issue leaves open is a `decision`, not a wait.** The issue states the choice and
-  a default, and mentions the person who directed the work and the maintainers. If no
-  maintainer objects within 72 hours of the last change to the choice or its default, the
-  default stands and is built through the loop, unless it is one
-  [`GOVERNANCE.md`](GOVERNANCE.md) says is not decided this way. A design decision is then
-  recorded where the design is (kotton-protocol's documents, or the module docs). A reversal
-  after that is a new proposal, not a quiet change.
+  a default. The driver takes the default, records it there, or in the pull request's
+  description when the choice came up in the work, and builds it through the loop; nothing
+  waits for a maintainer. A choice that touches a principle ([`GOVERNANCE.md`](GOVERNANCE.md))
+  goes to a maintainer with a recommendation and waits for a written answer. A design decision
+  is then recorded where the design is (kotton-protocol's documents, or the module docs). A
+  reversal after that is a new proposal, not a quiet change.
 - **Defects are budgeted when a sprint opens.** One or two `defect` issues are taken into the
   sprint and named in its milestone; no others are taken mid-sprint. A `hygiene` issue that no
   sprint takes by the end of the next sprint is closed as not taken, with a comment citing this
@@ -71,10 +72,10 @@ reorder it at any time, and nothing waits for one to.
 - **When a pull request lands, its issue closes**, once its assessor has confirmed the
   done-when was met, naming the pull request; or it says what is left and under which issue.
 - **Report, do not ask, within the queue.** Before a blocker, name its clause and go. Work off
-  the queue is a `decision` under the rule above, not something a driver starts on its own
-  word. A driver does not close, relabel or delete what another person opened, delete a branch
-  it did not make, or reorder the milestone; it asks for these, as it asks for what
-  [`GOVERNANCE.md`](GOVERNANCE.md) reserves to a maintainer.
+  the queue is a `decision` under the rule above, not something a driver starts without
+  recording the choice. A driver does not close, relabel or delete what another person opened,
+  delete a branch it did not make, or reorder the milestone; it asks for these, as it asks for
+  what [`GOVERNANCE.md`](GOVERNANCE.md) reserves to a maintainer.
 
 ## Every commit is signed off
 
