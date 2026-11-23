@@ -311,6 +311,11 @@ lint:
     # The principles it inspects (II, III and IV), against the code.
     cargo xtask constitution-check
     cargo xtask tier-check
+    # Every `[workspace] exclude` entry, the root manifest's and any other workspace root's
+    # under the code roots, names a directory in the tree that holds a tracked Cargo.toml.
+    # Cargo accepts an entry that names nothing, so without this the list goes stale and no
+    # build says so.
+    cargo xtask exclude-check
     cargo xtask blindness-check
     cargo xtask vault-check
     cargo xtask key-reach-check
