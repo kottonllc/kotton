@@ -46,8 +46,12 @@
 //!   one that does not hold together ([`check_handed_drives`]), and one whose
 //!   rows would be written over a row this device holds — its key paired here
 //!   as something other than a vault, or its DID paired here beside another
-//!   key ([`check_handed_rows`]). A row is the person's and the node's DID's,
-//!   and its label keys nothing (`kotton_peer::daemon::db`), so a drive's
+//!   key ([`check_handed_rows`]). The issuer's own row is read the same way
+//!   before anything is written ([`finalize_joined_node`]), and a row of it the
+//!   store would refuse refuses the join. The issuer reads the joiner's row the
+//!   same way before it keeps its share ([`finalize_enrolled_node`]), but that
+//!   read comes later, as the next paragraph says. A row is the person's and
+//!   the node's DID's, and its label keys nothing (`kotton_peer::daemon::db`), so a drive's
 //!   label that this device already shows on another row, the issuer's
 //!   included, or that another person here uses, is no reason to refuse: the
 //!   drive's row sits beside the other. The issuer's word replaces none of this
@@ -63,6 +67,12 @@
 //!   [`kotton_peer::pairing::JOINER_KEEPS_WITHIN`] leaves the issuer with no
 //!   row and no introduction, and the issuer's person is told so
 //!   ([`kotton_peer::pairing::JoinNotKept`]). There is nothing to revoke.
+//!   A refusal of the joiner's row on the issuer's side is not one of these:
+//!   [`finalize_enrolled_node`] runs after the issuer has replied `heard`, so
+//!   the issuer keeps nothing, while the joiner has kept its half, calls the
+//!   join complete, and is not told. The issuer's person is told the store's
+//!   refusal, which names the row; the mend is `device revoke` of that row,
+//!   then the ceremony again.
 //!   The joiner calls the join complete only on the issuer's sealed reply
 //!   that it heard `kept`. Without it the joiner cannot tell an issuer that
 //!   gave up from a reply that was lost, so its person is told the other
@@ -118,6 +128,18 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 use kotton_common::time::now_secs;
 
+/// The `PairFailed` a join refused before anything was written answers, with
+/// `why`, which the caller says to the issuer as well.
+fn not_joined(why: &str) -> UserResponse {
+    UserResponse::PairFailed {
+        reason: format!(
+            "This device was not joined: {why}. Nothing was kept here, and the device that \
+             would have admitted you keeps nothing of it either; join again from the device \
+             that holds your identity once this is resolved."
+        ),
+    }
+}
+
 /// Persist a joiner-side enrollment outcome (the `device join` completion): store
 /// the delivered KEL + adopt the AID, persist the FROST share/warm/delegation/CEK,
 /// record the issuer as a paired node, issue a session (the join cryptographically
@@ -132,6 +154,12 @@ use kotton_common::time::now_secs;
 /// person's row for the issuer's key is stored under another spelling, the node
 /// carries the key's derivation and the row keeps its DID as stored. The label
 /// names the row either way.
+///
+/// **It reads every row it would write before it keeps anything**: the handed
+/// drives' ([`check_handed_rows`]) and the issuer's own
+/// ([`network_db::row_refused_for`]). Where the store refuses one, the join is
+/// refused with the reason and nothing is kept here: no user, no key log, no
+/// key, no row, no drive.
 // Allowed: the daemon state a join's completion writes, as `handle_device_add` below takes it.
 #[allow(clippy::too_many_arguments)]
 pub async fn finalize_joined_node(
@@ -164,18 +192,18 @@ pub async fn finalize_joined_node(
     };
     if let Err(why) = checked {
         tracing::warn!(user_id, %why, "refused a join whose drives cannot be recorded");
-        return Ok(UserResponse::PairFailed {
-            reason: format!(
-                "This device was not joined: {why}. Nothing was kept here, and the device that \
-                 would have admitted you keeps nothing of it either; join again from the device \
-                 that holds your identity once this is resolved."
-            ),
-        });
+        return Ok(not_joined(&why));
     }
     // The admitting device's key enters the allowlist below; bytes the Ed25519
     // rule refuses are refused here, before anything is written.
     let key = VerifyingKey::from_bytes(&joined.peer.public_key)
         .map_err(|e| io::Error::other(format!("the admitting device's key is not an Ed25519 key: {e}")))?;
+    // The issuer's own row, read before anything is written: a row the store
+    // would refuse refuses the join here, and nothing is kept.
+    if let Some(why) = network_db::row_refused_for(db, user_id, &key).await? {
+        tracing::warn!(user_id, %why, "refused a join whose issuer's row cannot be recorded");
+        return Ok(not_joined(&format!("the device admitting it cannot be recorded here: {why}")));
+    }
     // Provision BEFORE writing anything: this validates that `user_id` is either
     // free or already this same identity (a name colliding with a *different*
     // local identity is rejected), and creates the user directory. Doing it first
@@ -1290,9 +1318,10 @@ async fn first_drive_at(runtime: &DeviceRuntime, store: &kotton_store::runtime::
 /// it records), and a dial reads no row: [`kotton_peer::dialer::Dialer::connect`] takes the node
 /// it is handed.
 ///
-/// `Err` is the `PairFailed` reason. A write that fails part-way through
-/// [`finalize_enrolled_node`] is said as such; that function is not one
-/// transaction, which is its own work.
+/// `Err` is the `PairFailed` reason. A row the store refuses is read by
+/// [`finalize_enrolled_node`] before it keeps anything, so that refusal keeps
+/// nothing here either. A write that fails part-way through it for another
+/// reason is said as such; that function is not one transaction.
 #[allow(clippy::too_many_arguments)]
 async fn keep_the_admitted(
     the_vaults_rule: impl std::future::Future<Output = Option<Refused>>,
@@ -2382,6 +2411,79 @@ mod handed_drive_tests {
         );
     }
 
+    /// **A join the store would refuse the issuer's row for keeps nothing**:
+    /// where the issuer's key has no row here and its key's derivation is a
+    /// row's DID beside another key, the join is refused with the store's
+    /// reason, read before the first write. The delivered share, group key,
+    /// warm key, delegation and data keys are not kept, the key log and user
+    /// are not written, and the rows, the allowlist and the sessions are as
+    /// they were.
+    #[tokio::test]
+    async fn a_join_the_store_would_refuse_the_issuers_row_for_keeps_nothing() {
+        use kotton_common::crypto::kdf_labels;
+        let (_dir, db) = machine_db().await;
+        let temp = tempfile::tempdir().unwrap();
+        let issuer = a_node("issuer", 1);
+        let other = a_node("other", 4);
+        network_db::seed_paired_node_as_stored(&db, "old-laptop", "alice", &issuer.device_did.to_string(), &other.public_key, "[]", 0, Some("full"))
+            .await
+            .unwrap();
+        let rows_before = stored_rows(&db, "alice").await;
+
+        let runtime = crate::runtime::DeviceRuntime::new_with_secrets(
+            temp.path().to_path_buf(),
+            crate::config::RuntimeConfig::default(),
+            Arc::new(kotton_secret::MemorySecrets::new()),
+        )
+        .await
+        .unwrap();
+        let files_before = files_under(temp.path());
+        let warm = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let inception = kotton_crypto::kel_verify::build_fresh_inception(&ed25519_dalek::SigningKey::from_bytes(&[9; 32]));
+        let joined = kotton_peer::pairing::JoinedNode {
+            root_did: issuer.device_did.clone(),
+            peer: issuer.clone(),
+            frost_share: Some(kotton_wire::peer::FrostSharePayload("a share".into())),
+            warm_key_delegation: Some(kotton_wire::peer::WarmKeyDelegation {
+                warm_did: a_node("warm", 7).device_did,
+                warm_pubkey: a_node("warm", 7).public_key,
+                expires_at: i64::MAX,
+                root_did: issuer.device_did.clone(),
+                quorum_signature: String::new(),
+            }),
+            data_keys: Some(kotton_wire::peer::DataKeys { cek: [1; 32], cek_epoch: 1, master_secret: [2; 32] }),
+            pubkey_package: Some("a group key".into()),
+            kel: vec![inception],
+            recovery_bundle: None,
+            gateway: None,
+            drives: Vec::new(),
+        };
+        let sessions: kotton_session::service::tokens::SessionMap = Default::default();
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let answer =
+            super::finalize_joined_node(&runtime, &NobodyResident, &db, &sessions, &paired_keys, "alice", &warm, joined).await;
+
+        for label in [
+            kdf_labels::frost_share("alice"),
+            kdf_labels::frost_pubkey_package("alice"),
+            kdf_labels::warm_signing_key("alice"),
+            kdf_labels::warm_key_delegation("alice"),
+            kdf_labels::operational_cek("alice"),
+            kdf_labels::operational_cek_epoch("alice"),
+            kdf_labels::master_secret_keychain_key("alice"),
+        ] {
+            assert_eq!(runtime.secrets().get_secret(&label).unwrap(), None, "a refused join kept {label}");
+        }
+        assert_eq!(files_under(temp.path()), files_before, "a refused join wrote its key log or its user");
+        assert_eq!(stored_rows(&db, "alice").await, rows_before, "a refused join changed a row");
+        assert_eq!(drive_records(&db).await, 0, "a refused join recorded a drive");
+        assert!(paired_keys.read().unwrap().is_empty(), "a refused join allowed the issuer's key");
+        assert!(sessions.read().unwrap().is_empty(), "a refused join minted a session");
+        let why = refusal(answer.expect("a refused join is a PairFailed"));
+        assert!(why.starts_with("This device was not joined: the device admitting it cannot be recorded here: "), "{why}");
+        assert!(why.contains("beside another key") && why.contains("Nothing was kept here"), "{why}");
+    }
+
     /// **A handed drive is written under its key's derivation**, with the
     /// address and relay it was handed with.
     #[tokio::test]
@@ -3179,6 +3281,53 @@ mod admit_tests {
         assert!(row.addresses.is_empty(), "the address the enrolment brought was not written: {:?}", row.addresses);
         assert_eq!(row.relay_url.as_deref(), Some("http://relay.test:7700"), "the relay was not written to the row as stored");
         assert_eq!(row.posture.as_deref(), Some("blind-storage"));
+    }
+
+    /// **An enrolment the store would refuse the node's row for keeps
+    /// nothing**: where the node's key has no row here and its key's
+    /// derivation is a row's DID beside another key, the enrolment answers the
+    /// store's refusal, read before the first write. The issuer's share and
+    /// the group key are not kept, and the rows, the drives, the allowlist and
+    /// the members are as they were.
+    #[tokio::test]
+    async fn an_enrolment_the_store_would_refuse_the_nodes_row_for_keeps_nothing() {
+        use kotton_common::crypto::kdf_labels;
+        use kotton_sys::secret::SecretsStore as _;
+        use std::collections::HashSet;
+        use std::sync::{Arc, RwLock};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::open_machine_db(dir.path().join("agent.db")).await.unwrap());
+        let paired_keys = Arc::new(RwLock::new(HashSet::new()));
+        let members = Members::default();
+        let secrets = kotton_secret::MemorySecrets::new();
+        let mut enrolled = an_enrolled_vault();
+        let derived = enrolled.node.device_did.to_string();
+        let other = kotton_crypto::ed25519::verifying_key(&ed25519_dalek::SigningKey::from_bytes(&[6; 32]));
+        kotton_peer::daemon::db::seed_paired_node_as_stored(&db, "attic", "alice", &derived, other.as_bytes(), "[]", 0, Some("full"))
+            .await
+            .unwrap();
+        let rows = || async { format!("{:?}", kotton_peer::daemon::db::list_paired_nodes(&db, "alice").await.unwrap()) };
+        let rows_before = rows().await;
+        enrolled.issuer_share =
+            Some((kotton_wire::peer::FrostSharePayload("a share".into()), enrolled.node.device_did.clone()));
+        enrolled.pubkey_package = Some("a group key".into());
+
+        let refused =
+            kotton_peer::daemon::nodes::finalize_enrolled_node(&secrets, &members, &db, &paired_keys, "alice", Posture::Full, enrolled)
+                .await;
+
+        assert_eq!(secrets.get_secret(&kdf_labels::frost_share("alice")).unwrap(), None, "a refused enrolment kept the share");
+        assert_eq!(
+            secrets.get_secret(&kdf_labels::frost_pubkey_package("alice")).unwrap(),
+            None,
+            "a refused enrolment kept the group key"
+        );
+        assert_eq!(rows().await, rows_before, "a refused enrolment changed a row");
+        let after = recorded(&db, &paired_keys, &members).await;
+        assert!(!after.row && after.drives == 0, "a refused enrolment recorded the node");
+        assert!(!after.allowed && after.members == 0, "a refused enrolment allowed the node or wrote a member");
+        let why = refused.expect_err("an enrolment the store refuses was kept").to_string();
+        assert!(why.contains("beside another key") && why.contains("nothing was written"), "{why}");
     }
 }
 
