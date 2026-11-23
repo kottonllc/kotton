@@ -522,7 +522,8 @@ mod peer_list_tests {
     /// line, and reads back through this shell's parser as `peer add` with the row's
     /// label, the `did:key` the derivation makes of the row's bytes (the one DID the
     /// daemon takes beside them, kottonllc/kotton#597, 28A), those bytes and the row's
-    /// first address, at an IPv4 address and at an IPv6 one. The string stored beside
+    /// first address, at an IPv4 address, at an IPv6 one and at an IPv6 one with a
+    /// zone. The string stored beside
     /// the bytes is in the record's `did` row and in no command. That the daemon takes
     /// the line and adds no row is held in the suite
     /// (`the_peer_add_line_peer_show_prints_is_one_the_daemon_takes`).
@@ -531,7 +532,7 @@ mod peer_list_tests {
         let (bytes, derived) = seeded(61);
         let other = kotton_crypto::DidKeyMethod::spelled_otherwise(&bytes).to_string();
         assert_ne!(other, derived, "the other spelling is another string");
-        for address in ["203.0.113.84:7710", "[2001:db8::7]:7710"] {
+        for address in ["203.0.113.84:7710", "[2001:db8::7]:7710", "[fe80::1%3]:7710"] {
             let row = |did: &str| PairedNode {
                 public_key: bytes,
                 addresses: vec![address.parse().unwrap(), "198.51.100.9:1".parse().unwrap()],
@@ -606,6 +607,43 @@ mod peer_list_tests {
             "a node with no address prints no line, and says why: {:?}",
             pairs[0]
         );
+    }
+
+    /// **`peer show`'s `line` row for a node at an IPv6 address is the recovery card's
+    /// line, and reads back as the node's key and address**: byte for byte the line
+    /// [`super::super::id::recovery_line`] prints, read by
+    /// [`kotton_wire::line::InstanceLine::vault`] as the row's key and first address,
+    /// and handed by this shell's parser to `enrol` as its one word, which the one
+    /// parser for lines reads as that line. At an IPv6 address and at one with a zone.
+    #[test]
+    fn peer_shows_the_line_of_a_node_at_an_ipv6_address_as_it_reads_back() {
+        for address in ["[2001:db8::7]:7710", "[fe80::1%3]:7710"] {
+            let at: std::net::SocketAddr = address.parse().unwrap();
+            let n = PairedNode { addresses: vec![at, "203.0.113.84:7710".parse().unwrap()], ..node("vault", DID) };
+            let Out::Record(pairs) = show_record(&n) else {
+                panic!("peer show is a record");
+            };
+            let (first, line) = &pairs[0];
+            assert_eq!(first, "line", "the line is the first row: {pairs:?}");
+            let (card, card_at) = super::super::id::recovery_line(&n).expect("the card has a line for it");
+            assert_eq!(line, &card, "peer show and the recovery card print one line");
+            assert_eq!(card_at, at);
+            assert_eq!(kotton_wire::line::InstanceLine::vault(line), Ok((n.public_key, at)), "`{line}`");
+
+            let typed = format!("enrol {line}");
+            let chain = crate::parser::parse_command_chain(&typed);
+            assert_eq!(chain.len(), 1, "`{typed}` is {} commands: {chain:?}", chain.len());
+            let words = crate::utils::parse_command(&crate::utils::expand_vars(&chain[0].command, &Default::default()));
+            let (words, redirect) = crate::executor::parse_redirect(words);
+            assert!(redirect.is_none(), "`{typed}` redirects");
+            assert_eq!(words, ["enrol".to_owned(), line.clone()], "`{typed}` hands `enrol` other than its one word");
+            let given = kotton_wire::line::InstanceLine::block(&words[1..].join(" "));
+            let [(word, read)] = given.as_slice() else {
+                panic!("`{typed}` gives `enrol` other than one line: {given:?}");
+            };
+            assert_eq!(word, line);
+            assert_eq!(read.as_ref().map(kotton_wire::line::InstanceLine::to_text).as_ref(), Ok(line));
+        }
     }
 
     /// A clock skew says so instead of rendering a negative age as a huge one.
