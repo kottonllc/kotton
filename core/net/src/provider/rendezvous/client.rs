@@ -17,9 +17,19 @@ use kotton_wire::rendezvous::{
 use reqwest::Client;
 
 /// Errors produced by the rendezvous client.
+///
+/// What a relay sent is another node's text, and is quoted where it enters
+/// this device: this type's `Display` prints a relay's error body and an
+/// address it returned through [`kotton_wire::note::quoted_cut`], so every
+/// error, sentence and log line that prints one of these errors prints the
+/// relay's words as data, once, and to the stated length. The fields hold
+/// the text as it came, for a reader that matches on it.
 #[derive(Debug, thiserror::Error)]
 pub enum RendezvousError {
-    #[error("HTTP error from rendezvous server: {status} \u{2014} {body}")]
+    /// The relay answered with a status that is not success. `body` is the
+    /// relay's own `error` text as it came, or `(no body)` when it sent none
+    /// this client could read.
+    #[error("HTTP error from rendezvous server: {status} \u{2014} {}", kotton_wire::note::quoted_cut(.body))]
     HttpError { status: u16, body: String },
 
     #[error("Request error: {0}")]
@@ -28,7 +38,8 @@ pub enum RendezvousError {
     #[error("No entry found for fingerprint {0}")]
     NotFound(String),
 
-    #[error("Invalid address returned by rendezvous server: {0}")]
+    /// The relay returned an address that does not parse, as it came.
+    #[error("Invalid address returned by rendezvous server: {}", kotton_wire::note::quoted_cut(.0))]
     InvalidAddr(String),
 
     #[error("Clock error: {0}")]
@@ -216,4 +227,42 @@ fn unix_now() -> Result<i64, RendezvousError> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .map_err(|e| RendezvousError::Clock(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RendezvousError;
+    use kotton_wire::note::{quoted_cut, MAX_SAID_CHARS};
+
+    /// **Another node's text is quoted where it enters this device**: a
+    /// relay's error body and an address it returned are printed by
+    /// `RendezvousError`'s `Display` through `quoted_cut`, so an error made of
+    /// one, and every sentence and log line that prints that error, holds the
+    /// relay's words as data, with no line break and no backtick of its own,
+    /// to the stated length, and quoted once. The fields keep the text as it
+    /// came.
+    #[test]
+    fn a_relays_text_is_quoted_where_it_enters_the_error() {
+        let forged = "not an operator`\nFORGED-0b7d: admitted";
+        let long = "b".repeat(MAX_SAID_CHARS + 3);
+        for text in [forged, long.as_str()] {
+            let http = RendezvousError::HttpError { status: 403, body: text.to_string() };
+            assert_eq!(http.to_string(), format!("HTTP error from rendezvous server: 403 \u{2014} {}", quoted_cut(text)));
+            let addr = RendezvousError::InvalidAddr(text.to_string());
+            assert_eq!(addr.to_string(), format!("Invalid address returned by rendezvous server: {}", quoted_cut(text)));
+            // As a print site says it: once, and nothing of the relay's text
+            // as it came.
+            for said in [format!("coord push: {http}"), format!("{:#}", anyhow::Error::from(addr))] {
+                assert!(!said.contains('\n') && !said.contains(text), "{said}");
+                assert_eq!(said.matches(&quoted_cut(text)).count(), 1, "{said}");
+            }
+            let RendezvousError::HttpError { body, .. } = http else { unreachable!() };
+            assert_eq!(body, text, "the body is kept as it came");
+        }
+        let http = RendezvousError::HttpError { status: 500, body: forged.to_string() };
+        assert_eq!(
+            http.to_string(),
+            "HTTP error from rendezvous server: 500 \u{2014} `not an operator\\u{60}\\nFORGED-0b7d: admitted`"
+        );
+    }
 }
