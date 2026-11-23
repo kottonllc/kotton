@@ -152,11 +152,11 @@ fn every_command_the_daemons_operator_copy_tells_a_person_to_type_is_one_the_she
         let (kept, line) = kept_and_line(service);
         let name = "attic";
         let sentences = kuserd::agent::commands_the_copy_tells_a_person_to_type(name, &kept, &line);
-        // Sixteen for a vault, twenty-two for a relay: a sentence that stopped
+        // Sixteen for a vault, twenty-six for a relay: a sentence that stopped
         // being rendered is a sentence no longer held to the shell.
         let rendered = match service {
             OperatedService::Vault => 16,
-            OperatedService::Relay => 22,
+            OperatedService::Relay => 26,
         };
         assert_eq!(sentences.len(), rendered, "the copy rendered for the {} changed in number", service.word());
         for (which, said) in &sentences {
@@ -170,7 +170,24 @@ fn every_command_the_daemons_operator_copy_tells_a_person_to_type_is_one_the_she
             seen.extend(backticked(said).into_iter().map(str::to_string));
         }
     }
-    for verb in ["mint vault attic", "mint relay attic", "relay rule attic people_i_invite"] {
+    // The line `kvaultd drop` prints where the vault holds an invited key names
+    // the verb a person types at the desktop, and is held to the shell the same way.
+    let url = "http://203.0.113.9:7700";
+    let held = kotton_wire::ipc::UserResponse::NodeRelayResult {
+        relay_url: Some(url.to_string()),
+        relay_key: Some(hex::encode([9u8; 32])),
+        admission: None,
+        invited_held: true,
+    };
+    let door = kvaultd::reach::left_to_rotate(Some(&held)).expect("the door's line where an invited key is held");
+    // And the line it prints where the door could not be asked.
+    let unasked = kvaultd::reach::left_to_rotate(None).expect("the door's line where it could not be asked");
+    for door in [&door, &unasked] {
+        let lacks = commands_the_shell_lacks_for(&verbs, door, Some(url));
+        assert!(lacks.is_empty(), "`kvaultd drop` tells a person to type {lacks:?}, which the shell does not have:\n{door}");
+        seen.extend(backticked(door).into_iter().map(str::to_string));
+    }
+    for verb in ["mint vault attic", "mint relay attic", "relay rule attic people_i_invite", "relay rotate attic", "relay rotate"] {
         assert!(seen.iter().any(|s| s == verb), "the copy no longer says `{verb}`: {seen:?}");
     }
     assert!(seen.iter().any(|s| s.starts_with("enrol ")), "the copy no longer says `enrol <line>`: {seen:?}");

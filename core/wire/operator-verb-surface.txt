@@ -2,7 +2,7 @@
 # Regenerate with `cargo xtask wire-surface`; `cargo xtask wire-check` gates it.
 # Variants sorted by name; fields in declaration order, which is the order
 # serde writes them. See xtask/src/wire_check.rs for why this file exists.
-# variants: 10
+# variants: 11
 Digits
     pool: String
 Drop
@@ -17,6 +17,7 @@ Move
 Pools
 ReadRule
 RelayInvite
+RotateInvited
 SetQuota
     pool: String
     quota: u64
