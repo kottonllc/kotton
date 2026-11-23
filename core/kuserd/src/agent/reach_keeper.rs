@@ -35,8 +35,10 @@
 //! tells every vault this desktop told to stand at that relay, not only the
 //! one looked at, and hands the reach note on. A drop that has waited seven
 //! days ends before the pass dials for it. The pass also dials a relay, and
-//! the vaults told to stand there, where a rotation `relay rotate` began still
-//! stands: it finishes that rotation with the key already kept and mints none.
+//! the vaults told to stand there, where a rotation begun — by `relay rotate`
+//! or by a look — still stands: it finishes that rotation with the key already
+//! kept and mints none, for seven days from its mint, and not at a relay a
+//! look of the same pass tried and left unfinished.
 //! A rotation the pass begins or finishes and leaves unfinished is tried again
 //! on the hour, not on the reach change that rotation itself raises, which
 //! would try it again at once.
