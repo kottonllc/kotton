@@ -316,6 +316,10 @@ lint:
     # Cargo accepts an entry that names nothing, so without this the list goes stale and no
     # build says so.
     cargo xtask exclude-check
+    # No answer is printed by `Debug` outside tests: an answer not asked for is said by its name,
+    # another node's text through `quoted_cut`. The sites still owed are xtask/debug-owed.toml,
+    # which only shrinks against the merge base with origin/main.
+    cargo xtask debug-check
     cargo xtask blindness-check
     cargo xtask vault-check
     cargo xtask key-reach-check

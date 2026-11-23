@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# The sites `debug-check` (xtask/src/debug_check.rs) finds that still print an answer by
+# `Debug` outside tests, one entry per file, enclosing function and expression as printed, with
+# how many sites share that key and the row of the rule each belongs to. The rule: an answer a
+# reader did not ask for is said by its name and no field (`kotton_wire::ipc::unasked`, or the
+# answer's `name()`); another node's text is printed through `kotton_wire::note::quoted_cut`;
+# this device's own daemon's `Error` is said by its message as written.
+#
+# A list only shrinks. `debug-check` refuses a finding no entry covers, an entry that covers no
+# finding (a fix that lands deletes its entry), an entry whose `sites` is not what it finds, and
+# an entry, or a count, the list at the merge base with origin/main does not hold.
+
+[[owed]]
+file = "core/app/src/daemon/apps.rs"
+function = "service_host_call"
+expression = "other"
+sites = 1
+row = "an answer not asked for is said by its name: a call the app runner raised that the host has no import for"
+
+[[owed]]
+file = "core/app/src/fetch_session.rs"
+function = "run_fetch_cycle"
+expression = "other"
+sites = 1
+row = "an answer not asked for is said by its name: a frame of the app runner's a fetch did not ask for"
+
+[[owed]]
+file = "core/kuserd/src/agent/operator.rs"
+function = "enrol_one"
+expression = "other"
+sites = 1
+row = "an answer not asked for is said by its name: what keeping an enrolled line answered, in the refusal a person reads"
+
+[[owed]]
+file = "core/kuserd/src/agent/operator.rs"
+function = "rotate"
+expression = "other"
+sites = 2
+row = "an answer not asked for is said by its name: what reading or setting a relay's rule answered, in the log of a rotation"
+
+[[owed]]
+file = "core/kuserd/src/agent/operator.rs"
+function = "set_pending_rule"
+expression = "answer"
+sites = 1
+row = "an answer not asked for is said by its name: what setting a relay's rule asked for at the mint answered, in its log"
