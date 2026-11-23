@@ -24,24 +24,3 @@ function = "run_fetch_cycle"
 expression = "other"
 sites = 1
 row = "an answer not asked for is said by its name: a frame of the app runner's a fetch did not ask for"
-
-[[owed]]
-file = "core/kuserd/src/agent/operator.rs"
-function = "enrol_one"
-expression = "other"
-sites = 1
-row = "an answer not asked for is said by its name: what keeping an enrolled line answered, in the refusal a person reads"
-
-[[owed]]
-file = "core/kuserd/src/agent/operator.rs"
-function = "rotate"
-expression = "other"
-sites = 2
-row = "an answer not asked for is said by its name: what reading or setting a relay's rule answered, in the log of a rotation"
-
-[[owed]]
-file = "core/kuserd/src/agent/operator.rs"
-function = "set_pending_rule"
-expression = "answer"
-sites = 1
-row = "an answer not asked for is said by its name: what setting a relay's rule asked for at the mint answered, in its log"

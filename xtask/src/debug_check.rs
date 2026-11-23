@@ -32,9 +32,9 @@
 //!
 //! ## What it refuses
 //!
-//! A `Debug` formatting of an expression known to be an answer ([`ANSWERS`]: kuserd's, the
-//! device daemon's and kuid's answers, the app runner's output and its calls to the host, a
-//! pairing payload, and a relay client's error):
+//! A `Debug` formatting of an expression known to be an answer ([`ANSWERS`], held to the wire
+//! crate by a test: every enum of it the rule there names is in [`ANSWERS`] or in the test's
+//! list of the wire's enums that are not another party's answer):
 //!
 //! - in a macro of the `format!` family (`format!`, `format_args!`, `print!`, `println!`,
 //!   `eprint!`, `eprintln!`, `write!`, `writeln!`, `panic!`, `unreachable!`, `todo!`,
@@ -48,7 +48,9 @@
 //! - any argument of `dbg!`.
 //!
 //! Each finding names the file and line, the macro, the enclosing function, the form as
-//! written, the expression, why it is known to be an answer, and the sayer to use instead.
+//! written, the expression, why it is known to be an answer, and the sayer to use instead: for
+//! an answer `variant_names!` names ([`NAMED`]), `kotton_wire::ipc::unasked` or its `name()`;
+//! for a relay client's error, its `Display`; for any other, a name of its own.
 //!
 //! ## How it knows an answer
 //!
@@ -72,7 +74,8 @@
 //! and each of these through `&`, `*`, parentheses, `?` and `.clone()`, `.as_ref()`,
 //! `.as_deref()`, `.as_mut()`, `.borrow()`, `.to_owned()`, `.unwrap()` and `.expect(..)`.
 //! Scopes are lexical: a block, an arm, a closure or a function binds its own names, and a
-//! binding of a name with none of these shadows the name.
+//! binding of a name with none of these shadows the name. A type is matched by its last
+//! segment, so a type of another crate that bears an answer's name is read as that answer.
 //!
 //! ## What it does not see
 //!
@@ -84,8 +87,11 @@
 //! macro builds (`concat!`, a `const`), a `Debug` reached through a `{}` of a type whose
 //! `Display` calls `Debug`, a print inside a `macro_rules!` body (its `$` fragments do not
 //! parse), an `impl Debug` that is not derived, and `Debug` written by hand
-//! (`fmt::Debug::fmt(&answer, f)`, `.fmt(f)`). A format or `tracing` macro whose arguments
-//! do not parse is refused rather than passed.
+//! (`fmt::Debug::fmt(&answer, f)`, `.fmt(f)`). Nor does it see the arguments a
+//! `#[tracing::instrument]` records by `Debug`, a `tracing::field::debug(answer)` value, an
+//! answer printed inside a tuple (`(name, answer)`) or a `Some(answer)`, an answer reached
+//! through an index (`answers[0]`) or `.err()`/`.ok()`, or a tuple struct's field (`s.0`). A
+//! format or `tracing` macro whose arguments do not parse is refused rather than passed.
 //!
 //! ## The owed list
 //!
@@ -130,9 +136,17 @@ use crate::tier_check::{file_at, git, merge_base, short, MAIN_REF};
 /// The sites still owed, repo-relative.
 pub(crate) const OWED_FILE: &str = "xtask/debug-owed.toml";
 
-/// The answers, by the name of their type: kuserd's, the device daemon's and kuid's answers,
-/// the app runner's output and its calls to the host, a pairing payload another device sent,
-/// and a relay client's error, which carries the relay's own words.
+/// The answers, by the name of their type: kuserd's, the device daemon's, kuid's and the
+/// inference daemon's answers; the app runner's output and its calls to the host, and the
+/// host's ops and replies to the runner; a pairing payload another device sent, and the
+/// joiner's answer at the end of pairing (`Answer`, the name the handshake responder's answer
+/// also bears); the handshake initiator's reply to an ask for events; a contact's answer to a
+/// delivery; a relay's answer to its operator; and a relay client's error, which carries the
+/// relay's own words.
+///
+/// Every enum of the wire crate a `variant_names!` names, and every public one whose name ends
+/// in `Response`, `Answer` or `Reply`, is here or in the tests' `NOT_ANSWERS`: a test reads the
+/// wire crate and holds the two lists to it.
 pub(crate) const ANSWERS: &[&str] = &[
     "UserResponse",
     "DeviceResponse",
@@ -141,7 +155,21 @@ pub(crate) const ANSWERS: &[&str] = &[
     "RunnerHostCall",
     "PairingPayload",
     "RendezvousError",
+    "ContactResponse",
+    "RelayOperatorResponse",
+    "Answer",
+    "AskReply",
+    "RunnerHostReply",
+    "RunnerOp",
+    "InferResponse",
 ];
+
+/// The answers `variant_names!` gives a `name()` and `kotton_wire::Named`, so `unasked` takes
+/// them; a test holds this to the wire crate.
+const NAMED: &[&str] = &["UserResponse", "DeviceResponse", "KuidResponse", "PairingPayload", "RunnerOp", "RunnerHostReply"];
+
+/// The relay client's error, whose `Display` prints the relay's words through `quoted_cut`.
+const RELAY_ERROR: &str = "RendezvousError";
 
 /// The types whose type argument a declared type is read through.
 // Each is the type's identifier, `stringify!`d: a name in code, not a word a person reads.
@@ -165,11 +193,31 @@ const TRACING: &[&str] = &[
     "warn_span", "error_span",
 ];
 
-/// What to say instead, in every finding.
+/// The rule's other rows, ending every remedy.
+const REST: &str = "another node's text through `kotton_wire::note::quoted_cut`, and this device's \
+    own daemon's `Error` by its message as written";
+
+/// What to say instead, where the answer's type is not known.
 const REMEDY: &str = "Say an answer not asked for by its name and no field \
-    (`kotton_wire::ipc::unasked(&answer)` or `answer.name()`), another node's text through \
+    (`kotton_wire::ipc::unasked(&answer)` for an answer `variant_names!` names, a name of its own \
+    for one it does not), a relay client's error by its `Display`, another node's text through \
     `kotton_wire::note::quoted_cut`, and this device's own daemon's `Error` by its message as \
     written";
+
+/// What to say instead of a `ty`, by what `ty` has.
+fn remedy(ty: &str) -> String {
+    let sayer = if NAMED.contains(&ty) {
+        format!("Say a `{ty}` not asked for by its name and no field (`kotton_wire::ipc::unasked(&answer)` or `answer.name()`)")
+    } else if ty == RELAY_ERROR {
+        format!("Say a `{ty}` by its `Display`, which prints the relay's words through `kotton_wire::note::quoted_cut`")
+    } else {
+        format!(
+            "Say a `{ty}` not asked for by a name of its own and no field (a word for each variant, as \
+             `variant_names!` gives the wire's answers)"
+        )
+    };
+    format!("{sayer}; {REST}")
+}
 
 /// What the line-marking pass appends to a macro's name, before the line.
 const MARK: &str = "__debug_check_line_";
@@ -197,6 +245,8 @@ pub(crate) struct Finding {
     pub(crate) form: String,
     pub(crate) expression: String,
     pub(crate) why: String,
+    /// The answer's type, by name.
+    pub(crate) ty: String,
 }
 
 impl Finding {
@@ -214,13 +264,14 @@ impl Finding {
     /// The finding, worded, with the remedy.
     pub(crate) fn said(&self) -> String {
         format!(
-            "{}: `{}!` in fn `{}` prints `{}` by Debug (`{}`), and {}. {REMEDY}",
+            "{}: `{}!` in fn `{}` prints `{}` by Debug (`{}`), and {}. {}",
             self.at(),
             self.mac,
             self.function,
             self.expression,
             self.form,
-            self.why
+            self.why,
+            remedy(&self.ty)
         )
     }
 }
@@ -1018,13 +1069,26 @@ impl<'ast> Visit<'ast> for Fields {
     }
 }
 
+/// Why a binding or an expression is known to be an answer, and which answer.
+#[derive(Debug, Clone)]
+struct Why {
+    why: String,
+    ty: String,
+}
+
+impl Why {
+    fn new(why: String, ty: &str) -> Self {
+        Why { why, ty: ty.to_string() }
+    }
+}
+
 /// One file's walk.
 struct Walker {
     file: String,
     fields: BTreeMap<String, String>,
     /// Each scope's names: `Some(why)` for a binding known to be an answer, `None` for one
     /// that shadows a name.
-    scopes: Vec<HashMap<String, Option<String>>>,
+    scopes: Vec<HashMap<String, Option<Why>>>,
     scrutinees: Vec<BTreeMap<String, String>>,
     fns: Vec<String>,
     impls: Vec<Option<String>>,
@@ -1060,7 +1124,7 @@ impl Walker {
         self.scopes.pop();
     }
 
-    fn lookup(&self, name: &str) -> Option<String> {
+    fn lookup(&self, name: &str) -> Option<Why> {
         self.scopes.iter().rev().find_map(|s| s.get(name)).cloned().flatten()
     }
 
@@ -1069,19 +1133,19 @@ impl Walker {
     }
 
     /// Why `e` is known to be an answer, with its text; `None` when it is not known.
-    fn known(&self, e: &Expr) -> Option<(String, String)> {
+    fn known(&self, e: &Expr) -> Option<(String, Why)> {
         let why = match e {
             Expr::Path(p) if p.qself.is_none() => match p.path.get_ident() {
                 Some(id) => {
                     let name = id.to_string();
-                    self.lookup(&name).map(|w| format!("`{name}` {w}"))?
+                    self.lookup(&name).map(|w| Why::new(format!("`{name}` {}", w.why), &w.ty))?
                 }
-                None => variant_of(&p.path).map(|t| format!("`{}` names a `{t}`", path_text(&p.path)))?,
+                None => variant_of(&p.path).map(|t| Why::new(format!("`{}` names a `{t}`", path_text(&p.path)), &t))?,
             },
             Expr::Field(f) => {
                 let Member::Named(m) = &f.member else { return None };
                 let t = self.fields.get(&m.to_string())?;
-                format!("`{m}` is a field this file declares with `{t}`")
+                Why::new(format!("`{m}` is a field this file declares with `{t}`"), t)
             }
             Expr::Reference(r) => self.known(&r.expr)?.1,
             Expr::Paren(p) => self.known(&p.expr)?.1,
@@ -1090,10 +1154,10 @@ impl Walker {
             Expr::Try(t) => self.known(&t.expr)?.1,
             Expr::MethodCall(m) if THROUGH.contains(&m.method.to_string().as_str()) => self.known(&m.receiver)?.1,
             Expr::Call(c) => match &*c.func {
-                Expr::Path(p) => variant_of(&p.path).map(|t| format!("`{}` builds a `{t}`", path_text(&p.path)))?,
+                Expr::Path(p) => variant_of(&p.path).map(|t| Why::new(format!("`{}` builds a `{t}`", path_text(&p.path)), &t))?,
                 _ => return None,
             },
-            Expr::Struct(s) => variant_of(&s.path).map(|t| format!("`{}` builds a `{t}`", path_text(&s.path)))?,
+            Expr::Struct(s) => variant_of(&s.path).map(|t| Why::new(format!("`{}` builds a `{t}`", path_text(&s.path)), &t))?,
             _ => return None,
         };
         Some((text(e), why))
@@ -1104,7 +1168,7 @@ impl Walker {
     /// `ty` is the declared type, `answers` the places another pattern of the same `match`
     /// names an answer's variants, `whole` why the value bound is known, and `scrut` whether
     /// the function's scrutinees apply to a binding of the whole value.
-    fn bind(&mut self, pat: &Pat, ty: Option<&Type>, answers: &[(Place, String)], whole: Option<String>, scrut: bool) {
+    fn bind(&mut self, pat: &Pat, ty: Option<&Type>, answers: &[(Place, String)], whole: Option<Why>, scrut: bool) {
         if let (None, Pat::Type(t)) = (ty, pat) {
             return self.bind(&t.pat, Some(&t.ty), answers, whole, scrut);
         }
@@ -1118,21 +1182,21 @@ impl Walker {
             if place.is_empty() {
                 why = declared
                     .as_ref()
-                    .map(|t| format!("is declared as `{t}`"))
-                    .or_else(|| whole.as_ref().map(|w| format!("is bound to the value matched, and {w}")))
+                    .map(|t| Why::new(format!("is declared as `{t}`"), t))
+                    .or_else(|| whole.as_ref().map(|w| Why::new(format!("is bound to the value matched, and {}", w.why), &w.ty)))
                     .or_else(|| {
                         if !scrut {
                             return None;
                         }
                         let t = self.scrutinees.last()?.get(&name)?;
-                        Some(format!("is read against `{t}`'s variants in fn `{}`", self.function_name()))
+                        Some(Why::new(format!("is read against `{t}`'s variants in fn `{}`", self.function_name()), t))
                     });
             }
             if why.is_none() {
                 why = here
                     .iter()
                     .find(|(q, _)| q.starts_with(&place))
-                    .map(|(_, t)| format!("is bound where a pattern of the same match names `{t}`'s variants"));
+                    .map(|(_, t)| Why::new(format!("is bound where a pattern of the same match names `{t}`'s variants"), t));
             }
             if let Some(top) = self.scopes.last_mut() {
                 top.insert(name, why);
@@ -1149,7 +1213,7 @@ impl Walker {
         for input in &sig.inputs {
             match input {
                 FnArg::Receiver(_) => {
-                    let why = self.impls.last().cloned().flatten().map(|t| format!("is the `{t}` its impl is for"));
+                    let why = self.impls.last().cloned().flatten().map(|t| Why::new(format!("is the `{t}` its impl is for"), &t));
                     if let Some(top) = self.scopes.last_mut() {
                         top.insert("self".to_string(), why);
                     }
@@ -1189,7 +1253,7 @@ impl Walker {
         ModDecl { inline: self.inline.clone(), name: m.ident.to_string(), path }
     }
 
-    fn found(&mut self, mac: &str, line: Option<usize>, form: String, (expression, why): (String, String)) {
+    fn found(&mut self, mac: &str, line: Option<usize>, form: String, (expression, why): (String, Why)) {
         self.findings.push(Finding {
             file: self.file.clone(),
             line,
@@ -1197,7 +1261,8 @@ impl Walker {
             mac: mac.to_string(),
             form,
             expression,
-            why,
+            why: why.why,
+            ty: why.ty,
         });
     }
 
@@ -1220,7 +1285,7 @@ impl Walker {
             }
             let known = match at {
                 Some(Ok(i)) => self.known(&exprs[i]),
-                Some(Err(name)) => self.lookup(&name).map(|w| (name.clone(), format!("`{name}` {w}"))),
+                Some(Err(name)) => self.lookup(&name).map(|w| (name.clone(), Why::new(format!("`{name}` {}", w.why), &w.ty))),
                 None => None,
             };
             if let Some(k) = known {
@@ -1715,10 +1780,11 @@ pub(crate) fn judge(findings: &[Finding], owed: &[Owe], base: &Base) -> Vec<Stri
             let at: Vec<String> = fs.iter().map(|f| f.at()).collect();
             refused.push(format!(
                 "the owed entry {} owes {} sites, and {n} print it by Debug ({}): a site is new, and no entry \
-                 owes it. {REMEDY}",
+                 owes it. {}",
                 o.named(),
                 o.sites,
-                at.join(", ")
+                at.join(", "),
+                remedy(&fs[0].ty)
             ));
         }
     }
@@ -1829,7 +1895,11 @@ pub fn run(root: &Path) {
         );
     }
     if report.refused.is_empty() {
-        println!("debug-check: OK: no answer is printed by Debug outside tests but the sites owed above.");
+        println!(
+            "debug-check: OK: no `Debug` of a value the check knows to be one of the {} listed answer \
+             types, outside tests and the owed list.",
+            ANSWERS.len()
+        );
         return;
     }
     eprintln!("debug-check: {} refused:\n", report.refused.len());
@@ -1858,8 +1928,8 @@ mod tests {
         assert_eq!(f.len(), 1, "{f:?}");
         let said = f[0].said();
         assert!(said.starts_with(&format!("{AT}:{line}: ")), "{said}");
-        assert!(said.ends_with(REMEDY), "{said}");
-        assert!(said.contains("kotton_wire::ipc::unasked") && said.contains("kotton_wire::note::quoted_cut"), "{said}");
+        assert!(said.ends_with(&remedy(&f[0].ty)), "{said}");
+        assert!(said.contains("kotton_wire::note::quoted_cut"), "{said}");
         f[0].clone()
     }
 
@@ -2037,7 +2107,7 @@ mod tests {
         let r = judge(&finding(), &[], &at(""));
         assert_eq!(r.len(), 1, "{r:?}");
         assert!(r[0].starts_with(&format!("{AT}:2: `warn!` in fn `speak` prints `r` by Debug (`answer = ?r`)")), "{}", r[0]);
-        assert!(r[0].ends_with(REMEDY), "{}", r[0]);
+        assert!(r[0].ends_with(&remedy("UserResponse")), "{}", r[0]);
     }
 
     #[test]
@@ -2138,5 +2208,161 @@ mod tests {
         assert!(parse_owed(&entry(0)).unwrap_err().contains("no `sites` count"));
         assert!(parse_owed("[[owed]]\nfile = \"a\"\n").unwrap_err().contains("no `function` string"));
         assert!(parse_owed("[other]\n").unwrap_err().contains("is not `owed`"));
+    }
+
+    #[test]
+    fn an_owed_entry_with_a_key_no_entry_holds_is_refused() {
+        let e = parse_owed(&format!("{}colour = \"red\"\n", entry(1)));
+        assert!(matches!(&e, Err(m) if *m == format!("{OWED_FILE}: entry 1 holds `colour`, which no entry holds")), "{e:?}");
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_refused_unless_it_is_test_code() {
+        let r = read(&[(AT.into(), "fn f( {\n".into())]);
+        assert_eq!(r.refused.len(), 1, "{:?}", r.refused);
+        assert!(r.refused[0].starts_with(&format!("{AT}: does not parse (")), "{}", r.refused[0]);
+        assert!(r.refused[0].ends_with("so debug-check cannot read it: every source outside tests is read"), "{}", r.refused[0]);
+        // One a `#[cfg(test)] mod` brings in is set aside.
+        let r = read(&[(AT.into(), "#[cfg(test)]\nmod t;\n".into()), ("core/x/src/t.rs".into(), "fn f( {\n".into())]);
+        assert!(r.refused.is_empty(), "{:?}", r.refused);
+        assert_eq!((r.files, r.test_files), (1, 1));
+    }
+
+    #[test]
+    fn a_file_under_an_inner_cfg_test_is_set_aside() {
+        let src = "#![cfg(test)]\nfn t(r: UserResponse) { panic!(\"{r:?}\") }\n";
+        let r = read(&[(AT.into(), src.into())]);
+        assert_eq!((r.findings.len(), r.files, r.test_files), (0, 0, 1), "{:?}", r.findings);
+        // One whose condition holds outside tests too is read.
+        let r = read(&[(AT.into(), src.replace("#![cfg(test)]", "#![cfg(any(test, unix))]"))]);
+        assert_eq!((r.findings.len(), r.files, r.test_files), (1, 1, 0), "{:?}", r.findings);
+    }
+
+    #[test]
+    fn a_statement_under_a_test_attribute_is_set_aside() {
+        let src = "fn f(r: UserResponse) {\n    #[cfg(test)]\n    let s = format!(\"{r:?}\");\n    #[cfg(test)]\n    \
+                   println!(\"{r:?}\");\n    eprintln!(\"{r:?}\");\n}\n";
+        assert_eq!(one(src, 6).mac, "eprintln");
+    }
+
+    #[test]
+    fn a_tree_with_no_source_is_refused() {
+        let r = Repo::new();
+        r.write("README", "x\n");
+        r.commit("first");
+        assert_eq!(
+            check(r.path()).refused,
+            ["found no .rs file under the code roots: a check that reads nothing does not pass. Run it from the \
+              repository's root"]
+        );
+    }
+
+    #[test]
+    fn the_remedy_names_what_the_type_has() {
+        for ty in ANSWERS {
+            let said = one(&format!("fn f(r: {ty}) {{\n    panic!(\"{{r:?}}\")\n}}\n"), 2).said();
+            if NAMED.contains(ty) {
+                assert!(said.contains("`kotton_wire::ipc::unasked(&answer)` or `answer.name()`"), "{said}");
+            } else {
+                assert!(!said.contains("name()") && !said.contains("unasked"), "{said}");
+                let sayer = if *ty == RELAY_ERROR { "by its `Display`" } else { "by a name of its own" };
+                assert!(said.contains(sayer), "{said}");
+            }
+        }
+    }
+
+    // The answers, held to the wire crate.
+
+    /// The wire's enums [`wire_enums`] names that are not another party's answer, each with why.
+    /// None today: every one it names is an answer.
+    const NOT_ANSWERS: &[(&str, &str)] = &[];
+
+    /// What [`wire_enums`] finds.
+    #[derive(Debug, Default)]
+    struct WireEnums {
+        /// Each enum a `variant_names!` names.
+        named: BTreeSet<String>,
+        /// Each `pub enum` whose name ends in `Response`, `Answer` or `Reply`.
+        suffixed: BTreeSet<String>,
+    }
+
+    impl<'ast> Visit<'ast> for WireEnums {
+        fn visit_item(&mut self, i: &'ast Item) {
+            if !test_only(item_attrs(i)) {
+                visit::visit_item(self, i);
+            }
+        }
+
+        fn visit_item_enum(&mut self, e: &'ast syn::ItemEnum) {
+            let name = e.ident.to_string();
+            if matches!(e.vis, syn::Visibility::Public(_)) && ["Response", "Answer", "Reply"].iter().any(|s| name.ends_with(s)) {
+                self.suffixed.insert(name);
+            }
+        }
+
+        fn visit_item_macro(&mut self, m: &'ast syn::ItemMacro) {
+            if !m.mac.path.is_ident("variant_names") {
+                return;
+            }
+            let ty = m
+                .mac
+                .parse_body_with(|input: ParseStream| {
+                    let ty: Ident = input.parse()?;
+                    input.step(|c| {
+                        let mut rest = *c;
+                        while let Some((_, next)) = rest.token_tree() {
+                            rest = next;
+                        }
+                        Ok(((), rest))
+                    })?;
+                    Ok(ty)
+                })
+                .expect("a `variant_names!` begins with its type's name");
+            self.named.insert(ty.to_string());
+        }
+    }
+
+    /// The wire crate's enums an answer may be, read from every `.rs` file under `dir` outside
+    /// test code: each enum a `variant_names!(Type { .. })` names (the crate's one way of
+    /// giving a type a name, which a type has so a reader can say it), and each `pub enum`
+    /// whose name ends in `Response`, `Answer` or `Reply`. Structs are not read.
+    fn wire_enums(dir: &Path) -> WireEnums {
+        let mut found = WireEnums::default();
+        let mut dirs = vec![dir.to_path_buf()];
+        while let Some(d) = dirs.pop() {
+            for entry in std::fs::read_dir(&d).unwrap_or_else(|e| panic!("{}: {e}", d.display())) {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let src = std::fs::read_to_string(&path).unwrap();
+                    let file = syn::parse_file(&src).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                    if !test_only(&file.attrs) {
+                        found.visit_file(&file);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_answers_are_held_to_the_wire_crate() {
+        let wire = wire_enums(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/wire/src"));
+        assert!(wire.named.contains("UserResponse") && wire.suffixed.contains("UserResponse"), "{wire:?}");
+        let not: Vec<&str> = NOT_ANSWERS.iter().map(|(t, _)| *t).collect();
+        let unplaced: Vec<&String> =
+            wire.named.union(&wire.suffixed).filter(|t| !ANSWERS.contains(&t.as_str()) && !not.contains(&t.as_str())).collect();
+        assert!(
+            unplaced.is_empty(),
+            "the wire crate's {unplaced:?} is in neither ANSWERS nor NOT_ANSWERS: add each to ANSWERS, or to \
+             NOT_ANSWERS with why it is not another party's answer"
+        );
+        for t in &not {
+            assert!(!ANSWERS.contains(t), "{t} is in both ANSWERS and NOT_ANSWERS");
+            assert!(wire.named.contains(*t) || wire.suffixed.contains(*t), "NOT_ANSWERS names {t}, which the wire crate's rule does not");
+        }
+        let named: BTreeSet<&str> = wire.named.iter().map(String::as_str).filter(|t| ANSWERS.contains(t)).collect();
+        assert_eq!(named, NAMED.iter().copied().collect::<BTreeSet<_>>(), "NAMED is the answers `variant_names!` names");
     }
 }
