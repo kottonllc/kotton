@@ -139,11 +139,11 @@ const LIBRARY: &str = "ed25519-dalek";
 /// such package, with or without a `source` and [`THRESHOLD_HOME_PACKAGE`] alone left out
 /// (`threshold_packages`): each of them reaches the core's own checks, as `frost-ed25519` and
 /// `frost-rerandomized` re-export it.
-const THRESHOLD_CORE: &str = "frost-core";
+pub(crate) const THRESHOLD_CORE: &str = "frost-core";
 
 /// The one manifest that lists the threshold library: `kotton-crypto`'s, whose provider hands
 /// every group key and signature to the Ed25519 rule.
-const THRESHOLD_HOME: &str = "core/crypto/Cargo.toml";
+pub(crate) const THRESHOLD_HOME: &str = "core/crypto/Cargo.toml";
 
 /// The package [`THRESHOLD_HOME`] declares, by the name a lockfile records it under: the one
 /// package of the tree with a dependency edge to the threshold library, and the one the
@@ -245,11 +245,9 @@ fn findings(root: &Path) -> (usize, Vec<String>) {
     let mut manifests = Vec::new();
     let mut shadows = Vec::new();
     let mut elsewhere = Vec::new();
-    let mut locks = Vec::new();
     for path in &files {
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         if name == "Cargo.lock" {
-            locks.push(path.clone());
             continue;
         }
         if name == CLIPPY_TOML || name == ".clippy.toml" {
@@ -281,18 +279,6 @@ fn findings(root: &Path) -> (usize, Vec<String>) {
     }
     walk(&root.join("just"), &mut elsewhere);
     walk(&root.join(".github/workflows"), &mut elsewhere);
-    // The root's lockfile is the workspace's, and is read whatever the walk found.
-    let mut lockfiles = Vec::new();
-    match std::fs::read_to_string(root.join("Cargo.lock")) {
-        Ok(text) => lockfiles.push(("Cargo.lock".to_string(), text)),
-        Err(_) => return (0, vec!["Cargo.lock is not at the root of the tree, so the threshold library cannot be read".into()]),
-    }
-    for path in &locks {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return (0, vec![format!("could not read {}", path.display())]);
-        };
-        lockfiles.push((rel(root, path), text));
-    }
     let mut others = Vec::new();
     for path in &elsewhere {
         if let Ok(text) = std::fs::read_to_string(path) {
@@ -310,11 +296,10 @@ fn findings(root: &Path) -> (usize, Vec<String>) {
     found.extend(lint_run_findings(&others));
     let root_manifest: Vec<(String, String)> = others.iter().filter(|(f, _)| f == "Cargo.toml").cloned().collect();
     found.extend(feature_findings(manifests.iter().chain(&root_manifest)));
-    match read_lockfiles(&lockfiles) {
-        Ok(packages) => {
-            let threshold = threshold_packages(&packages);
-            found.extend(edge_findings(&packages, &threshold));
-            found.extend(threshold_findings(manifests.iter().chain(&root_manifest), &threshold));
+    match threshold_library(root) {
+        Ok(ThresholdLibrary { lockfiles, packages, library }) => {
+            found.extend(edge_findings(&packages, &library));
+            found.extend(threshold_findings(manifests.iter().chain(&root_manifest), &library));
             found.extend(record_findings(&manifests, &lockfiles, &packages));
             found.extend(home_record_findings(&packages));
         }
@@ -611,7 +596,7 @@ fn feature_findings<'a>(manifests: impl Iterator<Item = &'a (String, String)>) -
 
 /// A package a lockfile records: its name, whether it is of the tree (no `source`: a member,
 /// a path dependency or a `[patch]` copy), and the names in its `dependencies`.
-struct LockPackage {
+pub(crate) struct LockPackage {
     name: String,
     in_tree: bool,
     deps: Vec<String>,
@@ -640,6 +625,45 @@ fn read_lockfiles(lockfiles: &[(String, String)]) -> Result<Vec<(String, LockPac
         }
     }
     Ok(out)
+}
+
+/// The threshold library as the lockfiles read record it: the lockfiles (the root's
+/// `Cargo.lock`, then every `Cargo.lock` under the code roots), every package they record, and
+/// the library's packages among them (`threshold_packages`). `ed25519-check` and
+/// `threshold-surface-check` both read the library through this, so a package one counts as
+/// the library the other does too. A lockfile missing at the root, unreadable or not parsing is
+/// the error, naming the file.
+pub(crate) fn threshold_library(root: &Path) -> Result<ThresholdLibrary, String> {
+    // The root's lockfile is the workspace's, and is read whatever the walk finds.
+    let mut lockfiles = Vec::new();
+    match std::fs::read_to_string(root.join("Cargo.lock")) {
+        Ok(text) => lockfiles.push(("Cargo.lock".to_string(), text)),
+        Err(_) => return Err("Cargo.lock is not at the root of the tree, so the threshold library cannot be read".into()),
+    }
+    let mut files = Vec::new();
+    for r in crate::tree::CODE_ROOTS {
+        walk(&root.join(r), &mut files);
+    }
+    files.sort();
+    for path in files.iter().filter(|p| p.file_name().is_some_and(|n| n == "Cargo.lock")) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Err(format!("could not read {}", path.display()));
+        };
+        lockfiles.push((rel(root, path), text));
+    }
+    let packages = read_lockfiles(&lockfiles)?;
+    let library = threshold_packages(&packages);
+    Ok(ThresholdLibrary { lockfiles, packages, library })
+}
+
+/// What [`threshold_library`] reads.
+pub(crate) struct ThresholdLibrary {
+    /// (file, text) of each lockfile read.
+    pub(crate) lockfiles: Vec<(String, String)>,
+    /// Every package each lockfile records, with the lockfile it is in.
+    pub(crate) packages: Vec<(String, LockPackage)>,
+    /// The threshold library's packages, by package name.
+    pub(crate) library: BTreeSet<String>,
 }
 
 /// The threshold library, by package name: [`THRESHOLD_CORE`] and every package the lockfiles
@@ -746,6 +770,27 @@ fn threshold_findings<'a>(
         }
     }
     out
+}
+
+/// The names Rust gives, inside [`THRESHOLD_HOME`]'s crate, to the crates of the threshold
+/// library (`library`, by package name): each package's own name with `-` read as `_`, and the
+/// key of every entry in any of `home`'s dependency tables that is a package of the library,
+/// renamed (`package = ..`) or inherited (`workspace = true`) from `root`'s
+/// `[workspace.dependencies]` under that key. A manifest that does not parse is the error.
+pub(crate) fn threshold_crate_names(root: &str, home: &str, library: &BTreeSet<String>) -> Result<BTreeSet<String>, String> {
+    let root = Manifest::read(root).map_err(|e| format!("Cargo.toml: {e}"))?;
+    let home_m = Manifest::read(home).map_err(|e| format!("{THRESHOLD_HOME}: {e}"))?;
+    let inherited = |key: &str| {
+        root.deps.iter().find(|d| d.table == "workspace.dependencies" && d.key == key).map(|d| d.package.clone())
+    };
+    let mut names: BTreeSet<String> = library.iter().map(|p| p.replace('-', "_")).collect();
+    for d in &home_m.deps {
+        let package = if d.inherited { inherited(&d.key).unwrap_or_else(|| d.package.clone()) } else { d.package.clone() };
+        if library.contains(&package) || library.contains(&d.package) {
+            names.insert(d.key.replace('-', "_"));
+        }
+    }
+    Ok(names)
 }
 
 /// The directory of a file, by its relative path with `/` separators: `""` at the root.

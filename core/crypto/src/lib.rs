@@ -11,7 +11,4 @@ pub mod delivery_ack;
 pub mod reach_note;
 pub mod schema_signature;
 
-#[cfg(test)]
-mod threshold_surface;
-
 pub use provider::*;
