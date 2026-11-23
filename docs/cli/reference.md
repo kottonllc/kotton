@@ -120,6 +120,8 @@ In a sentence a name is printed between backticks, so a person reading it can te
 
 A note's sentence gives a command to type only with a name that is one plain word, in ASCII. That is a concession. A device, vault or relay named in another script is stored, listed, shown in full and taken by its verb whole; what it costs is the line to copy: its note gives the DID as stored to copy, or the verb and the name with no line. It is made because a printed command must reach its row typed as printed, and names are compared byte for byte: a name a vault or a relay is minted under is in composed form (NFC), but a device's label and a DID are in no normal form, and none is applied where a typed name is compared. The seam: once a normal form is applied where a name is stored and where it is compared, the set of plain words widens, and no store or message changes for it.
 
+A command a readout prints, as `peer show` prints the `peer add` line, is a line the REPL takes as printed. Typed after `kotton` at a terminal it is read first by that shell, which hands the verb its words. An address is printed as `<ip>:<port>`, and an IPv6 one in brackets, as `[2001:db8::7]:7710`; a POSIX shell reads an unquoted word in brackets as a pattern, so there a word that holds an IPv6 address in brackets is put in quotes, `'[2001:db8::7]:7710'`, and so is a line that holds one, as a vault's line given to `enrol`. In quotes the shell hands the word on as typed.
+
 ###### **Subcommands:**
 
 * `login` — Authenticate and cache a session token for a user

@@ -26,7 +26,8 @@ pub fn finish(result: std::io::Result<()>) -> std::process::ExitCode {
     }
 }
 
-/// How a name is printed in what `kotton` says, and what `--json` carries for it: the
+/// How a name is printed in what `kotton` says, what `--json` carries for it, and how a
+/// printed command is typed at the REPL and at a terminal's own shell: the
 /// top-level command's long help (`kotton --help`, not `-h`), which the CLI reference
 /// renders at the top of `kotton`'s own section. It holds the decision on which
 /// characters the quoted print's rule names (`kotton_wire::note::quoted`). Each
@@ -58,7 +59,15 @@ must reach its row typed as printed, and names are compared byte for byte: a nam
 relay is minted under is in composed form (NFC), but a device's label and a DID are in no normal \
 form, and none is applied where a typed name is compared. The seam: once a normal form is \
 applied where a name is stored and where it is compared, the set of plain words widens, and no \
-store or message changes for it.";
+store or message changes for it.
+
+A command a readout prints, as `peer show` prints the `peer add` line, is a line the REPL takes \
+as printed. Typed after `kotton` at a terminal it is read first by that shell, which hands the \
+verb its words. An address is printed as `<ip>:<port>`, and an IPv6 one in brackets, as \
+`[2001:db8::7]:7710`; a POSIX shell reads an unquoted word in brackets as a pattern, so there a \
+word that holds an IPv6 address in brackets is put in quotes, `'[2001:db8::7]:7710'`, and so is \
+a line that holds one, as a vault's line given to `enrol`. In quotes the shell hands the word on \
+as typed.";
 
 /// Top-level CLI entry point — re-exported so `xtask gen-docs` can walk the
 /// command tree without duplicating the parser definition.
