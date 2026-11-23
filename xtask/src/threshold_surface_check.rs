@@ -33,9 +33,14 @@
 //!   `super::` and `crate::` to a module and on to such a name there, private or not. So a
 //!   child file that names its parent's private `use frost_ed25519 as frost;` as
 //!   `super::frost::Identifier` names the library, and so does a path through a module a glob
-//!   brought in. Bindings are read to a fixed point across every module. A bare name that any
-//!   module of the same file binds to the library is read as the library in that whole file,
-//!   as the check this replaces read it. A name a block binds is read inside that block's items.
+//!   brought in. A bare name that any module of the same file binds to the library is read as
+//!   the library in that whole file, beside whatever else it names there. A name a block binds
+//!   is read inside that block's items.
+//! - **Resolution settles.** Bindings are read to a fixed point across every module. A scope's
+//!   own child modules, the items it declares and the names its `use`s bind shadow what a glob
+//!   brings in, as rustc has it, and a name's targets only grow from round to round, so the
+//!   reading reaches the same end whatever order the modules are read in. A crate whose
+//!   bindings are still growing after [`ROUNDS`] rounds is refused, not read.
 //! - **A public item** is one written `pub`, in whatever module: a function's signature
 //!   (parameters, return, generics and their bounds), a constant's or static's type, a pub
 //!   item of an `extern` block, a struct's or union's generics and `pub` fields, every field
@@ -61,6 +66,8 @@
 //! - A library crate whose `[lib]` names it other than its package's name, unless
 //!   `kotton-crypto`'s manifest gives it a key by that name.
 //! - Types only inferred: an `impl Trait` return names what it names, and nothing it hides.
+//! - An item the parser keeps verbatim: `syn` holds an item it does not model as tokens, and
+//!   no path inside it is read.
 //!
 //! ## Line numbers
 //!
@@ -87,15 +94,24 @@ const MARK: &str = "__threshold_surface_line";
 const STARTS: &[&str] =
     &["pub", "fn", "struct", "enum", "union", "type", "trait", "impl", "use", "extern", "mod", "const", "static", "unsafe", "async"];
 
+/// The most rounds name resolution takes before the crate is refused. A name's targets only
+/// grow, so a crate settles in about as many rounds as its longest chain of imports; the tree's
+/// crate settles in a handful.
+const ROUNDS: usize = 64;
+
 pub fn run(root: &Path) {
     let read = |path: &str| std::fs::read_to_string(root.join(path)).ok();
-    let (report, crates) = match crates_of(root) {
-        Ok((crates, lib)) => (check(&lib, &crates, &read), crates),
+    let (report, crates, lists) = match crates_of(root) {
+        Ok((crates, lib, lists)) => (check(&lib, &crates, &read), crates, lists),
         Err(e) => {
             eprintln!("threshold-surface-check: {e}");
             std::process::exit(1);
         }
     };
+    if let Some(e) = vacuous(lists, &report) {
+        eprintln!("threshold-surface-check: {e}");
+        std::process::exit(1);
+    }
     if report.found.is_empty() {
         println!(
             "threshold-surface-check: OK: {} module(s) of kotton-crypto in {} file(s) read; no public item names \
@@ -118,19 +134,42 @@ pub fn run(root: &Path) {
     std::process::exit(1);
 }
 
-/// The library's crate names, and the crate root of [`THRESHOLD_HOME`] (repo-relative).
-fn crates_of(root: &Path) -> Result<(BTreeSet<String>, String), String> {
+/// A clean report that read nothing it guards: the manifest lists the library, yet no module
+/// binds a name to it, so the reading has missed where the crate uses it.
+fn vacuous(lists: bool, report: &Report) -> Option<String> {
+    (lists && report.found.is_empty() && report.bound == 0).then(|| {
+        format!(
+            "kotton-crypto's manifest lists the threshold library, but none of the {} module(s) read binds a name to \
+             it, so the check has not read where the crate uses it",
+            report.modules
+        )
+    })
+}
+
+/// Whether the manifest `t` gives the crate's own code a dependency keyed by one of `crates`.
+fn lists_library(t: &toml::Table, crates: &BTreeSet<String>) -> bool {
+    let keyed = |d: Option<&toml::Value>| {
+        d.and_then(|d| d.as_table()).is_some_and(|d| d.keys().any(|k| crates.contains(&k.replace('-', "_"))))
+    };
+    keyed(t.get("dependencies"))
+        || t.get("target").and_then(|t| t.as_table()).is_some_and(|ts| ts.values().any(|v| keyed(v.get("dependencies"))))
+}
+
+/// The library's crate names, the crate root of [`THRESHOLD_HOME`] (repo-relative), and whether
+/// its manifest lists the library.
+fn crates_of(root: &Path) -> Result<(BTreeSet<String>, String, bool), String> {
     let library = threshold_library(root)?.library;
     let read = |p: &str| std::fs::read_to_string(root.join(p)).map_err(|e| format!("{p}: {e}"));
     let home = read(THRESHOLD_HOME)?;
     let crates = threshold_crate_names(&read("Cargo.toml")?, &home, &library)?;
     let dir = THRESHOLD_HOME.strip_suffix("Cargo.toml").unwrap_or(THRESHOLD_HOME).trim_end_matches('/');
-    let lib = home
-        .parse::<toml::Table>()
-        .ok()
+    let table = home.parse::<toml::Table>().ok();
+    let lib = table
+        .as_ref()
         .and_then(|t| t.get("lib")?.get("path")?.as_str().map(str::to_string))
         .unwrap_or_else(|| "src/lib.rs".to_string());
-    Ok((crates, normalise(&join(dir, &lib))))
+    let lists = table.as_ref().is_some_and(|t| lists_library(t, &crates));
+    Ok((crates, normalise(&join(dir, &lib)), lists))
 }
 
 /// What one run found.
@@ -155,11 +194,17 @@ fn check(lib: &str, crates: &BTreeSet<String>, read: &dyn Fn(&str) -> Option<Str
     let mut c = Crate { files: &files, crates: crates.clone(), modules: Vec::new(), found, file_names: BTreeMap::new() };
     c.build(root.file.items.iter().collect(), lib, "crate".into(), Within::Root, Some(Dir::owning(lib)), &mut vec![lib.to_string()]);
     c.global();
-    c.bind();
+    if let Err(rounds) = c.bind(ROUNDS) {
+        c.found.push(format!(
+            "{lib}: the imports of the crate rooted here do not settle: its bindings were still growing after {rounds} \
+             rounds of name resolution, so its public items cannot be read"
+        ));
+        return Report { files: files.len(), modules: c.modules.len(), bound: 0, found: c.found };
+    }
     for m in 0..c.modules.len() {
         c.exposures(m);
     }
-    let bound = c.modules.iter().map(|m| m.bindings.values().filter(|t| **t == Target::Library).count()).sum();
+    let bound = c.modules.iter().map(|m| m.bindings.values().filter(|t| t.contains(&Target::Library)).count()).sum();
     Report { files: files.len(), modules: c.modules.len(), bound, found: c.found }
 }
 
@@ -408,11 +453,39 @@ fn path_attr(attrs: &[Attribute]) -> Option<String> {
 
 /// What a name or a path resolves to, as far as this check needs: the library, a module of the
 /// crate, or anything else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Target {
     Library,
     Module(usize),
     Other,
+}
+
+/// Every target a name or a path may resolve to: it names the library if any of them is.
+type Targets = BTreeSet<Target>;
+
+fn one(t: Target) -> Targets {
+    Targets::from([t])
+}
+
+/// The names a `use` tree binds, as it is written: each leaf's name or rename, and a `self`'s
+/// prefix.
+fn use_names(tree: &UseTree, prefix: Option<&Ident>, out: &mut BTreeSet<String>) {
+    match tree {
+        UseTree::Path(p) => use_names(&p.tree, Some(&p.ident), out),
+        UseTree::Name(n) if n.ident == "self" => out.extend(prefix.map(Ident::to_string)),
+        UseTree::Name(n) => {
+            out.insert(n.ident.to_string());
+        }
+        UseTree::Rename(r) => {
+            out.insert(r.rename.to_string());
+        }
+        UseTree::Glob(_) => {}
+        UseTree::Group(g) => {
+            for t in &g.items {
+                use_names(t, prefix, out);
+            }
+        }
+    }
 }
 
 /// A scope: a module of the crate, or the items of a body (a function's, a constant's, an
@@ -431,7 +504,11 @@ struct Module<'a> {
     in_body: bool,
     items: Vec<&'a Item>,
     children: BTreeMap<String, usize>,
-    bindings: BTreeMap<String, Target>,
+    /// The names the scope declares itself, read off its items: its child modules, the names
+    /// its `use`s and `extern crate`s bind, and its type aliases, structs, unions, enums and
+    /// traits. These shadow a glob's names, and a name declared here is not looked up around.
+    declared: BTreeSet<String>,
+    bindings: BTreeMap<String, Targets>,
 }
 
 /// Where a scope is declared: it is the crate root, a module declared in a scope, or a body
@@ -560,6 +637,7 @@ impl<'a> Crate<'a> {
             in_body,
             items: items.clone(),
             children: BTreeMap::new(),
+            declared: BTreeSet::new(),
             bindings: BTreeMap::new(),
         });
         for item in &items {
@@ -604,6 +682,26 @@ impl<'a> Crate<'a> {
                 self.build(inner, file, format!("{name}::{{body of {what}}}"), Within::Body(idx), None, stack);
             }
         }
+        let mut declared: BTreeSet<String> = self.modules[idx].children.keys().cloned().collect();
+        for item in &items {
+            let name = match item {
+                Item::Use(u) => {
+                    use_names(&u.tree, None, &mut declared);
+                    continue;
+                }
+                Item::ExternCrate(e) => e.rename.as_ref().map_or(&e.ident, |(_, a)| a),
+                Item::Type(x) => &x.ident,
+                Item::Struct(x) => &x.ident,
+                Item::Union(x) => &x.ident,
+                Item::Enum(x) => &x.ident,
+                Item::Trait(x) => &x.ident,
+                Item::TraitAlias(x) => &x.ident,
+                _ => continue,
+            };
+            declared.insert(name.to_string());
+        }
+        declared.remove("_");
+        self.modules[idx].declared = declared;
         idx
     }
 
@@ -623,55 +721,81 @@ impl<'a> Crate<'a> {
         self.crates.extend(more);
     }
 
-    fn lookup(&self, m: usize, name: &str) -> Option<Target> {
+    /// What `name` names in scope `m`: its bindings and child module there and, until a scope
+    /// that declares the name itself, in the scopes around it as well. A name only a glob brought
+    /// in does not end the walk, so an outer scope's reading of it is kept beside the glob's.
+    fn lookup(&self, m: usize, name: &str) -> Targets {
+        let mut out = Targets::new();
         let mut at = Some(m);
         while let Some(i) = at {
             let s = &self.modules[i];
-            if let Some(t) = s.bindings.get(name) {
-                return Some(*t);
-            }
-            if let Some(c) = s.children.get(name) {
-                return Some(Target::Module(*c));
+            out.extend(s.bindings.get(name).into_iter().flatten().copied());
+            out.extend(s.children.get(name).map(|c| Target::Module(*c)));
+            if s.declared.contains(name) {
+                break;
             }
             at = s.outer;
         }
-        None
+        out
     }
 
-    fn first(&self, m: usize, name: &str, leading_colon: bool) -> Target {
+    fn first(&self, m: usize, name: &str, leading_colon: bool) -> Targets {
         if leading_colon {
-            return if self.crates.contains(name) { Target::Library } else { Target::Other };
+            return one(if self.crates.contains(name) { Target::Library } else { Target::Other });
         }
         let home = self.modules[m].home;
         match name {
-            "crate" => Target::Module(0),
-            "self" => Target::Module(home),
-            "super" => self.modules[home].parent.map_or(Target::Other, Target::Module),
-            "Self" => Target::Other,
-            _ if self.crates.contains(name) => Target::Library,
-            _ if self.file_names.get(&self.modules[m].file).is_some_and(|n| n.contains(name)) => Target::Library,
-            _ => self.lookup(m, name).unwrap_or(Target::Other),
-        }
-    }
-
-    fn step(&self, t: Target, name: &str) -> Target {
-        match t {
-            Target::Module(x) => match name {
-                "super" => self.modules[x].parent.map_or(Target::Other, Target::Module),
-                "self" => t,
-                _ => {
-                    let s = &self.modules[x];
-                    s.bindings.get(name).copied().or(s.children.get(name).map(|c| Target::Module(*c))).unwrap_or(Target::Other)
+            "crate" => one(Target::Module(0)),
+            "self" => one(Target::Module(home)),
+            "super" => one(self.modules[home].parent.map_or(Target::Other, Target::Module)),
+            "Self" => one(Target::Other),
+            _ if self.crates.contains(name) => one(Target::Library),
+            _ => {
+                let mut t = self.lookup(m, name);
+                if self.file_names.get(&self.modules[m].file).is_some_and(|n| n.contains(name)) {
+                    t.insert(Target::Library);
                 }
-            },
-            other => other,
+                if t.is_empty() {
+                    t.insert(Target::Other);
+                }
+                t
+            }
         }
     }
 
-    fn resolve(&self, m: usize, path: &syn::Path) -> Target {
+    fn step(&self, from: &Targets, name: &str) -> Targets {
+        let mut out = Targets::new();
+        for t in from {
+            match *t {
+                Target::Module(x) => match name {
+                    "super" => {
+                        out.insert(self.modules[x].parent.map_or(Target::Other, Target::Module));
+                    }
+                    "self" => {
+                        out.insert(*t);
+                    }
+                    _ => {
+                        let s = &self.modules[x];
+                        let mut here: Targets = s.bindings.get(name).cloned().unwrap_or_default();
+                        here.extend(s.children.get(name).map(|c| Target::Module(*c)));
+                        if here.is_empty() {
+                            here.insert(Target::Other);
+                        }
+                        out.extend(here);
+                    }
+                },
+                other => {
+                    out.insert(other);
+                }
+            }
+        }
+        out
+    }
+
+    fn resolve(&self, m: usize, path: &syn::Path) -> Targets {
         let mut segs = path.segments.iter().map(|s| s.ident.to_string());
-        let Some(head) = segs.next() else { return Target::Other };
-        segs.fold(self.first(m, &head, path.leading_colon.is_some()), |t, s| self.step(t, &s))
+        let Some(head) = segs.next() else { return one(Target::Other) };
+        segs.fold(self.first(m, &head, path.leading_colon.is_some()), |t, s| self.step(&t, &s))
     }
 
     /// The first path `visit` meets, read in scope `m`, that names the library.
@@ -681,35 +805,43 @@ impl<'a> Crate<'a> {
         f.found
     }
 
-    /// What `tree` binds, read in `m`: (name, target) for each leaf, and each glob's target.
+    /// What `tree` binds, read in `m`: (name, targets) for each leaf, and every glob's targets.
     fn use_tree(
         &self,
         m: usize,
         tree: &UseTree,
         leading_colon: bool,
-        prefix: Option<(Target, &Ident)>,
-        out: &mut Vec<(String, Target)>,
-        globs: &mut Vec<Target>,
+        prefix: Option<(&Targets, &Ident)>,
+        out: &mut Vec<(String, Targets)>,
+        globs: &mut Targets,
     ) {
         let at = |id: &Ident| match prefix {
             None => self.first(m, &id.to_string(), leading_colon),
             Some((t, _)) => self.step(t, &id.to_string()),
         };
         match tree {
-            UseTree::Path(p) => self.use_tree(m, &p.tree, leading_colon, Some((at(&p.ident), &p.ident)), out, globs),
+            UseTree::Path(p) => {
+                let t = at(&p.ident);
+                self.use_tree(m, &p.tree, leading_colon, Some((&t, &p.ident)), out, globs);
+            }
             UseTree::Name(n) if n.ident == "self" => {
                 if let Some((t, id)) = prefix {
-                    out.push((id.to_string(), t));
+                    out.push((id.to_string(), t.clone()));
                 }
             }
             UseTree::Name(n) => out.push((n.ident.to_string(), at(&n.ident))),
             UseTree::Rename(r) if r.ident == "self" => {
                 if let Some((t, _)) = prefix {
-                    out.push((r.rename.to_string(), t));
+                    out.push((r.rename.to_string(), t.clone()));
                 }
             }
             UseTree::Rename(r) => out.push((r.rename.to_string(), at(&r.ident))),
-            UseTree::Glob(_) => globs.push(prefix.map_or(Target::Other, |(t, _)| t)),
+            UseTree::Glob(_) => match prefix {
+                Some((t, _)) => globs.extend(t.iter().copied()),
+                None => {
+                    globs.insert(Target::Other);
+                }
+            },
             UseTree::Group(g) => {
                 for t in &g.items {
                     self.use_tree(m, t, leading_colon, prefix, out, globs);
@@ -720,37 +852,36 @@ impl<'a> Crate<'a> {
 
     /// Whether module `x` binds any name to the library.
     fn binds_library(&self, x: usize) -> bool {
-        self.modules[x].bindings.values().any(|t| *t == Target::Library)
+        self.modules[x].bindings.values().any(|t| t.contains(&Target::Library))
     }
 
-    /// The names scope `m`'s items bind, read with the bindings as they stand.
-    fn bindings_of(&self, m: usize) -> BTreeMap<String, Target> {
-        let mut out: BTreeMap<String, Target> = BTreeMap::new();
-        let mut put = |name: String, t: Target| {
-            if name == "_" {
+    /// The names scope `m`'s items bind, read with the bindings as they stand. A glob brings in
+    /// the globbed module's bindings and child modules, but not a name the scope declares.
+    fn bindings_of(&self, m: usize) -> BTreeMap<String, Targets> {
+        let declared = &self.modules[m].declared;
+        let mut out: BTreeMap<String, Targets> = BTreeMap::new();
+        let mut put = |name: &str, t: &Targets, glob: bool| {
+            if name == "_" || (glob && declared.contains(name)) {
                 return;
             }
-            let e = out.entry(name).or_insert(t);
-            if t == Target::Library {
-                *e = t;
-            }
+            out.entry(name.to_string()).or_default().extend(t.iter().copied());
         };
         for item in &self.modules[m].items {
             match item {
                 Item::Use(u) => {
-                    let (mut leaves, mut globs) = (Vec::new(), Vec::new());
+                    let (mut leaves, mut globs) = (Vec::new(), Targets::new());
                     self.use_tree(m, &u.tree, u.leading_colon.is_some(), None, &mut leaves, &mut globs);
-                    for (n, t) in leaves {
-                        put(n, t);
+                    for (n, t) in &leaves {
+                        put(n, t, false);
                     }
                     for g in globs {
                         if let Target::Module(x) = g {
                             let s = &self.modules[x];
                             for (n, t) in &s.bindings {
-                                put(n.clone(), *t);
+                                put(n, t, true);
                             }
                             for (n, c) in &s.children {
-                                put(n.clone(), Target::Module(*c));
+                                put(n, &one(Target::Module(*c)), true);
                             }
                         }
                     }
@@ -764,14 +895,14 @@ impl<'a> Crate<'a> {
                     } else {
                         Target::Other
                     };
-                    put(name, t);
+                    put(&name, &one(t), false);
                 }
                 Item::Type(t) => {
                     let lib = self.names(m, |f| {
                         f.visit_generics(&t.generics);
                         f.visit_type(&t.ty);
                     });
-                    put(t.ident.to_string(), if lib.is_some() { Target::Library } else { Target::Other });
+                    put(&t.ident.to_string(), &one(if lib.is_some() { Target::Library } else { Target::Other }), false);
                 }
                 _ => {}
             }
@@ -780,29 +911,36 @@ impl<'a> Crate<'a> {
     }
 
     /// Every scope's bindings, to a fixed point: a binding may lead to another, in any module.
-    fn bind(&mut self) {
-        loop {
+    /// Each round adds what the scopes' items bind, read with the bindings as they stand, to
+    /// what they already bind, and nothing is taken away; every step of the reading only gains
+    /// targets as the bindings gain them, so the end is the same whatever order the scopes are
+    /// read in. The rounds it took, or `Err(limit)` if the bindings still grew in the last of
+    /// `limit` rounds.
+    fn bind(&mut self, limit: usize) -> Result<usize, usize> {
+        for round in 1..=limit {
             let mut changed = false;
             for m in 0..self.modules.len() {
-                let b = self.bindings_of(m);
-                if b != self.modules[m].bindings {
-                    self.modules[m].bindings = b;
-                    changed = true;
+                for (n, t) in self.bindings_of(m) {
+                    let have = self.modules[m].bindings.entry(n).or_default();
+                    let before = have.len();
+                    have.extend(t);
+                    changed |= have.len() != before;
                 }
             }
             let mut file_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
             for s in &self.modules {
                 let names = file_names.entry(s.file.clone()).or_default();
-                names.extend(s.bindings.iter().filter(|(_, t)| **t == Target::Library).map(|(n, _)| n.clone()));
+                names.extend(s.bindings.iter().filter(|(_, t)| t.contains(&Target::Library)).map(|(n, _)| n.clone()));
             }
             if file_names != self.file_names {
                 self.file_names = file_names;
                 changed = true;
             }
             if !changed {
-                return;
+                return Ok(round);
             }
         }
+        Err(limit)
     }
 
     /// The line of `item` in scope `m`'s file.
@@ -839,14 +977,14 @@ impl<'a> Crate<'a> {
             };
             match item {
                 Item::Use(u) => {
-                    let (mut leaves, mut globs) = (Vec::new(), Vec::new());
+                    let (mut leaves, mut globs) = (Vec::new(), Targets::new());
                     self.use_tree(m, &u.tree, u.leading_colon.is_some(), None, &mut leaves, &mut globs);
                     let text = quote_tree(&u.tree);
                     if globs.contains(&Target::Library) {
                         out.push((line, format!("`use {text}` imports by glob, so binds names this check cannot see, and"), text.clone()));
                     }
                     if !in_body && !is_private(&u.vis) {
-                        if leaves.iter().any(|(_, t)| *t == Target::Library) {
+                        if leaves.iter().any(|(_, t)| t.contains(&Target::Library)) {
                             out.push((line, format!("`use {text}`, not private,"), text.clone()));
                         } else if globs.iter().any(|g| matches!(g, Target::Module(x) if self.binds_library(*x))) {
                             out.push((line, format!("`use {text}`, not private, globs a module that binds a name to the library: it"), text));
@@ -1010,7 +1148,7 @@ struct Finder<'c, 'a> {
 
 impl<'ast> Visit<'ast> for Finder<'_, '_> {
     fn visit_path(&mut self, path: &'ast syn::Path) {
-        if self.found.is_none() && self.c.resolve(self.m, path) == Target::Library {
+        if self.found.is_none() && self.c.resolve(self.m, path).contains(&Target::Library) {
             let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
             let lead = if path.leading_colon.is_some() { "::" } else { "" };
             self.found = Some(format!("{lead}{}", segs.join("::")));
@@ -1074,7 +1212,8 @@ mod tests {
         tree(&[(LIB, src)])
     }
 
-    // -- What the check this replaces refused, each still refused.
+    // -- A public item, a trait impl, a `#[from]` field or a re-export that names the library is
+    // refused; a private item or a body is not.
 
     #[test]
     fn an_error_variant_carrying_the_library_error_is_refused() {
@@ -1143,6 +1282,9 @@ mod tests {
             ("pub const C: frost_ed25519::Identifier = X;\n", "pub const C"),
             ("pub static S: Option<frost_ed25519::Identifier> = None;\n", "pub static S"),
             ("pub union U { pub a: frost_ed25519::Identifier }\n", "pub union U's field a"),
+            ("pub union U<T: frost_core::Ciphersuite> { a: u8 }\n", "pub union U's generics"),
+            ("extern \"C\" {\n    pub fn f(_: frost_ed25519::Identifier);\n}\n", "pub fn f of an extern block"),
+            ("extern \"C\" {\n    pub static S: frost_core::Identifier;\n}\n", "pub static S of an extern block"),
             ("pub enum E<T: frost_ed25519::Ciphersuite> { A(T) }\n", "pub enum E's generics"),
             ("pub trait T: frost_ed25519::Ciphersuite {}\n", "pub trait T"),
             ("pub trait T { fn f(&self) -> frost_ed25519::Identifier; }\n", "pub trait T"),
@@ -1165,7 +1307,8 @@ mod tests {
         }
     }
 
-    // -- What the check this replaces did not see.
+    // -- A name of the library reached through another module, a glob, a `#[path]` or a body is
+    // refused, and so is a module file that cannot be read.
 
     #[test]
     fn a_path_through_self_super_or_crate_to_a_private_binding_is_refused() {
@@ -1318,8 +1461,7 @@ mod tests {
     }
 
     /// A bare name any module of a file binds to the library is the library in the whole file,
-    /// as the check this replaces read it, so a module of the same file named like it is refused
-    /// where it is named bare.
+    /// so a module of the same file named like it is refused where it is named bare.
     #[test]
     fn a_bare_name_bound_anywhere_in_the_file_is_the_library_there() {
         let found = exposed(
@@ -1340,6 +1482,83 @@ mod tests {
         assert_eq!(lines, [Some(2), Some(3), Some(8), Some(9), Some(10)]);
     }
 
+    // -- Resolution settles.
+
+    /// The findings over `files`, read on a thread: a reading that does not return within a few
+    /// seconds fails the test instead of hanging the suite.
+    fn settled(files: &[(&str, &str)]) -> Vec<String> {
+        let owned: Vec<(String, String)> = files.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect();
+        let (send, recv) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let borrowed: Vec<(&str, &str)> = owned.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+            let _ = send.send(tree(&borrowed));
+        });
+        recv.recv_timeout(std::time::Duration::from_secs(10)).expect("name resolution returns")
+    }
+
+    /// A module's glob of its own child module, which binds a name like the child's to the
+    /// library: the child shadows the glob's name, so the glob's path stays the child, and the
+    /// glob is refused as globbing a module that binds a name to the library.
+    #[test]
+    fn a_glob_of_a_child_that_binds_the_child_s_name_settles_and_is_refused() {
+        let found = settled(&[
+            (LIB, "mod provider;\n"),
+            ("src/provider/mod.rs", "pub mod frost;\npub use frost::*;\n"),
+            ("src/provider/frost.rs", "use frost_ed25519 as frost;\n"),
+        ]);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(
+            found[0].starts_with("src/provider/mod.rs:2: `use frost::*`, not private, globs a module that binds a name to the library"),
+            "{found:#?}"
+        );
+    }
+
+    /// The same shape with no library in it settles and passes.
+    #[test]
+    fn a_glob_that_brings_in_its_own_path_s_name_settles_and_passes() {
+        let found = settled(&[(LIB, "mod a {\n    pub mod g {\n        pub use std::fmt as a;\n    }\n}\npub use a::g::*;\n")]);
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// A chain of globs takes a round per link, read in the order the modules are declared; a
+    /// bound under that refuses, naming the crate, and the check's bound reads it whole.
+    #[test]
+    fn resolution_that_does_not_settle_within_its_bound_is_refused() {
+        let src = "pub use a::*;\nmod a {\n    pub use super::b::*;\n}\nmod b {\n    pub use frost_ed25519 as k;\n}\n";
+        let map: BTreeMap<String, String> = [(LIB.to_string(), src.to_string())].into();
+        let read = |p: &str| map.get(p).cloned();
+        let mut files = BTreeMap::new();
+        discover(LIB, &Dir::owning(LIB), &read, &mut files, &mut Vec::new(), &mut Vec::new());
+        let fresh = || {
+            let mut c = Crate { files: &files, crates: crates(), modules: Vec::new(), found: Vec::new(), file_names: BTreeMap::new() };
+            c.build(files[LIB].file.items.iter().collect(), LIB, "crate".into(), Within::Root, Some(Dir::owning(LIB)), &mut Vec::new());
+            c
+        };
+        assert_eq!(fresh().bind(2), Err(2));
+        let mut c = fresh();
+        assert_eq!(c.bind(ROUNDS), Ok(4));
+        assert!(c.modules[0].bindings.get("k").is_some_and(|t| t.contains(&Target::Library)), "{:?}", c.modules[0].bindings);
+        let found = exposed(src);
+        assert_eq!(found.len(), 3, "{found:#?}");
+    }
+
+    /// A crate whose manifest lists the library but whose modules bind no name to it read
+    /// nothing the check guards, and is refused; one that binds a name, or does not list it, is not.
+    #[test]
+    fn a_reading_that_binds_no_name_to_a_listed_library_is_refused() {
+        let report = check(LIB, &crates(), &|p| (p == LIB).then(|| "pub fn f() {}\n".to_string()));
+        assert!(report.found.is_empty() && report.bound == 0, "{report:?}");
+        assert!(vacuous(true, &report).is_some_and(|e| e.contains("binds a name to it")), "{report:?}");
+        assert_eq!(vacuous(false, &report), None);
+        let report = check(LIB, &crates(), &|p| (p == LIB).then(|| "use frost_ed25519 as f;\n".to_string()));
+        assert_eq!(report.bound, 1, "{report:?}");
+        assert_eq!(vacuous(true, &report), None);
+        let manifest = |t: &str| t.parse::<toml::Table>().unwrap();
+        assert!(lists_library(&manifest("[dependencies]\nfrost-ed25519 = \"2\"\n"), &crates()));
+        assert!(lists_library(&manifest("[target.'cfg(unix)'.dependencies]\nfrost-core = \"2\"\n"), &crates()));
+        assert!(!lists_library(&manifest("[dev-dependencies]\nfrost-core = \"2\"\n"), &crates()));
+    }
+
     // -- The real tree.
 
     /// The tree's own crate passes, the walk reaches the module that uses the library, and that
@@ -1347,11 +1566,13 @@ mod tests {
     #[test]
     fn the_tree_s_crate_passes_and_its_names_for_the_library_are_seen() {
         let root = crate::out::root();
-        let (crates, lib) = crates_of(&root).unwrap();
+        let (crates, lib, lists) = crates_of(&root).unwrap();
         assert!(crates.contains("frost_core") && crates.contains("frost_ed25519"), "{crates:?}");
+        assert!(lists, "the crate's manifest lists the library");
         let read = |p: &str| std::fs::read_to_string(root.join(p)).ok();
         let report = check(&lib, &crates, &read);
         assert!(report.found.is_empty(), "{:#?}", report.found);
+        assert_eq!(vacuous(lists, &report), None);
 
         let mut files = BTreeMap::new();
         discover(&lib, &Dir::owning(&lib), &read, &mut files, &mut Vec::new(), &mut Vec::new());
@@ -1359,10 +1580,11 @@ mod tests {
         let mut c = Crate { files: &files, crates, modules: Vec::new(), found: Vec::new(), file_names: BTreeMap::new() };
         c.build(files[&lib].file.items.iter().collect(), &lib, "crate".into(), Within::Root, Some(Dir::owning(&lib)), &mut Vec::new());
         c.global();
-        c.bind();
+        let rounds = c.bind(ROUNDS).expect("the tree's crate settles");
+        assert!(rounds <= 8, "the tree's crate took {rounds} rounds");
         let frost = c.modules.iter().find(|m| m.name == "crate::provider::frost").expect("the provider's module");
         for name in ["frost", "Identifier", "KeyPackage"] {
-            assert_eq!(frost.bindings.get(name), Some(&Target::Library), "{name}: {:?}", frost.bindings);
+            assert!(frost.bindings.get(name).is_some_and(|t| t.contains(&Target::Library)), "{name}: {:?}", frost.bindings);
         }
     }
 
