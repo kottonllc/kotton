@@ -464,10 +464,12 @@ pub enum OperatorVerb {
     /// `Tenants`; only the drops whose pool it no longer lists are answered by
     /// this rotation, and a drop still listed, or whose vault did not answer,
     /// waits for its own. A rotation this verb began and did not finish is
-    /// finished by the verb said again, with the key already kept, until the
-    /// relay answers a set. Refused for a relay whose credential recorded no
-    /// key, and for one this desktop keeps no keys for yet, each with the act
-    /// that mends it.
+    /// finished, with the key already kept and none minted, until the relay
+    /// answers a set: on the desktop's hourly pass, and by the verb said
+    /// again, which then answers in the desktop's words that it finished the
+    /// earlier rotation and that said again it rotates anew. Refused for a
+    /// relay whose credential recorded no key, and for one this desktop keeps
+    /// no keys for yet, each with the act that mends it.
     RotateInvited,
 }
 

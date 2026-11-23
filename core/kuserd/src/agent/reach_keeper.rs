@@ -30,12 +30,15 @@
 //! a drop of theirs waits at, and no other
 //! ([`super::operator::look_on_the_pass`]): it reads `Tenants`, rotates the
 //! invited key for each pool no longer listed, and never says a drop. With no
-//! drop waiting, it dials no vault. The rotation that follows a look tells
-//! every vault this desktop told to stand at that relay, not only the one
-//! looked at, and hands the reach note on. A drop that has waited seven days
-//! ends before the pass dials for it. A rotation it began and could not finish
-//! is tried again on the hour, not on the reach change that rotation itself
-//! raises, which would try it again at once.
+//! drop waiting, it asks no vault `Tenants`. The rotation that follows a look
+//! tells every vault this desktop told to stand at that relay, not only the
+//! one looked at, and hands the reach note on. A drop that has waited seven
+//! days ends before the pass dials for it. The pass also dials a relay, and
+//! the vaults told to stand there, where a rotation `relay rotate` began still
+//! stands: it finishes that rotation with the key already kept and mints none.
+//! A rotation the pass begins or finishes and leaves unfinished is tried again
+//! on the hour, not on the reach change that rotation itself raises, which
+//! would try it again at once.
 
 use crate::agent::message_host::DaemonMessageHost;
 use crate::residency::{RecordStores, UserRegistry};

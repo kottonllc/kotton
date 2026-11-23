@@ -31,6 +31,11 @@ yaml-rust2 = { version = "=0.13.0", default-features = false }
 # The version the workspace already locks (kotton-schemas, kotton-store, kotton-wire), so no
 # crate is added; pinned exactly, like the YAML parser above.
 toml = { version = "=0.8.2", default-features = false, features = ["parse"] }
+# `debug-check` reads Rust with a real parser, because a scanner of lines cannot tell an
+# answer's `Debug` from any other value's in the same file. The version the workspace already
+# locks, so no crate is added; pinned exactly, like the parsers above. No `printing` and no
+# `proc-macro`: the check reads syntax and never writes it back.
+syn = { version = "=2.0.119", default-features = false, features = ["full", "parsing", "visit"] }
 
 # `gen-docs` / `docs-check` are the only subcommands that need the real command
 # tree, and depending on it unconditionally made every *other* check pay for
