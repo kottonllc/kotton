@@ -1809,6 +1809,16 @@ pub fn ceremony_failure_copy(err: &str) -> String {
 /// stored under another spelling, the node returned carries the key's
 /// derivation and the row keeps its DID as stored. The label names the row
 /// either way.
+///
+/// **It reads the row for its own node before it keeps anything**
+/// ([`network_db::row_refused_for`]). Where the store refuses that row — its
+/// key's derivation is already a row's DID beside another key — it answers the
+/// store's refusal with nothing kept: no FROST share or group key, no row, no
+/// drive, no key on the allowlist, no member. It is not one transaction: a
+/// write that fails for another reason after the first leaves what was kept
+/// before it. No writer of this build stores the refused shape — every writer
+/// names a new row by its own key's derivation or keeps the key's row — so
+/// between the read and the write the offending row can only be removed.
 pub async fn finalize_enrolled_node(
     secrets: &dyn SecretsStore,
     member_store: &dyn crate::membership::MemberStore,
@@ -1822,6 +1832,11 @@ pub async fn finalize_enrolled_node(
     // refused here, before anything is recorded.
     let key = VerifyingKey::from_bytes(&enrolled.node.public_key)
         .map_err(|e| io::Error::other(format!("the enrolled node's key is not an Ed25519 key: {e}")))?;
+    // The row the store would refuse is refused here, before the first write:
+    // a ceremony the store refuses keeps nothing.
+    if let Some(why) = network_db::row_refused_for(db, user_id, &key).await? {
+        return Err(io::Error::other(why));
+    }
     // Full/Cosigner: persist the issuer's retained 2-of-2 share + group key. Blind
     // retains nothing.
     if let Some((issuer_share, _root_did)) = &enrolled.issuer_share {
