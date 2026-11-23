@@ -233,7 +233,7 @@ pub async fn finalize_joined_node(
     // person and the issuer are told that the name is taken here and nothing
     // of whom it is taken by.
     let taken = crate::users::name_taken_by_another(runtime.base_dir(), user_id, &user_did)
-        .map_err(|e| io::Error::other(format!("read whom this device keeps: {e:#}")))?;
+        .map_err(|e| io::Error::other(format!("read whom this device keeps: {e}")))?;
     if taken {
         tracing::warn!(user_id, "refused a join under a name another identity holds here");
         return Ok(not_joined(&format!(

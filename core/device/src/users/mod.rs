@@ -383,12 +383,11 @@ impl DeviceUsers for DeviceRuntime {
         // worse, install this identity's keys under another identity's name).
         // A join reads this before it writes anything (`name_taken_by_another`);
         // this refusal stands for a name taken since that read.
-        if let Some(existing) = held_by_another(&registry, user_id, did) {
+        if held_by_another(&registry, user_id, did).is_some() {
             return Err(anyhow!(
-                "the name '{user_id}' already belongs to a different identity on this device \
-                 ({} ≠ {}); choose a different name for the joining device",
-                existing.did,
-                did
+                "the name {} already belongs to a different identity on this device; \
+                 choose a different name for the joining device",
+                kotton_wire::note::quoted(user_id)
             ));
         }
         if registry.users.iter().any(|u| u.user_id == user_id) {
