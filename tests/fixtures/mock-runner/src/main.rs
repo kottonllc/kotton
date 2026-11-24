@@ -62,6 +62,9 @@ fn surface_of(op: &RunnerOp) -> kotton_wire::SurfaceHandle {
     }
 }
 
+/// What the `error` mode says in its `Error`.
+const MOCK_ERROR: &str = "mock `error`\nFORGED: launched";
+
 fn respond(
     op: &RunnerOp,
     mode: &str,
@@ -72,8 +75,10 @@ fn respond(
         "exit" => {
             std::process::exit(0);
         }
+        // Words with a backtick and a line break, as an app's code may write
+        // them: a reader holds that the daemon prints them as data.
         "error" => Some(RunnerOutput::Error {
-            message: "mock error".to_string(),
+            message: MOCK_ERROR.to_string(),
         }),
         // **Whether the process the daemon spawned may open a socket**, said
         // back on the one channel a launch has. `probe-socket` answers the same

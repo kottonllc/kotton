@@ -1043,14 +1043,23 @@ mod tests {
     fn a_library_failure_keeps_the_library_text_that_tells_it_apart() {
         let said = |r: KeyShares| match r {
             Err(e @ FrostError::Frost(_)) => e.to_string(),
-            other => panic!("expected the library's failure, got {other:?}"),
+            _ => panic!("expected the library's failure"),
         };
         let threshold = said(generate_key_shares(1, 3));
         let group = said(generate_key_shares(2, 1));
-        assert_eq!(threshold, format!("FROST: {}", frost::Error::InvalidMinSigners));
-        assert_eq!(group, format!("FROST: {}", frost::Error::InvalidMaxSigners));
-        assert_ne!(threshold, group);
-        assert_eq!(said(split_existing_identity(&[7; 32], 1, 3)), threshold);
+        assert!(
+            threshold == format!("FROST: {}", frost::Error::InvalidMinSigners),
+            "a threshold under two does not say the library's words for it"
+        );
+        assert!(
+            group == format!("FROST: {}", frost::Error::InvalidMaxSigners),
+            "a group under two does not say the library's words for it"
+        );
+        assert!(threshold != group, "a threshold under two and a group under two say the same words");
+        assert!(
+            said(split_existing_identity(&[7; 32], 1, 3)) == threshold,
+            "splitting an identity under a threshold of one does not say what generating does"
+        );
     }
 
     /// What each [`FrostError`] says, and that none says the input it failed on. Every input
@@ -1153,7 +1162,7 @@ mod tests {
             let words: std::collections::BTreeSet<_> = PARTS.iter().map(|(p, _)| p.to_string()).collect();
             assert_eq!(words.len(), PARTS.len(), "two kinds of thing share their words");
             for (part, said) in PARTS {
-                assert_eq!(part.to_string(), said);
+                assert!(part.to_string() == said, "{part:?} does not say {said:?}");
             }
         }
 
@@ -1168,8 +1177,8 @@ mod tests {
                 let dbg = format!("{e:?}");
                 assert!(!shown.contains(MARKER), "the Display of the failure to write {words} holds the writer's text");
                 assert!(!dbg.contains(MARKER), "the Debug of the failure to write {words} holds the writer's text");
-                assert_eq!(shown, format!("could not write {words}"));
-                assert_eq!(dbg, format!("Serialise({part:?})"));
+                assert!(shown == format!("could not write {words}"), "the failure to write {words} does not say so");
+                assert!(dbg == format!("Serialise({part:?})"), "the failure to write {words} does not debug as Serialise({part:?})");
             }
         }
 
@@ -1206,7 +1215,7 @@ mod tests {
             reads_marked(FrostPart::Identifier, None, |x| {
                 aggregate(&pkg, &pk, &[(x.to_string(), s1.clone()), (id2.clone(), s2.clone())])
             });
-            reads_marked(FrostPart::SignatureShare, None, |x| {
+            reads_marked(FrostPart::SignatureShare, Some(&s1), |x| {
                 aggregate(&pkg, &pk, &[(id1.clone(), x.to_string()), (id2.clone(), s2.clone())])
             });
         }
@@ -1246,7 +1255,7 @@ mod tests {
             for text in [e.to_string(), format!("{e:?}")] {
                 assert!(!text.chars().any(|c| c.is_ascii_digit()), "the failure for an index holds a digit");
             }
-            assert_eq!(e.to_string(), "invalid participant index");
+            assert!(e.to_string() == "invalid participant index", "the failure for an index does not say so");
         }
 
         /// A key package naming a group key the Ed25519 rule refuses fails without the key in
@@ -1268,9 +1277,11 @@ mod tests {
                 let e = failure(&name, key_package_verifying_key(&with_group_key(&shares[0].1, &key)));
                 not_in(&name, &e, &key);
                 match e {
-                    FrostError::Refused(_) => assert_eq!(e.to_string(), "FROST: refused by the Ed25519 rule"),
+                    FrostError::Refused(_) => {
+                        assert!(e.to_string() == "FROST: refused by the Ed25519 rule", "{name}: the refusal does not say so")
+                    }
                     FrostError::Deserialise(FrostPart::KeyPackage) => {
-                        assert_eq!(e.to_string(), "could not read a key package")
+                        assert!(e.to_string() == "could not read a key package", "{name}: the unread key package does not say so")
                     }
                     _ => panic!("{name}: neither refused by the rule nor unread as a key package"),
                 }
@@ -1284,8 +1295,8 @@ mod tests {
             let e = failure("a signature", released(&key, message, refused));
             assert!(matches!(e, FrostError::Refused(_)));
             not_in("a signature", &e, &refused[32..]);
-            assert_eq!(e.to_string(), "FROST: refused by the Ed25519 rule");
-            assert_eq!(format!("{e:?}"), "Refused(Refused)");
+            assert!(e.to_string() == "FROST: refused by the Ed25519 rule", "the refused signature does not say so");
+            assert!(format!("{e:?}") == "Refused(Refused)", "the refused signature does not debug as Refused(Refused)");
         }
 
         /// Every failure of the threshold library this crate names comes back in fixed words that
@@ -1293,7 +1304,8 @@ mod tests {
         /// value would differ and fail here; and no value a failure carries (a participant's
         /// identifier, here a marked one) is in the `Display` or `Debug`. This holds the variants
         /// the library has at the version in the lockfile; a variant a later version adds is not
-        /// listed here, and `library` gives it fixed words of its own.
+        /// listed here, and `library` gives it fixed words of its own;
+        /// `the_listed_failures_are_those_of_the_library_in_the_lockfile` fails until it is.
         #[test]
         fn every_library_failure_says_the_fixed_words_the_library_gives_it() {
             use frost::{Error as E, FieldError, GroupError};
@@ -1346,7 +1358,7 @@ mod tests {
                 let theirs = e.to_string();
                 let ours = library(e);
                 assert!(matches!(ours, FrostError::Frost(_)));
-                assert_eq!(ours.to_string(), format!("FROST: {theirs}"), "the words for a library failure differ from the library's");
+                assert!(ours.to_string() == format!("FROST: {theirs}"), "the words for a library failure differ from the library's");
                 for text in [ours.to_string(), format!("{ours:?}")] {
                     for m in &markers {
                         assert!(!text.contains(m.as_str()), "a library failure's text holds the identifier it carries");
@@ -1357,6 +1369,46 @@ mod tests {
             // Variants that carry a different value, or a different inner error, share their words;
             // every other pair is told apart.
             assert_eq!(distinct.len(), failures.len() - 1 - 1 - 2);
+        }
+
+        /// The version of the threshold library's core package, where its failures are declared,
+        /// that `library` and `every_library_failure_says_the_fixed_words_the_library_gives_it`
+        /// list the failures of.
+        const LISTED_AGAINST: &str = "2.2.0";
+
+        /// The version of every package named `frost-core` that `lock` records.
+        fn core_versions(lock: &str) -> Vec<String> {
+            let mut versions = Vec::new();
+            for block in lock.split("[[package]]").skip(1) {
+                let mut lines = block.lines().map(str::trim);
+                if lines.clone().any(|l| l == "name = \"frost-core\"") {
+                    let version = lines.find_map(|l| l.strip_prefix("version = "));
+                    versions.push(version.expect("a package records its version").trim_matches('"').to_string());
+                }
+            }
+            versions
+        }
+
+        /// The failures `library` and its test list are those of the library at the version the
+        /// lockfile records, read from `Cargo.lock` as the surface test reads it. An upgrade can
+        /// add a failure that `library` would say only in its fallback words, so an upgrade fails
+        /// here until both are listed again against the new version.
+        #[test]
+        fn the_listed_failures_are_those_of_the_library_in_the_lockfile() {
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let lock =
+                std::fs::read_to_string(manifest.join("../../Cargo.lock")).expect("read the workspace's Cargo.lock");
+            let versions = core_versions(&lock);
+            assert!(!versions.is_empty(), "the lockfile records no frost-core package");
+            for version in &versions {
+                assert!(
+                    version == LISTED_AGAINST,
+                    "the lockfile has frost-core {version}, but the library's failures are listed against \
+                     {LISTED_AGAINST}: re-list `library` and \
+                     `every_library_failure_says_the_fixed_words_the_library_gives_it` against {version}, \
+                     then set `LISTED_AGAINST` to it"
+                );
+            }
         }
     }
 }

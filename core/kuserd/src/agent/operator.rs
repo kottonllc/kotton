@@ -48,8 +48,10 @@
 //! `relay rotate` began still stands, to finish it. It never says a drop: a
 //! drop is said by the person. The rotation a look begins tells every vault
 //! standing at that relay its keys again and hands the reach note on. One look
-//! rotates each relay once for every waiting drop it finds gone, and a
-//! rotation begun is finished with the key already minted, never begun again.
+//! rotates each relay once for every waiting drop it finds gone, and so does
+//! one pass: it reads every vault a drop waits at first, then sets each relay
+//! once with one new key for the drops found gone at all of them. A rotation
+//! begun is finished with the key already minted, never begun again.
 //! Looks, and every write to the record, are one at a time for a person.
 //!
 //! **A drop of a name the vault does not keep rotates nothing**: where no drop
@@ -2919,7 +2921,7 @@ async fn kept_there(net: &impl Wire, credential: &OperatorCredential, reach: Opt
 }
 
 /// Look at the drops waiting at the vault `credential` operates: find which
-/// pools are gone, and rotate *invited* for them ([`rotate`]). A pool is gone
+/// pools are gone ([`gone_at`]), and rotate *invited* for them ([`rotate`]). A pool is gone
 /// when the vault answered its drop with `TenantDropped` (`seen.dropped`), or
 /// when a `Tenants` answer of the vault's — the verb's own (`seen.listed`), or
 /// one asked here, once, bounded by [`WITHIN`] — does not list its name.
@@ -2937,24 +2939,56 @@ async fn look(
     credential: &OperatorCredential,
     seen: Seen<'_>,
 ) -> Looked {
-    let Some(key) = vault_key(credential) else {
+    if vault_key(credential).is_none() {
         return Looked::Nothing;
-    };
-    let vault = hex::encode(key);
+    }
     // A drop whose wait is over ends here, before anything is dialled.
     if let Err(e) = end_what_is_over(store, None) {
         tracing::warn!(vault = %credential.name, error = %e, "the drops waiting for a rotation do not open");
         return Looked::Unanswered;
     }
+    match gone_at(net, store, credential, seen).await {
+        Found::Nothing => Looked::Nothing,
+        Found::Unanswered => Looked::Unanswered,
+        Found::Read(gone) if gone.is_empty() => Looked::Read { gone: Vec::new(), finished: true },
+        Found::Read(gone) => {
+            let finished = rotate(net, users, record_stores, store, &gone).await;
+            Looked::Read { gone: gone.into_iter().map(|d| d.pool).collect(), finished }
+        }
+    }
+}
+
+/// What reading one vault for the drops waiting there found ([`gone_at`]).
+enum Found {
+    /// No drop waits at this vault, and nothing was dialled.
+    Nothing,
+    /// Drops wait, and the vault gave no `VaultTenants` within the bound:
+    /// every one waits on, unminted where it was.
+    Unanswered,
+    /// The vault was read: the drops waiting there whose pool is gone.
+    Read(Vec<WaitingDrop>),
+}
+
+/// The read half of a look at the vault `credential` operates: which of the
+/// drops waiting there are gone, by `seen` or by one `Tenants` ask bounded by
+/// [`WITHIN`]. Nothing is written and nothing rotates here, so a look rotates
+/// what this finds ([`look`]) and the keeper's pass rotates once for what it
+/// finds at every vault ([`look_at_every_vault`]). The caller holds
+/// [`one_at_a_time`].
+async fn gone_at(net: &impl Wire, store: &UserStore, credential: &OperatorCredential, seen: Seen<'_>) -> Found {
+    let Some(key) = vault_key(credential) else {
+        return Found::Nothing;
+    };
+    let vault = hex::encode(key);
     let waiting: Vec<WaitingDrop> = match waiting_drops(store) {
         Ok(all) => all.into_iter().filter(|d| d.vault == vault).collect(),
         Err(e) => {
             tracing::warn!(vault = %credential.name, error = %e, "the drops waiting for a rotation do not open");
-            return Looked::Unanswered;
+            return Found::Unanswered;
         }
     };
     if waiting.is_empty() {
-        return Looked::Nothing;
+        return Found::Nothing;
     }
     let (mut gone, rest): (Vec<WaitingDrop>, Vec<WaitingDrop>) =
         waiting.into_iter().partition(|d| Some(d.pool.as_str()) == seen.dropped);
@@ -2984,15 +3018,15 @@ async fn look(
             }
         }
     }
-    if gone.is_empty() {
-        return if read { Looked::Read { gone: Vec::new(), finished: true } } else { Looked::Unanswered };
+    if gone.is_empty() && !read {
+        return Found::Unanswered;
     }
-    let finished = rotate(net, users, record_stores, store, &gone).await;
-    Looked::Read { gone: gone.into_iter().map(|d| d.pool).collect(), finished }
+    Found::Read(gone)
 }
 
 /// Rotate *invited* at every relay the drops `gone` are owed it at, once per
-/// relay however many of them are owed it there. A relay owed by a drop whose
+/// relay however many of them are owed it there — the drops one look found,
+/// or those the keeper's pass found at every vault it read. A relay owed by a drop whose
 /// key is not minted yet is rotated with a new key; one where every drop's key
 /// is minted is set with the key already kept, which finishes the rotation
 /// begun and begins none. A key minted before a pool was found gone is not
@@ -3066,7 +3100,14 @@ async fn rotate(
 }
 
 /// The reach keeper's look ([`super::reach_keeper`]): every vault a drop waits
-/// at, looked at once ([`look`]) — and no other vault is asked `Tenants`. With
+/// at, read once ([`gone_at`]) — and no other vault is asked `Tenants`. The
+/// pass reads every vault before it rotates, then rotates once for the drops
+/// found gone at all of them ([`rotate`]): one key minted at each relay they
+/// are owed, every vault standing there told that key, and the relay set once
+/// a pass, however many of those vaults had a drop found gone. A pass that
+/// stops after a read and before the rotation has written nothing for the
+/// drops it read: they wait, unminted, and the next look or pass reads them
+/// again. With
 /// no drop waiting and no rotation `relay rotate` began still standing, nothing
 /// is dialled; where such a rotation stands, its relay, and the vaults told to
 /// stand there, are dialled to finish it. It reads `Tenants` and rotates; it
@@ -3115,13 +3156,19 @@ async fn look_at_every_vault(net: &impl Wire, users: &UserRegistry, record_store
             vaults.push(&d.vault);
         }
     }
-    let mut unfinished = false;
+    // Every vault is read first, and the pass then rotates once for what it
+    // found gone at all of them (when a dropped pool's invited key rotates: one
+    // rotation at a relay answers every waiting drop found gone on that look),
+    // so each relay is set once a pass however many vaults stand there. A vault
+    // that did not answer leaves its drops waiting, unminted, for a later pass.
+    let mut gone: Vec<WaitingDrop> = Vec::new();
     for v in vaults {
         let Some(credential) = kept.iter().find(|c| vault_key(c).map(hex::encode).as_deref() == Some(v)) else { continue };
-        if let Looked::Read { finished: false, .. } = look(net, users, record_stores, store, credential, Seen::default()).await {
-            unfinished = true;
+        if let Found::Read(found) = gone_at(net, store, credential, Seen::default()).await {
+            gone.extend(found);
         }
     }
+    let mut unfinished = !gone.is_empty() && !rotate(net, users, record_stores, store, &gone).await;
     // A rotation `relay rotate` began and the relay has not answered is
     // finished as a look's is, with the key already kept ([`finish_begun`]):
     // after the looks, so a look that mints at that relay sets its own newer
@@ -5392,6 +5439,13 @@ mod tests {
         assert!(kotton_peer::relay_key::key_to_keep(None, Err(unproven())).is_err(), "an unproven key refuses at first sight");
         assert!(kotton_peer::relay_key::key_to_keep(Some(named), Err(unproven())).is_err());
     }
+    /// What one vault lists, by its credential's name ([`Fake::lists_at`]).
+    type ListedAt = (String, Option<Vec<&'static str>>);
+
+    /// One `StandAt` a vault took: its credential's name, and the invited key
+    /// for each relay, by the relay's key ([`Fake::told_at`]).
+    type ToldAt = (String, Vec<(String, String)>);
+
     /// A vault and a relay of the test's own, said to through [`Wire`]: what
     /// each was asked, in order, and the answers each is set to give.
     struct Fake<'a> {
@@ -5418,6 +5472,14 @@ mod tests {
         took: std::sync::Mutex<Vec<String>>,
         /// The drops that waited when `DropTenant` was sent.
         waiting_at_drop: std::sync::Mutex<Option<Vec<WaitingDrop>>>,
+        /// The names a vault lists, by its credential's name, where it lists
+        /// other than [`Fake::lists`]; `None` for no answer within any bound.
+        lists_at: std::sync::Mutex<Vec<ListedAt>>,
+        /// Each `StandAt` taken: the vault's credential name, and the invited
+        /// key it was told for each relay, by the relay's key.
+        told: std::sync::Mutex<Vec<ToldAt>>,
+        /// The relay each set at a relay was sent to, by its address.
+        set_at: std::sync::Mutex<Vec<String>>,
     }
 
     impl<'a> Fake<'a> {
@@ -5436,7 +5498,28 @@ mod tests {
                 set_with: Default::default(),
                 took: Default::default(),
                 waiting_at_drop: Default::default(),
+                lists_at: Default::default(),
+                told: Default::default(),
+                set_at: Default::default(),
             }
+        }
+
+        /// The vault `vault` lists `names`, whatever the others list.
+        fn lists_at(&self, vault: &str, names: Option<&[&'static str]>) {
+            let mut all = self.lists_at.lock().unwrap();
+            all.retain(|(v, _)| v != vault);
+            all.push((vault.to_string(), names.map(<[_]>::to_vec)));
+        }
+
+        /// The invited key each `StandAt` the vault `vault` took named for
+        /// the relay `relay`.
+        fn told_at(&self, vault: &str, relay: [u8; 32]) -> Vec<String> {
+            let relay = hex::encode(relay);
+            let told = self.told.lock().unwrap();
+            told.iter()
+                .filter(|(v, _)| v == vault)
+                .filter_map(|(_, keys)| keys.iter().find(|(r, _)| *r == relay).map(|(_, k)| k.clone()))
+                .collect()
         }
 
         fn said(&self) -> Vec<&'static str> {
@@ -5447,7 +5530,7 @@ mod tests {
             *self.lists.lock().unwrap() = names.map(<[_]>::to_vec);
         }
 
-        async fn answer(&self, request: VaultPeerRequest) -> anyhow::Result<UserResponse> {
+        async fn answer(&self, vault: &str, request: VaultPeerRequest) -> anyhow::Result<UserResponse> {
             // Each answer lets another task run first, as a real wire would.
             tokio::task::yield_now().await;
             self.said.lock().unwrap().push(request.variant_name());
@@ -5456,14 +5539,21 @@ mod tests {
                     *self.waiting_at_drop.lock().unwrap() = Some(waiting_drops(&self.store).unwrap_or_default());
                     self.drop.lock().unwrap().clone()
                 }
-                VaultPeerRequest::Tenants => self.lists.lock().unwrap().clone().map(|names| UserResponse::VaultTenants {
-                    tenants: names.into_iter().map(tenant).collect(),
-                }),
+                VaultPeerRequest::Tenants => {
+                    let at = self.lists_at.lock().unwrap().iter().find(|(v, _)| v == vault).map(|(_, l)| l.clone());
+                    at.unwrap_or_else(|| self.lists.lock().unwrap().clone())
+                        .map(|names| UserResponse::VaultTenants { tenants: names.into_iter().map(tenant).collect() })
+                }
                 VaultPeerRequest::DeviceInvite { .. } => Some(self.invite.lock().unwrap().clone()),
                 VaultPeerRequest::SetQuota { quota, .. } => Some(UserResponse::VaultCapacityResult { held: 0, quota: Some(*quota) }),
-                VaultPeerRequest::StandAt { .. } => Some(if take_one(&self.refuse_stands) {
+                VaultPeerRequest::StandAt { relays } => Some(if take_one(&self.refuse_stands) {
                     UserResponse::Error { message: "not now".into() }
                 } else {
+                    let keys = relays
+                        .iter()
+                        .map(|r| (r.key.clone(), r.invited.as_ref().map(|k| k.expose().to_string()).unwrap_or_default()))
+                        .collect();
+                    self.told.lock().unwrap().push((vault.to_string(), keys));
                     UserResponse::Ok
                 }),
                 other => panic!("the vault was sent {}", other.variant_name()),
@@ -5485,16 +5575,17 @@ mod tests {
 
         async fn vault(
             &self,
-            _credential: &OperatorCredential,
+            credential: &OperatorCredential,
             _stands_at: Option<&str>,
             requests: Vec<VaultPeerRequest>,
         ) -> anyhow::Result<UserResponse> {
-            in_order(requests, |request| async move { self.answer(request).await }).await
+            let vault = credential.name.as_str();
+            in_order(requests, |request| async move { self.answer(vault, request).await }).await
         }
 
         async fn relay(
             &self,
-            _url: &str,
+            url: &str,
             _key: &ed25519_dalek::SigningKey,
             request: &RelayOperatorRequest,
         ) -> Result<RelayOperatorResponse, kotton_net::rendezvous::RendezvousError> {
@@ -5507,6 +5598,7 @@ mod tests {
                 }
                 RelayOperatorRequest::SetRule { invited, .. } => {
                     self.said.lock().unwrap().push("SetRule");
+                    self.set_at.lock().unwrap().push(url.to_string());
                     self.set_with.lock().unwrap().push(invited.clone().unwrap_or_default());
                     if take_one(&self.unreached_sets) {
                         return Err(kotton_net::rendezvous::RendezvousError::Clock("the relay was not reached".into()));
@@ -6451,5 +6543,201 @@ mod tests {
         assert!(!matches!(answer, UserResponse::RelayRule { .. }), "{answer:?}");
         assert_ne!(invited_kept(&store), first_invited(), "the one write did not keep the key");
         assert!(rotation_begun(&store), "a stop after the write that kept the key left it unmarked");
+    }
+
+    const YARD: [u8; 32] = [6u8; 32];
+    const YARD_URL: &str = "http://203.0.113.10:7700";
+
+    fn barn() -> OperatorCredential {
+        OperatorCredential {
+            operates: Operates::Vault { vault: [3u8; 32], addr: Some("203.0.113.9:7711".parse().unwrap()) },
+            ..a_vault("barn")
+        }
+    }
+
+    /// [`a_desk`] with a second vault, `barn`, and a second relay, `yard`,
+    /// keys kept for both relays, and both vaults told to stand at `at`.
+    async fn a_desk_of_two(temp: &tempfile::TempDir, at: &[[u8; 32]]) -> (Arc<UserStore>, DeviceRuntime, UserRegistry) {
+        let (store, runtime, users) = a_desk(temp).await;
+        keep_credentials(&store, &[home(), barn(), a_relay("gate", GATE_URL, GATE), a_relay("yard", YARD_URL, YARD)]).unwrap();
+        let mut keys = kept_keys(&store).unwrap();
+        keys.push(RelayKeys {
+            key: hex::encode(YARD),
+            mine: AdmissionKey::from_bytes([12u8; 32]).to_text(),
+            invited: AdmissionKey::from_bytes([13u8; 32]).to_text(),
+            rotation_begun: false,
+        });
+        keep_keys(&store, &keys).unwrap();
+        let stood: Vec<Stood> = at
+            .iter()
+            .map(|r| Stood { key: hex::encode(r), hint: if *r == GATE { GATE_URL } else { YARD_URL }.into() })
+            .collect();
+        let told: Vec<StandsAt> =
+            [[2u8; 32], [3u8; 32]].iter().map(|v| StandsAt { vault: hex::encode(v), relays: stood.clone(), told_at: 1 }).collect();
+        keep_stands(&store, &told).unwrap();
+        (store, runtime, users)
+    }
+
+    /// A drop of `sam` waiting at `home` and one of `kim` at `barn`, each
+    /// owed a rotation at `at`.
+    fn a_drop_waiting_at_each(store: &UserStore, at: &[[u8; 32]]) {
+        let relays: Vec<String> = at.iter().map(hex::encode).collect();
+        wait_for_rotation(store, &hex::encode([2u8; 32]), "sam", &relays).unwrap();
+        wait_for_rotation(store, &hex::encode([3u8; 32]), "kim", &relays).unwrap();
+    }
+
+    fn invited_kept_at(store: &UserStore, relay: [u8; 32]) -> String {
+        kept_keys(store).unwrap().into_iter().find(|k| k.key == hex::encode(relay)).expect("the relay's keys").invited
+    }
+
+    /// **One pass sets each relay once for the drops of every vault it finds
+    /// gone** (when a dropped pool's invited key rotates: one rotation at a
+    /// relay answers every waiting drop found gone on that look). Two vaults
+    /// stand at one relay, and a drop waits at each: the pass reads both
+    /// vaults first, then mints one key, tells each vault that key and sets the
+    /// relay once. Both drops are owed nothing more.
+    #[tokio::test]
+    async fn one_pass_finding_drops_gone_at_two_vaults_sets_their_relay_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk_of_two(&temp, &[GATE]).await;
+        let stores = RecordStores::new();
+        a_drop_waiting_at_each(&store, &[GATE]);
+        let fake = Fake::new(&runtime, &store);
+
+        assert!(!look_at_every_vault(&fake, &users, &stores, &store).await, "the pass left the rotation unfinished");
+        let new = invited_kept(&store);
+        assert_ne!(new, first_invited(), "the invited key did not rotate");
+        assert_eq!(*fake.took.lock().unwrap(), std::slice::from_ref(&new), "the relay took more than the one new key");
+        assert_eq!(*fake.set_with.lock().unwrap(), std::slice::from_ref(&new), "the relay was set more than once");
+        assert_eq!(fake.told_at("home", GATE), std::slice::from_ref(&new), "home was not told the one key");
+        assert_eq!(fake.told_at("barn", GATE), std::slice::from_ref(&new), "barn was not told the one key");
+        assert_eq!(fake.said(), ["Tenants", "Tenants", "ReadRule", "StandAt", "StandAt", "SetRule"], "the pass rotated before it read every vault");
+        assert!(pools_waiting(&store).is_empty(), "a drop found gone still waits");
+    }
+
+    /// **A vault that does not answer the pass leaves its drop waiting,
+    /// unminted, for its own rotation** (a key minted before a pool was found
+    /// gone is not that pool's rotation). The pass reads both vaults before it
+    /// rotates; the one that answers is rotated for once, and the silent one's
+    /// drop is not marked minted. A later pass that finds it gone mints anew
+    /// for it.
+    #[tokio::test(start_paused = true)]
+    async fn a_vault_silent_on_the_pass_leaves_its_drop_unminted_for_its_own_rotation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk_of_two(&temp, &[GATE]).await;
+        let stores = RecordStores::new();
+        a_drop_waiting_at_each(&store, &[GATE]);
+        let fake = Fake::new(&runtime, &store);
+        fake.lists_at("barn", None);
+
+        assert!(!look_at_every_vault(&fake, &users, &stores, &store).await);
+        assert_eq!(fake.said(), ["Tenants", "Tenants", "ReadRule", "StandAt", "StandAt", "SetRule"], "the pass rotated before it read every vault");
+        let first = invited_kept(&store);
+        assert_ne!(first, first_invited());
+        assert_eq!(*fake.took.lock().unwrap(), std::slice::from_ref(&first), "one vault answering rotated the relay more than once");
+        assert_eq!(pools_waiting(&store), [("kim".to_string(), vec![false])], "the silent vault's drop was answered or marked minted");
+
+        fake.lists_at("barn", Some(&[]));
+        assert!(!look_at_every_vault(&fake, &users, &stores, &store).await);
+        let second = invited_kept(&store);
+        assert_ne!(second, first, "the drop found gone later was finished with a key minted before it was found gone");
+        assert_eq!(*fake.took.lock().unwrap(), [first, second.clone()]);
+        assert_eq!(fake.told_at("barn", GATE).last(), Some(&second));
+        assert!(pools_waiting(&store).is_empty());
+    }
+
+    /// **One pass sets each of two relays once.** Both vaults stand at both
+    /// relays, and each drop is owed a rotation at both: each relay takes one
+    /// new key, and every vault is last told the key each relay took.
+    #[tokio::test]
+    async fn one_pass_sets_each_of_two_relays_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk_of_two(&temp, &[GATE, YARD]).await;
+        let stores = RecordStores::new();
+        a_drop_waiting_at_each(&store, &[GATE, YARD]);
+        let yard_before = invited_kept_at(&store, YARD);
+        let fake = Fake::new(&runtime, &store);
+
+        assert!(!look_at_every_vault(&fake, &users, &stores, &store).await);
+        let mut set_at = fake.set_at.lock().unwrap().clone();
+        set_at.sort();
+        let mut each = vec![GATE_URL.to_string(), YARD_URL.to_string()];
+        each.sort();
+        assert_eq!(set_at, each, "a relay was set other than once");
+        let (gate, yard) = (invited_kept(&store), invited_kept_at(&store, YARD));
+        assert!(gate != first_invited() && yard != yard_before, "a relay's invited key did not rotate");
+        let mut took = fake.took.lock().unwrap().clone();
+        took.sort();
+        let mut want = vec![gate.clone(), yard.clone()];
+        want.sort();
+        assert_eq!(took, want, "the relays took other keys than the two minted");
+        for vault in ["home", "barn"] {
+            assert_eq!(fake.told_at(vault, GATE).last(), Some(&gate), "{vault} was not told the key gate took");
+            assert_eq!(fake.told_at(vault, YARD).last(), Some(&yard), "{vault} was not told the key yard took");
+        }
+        assert!(pools_waiting(&store).is_empty());
+    }
+
+    /// **With the mark of a rotation `relay rotate` began standing, one pass
+    /// that finds drops gone at two vaults hands the relay one key** (the
+    /// pass looks before it finishes): the newer key, minted once for both
+    /// drops; the relay's answer clears the mark, and nothing is left to
+    /// finish.
+    #[tokio::test]
+    async fn a_mark_standing_and_drops_gone_at_two_vaults_hand_the_relay_one_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk_of_two(&temp, &[GATE]).await;
+        let stores = RecordStores::new();
+        let fake = Fake::new(&runtime, &store);
+        let first = begun_and_unreached(&fake, &users, &stores, &store).await;
+        a_drop_waiting_at_each(&store, &[GATE]);
+        let at_the_verb = fake.said().len();
+
+        assert!(!look_at_every_vault(&fake, &users, &stores, &store).await, "the pass left a rotation unfinished");
+        let newer = invited_kept(&store);
+        assert_ne!(newer, first, "a drop found gone was finished with a key minted before it was found gone");
+        assert_eq!(*fake.took.lock().unwrap(), std::slice::from_ref(&newer), "the relay took another key, or two");
+        assert_eq!(fake.said()[at_the_verb..], ["Tenants", "Tenants", "ReadRule", "StandAt", "StandAt", "SetRule"]);
+        assert_eq!(fake.told_at("home", GATE).last(), Some(&newer));
+        assert_eq!(fake.told_at("barn", GATE).last(), Some(&newer));
+        assert!(!rotation_begun(&store), "the relay answered and the mark stays");
+        assert!(pools_waiting(&store).is_empty());
+    }
+
+    /// **A pass that stops after the keys write and before the relay is set
+    /// is finished by the next, which mints nothing** (a rotation begun is
+    /// finished, not begun again). The one key is kept and both drops found
+    /// gone are marked minted under it; the relay is not reached. The next
+    /// pass reads both vaults again and sets that key: the relay takes it
+    /// alone, and both drops are owed nothing more.
+    #[tokio::test]
+    async fn a_pass_stopped_before_the_relay_is_set_is_finished_by_the_next_without_minting() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk_of_two(&temp, &[GATE]).await;
+        let stores = RecordStores::new();
+        a_drop_waiting_at_each(&store, &[GATE]);
+        let fake = Fake::new(&runtime, &store);
+
+        stop_after_keys_writes(Some(1));
+        fake.unreached_sets.store(1, std::sync::atomic::Ordering::SeqCst);
+        let unfinished = look_at_every_vault(&fake, &users, &stores, &store).await;
+        stop_after_keys_writes(None);
+        assert!(unfinished, "a relay not reached was said finished");
+        let minted = invited_kept(&store);
+        assert_ne!(minted, first_invited(), "the one write did not keep the key");
+        assert_eq!(*fake.set_with.lock().unwrap(), std::slice::from_ref(&minted), "the stopped pass sent more than the one key");
+        assert!(fake.took.lock().unwrap().is_empty());
+        assert_eq!(
+            pools_waiting(&store),
+            [("sam".to_string(), vec![true]), ("kim".to_string(), vec![true])],
+            "a drop found gone was not marked minted under the one key"
+        );
+        let stopped = fake.said().len();
+
+        assert!(!look_at_every_vault(&fake, &users, &stores, &store).await, "the next pass left the rotation unfinished");
+        assert_eq!(fake.said()[stopped..], ["Tenants", "Tenants", "ReadRule", "StandAt", "StandAt", "SetRule"]);
+        assert_eq!(invited_kept(&store), minted, "the next pass minted again");
+        assert_eq!(*fake.took.lock().unwrap(), std::slice::from_ref(&minted), "the relay took a key other than the one kept");
+        assert!(pools_waiting(&store).is_empty(), "the relay answered and a drop still waits");
     }
 }
