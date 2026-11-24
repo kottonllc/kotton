@@ -2590,8 +2590,8 @@ mod tests {
             "{:?}",
             rotated.out
         );
-        let finished = "the relay 'gate' now holds the invited key kept here since an earlier `relay rotate` the relay \
-                        had not answered: this saying finished that rotation and minted no new key — say `relay rotate \
+        let finished = "the relay 'gate' now holds the invited key kept here since an earlier rotation the relay had not \
+                        answered: this saying finished that rotation and minted no new key — say `relay rotate \
                         gate` again only to rotate anew, for a pool dropped since, and a rotation that follows this one \
                         refuses a device still invited that has not reconnected to its vault";
         let said = failed(spoken(&OperatorVerb::RotateInvited, To::Only("gate"), UserResponse::Error { message: finished.into() }));

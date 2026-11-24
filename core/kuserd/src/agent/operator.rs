@@ -62,7 +62,7 @@
 //! when its key was minted ([`RelayKeys::begun_at`]); the pass finishes the
 //! rotation for seven days from then ([`A_ROTATION_IS_FINISHED_FOR`]) and then
 //! dials nothing for it. The person's next verb then says, once, that the
-//! relay never answered it and that `relay rotate <r>` finishes it, and does
+//! relay never answered a set of it and that `relay rotate <r>` finishes it, and does
 //! nothing else ([`unanswered_said`]); the mark stands for that verb, which
 //! still finishes it. The pass does not send the finish to a relay a look of
 //! the same pass tried and left unfinished.
@@ -241,8 +241,9 @@ pub(crate) struct RelayKeys {
     /// write as the mark: the pass finishes the rotation for
     /// [`A_ROTATION_IS_FINISHED_FOR`] from then and then dials nothing for it
     /// ([`begun_has_ended`]). Cleared, the mark kept, once the person has been
-    /// told that the relay never answered it ([`unanswered_said`]); a mark
-    /// with no date is past its end.
+    /// told that the relay never answered a set of it ([`unanswered_said`]); a mark
+    /// with no date is past its end and is not said. Cleared with the mark
+    /// when the relay answers a set ([`rotation_answered`]).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub begun_at: u64,
 }
@@ -415,13 +416,13 @@ fn ended_unrotated_sentence(drops: u32, name: &str) -> String {
     )
 }
 
-/// What a rotation begun that the relay never answered within
+/// What a rotation begun whose relay never answered a set of it within
 /// [`A_ROTATION_IS_FINISHED_FOR`] is said with: that the keeper no longer
 /// finishes it, and the verb that does.
 fn begun_unanswered_sentence(name: &str) -> String {
     format!(
-        "A rotation of the invited key begun at the relay '{name}' was never answered by the relay in seven days, and \
-         is no longer tried on its own — `relay rotate {name}` finishes it with the key kept here."
+        "The relay '{name}' never answered a set of the invited key's rotation begun there, and after seven days that \
+         rotation is no longer tried on its own — `relay rotate {name}` finishes it with the key kept here."
     )
 }
 
@@ -2390,7 +2391,7 @@ async fn set_pending_rule(
     let Operates::Relay { rule: Some(rule), .. } = credential.operates else {
         return None;
     };
-    let answer = set_rule(net, users, record_stores, store, &credential, rule, false).await;
+    let answer = set_rule(net, users, record_stores, store, &credential, rule).await;
     if matches!(answer, UserResponse::RelayRule { .. }) {
         if let Err(e) = set_pending_cleared(store, name) {
             tracing::warn!(error = %e, name, "the rule was set, and the credential still carries it");
@@ -2790,7 +2791,7 @@ async fn speak_by(
         }
         return match verb {
             OperatorVerb::SetRule { rule } => {
-                let answer = set_rule(net, users, record_stores, &store, &credential, rule, false).await;
+                let answer = set_rule(net, users, record_stores, &store, &credential, rule).await;
                 if pending && matches!(answer, UserResponse::RelayRule { .. }) {
                     let _ = set_pending_cleared(&store, name);
                 }
@@ -3292,7 +3293,7 @@ async fn look_at_every_vault(net: &impl Wire, users: &UserRegistry, record_store
         let Some(relay) = kept.iter().find(|c| relay_key(c) == Some(id)) else { continue };
         let answer = finish_begun(net, users, record_stores, store, relay).await;
         if !matches!(answer, UserResponse::RelayRule { .. }) {
-            tracing::warn!(relay = %relay.name, answer = %own_answer_logged(&answer), "the rotation `relay rotate` began is not finished yet");
+            tracing::warn!(relay = %relay.name, answer = %own_answer_logged(&answer), "the rotation begun here is not finished yet");
             unfinished = true;
         }
     }
@@ -3649,8 +3650,7 @@ async fn read_rule(net: &impl Wire, credential: &OperatorCredential) -> UserResp
 }
 
 /// Set the relay's rule to `rule`, under the relay's `credential`: keys first
-/// (minted if none are kept for the relay's key, or *invited* minted anew when
-/// `rotate_invited`), kept sealed; then every vault this desktop told to stand
+/// (minted if none are kept for the relay's key), kept sealed; then every vault this desktop told to stand
 /// at that relay is told its reach set again with them — none when there is
 /// none — and they go into this device's keyring; then the rule, at the relay.
 /// Refused for a relay whose credential recorded no key: nothing could name it.
@@ -3661,13 +3661,11 @@ async fn set_rule(
     store: &UserStore,
     credential: &OperatorCredential,
     rule: AdmissionRule,
-    rotate_invited: bool,
 ) -> UserResponse {
     // One at a time with the looks: a rotation's keys are written by the same
     // read-then-write, and neither is written over by the other.
     let _one = one_at_a_time(store).await;
-    let invited = if rotate_invited { Invited::New } else { Invited::Kept };
-    set_rule_minting(net, users, record_stores, store, credential, rule, invited, || Ok(())).await
+    set_rule_minting(net, users, record_stores, store, credential, rule, Invited::Kept, || Ok(())).await
 }
 
 /// What a set does with the *invited* key kept for its relay.
@@ -3688,7 +3686,7 @@ enum Invited {
 /// or relay is told them: a rotation owed to a waiting drop records there that
 /// its key is minted ([`mark_minted`]). Where that cannot be recorded nothing
 /// is told, the keys from before are kept again, and the set is refused. The
-/// keys, and the mark of a rotation `relay rotate` began ([`Invited`]), are
+/// keys, and the mark of a rotation begun with its date ([`Invited`]), are
 /// one write. The caller holds [`one_at_a_time`].
 #[allow(clippy::too_many_arguments)]
 async fn set_rule_minting(
@@ -3711,7 +3709,7 @@ async fn set_rule_minting(
     };
     let relay = relay.clone();
     // 1. The keys, kept before anything is sent anywhere — with the mark of a
-    // rotation begun on the person's word, in the same write.
+    // rotation begun, and its date, in the same write where a key is minted.
     let mut all = match kept_keys(store) {
         Ok(a) => a,
         Err(e) => return refused(format!("the relay keys kept here do not open: {e:#}")),
@@ -3808,8 +3806,8 @@ async fn set_rule_minting(
         )))
     });
     let answer = rule_answer(said, name);
-    // The relay answered a set: a rotation `relay rotate` began here is
-    // finished, and the verb said again mints anew.
+    // The relay answered a set: a rotation begun here — by `relay rotate` or
+    // by a look — is finished, and the verb said again mints anew.
     if matches!(answer, UserResponse::RelayRule { .. }) {
         if let Err(e) = rotation_answered(store, &id) {
             tracing::warn!(relay = %name, error = %e, "the relay answered the set, and its keys still say a rotation was begun");
@@ -3818,14 +3816,17 @@ async fn set_rule_minting(
     answer
 }
 
-/// The relay `relay` answered a set of its rule: the mark that `relay rotate`
-/// began a rotation there ([`RelayKeys::rotation_begun`]) is cleared.
+/// The relay `relay` answered a set of its rule: the mark that a rotation was
+/// begun there ([`RelayKeys::rotation_begun`]) is cleared, and its date
+/// ([`RelayKeys::begun_at`]) with it, in one write: the date stands only while
+/// its mark does.
 fn rotation_answered(store: &UserStore, relay: &RelayId) -> anyhow::Result<()> {
     let mut all = kept_keys(store)?;
-    let Some(k) = all.iter_mut().find(|k| k.relay() == Some(*relay) && k.rotation_begun) else {
+    let Some(k) = all.iter_mut().find(|k| k.relay() == Some(*relay) && (k.rotation_begun || k.begun_at != 0)) else {
         return Ok(());
     };
     k.rotation_begun = false;
+    k.begun_at = 0;
     keep_keys(store, &all)
 }
 
@@ -6306,7 +6307,7 @@ mod tests {
         assert_eq!(invited_kept(&store), rotated);
     }
 
-    /// Whether the relay's kept keys say `relay rotate` began a rotation there.
+    /// Whether the relay's kept keys say a rotation was begun there.
     fn rotation_begun(store: &UserStore) -> bool {
         kept_keys(store).unwrap().into_iter().find(|k| k.key == hex::encode(GATE)).expect("the relay's keys").rotation_begun
     }
@@ -6469,11 +6470,15 @@ mod tests {
     /// it kept, marked as a rotation begun.
     async fn begun_and_unreached(fake: &Fake<'_>, users: &UserRegistry, stores: &RecordStores, store: &UserStore) -> String {
         fake.unreached_sets.store(1, std::sync::atomic::Ordering::SeqCst);
+        let before = kotton_peer::rendezvous::unix_now();
         let answer = speak_by(fake, users, stores, "lee", "gate", OperatorVerb::RotateInvited).await;
+        let after = kotton_peer::rendezvous::unix_now();
         assert!(!matches!(answer, UserResponse::RelayRule { .. }), "a relay not reached was answered as a rotation: {answer:?}");
         let minted = invited_kept(store);
         assert_ne!(minted, first_invited(), "no key was kept");
         assert!(rotation_begun(store), "the rotation begun is not marked");
+        let dated = kept_keys(store).unwrap().into_iter().find(|k| k.key == hex::encode(GATE)).expect("the relay's keys").begun_at;
+        assert!((before..=after).contains(&dated), "the verb's mint is dated {dated} outside {before}..={after}");
         minted
     }
 
@@ -6794,7 +6799,7 @@ mod tests {
         assert!(pools_waiting(&store).is_empty());
     }
 
-    /// **With the mark of a rotation `relay rotate` began standing, one pass
+    /// **With the mark of a rotation begun standing — here `relay rotate`'s — one pass
     /// that finds drops gone at two vaults hands the relay one key** (the
     /// pass looks before it finishes): the newer key, minted once for both
     /// drops; the relay's answer clears the mark, and nothing is left to
@@ -6910,6 +6915,11 @@ mod tests {
         assert_eq!(*fake.took.lock().unwrap(), std::slice::from_ref(&minted), "{by:?}: the relay did not take the key kept");
         assert_eq!(invited_kept(&store), minted, "{by:?}: the pass minted a key");
         assert!(!rotation_begun(&store), "{by:?}: the relay answered and the mark stays");
+        let kept = String::from_utf8(kotton_store::runtime::private::read(&store, KEYS).unwrap().expect("the keys are kept")).unwrap();
+        assert!(
+            !kept.contains("rotation_begun") && !kept.contains("begun_at"),
+            "{by:?}: the relay answered and the kept keys still hold the mark or its date: {kept}"
+        );
     }
 
     /// [`a_rotation_stopped_then_cleared`] by an invite answered as the invite.
@@ -6984,7 +6994,7 @@ mod tests {
 
         let message = refusal(speak_by(&fake, &users, &stores, "lee", "home", OperatorVerb::Pools).await);
         assert!(message.contains(&begun_unanswered_sentence("gate")), "{message}");
-        assert!(message.contains("never answered") && message.contains("`relay rotate gate`"), "{message}");
+        assert!(message.contains("never answered a set of") && message.contains("`relay rotate gate`"), "{message}");
         assert!(message.ends_with(ENDED_SAID_AGAIN), "{message}");
         assert!(fake.said().is_empty(), "the verb that said it did more: {:?}", fake.said());
         assert!(rotation_begun(&store), "the saying cleared the mark the verb finishes");
@@ -7046,5 +7056,55 @@ mod tests {
         assert_eq!(fake.said()[after_the_pass..], [&["Tenants"][..], &ROTATION[..]].concat(), "the next pass set the relay other than once");
         assert_eq!(*fake.took.lock().unwrap(), std::slice::from_ref(&newer), "the relay took another key");
         assert!(!rotation_begun(&store));
+    }
+
+    /// **A newer mint dates the mark anew, and a mark already said is live
+    /// again.** A mark past its end is said, which clears its date; a look
+    /// then mints for a drop found gone and the relay refuses the set. The
+    /// mark stands, dated at that mint and within its end, so the pass
+    /// finishes it again.
+    #[tokio::test]
+    async fn a_newer_mint_dates_the_mark_anew_and_a_mark_said_is_live_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let stores = RecordStores::new();
+        let fake = Fake::new(&runtime, &store);
+        begun_seven_days_ago(&store);
+        let _ = refusal(speak_by(&fake, &users, &stores, "lee", "home", OperatorVerb::Pools).await);
+        let keys = || kept_keys(&store).unwrap().into_iter().find(|k| k.key == hex::encode(GATE)).expect("the relay's keys");
+        assert!(keys().rotation_begun && keys().begun_at == 0, "the saying did not leave the mark undated");
+
+        wait_for_rotation(&store, &hex::encode([2u8; 32]), "sam", &[hex::encode(GATE)]).unwrap();
+        fake.refuse_sets.store(1, std::sync::atomic::Ordering::SeqCst);
+        let before = kotton_peer::rendezvous::unix_now();
+        assert!(look_at_every_vault(&fake, &users, &stores, &store).await);
+        let after = kotton_peer::rendezvous::unix_now();
+        let k = keys();
+        assert!(k.rotation_begun, "the newer mint left the mark");
+        assert!((before..=after).contains(&k.begun_at), "the newer mint is dated {} outside {before}..={after}", k.begun_at);
+        assert!(!begun_has_ended(&k, after), "a mark dated anew is past its end");
+
+        let at = fake.said().len();
+        assert!(!look_at_every_vault(&fake, &users, &stores, &store).await, "the pass left the rotation unfinished");
+        assert_eq!(fake.said()[at..], [&["Tenants"][..], &ROTATION[..]].concat(), "the pass did not finish the mark live again");
+        assert!(!rotation_begun(&store));
+    }
+
+    /// **A drop ended and a rotation past its end are said in one refusal,
+    /// with the closing line once.**
+    #[tokio::test]
+    async fn both_sentences_are_said_in_one_refusal_with_the_closing_line_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, runtime, users) = a_desk(&temp).await;
+        let stores = RecordStores::new();
+        keep_ended(&store, &[EndedAt { key: hex::encode(GATE), drops: 1 }]).unwrap();
+        begun_seven_days_ago(&store);
+        let fake = Fake::new(&runtime, &store);
+        let message = refusal(speak_by(&fake, &users, &stores, "lee", "home", OperatorVerb::Pools).await);
+        assert!(message.contains(&ended_unrotated_sentence(1, "gate")), "{message}");
+        assert!(message.contains(&begun_unanswered_sentence("gate")), "{message}");
+        assert_eq!(message.matches(ENDED_SAID_AGAIN).count(), 1, "{message}");
+        assert!(message.ends_with(ENDED_SAID_AGAIN), "{message}");
+        assert!(fake.said().is_empty(), "the verb that said them did more: {:?}", fake.said());
     }
 }
