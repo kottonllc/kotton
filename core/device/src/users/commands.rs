@@ -2699,6 +2699,13 @@ mod tests {
             err.to_string().contains("different identity"),
             "expected a name-collision error, got: {err}"
         );
+        // It names the local name and no identifier of either identity.
+        let said = err.to_string();
+        assert!(said.contains("laptop"), "names the local name: {said}");
+        assert!(
+            !said.contains(did_a) && !said.contains(did_b) && !said.contains("did:"),
+            "carries no identifier: {said}"
+        );
 
         // The registry still holds exactly one 'laptop', bound to identity A.
         let registry = storage::load_users(&temp.path().join("system")).unwrap();
