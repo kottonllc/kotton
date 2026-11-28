@@ -340,6 +340,21 @@ pub fn cek_domain_id(
     Some(hex::encode(kotton_crypto::kdf::derive_cek_domain_id(&cek)))
 }
 
+/// The record under `user_id` in `registry` when it holds an identity other than
+/// `did`: the name is taken on this device, and a join under it is refused.
+fn held_by_another<'a>(registry: &'a storage::UsersRegistry, user_id: &str, did: &str) -> Option<&'a UserRecord> {
+    registry.users.iter().find(|u| u.user_id == user_id && u.did != did)
+}
+
+/// Whether `user_id` is taken on the device under `base_dir` by an identity other
+/// than `did`: read from the registry [`DeviceUsers::provision_joined_user`]
+/// refuses by, and nothing written. A join asks this before it keeps anything,
+/// so a join under a name taken here is refused with nothing kept.
+pub(crate) fn name_taken_by_another(base_dir: &std::path::Path, user_id: &str, did: &str) -> Result<bool> {
+    let registry = storage::load_users(&base_dir.join("system")).context("failed to load users registry")?;
+    Ok(held_by_another(&registry, user_id, did).is_some())
+}
+
 #[async_trait::async_trait]
 impl DeviceUsers for DeviceRuntime {
     /// Provision a user that this device **joined** rather than created:
@@ -366,16 +381,17 @@ impl DeviceUsers for DeviceRuntime {
         // identity (re-joining). A name that already maps to a DIFFERENT identity is
         // a genuine collision — reject it rather than silently skip provisioning (or
         // worse, install this identity's keys under another identity's name).
-        if let Some(existing) = registry.users.iter().find(|u| u.user_id == user_id) {
-            if existing.did == did {
-                return Ok(None); // idempotent re-join of the same identity
-            }
+        // A join reads this before it writes anything (`name_taken_by_another`);
+        // this refusal stands for a name taken since that read.
+        if held_by_another(&registry, user_id, did).is_some() {
             return Err(anyhow!(
-                "the name '{user_id}' already belongs to a different identity on this device \
-                 ({} ≠ {}); choose a different name for the joining device",
-                existing.did,
-                did
+                "the name {} already belongs to a different identity on this device; \
+                 choose a different name for the joining device",
+                kotton_wire::note::quoted(user_id)
             ));
+        }
+        if registry.users.iter().any(|u| u.user_id == user_id) {
+            return Ok(None); // idempotent re-join of the same identity
         }
         let now = SystemTime::now();
         // Dispatch the method from the DID itself: a did:kel AID (delivered
