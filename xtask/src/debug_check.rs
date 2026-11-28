@@ -166,7 +166,16 @@ pub(crate) const ANSWERS: &[&str] = &[
 
 /// The answers `variant_names!` gives a `name()` and `kotton_wire::Named`, so `unasked` takes
 /// them; a test holds this to the wire crate.
-const NAMED: &[&str] = &["UserResponse", "DeviceResponse", "KuidResponse", "PairingPayload", "RunnerOp", "RunnerHostReply"];
+const NAMED: &[&str] = &[
+    "UserResponse",
+    "DeviceResponse",
+    "KuidResponse",
+    "PairingPayload",
+    "RunnerOutput",
+    "RunnerHostCall",
+    "RunnerOp",
+    "RunnerHostReply",
+];
 
 /// The relay client's error, whose `Display` prints the relay's words through `quoted_cut`.
 const RELAY_ERROR: &str = "RendezvousError";
