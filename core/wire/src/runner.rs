@@ -502,6 +502,14 @@ pub enum RunnerHostCall {
     Files { verb: RunnerFileVerb },
 }
 
+// A call the host has no import for is named, never printed: the daemon says
+// which variant the guest raised and nothing of what it held.
+variant_names!(RunnerHostCall {
+    NetRequest, QuarantineWrite, QuarantineReadOwn, QuarantineListOwn, Auth, Devices, Infer,
+    Surface, Messages, Contacts, Network, Joining, Records, Landlord, Operators, Grants, Kept,
+    Files,
+});
+
 /// The `files` verbs, mirroring `resource directory` in `interface files`.
 ///
 /// Every `path` is an **absolute path in the person's tree** (`/notes/a.md`):
@@ -2277,9 +2285,17 @@ pub enum RunnerOutput {
         #[serde(default)]
         wrote: Vec<String>,
     },
-    /// The op failed. `message` is a human-readable error string.
+    /// The op failed. `message` is a human-readable error string, written by
+    /// the app's code the runner ran: another party's text, which the daemon
+    /// prints as data and to a bounded length (`crate::note::quoted_cut`).
     Error { message: String },
 }
+
+// A frame the daemon did not ask for is named, never printed: which result
+// came and nothing of what it held.
+variant_names!(RunnerOutput {
+    Launched, MessageHandled, InputHandled, SurfaceErrorHandled, HostCall, Fetched, Error,
+});
 
 #[cfg(test)]
 mod file_frame_tests {

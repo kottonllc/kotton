@@ -11,16 +11,3 @@
 # finding (a fix that lands deletes its entry), an entry whose `sites` is not what it finds, and
 # an entry, or a count, the list at the merge base with origin/main does not hold.
 
-[[owed]]
-file = "core/app/src/daemon/apps.rs"
-function = "service_host_call"
-expression = "other"
-sites = 1
-row = "an answer not asked for is said by its name: a call the app runner raised that the host has no import for"
-
-[[owed]]
-file = "core/app/src/fetch_session.rs"
-function = "run_fetch_cycle"
-expression = "other"
-sites = 1
-row = "an answer not asked for is said by its name: a frame of the app runner's a fetch did not ask for"
