@@ -542,3 +542,210 @@ async fn a_key_the_door_does_not_admit_is_closed_on_without_a_word() {
     }
     door.abort();
 }
+
+// ── How a dialer's leg ends ───────────────────────────────────────────────────
+
+/// A recovery authority's claim-maker that names one key and holds another: its tag answers
+/// no claim by the key it names.
+struct Misnamed {
+    holds: SigningKey,
+    names: [u8; 32],
+}
+
+impl MakesClaim for Misnamed {
+    fn claim(&self, awaiting: &AwaitingAnswer) -> Option<RecoveryClaim> {
+        awaiting.claim(&kotton_crypto::x25519::ed25519_priv_to_x25519(&self.holds), self.names)
+    }
+}
+
+/// How a dialer's leg ends once the relay ends its side: as the relay ends it, with a
+/// WebSocket close, or with a TCP reset. A close the relay sends is withheld from the last two,
+/// so that the dialer meets the ending named and no other.
+#[derive(Clone, Copy, Debug)]
+enum Ending {
+    AsTheRelayEndsIt,
+    Close,
+    Reset,
+}
+
+/// A frame at the front of `buf` from the relay (unmasked): its opcode and whole length, once
+/// it is all there.
+fn whole_frame(buf: &[u8]) -> Option<(u8, usize)> {
+    let (len, at) = match *buf.get(1)? & 0x7f {
+        126 => (usize::from(u16::from_be_bytes([*buf.get(2)?, *buf.get(3)?])), 4),
+        127 => (usize::try_from(u64::from_be_bytes(buf.get(2..10)?.try_into().ok()?)).ok()?, 10),
+        n => (usize::from(n), 2),
+    };
+    (buf.len() >= at + len).then(|| (buf[0] & 0x0f, at + len))
+}
+
+/// A listener that forwards each connection to `relay_addr` and ends each dialer's leg as
+/// `ending` says, once the relay has ended its side.
+async fn ending_tap(relay_addr: &str, ending: Ending) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let relay_addr = relay_addr.to_string();
+    tokio::spawn(async move {
+        while let Ok((mut near, _)) = listener.accept().await {
+            let Ok(mut far) = tokio::net::TcpStream::connect(&relay_addr).await else {
+                continue;
+            };
+            tokio::spawn(async move {
+                let (mut up, mut down) = ([0u8; 8192], [0u8; 8192]);
+                // What the relay sent and the dialer has not been given: its HTTP head until
+                // that is through, then frames until each is whole.
+                let (mut pending, mut head_through) = (Vec::new(), false);
+                'forward: loop {
+                    tokio::select! {
+                        n = near.read(&mut up) => match n {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => {
+                                if far.write_all(&up[..n]).await.is_err() {
+                                    return;
+                                }
+                            }
+                        },
+                        n = far.read(&mut down) => match n {
+                            Ok(0) | Err(_) => break 'forward,
+                            Ok(n) => {
+                                pending.extend_from_slice(&down[..n]);
+                                if !head_through {
+                                    let Some(end) = pending.windows(4).position(|w| w == b"\r\n\r\n") else {
+                                        continue 'forward;
+                                    };
+                                    let head: Vec<u8> = pending.drain(..end + 4).collect();
+                                    if near.write_all(&head).await.is_err() {
+                                        return;
+                                    }
+                                    head_through = true;
+                                }
+                                while let Some((opcode, len)) = whole_frame(&pending) {
+                                    if opcode == 8 && !matches!(ending, Ending::AsTheRelayEndsIt) {
+                                        break 'forward;
+                                    }
+                                    let frame: Vec<u8> = pending.drain(..len).collect();
+                                    if near.write_all(&frame).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+                match ending {
+                    Ending::AsTheRelayEndsIt => {
+                        let _ = near.shutdown().await;
+                    }
+                    Ending::Close => {
+                        // A close, normal closure, from the server's side and so unmasked.
+                        let _ = near.write_all(&[0x88, 0x02, 0x03, 0xe8]).await;
+                        let _ = near.shutdown().await;
+                    }
+                    Ending::Reset => {
+                        let _ = near.set_zero_linger();
+                        drop(near);
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// Every refusal a dialer can meet at a relayed door's admit stage, over a real relay, reads
+/// the circuit closing and nothing else, whether its leg ends as the relay ends it, in a
+/// close or in a reset (kotton-protocol's *One handshake admits a device, by the identity's
+/// log*: a refusal is the circuit closing, and no frame says why). Each is set beside a dial
+/// the same door admits, and each is met when the door refuses, well before any wait runs out.
+#[tokio::test]
+async fn every_refusal_at_the_door_reads_the_circuit_closing_however_the_leg_ends() {
+    use kotton_crypto::kel_verify::{build_inception, build_mnemonic_rotation, kel_recovery_pubkey};
+
+    let (_relay, relay_addr) = crate::common::relay::spawn().await;
+    let relay_url = format!("http://{relay_addr}");
+
+    // One door: a key it admits, a tip it hosts and an identity whose inception commits
+    // `authority`.
+    let (door_key, held, stranger, recovered, claimant) =
+        (random_key(), random_key(), random_key(), random_key(), random_key());
+    let seed = [11u8; 32];
+    let rung = |seed: &[u8; 32], i| kel_recovery_pubkey(&kotton_crypto::kdf::derive_kel_recovery_key(seed, i));
+    let authority = random_key();
+    let committed = [rung(&seed, 0), pub_of(&authority)];
+    let tip = build_inception(&random_key(), &committed);
+    let rotation = build_mnemonic_rotation(&tip, &seed, 0, &recovered, 0, &committed);
+    let other_seed = [12u8; 32];
+    let unadmitted = build_mnemonic_rotation(&tip, &other_seed, 0, &stranger, 0, &[rung(&other_seed, 0)]);
+    let elsewhere = build_inception(&random_key(), &[rung(&seed, 0)]);
+    let unhosted = build_mnemonic_rotation(&elsewhere, &seed, 0, &stranger, 0, &[rung(&seed, 0)]);
+    let admission = Admission::default();
+    admission.learn_chain(std::slice::from_ref(&tip));
+    let (label, door, served) = hold_door(&relay_url, &door_key, admitting(&[pub_of(&held)], admission)).await;
+
+    let offering = |events| CircuitOffer { events, claim: None };
+    let misnamed = |names| CircuitOffer {
+        events: Vec::new(),
+        claim: Some(Arc::new(Misnamed { holds: random_key(), names })),
+    };
+    let not_a_point = (0u8..=u8::MAX)
+        .map(|n| [n; 32])
+        .find(|b| ed25519_dalek::VerifyingKey::from_bytes(b).is_err())
+        .unwrap();
+    let wrong_door = random_key();
+    let by_key = (&held, &door_key, CircuitOffer::default());
+    let by_events = (&recovered, &door_key, offering(vec![rotation.clone()]));
+    let by_claim = (&claimant, &door_key, claiming(&authority));
+    // What is refused: the dial the door refuses (as whom, towards which key, offering what),
+    // and the one it admits.
+    type Dial<'a> = (&'a SigningKey, &'a SigningKey, CircuitOffer);
+    let cases: [(&str, Dial, &Dial); 8] = [
+        ("a door dialled under another key", (&held, &wrong_door, CircuitOffer::default()), &by_key),
+        ("a key the door does not hold, offering nothing", (&stranger, &door_key, CircuitOffer::default()), &by_key),
+        (
+            "events for an identity the door does not host",
+            (&stranger, &door_key, offering(vec![unhosted])),
+            &by_events,
+        ),
+        ("events that name another key", (&stranger, &door_key, offering(vec![rotation.clone()])), &by_events),
+        (
+            "events naming the dialer that the hosted tip does not admit",
+            (&stranger, &door_key, offering(vec![unadmitted])),
+            &by_events,
+        ),
+        ("a claim by an authority no hosted identity holds", (&claimant, &door_key, claiming(&random_key())), &by_claim),
+        (
+            "a claim whose tag the authority it names did not make",
+            (&claimant, &door_key, misnamed(pub_of(&authority))),
+            &by_claim,
+        ),
+        ("a claim whose named key is no point", (&claimant, &door_key, misnamed(not_a_point)), &by_claim),
+    ];
+
+    let mut taps = Vec::new();
+    for ending in [Ending::AsTheRelayEndsIt, Ending::Close, Ending::Reset] {
+        taps.push((ending, format!("http://{}", ending_tap(&relay_addr, ending).await)));
+    }
+    let one = format!("{:?}", kotton_sys::net::TransportError::ConnectionFailed("the circuit closed".into()));
+    let mut admitted = 0;
+    for (what, (own, towards, offer), (a_own, a_towards, a_offer)) in &cases {
+        for (ending, tap_url) in &taps {
+            let conn = dial(tap_url, &label, a_own, a_towards, a_offer)
+                .await
+                .unwrap_or_else(|e| panic!("{what}, {ending:?}: the same door admits its counterpart: {e:?}"));
+            assert_eq!(conn.request(b"ping").await.unwrap(), b"echo:ping");
+            admitted += 1;
+            drop(conn);
+
+            let started = std::time::Instant::now();
+            let reading = dial(tap_url, &label, own, towards, offer).await.err().map(|e| format!("{e:?}"));
+            assert_eq!(reading.as_ref(), Some(&one), "{what}, {ending:?}: refusals must read as one");
+            assert!(
+                started.elapsed() < FIRST_FRAME_WAIT,
+                "{what}, {ending:?}: met when the door refused, not when a wait ran out"
+            );
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(served.load(Ordering::SeqCst), admitted, "only the admitted dials reached the handler");
+    door.abort();
+}

@@ -256,6 +256,19 @@ async fn send<W: AsyncWrite + Unpin>(w: &mut W, frame: &[u8]) -> Result<(), Tran
     w.flush().await.map_err(io_err)
 }
 
+/// The door's next handshake frame, to a dialer. Any end of the stream before the frame is
+/// whole, an I/O error among them, is the circuit closing: the one reading of a refusal,
+/// whether the dialer's leg ends in a close or a reset.
+async fn from_door<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, TransportError> {
+    read_body(r).await.ok().flatten().ok_or_else(closed)
+}
+
+/// A dialer's handshake frame to the door; a stream that has ended is the circuit closing,
+/// as [`from_door`] reads one.
+async fn to_door<W: AsyncWrite + Unpin>(w: &mut W, frame: &[u8]) -> Result<(), TransportError> {
+    send(w, frame).await.map_err(|_| closed())
+}
+
 /// The version byte and the first frame, read whole and nothing past them.
 async fn read_opening_bytes<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Vec<u8>> {
     let mut head = [0u8; 3];
@@ -274,7 +287,7 @@ where
 {
     /// Dial the door whose key is `responder` over `stream` (the relay-bridged channel), as
     /// `own`, offering `offer` if the door asks for events. Admitted within [`ADMIT_WAIT`], or
-    /// closed.
+    /// closed: a refusal, an expiry and any end of the stream during the handshake read as one.
     pub async fn connect(
         stream: S,
         own: &SigningKey,
@@ -298,12 +311,12 @@ where
         let responder_static = kotton_crypto::x25519::ed25519_pub_to_x25519(&responder);
         let (initiator, opening) =
             Initiator::open(&own_static, &responder_static, None, None).map_err(|_| closed())?;
-        send(&mut stream, &opening).await?;
-        let second = read_body(&mut stream).await?.ok_or_else(closed)?;
+        to_door(&mut stream, &opening).await?;
+        let second = from_door(&mut stream).await?;
         let (awaiting, third) = initiator.read_second(&second).map_err(|_| closed())?;
-        send(&mut stream, &third).await?;
+        to_door(&mut stream, &third).await?;
         let claim = offer.claim.as_ref().and_then(|maker| maker.claim(&awaiting));
-        let first = read_body(&mut stream).await?.ok_or_else(closed)?;
+        let first = from_door(&mut stream).await?;
         let (mut channel, answer) = awaiting.read_first(&first).map_err(|_| closed())?;
         if answer == Answer::AskForEvents {
             let reply = match claim {
@@ -321,8 +334,8 @@ where
                 }
             };
             let body = reply.encode().map_err(|_| closed())?;
-            send(&mut stream, &channel.seal(&body).map_err(|_| closed())?).await?;
-            let admitted = read_body(&mut stream).await?.ok_or_else(closed)?;
+            to_door(&mut stream, &channel.seal(&body).map_err(|_| closed())?).await?;
+            let admitted = from_door(&mut stream).await?;
             channel.read_admitted(&admitted).map_err(|_| closed())?;
         }
         Ok(Self {
@@ -1372,6 +1385,107 @@ mod tests {
         let mut rest = Vec::new();
         c_io.read_to_end(&mut rest).await.unwrap();
         (door, !rest.is_empty())
+    }
+
+    /// What [`HeldKeys`] admits, with each recovery claim put to it counted.
+    struct CountingClaims {
+        inner: HeldKeys,
+        claims: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Admits for CountingClaims {
+        fn by_key(&self, initiator: &[u8; 32]) -> Option<[u8; 32]> {
+            self.inner.by_key(initiator)
+        }
+
+        fn by_events(&self, initiator: &[u8; 32], events: &[Vec<u8>]) -> Option<[u8; 32]> {
+            self.inner.by_events(initiator, events)
+        }
+
+        fn by_claim(&self, authority: &[u8; 32]) -> Option<String> {
+            self.claims.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.by_claim(authority)
+        }
+    }
+
+    /// The door's refusals take one path whatever they refuse: what the dialer proves on this
+    /// connection is checked before the door looks up anything it hosts, for offered events
+    /// as for a recovery claim. Events that name no key the dialer holds are refused while
+    /// every reader of the hosted tips is held off, and a claim whose tag the authority it
+    /// names did not make, or whose named key is no point, is refused with no authority looked
+    /// up. Beside each, its counterpart is looked up and admitted.
+    #[tokio::test]
+    async fn the_dialers_proof_is_checked_before_any_lookup_by_events_as_by_a_claim() {
+        use kotton_crypto::kel_verify::{build_inception, build_mnemonic_rotation, kel_recovery_pubkey};
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        // The events path: a hosted tip, and the rotation that names `recovered`.
+        let seed = [42u8; 32];
+        let rung = |i| kel_recovery_pubkey(&kotton_crypto::kdf::derive_kel_recovery_key(&seed, i));
+        let tip = build_inception(&key(30), &[rung(0)]);
+        let (recovered, stranger) = (key(31), key(42));
+        let rotation = build_mnemonic_rotation(&tip, &seed, 0, &recovered, 0, &[rung(0)]);
+        let hosting_tip = Admission::default();
+        hosting_tip.tips.write().unwrap().insert(tip.aid.to_string(), tip.clone());
+        let held = HeldKeys::new(Arc::new(RwLock::new(HashSet::new())), hosting_tip.clone());
+        let events = vec![serde_json::to_vec(&rotation).unwrap()];
+        let montgomery = |k: &SigningKey| {
+            kotton_crypto::x25519::ed25519_pub_to_x25519(&kotton_crypto::ed25519::verifying_key(k)).to_bytes()
+        };
+        // The events put to the door by `initiator` while a writer holds the hosted tips:
+        // whether the answer came while they were held, and the answer.
+        let asked_while_held = |initiator: [u8; 32], wait: Duration| {
+            let writer = hosting_tip.tips.write().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (held, events) = (held.clone(), events.clone());
+            let asking = std::thread::spawn(move || tx.send(held.by_events(&initiator, &events)).unwrap());
+            let early = rx.recv_timeout(wait).ok();
+            drop(writer);
+            let answer = early.unwrap_or_else(|| rx.recv().unwrap());
+            asking.join().unwrap();
+            (early.is_some(), answer)
+        };
+        assert_eq!(
+            asked_while_held(montgomery(&stranger), Duration::from_secs(5)),
+            (true, None),
+            "events naming another key are refused before the hosted tips are read"
+        );
+        assert_eq!(
+            asked_while_held(montgomery(&recovered), Duration::from_millis(300)),
+            (false, Some(pub_of(&recovered))),
+            "events naming the dialer's key are put to the hosted tips, and admit it"
+        );
+
+        // The claim path: a hosted identity whose inception commits `authority`.
+        let (door_key, claimant, authority) = (key(40), key(2), key(11));
+        let hosting_authority = Admission::default();
+        hosting_authority.learn_chain(&[build_inception(&key(10), &[pub_of(&authority)])]);
+        let not_a_point = (0u8..=u8::MAX)
+            .map(|n| [n; 32])
+            .find(|b| VerifyingKey::from_bytes(b).is_err())
+            .unwrap();
+        let misnamed = |names| CircuitOffer {
+            events: Vec::new(),
+            claim: Some(Arc::new(Misnamed { holds: key(12), names })),
+        };
+        let counting = Arc::new(CountingClaims {
+            inner: HeldKeys::new(Arc::new(RwLock::new(HashSet::new())), hosting_authority),
+            claims: std::sync::atomic::AtomicUsize::new(0),
+        });
+        for (what, offer, admitted, looked_up) in [
+            ("a claim whose tag the named authority did not make", misnamed(pub_of(&authority)), false, 0),
+            ("a claim whose named key is no point", misnamed(not_a_point), false, 0),
+            ("a claim by the authority the identity commits", claiming(authority.clone()), true, 1),
+        ] {
+            let door = Door::new(std::slice::from_ref(&door_key), counting.clone()).unwrap();
+            let (s_io, c_io) = tokio::io::duplex(64 * 1024);
+            let server = tokio::spawn(async move { RelayedConnection::accept(s_io, &door, place()).await.map(drop) });
+            let dialled = RelayedConnection::connect(c_io, &claimant, &pub_of(&door_key), &offer).await;
+            assert_eq!(dialled.is_ok(), admitted, "{what}: the dialer's reading");
+            assert_eq!(server.await.unwrap().is_ok(), admitted, "{what}: the door's reading");
+            assert_eq!(counting.claims.swap(0, Ordering::SeqCst), looked_up, "{what}: authorities looked up");
+        }
     }
 
     /// A recovered device offers, inside the channel, the rotation that names its key, and
