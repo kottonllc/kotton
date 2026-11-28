@@ -19,7 +19,8 @@ use kotton_grant::daemon::db::grant_db;
 use kotton_schemas::{AppKind, AppManifest, ApprovedCapabilities, CapabilityGrant, CapabilityKind, CapabilityTarget};
 use kotton_sys::secret::SecretsStore;
 use kotton_wire::did::Did;
-use kotton_wire::ipc::{SecretText, UserResponse};
+use kotton_wire::ipc::{unasked, SecretText, UserResponse};
+use kotton_wire::note::quoted_cut;
 use kotton_wire::runner::{
     RunnerAdmittedBrowser, RunnerAuthError, RunnerAuthVerb, RunnerContact, RunnerContactVerb, RunnerDeviceVerb,
     RunnerDirEntry, RunnerFileVerb, RunnerHostCall, RunnerHostReply, RunnerPathKind, RunnerIdentity, RunnerInferError, RunnerInferOptions,
@@ -819,7 +820,8 @@ async fn service_host_call(
         RunnerHostCall::Grants { verb } => OccupantCall::Grants(verb),
         other => {
             return Err(io::Error::other(format!(
-                "a guest in the app world raised a host call it has no import for: {other:?}"
+                "a guest in the app world raised a host call it has no import for: {}",
+                unasked(&other)
             )))
         }
     };
@@ -4022,7 +4024,7 @@ async fn spawn_and_present(
                     EventCategory::WASM,
                     EventLevel::Error,
                     format!("App launch error: {app_id}"),
-                    serde_json::json!({ "app_id": &app_id, "error": &message }),
+                    serde_json::json!({ "app_id": &app_id, "error": quoted_cut(&message) }),
                 )
                 .in_scope(EventScope::of(user_id.as_deref())),
             );
@@ -4032,7 +4034,7 @@ async fn spawn_and_present(
             // of its own — it holds no `surface` resource to ask with — so this
             // handle is the whole of what is open.
             abandon_launch(host, &live_instances, &app_id, handle).await;
-            Err(io::Error::other(format!("runner: {message}")))
+            Err(runner_failed("runner", &message))
         }
         _ => {
             // A launch op answered with something that is not a launch. Reachable
@@ -4495,7 +4497,7 @@ pub async fn app_message(
             }
             RunnerOutput::Error { message } => {
                 // Not re-inserted; next call will respawn.
-                Err(io::Error::other(format!("runner: {message}")))
+                Err(runner_failed("runner", &message))
             }
             _ => Err(io::Error::other("unexpected runner output for message op")),
         };
@@ -4600,11 +4602,11 @@ pub async fn app_message(
                     EventCategory::WASM,
                     EventLevel::Error,
                     format!("App message error: {app_id}"),
-                    serde_json::json!({ "app_id": &app_id, "error": &message }),
+                    serde_json::json!({ "app_id": &app_id, "error": quoted_cut(&message) }),
                 )
                 .in_scope(EventScope::of(user_id.as_deref())),
             );
-            Err(io::Error::other(format!("runner: {message}")))
+            Err(runner_failed("runner", &message))
         }
         _ => Err(io::Error::other("unexpected runner output for message op")),
     }
@@ -4722,7 +4724,7 @@ pub async fn app_input_event(
                 patches: bare_patches(&patches),
             })
         }
-        RunnerOutput::Error { message } => Err(io::Error::other(format!("runner: {message}"))),
+        RunnerOutput::Error { message } => Err(runner_failed("runner", &message)),
         _ => Err(io::Error::other("unexpected runner output for input op")),
     }
 }
@@ -4805,7 +4807,7 @@ pub async fn app_windows_changed(
             }
             Ok(())
         }
-        RunnerOutput::Error { message } => Err(io::Error::other(format!("runner: {message}"))),
+        RunnerOutput::Error { message } => Err(runner_failed("runner", &message)),
         _ => Err(io::Error::other("unexpected runner output for the window-list nudge")),
     }
 }
@@ -4871,7 +4873,7 @@ pub async fn app_surface_error(
             instances.insert(app_id, instance);
             Ok(UserResponse::SurfaceOk)
         }
-        RunnerOutput::Error { message } => Err(io::Error::other(format!("runner: {message}"))),
+        RunnerOutput::Error { message } => Err(runner_failed("runner", &message)),
         _ => Err(io::Error::other(
             "unexpected runner output for surface_error op",
         )),
@@ -5063,10 +5065,17 @@ async fn init_long_lived_runner(
     // surfaces as EOF, so the caller never stores a dead instance.
     let init_output = drain_until_result(instance, host, occupant, infer, records).await?;
     if let RunnerOutput::Error { message } = &init_output {
-        return Err(io::Error::other(format!("runner init: {message}")));
+        return Err(runner_failed("runner init", message));
     }
 
     Ok(init_output)
+}
+
+/// An app runner's `Error`, as this daemon says it: `word`, the daemon's own,
+/// then the runner's words. The runner runs an app's code, so its words are
+/// another party's, printed as data and to a bounded length ([`quoted_cut`]).
+fn runner_failed(word: &str, message: &str) -> io::Error {
+    io::Error::other(format!("{word}: {}", quoted_cut(message)))
 }
 
 /// Read frames from a running instance until a terminal result, servicing any
@@ -7747,6 +7756,53 @@ mod host_call_tests {
         assert!(
             surfaces.is_empty(),
             "the cap is counted on this list, so a close that did not shorten it would be              an app charged for a surface it gave back"
+        );
+    }
+
+    /// **A host call the app world has no import for is said by its name, and
+    /// no field of it**: what the guest wrote in the frame stays out of the
+    /// error that drops the instance.
+    #[tokio::test]
+    async fn a_call_the_host_has_no_import_for_is_said_by_its_name_alone() {
+        let call = RunnerHostCall::NetRequest {
+            request: kotton_wire::runner::HostRequest {
+                method: "GET".into(),
+                url: "https://FIELD.example/`\nFORGED".into(),
+                headers: vec![],
+                body: b"FIELD".to_vec(),
+            },
+        };
+        let err = service_host_call(call, None, None, None)
+            .await
+            .expect_err("a call with no import drops the instance");
+        assert_eq!(
+            err.to_string(),
+            "a guest in the app world raised a host call it has no import for: `NetRequest`"
+        );
+    }
+
+    /// **An app runner's `Error` is printed as data, to the stated length,
+    /// after the daemon's own word**: the words are written by the app's code,
+    /// so a backtick and a line break in them are printed by their escapes, and
+    /// words past the bound are cut and say so.
+    #[test]
+    fn a_runners_words_are_printed_as_data_and_to_the_bound() {
+        let forged = "no `surface`\nFORGED: launched";
+        assert_eq!(
+            runner_failed("runner", forged).to_string(),
+            "runner: `no \\u{60}surface\\u{60}\\nFORGED: launched`"
+        );
+        assert_eq!(
+            runner_failed("runner init", forged).to_string(),
+            "runner init: `no \\u{60}surface\\u{60}\\nFORGED: launched`"
+        );
+        let long = "x".repeat(kotton_wire::note::MAX_SAID_CHARS + 88);
+        assert_eq!(
+            runner_failed("runner", &long).to_string(),
+            format!(
+                "runner: `{}` (cut: 88 more characters)",
+                "x".repeat(kotton_wire::note::MAX_SAID_CHARS)
+            )
         );
     }
 }

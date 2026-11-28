@@ -28,14 +28,17 @@
 //! **The pass also looks at the drops that wait for their rotation**: when a
 //! dropped pool's invited key rotates. Each person's pass looks at every vault
 //! a drop of theirs waits at, and no other
-//! ([`super::operator::look_on_the_pass`]): it reads `Tenants`, rotates the
-//! invited key for each pool no longer listed, and never says a drop. With no
+//! ([`super::operator::look_on_the_pass`]): it reads `Tenants` at every one
+//! of them first, then rotates the invited key once at each relay for every
+//! pool no longer listed at any of them, and never says a drop. With no
 //! drop waiting, it asks no vault `Tenants`. The rotation that follows a look
 //! tells every vault this desktop told to stand at that relay, not only the
 //! one looked at, and hands the reach note on. A drop that has waited seven
 //! days ends before the pass dials for it. The pass also dials a relay, and
-//! the vaults told to stand there, where a rotation `relay rotate` began still
-//! stands: it finishes that rotation with the key already kept and mints none.
+//! the vaults told to stand there, where a rotation begun — by `relay rotate`
+//! or by a look — still stands: it finishes that rotation with the key already
+//! kept and mints none, for seven days from its mint, and not at a relay a
+//! look of the same pass tried and left unfinished.
 //! A rotation the pass begins or finishes and leaves unfinished is tried again
 //! on the hour, not on the reach change that rotation itself raises, which
 //! would try it again at once.

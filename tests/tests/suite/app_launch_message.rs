@@ -146,7 +146,36 @@ async fn runner_that_hangs_is_killed_by_the_deadline() {
     );
 }
 
-/// When the runner returns `Error`, `app_launch` should surface an error.
+/// The mock runner's `Error` in its `error` mode, as the daemon prints it:
+/// between backticks, its own backtick and line break by their escapes.
+const MOCK_ERROR_SAID: &str = "`mock \\u{60}error\\u{60}\\nFORGED: launched`";
+
+/// The `error` field of the `wasm` event the daemon published as `message`,
+/// read from the owner's event log. A bounded wait: the log is a task on the bus.
+async fn logged_error(env: &mut TestEnv, message: &str) -> String {
+    for _ in 0..300 {
+        let entries = env
+            .client
+            .query_events(Some("wasm".to_string()), None, None, Some(500))
+            .await
+            .expect("the owner's event log is read");
+        if let Some(entry) = entries.into_iter().find(|e| e.message == message) {
+            let payload: serde_json::Value =
+                serde_json::from_str(&entry.payload.expect("the event carries a payload"))
+                    .expect("the payload is JSON");
+            return payload["error"]
+                .as_str()
+                .expect("the payload names the error")
+                .to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("no `wasm` event {message:?} reached the owner's event log");
+}
+
+/// **An app runner's `Error` at launch is printed as data**: the launch fails
+/// with the daemon's word and then the runner's words between backticks, and
+/// the event the daemon keeps of it holds the same quoted words.
 #[tokio::test]
 #[serial]
 #[allow(unsafe_code)] // env::set_var/remove_var are unsafe in Rust 1.81+; serialised by #[serial]
@@ -162,13 +191,16 @@ async fn launch_runner_error_surfaces_as_ipc_error() {
 
     unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
 
-    assert!(
-        result.is_err(),
-        "expected app_launch to fail when runner returns Error"
+    let err = result.expect_err("app_launch fails when the runner returns Error");
+    assert_eq!(err.to_string(), format!("runner: {MOCK_ERROR_SAID}"));
+    assert_eq!(
+        logged_error(&mut env, &format!("App launch error: {app_id}")).await,
+        MOCK_ERROR_SAID
     );
 }
 
-/// When the runner returns `Error` for a message, `app_message` should surface an error.
+/// **An app runner's `Error` for a message is printed as data**, as at launch:
+/// in the failure and in the event the daemon keeps of it.
 #[tokio::test]
 #[serial]
 #[allow(unsafe_code)] // env::set_var/remove_var are unsafe in Rust 1.81+; serialised by #[serial]
@@ -183,8 +215,10 @@ async fn message_runner_error_surfaces_as_ipc_error() {
 
     unsafe { std::env::remove_var("MOCK_RUNNER_MODE") };
 
-    assert!(
-        result.is_err(),
-        "expected app_message to fail when runner returns Error"
+    let err = result.expect_err("app_message fails when the runner returns Error");
+    assert_eq!(err.to_string(), format!("runner: {MOCK_ERROR_SAID}"));
+    assert_eq!(
+        logged_error(&mut env, &format!("App message error: {app_id}")).await,
+        MOCK_ERROR_SAID
     );
 }

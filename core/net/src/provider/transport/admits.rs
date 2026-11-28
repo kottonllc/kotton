@@ -147,19 +147,22 @@ impl Admits for HeldKeys {
             .map(|e| serde_json::from_slice(e).ok())
             .collect::<Option<_>>()?;
         let aid = offered.first()?.aid.to_string();
-        let tip = self.admission.tips.read().unwrap().get(&aid).cloned()?;
         // The candidate is taken from the offered events' keys, not from a set the door holds.
         // That is equivalent to asking for the key the events admit: `admits_device` below
         // replays the events from the door's own tip and accepts only where the key state they
         // end on is exactly `key`, so a key some event names but the replay does not end on is
         // refused there. And `key` is the one whose Montgomery form the handshake proved the
         // initiator holds; none where two offered keys share that form.
+        //
+        // The key first, as a claim's tag is checked first: events that name no key the
+        // initiator holds are refused before the door looks up the identity they are for.
         let key = one_of(
             offered
                 .iter()
                 .map(|e| (&e.key_state.group_key, montgomery(&e.key_state.group_key))),
             initiator,
         )?;
+        let tip = self.admission.tips.read().unwrap().get(&aid).cloned()?;
         kotton_crypto::kel_verify::admits_device(
             &tip,
             &offered,
