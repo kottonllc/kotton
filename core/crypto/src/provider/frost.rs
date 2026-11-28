@@ -30,8 +30,8 @@ use crate::ed25519::{Signature, VerifyingKey};
 
 /// A failure of this module, in this crate's own fixed words. Its surface names no type of the
 /// threshold library: a dependent of this crate names the tree's own types only, and the library
-/// stays a dependency of this crate alone. `threshold_surface` holds that for every public item of
-/// the crate.
+/// stays a dependency of this crate alone. `threshold-surface-check` in `xtask` holds that for
+/// every public item of the crate.
 ///
 /// No variant's `Display` or `Debug` holds a byte of the input it failed on: an error's text holds
 /// nothing that is not this device's own to say. A reader's or writer's own error (the hex

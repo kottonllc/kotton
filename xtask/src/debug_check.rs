@@ -427,7 +427,7 @@ struct ModDecl {
     path: Option<String>,
 }
 
-fn join(a: &str, b: &str) -> String {
+pub(crate) fn join(a: &str, b: &str) -> String {
     match (a.is_empty(), b.is_empty()) {
         (true, _) => b.to_string(),
         (_, true) => a.to_string(),
@@ -436,7 +436,7 @@ fn join(a: &str, b: &str) -> String {
 }
 
 /// `path` with `.` and `..` components resolved.
-fn normalise(path: &str) -> String {
+pub(crate) fn normalise(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for p in path.split('/') {
         match p {

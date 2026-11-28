@@ -426,6 +426,11 @@ lint:
     # no manifest but kotton-crypto's lists the threshold library, and that `clippy.toml` refuses
     # the library's own signature checks.
     cargo xtask ed25519-check
+    # No public item of kotton-crypto names a crate of the threshold library, which ed25519-check
+    # holds to be a dependency of that crate alone: the crate's modules are read as rustc finds
+    # them, and the library is read through the same function ed25519-check reads it with. Its
+    # module doc (`xtask/src/threshold_surface_check.rs`) says what it does not see.
+    cargo xtask threshold-surface-check
     # The allowlist's element is the key type (`kotton_ed25519::VerifyingKey`), so no insert of
     # raw bytes compiles: each holder of the live set declares it so, and no live set of byte
     # arrays is declared anywhere. The compiler holds every insert to that declaration.
